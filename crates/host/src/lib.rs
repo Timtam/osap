@@ -40,8 +40,10 @@ struct HotkeyReg {
 struct Shared {
     backend: Rc<dyn Backend>,
     tts: RefCell<Tts>,
-    _audio_stream: Option<rodio::OutputStream>,
-    audio: Option<rodio::OutputStreamHandle>,
+    /// Audio output, opened lazily on first `host.sound.play` so we don't hold
+    /// the audio device at startup — this tool overlays audio software, and
+    /// grabbing the device can interrupt it. Kept alive as (stream, handle).
+    audio: RefCell<Option<(rodio::OutputStream, rodio::OutputStreamHandle)>>,
     next_id: Cell<i32>,
     /// module_idx → root directory.
     roots: RefCell<Vec<PathBuf>>,
@@ -222,20 +224,12 @@ impl Manager {
     pub fn new() -> Result<Self> {
         let backend = backend::platform();
         let tts = Tts::default().context("failed to initialize TTS engine")?;
-        let (audio_stream, audio) = match rodio::OutputStream::try_default() {
-            Ok((s, h)) => (Some(s), Some(h)),
-            Err(e) => {
-                logging::line("sound", &format!("no audio output device: {e}"));
-                (None, None)
-            }
-        };
         let store = settings::Store::load();
         let disabled_ids = store.disabled_ids();
         let shared = Rc::new(Shared {
             backend,
             tts: RefCell::new(tts),
-            _audio_stream: audio_stream,
-            audio,
+            audio: RefCell::new(None),
             next_id: Cell::new(0),
             roots: RefCell::new(Vec::new()),
             ids: RefCell::new(Vec::new()),
@@ -808,8 +802,19 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<()> {
     sound.set(
         "play",
         lua.create_function(move |_, rel: String| {
-            if let Some(handle) = &sh.audio {
-                let path = sh.root(idx).join(&rel);
+            let path = sh.root(idx).join(&rel);
+            let mut audio = sh.audio.borrow_mut();
+            if audio.is_none() {
+                // Open the audio device on first use only (see the field doc).
+                match rodio::OutputStream::try_default() {
+                    Ok(pair) => *audio = Some(pair),
+                    Err(e) => {
+                        logging::line("sound", &format!("no audio output device: {e}"));
+                        return Ok(());
+                    }
+                }
+            }
+            if let Some((_, handle)) = audio.as_ref() {
                 let play = || -> anyhow::Result<()> {
                     let file = std::io::BufReader::new(std::fs::File::open(&path)?);
                     let source = rodio::Decoder::new(file)?;

@@ -18,7 +18,15 @@ Overlay.__index = Overlay
 
 function O.new(label)
   return setmetatable(
-    { label = label or "Overlay", controls = {}, focus = 0, registered = {}, active = false },
+    {
+      label = label or "Overlay",
+      controls = {},
+      focus = 0,
+      registered = {},
+      capturedKeys = {},
+      active = false,
+      naturalNav = false,
+    },
     Overlay
   )
 end
@@ -53,7 +61,17 @@ local function speakControl(self, index)
   local tl = TYPE_LABEL[c.kind]
   if tl ~= "" then parts[#parts + 1] = tl end
   if c.kind == "ocr" and c.region then
-    local r = host.ocr.recognize({ region = c.region })
+    local region = c.region
+    -- An attached overlay's regions are relative to the plugin window's
+    -- top-left (x1, y1, x2, y2); translate to screen coords via its origin.
+    if self.matcher then
+      local win = host.window.active()
+      if win then
+        local b = win.bounds
+        region = { b.x + region[1], b.y + region[2], b.x + region[3], b.y + region[4] }
+      end
+    end
+    local r = host.ocr.recognize({ region = region })
     parts[#parts + 1] = (r.text ~= "" and r.text or "no text")
   end
   host.speech.output(table.concat(parts, ", "), { interrupt = true })
@@ -99,15 +117,32 @@ end
 
 function Overlay:_registerHotkeys()
   self.registered = self.registered or {}
+  self.capturedKeys = self.capturedKeys or {}
+  -- Per-control hotkeys (e.g. Alt+P) are always global hotkeys.
   for i, c in ipairs(self.controls) do
     if c.hotkey then
       local idx = i
       self.registered[#self.registered + 1] = host.hotkey.register(c.hotkey, function() self:activate(idx) end)
     end
   end
-  self.registered[#self.registered + 1] = host.hotkey.register(NAV.next, function() self:focusNext() end)
-  self.registered[#self.registered + 1] = host.hotkey.register(NAV.prev, function() self:focusPrev() end)
-  self.registered[#self.registered + 1] = host.hotkey.register(NAV.activate, function() self:activate() end)
+  if self.naturalNav then
+    -- Capture (+ suppress) the normal navigation keys, ReaHotkey-style — only
+    -- while the overlay is active (its window is focused). Modifier-exact, so
+    -- Alt+Tab etc. pass through.
+    local function cap(spec, fn)
+      host.keys.capture(spec, fn)
+      self.capturedKeys[#self.capturedKeys + 1] = spec
+    end
+    -- Tab moves *between* elements; arrow keys are left for value changes within
+    -- a control (standard interaction scheme), so we don't capture them here.
+    cap("Tab", function() self:focusNext() end)
+    cap("Shift+Tab", function() self:focusPrev() end)
+    cap("Return", function() self:activate() end)
+  else
+    self.registered[#self.registered + 1] = host.hotkey.register(NAV.next, function() self:focusNext() end)
+    self.registered[#self.registered + 1] = host.hotkey.register(NAV.prev, function() self:focusPrev() end)
+    self.registered[#self.registered + 1] = host.hotkey.register(NAV.activate, function() self:activate() end)
+  end
 end
 
 function Overlay:_unregisterHotkeys()
@@ -115,6 +150,10 @@ function Overlay:_unregisterHotkeys()
     host.hotkey.unregister(id)
   end
   self.registered = {}
+  for _, spec in ipairs(self.capturedKeys or {}) do
+    host.keys.release(spec)
+  end
+  self.capturedKeys = {}
 end
 
 -- Always-on: register hotkeys immediately and announce.
@@ -132,20 +171,22 @@ function Overlay:_activate()
   self.active = true
   self.focus = 0
   self:_registerHotkeys()
-  host.speech.output(self.label .. " overlay active", { interrupt = true })
+  -- Silent on activate/deactivate (ReaHotkey-style natural feel): the screen
+  -- reader already announces the window-title change, so this would just be
+  -- chatter — the user navigates with Tab as in any accessible control.
 end
 
 function Overlay:_deactivate()
   if not self.active then return end
   self.active = false
   self:_unregisterHotkeys()
-  host.speech.output(self.label .. " overlay closed", { interrupt = true })
 end
 
 -- Context-bound: activate automatically while a window matching `matcher` is
 -- focused, deactivate when leaving (ReaHotkey-style).
-function Overlay:attach(matcher)
+function Overlay:attach(matcher, opts)
   self.matcher = matcher
+  self.naturalNav = opts ~= nil and opts.naturalNav == true
   self.active = false
   host.window.onTrigger({}, { on = "activate" }, function(win)
     if host.window.test(matcher, win) then
