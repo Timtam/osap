@@ -1,13 +1,14 @@
-//! Host runtime: embeds a Luau VM and exposes the `host` API (design principle:
-//! primitives are first-class, see `docs/host-api-capability-catalog.md`).
-//!
-//! The OS is reached only through [`backend::Backend`] (one impl per platform).
-//! Walking-skeleton scope: `host.log`, `host.speech` (tts-rs), `host.hotkey`,
-//! `host.window` + `host.os`, `host.path`, `host.resource.read`.
+//! Host runtime: a module **manager** that hosts many Luau modules concurrently
+//! in one process (one VM each, shared services + one event loop), per
+//! `docs/module-runtime-and-lifecycle.md`. The OS is reached only through
+//! [`backend::Backend`]. The `host` API (design: primitives are first-class —
+//! see `docs/host-api-capability-catalog.md`) is installed per module VM and
+//! bound to that module's root + the shared services.
 
 mod backend;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -19,81 +20,215 @@ use tts::Tts;
 use backend::{Backend, CapturedImage, HostEvents, MouseButton, WinInfo};
 use module_manifest::LoadedModule;
 
-/// Luau prelude that adds the OS-gated `host.window.find`/`findAll` matcher on
-/// top of the native `host.window.list`/`active` bindings.
 const WINDOW_PRELUDE: &str = include_str!("window_prelude.luau");
-
-/// Luau prelude implementing the `host.overlay` self-voicing control-tree runtime.
 const OVERLAY_PRELUDE: &str = include_str!("overlay_prelude.luau");
 
-/// Shared host state that the `host` API closures access via `Rc<RefCell<…>>`.
-struct HostState {
-    root: PathBuf,
-    tts: Tts,
-    /// Registered global hotkeys: backend id → Luau callback (kept in the Lua registry).
-    hotkeys: Vec<(i32, RegistryKey)>,
-    hotkey_counter: i32,
-    /// Captured low-level keys: (vk, modifier-mask) → Luau callback (in the registry).
-    keys: Vec<(u32, u8, RegistryKey)>,
-    /// Audio output stream (kept alive so detached sounds keep playing) + its handle.
+/// Services shared by every module: the OS backend, one speech engine, one audio
+/// output, the global hotkey-id counter, and the central event routing.
+struct Shared {
+    backend: Rc<dyn Backend>,
+    tts: RefCell<Tts>,
     _audio_stream: Option<rodio::OutputStream>,
     audio: Option<rodio::OutputStreamHandle>,
+    next_id: Cell<i32>,
+    /// module_idx → root directory.
+    roots: RefCell<Vec<PathBuf>>,
+    /// module_idx → enabled.
+    enabled: RefCell<Vec<bool>>,
+    /// Global hotkey id → (module_idx, that module's VM, callback in its registry).
+    hotkeys: RefCell<HashMap<i32, (usize, Lua, RegistryKey)>>,
+    /// Captured keys: (vk, modifier-mask, module_idx, VM, callback).
+    keys: RefCell<Vec<(u32, u8, usize, Lua, RegistryKey)>>,
 }
 
-impl HostState {
-    fn resolve(&self, rel: &str) -> PathBuf {
-        self.root.join(rel)
+impl Shared {
+    fn root(&self, idx: usize) -> PathBuf {
+        self.roots.borrow()[idx].clone()
+    }
+    fn alloc_id(&self) -> i32 {
+        let id = self.next_id.get() + 1;
+        self.next_id.set(id);
+        id
+    }
+    /// Recomputes the global captured-key set from all modules and updates the hook.
+    fn refresh_captured(&self) {
+        let mut set: Vec<(u32, u8)> =
+            self.keys.borrow().iter().map(|(vk, m, ..)| (*vk, *m)).collect();
+        set.sort_unstable();
+        set.dedup();
+        self.backend.set_captured_keys(&set);
     }
 }
 
-/// Bridges OS events from the backend into the modules' Luau callbacks.
+/// A loaded module: its id + its own Luau VM.
+struct Module {
+    id: String,
+    lua: Lua,
+}
+
+/// Loads and runs many modules concurrently in one process.
+pub struct Manager {
+    shared: Rc<Shared>,
+    modules: Vec<Module>,
+}
+
+impl Manager {
+    pub fn new() -> Result<Self> {
+        let backend = backend::platform();
+        let tts = Tts::default().context("failed to initialize TTS engine")?;
+        let (audio_stream, audio) = match rodio::OutputStream::try_default() {
+            Ok((s, h)) => (Some(s), Some(h)),
+            Err(e) => {
+                eprintln!("  [sound] no audio output device: {e}");
+                (None, None)
+            }
+        };
+        let shared = Rc::new(Shared {
+            backend,
+            tts: RefCell::new(tts),
+            _audio_stream: audio_stream,
+            audio,
+            next_id: Cell::new(0),
+            roots: RefCell::new(Vec::new()),
+            enabled: RefCell::new(Vec::new()),
+            hotkeys: RefCell::new(HashMap::new()),
+            keys: RefCell::new(Vec::new()),
+        });
+        Ok(Self {
+            shared,
+            modules: Vec::new(),
+        })
+    }
+
+    /// Loads a module from an unpacked directory and runs its entry point.
+    pub fn load(&mut self, dir: impl AsRef<Path>) -> Result<()> {
+        let module = LoadedModule::load_dir(dir)?;
+        let idx = self.modules.len();
+        println!(
+            "» Loading module: {} v{} (id {})",
+            module.manifest.name, module.manifest.version, module.manifest.id
+        );
+        if !module.manifest.capabilities.require.is_empty() {
+            println!("  Capabilities: {}", module.manifest.capabilities.require.join(", "));
+        }
+
+        self.shared.roots.borrow_mut().push(module.root.clone());
+        self.shared.enabled.borrow_mut().push(true);
+
+        let lua = Lua::new();
+        install_host_api(&lua, &self.shared, idx).context("failed to install host API")?;
+        lua.load(WINDOW_PRELUDE).set_name("window_prelude").exec()?;
+        lua.load(OVERLAY_PRELUDE).set_name("overlay_prelude").exec()?;
+
+        let entry = module.entry_path();
+        let code = std::fs::read_to_string(&entry)
+            .with_context(|| format!("entry point not readable: {}", entry.display()))?;
+        lua.load(code)
+            .set_name(entry.display().to_string())
+            .exec()
+            .with_context(|| format!("error running module '{}'", module.manifest.id))?;
+
+        self.modules.push(Module {
+            id: module.manifest.id,
+            lua,
+        });
+        Ok(())
+    }
+
+    /// Runs the shared event loop if any module registered hotkeys, keys, or
+    /// window triggers; otherwise waits for pending speech and returns.
+    pub fn run(&mut self) -> Result<()> {
+        let has_hotkeys = !self.shared.hotkeys.borrow().is_empty();
+        let has_keys = !self.shared.keys.borrow().is_empty();
+        let has_triggers = self.modules.iter().any(|m| window_has_triggers(&m.lua));
+
+        if has_hotkeys || has_keys || has_triggers {
+            if has_triggers {
+                self.shared
+                    .backend
+                    .watch_foreground()
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+                    .context("failed to watch foreground windows")?;
+            }
+            println!("» Listening for events — press Ctrl+C to quit.");
+            let backend = self.shared.backend.clone();
+            let mut dispatcher = Dispatcher {
+                shared: &self.shared,
+                modules: &self.modules,
+            };
+            backend
+                .run_event_loop(&mut dispatcher)
+                .map_err(|e| anyhow::anyhow!("{e}"))
+                .context("event loop failed")?;
+        } else {
+            self.wait_for_speech();
+        }
+        Ok(())
+    }
+
+    fn wait_for_speech(&self) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let speaking = self.shared.tts.borrow().is_speaking().unwrap_or(false);
+            if !speaking || Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+/// Convenience entry: load each directory as a module and run them together.
+pub fn run(dirs: &[String]) -> Result<()> {
+    let mut manager = Manager::new()?;
+    for dir in dirs {
+        manager.load(dir)?;
+    }
+    manager.run()
+}
+
+/// Bridges OS events from the backend into the owning module's Luau callbacks.
 struct Dispatcher<'a> {
-    lua: &'a Lua,
-    state: Rc<RefCell<HostState>>,
+    shared: &'a Shared,
+    modules: &'a [Module],
+}
+
+impl Dispatcher<'_> {
+    fn enabled(&self, idx: usize) -> bool {
+        self.shared.enabled.borrow().get(idx).copied().unwrap_or(false)
+    }
 }
 
 impl HostEvents for Dispatcher<'_> {
     fn on_hotkey(&mut self, id: i32) {
-        let func: Option<Function> = {
-            let st = self.state.borrow();
-            st.hotkeys
-                .iter()
-                .find(|(hid, _)| *hid == id)
-                .and_then(|(_, key)| self.lua.registry_value::<Function>(key).ok())
+        let found = {
+            let map = self.shared.hotkeys.borrow();
+            map.get(&id).and_then(|(idx, lua, key)| {
+                if self.enabled(*idx) {
+                    lua.registry_value::<Function>(key).ok().map(|f| (lua.clone(), f))
+                } else {
+                    None
+                }
+            })
         };
-        if let Some(f) = func {
+        if let Some((_lua, f)) = found {
             if let Err(e) = f.call::<()>(()) {
                 eprintln!("  [hotkey] callback error: {e}");
             }
         }
     }
 
-    fn on_window_activate(&mut self, win: WinInfo) {
-        let table = match win_to_table(self.lua, &win) {
-            Ok(t) => t,
-            Err(_) => return,
-        };
-        let res = (|| -> mlua::Result<()> {
-            let host: Table = self.lua.globals().get("host")?;
-            let window: Table = host.get("window")?;
-            let dispatch: Function = window.get("_dispatchActivate")?;
-            dispatch.call::<()>(table)
-        })();
-        if let Err(e) = res {
-            eprintln!("  [trigger] dispatch error: {e}");
-        }
-    }
-
     fn on_key(&mut self, vk: u32, mods: u8) {
-        let func: Option<Function> = {
-            let st = self.state.borrow();
-            st.keys
-                .iter()
-                .find(|(k, m, _)| *k == vk && *m == mods)
-                .and_then(|(_, _, key)| self.lua.registry_value::<Function>(key).ok())
+        let found = {
+            let keys = self.shared.keys.borrow();
+            keys.iter()
+                .find(|(k, m, idx, ..)| *k == vk && *m == mods && self.enabled(*idx))
+                .and_then(|(_, _, _, lua, key)| {
+                    lua.registry_value::<Function>(key).ok().map(|f| (lua.clone(), f))
+                })
         };
-        if let Some(f) = func {
-            let table = self.lua.create_table().ok();
+        if let Some((lua, f)) = found {
+            let table = lua.create_table().ok();
             if let Some(t) = &table {
                 let _ = t.set("shift", mods & backend::MASK_SHIFT != 0);
                 let _ = t.set("ctrl", mods & backend::MASK_CTRL != 0);
@@ -109,89 +244,30 @@ impl HostEvents for Dispatcher<'_> {
             }
         }
     }
+
+    fn on_window_activate(&mut self, win: WinInfo) {
+        for (idx, m) in self.modules.iter().enumerate() {
+            if !self.enabled(idx) {
+                continue;
+            }
+            let table = match win_to_table(&m.lua, &win) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let res = (|| -> mlua::Result<()> {
+                let host: Table = m.lua.globals().get("host")?;
+                let window: Table = host.get("window")?;
+                let dispatch: Function = window.get("_dispatchActivate")?;
+                dispatch.call::<()>(table)
+            })();
+            if let Err(e) = res {
+                eprintln!("  [trigger] dispatch error ({}): {e}", m.id);
+            }
+        }
+    }
 }
 
-/// Loads a module from an unpacked directory, installs the `host` API and runs
-/// the entry point. If the module registered hotkeys, enters the always-on event
-/// loop; otherwise waits for any pending speech and exits.
-pub fn run_module(dir: impl AsRef<Path>) -> Result<()> {
-    let module = LoadedModule::load_dir(dir)?;
-    println!(
-        "» Loading module: {} v{} (id {})",
-        module.manifest.name, module.manifest.version, module.manifest.id
-    );
-    if !module.manifest.capabilities.require.is_empty() {
-        println!(
-            "  Requested capabilities: {}",
-            module.manifest.capabilities.require.join(", ")
-        );
-    }
-
-    let backend = backend::platform();
-
-    let tts = Tts::default().context("failed to initialize TTS engine")?;
-    let (audio_stream, audio_handle) = match rodio::OutputStream::try_default() {
-        Ok((s, h)) => (Some(s), Some(h)),
-        Err(e) => {
-            eprintln!("  [sound] no audio output device: {e}");
-            (None, None)
-        }
-    };
-    let state = Rc::new(RefCell::new(HostState {
-        root: module.root.clone(),
-        tts,
-        hotkeys: Vec::new(),
-        hotkey_counter: 0,
-        keys: Vec::new(),
-        _audio_stream: audio_stream,
-        audio: audio_handle,
-    }));
-
-    let lua = Lua::new();
-    install_host_api(&lua, &state, &backend).context("failed to install host API")?;
-    lua.load(WINDOW_PRELUDE)
-        .set_name("window_prelude")
-        .exec()
-        .context("failed to load host.window matcher prelude")?;
-    lua.load(OVERLAY_PRELUDE)
-        .set_name("overlay_prelude")
-        .exec()
-        .context("failed to load host.overlay runtime")?;
-
-    let entry = module.entry_path();
-    let code = std::fs::read_to_string(&entry)
-        .with_context(|| format!("entry point not readable: {}", entry.display()))?;
-    lua.load(code)
-        .set_name(entry.display().to_string())
-        .exec()
-        .context("error while running the module entry point")?;
-
-    let has_hotkeys = !state.borrow().hotkeys.is_empty();
-    let has_triggers = window_has_triggers(&lua);
-    let has_keys = !state.borrow().keys.is_empty();
-    if has_hotkeys || has_triggers || has_keys {
-        if has_triggers {
-            backend
-                .watch_foreground()
-                .map_err(|e| anyhow::anyhow!("{e}"))
-                .context("failed to watch foreground windows")?;
-        }
-        println!("» Listening for events — press Ctrl+C to quit.");
-        let mut dispatcher = Dispatcher {
-            lua: &lua,
-            state: state.clone(),
-        };
-        backend
-            .run_event_loop(&mut dispatcher)
-            .map_err(|e| anyhow::anyhow!("{e}"))
-            .context("event loop failed")?;
-    } else {
-        wait_for_speech(&state);
-    }
-    Ok(())
-}
-
-fn install_host_api(lua: &Lua, state: &Rc<RefCell<HostState>>, backend: &Rc<dyn Backend>) -> Result<()> {
+fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<()> {
     let host = lua.create_table()?;
 
     // host.log.info(msg)
@@ -205,9 +281,10 @@ fn install_host_api(lua: &Lua, state: &Rc<RefCell<HostState>>, backend: &Rc<dyn 
     )?;
     host.set("log", log)?;
 
-    // host.speech.output(text, { interrupt = true })
+    // host.speech.output(text, { interrupt = true })  (do not echo to console:
+    // a screen reader would read the terminal and double the speech)
     let speech = lua.create_table()?;
-    let s = state.clone();
+    let sh = shared.clone();
     speech.set(
         "output",
         lua.create_function(move |_, (text, opts): (String, Option<Table>)| {
@@ -215,10 +292,8 @@ fn install_host_api(lua: &Lua, state: &Rc<RefCell<HostState>>, backend: &Rc<dyn 
                 Some(t) => t.get::<bool>("interrupt").unwrap_or(true),
                 None => true,
             };
-            // Note: do NOT echo the spoken text to the console — a screen reader
-            // reading the terminal would announce it a second time (double speech).
-            s.borrow_mut()
-                .tts
+            sh.tts
+                .borrow_mut()
                 .speak(text, interrupt)
                 .map_err(mlua::Error::external)?;
             Ok(())
@@ -226,79 +301,67 @@ fn install_host_api(lua: &Lua, state: &Rc<RefCell<HostState>>, backend: &Rc<dyn 
     )?;
     host.set("speech", speech)?;
 
-    // host.hotkey.register(spec, callback)
+    // host.hotkey.register(spec, cb) -> id ; host.hotkey.unregister(id)
     let hk = lua.create_table()?;
-    let s_hk = state.clone();
-    let b_hk = backend.clone();
+    let sh = shared.clone();
     hk.set(
         "register",
         lua.create_function(move |lua, (spec, cb): (String, Function)| {
-            let id = {
-                let mut st = s_hk.borrow_mut();
-                st.hotkey_counter += 1;
-                st.hotkey_counter
-            };
-            b_hk.register_hotkey(id, &spec).map_err(mlua::Error::external)?;
+            let id = sh.alloc_id();
+            sh.backend.register_hotkey(id, &spec).map_err(mlua::Error::external)?;
             let key = lua.create_registry_value(cb)?;
-            s_hk.borrow_mut().hotkeys.push((id, key));
+            sh.hotkeys.borrow_mut().insert(id, (idx, lua.clone(), key));
             Ok(id)
         })?,
     )?;
-    let s_unhk = state.clone();
-    let b_unhk = backend.clone();
+    let sh = shared.clone();
     hk.set(
         "unregister",
         lua.create_function(move |_, id: i32| {
-            b_unhk.unregister_hotkey(id);
-            s_unhk.borrow_mut().hotkeys.retain(|(hid, _)| *hid != id);
+            sh.backend.unregister_hotkey(id);
+            sh.hotkeys.borrow_mut().remove(&id);
             Ok(())
         })?,
     )?;
     host.set("hotkey", hk)?;
 
-    // host.keys: low-level key capture + suppression (capture / release / releaseAll)
+    // host.keys: low-level key capture + suppression (modifier-aware)
     let keys = lua.create_table()?;
-    let s_kcap = state.clone();
-    let b_kcap = backend.clone();
+    let sh = shared.clone();
     keys.set(
         "capture",
         lua.create_function(move |lua, (spec, cb): (String, Function)| {
             let (vk, mask) = backend::key_spec(&spec)
                 .ok_or_else(|| mlua::Error::external(format!("unknown key spec '{spec}'")))?;
             let key = lua.create_registry_value(cb)?;
-            {
-                let mut st = s_kcap.borrow_mut();
-                st.keys.retain(|(k, m, _)| !(*k == vk && *m == mask));
-                st.keys.push((vk, mask, key));
-            }
-            let set: Vec<(u32, u8)> =
-                s_kcap.borrow().keys.iter().map(|(k, m, _)| (*k, *m)).collect();
-            b_kcap.set_captured_keys(&set);
-            b_kcap.watch_keys().map_err(mlua::Error::external)?;
+            sh.keys
+                .borrow_mut()
+                .retain(|(k, m, i, ..)| !(*k == vk && *m == mask && *i == idx));
+            sh.keys.borrow_mut().push((vk, mask, idx, lua.clone(), key));
+            sh.refresh_captured();
+            sh.backend.watch_keys().map_err(mlua::Error::external)?;
             Ok(())
         })?,
     )?;
-    let s_krel = state.clone();
-    let b_krel = backend.clone();
+    let sh = shared.clone();
     keys.set(
         "release",
         lua.create_function(move |_, spec: String| {
             if let Some((vk, mask)) = backend::key_spec(&spec) {
-                s_krel.borrow_mut().keys.retain(|(k, m, _)| !(*k == vk && *m == mask));
-                let set: Vec<(u32, u8)> =
-                    s_krel.borrow().keys.iter().map(|(k, m, _)| (*k, *m)).collect();
-                b_krel.set_captured_keys(&set);
+                sh.keys
+                    .borrow_mut()
+                    .retain(|(k, m, i, ..)| !(*k == vk && *m == mask && *i == idx));
+                sh.refresh_captured();
             }
             Ok(())
         })?,
     )?;
-    let s_kall = state.clone();
-    let b_kall = backend.clone();
+    let sh = shared.clone();
     keys.set(
         "releaseAll",
         lua.create_function(move |_, ()| {
-            s_kall.borrow_mut().keys.clear();
-            b_kall.set_captured_keys(&[]);
+            sh.keys.borrow_mut().retain(|(.., i, _, _)| *i != idx);
+            sh.refresh_captured();
             Ok(())
         })?,
     )?;
@@ -313,36 +376,36 @@ fn install_host_api(lua: &Lua, state: &Rc<RefCell<HostState>>, backend: &Rc<dyn 
     )?;
     host.set("os", os)?;
 
-    // host.window.list() / host.window.active()  (find/findAll added by the prelude)
+    // host.window.list() / host.window.active()  (find/findAll/onTrigger via prelude)
     let win = lua.create_table()?;
-    let b_list = backend.clone();
+    let sh = shared.clone();
     win.set(
         "list",
         lua.create_function(move |lua, ()| {
             let t = lua.create_table()?;
-            for w in b_list.enumerate_windows() {
+            for w in sh.backend.enumerate_windows() {
                 t.push(win_to_table(lua, &w)?)?;
             }
             Ok(t)
         })?,
     )?;
-    let b_active = backend.clone();
+    let sh = shared.clone();
     win.set(
         "active",
-        lua.create_function(move |lua, ()| match b_active.active_window() {
+        lua.create_function(move |lua, ()| match sh.backend.active_window() {
             Some(w) => Ok(Some(win_to_table(lua, &w)?)),
             None => Ok(None),
         })?,
     )?;
     host.set("window", win)?;
 
-    // host.screen.pixel(x,y) / .size() / .imageSearch(template, { region, tolerance })
+    // host.screen.pixel / .size / .imageSearch
     let screen = lua.create_table()?;
-    let b_pixel = backend.clone();
+    let sh = shared.clone();
     screen.set(
         "pixel",
         lua.create_function(move |lua, (x, y): (i32, i32)| {
-            let (r, g, b) = b_pixel.pixel(x, y);
+            let (r, g, b) = sh.backend.pixel(x, y);
             let t = lua.create_table()?;
             t.set("r", r)?;
             t.set("g", g)?;
@@ -351,69 +414,61 @@ fn install_host_api(lua: &Lua, state: &Rc<RefCell<HostState>>, backend: &Rc<dyn 
             Ok(t)
         })?,
     )?;
-    let b_size = backend.clone();
+    let sh = shared.clone();
     screen.set(
         "size",
         lua.create_function(move |lua, ()| {
-            let (w, h) = b_size.screen_size();
+            let (w, h) = sh.backend.screen_size();
             let t = lua.create_table()?;
             t.set("w", w)?;
             t.set("h", h)?;
             Ok(t)
         })?,
     )?;
-    let b_search = backend.clone();
-    let s_search = state.clone();
+    let sh = shared.clone();
     screen.set(
         "imageSearch",
-        lua.create_function(
-            move |lua, (template, opts): (String, Option<Table>)| {
-                let path = s_search.borrow().resolve(&template);
-                let img = image::open(&path)
-                    .map_err(|e| {
-                        mlua::Error::external(format!(
-                            "imageSearch: cannot open '{}': {e}",
-                            path.display()
-                        ))
-                    })?
-                    .to_rgba8();
-                let (tw, th) = (img.width(), img.height());
-                let (sw, sh) = b_search.screen_size();
-                let (rx, ry, rw, rh) = read_region(opts.as_ref(), sw, sh);
-                let tol: u8 = opts
-                    .as_ref()
-                    .and_then(|o| o.get::<u8>("tolerance").ok())
-                    .unwrap_or(0);
-                let cap = match b_search.capture(rx, ry, rw, rh) {
-                    Some(c) => c,
-                    None => return Ok(None),
-                };
-                match find_template(&cap, tw, th, img.as_raw(), tol) {
-                    Some((ox, oy)) => {
-                        let t = lua.create_table()?;
-                        t.set("x", rx + ox as i32)?;
-                        t.set("y", ry + oy as i32)?;
-                        t.set("w", tw)?;
-                        t.set("h", th)?;
-                        Ok(Some(t))
-                    }
-                    None => Ok(None),
+        lua.create_function(move |lua, (template, opts): (String, Option<Table>)| {
+            let path = sh.root(idx).join(&template);
+            let img = image::open(&path)
+                .map_err(|e| {
+                    mlua::Error::external(format!("imageSearch: cannot open '{}': {e}", path.display()))
+                })?
+                .to_rgba8();
+            let (tw, th) = (img.width(), img.height());
+            let (sw, sh_) = sh.backend.screen_size();
+            let (rx, ry, rw, rh) = read_region(opts.as_ref(), sw, sh_);
+            let cap = match sh.backend.capture(rx, ry, rw, rh) {
+                Some(c) => c,
+                None => return Ok(None),
+            };
+            let tol: u8 = opts.as_ref().and_then(|o| o.get::<u8>("tolerance").ok()).unwrap_or(0);
+            match find_template(&cap, tw, th, img.as_raw(), tol) {
+                Some((ox, oy)) => {
+                    let t = lua.create_table()?;
+                    t.set("x", rx + ox as i32)?;
+                    t.set("y", ry + oy as i32)?;
+                    t.set("w", tw)?;
+                    t.set("h", th)?;
+                    Ok(Some(t))
                 }
-            },
-        )?,
+                None => Ok(None),
+            }
+        })?,
     )?;
     host.set("screen", screen)?;
 
     // host.ocr.recognize({ region, lang }) -> { text, words = {{text,x,y,w,h}, ...} }
     let ocr = lua.create_table()?;
-    let b_ocr = backend.clone();
+    let sh = shared.clone();
     ocr.set(
         "recognize",
         lua.create_function(move |lua, opts: Option<Table>| {
-            let (sw, sh) = b_ocr.screen_size();
-            let (rx, ry, rw, rh) = read_region(opts.as_ref(), sw, sh);
+            let (sw, shh) = sh.backend.screen_size();
+            let (rx, ry, rw, rh) = read_region(opts.as_ref(), sw, shh);
             let lang: Option<String> = opts.as_ref().and_then(|o| o.get::<String>("lang").ok());
-            let res = b_ocr
+            let res = sh
+                .backend
                 .ocr(rx, ry, rw, rh, lang.as_deref())
                 .map_err(mlua::Error::external)?;
             let t = lua.create_table()?;
@@ -436,77 +491,74 @@ fn install_host_api(lua: &Lua, state: &Rc<RefCell<HostState>>, backend: &Rc<dyn 
 
     // host.input: cursorPos / move / click / drag / scroll / send / text
     let input = lua.create_table()?;
-    let b_curs = backend.clone();
+    let sh = shared.clone();
     input.set(
         "cursorPos",
         lua.create_function(move |lua, ()| {
-            let (x, y) = b_curs.cursor_pos();
+            let (x, y) = sh.backend.cursor_pos();
             let t = lua.create_table()?;
             t.set("x", x)?;
             t.set("y", y)?;
             Ok(t)
         })?,
     )?;
-    let b_move = backend.clone();
+    let sh = shared.clone();
     input.set(
         "move",
         lua.create_function(move |_, (x, y): (i32, i32)| {
-            b_move.mouse_move(x, y);
+            sh.backend.mouse_move(x, y);
             Ok(())
         })?,
     )?;
-    let b_click = backend.clone();
+    let sh = shared.clone();
     input.set(
         "click",
         lua.create_function(move |_, (x, y, opts): (i32, i32, Option<Table>)| {
-            b_click.mouse_click(x, y, button_from(opts.as_ref()));
+            sh.backend.mouse_click(x, y, button_from(opts.as_ref()));
             Ok(())
         })?,
     )?;
-    let b_drag = backend.clone();
+    let sh = shared.clone();
     input.set(
         "drag",
-        lua.create_function(
-            move |_, (x1, y1, x2, y2, opts): (i32, i32, i32, i32, Option<Table>)| {
-                b_drag.mouse_drag(x1, y1, x2, y2, button_from(opts.as_ref()));
-                Ok(())
-            },
-        )?,
+        lua.create_function(move |_, (x1, y1, x2, y2, opts): (i32, i32, i32, i32, Option<Table>)| {
+            sh.backend.mouse_drag(x1, y1, x2, y2, button_from(opts.as_ref()));
+            Ok(())
+        })?,
     )?;
-    let b_scroll = backend.clone();
+    let sh = shared.clone();
     input.set(
         "scroll",
         lua.create_function(move |_, (x, y, amount): (i32, i32, i32)| {
-            b_scroll.mouse_scroll(x, y, amount);
+            sh.backend.mouse_scroll(x, y, amount);
             Ok(())
         })?,
     )?;
-    let b_send = backend.clone();
+    let sh = shared.clone();
     input.set(
         "send",
         lua.create_function(move |_, combo: String| {
-            b_send.key_send(&combo).map_err(mlua::Error::external)
+            sh.backend.key_send(&combo).map_err(mlua::Error::external)
         })?,
     )?;
-    let b_text = backend.clone();
+    let sh = shared.clone();
     input.set(
         "text",
         lua.create_function(move |_, text: String| {
-            b_text.type_text(&text);
+            sh.backend.type_text(&text);
             Ok(())
         })?,
     )?;
     host.set("input", input)?;
 
-    // host.sound.play(path) — fire-and-forget playback of a bundled audio asset
+    // host.sound.play(path) — fire-and-forget audio asset playback
     let sound = lua.create_table()?;
-    let s_sound = state.clone();
+    let sh = shared.clone();
     sound.set(
         "play",
         lua.create_function(move |_, rel: String| {
-            let st = s_sound.borrow();
-            if let Some(handle) = &st.audio {
-                let path = st.resolve(&rel);
+            if let Some(handle) = &sh.audio {
+                let path = sh.root(idx).join(&rel);
                 let play = || -> anyhow::Result<()> {
                     let file = std::io::BufReader::new(std::fs::File::open(&path)?);
                     let source = rodio::Decoder::new(file)?;
@@ -525,21 +577,21 @@ fn install_host_api(lua: &Lua, state: &Rc<RefCell<HostState>>, backend: &Rc<dyn 
     host.set("sound", sound)?;
 
     // host.path(rel) -> real path (escape hatch)
-    let s2 = state.clone();
+    let sh = shared.clone();
     host.set(
         "path",
         lua.create_function(move |_, rel: String| {
-            Ok(s2.borrow().resolve(&rel).to_string_lossy().to_string())
+            Ok(sh.root(idx).join(&rel).to_string_lossy().to_string())
         })?,
     )?;
 
     // host.resource.read(rel) -> bytes/string from the package
     let resource = lua.create_table()?;
-    let s3 = state.clone();
+    let sh = shared.clone();
     resource.set(
         "read",
         lua.create_function(move |_, rel: String| {
-            let path = s3.borrow().resolve(&rel);
+            let path = sh.root(idx).join(&rel);
             std::fs::read_to_string(&path).map_err(mlua::Error::external)
         })?,
     )?;
@@ -549,8 +601,7 @@ fn install_host_api(lua: &Lua, state: &Rc<RefCell<HostState>>, backend: &Rc<dyn 
     Ok(())
 }
 
-/// Returns true if the loaded module registered any window triggers (added by
-/// the window prelude).
+/// Returns true if the given module VM registered any window triggers.
 fn window_has_triggers(lua: &Lua) -> bool {
     (|| -> mlua::Result<bool> {
         let host: Table = lua.globals().get("host")?;
@@ -563,9 +614,7 @@ fn window_has_triggers(lua: &Lua) -> bool {
 
 /// Reads `{ button = "left"|"right"|"middle" }` from input opts (default left).
 fn button_from(opts: Option<&Table>) -> MouseButton {
-    let name = opts
-        .and_then(|o| o.get::<String>("button").ok())
-        .unwrap_or_default();
+    let name = opts.and_then(|o| o.get::<String>("button").ok()).unwrap_or_default();
     match name.to_ascii_lowercase().as_str() {
         "right" => MouseButton::Right,
         "middle" => MouseButton::Middle,
@@ -650,17 +699,4 @@ fn win_to_table(lua: &Lua, w: &WinInfo) -> mlua::Result<Table> {
     t.set("bounds", b)?;
 
     Ok(t)
-}
-
-/// Keeps the process alive until speech output has finished (CLI skeleton: tts-rs
-/// speaks asynchronously). Bounded by a timeout.
-fn wait_for_speech(state: &Rc<RefCell<HostState>>) {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        let speaking = state.borrow().tts.is_speaking().unwrap_or(false);
-        if !speaking || Instant::now() > deadline {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
 }

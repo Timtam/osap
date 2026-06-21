@@ -19,11 +19,13 @@ Try the global-hotkey demo (stays resident): `cargo run -p app -- modules/hotkey
 
 Try the first self-voicing **overlay** (stays resident): `cargo run -p app -- modules/overlay`, then navigate with **Ctrl+Alt+Left/Right** and activate with **Ctrl+Alt+Enter** (or the per-control hotkeys **Ctrl+Alt+1/2/3**).
 
+Load **several modules at once** (they share one process, TTS, and event loop): `cargo run -p app -- modules/hotkey modules/window-trigger`.
+
 ## Structure
 
 - `crates/module-manifest` — `module.toml` parsing + module loading (dev: unpacked directory).
-- `crates/host` — Luau runtime + `host` API (`log`/`speech`/`sound`/`hotkey`/`window`/`os`/`screen`/`ocr`/`input`/`overlay`/`path`/`resource`). The OS is reached through a `Backend` trait (`crates/host/src/backend/`, one impl per platform; Windows real, others stub). The OS-gated window matcher (`find`/`findAll`) is a Luau prelude.
-- `crates/app` — binary `automation-platform`, loads & runs a module.
+- `crates/host` — **module manager** + Luau runtime + `host` API (`log`/`speech`/`sound`/`hotkey`/`keys`/`window`/`os`/`screen`/`ocr`/`input`/`overlay`/`path`/`resource`). Loads many modules concurrently (one VM each; shared backend/TTS/audio + one event loop, central event routing). The OS is reached through a `Backend` trait (`crates/host/src/backend/`, one impl per platform; Windows real, others stub); the window matcher + overlay runtime are Luau preludes.
+- `crates/app` — binary `automation-platform`, loads & runs one or more modules: `automation-platform <dir1> <dir2> …`.
 - `modules/hello`, `modules/hotkey`, `modules/window`, `modules/window-trigger`, `modules/screen`, `modules/ocr`, `modules/input`, `modules/sound`, `modules/overlay`, `modules/overlay-attach`, `modules/keys` — example modules (speak-once; global-hotkey trigger; window/os inspection; foreground-change trigger; screen capture & image search; OCR; mouse/keyboard input; audio playback; self-voicing overlay; context-bound overlay; low-level key capture).
 - `docs/` — design documents (see below).
 - `TODO.md` — backlog & implementation slices.

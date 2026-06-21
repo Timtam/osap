@@ -1,14 +1,18 @@
-//! Walking-skeleton entry: loads a module (default `modules/hello`) and runs it.
+//! Entry: loads one or more modules (default `modules/hello`) into one process
+//! and runs them together under the manager.
 
 use anyhow::Result;
 
 fn main() -> Result<()> {
-    let dir = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "modules/hello".to_string());
+    let dirs: Vec<String> = std::env::args().skip(1).collect();
+    let dirs = if dirs.is_empty() {
+        vec!["modules/hello".to_string()]
+    } else {
+        dirs
+    };
 
     println!("== Automation Platform — Walking Skeleton ==");
-    host::run_module(&dir)?;
+    host::run(&dirs)?;
     println!("== done ==");
     Ok(())
 }
