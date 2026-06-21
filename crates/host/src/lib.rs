@@ -1,11 +1,13 @@
 //! Host runtime: embeds a Luau VM and exposes the `host` API (design principle:
 //! primitives are first-class, see `docs/host-api-capability-catalog.md`).
 //!
-//! Walking-skeleton scope: `host.log`, `host.speech` (tts-rs), `host.path`,
-//! `host.resource.read`, `host.hotkey` (global hotkeys → Luau callbacks).
-//! Further capabilities (window/input/screen/ocr/overlay) to follow.
+//! Walking-skeleton scope: `host.log`, `host.speech` (tts-rs), `host.hotkey`
+//! (global hotkeys → Luau callbacks), `host.window` + `host.os` (window
+//! detection + OS-gated matcher), `host.path`, `host.resource.read`.
+//! Further capabilities (input/screen/ocr/overlay) to follow.
 
 mod hotkey;
+mod window;
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -17,6 +19,10 @@ use mlua::{Function, Lua, RegistryKey, Table};
 use tts::Tts;
 
 use module_manifest::LoadedModule;
+
+/// Luau prelude that adds the OS-gated `host.window.find`/`findAll` matcher on
+/// top of the native `host.window.list`/`active` bindings.
+const WINDOW_PRELUDE: &str = include_str!("window_prelude.luau");
 
 /// Shared host state that the `host` API closures access via `Rc<RefCell<…>>`.
 struct HostState {
@@ -59,6 +65,10 @@ pub fn run_module(dir: impl AsRef<Path>) -> Result<()> {
 
     let lua = Lua::new();
     install_host_api(&lua, &state).context("failed to install host API")?;
+    lua.load(WINDOW_PRELUDE)
+        .set_name("window_prelude")
+        .exec()
+        .context("failed to load host.window matcher prelude")?;
 
     let entry = module.entry_path();
     let code = std::fs::read_to_string(&entry)
@@ -122,6 +132,36 @@ fn install_host_api(lua: &Lua, state: &Rc<RefCell<HostState>>) -> Result<()> {
     )?;
     host.set("hotkey", hk)?;
 
+    // host.os.current / host.os.is(name)
+    let os = lua.create_table()?;
+    os.set("current", std::env::consts::OS)?;
+    os.set(
+        "is",
+        lua.create_function(|_, name: String| Ok(name == std::env::consts::OS))?,
+    )?;
+    host.set("os", os)?;
+
+    // host.window.list() / host.window.active()  (find/findAll added by the prelude)
+    let win = lua.create_table()?;
+    win.set(
+        "list",
+        lua.create_function(|lua, ()| {
+            let t = lua.create_table()?;
+            for w in window::enumerate() {
+                t.push(win_to_table(lua, &w)?)?;
+            }
+            Ok(t)
+        })?,
+    )?;
+    win.set(
+        "active",
+        lua.create_function(|lua, ()| match window::active() {
+            Some(w) => Ok(Some(win_to_table(lua, &w)?)),
+            None => Ok(None),
+        })?,
+    )?;
+    host.set("window", win)?;
+
     // host.path(rel) -> real path (escape hatch)
     let s2 = state.clone();
     host.set(
@@ -145,6 +185,35 @@ fn install_host_api(lua: &Lua, state: &Rc<RefCell<HostState>>) -> Result<()> {
 
     lua.globals().set("host", host)?;
     Ok(())
+}
+
+/// Converts a native window snapshot into the Lua table modules see:
+/// `{ id, title, class, app = { name, exe, pid }, bounds = { x, y, w, h } }`.
+fn win_to_table(lua: &Lua, w: &window::WinInfo) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("id", w.hwnd)?;
+    t.set("title", w.title.clone())?;
+    t.set("class", w.class.clone())?;
+
+    let app = lua.create_table()?;
+    let name = w
+        .exe
+        .rsplit_once('.')
+        .map(|(stem, _)| stem.to_string())
+        .unwrap_or_else(|| w.exe.clone());
+    app.set("name", name)?;
+    app.set("exe", w.exe.clone())?;
+    app.set("pid", w.pid)?;
+    t.set("app", app)?;
+
+    let b = lua.create_table()?;
+    b.set("x", w.x)?;
+    b.set("y", w.y)?;
+    b.set("w", w.w)?;
+    b.set("h", w.h)?;
+    t.set("bounds", b)?;
+
+    Ok(t)
 }
 
 /// Keeps the process alive until speech output has finished (CLI skeleton: tts-rs
