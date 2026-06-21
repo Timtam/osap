@@ -24,6 +24,15 @@ use module_manifest::LoadedModule;
 const WINDOW_PRELUDE: &str = include_str!("window_prelude.luau");
 const OVERLAY_PRELUDE: &str = include_str!("overlay_prelude.luau");
 
+/// A registered global hotkey: which module owns it, the VM + callback to fire,
+/// and the spec so it can be re-registered with the OS after a disable/enable.
+struct HotkeyReg {
+    module_idx: usize,
+    lua: Lua,
+    cb: RegistryKey,
+    spec: String,
+}
+
 /// Services shared by every module: the OS backend, one speech engine, one audio
 /// output, the global hotkey-id counter, and the central event routing.
 struct Shared {
@@ -36,8 +45,8 @@ struct Shared {
     roots: RefCell<Vec<PathBuf>>,
     /// module_idx → enabled.
     enabled: RefCell<Vec<bool>>,
-    /// Global hotkey id → (module_idx, that module's VM, callback in its registry).
-    hotkeys: RefCell<HashMap<i32, (usize, Lua, RegistryKey)>>,
+    /// Global hotkey id → its registration (owning module, VM, callback, spec).
+    hotkeys: RefCell<HashMap<i32, HotkeyReg>>,
     /// Captured keys: (vk, modifier-mask, module_idx, VM, callback).
     keys: RefCell<Vec<(u32, u8, usize, Lua, RegistryKey)>>,
 }
@@ -51,19 +60,53 @@ impl Shared {
         self.next_id.set(id);
         id
     }
-    /// Recomputes the global captured-key set from all modules and updates the hook.
+    /// Recomputes the global captured-key set from *enabled* modules and updates
+    /// the hook (so a disabled module's keys are no longer suppressed).
     fn refresh_captured(&self) {
-        let mut set: Vec<(u32, u8)> =
-            self.keys.borrow().iter().map(|(vk, m, ..)| (*vk, *m)).collect();
+        let enabled = self.enabled.borrow();
+        let mut set: Vec<(u32, u8)> = self
+            .keys
+            .borrow()
+            .iter()
+            .filter(|(_, _, idx, ..)| enabled.get(*idx).copied().unwrap_or(false))
+            .map(|(vk, m, ..)| (*vk, *m))
+            .collect();
         set.sort_unstable();
         set.dedup();
         self.backend.set_captured_keys(&set);
     }
+
+    /// Enables or disables a module at runtime: (un)registers its OS hotkeys and
+    /// recomputes the captured-key set. The dispatcher already skips disabled
+    /// modules' hotkeys/keys/triggers via the `enabled` flag.
+    fn set_enabled(&self, idx: usize, enabled: bool) {
+        {
+            let mut en = self.enabled.borrow_mut();
+            if idx >= en.len() || en[idx] == enabled {
+                return;
+            }
+            en[idx] = enabled;
+        }
+        for (id, reg) in self.hotkeys.borrow().iter() {
+            if reg.module_idx != idx {
+                continue;
+            }
+            if enabled {
+                let _ = self.backend.register_hotkey(*id, &reg.spec);
+            } else {
+                self.backend.unregister_hotkey(*id);
+            }
+        }
+        self.refresh_captured();
+        println!("» Module {idx} {}", if enabled { "enabled" } else { "disabled" });
+    }
 }
 
-/// A loaded module: its id + its own Luau VM.
+/// A loaded module: its identity + its own Luau VM.
 struct Module {
     id: String,
+    name: String,
+    version: String,
     lua: Lua,
 }
 
@@ -131,6 +174,8 @@ impl Manager {
 
         self.modules.push(Module {
             id: module.manifest.id,
+            name: module.manifest.name,
+            version: module.manifest.version,
             lua,
         });
         Ok(())
@@ -165,18 +210,37 @@ impl Manager {
                     .map_err(|e| anyhow::anyhow!("{e}"))
                     .context("event loop failed")?;
             } else {
-                // wxWidgets owns the loop; drain our OS events from its timer tick.
-                println!("» Window open — modules are active. Close the window to quit.");
+                // wxWidgets owns the loop. Snapshot the module list for the tray
+                // manager window, then drain our OS events from its timer tick.
+                println!("» Module manager running in the system tray.");
+                let module_infos: Vec<gui::ModuleInfo> = {
+                    let enabled = self.shared.enabled.borrow();
+                    self.modules
+                        .iter()
+                        .enumerate()
+                        .map(|(i, m)| gui::ModuleInfo {
+                            name: m.name.clone(),
+                            version: m.version.clone(),
+                            id: m.id.clone(),
+                            enabled: enabled.get(i).copied().unwrap_or(true),
+                        })
+                        .collect()
+                };
                 let backend = self.shared.backend.clone();
                 let shared = self.shared.clone();
+                let toggle_shared = self.shared.clone();
                 let modules = Rc::new(std::mem::take(&mut self.modules));
-                gui::run_gui(move || {
-                    let mut dispatcher = Dispatcher {
-                        shared: &shared,
-                        modules: &modules[..],
-                    };
-                    backend.pump_pending(&mut dispatcher);
-                })
+                gui::run_gui(
+                    module_infos,
+                    move |idx, enabled| toggle_shared.set_enabled(idx, enabled),
+                    move || {
+                        let mut dispatcher = Dispatcher {
+                            shared: &shared,
+                            modules: &modules[..],
+                        };
+                        backend.pump_pending(&mut dispatcher);
+                    },
+                )
                 .map_err(|e| anyhow::anyhow!("{e}"))
                 .context("wx GUI loop failed")?;
             }
@@ -223,9 +287,12 @@ impl HostEvents for Dispatcher<'_> {
     fn on_hotkey(&mut self, id: i32) {
         let found = {
             let map = self.shared.hotkeys.borrow();
-            map.get(&id).and_then(|(idx, lua, key)| {
-                if self.enabled(*idx) {
-                    lua.registry_value::<Function>(key).ok().map(|f| (lua.clone(), f))
+            map.get(&id).and_then(|reg| {
+                if self.enabled(reg.module_idx) {
+                    reg.lua
+                        .registry_value::<Function>(&reg.cb)
+                        .ok()
+                        .map(|f| (reg.lua.clone(), f))
                 } else {
                     None
                 }
@@ -330,7 +397,15 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<()> {
             let id = sh.alloc_id();
             sh.backend.register_hotkey(id, &spec).map_err(mlua::Error::external)?;
             let key = lua.create_registry_value(cb)?;
-            sh.hotkeys.borrow_mut().insert(id, (idx, lua.clone(), key));
+            sh.hotkeys.borrow_mut().insert(
+                id,
+                HotkeyReg {
+                    module_idx: idx,
+                    lua: lua.clone(),
+                    cb: key,
+                    spec,
+                },
+            );
             Ok(id)
         })?,
     )?;
