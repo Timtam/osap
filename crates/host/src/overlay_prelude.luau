@@ -54,22 +54,39 @@ end
 
 local TYPE_LABEL = { static = "", hotspot = "button", custom = "button", ocr = "button" }
 
-local function speakControl(self, index)
+-- Origin (top-left) of the overlay's coordinate space in screen pixels: the
+-- attached plugin window's position, or (0, 0) for an unattached overlay. All
+-- control coordinates (OCR regions, hotspot points) are relative to this.
+local function originOf(self)
+  if self.matcher then
+    local win = host.window.active()
+    -- Coordinates are relative to the plugin window's CLIENT area (like
+    -- AutoHotkey's default), not the frame — so use the client origin.
+    if win then return win.client.x, win.client.y end
+  end
+  return 0, 0
+end
+
+local function ocrCenter(self, c)
+  local ox, oy = originOf(self)
+  return ox + math.floor((c.region[1] + c.region[3]) / 2),
+    oy + math.floor((c.region[2] + c.region[4]) / 2)
+end
+
+local function speakControl(self, index, moveMouse)
   local c = self.controls[index]
   if not c then return end
   local parts = { c.label or "" }
   local tl = TYPE_LABEL[c.kind]
   if tl ~= "" then parts[#parts + 1] = tl end
   if c.kind == "ocr" and c.region then
-    local region = c.region
-    -- An attached overlay's regions are relative to the plugin window's
-    -- top-left (x1, y1, x2, y2); translate to screen coords via its origin.
-    if self.matcher then
-      local win = host.window.active()
-      if win then
-        local b = win.bounds
-        region = { b.x + region[1], b.y + region[2], b.x + region[3], b.y + region[4] }
-      end
+    local ox, oy = originOf(self)
+    local region = { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] }
+    if moveMouse then
+      -- ReaHotkey moves the mouse onto the control on focus (some plugin UIs
+      -- only reveal the current value on hover).
+      host.input.move(ox + math.floor((c.region[1] + c.region[3]) / 2),
+        oy + math.floor((c.region[2] + c.region[4]) / 2))
     end
     local r = host.ocr.recognize({ region = region })
     parts[#parts + 1] = (r.text ~= "" and r.text or "no text")
@@ -89,7 +106,7 @@ function Overlay:focusNext()
     self.focus = (self.focus % n) + 1
     if isFocusable(self, self.focus) then break end
   end
-  speakControl(self, self.focus)
+  speakControl(self, self.focus, true)
 end
 
 function Overlay:focusPrev()
@@ -99,19 +116,25 @@ function Overlay:focusPrev()
     self.focus = ((self.focus - 2) % n) + 1
     if isFocusable(self, self.focus) then break end
   end
-  speakControl(self, self.focus)
+  speakControl(self, self.focus, true)
 end
 
 function Overlay:activate(index)
-  local c = self.controls[index or self.focus]
+  local i = index or self.focus
+  local c = self.controls[i]
   if not c then return end
   if c.kind == "hotspot" and c.at then
-    host.input.click(c.at[1], c.at[2])
+    local ox, oy = originOf(self)
+    host.input.click(ox + c.at[1], oy + c.at[2])
     host.speech.output(c.label .. ", activated", { interrupt = true })
   elseif c.kind == "custom" and c.onActivate then
     c.onActivate()
-  elseif c.kind == "ocr" then
-    speakControl(self, index or self.focus) -- re-read the region
+  elseif c.kind == "ocr" and c.region then
+    -- An OCR button is a Button: re-read its label, then click the centre of
+    -- the region (it sits over a clickable element), like ReaHotkey.
+    speakControl(self, i, false)
+    local cx, cy = ocrCenter(self, c)
+    host.input.click(cx, cy)
   end
 end
 

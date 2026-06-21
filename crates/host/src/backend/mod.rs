@@ -21,6 +21,11 @@ pub struct WinInfo {
     pub y: i32,
     pub w: i32,
     pub h: i32,
+    /// Screen coords of the client-area top-left. Overlay coordinates are
+    /// relative to the client area (as in AutoHotkey's default Client mode),
+    /// not the window frame.
+    pub client_x: i32,
+    pub client_y: i32,
 }
 
 /// A captured screen region (RGBA, row-major, top-down).

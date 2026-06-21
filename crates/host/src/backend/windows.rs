@@ -9,9 +9,9 @@ use super::{Backend, CapturedImage, HostEvents, MouseButton, OcrText, OcrWord, W
 
 use windows_sys::Win32::Foundation::{CloseHandle, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
-    GetPixel, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
-    SRCCOPY,
+    BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
+    GetDC, GetDIBits, GetPixel, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    DIB_RGB_COLORS, SRCCOPY,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::{
@@ -159,7 +159,43 @@ impl Backend for WindowsBackend {
         let cap = self
             .capture(x, y, w, h)
             .ok_or_else(|| "screen capture failed".to_string())?;
-        let (text, words) = run_ocr(&cap, lang).map_err(|e| format!("OCR failed: {e}"))?;
+        let debug = std::env::var_os("AUTOMATION_PLATFORM_OCR_DEBUG").is_some();
+        if debug {
+            save_debug(&cap, "ocr-debug-raw.png");
+        }
+        // Windows.Media.Ocr struggles with small UI text; upscale a small region
+        // before OCR (Tesseract, which ReaHotkey uses, doesn't need this). Large
+        // regions (e.g. full-screen) are left alone so OCR stays fast.
+        let factor: u32 = if cap.w <= 400 && cap.h <= 200 { 3 } else { 1 };
+        let scaled = if factor > 1 { upscale(&cap, factor) } else { cap };
+        if debug {
+            save_debug(&scaled, "ocr-debug.png");
+        }
+        let (mut text, mut words) =
+            run_ocr(&scaled, lang).map_err(|e| format!("OCR failed: {e}"))?;
+        if text.trim().is_empty() {
+            // Stubborn small/low-contrast text (e.g. a highlighted single digit):
+            // retry on a high-contrast binarization of the same image.
+            let bin = binarize(&scaled);
+            if debug {
+                save_debug(&bin, "ocr-debug-bin.png");
+            }
+            if let Ok((t2, w2)) = run_ocr(&bin, lang) {
+                if !t2.trim().is_empty() {
+                    text = t2;
+                    words = w2;
+                }
+            }
+        }
+        if factor > 1 {
+            let (f, pad) = (factor as i32, OCR_PAD as i32);
+            for word in &mut words {
+                word.x = (word.x - pad) / f;
+                word.y = (word.y - pad) / f;
+                word.w /= f;
+                word.h /= f;
+            }
+        }
         Ok(OcrText { text, words })
     }
 
@@ -494,6 +530,11 @@ fn window_info(hwnd_val: isize) -> Option<WinInfo> {
         };
         GetWindowRect(hwnd, &mut rect);
 
+        // Client-area origin in screen coords (overlay coordinates are relative
+        // to the client area, like AutoHotkey's default Client coord mode).
+        let mut client = POINT { x: 0, y: 0 };
+        ClientToScreen(hwnd, &mut client);
+
         Some(WinInfo {
             hwnd: hwnd_val,
             title,
@@ -504,6 +545,8 @@ fn window_info(hwnd_val: isize) -> Option<WinInfo> {
             y: rect.top,
             w: rect.right - rect.left,
             h: rect.bottom - rect.top,
+            client_x: client.x,
+            client_y: client.y,
         })
     }
 }
@@ -554,6 +597,122 @@ fn parse_spec(spec: &str) -> Result<(u32, u32), String> {
 /// Maps a friendly key name to a Win32 virtual-key code.
 fn parse_key(key: &str) -> Result<u32, String> {
     super::key_to_vk(key).ok_or_else(|| format!("unknown key '{key}'"))
+}
+
+/// High-contrast (black-on-white) binarization via Otsu's threshold — a retry
+/// preprocessing for text Windows.Media.Ocr won't read in colour (e.g. a small
+/// highlighted digit). Tesseract, which ReaHotkey uses, doesn't need this.
+fn binarize(cap: &CapturedImage) -> CapturedImage {
+    let img = match image::RgbaImage::from_raw(cap.w, cap.h, cap.rgba.clone()) {
+        Some(i) => i,
+        None => {
+            return CapturedImage {
+                w: cap.w,
+                h: cap.h,
+                rgba: cap.rgba.clone(),
+            }
+        }
+    };
+    let gray: Vec<u8> = img
+        .pixels()
+        .map(|p| {
+            let [r, g, b, _] = p.0;
+            ((r as u32 * 30 + g as u32 * 59 + b as u32 * 11) / 100) as u8
+        })
+        .collect();
+    let mut hist = [0u32; 256];
+    for &v in &gray {
+        hist[v as usize] += 1;
+    }
+    let thresh = otsu(&hist, gray.len() as u32) as u16;
+    let above = gray.iter().filter(|&&v| v as u16 > thresh).count();
+    // Text is the minority class; render it black on a white background.
+    let text_is_bright = above < gray.len() - above;
+    let mut out = image::RgbaImage::new(cap.w, cap.h);
+    for (px, &v) in out.pixels_mut().zip(gray.iter()) {
+        let is_text = if text_is_bright {
+            v as u16 > thresh
+        } else {
+            (v as u16) <= thresh
+        };
+        let c = if is_text { 0u8 } else { 255u8 };
+        *px = image::Rgba([c, c, c, 255]);
+    }
+    CapturedImage {
+        w: cap.w,
+        h: cap.h,
+        rgba: out.into_raw(),
+    }
+}
+
+/// Otsu's threshold for an 8-bit luminance histogram.
+fn otsu(hist: &[u32; 256], total: u32) -> u8 {
+    let total = total as f64;
+    let global: f64 = (0..256).map(|i| i as f64 * hist[i] as f64).sum();
+    let (mut sum_b, mut w_b, mut max_var, mut threshold) = (0.0f64, 0.0f64, -1.0f64, 0u8);
+    for t in 0..256 {
+        w_b += hist[t] as f64;
+        if w_b == 0.0 {
+            continue;
+        }
+        let w_f = total - w_b;
+        if w_f <= 0.0 {
+            break;
+        }
+        sum_b += t as f64 * hist[t] as f64;
+        let m_b = sum_b / w_b;
+        let m_f = (global - sum_b) / w_f;
+        let var_between = w_b * w_f * (m_b - m_f) * (m_b - m_f);
+        if var_between > max_var {
+            max_var = var_between;
+            threshold = t as u8;
+        }
+    }
+    threshold
+}
+
+/// Saves a captured image next to the executable for OCR debugging
+/// (`AUTOMATION_PLATFORM_OCR_DEBUG=1`).
+fn save_debug(cap: &CapturedImage, name: &str) {
+    if let Some(img) = image::RgbaImage::from_raw(cap.w, cap.h, cap.rgba.clone()) {
+        let path = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join(name)))
+            .unwrap_or_else(|| std::path::PathBuf::from(name));
+        let _ = img.save(&path);
+    }
+}
+
+/// Background padding (px) added around the upscaled region. Windows.Media.Ocr is
+/// far more reliable when small text isn't flush against the image edge.
+const OCR_PAD: u32 = 24;
+
+/// Upscales a captured region (sharp filter) and frames it with a background
+/// border — both help Windows.Media.Ocr read small UI text (Tesseract, which
+/// ReaHotkey uses, doesn't need this).
+fn upscale(cap: &CapturedImage, factor: u32) -> CapturedImage {
+    use image::{imageops, ImageBuffer, RgbaImage};
+    let img = match RgbaImage::from_raw(cap.w, cap.h, cap.rgba.clone()) {
+        Some(i) => i,
+        None => {
+            return CapturedImage {
+                w: cap.w,
+                h: cap.h,
+                rgba: cap.rgba.clone(),
+            }
+        }
+    };
+    let (sw, sh) = (cap.w * factor, cap.h * factor);
+    let resized = imageops::resize(&img, sw, sh, imageops::FilterType::Lanczos3);
+    let bg = *resized.get_pixel(0, 0);
+    let (pw, ph) = (sw + OCR_PAD * 2, sh + OCR_PAD * 2);
+    let mut canvas: RgbaImage = ImageBuffer::from_pixel(pw, ph, bg);
+    imageops::overlay(&mut canvas, &resized, OCR_PAD as i64, OCR_PAD as i64);
+    CapturedImage {
+        w: pw,
+        h: ph,
+        rgba: canvas.into_raw(),
+    }
 }
 
 /// Runs Windows.Media.Ocr (WinRT) over a captured region.

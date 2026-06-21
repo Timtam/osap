@@ -1089,5 +1089,11 @@ fn win_to_table(lua: &Lua, w: &WinInfo) -> mlua::Result<Table> {
     b.set("h", w.h)?;
     t.set("bounds", b)?;
 
+    // Client-area origin (screen coords) — overlay regions are relative to this.
+    let cl = lua.create_table()?;
+    cl.set("x", w.client_x)?;
+    cl.set("y", w.client_y)?;
+    t.set("client", cl)?;
+
     Ok(t)
 }
