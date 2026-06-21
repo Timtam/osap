@@ -194,16 +194,37 @@ end
 function Overlay:_activate()
   if self.active then return end
   self.active = true
-  self.focus = 0
+  -- Remember the last-focused control across deactivate/reactivate, so re-entering
+  -- the window (e.g. Alt+Tab out and back) resumes where you were — only pick the
+  -- first focusable control on the very first activation.
+  if self.focus == 0 then
+    for i = 1, #self.controls do
+      if isFocusable(self, i) then
+        self.focus = i
+        break
+      end
+    end
+  end
   self:_registerHotkeys()
-  -- Silent on activate/deactivate (ReaHotkey-style natural feel): the screen
-  -- reader already announces the window-title change, so this would just be
-  -- chatter — the user navigates with Tab as in any accessible control.
+  if self.naturalNav then
+    -- Scope key suppression to this (now-foreground) window: when a control opens
+    -- a menu (another window comes forward), Tab/Enter pass to it natively, and
+    -- resume here once the plugin window is focused again.
+    host.keys.scope(true)
+  end
+  -- Announce the focused control shortly after the window gains focus, once the
+  -- screen reader's window-title announcement has passed (so it isn't clobbered).
+  if host.timer and self.focus > 0 then
+    host.timer.after(350, function()
+      if self.active then speakControl(self, self.focus, false) end
+    end)
+  end
 end
 
 function Overlay:_deactivate()
   if not self.active then return end
   self.active = false
+  if self.naturalNav then host.keys.scope(false) end
   self:_unregisterHotkeys()
 end
 

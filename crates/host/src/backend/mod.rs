@@ -99,6 +99,12 @@ pub trait Backend {
     /// matches only when the pressed modifier state equals the mask (so "Tab"
     /// (mask 0) does not swallow Alt+Tab).
     fn set_captured_keys(&self, keys: &[(u32, u8)]);
+    /// Scopes captured-key suppression to the current foreground window (`true`)
+    /// or makes it global again (`false`). While scoped, the hook only intercepts
+    /// keys when that window is foreground — so a menu opened by a control (which
+    /// brings another window to the foreground) receives the keys natively
+    /// (ReaHotkey's `HotIf WinActive` model).
+    fn set_key_scope(&self, to_foreground: bool);
     /// Installs the low-level keyboard hook (idempotent).
     fn watch_keys(&self) -> Result<(), String>;
 

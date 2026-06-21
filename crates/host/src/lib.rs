@@ -63,6 +63,8 @@ struct Shared {
     on_change: RefCell<HashMap<(usize, String), Vec<(Lua, RegistryKey)>>>,
     /// Coalesces setting auto-saves to the event-loop tick.
     dirty: Cell<bool>,
+    /// One-shot timers: (deadline, module_idx, VM, callback), fired from the tick.
+    timers: RefCell<Vec<(Instant, usize, Lua, RegistryKey)>>,
 }
 
 impl Shared {
@@ -150,6 +152,34 @@ impl Shared {
         }
         self.sync_enabled_into_store();
         self.store.borrow().save();
+    }
+
+    /// Fires one-shot timers whose deadline has passed (driven by the loop tick).
+    fn fire_due_timers(&self) {
+        let now = Instant::now();
+        let mut due: Vec<(usize, Lua, RegistryKey)> = Vec::new();
+        {
+            let mut timers = self.timers.borrow_mut();
+            let mut i = 0;
+            while i < timers.len() {
+                if timers[i].0 <= now {
+                    let (_, idx, lua, cb) = timers.remove(i);
+                    due.push((idx, lua, cb));
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        for (idx, lua, cb) in due {
+            if self.enabled.borrow().get(idx).copied().unwrap_or(false) {
+                if let Ok(f) = lua.registry_value::<Function>(&cb) {
+                    if let Err(e) = f.call::<()>(()) {
+                        logging::line("timer", &format!("callback error: {e}"));
+                    }
+                }
+            }
+            let _ = lua.remove_registry_value(cb);
+        }
     }
 
     /// Applies a setting change from the GUI: validates against the schema,
@@ -240,6 +270,7 @@ impl Manager {
             schemas: RefCell::new(Vec::new()),
             on_change: RefCell::new(HashMap::new()),
             dirty: Cell::new(false),
+            timers: RefCell::new(Vec::new()),
         });
         Ok(Self {
             shared,
@@ -385,6 +416,7 @@ impl Manager {
                             modules: &modules[..],
                         };
                         backend.pump_pending(&mut dispatcher);
+                        shared.fire_due_timers();
                         shared.flush_if_dirty();
                     },
                 )
@@ -611,7 +643,29 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<()> {
             Ok(())
         })?,
     )?;
+    let sh = shared.clone();
+    keys.set(
+        "scope",
+        lua.create_function(move |_, to_foreground: bool| {
+            sh.backend.set_key_scope(to_foreground);
+            Ok(())
+        })?,
+    )?;
     host.set("keys", keys)?;
+
+    // host.timer: one-shot delayed callbacks, fired from the event-loop tick.
+    let timer = lua.create_table()?;
+    let sh = shared.clone();
+    timer.set(
+        "after",
+        lua.create_function(move |lua, (ms, cb): (u64, Function)| {
+            let key = lua.create_registry_value(cb)?;
+            let deadline = Instant::now() + Duration::from_millis(ms);
+            sh.timers.borrow_mut().push((deadline, idx, lua.clone(), key));
+            Ok(())
+        })?,
+    )?;
+    host.set("timer", timer)?;
 
     // host.os.current / host.os.is(name)
     let os = lua.create_table()?;

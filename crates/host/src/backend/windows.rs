@@ -25,7 +25,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, VK_CONTROL, VK_MENU, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumWindows, GetClassNameW,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumWindows, FindWindowW,
+    GetClassNameW,
     GetCursorPos, GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowRect,
     GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
     PostThreadMessageW, RegisterClassW, SetCursorPos, SetWindowsHookExW, TranslateMessage,
@@ -59,6 +60,11 @@ thread_local! {
 }
 
 static KEY_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// HWND (isize) the captured-key suppression is scoped to (0 = global). The hook
+/// only intercepts a captured key while this window is foreground — so a menu a
+/// control opened (another window) gets Tab/Enter natively, ReaHotkey-style.
+static KEY_SCOPE: AtomicIsize = AtomicIsize::new(0);
 
 pub struct WindowsBackend;
 
@@ -357,6 +363,16 @@ impl Backend for WindowsBackend {
         CAPTURED_KEYS.with(|c| *c.borrow_mut() = keys.to_vec());
     }
 
+    fn set_key_scope(&self, to_foreground: bool) {
+        let hwnd = if to_foreground {
+            let fg = unsafe { GetForegroundWindow() };
+            fg as isize
+        } else {
+            0
+        };
+        KEY_SCOPE.store(hwnd, Ordering::Relaxed);
+    }
+
     fn watch_keys(&self) -> Result<(), String> {
         if KEY_HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
             return Ok(()); // already installed
@@ -492,6 +508,18 @@ unsafe extern "system" fn win_event_proc(
     }
 }
 
+/// True while a standard Win32 popup menu (class "#32768") is open — ReaHotkey's
+/// `WinExist("ahk_class #32768")` check. While a menu is up, captured navigation
+/// keys must pass through to it: its window is owned by the plugin, so the
+/// foreground window doesn't change and a foreground check alone can't see it.
+fn popup_menu_open() -> bool {
+    const MENU_CLASS: [u16; 7] = [
+        b'#' as u16, b'3' as u16, b'2' as u16, b'7' as u16, b'6' as u16, b'8' as u16, 0,
+    ];
+    let hwnd = unsafe { FindWindowW(MENU_CLASS.as_ptr(), std::ptr::null()) };
+    !hwnd.is_null() && unsafe { IsWindowVisible(hwnd) != 0 }
+}
+
 unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
         let kb = &*(lparam as *const KBDLLHOOKSTRUCT);
@@ -518,14 +546,23 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
             let matched =
                 CAPTURED_KEYS.with(|c| c.borrow().iter().any(|&(v, m)| v == vk && m == mask));
             if matched {
-                if is_down {
-                    KEY_QUEUE.with(|q| q.borrow_mut().push((vk, mask)));
-                    let tid = HOOK_THREAD.load(Ordering::Relaxed);
-                    if tid != 0 {
-                        PostThreadMessageW(tid, WM_NULL, 0, 0);
+                // Intercept a captured nav key only while the overlay should own
+                // it (ReaHotkey's GetContext): the scoped window is foreground AND
+                // no popup menu is open. A control that opened a #32768 menu must
+                // let Tab/Enter/arrows reach the menu natively — the menu window is
+                // owned by the plugin, so the foreground doesn't change.
+                let scope = KEY_SCOPE.load(Ordering::Relaxed);
+                let in_scope = scope == 0 || GetForegroundWindow() as isize == scope;
+                if in_scope && !popup_menu_open() {
+                    if is_down {
+                        KEY_QUEUE.with(|q| q.borrow_mut().push((vk, mask)));
+                        let tid = HOOK_THREAD.load(Ordering::Relaxed);
+                        if tid != 0 {
+                            PostThreadMessageW(tid, WM_NULL, 0, 0);
+                        }
                     }
+                    return 1; // suppress the matched combo (down + up)
                 }
-                return 1; // suppress the matched combo (down + up)
             }
         }
     }
