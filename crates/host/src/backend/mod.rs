@@ -45,6 +45,13 @@ pub struct OcrText {
     pub words: Vec<OcrWord>,
 }
 
+/// Mouse button for input synthesis.
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+}
+
 /// OS-level operations the host needs. Lua-agnostic on purpose: callback/state
 /// mapping stays in the host; only OS specifics live behind this trait.
 pub trait Backend {
@@ -60,6 +67,17 @@ pub trait Backend {
 
     /// Recognizes text in a screen region.
     fn ocr(&self, x: i32, y: i32, w: i32, h: i32, lang: Option<&str>) -> Result<OcrText, String>;
+
+    /// Current mouse cursor position (screen coordinates).
+    fn cursor_pos(&self) -> (i32, i32);
+    fn mouse_move(&self, x: i32, y: i32);
+    fn mouse_click(&self, x: i32, y: i32, button: MouseButton);
+    fn mouse_drag(&self, x1: i32, y1: i32, x2: i32, y2: i32, button: MouseButton);
+    fn mouse_scroll(&self, x: i32, y: i32, amount: i32);
+    /// Sends a key combo like "Ctrl+S".
+    fn key_send(&self, combo: &str) -> Result<(), String>;
+    /// Types Unicode text.
+    fn type_text(&self, text: &str);
 
     /// Registers a global hotkey identified by `id` from a spec like "Ctrl+Alt+H".
     fn register_hotkey(&self, id: i32, spec: &str) -> Result<(), String>;

@@ -5,9 +5,9 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use super::{Backend, CapturedImage, HostEvents, OcrText, OcrWord, WinInfo};
+use super::{Backend, CapturedImage, HostEvents, MouseButton, OcrText, OcrWord, WinInfo};
 
-use windows_sys::Win32::Foundation::{CloseHandle, HMODULE, HWND, LPARAM, RECT};
+use windows_sys::Win32::Foundation::{CloseHandle, HMODULE, HWND, LPARAM, POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
     GetPixel, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
@@ -18,13 +18,16 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
+    RegisterHotKey, SendInput, INPUT, INPUT_KEYBOARD, INPUT_MOUSE, KEYEVENTF_KEYUP,
+    KEYEVENTF_UNICODE, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN,
+    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, EnumWindows, GetClassNameW, GetForegroundWindow, GetMessageW,
+    DispatchMessageW, EnumWindows, GetClassNameW, GetCursorPos, GetForegroundWindow, GetMessageW,
     GetSystemMetrics, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
-    IsWindowVisible, PostThreadMessageW, TranslateMessage, EVENT_SYSTEM_FOREGROUND, MSG,
-    SM_CXSCREEN, SM_CYSCREEN, WINEVENT_OUTOFCONTEXT, WM_HOTKEY, WM_NULL,
+    IsWindowVisible, PostThreadMessageW, SetCursorPos, TranslateMessage, EVENT_SYSTEM_FOREGROUND,
+    MSG, SM_CXSCREEN, SM_CYSCREEN, WINEVENT_OUTOFCONTEXT, WM_HOTKEY, WM_NULL,
 };
 
 thread_local! {
@@ -137,6 +140,89 @@ impl Backend for WindowsBackend {
             .ok_or_else(|| "screen capture failed".to_string())?;
         let (text, words) = run_ocr(&cap, lang).map_err(|e| format!("OCR failed: {e}"))?;
         Ok(OcrText { text, words })
+    }
+
+    fn cursor_pos(&self) -> (i32, i32) {
+        unsafe {
+            let mut p: POINT = std::mem::zeroed();
+            GetCursorPos(&mut p);
+            (p.x, p.y)
+        }
+    }
+
+    fn mouse_move(&self, x: i32, y: i32) {
+        unsafe {
+            SetCursorPos(x, y);
+        }
+    }
+
+    fn mouse_click(&self, x: i32, y: i32, button: MouseButton) {
+        let (down, up) = button_flags(button);
+        unsafe {
+            SetCursorPos(x, y);
+            send_mouse_event(down, 0);
+            send_mouse_event(up, 0);
+        }
+    }
+
+    fn mouse_drag(&self, x1: i32, y1: i32, x2: i32, y2: i32, button: MouseButton) {
+        let (down, up) = button_flags(button);
+        unsafe {
+            SetCursorPos(x1, y1);
+            send_mouse_event(down, 0);
+            SetCursorPos(x2, y2);
+            send_mouse_event(up, 0);
+        }
+    }
+
+    fn mouse_scroll(&self, x: i32, y: i32, amount: i32) {
+        unsafe {
+            SetCursorPos(x, y);
+            send_mouse_event(MOUSEEVENTF_WHEEL, amount * 120); // 120 == WHEEL_DELTA
+        }
+    }
+
+    fn key_send(&self, combo: &str) -> Result<(), String> {
+        let parts: Vec<&str> = combo
+            .split('+')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let (key_part, mod_parts) = parts
+            .split_last()
+            .ok_or_else(|| "empty key combo".to_string())?;
+        let mut mod_vks: Vec<u16> = Vec::new();
+        for m in mod_parts {
+            let vk: u16 = match m.to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => 0x11,
+                "alt" | "option" => 0x12,
+                "shift" => 0x10,
+                "win" | "super" | "cmd" | "command" | "meta" => 0x5B,
+                other => return Err(format!("unknown modifier '{other}'")),
+            };
+            mod_vks.push(vk);
+        }
+        let key_vk = parse_key(key_part)? as u16;
+        unsafe {
+            for &vk in &mod_vks {
+                send_key_event(vk, 0, 0);
+            }
+            send_key_event(key_vk, 0, 0);
+            send_key_event(key_vk, 0, KEYEVENTF_KEYUP);
+            for &vk in mod_vks.iter().rev() {
+                send_key_event(vk, 0, KEYEVENTF_KEYUP);
+            }
+        }
+        Ok(())
+    }
+
+    fn type_text(&self, text: &str) {
+        unsafe {
+            for u in text.encode_utf16() {
+                send_key_event(0, u, KEYEVENTF_UNICODE);
+                send_key_event(0, u, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);
+            }
+        }
     }
 
     fn register_hotkey(&self, id: i32, spec: &str) -> Result<(), String> {
@@ -404,4 +490,29 @@ fn run_ocr(img: &CapturedImage, lang: Option<&str>) -> windows::core::Result<(St
         }
     }
     Ok((text, words))
+}
+
+fn button_flags(button: MouseButton) -> (u32, u32) {
+    match button {
+        MouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+        MouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+        MouseButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+    }
+}
+
+unsafe fn send_mouse_event(flags: u32, data: i32) {
+    let mut input: INPUT = std::mem::zeroed();
+    input.r#type = INPUT_MOUSE;
+    input.Anonymous.mi.dwFlags = flags;
+    input.Anonymous.mi.mouseData = data as u32; // wheel delta reinterpreted
+    SendInput(1, &input, std::mem::size_of::<INPUT>() as i32);
+}
+
+unsafe fn send_key_event(vk: u16, scan: u16, flags: u32) {
+    let mut input: INPUT = std::mem::zeroed();
+    input.r#type = INPUT_KEYBOARD;
+    input.Anonymous.ki.wVk = vk;
+    input.Anonymous.ki.wScan = scan;
+    input.Anonymous.ki.dwFlags = flags;
+    SendInput(1, &input, std::mem::size_of::<INPUT>() as i32);
 }

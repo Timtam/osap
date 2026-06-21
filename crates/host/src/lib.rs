@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use mlua::{Function, Lua, RegistryKey, Table};
 use tts::Tts;
 
-use backend::{Backend, CapturedImage, HostEvents, WinInfo};
+use backend::{Backend, CapturedImage, HostEvents, MouseButton, WinInfo};
 use module_manifest::LoadedModule;
 
 /// Luau prelude that adds the OS-gated `host.window.find`/`findAll` matcher on
@@ -327,6 +327,70 @@ fn install_host_api(lua: &Lua, state: &Rc<RefCell<HostState>>, backend: &Rc<dyn 
     )?;
     host.set("ocr", ocr)?;
 
+    // host.input: cursorPos / move / click / drag / scroll / send / text
+    let input = lua.create_table()?;
+    let b_curs = backend.clone();
+    input.set(
+        "cursorPos",
+        lua.create_function(move |lua, ()| {
+            let (x, y) = b_curs.cursor_pos();
+            let t = lua.create_table()?;
+            t.set("x", x)?;
+            t.set("y", y)?;
+            Ok(t)
+        })?,
+    )?;
+    let b_move = backend.clone();
+    input.set(
+        "move",
+        lua.create_function(move |_, (x, y): (i32, i32)| {
+            b_move.mouse_move(x, y);
+            Ok(())
+        })?,
+    )?;
+    let b_click = backend.clone();
+    input.set(
+        "click",
+        lua.create_function(move |_, (x, y, opts): (i32, i32, Option<Table>)| {
+            b_click.mouse_click(x, y, button_from(opts.as_ref()));
+            Ok(())
+        })?,
+    )?;
+    let b_drag = backend.clone();
+    input.set(
+        "drag",
+        lua.create_function(
+            move |_, (x1, y1, x2, y2, opts): (i32, i32, i32, i32, Option<Table>)| {
+                b_drag.mouse_drag(x1, y1, x2, y2, button_from(opts.as_ref()));
+                Ok(())
+            },
+        )?,
+    )?;
+    let b_scroll = backend.clone();
+    input.set(
+        "scroll",
+        lua.create_function(move |_, (x, y, amount): (i32, i32, i32)| {
+            b_scroll.mouse_scroll(x, y, amount);
+            Ok(())
+        })?,
+    )?;
+    let b_send = backend.clone();
+    input.set(
+        "send",
+        lua.create_function(move |_, combo: String| {
+            b_send.key_send(&combo).map_err(mlua::Error::external)
+        })?,
+    )?;
+    let b_text = backend.clone();
+    input.set(
+        "text",
+        lua.create_function(move |_, text: String| {
+            b_text.type_text(&text);
+            Ok(())
+        })?,
+    )?;
+    host.set("input", input)?;
+
     // host.path(rel) -> real path (escape hatch)
     let s2 = state.clone();
     host.set(
@@ -362,6 +426,18 @@ fn window_has_triggers(lua: &Lua) -> bool {
         has.call::<bool>(())
     })()
     .unwrap_or(false)
+}
+
+/// Reads `{ button = "left"|"right"|"middle" }` from input opts (default left).
+fn button_from(opts: Option<&Table>) -> MouseButton {
+    let name = opts
+        .and_then(|o| o.get::<String>("button").ok())
+        .unwrap_or_default();
+    match name.to_ascii_lowercase().as_str() {
+        "right" => MouseButton::Right,
+        "middle" => MouseButton::Middle,
+        _ => MouseButton::Left,
+    }
 }
 
 /// Reads an optional `{ region = { x1, y1, x2, y2 } }` (named or positional) and
