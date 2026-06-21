@@ -21,6 +21,8 @@ Try the first self-voicing **overlay** (stays resident): `cargo run -p app -- mo
 
 Load **several modules at once** (they share one process, TTS, and event loop): `cargo run -p app -- modules/hotkey modules/window-trigger`.
 
+A module can be loaded either as an unpacked directory (dev) or as a **`.zip` package** (extracted on demand to a content-addressed cache): `cargo run -p app -- path/to/module.zip`.
+
 ## Structure
 
 - `crates/module-manifest` — `module.toml` parsing + module loading (dev: unpacked directory).

@@ -42,6 +42,17 @@ pub struct LoadedModule {
 }
 
 impl LoadedModule {
+    /// Loads a module from either an unpacked directory or a `.zip` package
+    /// (extracted on demand into a content-addressed cache).
+    pub fn load(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        if path.is_dir() {
+            Self::load_dir(path)
+        } else {
+            Self::load_zip(path)
+        }
+    }
+
     /// Loads a module from an unpacked directory (dev mode).
     pub fn load_dir(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
@@ -62,5 +73,41 @@ impl LoadedModule {
     /// (basis for `host.path()` / `host.resource.read()`).
     pub fn resolve(&self, rel: &str) -> PathBuf {
         self.root.join(rel)
+    }
+
+    /// Extracts a `.zip` package into a content-addressed cache dir and loads it.
+    fn load_zip(path: &Path) -> Result<Self> {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("module package not readable: {}", path.display()))?;
+        let hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            bytes.hash(&mut h);
+            h.finish()
+        };
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes))
+            .with_context(|| format!("not a valid module package: {}", path.display()))?;
+
+        let manifest: ModuleManifest = {
+            let mut entry = archive
+                .by_name("module.toml")
+                .context("module.toml missing in package root")?;
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut entry, &mut text)?;
+            toml::from_str(&text).context("module.toml is not valid TOML")?
+        };
+
+        // Content-addressed cache: <temp>/automation-platform-modules/<id>/<version>-<hash>/
+        let cache = std::env::temp_dir()
+            .join("automation-platform-modules")
+            .join(&manifest.id)
+            .join(format!("{}-{hash:016x}", manifest.version));
+        if !cache.join("module.toml").exists() {
+            std::fs::create_dir_all(&cache)?;
+            archive
+                .extract(&cache)
+                .context("failed to extract module package")?;
+        }
+        Self::load_dir(cache)
     }
 }

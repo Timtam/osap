@@ -102,7 +102,7 @@ impl Manager {
 
     /// Loads a module from an unpacked directory and runs its entry point.
     pub fn load(&mut self, dir: impl AsRef<Path>) -> Result<()> {
-        let module = LoadedModule::load_dir(dir)?;
+        let module = LoadedModule::load(dir)?;
         let idx = self.modules.len();
         println!(
             "» Loading module: {} v{} (id {})",
