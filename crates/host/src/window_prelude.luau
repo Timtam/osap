@@ -91,13 +91,21 @@ end
 -- every foreground change; here we run the matching registered callbacks.
 local triggers = {}
 
+local focusCbs = {}
+
 function W.onTrigger(matcher, opts, cb)
   opts = opts or {}
   triggers[#triggers + 1] = { matcher = matcher or {}, on = opts.on or "activate", cb = cb }
 end
 
+-- Focus-change callbacks: fired when the keyboard focus moves, including within
+-- the same top-level window (used to detect focus entering an embedded plugin).
+function W.onFocus(cb)
+  focusCbs[#focusCbs + 1] = cb
+end
+
 function W._hasTriggers()
-  return #triggers > 0
+  return #triggers > 0 or #focusCbs > 0
 end
 
 function W._dispatchActivate(win)
@@ -105,5 +113,11 @@ function W._dispatchActivate(win)
     if t.on == "activate" and matches(t.matcher, win) then
       t.cb(win)
     end
+  end
+end
+
+function W._dispatchFocus()
+  for _, cb in ipairs(focusCbs) do
+    cb()
   end
 end

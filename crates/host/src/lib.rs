@@ -20,7 +20,7 @@ use anyhow::{Context, Result};
 use mlua::{Function, Lua, RegistryKey, Table};
 use tts::Tts;
 
-use backend::{Backend, CapturedImage, HostEvents, MouseButton, WinInfo};
+use backend::{Backend, CapturedImage, ControlInfo, HostEvents, MouseButton, WinInfo};
 use module_manifest::LoadedModule;
 
 const WINDOW_PRELUDE: &str = include_str!("window_prelude.luau");
@@ -535,6 +535,23 @@ impl HostEvents for Dispatcher<'_> {
             }
         }
     }
+
+    fn on_focus_change(&mut self) {
+        for (idx, m) in self.modules.iter().enumerate() {
+            if !self.enabled(idx) {
+                continue;
+            }
+            let res = (|| -> mlua::Result<()> {
+                let host: Table = m.lua.globals().get("host")?;
+                let window: Table = host.get("window")?;
+                let dispatch: Function = window.get("_dispatchFocus")?;
+                dispatch.call::<()>(())
+            })();
+            if let Err(e) = res {
+                logging::line("focus", &format!("dispatch error ({}): {e}", m.id));
+            }
+        }
+    }
 }
 
 fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<()> {
@@ -695,6 +712,39 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<()> {
         lua.create_function(move |lua, ()| match sh.backend.active_window() {
             Some(w) => Ok(Some(win_to_table(lua, &w)?)),
             None => Ok(None),
+        })?,
+    )?;
+    // host.window.controls(win?) — child controls (class + geometry) of a window
+    // (the active one if omitted), for detecting embedded plugins.
+    let sh = shared.clone();
+    win.set(
+        "controls",
+        lua.create_function(move |lua, win_arg: Option<Table>| {
+            let hwnd: isize = match win_arg {
+                Some(t) => t.get("id")?,
+                None => match sh.backend.active_window() {
+                    Some(w) => w.hwnd,
+                    None => return Ok(lua.create_table()?),
+                },
+            };
+            let t = lua.create_table()?;
+            for c in sh.backend.window_controls(hwnd) {
+                t.push(control_to_table(lua, &c)?)?;
+            }
+            Ok(t)
+        })?,
+    )?;
+    // host.window.focusChain() — controls from the focused element up to its
+    // top-level window, for detecting focus inside an embedded plugin.
+    let sh = shared.clone();
+    win.set(
+        "focusChain",
+        lua.create_function(move |lua, ()| {
+            let t = lua.create_table()?;
+            for c in sh.backend.window_focus_chain() {
+                t.push(control_to_table(lua, &c)?)?;
+            }
+            Ok(t)
         })?,
     )?;
     host.set("window", win)?;
@@ -1120,6 +1170,23 @@ fn matches_at(hay: &CapturedImage, ox: u32, oy: u32, tw: u32, th: u32, tmpl: &[u
 
 /// Converts a native window snapshot into the Lua table modules see:
 /// `{ id, title, class, app = { name, exe, pid }, bounds = { x, y, w, h } }`.
+fn control_to_table(lua: &Lua, c: &ControlInfo) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("id", c.hwnd)?;
+    t.set("class", c.class.clone())?;
+    let b = lua.create_table()?;
+    b.set("x", c.x)?;
+    b.set("y", c.y)?;
+    b.set("w", c.w)?;
+    b.set("h", c.h)?;
+    t.set("bounds", b)?;
+    let cl = lua.create_table()?;
+    cl.set("x", c.client_x)?;
+    cl.set("y", c.client_y)?;
+    t.set("client", cl)?;
+    Ok(t)
+}
+
 fn win_to_table(lua: &Lua, w: &WinInfo) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     t.set("id", w.hwnd)?;

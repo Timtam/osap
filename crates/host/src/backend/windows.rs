@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
-use super::{Backend, CapturedImage, HostEvents, MouseButton, OcrText, OcrWord, WinInfo};
+use super::{Backend, CapturedImage, ControlInfo, HostEvents, MouseButton, OcrText, OcrWord, WinInfo};
 
 use windows_sys::Win32::Foundation::{CloseHandle, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -25,12 +25,13 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, VK_CONTROL, VK_MENU, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumWindows, FindWindowW,
-    GetClassNameW,
-    GetCursorPos, GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowRect,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumChildWindows,
+    EnumWindows, FindWindowW, GetAncestor, GetClassNameW, GetCursorPos, GetForegroundWindow,
+    GetGUIThreadInfo, GetMessageW, GetSystemMetrics, GetWindowRect,
     GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
     PostThreadMessageW, RegisterClassW, SetCursorPos, SetWindowsHookExW, TranslateMessage,
-    EVENT_SYSTEM_FOREGROUND, HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, SM_CXSCREEN, SM_CYSCREEN,
+    EVENT_OBJECT_FOCUS, EVENT_SYSTEM_FOREGROUND, GA_PARENT, GUITHREADINFO,
+    HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, SM_CXSCREEN, SM_CYSCREEN,
     WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_NULL, WM_SYSKEYDOWN,
     WM_SYSKEYUP, WNDCLASSW,
 };
@@ -41,6 +42,10 @@ thread_local! {
     static FOREGROUND_QUEUE: RefCell<Vec<isize>> = RefCell::new(Vec::new());
     /// Hotkey ids received by the message-only window proc, drained by the loop.
     static HOTKEY_QUEUE: RefCell<Vec<i32>> = RefCell::new(Vec::new());
+    /// Set when the focused element changed (coalesced; drained by the loop). A
+    /// focus change need not raise a foreground event (e.g. focusing into a
+    /// plugin embedded in an already-foreground DAW host window).
+    static FOCUS_DIRTY: std::cell::Cell<bool> = std::cell::Cell::new(false);
 }
 
 /// HWND (as isize) of the lazily-created message-only window that owns global
@@ -89,6 +94,50 @@ impl Backend for WindowsBackend {
             return None;
         }
         window_info(hwnd as isize)
+    }
+
+    fn window_controls(&self, hwnd_val: isize) -> Vec<ControlInfo> {
+        let mut hwnds: Vec<isize> = Vec::new();
+        unsafe {
+            EnumChildWindows(
+                hwnd_val as HWND,
+                Some(enum_proc),
+                &mut hwnds as *mut Vec<isize> as LPARAM,
+            );
+        }
+        hwnds.into_iter().filter_map(control_info).collect()
+    }
+
+    fn window_focus_chain(&self) -> Vec<ControlInfo> {
+        unsafe {
+            let fg = GetForegroundWindow();
+            if fg.is_null() {
+                return Vec::new();
+            }
+            let tid = GetWindowThreadProcessId(fg, std::ptr::null_mut());
+            let mut gti: GUITHREADINFO = std::mem::zeroed();
+            gti.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+            let focused = if GetGUIThreadInfo(tid, &mut gti) != 0 && !gti.hwndFocus.is_null() {
+                gti.hwndFocus
+            } else {
+                fg
+            };
+            // Walk from the focused control up to the top-level window.
+            let mut hwnds: Vec<isize> = Vec::new();
+            let mut h = focused;
+            while !h.is_null() {
+                hwnds.push(h as isize);
+                if h == fg {
+                    break;
+                }
+                let parent = GetAncestor(h, GA_PARENT);
+                if parent.is_null() || parent == h {
+                    break;
+                }
+                h = parent;
+            }
+            hwnds.into_iter().filter_map(control_info).collect()
+        }
     }
 
     fn screen_size(&self) -> (i32, i32) {
@@ -355,7 +404,20 @@ impl Backend for WindowsBackend {
         if hook.is_null() {
             return Err("SetWinEventHook failed".to_string());
         }
-        // Intentionally leak the hook handle: it lives for the process lifetime.
+        // Also track focus changes within a window — focusing into a plugin
+        // embedded in a DAW host doesn't raise a foreground event.
+        unsafe {
+            SetWinEventHook(
+                EVENT_OBJECT_FOCUS,
+                EVENT_OBJECT_FOCUS,
+                std::ptr::null_mut::<core::ffi::c_void>() as HMODULE,
+                Some(win_event_proc),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT,
+            );
+        }
+        // Intentionally leak the hook handles: they live for the process lifetime.
         Ok(())
     }
 
@@ -420,6 +482,9 @@ impl Backend for WindowsBackend {
         for (vk, mask) in pending_keys {
             events.on_key(vk, mask);
         }
+        if FOCUS_DIRTY.with(|f| f.replace(false)) {
+            events.on_focus_change();
+        }
     }
 }
 
@@ -427,6 +492,39 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
     let vec = &mut *(lparam as *mut Vec<isize>);
     vec.push(hwnd as isize);
     1 // TRUE — keep enumerating
+}
+
+/// Class name + screen geometry of a child control (visible only), for embedded
+/// plugin detection.
+fn control_info(hwnd_val: isize) -> Option<ControlInfo> {
+    let hwnd = hwnd_val as HWND;
+    unsafe {
+        if IsWindowVisible(hwnd) == 0 {
+            return None;
+        }
+        let mut cbuf = [0u16; 256];
+        let cn = GetClassNameW(hwnd, cbuf.as_mut_ptr(), cbuf.len() as i32);
+        let class = String::from_utf16_lossy(&cbuf[..cn.max(0) as usize]);
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        GetWindowRect(hwnd, &mut rect);
+        let mut client = POINT { x: 0, y: 0 };
+        ClientToScreen(hwnd, &mut client);
+        Some(ControlInfo {
+            hwnd: hwnd_val,
+            class,
+            x: rect.left,
+            y: rect.top,
+            w: rect.right - rect.left,
+            h: rect.bottom - rect.top,
+            client_x: client.x,
+            client_y: client.y,
+        })
+    }
 }
 
 /// Lazily creates a hidden message-only window that owns our global hotkeys.
@@ -501,6 +599,14 @@ unsafe extern "system" fn win_event_proc(
         let v = hwnd as isize;
         FOREGROUND_QUEUE.with(|q| q.borrow_mut().push(v));
         // Wake the event loop so it drains the queue even without a real message.
+        let tid = HOOK_THREAD.load(Ordering::Relaxed);
+        if tid != 0 {
+            PostThreadMessageW(tid, WM_NULL, 0, 0);
+        }
+    } else if event == EVENT_OBJECT_FOCUS {
+        // Focus moved (possibly within the same top-level window); coalesce and
+        // let the loop re-check via the focus chain.
+        FOCUS_DIRTY.with(|f| f.set(true));
         let tid = HOOK_THREAD.load(Ordering::Relaxed);
         if tid != 0 {
             PostThreadMessageW(tid, WM_NULL, 0, 0);

@@ -30,6 +30,21 @@ pub struct WinInfo {
     pub client_y: i32,
 }
 
+/// A child control (window) inside a top-level window: its class and geometry,
+/// for detecting plugins embedded in a host (DAW) window.
+pub struct ControlInfo {
+    pub hwnd: isize,
+    pub class: String,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    /// Screen coords of the control's client-area top-left — the overlay's
+    /// coordinate origin when the plugin is embedded in a host window.
+    pub client_x: i32,
+    pub client_y: i32,
+}
+
 /// A captured screen region (RGBA, row-major, top-down).
 pub struct CapturedImage {
     pub w: u32,
@@ -64,6 +79,15 @@ pub enum MouseButton {
 pub trait Backend {
     fn enumerate_windows(&self) -> Vec<WinInfo>;
     fn active_window(&self) -> Option<WinInfo>;
+
+    /// Child controls (descendant windows) of a top-level window, for detecting
+    /// embedded plugins by control class + locating their coordinate origin.
+    fn window_controls(&self, hwnd: isize) -> Vec<ControlInfo>;
+
+    /// The chain of controls from the currently-focused element up to its
+    /// top-level window — for detecting whether focus is inside an embedded
+    /// plugin's control (which a foreground check alone can't see).
+    fn window_focus_chain(&self) -> Vec<ControlInfo>;
 
     /// Size of the primary display in pixels.
     fn screen_size(&self) -> (i32, i32);
@@ -123,6 +147,8 @@ pub trait Backend {
 pub trait HostEvents {
     fn on_hotkey(&mut self, id: i32);
     fn on_window_activate(&mut self, win: WinInfo);
+    /// The keyboard focus moved (possibly within the same top-level window).
+    fn on_focus_change(&mut self);
     /// A captured key fired; `mods` is the pressed modifier bitmask (MASK_*).
     fn on_key(&mut self, vk: u32, mods: u8);
 }

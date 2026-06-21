@@ -27,6 +27,9 @@ function O.new(label)
       active = false,
       naturalNav = false,
       hoverToRead = false,
+      contexts = {},
+      activeCtx = false,
+      triggerSet = false,
     },
     Overlay
   )
@@ -56,14 +59,14 @@ end
 local TYPE_LABEL = { static = "", hotspot = "button", custom = "button", ocr = "button" }
 
 -- Origin (top-left) of the overlay's coordinate space in screen pixels: the
--- attached plugin window's position, or (0, 0) for an unattached overlay. All
--- control coordinates (OCR regions, hotspot points) are relative to this.
+-- client-area top-left of the active context's coordinate window — the plugin
+-- window itself when standalone, or the embedded plugin's child control when
+-- hosted in a DAW. Re-resolved per call so it tracks window moves. (0, 0) when
+-- unattached. All control coordinates (OCR regions, hotspots) are relative to it.
 local function originOf(self)
-  if self.matcher then
-    local win = host.window.active()
-    -- Coordinates are relative to the plugin window's CLIENT area (like
-    -- AutoHotkey's default), not the frame — so use the client origin.
-    if win then return win.client.x, win.client.y end
+  if self.activeCtx then
+    local o = self.activeCtx.origin()
+    if o and o.client then return o.client.x, o.client.y end
   end
   return 0, 0
 end
@@ -228,22 +231,74 @@ function Overlay:_deactivate()
   self:_unregisterHotkeys()
 end
 
--- Context-bound: activate automatically while a window matching `matcher` is
--- focused, deactivate when leaving (ReaHotkey-style).
-function Overlay:attach(matcher, opts)
-  self.matcher = matcher
-  self.naturalNav = opts ~= nil and opts.naturalNav == true
-  self.hoverToRead = opts ~= nil and opts.hoverToRead == true
-  self.active = false
-  host.window.onTrigger({}, { on = "activate" }, function(win)
-    if host.window.test(matcher, win) then
-      self:_activate()
-    else
-      self:_deactivate()
-    end
-  end)
-  local cur = host.window.active()
-  if cur and host.window.test(matcher, cur) then
-    self:_activate()
+-- Registers the single foreground trigger (once) that drives activation across
+-- all of the overlay's contexts: the first context that matches the focused
+-- window wins and supplies the coordinate origin.
+local function ensureTrigger(self, opts)
+  if opts then
+    self.naturalNav = opts.naturalNav == true
+    self.hoverToRead = opts.hoverToRead == true
   end
+  if self.triggerSet then return end
+  self.triggerSet = true
+  -- Re-evaluate the contexts from the *current* state (active window + focus
+  -- chain): the first context that matches wins and supplies the origin.
+  local function check()
+    for _, ctx in ipairs(self.contexts) do
+      if ctx.match() then
+        self.activeCtx = ctx
+        self:_activate()
+        return
+      end
+    end
+    self.activeCtx = false
+    self:_deactivate()
+  end
+  -- Foreground changes AND focus changes (the latter catches focus moving into
+  -- an embedded plugin without a foreground change).
+  host.window.onTrigger({}, { on = "activate" }, function() check() end)
+  host.window.onFocus(function() check() end)
+  check()
+end
+
+-- Context-bound (standalone): active while a window matching `matcher` is
+-- focused; coordinates are relative to that window's client area.
+function Overlay:attach(matcher, opts)
+  self.contexts[#self.contexts + 1] = {
+    match = function()
+      local a = host.window.active()
+      return a ~= nil and host.window.test(matcher, a)
+    end,
+    origin = function() return host.window.active() end,
+  }
+  ensureTrigger(self, opts)
+end
+
+-- Context-bound (embedded): active while the keyboard focus is *inside* a plugin
+-- control — a window whose class matches `spec.control` (a Luau pattern) on the
+-- focus-ancestor chain — within a DAW host window (any of `spec.hosts`). Keying
+-- on focus-in-plugin (not just host-foreground) means we don't capture the
+-- host's own navigation keys. Coordinates are relative to that control's client
+-- area, so the same regions work standalone and embedded.
+function Overlay:attachEmbedded(spec, opts)
+  local hosts = spec.hosts or { spec.host }
+  local pattern = spec.control
+  local function pluginControl()
+    local active = host.window.active()
+    if not active then return nil end
+    local hostOk = false
+    for _, h in ipairs(hosts) do
+      if host.window.test(h, active) then hostOk = true break end
+    end
+    if not hostOk then return nil end
+    for _, c in ipairs(host.window.focusChain()) do
+      if string.match(c.class, pattern) then return c end
+    end
+    return nil
+  end
+  self.contexts[#self.contexts + 1] = {
+    match = function() return pluginControl() ~= nil end,
+    origin = function() return pluginControl() end,
+  }
+  ensureTrigger(self, opts)
 end

@@ -1,7 +1,7 @@
 //! Fallback backend for platforms without a real implementation yet.
 //! Window queries return empty; hotkey registration returns an error.
 
-use super::{Backend, CapturedImage, HostEvents, MouseButton, OcrText, WinInfo};
+use super::{Backend, CapturedImage, ControlInfo, HostEvents, MouseButton, OcrText, WinInfo};
 
 pub struct StubBackend;
 
@@ -61,6 +61,12 @@ impl Backend for StubBackend {
         Ok(())
     }
 
+    fn window_controls(&self, _hwnd: isize) -> Vec<ControlInfo> {
+        Vec::new()
+    }
+    fn window_focus_chain(&self) -> Vec<ControlInfo> {
+        Vec::new()
+    }
     fn set_captured_keys(&self, _keys: &[(u32, u8)]) {}
     fn set_key_scope(&self, _to_foreground: bool) {}
     fn watch_keys(&self) -> Result<(), String> {

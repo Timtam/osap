@@ -27,3 +27,29 @@ host.hotkey.register("Ctrl+Alt+I", function()
     { interrupt = true }
   )
 end)
+
+-- Ctrl+Alt+C: dump the focused window's child controls (class + screen geometry +
+-- client origin), for detecting plugins embedded in a host (DAW) window and
+-- finding their coordinate origin.
+host.hotkey.register("Ctrl+Alt+C", function()
+  local win = host.window.active()
+  if not win then
+    host.speech.output("No active window.", { interrupt = true })
+    return
+  end
+  local controls = host.window.controls()
+  host.log.info(string.format(
+    "CONTROLS '%s' [%s] clientOrigin=(%d,%d) controls=%d",
+    win.title, win.class, win.client.x, win.client.y, #controls
+  ))
+  for _, c in ipairs(controls) do
+    host.log.info(string.format(
+      "  [%s] window (%d,%d) %dx%d  client (%d,%d)",
+      c.class, c.bounds.x, c.bounds.y, c.bounds.w, c.bounds.h, c.client.x, c.client.y
+    ))
+  end
+  host.speech.output(
+    string.format("%s, %d child controls logged.", win.title, #controls),
+    { interrupt = true }
+  )
+end)
