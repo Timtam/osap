@@ -1,0 +1,7 @@
+id = "com.tool.inspect"
+name = "OCR window inspector"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
+
+[capabilities]
+require = ["window", "ocr", "speech", "log", "hotkey"]

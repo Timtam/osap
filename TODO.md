@@ -57,7 +57,9 @@ Foundation: [docs/reahotkey-port-analysis.md](docs/reahotkey-port-analysis.md).
 
 ## Dev tools
 
-- [ ] **Window/control inspector** (built-in dev tool, à la AHK *Window Spy* and like ReaHotkeys *Overlay Designer* — but **inspection only, without the design/code-generation aspect**). Shows live, for the window/element under the cursor or the focused one:
+- [x] **OCR window inspector (first version):** `modules/inspect` — **Ctrl+Alt+I** OCRs the focused window's client area and logs every recognized word with its **client-relative coordinates** (+ saves the capture with `AUTOMATION_PLATFORM_OCR_DEBUG=1`). Calibrates overlay regions and reveals where hardcoded (e.g. ReaHotkey) coordinates land vs the real controls. Resolved the sforzando polyphony case (the region was correct; the failures were the hover scrub-value — fixed by `hoverToRead`-off — and UWP OCR being blind to *single* digits). ✓ (2026-06-21)
+  - Follow-up: UWP OCR misses isolated single digits ("1"); a stronger engine (Tesseract/ONNX, as ReaHotkey uses) is the long-term fix. Also: label-relative OCR controls (find "POLY.", read right) to be robust against window-width shifts.
+- [ ] **Window/control inspector (full):** extend to the element under the cursor (AX/UIA role/value), live mouse position + pixel colour, freeze hotkey — à la AHK *Window Spy*, **inspection only**. Shows live, for the window/element under the cursor or the focused one:
   - **Window:** title, app (`name`/`bundleId`/`exe`/`pid`), OS parameters (Windows: Win32 class; macOS: AX role/subrole/identifier), `bounds`, id.
   - **Control/element under the cursor:** class (`ClassNN`) or AX role/subrole/identifier/value, geometry **relative to the window/plugin control** (for coordinate calibration), AX-tree path.
   - **Mouse:** position absolute + relative to the focused window/plugin control; **pixel color** under the cursor.
