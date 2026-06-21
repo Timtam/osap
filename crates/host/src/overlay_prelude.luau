@@ -26,6 +26,7 @@ function O.new(label)
       capturedKeys = {},
       active = false,
       naturalNav = false,
+      hoverToRead = false,
     },
     Overlay
   )
@@ -82,9 +83,10 @@ local function speakControl(self, index, moveMouse)
   if c.kind == "ocr" and c.region then
     local ox, oy = originOf(self)
     local region = { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] }
-    if moveMouse then
-      -- ReaHotkey moves the mouse onto the control on focus (some plugin UIs
-      -- only reveal the current value on hover).
+    if moveMouse and self.hoverToRead then
+      -- Move the mouse onto the control on focus — only for overlays that opt in.
+      -- Some plugin UIs reveal the value on hover; others (like sforzando) show a
+      -- *different* value while hovered, so this is off by default.
       host.input.move(ox + math.floor((c.region[1] + c.region[3]) / 2),
         oy + math.floor((c.region[2] + c.region[4]) / 2))
     end
@@ -210,6 +212,7 @@ end
 function Overlay:attach(matcher, opts)
   self.matcher = matcher
   self.naturalNav = opts ~= nil and opts.naturalNav == true
+  self.hoverToRead = opts ~= nil and opts.hoverToRead == true
   self.active = false
   host.window.onTrigger({}, { on = "activate" }, function(win)
     if host.window.test(matcher, win) then
