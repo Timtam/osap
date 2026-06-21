@@ -334,6 +334,7 @@ dependencies = [
  "mlua",
  "module-manifest",
  "tts",
+ "windows",
  "windows-sys 0.61.2",
 ]
 

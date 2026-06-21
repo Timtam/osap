@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use super::{Backend, CapturedImage, HostEvents, WinInfo};
+use super::{Backend, CapturedImage, HostEvents, OcrText, OcrWord, WinInfo};
 
 use windows_sys::Win32::Foundation::{CloseHandle, HMODULE, HWND, LPARAM, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -122,6 +122,21 @@ impl Backend for WindowsBackend {
                 rgba: buf,
             })
         }
+    }
+
+    fn ocr(
+        &self,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        lang: Option<&str>,
+    ) -> Result<OcrText, String> {
+        let cap = self
+            .capture(x, y, w, h)
+            .ok_or_else(|| "screen capture failed".to_string())?;
+        let (text, words) = run_ocr(&cap, lang).map_err(|e| format!("OCR failed: {e}"))?;
+        Ok(OcrText { text, words })
     }
 
     fn register_hotkey(&self, id: i32, spec: &str) -> Result<(), String> {
@@ -332,4 +347,61 @@ fn parse_key(key: &str) -> Result<u32, String> {
         _ => return Err(format!("unknown key '{key}'")),
     };
     Ok(vk)
+}
+
+/// Runs Windows.Media.Ocr (WinRT) over a captured region.
+fn run_ocr(img: &CapturedImage, lang: Option<&str>) -> windows::core::Result<(String, Vec<OcrWord>)> {
+    use std::sync::Once;
+
+    use windows::core::HSTRING;
+    use windows::Globalization::Language;
+    use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
+    use windows::Media::Ocr::OcrEngine;
+    use windows::Security::Cryptography::CryptographicBuffer;
+    use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
+
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = unsafe { RoInitialize(RO_INIT_MULTITHREADED) };
+    });
+
+    // SoftwareBitmap wants BGRA; GDI leaves alpha at zero, so force it opaque.
+    let mut bgra = img.rgba.clone();
+    for px in bgra.chunks_exact_mut(4) {
+        px.swap(0, 2);
+        px[3] = 255;
+    }
+
+    let buffer = CryptographicBuffer::CreateFromByteArray(&bgra)?;
+    let bitmap = SoftwareBitmap::CreateCopyFromBuffer(
+        &buffer,
+        BitmapPixelFormat::Bgra8,
+        img.w as i32,
+        img.h as i32,
+    )?;
+
+    let engine = match lang {
+        Some(code) => {
+            OcrEngine::TryCreateFromLanguage(&Language::CreateLanguage(&HSTRING::from(code))?)?
+        }
+        None => OcrEngine::TryCreateFromUserProfileLanguages()?,
+    };
+
+    let result = engine.RecognizeAsync(&bitmap)?.get()?;
+
+    let text = result.Text()?.to_string();
+    let mut words = Vec::new();
+    for line in result.Lines()? {
+        for word in line.Words()? {
+            let r = word.BoundingRect()?;
+            words.push(OcrWord {
+                text: word.Text()?.to_string(),
+                x: r.X as i32,
+                y: r.Y as i32,
+                w: r.Width as i32,
+                h: r.Height as i32,
+            });
+        }
+    }
+    Ok((text, words))
 }

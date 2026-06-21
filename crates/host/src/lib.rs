@@ -272,17 +272,7 @@ fn install_host_api(lua: &Lua, state: &Rc<RefCell<HostState>>, backend: &Rc<dyn 
                     .to_rgba8();
                 let (tw, th) = (img.width(), img.height());
                 let (sw, sh) = b_search.screen_size();
-                let (rx, ry, rw, rh) =
-                    match opts.as_ref().and_then(|o| o.get::<Table>("region").ok()) {
-                        Some(region) => {
-                            let x1: i32 = region.get("x1").or_else(|_| region.get(1)).unwrap_or(0);
-                            let y1: i32 = region.get("y1").or_else(|_| region.get(2)).unwrap_or(0);
-                            let x2: i32 = region.get("x2").or_else(|_| region.get(3)).unwrap_or(sw);
-                            let y2: i32 = region.get("y2").or_else(|_| region.get(4)).unwrap_or(sh);
-                            (x1, y1, (x2 - x1).max(0), (y2 - y1).max(0))
-                        }
-                        None => (0, 0, sw, sh),
-                    };
+                let (rx, ry, rw, rh) = read_region(opts.as_ref(), sw, sh);
                 let tol: u8 = opts
                     .as_ref()
                     .and_then(|o| o.get::<u8>("tolerance").ok())
@@ -306,6 +296,36 @@ fn install_host_api(lua: &Lua, state: &Rc<RefCell<HostState>>, backend: &Rc<dyn 
         )?,
     )?;
     host.set("screen", screen)?;
+
+    // host.ocr.recognize({ region, lang }) -> { text, words = {{text,x,y,w,h}, ...} }
+    let ocr = lua.create_table()?;
+    let b_ocr = backend.clone();
+    ocr.set(
+        "recognize",
+        lua.create_function(move |lua, opts: Option<Table>| {
+            let (sw, sh) = b_ocr.screen_size();
+            let (rx, ry, rw, rh) = read_region(opts.as_ref(), sw, sh);
+            let lang: Option<String> = opts.as_ref().and_then(|o| o.get::<String>("lang").ok());
+            let res = b_ocr
+                .ocr(rx, ry, rw, rh, lang.as_deref())
+                .map_err(mlua::Error::external)?;
+            let t = lua.create_table()?;
+            t.set("text", res.text)?;
+            let words = lua.create_table()?;
+            for wd in res.words {
+                let w = lua.create_table()?;
+                w.set("text", wd.text)?;
+                w.set("x", rx + wd.x)?;
+                w.set("y", ry + wd.y)?;
+                w.set("w", wd.w)?;
+                w.set("h", wd.h)?;
+                words.push(w)?;
+            }
+            t.set("words", words)?;
+            Ok(t)
+        })?,
+    )?;
+    host.set("ocr", ocr)?;
 
     // host.path(rel) -> real path (escape hatch)
     let s2 = state.clone();
@@ -342,6 +362,21 @@ fn window_has_triggers(lua: &Lua) -> bool {
         has.call::<bool>(())
     })()
     .unwrap_or(false)
+}
+
+/// Reads an optional `{ region = { x1, y1, x2, y2 } }` (named or positional) and
+/// returns `(x, y, w, h)`, defaulting to the full screen.
+fn read_region(opts: Option<&Table>, sw: i32, sh: i32) -> (i32, i32, i32, i32) {
+    match opts.and_then(|o| o.get::<Table>("region").ok()) {
+        Some(region) => {
+            let x1: i32 = region.get("x1").or_else(|_| region.get(1)).unwrap_or(0);
+            let y1: i32 = region.get("y1").or_else(|_| region.get(2)).unwrap_or(0);
+            let x2: i32 = region.get("x2").or_else(|_| region.get(3)).unwrap_or(sw);
+            let y2: i32 = region.get("y2").or_else(|_| region.get(4)).unwrap_or(sh);
+            (x1, y1, (x2 - x1).max(0), (y2 - y1).max(0))
+        }
+        None => (0, 0, sw, sh),
+    }
 }
 
 /// Naive template search over a captured region (early-out per position; compares

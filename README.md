@@ -20,9 +20,9 @@ Try the global-hotkey demo (stays resident): `cargo run -p app -- modules/hotkey
 ## Structure
 
 - `crates/module-manifest` — `module.toml` parsing + module loading (dev: unpacked directory).
-- `crates/host` — Luau runtime + `host` API (`log`/`speech`/`hotkey`/`window`/`os`/`screen`/`path`/`resource`). The OS is reached through a `Backend` trait (`crates/host/src/backend/`, one impl per platform; Windows real, others stub). The OS-gated window matcher (`find`/`findAll`) is a Luau prelude.
+- `crates/host` — Luau runtime + `host` API (`log`/`speech`/`hotkey`/`window`/`os`/`screen`/`ocr`/`path`/`resource`). The OS is reached through a `Backend` trait (`crates/host/src/backend/`, one impl per platform; Windows real, others stub). The OS-gated window matcher (`find`/`findAll`) is a Luau prelude.
 - `crates/app` — binary `automation-platform`, loads & runs a module.
-- `modules/hello`, `modules/hotkey`, `modules/window`, `modules/window-trigger`, `modules/screen` — example modules (speak-once; global-hotkey trigger; window/os inspection; foreground-change trigger; screen capture & image search).
+- `modules/hello`, `modules/hotkey`, `modules/window`, `modules/window-trigger`, `modules/screen`, `modules/ocr` — example modules (speak-once; global-hotkey trigger; window/os inspection; foreground-change trigger; screen capture & image search; OCR).
 - `docs/` — design documents (see below).
 - `TODO.md` — backlog & implementation slices.
 

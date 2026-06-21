@@ -1,7 +1,7 @@
 //! Fallback backend for platforms without a real implementation yet.
 //! Window queries return empty; hotkey registration returns an error.
 
-use super::{Backend, CapturedImage, HostEvents, WinInfo};
+use super::{Backend, CapturedImage, HostEvents, OcrText, WinInfo};
 
 pub struct StubBackend;
 
@@ -24,6 +24,17 @@ impl Backend for StubBackend {
 
     fn capture(&self, _x: i32, _y: i32, _w: i32, _h: i32) -> Option<CapturedImage> {
         None
+    }
+
+    fn ocr(
+        &self,
+        _x: i32,
+        _y: i32,
+        _w: i32,
+        _h: i32,
+        _lang: Option<&str>,
+    ) -> Result<OcrText, String> {
+        Err("OCR is not implemented on this platform yet".to_string())
     }
 
     fn register_hotkey(&self, _id: i32, spec: &str) -> Result<(), String> {

@@ -30,6 +30,21 @@ pub struct CapturedImage {
     pub rgba: Vec<u8>,
 }
 
+/// A recognized word with its bounding box (in capture-region coordinates).
+pub struct OcrWord {
+    pub text: String,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+/// OCR result: the full recognized text plus per-word boxes.
+pub struct OcrText {
+    pub text: String,
+    pub words: Vec<OcrWord>,
+}
+
 /// OS-level operations the host needs. Lua-agnostic on purpose: callback/state
 /// mapping stays in the host; only OS specifics live behind this trait.
 pub trait Backend {
@@ -42,6 +57,9 @@ pub trait Backend {
     fn pixel(&self, x: i32, y: i32) -> (u8, u8, u8);
     /// Captures a screen region into an RGBA image.
     fn capture(&self, x: i32, y: i32, w: i32, h: i32) -> Option<CapturedImage>;
+
+    /// Recognizes text in a screen region.
+    fn ocr(&self, x: i32, y: i32, w: i32, h: i32, lang: Option<&str>) -> Result<OcrText, String>;
 
     /// Registers a global hotkey identified by `id` from a spec like "Ctrl+Alt+H".
     fn register_hotkey(&self, id: i32, spec: &str) -> Result<(), String>;
