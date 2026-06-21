@@ -6,9 +6,9 @@
 //! bound to that module's root + the shared services.
 
 mod backend;
-mod config;
 mod gui;
 mod logging;
+mod settings;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -53,6 +53,14 @@ struct Shared {
     hotkeys: RefCell<HashMap<i32, HotkeyReg>>,
     /// Captured keys: (vk, modifier-mask, module_idx, VM, callback).
     keys: RefCell<Vec<(u32, u8, usize, Lua, RegistryKey)>>,
+    /// Unified portable store: per-module enabled-state + settings.
+    store: RefCell<settings::Store>,
+    /// module_idx → (setting key → schema), for validation + the GUI. Not persisted.
+    schemas: RefCell<Vec<HashMap<String, settings::Field>>>,
+    /// onChange callbacks: (module_idx, key) → [(VM, callback)].
+    on_change: RefCell<HashMap<(usize, String), Vec<(Lua, RegistryKey)>>>,
+    /// Coalesces setting auto-saves to the event-loop tick.
+    dirty: Cell<bool>,
 }
 
 impl Shared {
@@ -117,17 +125,80 @@ impl Shared {
         }
     }
 
-    /// Writes the currently-disabled module ids to the portable config file.
-    fn save_config(&self) {
+    /// Mirrors the in-memory `enabled[]` flags into the store.
+    fn sync_enabled_into_store(&self) {
         let ids = self.ids.borrow();
         let enabled = self.enabled.borrow();
-        let disabled: Vec<String> = ids
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !enabled.get(*i).copied().unwrap_or(true))
-            .map(|(_, id)| id.clone())
-            .collect();
-        config::save_disabled(&disabled);
+        let mut store = self.store.borrow_mut();
+        for (i, id) in ids.iter().enumerate() {
+            store.set_enabled(id, enabled.get(i).copied().unwrap_or(true));
+        }
+    }
+
+    /// Persists the store immediately (enable/disable is a deliberate action).
+    fn save_config(&self) {
+        self.sync_enabled_into_store();
+        self.store.borrow().save();
+    }
+
+    /// Flushes pending setting changes to disk (coalesced; driven by the loop).
+    fn flush_if_dirty(&self) {
+        if !self.dirty.replace(false) {
+            return;
+        }
+        self.sync_enabled_into_store();
+        self.store.borrow().save();
+    }
+
+    /// Applies a setting change from the GUI: validates against the schema,
+    /// updates the store (auto-persisted on the next tick), and fires onChange.
+    fn set_setting(&self, idx: usize, key: &str, value: settings::Value) {
+        let valid = {
+            let schemas = self.schemas.borrow();
+            schemas
+                .get(idx)
+                .and_then(|m| m.get(key))
+                .map(|f| f.validate(&value).is_ok())
+                .unwrap_or(false)
+        };
+        if !valid {
+            return;
+        }
+        let id = self.ids.borrow()[idx].clone();
+        let old = self.store.borrow_mut().set(&id, key, value.clone());
+        self.dirty.set(true);
+        self.fire_on_change(idx, key, &value, old.as_ref());
+    }
+
+    /// Fires the `onChange` callbacks registered for (module, key).
+    fn fire_on_change(
+        &self,
+        idx: usize,
+        key: &str,
+        new: &settings::Value,
+        old: Option<&settings::Value>,
+    ) {
+        let cbs: Vec<(Lua, Function)> = {
+            let map = self.on_change.borrow();
+            match map.get(&(idx, key.to_string())) {
+                Some(list) => list
+                    .iter()
+                    .filter_map(|(lua, rk)| {
+                        lua.registry_value::<Function>(rk).ok().map(|f| (lua.clone(), f))
+                    })
+                    .collect(),
+                None => Vec::new(),
+            }
+        };
+        for (lua, f) in cbs {
+            let new_v = value_to_lua(&lua, new).unwrap_or(mlua::Value::Nil);
+            let old_v = old
+                .and_then(|o| value_to_lua(&lua, o).ok())
+                .unwrap_or(mlua::Value::Nil);
+            if let Err(e) = f.call::<()>((new_v, old_v)) {
+                logging::line("settings", &format!("onChange error ({key}): {e}"));
+            }
+        }
     }
 }
 
@@ -158,6 +229,8 @@ impl Manager {
                 (None, None)
             }
         };
+        let store = settings::Store::load();
+        let disabled_ids = store.disabled_ids();
         let shared = Rc::new(Shared {
             backend,
             tts: RefCell::new(tts),
@@ -169,11 +242,15 @@ impl Manager {
             enabled: RefCell::new(Vec::new()),
             hotkeys: RefCell::new(HashMap::new()),
             keys: RefCell::new(Vec::new()),
+            store: RefCell::new(store),
+            schemas: RefCell::new(Vec::new()),
+            on_change: RefCell::new(HashMap::new()),
+            dirty: Cell::new(false),
         });
         Ok(Self {
             shared,
             modules: Vec::new(),
-            disabled_ids: config::load_disabled(),
+            disabled_ids,
         })
     }
 
@@ -198,6 +275,7 @@ impl Manager {
         self.shared.roots.borrow_mut().push(module.root.clone());
         self.shared.ids.borrow_mut().push(module.manifest.id.clone());
         self.shared.enabled.borrow_mut().push(true);
+        self.shared.schemas.borrow_mut().push(HashMap::new());
 
         let lua = Lua::new();
         install_host_api(&lua, &self.shared, idx).context("failed to install host API")?;
@@ -256,43 +334,73 @@ impl Manager {
                     .run_event_loop(&mut dispatcher)
                     .map_err(|e| anyhow::anyhow!("{e}"))
                     .context("event loop failed")?;
+                self.shared.flush_if_dirty();
             } else {
                 // wxWidgets owns the loop. Snapshot the module list for the tray
                 // manager window, then drain our OS events from its timer tick.
                 logging::line("manager", "module manager running in the system tray");
-                let module_infos: Vec<gui::ModuleInfo> = {
-                    let enabled = self.shared.enabled.borrow();
-                    self.modules
-                        .iter()
-                        .enumerate()
-                        .map(|(i, m)| gui::ModuleInfo {
+                let module_infos: Vec<gui::ModuleInfo> = self
+                    .modules
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| {
+                        let mut settings: Vec<gui::SettingDesc> = {
+                            let schemas = self.shared.schemas.borrow();
+                            let store = self.shared.store.borrow();
+                            schemas
+                                .get(i)
+                                .map(|map| {
+                                    map.iter()
+                                        .map(|(key, f)| gui::SettingDesc {
+                                            key: key.clone(),
+                                            label: f.label.clone(),
+                                            kind: f.kind,
+                                            value: store
+                                                .get(&m.id, key)
+                                                .unwrap_or_else(|| f.default.clone()),
+                                            min: f.min,
+                                            max: f.max,
+                                            choices: f.choices.clone(),
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default()
+                        };
+                        settings.sort_by(|a, b| a.label.cmp(&b.label));
+                        gui::ModuleInfo {
                             name: m.name.clone(),
                             version: m.version.clone(),
                             id: m.id.clone(),
-                            enabled: enabled.get(i).copied().unwrap_or(true),
-                        })
-                        .collect()
-                };
+                            enabled: self.shared.enabled.borrow().get(i).copied().unwrap_or(true),
+                            settings,
+                        }
+                    })
+                    .collect();
                 let backend = self.shared.backend.clone();
                 let shared = self.shared.clone();
                 let toggle_shared = self.shared.clone();
+                let set_shared = self.shared.clone();
                 let modules = Rc::new(std::mem::take(&mut self.modules));
                 gui::run_gui(
                     module_infos,
                     move |idx, enabled| toggle_shared.set_enabled(idx, enabled),
+                    move |idx, key, value| set_shared.set_setting(idx, &key, value),
                     move || {
                         let mut dispatcher = Dispatcher {
                             shared: &shared,
                             modules: &modules[..],
                         };
                         backend.pump_pending(&mut dispatcher);
+                        shared.flush_if_dirty();
                     },
                 )
                 .map_err(|e| anyhow::anyhow!("{e}"))
                 .context("wx GUI loop failed")?;
+                self.shared.flush_if_dirty();
             }
         } else {
             self.wait_for_speech();
+            self.shared.flush_if_dirty();
         }
         Ok(())
     }
@@ -740,8 +848,143 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<()> {
     )?;
     host.set("resource", resource)?;
 
+    // host.settings: define/get/set/onChange — persisted in the unified store.
+    // A module only ever sees its own settings (the id is resolved from `idx`).
+    let settings_api = lua.create_table()?;
+    let sh = shared.clone();
+    settings_api.set(
+        "define",
+        lua.create_function(
+            move |lua, (key, default, opts): (String, mlua::Value, Option<Table>)| {
+                let def = lua_to_value(&default)?;
+                let field = field_from(&key, &def, opts.as_ref());
+                let id = sh.ids.borrow()[idx].clone();
+                sh.schemas.borrow_mut()[idx].insert(key.clone(), field);
+                let current = {
+                    let mut store = sh.store.borrow_mut();
+                    match store.get(&id, &key) {
+                        Some(v) if v.kind() == def.kind() => v, // persisted wins
+                        _ => {
+                            store.set(&id, &key, def.clone());
+                            sh.dirty.set(true);
+                            def
+                        }
+                    }
+                };
+                value_to_lua(lua, &current)
+            },
+        )?,
+    )?;
+    let sh = shared.clone();
+    settings_api.set(
+        "get",
+        lua.create_function(move |lua, key: String| {
+            if !sh.schemas.borrow()[idx].contains_key(&key) {
+                return Err(mlua::Error::external(format!("setting '{key}' was not defined")));
+            }
+            let id = sh.ids.borrow()[idx].clone();
+            let v = sh
+                .store
+                .borrow()
+                .get(&id, &key)
+                .ok_or_else(|| mlua::Error::external(format!("setting '{key}' has no value")))?;
+            value_to_lua(lua, &v)
+        })?,
+    )?;
+    let sh = shared.clone();
+    settings_api.set(
+        "set",
+        lua.create_function(move |_, (key, value): (String, mlua::Value)| {
+            let v = lua_to_value(&value)?;
+            {
+                let schemas = sh.schemas.borrow();
+                let field = schemas[idx].get(&key).ok_or_else(|| {
+                    mlua::Error::external(format!("setting '{key}' was not defined"))
+                })?;
+                field
+                    .validate(&v)
+                    .map_err(|e| mlua::Error::external(format!("setting '{key}': {e}")))?;
+            }
+            let id = sh.ids.borrow()[idx].clone();
+            let old = sh.store.borrow_mut().set(&id, &key, v.clone());
+            sh.dirty.set(true);
+            sh.fire_on_change(idx, &key, &v, old.as_ref());
+            Ok(())
+        })?,
+    )?;
+    let sh = shared.clone();
+    settings_api.set(
+        "onChange",
+        lua.create_function(move |lua, (key, cb): (String, Function)| {
+            let rk = lua.create_registry_value(cb)?;
+            sh.on_change.borrow_mut().entry((idx, key)).or_default().push((lua.clone(), rk));
+            Ok(())
+        })?,
+    )?;
+    host.set("settings", settings_api.clone())?;
+    host.set("config", settings_api)?; // catalog-compat alias (host.config.get/set)
+
     lua.globals().set("host", host)?;
     Ok(())
+}
+
+/// Converts a Luau value into a stored setting value (scalars only).
+fn lua_to_value(v: &mlua::Value) -> mlua::Result<settings::Value> {
+    match v {
+        mlua::Value::Boolean(b) => Ok(settings::Value::Bool(*b)),
+        mlua::Value::Integer(i) => Ok(settings::Value::Int(*i as i64)),
+        mlua::Value::Number(n) => {
+            if n.fract() == 0.0 && n.is_finite() {
+                Ok(settings::Value::Int(*n as i64))
+            } else {
+                Ok(settings::Value::Float(*n))
+            }
+        }
+        mlua::Value::String(s) => Ok(settings::Value::Str(s.to_str()?.to_string())),
+        _ => Err(mlua::Error::external(
+            "settings value must be a boolean, number, or string",
+        )),
+    }
+}
+
+/// Converts a stored setting value back into a Luau value.
+fn value_to_lua(lua: &Lua, v: &settings::Value) -> mlua::Result<mlua::Value> {
+    Ok(match v {
+        settings::Value::Bool(b) => mlua::Value::Boolean(*b),
+        settings::Value::Int(i) => mlua::Value::Integer(*i as mlua::Integer),
+        settings::Value::Float(f) => mlua::Value::Number(*f),
+        settings::Value::Str(s) => mlua::Value::String(lua.create_string(s)?),
+    })
+}
+
+/// Builds a setting's schema from its `define(key, default, opts)` call.
+fn field_from(key: &str, default: &settings::Value, opts: Option<&Table>) -> settings::Field {
+    let mut field = settings::Field {
+        kind: default.kind(),
+        label: key.to_string(),
+        default: default.clone(),
+        min: None,
+        max: None,
+        choices: None,
+    };
+    if let Some(o) = opts {
+        if let Ok(l) = o.get::<String>("label") {
+            field.label = l;
+        }
+        if let Ok(m) = o.get::<f64>("min") {
+            field.min = Some(m);
+        }
+        if let Ok(m) = o.get::<f64>("max") {
+            field.max = Some(m);
+        }
+        if let Ok(choices) = o.get::<Table>("oneOf") {
+            let list: Vec<String> = choices.sequence_values::<String>().flatten().collect();
+            if !list.is_empty() {
+                field.choices = Some(list);
+            }
+        }
+    }
+    field
 }
 
 /// Returns true if the given module VM registered any window triggers.

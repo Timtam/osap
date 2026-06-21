@@ -13,8 +13,22 @@ use std::rc::Rc;
 
 use wxdragon::prelude::*;
 
+use crate::settings;
+
 const MENU_SHOW: i32 = 1001;
 const MENU_QUIT: i32 = 1002;
+
+/// One module setting, as the manager window needs it to render + edit a control.
+#[derive(Clone)]
+pub struct SettingDesc {
+    pub key: String,
+    pub label: String,
+    pub kind: settings::Kind,
+    pub value: settings::Value,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub choices: Option<Vec<String>>,
+}
 
 /// One row in the module-manager list.
 pub struct ModuleInfo {
@@ -22,6 +36,7 @@ pub struct ModuleInfo {
     pub version: String,
     pub id: String,
     pub enabled: bool,
+    pub settings: Vec<SettingDesc>,
 }
 
 /// Runs the tray-resident module manager. `on_toggle(idx, enabled)` fires when
@@ -30,6 +45,7 @@ pub struct ModuleInfo {
 pub fn run_gui(
     modules: Vec<ModuleInfo>,
     on_toggle: impl FnMut(usize, bool) + 'static,
+    on_set: impl FnMut(usize, String, settings::Value) + 'static,
     mut pump: impl FnMut() + 'static,
 ) -> Result<(), Box<dyn std::error::Error>> {
     wxdragon::main(move |app| {
@@ -79,6 +95,11 @@ pub fn run_gui(
             .build();
         sizer.add(&hint, 0, SizerFlag::All, 12);
 
+        let settings_btn = Button::builder(&panel)
+            .with_label("Settings for selected module…")
+            .build();
+        sizer.add(&settings_btn, 0, SizerFlag::All, 12);
+
         panel.set_sizer(sizer, true);
 
         // Detect native checkbox toggles (mouse click on the box, or Space on
@@ -104,6 +125,32 @@ pub fn run_gui(
             list.on_key_up(move |e| {
                 sync_checks(hwnd, &items, &states, &on_toggle);
                 e.skip(true);
+            });
+        }
+
+        // "Settings…" opens a per-module dialog with native controls.
+        let settings_by_module: Rc<Vec<Vec<SettingDesc>>> =
+            Rc::new(modules.iter().map(|m| m.settings.clone()).collect());
+        let on_set: Rc<RefCell<Box<dyn FnMut(usize, String, settings::Value)>>> =
+            Rc::new(RefCell::new(Box::new(on_set)));
+        {
+            let (items, settings_by_module, on_set) =
+                (items.clone(), settings_by_module.clone(), on_set.clone());
+            settings_btn.on_click(move |_| {
+                let Some(sel) = list.get_selection() else {
+                    return;
+                };
+                let Some(idx) = items.iter().position(|it| native_checkboxes::same(it, &sel))
+                else {
+                    return;
+                };
+                if settings_by_module[idx].is_empty() {
+                    MessageDialog::builder(&frame, "This module has no settings.", "Settings")
+                        .build()
+                        .show_modal();
+                    return;
+                }
+                open_settings_dialog(&frame, idx, &settings_by_module[idx], &on_set);
             });
         }
 
@@ -184,6 +231,146 @@ fn make_icon() -> Option<Bitmap> {
         }
     }
     Bitmap::from_rgba(&data, size, size)
+}
+
+/// Formats a numeric setting value for a text field (no trailing `.0` for ints).
+fn number_to_string(v: &settings::Value) -> String {
+    match v {
+        settings::Value::Int(i) => i.to_string(),
+        settings::Value::Float(f) => f.to_string(),
+        _ => "0".to_string(),
+    }
+}
+
+/// Opens a modal settings dialog for one module, building a native control per
+/// setting (checkbox / number field / dropdown / text). On OK, applies each via `on_set`.
+fn open_settings_dialog(
+    parent: &Frame,
+    idx: usize,
+    descs: &[SettingDesc],
+    on_set: &RefCell<Box<dyn FnMut(usize, String, settings::Value)>>,
+) {
+    enum Ctl {
+        Bool(CheckBox),
+        Num(TextCtrl, bool, Option<f64>, Option<f64>), // (field, integral, min, max)
+        Choice(Choice, Vec<String>),
+        Text(TextCtrl),
+    }
+
+    let dialog = Dialog::builder(parent, "Module settings").build();
+    // Controls go on a Panel (not the bare Dialog): standard wxWidgets practice,
+    // and it gives the screen reader correct control labeling + Tab navigation.
+    let panel = Panel::builder(&dialog).build();
+    let sizer = BoxSizer::builder(Orientation::Vertical).build();
+    let mut controls: Vec<(String, Ctl)> = Vec::with_capacity(descs.len());
+
+    for d in descs {
+        match d.kind {
+            settings::Kind::Bool => {
+                // Label it exactly like the other rows: a leading StaticText is
+                // what the screen reader reliably reads as the control's name here
+                // (the checkbox's own label was not announced).
+                let lbl = StaticText::builder(&panel).with_label(&d.label).build();
+                sizer.add(&lbl, 0, SizerFlag::Left | SizerFlag::Top, 8);
+                let cb = CheckBox::builder(&panel).build();
+                cb.set_name(&d.label);
+                cb.set_value(matches!(d.value, settings::Value::Bool(true)));
+                sizer.add(&cb, 0, SizerFlag::All, 8);
+                controls.push((d.key.clone(), Ctl::Bool(cb)));
+            }
+            settings::Kind::Number => {
+                // A labeled text field — a composite spinner doesn't expose an
+                // accessible name to the screen reader; the range is enforced on OK.
+                let lbl = StaticText::builder(&panel).with_label(&d.label).build();
+                sizer.add(&lbl, 0, SizerFlag::Left | SizerFlag::Top, 8);
+                let tc = TextCtrl::builder(&panel).build();
+                tc.set_name(&d.label); // SetLabel() asserts on a TextCtrl; rely on
+                                       // the preceding StaticText + the window name
+                tc.set_value(&number_to_string(&d.value));
+                sizer.add(&tc, 0, SizerFlag::All | SizerFlag::Expand, 8);
+                let integral = matches!(d.value, settings::Value::Int(_));
+                controls.push((d.key.clone(), Ctl::Num(tc, integral, d.min, d.max)));
+            }
+            settings::Kind::Str => {
+                let lbl = StaticText::builder(&panel).with_label(&d.label).build();
+                sizer.add(&lbl, 0, SizerFlag::Left | SizerFlag::Top, 8);
+                if let Some(choices) = &d.choices {
+                    let ch = Choice::builder(&panel).build();
+                    ch.set_name(&d.label);
+                    let mut sel = 0u32;
+                    for (i, c) in choices.iter().enumerate() {
+                        ch.append(c);
+                        if d.value.as_str() == Some(c.as_str()) {
+                            sel = i as u32;
+                        }
+                    }
+                    ch.set_selection(sel);
+                    sizer.add(&ch, 0, SizerFlag::All, 8);
+                    controls.push((d.key.clone(), Ctl::Choice(ch, choices.clone())));
+                } else {
+                    let tc = TextCtrl::builder(&panel).build();
+                    tc.set_name(&d.label);
+                    tc.set_value(d.value.as_str().unwrap_or(""));
+                    sizer.add(&tc, 0, SizerFlag::All | SizerFlag::Expand, 8);
+                    controls.push((d.key.clone(), Ctl::Text(tc)));
+                }
+            }
+        }
+    }
+
+    // OK / Cancel — end the modal with the standard ids.
+    let buttons = BoxSizer::builder(Orientation::Horizontal).build();
+    let ok = Button::builder(&panel).with_label("OK").build();
+    let cancel = Button::builder(&panel).with_label("Cancel").build();
+    {
+        let d = dialog;
+        ok.on_click(move |_| d.end_modal(ID_OK));
+    }
+    {
+        let d = dialog;
+        cancel.on_click(move |_| d.end_modal(ID_CANCEL));
+    }
+    buttons.add(&ok, 0, SizerFlag::All, 6);
+    buttons.add(&cancel, 0, SizerFlag::All, 6);
+    sizer.add_sizer(&buttons, 0, SizerFlag::AlignRight | SizerFlag::All, 6);
+
+    panel.set_sizer(sizer, true);
+    let dlg_sizer = BoxSizer::builder(Orientation::Vertical).build();
+    dlg_sizer.add(&panel, 1, SizerFlag::Expand, 0);
+    dialog.set_sizer_and_fit(dlg_sizer, true);
+
+    if dialog.show_modal() == ID_OK {
+        let mut apply = on_set.borrow_mut();
+        for (key, ctl) in &controls {
+            let value: Option<settings::Value> = match ctl {
+                Ctl::Bool(c) => Some(settings::Value::Bool(c.get_value())),
+                Ctl::Num(c, integral, min, max) => {
+                    c.get_value().trim().parse::<f64>().ok().map(|mut n| {
+                        if let Some(mn) = min {
+                            n = n.max(*mn);
+                        }
+                        if let Some(mx) = max {
+                            n = n.min(*mx);
+                        }
+                        if *integral {
+                            settings::Value::Int(n as i64)
+                        } else {
+                            settings::Value::Float(n)
+                        }
+                    })
+                }
+                Ctl::Choice(c, choices) => {
+                    let i = c.get_selection().unwrap_or(0) as usize;
+                    Some(settings::Value::Str(choices.get(i).cloned().unwrap_or_default()))
+                }
+                Ctl::Text(c) => Some(settings::Value::Str(c.get_value())),
+            };
+            if let Some(v) = value {
+                apply(idx, key.clone(), v);
+            }
+        }
+    }
+    dialog.destroy();
 }
 
 /// Reads each row's native check state, reporting any that changed since the
@@ -319,6 +506,12 @@ mod native_checkboxes {
         }
         ((tvi.state & TVIS_STATEIMAGEMASK) >> 12) == 2
     }
+
+    /// True if two `TreeItemId`s refer to the same native tree node.
+    pub fn same(a: &TreeItemId, b: &TreeItemId) -> bool {
+        let ha = htreeitem(a);
+        !ha.is_null() && ha == htreeitem(b)
+    }
 }
 
 /// Non-Windows stub: a native TVS_CHECKBOXES equivalent (macOS/GTK) comes later.
@@ -330,6 +523,9 @@ mod native_checkboxes {
     pub fn enable(_hwnd: *mut c_void) {}
     pub fn set(_hwnd: *mut c_void, _item: &TreeItemId, _checked: bool) {}
     pub fn get(_hwnd: *mut c_void, _item: &TreeItemId) -> bool {
+        false
+    }
+    pub fn same(_a: &TreeItemId, _b: &TreeItemId) -> bool {
         false
     }
 }

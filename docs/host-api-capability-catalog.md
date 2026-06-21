@@ -91,12 +91,24 @@ local h = host.sound.play("assets/sounds/focus.ogg", { volume = 0.8 })
 h:stop()
 ```
 
-### host.resource — package resources & config
+### host.resource — package resources
 ```lua
 local bytes = host.resource.read("assets/data/profiles.json")  -- bytes/string from the package
 local p     = host.path("assets/images/serum2/preset.png")     -- real path (escape hatch)
-host.config.set("serum2ImageSearch", true) ; host.config.get("serum2ImageSearch")
 ```
+
+### host.settings — per-module settings (persisted)
+```lua
+-- declare + read in one line; the type is pinned from the default. opts (optional):
+-- { label = "…", min = N, max = N, oneOf = { … } }. A persisted value wins over the default.
+local rate = host.settings.define("speechRate", 50, { label = "Speech rate", min = 0, max = 100 })
+local lang = host.settings.define("ocrLanguage", "eng", { label = "OCR language", oneOf = { "eng", "deu" } })
+host.settings.set("imageSearch", true)        -- validated against the schema; auto-persisted
+local on = host.settings.get("imageSearch")    -- errors if the key was never define()d
+host.settings.onChange("speechRate", function(new, old) end)
+-- host.config is an alias of host.settings (catalog-compat).
+```
+Each module sees only its own settings (keyed by module id; isolation is structural). Scalars only (boolean / number / string). Persisted in a portable `<exe_dir>/settings.toml` next to the executable — one record per module (a host-owned `enabled` flag + the `settings` map); supersedes the old `disabled-modules.txt` (auto-migrated). Auto-saved (coalesced to the event loop + on shutdown, atomic write). The tray manager renders a native, accessible settings form per module from the registered schema.
 
 ### host.hotkey — hotkeys with context
 ```lua

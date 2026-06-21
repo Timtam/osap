@@ -1,0 +1,7 @@
+id = "com.example.settings"
+name = "Settings Demo"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
+
+[capabilities]
+require = ["settings", "speech", "log", "hotkey"]

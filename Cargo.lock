@@ -772,6 +772,8 @@ dependencies = [
  "mlua",
  "module-manifest",
  "rodio",
+ "serde",
+ "toml",
  "tts",
  "windows 0.58.0",
  "windows-sys 0.61.2",
