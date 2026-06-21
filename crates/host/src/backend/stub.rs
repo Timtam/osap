@@ -20,6 +20,10 @@ impl Backend for StubBackend {
         ))
     }
 
+    fn watch_foreground(&self) -> Result<(), String> {
+        Ok(())
+    }
+
     fn run_event_loop(&self, _events: &mut dyn HostEvents) -> Result<(), String> {
         Ok(())
     }

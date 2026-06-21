@@ -81,3 +81,24 @@ function W.findAll(m)
   end
   return out
 end
+
+-- Window triggers (auto-activation). The host calls W._dispatchActivate(win) on
+-- every foreground change; here we run the matching registered callbacks.
+local triggers = {}
+
+function W.onTrigger(matcher, opts, cb)
+  opts = opts or {}
+  triggers[#triggers + 1] = { matcher = matcher or {}, on = opts.on or "activate", cb = cb }
+end
+
+function W._hasTriggers()
+  return #triggers > 0
+end
+
+function W._dispatchActivate(win)
+  for _, t in ipairs(triggers) do
+    if t.on == "activate" and matches(t.matcher, win) then
+      t.cb(win)
+    end
+  end
+end

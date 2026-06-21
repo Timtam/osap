@@ -32,6 +32,9 @@ pub trait Backend {
     /// Registers a global hotkey identified by `id` from a spec like "Ctrl+Alt+H".
     fn register_hotkey(&self, id: i32, spec: &str) -> Result<(), String>;
 
+    /// Starts watching foreground-window changes (delivered as `on_window_activate`).
+    fn watch_foreground(&self) -> Result<(), String>;
+
     /// Runs the platform event loop, dispatching OS events into `events`.
     /// Blocks until the process is terminated.
     fn run_event_loop(&self, events: &mut dyn HostEvents) -> Result<(), String>;
@@ -40,6 +43,7 @@ pub trait Backend {
 /// Sink for OS events, implemented by the host to bridge into Luau callbacks.
 pub trait HostEvents {
     fn on_hotkey(&mut self, id: i32);
+    fn on_window_activate(&mut self, win: WinInfo);
 }
 
 /// The backend for the current platform.

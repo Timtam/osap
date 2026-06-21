@@ -1,20 +1,35 @@
 //! Windows implementation of the platform [`Backend`](super::Backend):
-//! window enumeration (Win32) + global hotkeys (`RegisterHotKey` + `GetMessage`).
+//! window enumeration (Win32), global hotkeys (`RegisterHotKey` + `GetMessage`),
+//! and foreground-change events (`SetWinEventHook`).
+
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use super::{Backend, HostEvents, WinInfo};
 
-use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
+use windows_sys::Win32::Foundation::{CloseHandle, HMODULE, HWND, LPARAM, RECT};
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
 };
+use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, EnumWindows, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowRect,
     GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
-    TranslateMessage, MSG, WM_HOTKEY,
+    PostThreadMessageW, TranslateMessage, EVENT_SYSTEM_FOREGROUND, MSG, WINEVENT_OUTOFCONTEXT,
+    WM_HOTKEY, WM_NULL,
 };
+
+thread_local! {
+    /// HWNDs whose window became foreground, queued by the WinEvent hook and
+    /// drained by the event loop on the same thread.
+    static FOREGROUND_QUEUE: RefCell<Vec<isize>> = RefCell::new(Vec::new());
+}
+
+/// Thread id of the event loop, so the WinEvent hook can wake `GetMessage`.
+static HOOK_THREAD: AtomicU32 = AtomicU32::new(0);
 
 pub struct WindowsBackend;
 
@@ -52,6 +67,26 @@ impl Backend for WindowsBackend {
         Ok(())
     }
 
+    fn watch_foreground(&self) -> Result<(), String> {
+        HOOK_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
+        let hook = unsafe {
+            SetWinEventHook(
+                EVENT_SYSTEM_FOREGROUND,
+                EVENT_SYSTEM_FOREGROUND,
+                std::ptr::null_mut::<core::ffi::c_void>() as HMODULE,
+                Some(win_event_proc),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT,
+            )
+        };
+        if hook.is_null() {
+            return Err("SetWinEventHook failed".to_string());
+        }
+        // Intentionally leak the hook handle: it lives for the process lifetime.
+        Ok(())
+    }
+
     fn run_event_loop(&self, events: &mut dyn HostEvents) -> Result<(), String> {
         let mut msg: MSG = unsafe { std::mem::zeroed() };
         loop {
@@ -66,6 +101,14 @@ impl Backend for WindowsBackend {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
+            // The WinEvent hook ran during dispatch and queued foreground changes.
+            let pending: Vec<isize> =
+                FOREGROUND_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
+            for hwnd in pending {
+                if let Some(win) = window_info(hwnd) {
+                    events.on_window_activate(win);
+                }
+            }
         }
         Ok(())
     }
@@ -75,6 +118,27 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
     let vec = &mut *(lparam as *mut Vec<isize>);
     vec.push(hwnd as isize);
     1 // TRUE — keep enumerating
+}
+
+unsafe extern "system" fn win_event_proc(
+    _hook: HWINEVENTHOOK,
+    event: u32,
+    hwnd: HWND,
+    id_object: i32,
+    id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    // OBJID_WINDOW == 0, CHILDID_SELF == 0: only the top-level foreground window.
+    if event == EVENT_SYSTEM_FOREGROUND && id_object == 0 && id_child == 0 && !hwnd.is_null() {
+        let v = hwnd as isize;
+        FOREGROUND_QUEUE.with(|q| q.borrow_mut().push(v));
+        // Wake the event loop so it drains the queue even without a real message.
+        let tid = HOOK_THREAD.load(Ordering::Relaxed);
+        if tid != 0 {
+            PostThreadMessageW(tid, WM_NULL, 0, 0);
+        }
+    }
 }
 
 fn window_info(hwnd_val: isize) -> Option<WinInfo> {

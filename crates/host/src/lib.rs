@@ -59,6 +59,22 @@ impl HostEvents for Dispatcher<'_> {
             }
         }
     }
+
+    fn on_window_activate(&mut self, win: WinInfo) {
+        let table = match win_to_table(self.lua, &win) {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+        let res = (|| -> mlua::Result<()> {
+            let host: Table = self.lua.globals().get("host")?;
+            let window: Table = host.get("window")?;
+            let dispatch: Function = window.get("_dispatchActivate")?;
+            dispatch.call::<()>(table)
+        })();
+        if let Err(e) = res {
+            eprintln!("  [trigger] dispatch error: {e}");
+        }
+    }
 }
 
 /// Loads a module from an unpacked directory, installs the `host` API and runs
@@ -102,10 +118,16 @@ pub fn run_module(dir: impl AsRef<Path>) -> Result<()> {
         .exec()
         .context("error while running the module entry point")?;
 
-    if state.borrow().hotkeys.is_empty() {
-        wait_for_speech(&state);
-    } else {
-        println!("» Listening for hotkeys — press Ctrl+C to quit.");
+    let has_hotkeys = !state.borrow().hotkeys.is_empty();
+    let has_triggers = window_has_triggers(&lua);
+    if has_hotkeys || has_triggers {
+        if has_triggers {
+            backend
+                .watch_foreground()
+                .map_err(|e| anyhow::anyhow!("{e}"))
+                .context("failed to watch foreground windows")?;
+        }
+        println!("» Listening for events — press Ctrl+C to quit.");
         let mut dispatcher = Dispatcher {
             lua: &lua,
             state: state.clone(),
@@ -114,6 +136,8 @@ pub fn run_module(dir: impl AsRef<Path>) -> Result<()> {
             .run_event_loop(&mut dispatcher)
             .map_err(|e| anyhow::anyhow!("{e}"))
             .context("event loop failed")?;
+    } else {
+        wait_for_speech(&state);
     }
     Ok(())
 }
@@ -228,6 +252,18 @@ fn install_host_api(lua: &Lua, state: &Rc<RefCell<HostState>>, backend: &Rc<dyn 
 
     lua.globals().set("host", host)?;
     Ok(())
+}
+
+/// Returns true if the loaded module registered any window triggers (added by
+/// the window prelude).
+fn window_has_triggers(lua: &Lua) -> bool {
+    (|| -> mlua::Result<bool> {
+        let host: Table = lua.globals().get("host")?;
+        let window: Table = host.get("window")?;
+        let has: Function = window.get("_hasTriggers")?;
+        has.call::<bool>(())
+    })()
+    .unwrap_or(false)
 }
 
 /// Converts a native window snapshot into the Lua table modules see:
