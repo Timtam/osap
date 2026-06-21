@@ -1,0 +1,9 @@
+id = "com.example.hotkey"
+name = "Hotkey Demo"
+version = "0.1.0"
+engine_api = ">=0.1, <0.2"
+entry = "src/main.luau"
+license = "MIT"
+
+[capabilities]
+require = ["hotkey", "speech", "log"]

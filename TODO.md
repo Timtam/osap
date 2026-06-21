@@ -6,7 +6,7 @@ Architecture and feasibility foundation: [docs/architecture-feasibility-study.md
 ## Implementation
 
 - [x] **Walking Skeleton (Slice 1):** Cargo workspace (`crates/module-manifest`, `host`, `app`) + Luau embedding (mlua/luau, `error-send` feature) + `host` API (`log`/`speech`/`path`/`resource`) + module loading (`module.toml` + entry). `cargo run -p app -- modules/hello` loads the example module and speaks via tts-rs. ✓ (2026-06-21)
-- [ ] **Slice 2:** `host.hotkey` (Win `RegisterHotKey` / macOS Carbon `RegisterEventHotKey`, possibly the `global-hotkey` crate) + event loop → hotkey triggers a Luau callback. First real "trigger".
+- [x] **Slice 2:** `host.hotkey` + event loop. Windows backend (Win32 `RegisterHotKey` + `GetMessage` loop via `windows-sys`) behind a platform-gated interface (seed of the OS-backend abstraction); a global hotkey triggers a Luau callback. Example: `modules/hotkey` (Ctrl+Alt+H → speaks). macOS Carbon `RegisterEventHotKey` to follow. ✓ (2026-06-21)
 - [ ] **Slice 3:** `host.window` (matcher + `active`/`find`) + `host.os` — window detection first-class.
 - [ ] **Slice 4:** Introduce an OS-backend trait abstraction (Windows first), preparing the macOS backend.
 - [ ] **Module-package loader:** ZIP + extract-on-install (currently only the unpacked dev directory).

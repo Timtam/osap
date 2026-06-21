@@ -2,8 +2,10 @@
 //! primitives are first-class, see `docs/host-api-capability-catalog.md`).
 //!
 //! Walking-skeleton scope: `host.log`, `host.speech` (tts-rs), `host.path`,
-//! `host.resource.read`. Further capabilities (window/input/screen/ocr/hotkey/overlay)
-//! to follow.
+//! `host.resource.read`, `host.hotkey` (global hotkeys → Luau callbacks).
+//! Further capabilities (window/input/screen/ocr/overlay) to follow.
+
+mod hotkey;
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -11,7 +13,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use mlua::{Lua, Table};
+use mlua::{Function, Lua, RegistryKey, Table};
 use tts::Tts;
 
 use module_manifest::LoadedModule;
@@ -20,6 +22,9 @@ use module_manifest::LoadedModule;
 struct HostState {
     root: PathBuf,
     tts: Tts,
+    /// Registered global hotkeys: Win32 id → Luau callback (kept in the Lua registry).
+    hotkeys: Vec<(i32, RegistryKey)>,
+    hotkey_counter: i32,
 }
 
 impl HostState {
@@ -29,7 +34,8 @@ impl HostState {
 }
 
 /// Loads a module from an unpacked directory, installs the `host` API and
-/// runs the entry point.
+/// runs the entry point. If the module registered hotkeys, enters the always-on
+/// event loop; otherwise just waits for any pending speech and exits.
 pub fn run_module(dir: impl AsRef<Path>) -> Result<()> {
     let module = LoadedModule::load_dir(dir)?;
     println!(
@@ -47,6 +53,8 @@ pub fn run_module(dir: impl AsRef<Path>) -> Result<()> {
     let state = Rc::new(RefCell::new(HostState {
         root: module.root.clone(),
         tts,
+        hotkeys: Vec::new(),
+        hotkey_counter: 0,
     }));
 
     let lua = Lua::new();
@@ -60,7 +68,12 @@ pub fn run_module(dir: impl AsRef<Path>) -> Result<()> {
         .exec()
         .context("error while running the module entry point")?;
 
-    wait_for_speech(&state);
+    let has_hotkeys = !state.borrow().hotkeys.is_empty();
+    if has_hotkeys {
+        hotkey::run_loop(&lua, &state).context("hotkey event loop failed")?;
+    } else {
+        wait_for_speech(&state);
+    }
     Ok(())
 }
 
@@ -97,6 +110,17 @@ fn install_host_api(lua: &Lua, state: &Rc<RefCell<HostState>>) -> Result<()> {
         })?,
     )?;
     host.set("speech", speech)?;
+
+    // host.hotkey.register(spec, callback)
+    let hk = lua.create_table()?;
+    let s_hk = state.clone();
+    hk.set(
+        "register",
+        lua.create_function(move |lua, (spec, cb): (String, Function)| {
+            hotkey::register(lua, &s_hk, &spec, cb)
+        })?,
+    )?;
+    host.set("hotkey", hk)?;
 
     // host.path(rel) -> real path (escape hatch)
     let s2 = state.clone();

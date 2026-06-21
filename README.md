@@ -15,12 +15,14 @@ cargo run -p app -- modules/hello
 
 This loads the example module (`module.toml` → `src/main.luau`) and has it speak via the host API (tts-rs). The default module path is `modules/hello`.
 
+Try the global-hotkey demo (stays resident): `cargo run -p app -- modules/hotkey`, then press **Ctrl+Alt+H** to hear it speak. Ctrl+C to quit.
+
 ## Structure
 
 - `crates/module-manifest` — `module.toml` parsing + module loading (dev: unpacked directory).
-- `crates/host` — Luau runtime + `host` API (currently `log`/`speech`/`path`/`resource`).
+- `crates/host` — Luau runtime + `host` API (`log`/`speech`/`hotkey`/`path`/`resource`); platform-gated hotkey backend (Windows: Win32 `RegisterHotKey` + message loop).
 - `crates/app` — binary `automation-platform`, loads & runs a module.
-- `modules/hello` — example module.
+- `modules/hello`, `modules/hotkey` — example modules (speak-once; global-hotkey trigger).
 - `docs/` — design documents (see below).
 - `TODO.md` — backlog & implementation slices.
 

@@ -9,3 +9,6 @@ anyhow = "1.0.102"
 mlua = { version = "0.11.6", features = ["luau", "error-send"] }
 module-manifest = { path = "../module-manifest" }
 tts = "0.26.3"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
