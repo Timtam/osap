@@ -7,6 +7,7 @@
 
 mod backend;
 mod gui;
+mod logging;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -98,7 +99,10 @@ impl Shared {
             }
         }
         self.refresh_captured();
-        println!("» Module {idx} {}", if enabled { "enabled" } else { "disabled" });
+        logging::line(
+            "manager",
+            &format!("module {idx} {}", if enabled { "enabled" } else { "disabled" }),
+        );
     }
 }
 
@@ -123,7 +127,7 @@ impl Manager {
         let (audio_stream, audio) = match rodio::OutputStream::try_default() {
             Ok((s, h)) => (Some(s), Some(h)),
             Err(e) => {
-                eprintln!("  [sound] no audio output device: {e}");
+                logging::line("sound", &format!("no audio output device: {e}"));
                 (None, None)
             }
         };
@@ -148,12 +152,18 @@ impl Manager {
     pub fn load(&mut self, dir: impl AsRef<Path>) -> Result<()> {
         let module = LoadedModule::load(dir)?;
         let idx = self.modules.len();
-        println!(
-            "» Loading module: {} v{} (id {})",
-            module.manifest.name, module.manifest.version, module.manifest.id
+        logging::line(
+            "manager",
+            &format!(
+                "loading module: {} v{} (id {})",
+                module.manifest.name, module.manifest.version, module.manifest.id
+            ),
         );
         if !module.manifest.capabilities.require.is_empty() {
-            println!("  Capabilities: {}", module.manifest.capabilities.require.join(", "));
+            logging::line(
+                "manager",
+                &format!("  capabilities: {}", module.manifest.capabilities.require.join(", ")),
+            );
         }
 
         self.shared.roots.borrow_mut().push(module.root.clone());
@@ -199,7 +209,7 @@ impl Manager {
             if std::env::var_os("AUTOMATION_PLATFORM_HEADLESS").is_some() {
                 // No window: block on the platform message loop. Same event
                 // delivery as the GUI path; useful for testing/automation.
-                println!("» Listening for events (headless) — press Ctrl+C to quit.");
+                logging::line("manager", "listening for events (headless)");
                 let backend = self.shared.backend.clone();
                 let mut dispatcher = Dispatcher {
                     shared: &self.shared,
@@ -212,7 +222,7 @@ impl Manager {
             } else {
                 // wxWidgets owns the loop. Snapshot the module list for the tray
                 // manager window, then drain our OS events from its timer tick.
-                println!("» Module manager running in the system tray.");
+                logging::line("manager", "module manager running in the system tray");
                 let module_infos: Vec<gui::ModuleInfo> = {
                     let enabled = self.shared.enabled.borrow();
                     self.modules
@@ -264,6 +274,7 @@ impl Manager {
 
 /// Convenience entry: load each directory as a module and run them together.
 pub fn run(dirs: &[String]) -> Result<()> {
+    logging::init();
     let mut manager = Manager::new()?;
     for dir in dirs {
         manager.load(dir)?;
@@ -300,7 +311,7 @@ impl HostEvents for Dispatcher<'_> {
         };
         if let Some((_lua, f)) = found {
             if let Err(e) = f.call::<()>(()) {
-                eprintln!("  [hotkey] callback error: {e}");
+                logging::line("hotkey", &format!("callback error: {e}"));
             }
         }
     }
@@ -327,7 +338,7 @@ impl HostEvents for Dispatcher<'_> {
                 None => f.call::<()>(()),
             };
             if let Err(e) = res {
-                eprintln!("  [keys] callback error: {e}");
+                logging::line("keys", &format!("callback error: {e}"));
             }
         }
     }
@@ -348,7 +359,7 @@ impl HostEvents for Dispatcher<'_> {
                 dispatch.call::<()>(table)
             })();
             if let Err(e) = res {
-                eprintln!("  [trigger] dispatch error ({}): {e}", m.id);
+                logging::line("trigger", &format!("dispatch error ({}): {e}", m.id));
             }
         }
     }
@@ -362,7 +373,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<()> {
     log.set(
         "info",
         lua.create_function(|_, msg: String| {
-            println!("  [module] {msg}");
+            logging::line("module", &msg);
             Ok(())
         })?,
     )?;
@@ -663,7 +674,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<()> {
                     Ok(())
                 };
                 if let Err(e) = play() {
-                    eprintln!("  [sound] cannot play '{}': {e}", path.display());
+                    logging::line("sound", &format!("cannot play '{}': {e}", path.display()));
                 }
             }
             Ok(())

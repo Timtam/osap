@@ -11,8 +11,6 @@ fn main() -> Result<()> {
         dirs
     };
 
-    println!("== Automation Platform — Walking Skeleton ==");
     host::run(&dirs)?;
-    println!("== done ==");
     Ok(())
 }

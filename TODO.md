@@ -24,7 +24,7 @@ Architecture and feasibility foundation: [docs/architecture-feasibility-study.md
 - [ ] **Module manager follow-ups:** persist the enabled set across runs; reload; CLI/IPC control surface; conflict detection (duplicate hotkeys / same captured key in two modules); a **native macOS/GTK checkbox path** (`TVS_CHECKBOXES` is Windows-only — non-Windows currently shows no checkboxes). Out-of-process only for the untrusted-native-FFI tier. See [docs/module-runtime-and-lifecycle.md](docs/module-runtime-and-lifecycle.md).
 - [ ] Finalize the host's license (currently the placeholder `GPL-3.0-or-later`; a permissive one might be more flexible for a module ecosystem).
 - [ ] **Packaging:** release builds must bundle the screen-reader client DLLs the `tolk` feature deploys next to the binary (`nvdaControllerClient64.dll`, `SAAPI64.dll`), so `host.speech` routes to NVDA/JAWS on end-user machines.
-- [ ] **Logging off stdout:** a screen reader reads the focused terminal, so the `[module]`/`[hotkey]` console lines get announced by NVDA. Route dev/diagnostic logging to a file (or structured logging), not stdout.
+- [x] **Logging off stdout:** diagnostics now go to a file `<exe_dir>/automation-platform.log` (portable — next to the binary) via `host::logging`, not stdout/stderr (a screen reader reads the focused terminal). ✓ (2026-06-21)
 
 ## Documentation
 
