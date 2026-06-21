@@ -185,7 +185,8 @@ fn install_host_api(lua: &Lua, state: &Rc<RefCell<HostState>>, backend: &Rc<dyn 
                 Some(t) => t.get::<bool>("interrupt").unwrap_or(true),
                 None => true,
             };
-            println!("  [speech] {text}");
+            // Note: do NOT echo the spoken text to the console — a screen reader
+            // reading the terminal would announce it a second time (double speech).
             s.borrow_mut()
                 .tts
                 .speak(text, interrupt)

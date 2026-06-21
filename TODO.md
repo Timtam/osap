@@ -18,6 +18,7 @@ Architecture and feasibility foundation: [docs/architecture-feasibility-study.md
 - [ ] **Module manager (multi-module runtime):** load all *enabled* modules concurrently in one process (one Luau VM each), shared event loop multiplexing triggers; per-module registration ownership so triggers can be revoked; dynamic enable/disable + reload via a control surface (GUI/tray + CLI/IPC); config persists the enabled set; conflict detection (e.g. duplicate hotkeys). Out-of-process only for the untrusted-native-FFI tier. See [docs/module-runtime-and-lifecycle.md](docs/module-runtime-and-lifecycle.md).
 - [ ] Finalize the host's license (currently the placeholder `GPL-3.0-or-later`; a permissive one might be more flexible for a module ecosystem).
 - [ ] **Packaging:** release builds must bundle the screen-reader client DLLs the `tolk` feature deploys next to the binary (`nvdaControllerClient64.dll`, `SAAPI64.dll`), so `host.speech` routes to NVDA/JAWS on end-user machines.
+- [ ] **Logging off stdout:** a screen reader reads the focused terminal, so the `[module]`/`[hotkey]` console lines get announced by NVDA. Route dev/diagnostic logging to a file (or structured logging), not stdout.
 
 ## Documentation
 
