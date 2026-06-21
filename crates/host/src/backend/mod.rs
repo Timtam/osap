@@ -7,6 +7,8 @@ use std::rc::Rc;
 
 #[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+mod paddle_ocr;
 #[cfg(not(windows))]
 mod stub;
 
@@ -182,6 +184,13 @@ pub fn key_spec(spec: &str) -> Option<(u32, u8)> {
         };
     }
     Some((key_to_vk(key)?, mask))
+}
+
+/// Warms up the secondary OCR engine (loads its model off the hot path) so the
+/// first OCR after launch is instant. No-op where it isn't available.
+pub fn warmup_ocr() {
+    #[cfg(windows)]
+    paddle_ocr::warmup();
 }
 
 /// The backend for the current platform.

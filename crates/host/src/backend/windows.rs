@@ -163,37 +163,69 @@ impl Backend for WindowsBackend {
         if debug {
             save_debug(&cap, "ocr-debug-raw.png");
         }
-        // Windows.Media.Ocr struggles with small UI text; upscale a small region
-        // before OCR (Tesseract, which ReaHotkey uses, doesn't need this). Large
-        // regions (e.g. full-screen) are left alone so OCR stays fast.
-        let factor: u32 = if cap.w <= 400 && cap.h <= 200 { 3 } else { 1 };
-        let scaled = if factor > 1 { upscale(&cap, factor) } else { cap };
+        // Windows.Media.Ocr struggles with small UI text, especially lone glyphs.
+        // For a small region, crop to the actual content and upscale *that* so the
+        // glyphs are large (far better than scaling the whole padded region, which
+        // leaves tiny digits tiny). Large regions (e.g. a whole window) are left
+        // alone so multi-word layout and speed are preserved.
+        let small = cap.w <= 400 && cap.h <= 200;
+
+        // Run the neural recognizer (PaddleOCR via ONNX Runtime) CONCURRENTLY for
+        // small regions. Its result is used only when Windows.Media.Ocr comes back
+        // empty — notably a lone digit, which WinRT rejects regardless of size — so
+        // that case costs about max(winrt, paddle) instead of their sum. When WinRT
+        // succeeds the background thread just finishes unused (negligible at human
+        // focus rates). WinRT stays the trusted primary and the only multi-word path.
+        let paddle = small.then(|| {
+            let probe = CapturedImage {
+                w: cap.w,
+                h: cap.h,
+                rgba: cap.rgba.clone(),
+            };
+            std::thread::spawn(move || super::paddle_ocr::recognize(&probe))
+        });
+
+        let tight = if small { Some(tighten(&cap)) } else { None };
+        let img: &CapturedImage = tight.as_ref().map(|t| &t.img).unwrap_or(&cap);
         if debug {
-            save_debug(&scaled, "ocr-debug.png");
+            save_debug(img, "ocr-debug.png");
         }
-        let (mut text, mut words) =
-            run_ocr(&scaled, lang).map_err(|e| format!("OCR failed: {e}"))?;
-        if text.trim().is_empty() {
-            // Stubborn small/low-contrast text (e.g. a highlighted single digit):
-            // retry on a high-contrast binarization of the same image.
-            let bin = binarize(&scaled);
-            if debug {
-                save_debug(&bin, "ocr-debug-bin.png");
-            }
-            if let Ok((t2, w2)) = run_ocr(&bin, lang) {
-                if !t2.trim().is_empty() {
-                    text = t2;
-                    words = w2;
+        let t_win = std::time::Instant::now();
+        let (mut text, mut words) = run_ocr(img, lang).map_err(|e| format!("OCR failed: {e}"))?;
+        let win_ms = t_win.elapsed().as_secs_f64() * 1000.0;
+
+        let mut used_paddle = false;
+        if let Some(handle) = paddle {
+            if text.trim().is_empty() {
+                if let Some(t) = handle.join().ok().flatten() {
+                    text = t;
+                    words.clear(); // recognition-only fallback returns text without boxes
+                    used_paddle = true;
                 }
             }
+            // else: WinRT won; the paddle thread finishes in the background.
         }
-        if factor > 1 {
-            let (f, pad) = (factor as i32, OCR_PAD as i32);
+        if debug {
+            crate::logging::line(
+                "ocr",
+                &format!(
+                    "{}x{} winrt {:.1}ms{} -> '{}'",
+                    cap.w,
+                    cap.h,
+                    win_ms,
+                    if used_paddle { " +paddle" } else { "" },
+                    text.replace('\n', " ")
+                ),
+            );
+        }
+        // Map word coordinates from the processed image back to the captured region.
+        if let Some(t) = &tight {
+            let (s, pad) = (t.scale as i32, t.pad as i32);
             for word in &mut words {
-                word.x = (word.x - pad) / f;
-                word.y = (word.y - pad) / f;
-                word.w /= f;
-                word.h /= f;
+                word.x = (word.x - pad) / s + t.off_x as i32;
+                word.y = (word.y - pad) / s + t.off_y as i32;
+                word.w /= s;
+                word.h /= s;
             }
         }
         Ok(OcrText { text, words })
@@ -599,78 +631,6 @@ fn parse_key(key: &str) -> Result<u32, String> {
     super::key_to_vk(key).ok_or_else(|| format!("unknown key '{key}'"))
 }
 
-/// High-contrast (black-on-white) binarization via Otsu's threshold — a retry
-/// preprocessing for text Windows.Media.Ocr won't read in colour (e.g. a small
-/// highlighted digit). Tesseract, which ReaHotkey uses, doesn't need this.
-fn binarize(cap: &CapturedImage) -> CapturedImage {
-    let img = match image::RgbaImage::from_raw(cap.w, cap.h, cap.rgba.clone()) {
-        Some(i) => i,
-        None => {
-            return CapturedImage {
-                w: cap.w,
-                h: cap.h,
-                rgba: cap.rgba.clone(),
-            }
-        }
-    };
-    let gray: Vec<u8> = img
-        .pixels()
-        .map(|p| {
-            let [r, g, b, _] = p.0;
-            ((r as u32 * 30 + g as u32 * 59 + b as u32 * 11) / 100) as u8
-        })
-        .collect();
-    let mut hist = [0u32; 256];
-    for &v in &gray {
-        hist[v as usize] += 1;
-    }
-    let thresh = otsu(&hist, gray.len() as u32) as u16;
-    let above = gray.iter().filter(|&&v| v as u16 > thresh).count();
-    // Text is the minority class; render it black on a white background.
-    let text_is_bright = above < gray.len() - above;
-    let mut out = image::RgbaImage::new(cap.w, cap.h);
-    for (px, &v) in out.pixels_mut().zip(gray.iter()) {
-        let is_text = if text_is_bright {
-            v as u16 > thresh
-        } else {
-            (v as u16) <= thresh
-        };
-        let c = if is_text { 0u8 } else { 255u8 };
-        *px = image::Rgba([c, c, c, 255]);
-    }
-    CapturedImage {
-        w: cap.w,
-        h: cap.h,
-        rgba: out.into_raw(),
-    }
-}
-
-/// Otsu's threshold for an 8-bit luminance histogram.
-fn otsu(hist: &[u32; 256], total: u32) -> u8 {
-    let total = total as f64;
-    let global: f64 = (0..256).map(|i| i as f64 * hist[i] as f64).sum();
-    let (mut sum_b, mut w_b, mut max_var, mut threshold) = (0.0f64, 0.0f64, -1.0f64, 0u8);
-    for t in 0..256 {
-        w_b += hist[t] as f64;
-        if w_b == 0.0 {
-            continue;
-        }
-        let w_f = total - w_b;
-        if w_f <= 0.0 {
-            break;
-        }
-        sum_b += t as f64 * hist[t] as f64;
-        let m_b = sum_b / w_b;
-        let m_f = (global - sum_b) / w_f;
-        let var_between = w_b * w_f * (m_b - m_f) * (m_b - m_f);
-        if var_between > max_var {
-            max_var = var_between;
-            threshold = t as u8;
-        }
-    }
-    threshold
-}
-
 /// Saves a captured image next to the executable for OCR debugging
 /// (`AUTOMATION_PLATFORM_OCR_DEBUG=1`).
 fn save_debug(cap: &CapturedImage, name: &str) {
@@ -712,6 +672,107 @@ fn upscale(cap: &CapturedImage, factor: u32) -> CapturedImage {
         w: pw,
         h: ph,
         rgba: canvas.into_raw(),
+    }
+}
+
+/// Content-tight preprocessing result: the processed image plus the parameters
+/// needed to map word coordinates back to the original captured region.
+struct Tightened {
+    img: CapturedImage,
+    off_x: u32, // content-crop origin within the capture
+    off_y: u32,
+    scale: u32, // integer upscale applied to the crop
+    pad: u32,   // background border added around the upscaled crop
+}
+
+/// Crops a captured region to its content bounding box (pixels differing from
+/// the corner background) and upscales it so small glyphs become large and
+/// framed — much more reliable for Windows.Media.Ocr than upscaling the whole
+/// padded region (a "poor man's detection" for fixed UI regions with padding).
+/// Falls back to a plain upscale when no distinct content is found.
+fn tighten(cap: &CapturedImage) -> Tightened {
+    use image::{imageops, ImageBuffer, RgbaImage};
+
+    let whole = || Tightened {
+        img: upscale(cap, 3),
+        off_x: 0,
+        off_y: 0,
+        scale: 3,
+        pad: OCR_PAD,
+    };
+    if cap.w < 3 || cap.h < 3 {
+        return whole();
+    }
+    let img = match RgbaImage::from_raw(cap.w, cap.h, cap.rgba.clone()) {
+        Some(i) => i,
+        None => return whole(),
+    };
+
+    // Background colour = average of the four corners; content = pixels far from it.
+    let at = |x: u32, y: u32| {
+        let p = img.get_pixel(x, y).0;
+        [p[0] as f32, p[1] as f32, p[2] as f32]
+    };
+    let cs = [
+        at(0, 0),
+        at(cap.w - 1, 0),
+        at(0, cap.h - 1),
+        at(cap.w - 1, cap.h - 1),
+    ];
+    let bg = [
+        (cs[0][0] + cs[1][0] + cs[2][0] + cs[3][0]) / 4.0,
+        (cs[0][1] + cs[1][1] + cs[2][1] + cs[3][1]) / 4.0,
+        (cs[0][2] + cs[1][2] + cs[2][2] + cs[3][2]) / 4.0,
+    ];
+    let thr = 55.0f32;
+    let (mut x0, mut y0, mut x1, mut y1) = (cap.w, cap.h, 0u32, 0u32);
+    let mut found = false;
+    for y in 0..cap.h {
+        for x in 0..cap.w {
+            let p = img.get_pixel(x, y).0;
+            let d = ((p[0] as f32 - bg[0]).powi(2)
+                + (p[1] as f32 - bg[1]).powi(2)
+                + (p[2] as f32 - bg[2]).powi(2))
+            .sqrt();
+            if d > thr {
+                found = true;
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
+        }
+    }
+    if !found {
+        return whole();
+    }
+
+    let m = 3i32;
+    let x0 = (x0 as i32 - m).max(0) as u32;
+    let y0 = (y0 as i32 - m).max(0) as u32;
+    let x1 = (x1 as i32 + m).min(cap.w as i32 - 1) as u32;
+    let y1 = (y1 as i32 + m).min(cap.h as i32 - 1) as u32;
+    let (cw, ch) = (x1 - x0 + 1, y1 - y0 + 1);
+    let cropped = imageops::crop_imm(&img, x0, y0, cw, ch).to_image();
+
+    // Upscale so the content is ~64px tall (Windows.Media.Ocr likes big glyphs).
+    let scale = (64 / ch.max(1)).clamp(3, 10);
+    let resized = imageops::resize(&cropped, cw * scale, ch * scale, imageops::FilterType::Lanczos3);
+    let bg_px = *resized.get_pixel(0, 0);
+    let (pw, ph) = (cw * scale + OCR_PAD * 2, ch * scale + OCR_PAD * 2);
+    let mut canvas: RgbaImage = ImageBuffer::from_pixel(pw, ph, bg_px);
+    imageops::overlay(&mut canvas, &resized, OCR_PAD as i64, OCR_PAD as i64);
+
+    Tightened {
+        img: CapturedImage {
+            w: pw,
+            h: ph,
+            rgba: canvas.into_raw(),
+        },
+        off_x: x0,
+        off_y: y0,
+        scale,
+        pad: OCR_PAD,
     }
 }
 

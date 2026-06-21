@@ -414,6 +414,7 @@ impl Manager {
 /// Convenience entry: load each directory as a module and run them together.
 pub fn run(dirs: &[String]) -> Result<()> {
     logging::init();
+    backend::warmup_ocr(); // preload the neural OCR model off the hot path
     let mut manager = Manager::new()?;
     for dir in dirs {
         manager.load(dir)?;
