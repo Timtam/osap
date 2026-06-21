@@ -24,7 +24,7 @@ Try the first self-voicing **overlay** (stays resident): `cargo run -p app -- mo
 - `crates/module-manifest` — `module.toml` parsing + module loading (dev: unpacked directory).
 - `crates/host` — Luau runtime + `host` API (`log`/`speech`/`sound`/`hotkey`/`window`/`os`/`screen`/`ocr`/`input`/`overlay`/`path`/`resource`). The OS is reached through a `Backend` trait (`crates/host/src/backend/`, one impl per platform; Windows real, others stub). The OS-gated window matcher (`find`/`findAll`) is a Luau prelude.
 - `crates/app` — binary `automation-platform`, loads & runs a module.
-- `modules/hello`, `modules/hotkey`, `modules/window`, `modules/window-trigger`, `modules/screen`, `modules/ocr`, `modules/input`, `modules/sound`, `modules/overlay`, `modules/overlay-attach` — example modules (speak-once; global-hotkey trigger; window/os inspection; foreground-change trigger; screen capture & image search; OCR; mouse/keyboard input; audio playback; self-voicing overlay; context-bound overlay).
+- `modules/hello`, `modules/hotkey`, `modules/window`, `modules/window-trigger`, `modules/screen`, `modules/ocr`, `modules/input`, `modules/sound`, `modules/overlay`, `modules/overlay-attach`, `modules/keys` — example modules (speak-once; global-hotkey trigger; window/os inspection; foreground-change trigger; screen capture & image search; OCR; mouse/keyboard input; audio playback; self-voicing overlay; context-bound overlay; low-level key capture).
 - `docs/` — design documents (see below).
 - `TODO.md` — backlog & implementation slices.
 

@@ -61,6 +61,11 @@ impl Backend for StubBackend {
         Ok(())
     }
 
+    fn set_captured_keys(&self, _vks: &[u32]) {}
+    fn watch_keys(&self) -> Result<(), String> {
+        Ok(())
+    }
+
     fn run_event_loop(&self, _events: &mut dyn HostEvents) -> Result<(), String> {
         Ok(())
     }

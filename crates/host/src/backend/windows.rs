@@ -3,31 +3,33 @@
 //! foreground-change events (`SetWinEventHook`), and screen capture (GDI).
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use super::{Backend, CapturedImage, HostEvents, MouseButton, OcrText, OcrWord, WinInfo};
 
-use windows_sys::Win32::Foundation::{CloseHandle, HMODULE, HWND, LPARAM, POINT, RECT};
+use windows_sys::Win32::Foundation::{CloseHandle, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
     GetPixel, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
     SRCCOPY,
 };
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::{
     GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, SendInput, UnregisterHotKey, INPUT, INPUT_KEYBOARD, INPUT_MOUSE, KEYEVENTF_KEYUP,
-    KEYEVENTF_UNICODE, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, MOUSEEVENTF_LEFTDOWN,
-    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN,
-    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
+    GetKeyState, RegisterHotKey, SendInput, UnregisterHotKey, INPUT, INPUT_KEYBOARD, INPUT_MOUSE,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, VK_CONTROL, VK_MENU, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, EnumWindows, GetClassNameW, GetCursorPos, GetForegroundWindow, GetMessageW,
-    GetSystemMetrics, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
-    IsWindowVisible, PostThreadMessageW, SetCursorPos, TranslateMessage, EVENT_SYSTEM_FOREGROUND,
-    MSG, SM_CXSCREEN, SM_CYSCREEN, WINEVENT_OUTOFCONTEXT, WM_HOTKEY, WM_NULL,
+    CallNextHookEx, DispatchMessageW, EnumWindows, GetClassNameW, GetCursorPos, GetForegroundWindow,
+    GetMessageW, GetSystemMetrics, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId, IsWindowVisible, PostThreadMessageW, SetCursorPos, SetWindowsHookExW,
+    TranslateMessage, EVENT_SYSTEM_FOREGROUND, HC_ACTION, KBDLLHOOKSTRUCT, MSG, SM_CXSCREEN,
+    SM_CYSCREEN, WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT, WM_HOTKEY, WM_KEYDOWN, WM_NULL, WM_SYSKEYDOWN,
 };
 
 thread_local! {
@@ -38,6 +40,15 @@ thread_local! {
 
 /// Thread id of the event loop, so the WinEvent hook can wake `GetMessage`.
 static HOOK_THREAD: AtomicU32 = AtomicU32::new(0);
+
+thread_local! {
+    /// Virtual-key codes currently intercepted (and suppressed) by the keyboard hook.
+    static CAPTURED_KEYS: RefCell<Vec<u32>> = RefCell::new(Vec::new());
+    /// Captured key-downs (vk, shift, ctrl, alt) queued for the event loop.
+    static KEY_QUEUE: RefCell<Vec<(u32, bool, bool, bool)>> = RefCell::new(Vec::new());
+}
+
+static KEY_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 
 pub struct WindowsBackend;
 
@@ -262,6 +273,24 @@ impl Backend for WindowsBackend {
         Ok(())
     }
 
+    fn set_captured_keys(&self, vks: &[u32]) {
+        CAPTURED_KEYS.with(|c| *c.borrow_mut() = vks.to_vec());
+    }
+
+    fn watch_keys(&self) -> Result<(), String> {
+        if KEY_HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
+            return Ok(()); // already installed
+        }
+        HOOK_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
+        let hmod = unsafe { GetModuleHandleW(std::ptr::null()) };
+        let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_keyboard_proc), hmod, 0) };
+        if hook.is_null() {
+            KEY_HOOK_INSTALLED.store(false, Ordering::SeqCst);
+            return Err("SetWindowsHookExW(WH_KEYBOARD_LL) failed".to_string());
+        }
+        Ok(())
+    }
+
     fn run_event_loop(&self, events: &mut dyn HostEvents) -> Result<(), String> {
         let mut msg: MSG = unsafe { std::mem::zeroed() };
         loop {
@@ -283,6 +312,11 @@ impl Backend for WindowsBackend {
                 if let Some(win) = window_info(hwnd) {
                     events.on_window_activate(win);
                 }
+            }
+            let pending_keys: Vec<(u32, bool, bool, bool)> =
+                KEY_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
+            for (vk, shift, ctrl, alt) in pending_keys {
+                events.on_key(vk, shift, ctrl, alt);
             }
         }
         Ok(())
@@ -314,6 +348,29 @@ unsafe extern "system" fn win_event_proc(
             PostThreadMessageW(tid, WM_NULL, 0, 0);
         }
     }
+}
+
+unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code == HC_ACTION as i32 {
+        let kb = &*(lparam as *const KBDLLHOOKSTRUCT);
+        let vk = kb.vkCode;
+        if CAPTURED_KEYS.with(|c| c.borrow().contains(&vk)) {
+            let msg = wparam as u32;
+            if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
+                let down = |k: u16| (GetKeyState(k as i32) as u16 & 0x8000) != 0;
+                KEY_QUEUE.with(|q| {
+                    q.borrow_mut()
+                        .push((vk, down(VK_SHIFT), down(VK_CONTROL), down(VK_MENU)))
+                });
+                let tid = HOOK_THREAD.load(Ordering::Relaxed);
+                if tid != 0 {
+                    PostThreadMessageW(tid, WM_NULL, 0, 0);
+                }
+            }
+            return 1; // suppress both down and up of captured keys
+        }
+    }
+    CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
 }
 
 fn window_info(hwnd_val: isize) -> Option<WinInfo> {
@@ -405,40 +462,7 @@ fn parse_spec(spec: &str) -> Result<(u32, u32), String> {
 
 /// Maps a friendly key name to a Win32 virtual-key code.
 fn parse_key(key: &str) -> Result<u32, String> {
-    let k = key.trim();
-    if k.len() == 1 {
-        let c = k.chars().next().unwrap();
-        if c.is_ascii_alphabetic() {
-            return Ok(c.to_ascii_uppercase() as u32);
-        }
-        if c.is_ascii_digit() {
-            return Ok(c as u32);
-        }
-    }
-    let lower = k.to_ascii_lowercase();
-    if let Some(n) = lower.strip_prefix('f').and_then(|s| s.parse::<u32>().ok()) {
-        if (1..=24).contains(&n) {
-            return Ok(0x70 + (n - 1)); // VK_F1 == 0x70
-        }
-    }
-    let vk = match lower.as_str() {
-        "space" => 0x20,
-        "enter" | "return" => 0x0D,
-        "esc" | "escape" => 0x1B,
-        "tab" => 0x09,
-        "backspace" => 0x08,
-        "delete" | "del" => 0x2E,
-        "up" => 0x26,
-        "down" => 0x28,
-        "left" => 0x25,
-        "right" => 0x27,
-        "home" => 0x24,
-        "end" => 0x23,
-        "pageup" => 0x21,
-        "pagedown" => 0x22,
-        _ => return Err(format!("unknown key '{key}'")),
-    };
-    Ok(vk)
+    super::key_to_vk(key).ok_or_else(|| format!("unknown key '{key}'"))
 }
 
 /// Runs Windows.Media.Ocr (WinRT) over a captured region.

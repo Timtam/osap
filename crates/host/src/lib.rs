@@ -33,6 +33,8 @@ struct HostState {
     /// Registered global hotkeys: backend id → Luau callback (kept in the Lua registry).
     hotkeys: Vec<(i32, RegistryKey)>,
     hotkey_counter: i32,
+    /// Captured low-level keys: vk → Luau callback (kept in the Lua registry).
+    keys: Vec<(u32, RegistryKey)>,
     /// Audio output stream (kept alive so detached sounds keep playing) + its handle.
     _audio_stream: Option<rodio::OutputStream>,
     audio: Option<rodio::OutputStreamHandle>,
@@ -81,6 +83,31 @@ impl HostEvents for Dispatcher<'_> {
             eprintln!("  [trigger] dispatch error: {e}");
         }
     }
+
+    fn on_key(&mut self, vk: u32, shift: bool, ctrl: bool, alt: bool) {
+        let func: Option<Function> = {
+            let st = self.state.borrow();
+            st.keys
+                .iter()
+                .find(|(k, _)| *k == vk)
+                .and_then(|(_, key)| self.lua.registry_value::<Function>(key).ok())
+        };
+        if let Some(f) = func {
+            let mods = self.lua.create_table().ok();
+            if let Some(m) = &mods {
+                let _ = m.set("shift", shift);
+                let _ = m.set("ctrl", ctrl);
+                let _ = m.set("alt", alt);
+            }
+            let res = match mods {
+                Some(m) => f.call::<()>(m),
+                None => f.call::<()>(()),
+            };
+            if let Err(e) = res {
+                eprintln!("  [keys] callback error: {e}");
+            }
+        }
+    }
 }
 
 /// Loads a module from an unpacked directory, installs the `host` API and runs
@@ -114,6 +141,7 @@ pub fn run_module(dir: impl AsRef<Path>) -> Result<()> {
         tts,
         hotkeys: Vec::new(),
         hotkey_counter: 0,
+        keys: Vec::new(),
         _audio_stream: audio_stream,
         audio: audio_handle,
     }));
@@ -139,7 +167,8 @@ pub fn run_module(dir: impl AsRef<Path>) -> Result<()> {
 
     let has_hotkeys = !state.borrow().hotkeys.is_empty();
     let has_triggers = window_has_triggers(&lua);
-    if has_hotkeys || has_triggers {
+    let has_keys = !state.borrow().keys.is_empty();
+    if has_hotkeys || has_triggers || has_keys {
         if has_triggers {
             backend
                 .watch_foreground()
@@ -225,6 +254,52 @@ fn install_host_api(lua: &Lua, state: &Rc<RefCell<HostState>>, backend: &Rc<dyn 
         })?,
     )?;
     host.set("hotkey", hk)?;
+
+    // host.keys: low-level key capture + suppression (capture / release / releaseAll)
+    let keys = lua.create_table()?;
+    let s_kcap = state.clone();
+    let b_kcap = backend.clone();
+    keys.set(
+        "capture",
+        lua.create_function(move |lua, (name, cb): (String, Function)| {
+            let vk = backend::key_to_vk(&name)
+                .ok_or_else(|| mlua::Error::external(format!("unknown key '{name}'")))?;
+            let key = lua.create_registry_value(cb)?;
+            {
+                let mut st = s_kcap.borrow_mut();
+                st.keys.retain(|(k, _)| *k != vk);
+                st.keys.push((vk, key));
+            }
+            let vks: Vec<u32> = s_kcap.borrow().keys.iter().map(|(k, _)| *k).collect();
+            b_kcap.set_captured_keys(&vks);
+            b_kcap.watch_keys().map_err(mlua::Error::external)?;
+            Ok(())
+        })?,
+    )?;
+    let s_krel = state.clone();
+    let b_krel = backend.clone();
+    keys.set(
+        "release",
+        lua.create_function(move |_, name: String| {
+            if let Some(vk) = backend::key_to_vk(&name) {
+                s_krel.borrow_mut().keys.retain(|(k, _)| *k != vk);
+                let vks: Vec<u32> = s_krel.borrow().keys.iter().map(|(k, _)| *k).collect();
+                b_krel.set_captured_keys(&vks);
+            }
+            Ok(())
+        })?,
+    )?;
+    let s_kall = state.clone();
+    let b_kall = backend.clone();
+    keys.set(
+        "releaseAll",
+        lua.create_function(move |_, ()| {
+            s_kall.borrow_mut().keys.clear();
+            b_kall.set_captured_keys(&[]);
+            Ok(())
+        })?,
+    )?;
+    host.set("keys", keys)?;
 
     // host.os.current / host.os.is(name)
     let os = lua.create_table()?;

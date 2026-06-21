@@ -87,6 +87,12 @@ pub trait Backend {
     /// Starts watching foreground-window changes (delivered as `on_window_activate`).
     fn watch_foreground(&self) -> Result<(), String>;
 
+    /// Sets the virtual-key codes to intercept + suppress via the low-level
+    /// keyboard hook; captured keys are delivered as `on_key`.
+    fn set_captured_keys(&self, vks: &[u32]);
+    /// Installs the low-level keyboard hook (idempotent).
+    fn watch_keys(&self) -> Result<(), String>;
+
     /// Runs the platform event loop, dispatching OS events into `events`.
     /// Blocks until the process is terminated.
     fn run_event_loop(&self, events: &mut dyn HostEvents) -> Result<(), String>;
@@ -96,6 +102,45 @@ pub trait Backend {
 pub trait HostEvents {
     fn on_hotkey(&mut self, id: i32);
     fn on_window_activate(&mut self, win: WinInfo);
+    fn on_key(&mut self, vk: u32, shift: bool, ctrl: bool, alt: bool);
+}
+
+/// Maps a friendly key name ("Tab", "a", "F1", "Right", "Escape") to a Win32
+/// virtual-key code. (VK codes; only used by the Windows backend.)
+pub fn key_to_vk(name: &str) -> Option<u32> {
+    let k = name.trim();
+    if k.chars().count() == 1 {
+        let c = k.chars().next().unwrap();
+        if c.is_ascii_alphabetic() {
+            return Some(c.to_ascii_uppercase() as u32);
+        }
+        if c.is_ascii_digit() {
+            return Some(c as u32);
+        }
+    }
+    let lower = k.to_ascii_lowercase();
+    if let Some(n) = lower.strip_prefix('f').and_then(|s| s.parse::<u32>().ok()) {
+        if (1..=24).contains(&n) {
+            return Some(0x70 + (n - 1));
+        }
+    }
+    Some(match lower.as_str() {
+        "space" => 0x20,
+        "enter" | "return" => 0x0D,
+        "esc" | "escape" => 0x1B,
+        "tab" => 0x09,
+        "backspace" => 0x08,
+        "delete" | "del" => 0x2E,
+        "up" => 0x26,
+        "down" => 0x28,
+        "left" => 0x25,
+        "right" => 0x27,
+        "home" => 0x24,
+        "end" => 0x23,
+        "pageup" => 0x21,
+        "pagedown" => 0x22,
+        _ => return None,
+    })
 }
 
 /// The backend for the current platform.
