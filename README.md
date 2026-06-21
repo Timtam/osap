@@ -20,7 +20,7 @@ Try the global-hotkey demo (stays resident): `cargo run -p app -- modules/hotkey
 ## Structure
 
 - `crates/module-manifest` — `module.toml` parsing + module loading (dev: unpacked directory).
-- `crates/host` — Luau runtime + `host` API (`log`/`speech`/`hotkey`/`window`/`os`/`path`/`resource`); platform-gated backends (Windows: Win32 hotkeys + window enumeration). The OS-gated window matcher (`find`/`findAll`) is a Luau prelude.
+- `crates/host` — Luau runtime + `host` API (`log`/`speech`/`hotkey`/`window`/`os`/`path`/`resource`). The OS is reached through a `Backend` trait (`crates/host/src/backend/`, one impl per platform; Windows real, others stub). The OS-gated window matcher (`find`/`findAll`) is a Luau prelude.
 - `crates/app` — binary `automation-platform`, loads & runs a module.
 - `modules/hello`, `modules/hotkey`, `modules/window` — example modules (speak-once; global-hotkey trigger; window/os inspection).
 - `docs/` — design documents (see below).

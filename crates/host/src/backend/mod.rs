@@ -1,0 +1,52 @@
+//! Platform backend abstraction. The host talks to the OS only through this
+//! trait; one implementation per platform, selected at compile time. Currently:
+//! Windows (real) and a stub (other platforms). The macOS backend will be a
+//! second `impl Backend`. See `docs/architecture-feasibility-study.md` §3.
+
+use std::rc::Rc;
+
+#[cfg(windows)]
+mod windows;
+#[cfg(not(windows))]
+mod stub;
+
+/// A snapshot of a window's matchable properties (normalized across platforms).
+pub struct WinInfo {
+    pub hwnd: isize,
+    pub title: String,
+    pub class: String,
+    pub pid: u32,
+    pub exe: String,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+/// OS-level operations the host needs. Lua-agnostic on purpose: callback/state
+/// mapping stays in the host; only OS specifics live behind this trait.
+pub trait Backend {
+    fn enumerate_windows(&self) -> Vec<WinInfo>;
+    fn active_window(&self) -> Option<WinInfo>;
+
+    /// Registers a global hotkey identified by `id` from a spec like "Ctrl+Alt+H".
+    fn register_hotkey(&self, id: i32, spec: &str) -> Result<(), String>;
+
+    /// Runs the platform event loop, dispatching OS events into `events`.
+    /// Blocks until the process is terminated.
+    fn run_event_loop(&self, events: &mut dyn HostEvents) -> Result<(), String>;
+}
+
+/// Sink for OS events, implemented by the host to bridge into Luau callbacks.
+pub trait HostEvents {
+    fn on_hotkey(&mut self, id: i32);
+}
+
+/// The backend for the current platform.
+pub fn platform() -> Rc<dyn Backend> {
+    #[cfg(windows)]
+    let backend: Rc<dyn Backend> = Rc::new(windows::WindowsBackend::new());
+    #[cfg(not(windows))]
+    let backend: Rc<dyn Backend> = Rc::new(stub::StubBackend);
+    backend
+}
