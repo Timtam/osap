@@ -55,6 +55,8 @@ impl Backend for StubBackend {
         ))
     }
 
+    fn unregister_hotkey(&self, _id: i32) {}
+
     fn watch_foreground(&self) -> Result<(), String> {
         Ok(())
     }

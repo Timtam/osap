@@ -18,7 +18,7 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, SendInput, INPUT, INPUT_KEYBOARD, INPUT_MOUSE, KEYEVENTF_KEYUP,
+    RegisterHotKey, SendInput, UnregisterHotKey, INPUT, INPUT_KEYBOARD, INPUT_MOUSE, KEYEVENTF_KEYUP,
     KEYEVENTF_UNICODE, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, MOUSEEVENTF_LEFTDOWN,
     MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN,
     MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
@@ -234,6 +234,12 @@ impl Backend for WindowsBackend {
             ));
         }
         Ok(())
+    }
+
+    fn unregister_hotkey(&self, id: i32) {
+        unsafe {
+            UnregisterHotKey(std::ptr::null_mut(), id);
+        }
     }
 
     fn watch_foreground(&self) -> Result<(), String> {

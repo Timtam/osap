@@ -81,6 +81,8 @@ pub trait Backend {
 
     /// Registers a global hotkey identified by `id` from a spec like "Ctrl+Alt+H".
     fn register_hotkey(&self, id: i32, spec: &str) -> Result<(), String>;
+    /// Unregisters a previously registered hotkey by id.
+    fn unregister_hotkey(&self, id: i32);
 
     /// Starts watching foreground-window changes (delivered as `on_window_activate`).
     fn watch_foreground(&self) -> Result<(), String>;

@@ -17,7 +17,10 @@ local Overlay = {}
 Overlay.__index = Overlay
 
 function O.new(label)
-  return setmetatable({ label = label or "Overlay", controls = {}, focus = 0 }, Overlay)
+  return setmetatable(
+    { label = label or "Overlay", controls = {}, focus = 0, registered = {}, active = false },
+    Overlay
+  )
 end
 
 local function add(self, control)
@@ -94,19 +97,65 @@ function Overlay:activate(index)
   end
 end
 
-function Overlay:show()
+function Overlay:_registerHotkeys()
+  self.registered = self.registered or {}
   for i, c in ipairs(self.controls) do
     if c.hotkey then
       local idx = i
-      host.hotkey.register(c.hotkey, function() self:activate(idx) end)
+      self.registered[#self.registered + 1] = host.hotkey.register(c.hotkey, function() self:activate(idx) end)
     end
   end
-  host.hotkey.register(NAV.next, function() self:focusNext() end)
-  host.hotkey.register(NAV.prev, function() self:focusPrev() end)
-  host.hotkey.register(NAV.activate, function() self:activate() end)
+  self.registered[#self.registered + 1] = host.hotkey.register(NAV.next, function() self:focusNext() end)
+  self.registered[#self.registered + 1] = host.hotkey.register(NAV.prev, function() self:focusPrev() end)
+  self.registered[#self.registered + 1] = host.hotkey.register(NAV.activate, function() self:activate() end)
+end
+
+function Overlay:_unregisterHotkeys()
+  for _, id in ipairs(self.registered or {}) do
+    host.hotkey.unregister(id)
+  end
+  self.registered = {}
+end
+
+-- Always-on: register hotkeys immediately and announce.
+function Overlay:show()
+  self:_registerHotkeys()
   host.speech.output(
     self.label .. " overlay ready. " .. #self.controls ..
     " controls. Control alt left and right to navigate, control alt enter to activate.",
     { interrupt = true }
   )
+end
+
+function Overlay:_activate()
+  if self.active then return end
+  self.active = true
+  self.focus = 0
+  self:_registerHotkeys()
+  host.speech.output(self.label .. " overlay active", { interrupt = true })
+end
+
+function Overlay:_deactivate()
+  if not self.active then return end
+  self.active = false
+  self:_unregisterHotkeys()
+  host.speech.output(self.label .. " overlay closed", { interrupt = true })
+end
+
+-- Context-bound: activate automatically while a window matching `matcher` is
+-- focused, deactivate when leaving (ReaHotkey-style).
+function Overlay:attach(matcher)
+  self.matcher = matcher
+  self.active = false
+  host.window.onTrigger({}, { on = "activate" }, function(win)
+    if host.window.test(matcher, win) then
+      self:_activate()
+    else
+      self:_deactivate()
+    end
+  end)
+  local cur = host.window.active()
+  if cur and host.window.test(matcher, cur) then
+    self:_activate()
+  end
 end

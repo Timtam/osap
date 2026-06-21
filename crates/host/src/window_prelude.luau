@@ -82,6 +82,11 @@ function W.findAll(m)
   return out
 end
 
+-- Tests whether a window matches a declarative matcher (used by host.overlay:attach).
+function W.test(matcher, win)
+  return matches(matcher, win)
+end
+
 -- Window triggers (auto-activation). The host calls W._dispatchActivate(win) on
 -- every foreground change; here we run the matching registered callbacks.
 local triggers = {}

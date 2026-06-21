@@ -211,7 +211,16 @@ fn install_host_api(lua: &Lua, state: &Rc<RefCell<HostState>>, backend: &Rc<dyn 
             b_hk.register_hotkey(id, &spec).map_err(mlua::Error::external)?;
             let key = lua.create_registry_value(cb)?;
             s_hk.borrow_mut().hotkeys.push((id, key));
-            println!("  [hotkey] registered '{spec}' (id {id})");
+            Ok(id)
+        })?,
+    )?;
+    let s_unhk = state.clone();
+    let b_unhk = backend.clone();
+    hk.set(
+        "unregister",
+        lua.create_function(move |_, id: i32| {
+            b_unhk.unregister_hotkey(id);
+            s_unhk.borrow_mut().hotkeys.retain(|(hid, _)| *hid != id);
             Ok(())
         })?,
     )?;
