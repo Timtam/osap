@@ -23,11 +23,25 @@ pub struct WinInfo {
     pub h: i32,
 }
 
+/// A captured screen region (RGBA, row-major, top-down).
+pub struct CapturedImage {
+    pub w: u32,
+    pub h: u32,
+    pub rgba: Vec<u8>,
+}
+
 /// OS-level operations the host needs. Lua-agnostic on purpose: callback/state
 /// mapping stays in the host; only OS specifics live behind this trait.
 pub trait Backend {
     fn enumerate_windows(&self) -> Vec<WinInfo>;
     fn active_window(&self) -> Option<WinInfo>;
+
+    /// Size of the primary display in pixels.
+    fn screen_size(&self) -> (i32, i32);
+    /// Color (r, g, b) of the pixel at screen coordinates.
+    fn pixel(&self, x: i32, y: i32) -> (u8, u8, u8);
+    /// Captures a screen region into an RGBA image.
+    fn capture(&self, x: i32, y: i32, w: i32, h: i32) -> Option<CapturedImage>;
 
     /// Registers a global hotkey identified by `id` from a spec like "Ctrl+Alt+H".
     fn register_hotkey(&self, id: i32, spec: &str) -> Result<(), String>;

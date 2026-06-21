@@ -1,13 +1,18 @@
 //! Windows implementation of the platform [`Backend`](super::Backend):
 //! window enumeration (Win32), global hotkeys (`RegisterHotKey` + `GetMessage`),
-//! and foreground-change events (`SetWinEventHook`).
+//! foreground-change events (`SetWinEventHook`), and screen capture (GDI).
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use super::{Backend, HostEvents, WinInfo};
+use super::{Backend, CapturedImage, HostEvents, WinInfo};
 
 use windows_sys::Win32::Foundation::{CloseHandle, HMODULE, HWND, LPARAM, RECT};
+use windows_sys::Win32::Graphics::Gdi::{
+    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
+    GetPixel, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+    SRCCOPY,
+};
 use windows_sys::Win32::System::Threading::{
     GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
 };
@@ -16,10 +21,10 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, EnumWindows, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
-    PostThreadMessageW, TranslateMessage, EVENT_SYSTEM_FOREGROUND, MSG, WINEVENT_OUTOFCONTEXT,
-    WM_HOTKEY, WM_NULL,
+    DispatchMessageW, EnumWindows, GetClassNameW, GetForegroundWindow, GetMessageW,
+    GetSystemMetrics, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+    IsWindowVisible, PostThreadMessageW, TranslateMessage, EVENT_SYSTEM_FOREGROUND, MSG,
+    SM_CXSCREEN, SM_CYSCREEN, WINEVENT_OUTOFCONTEXT, WM_HOTKEY, WM_NULL,
 };
 
 thread_local! {
@@ -54,6 +59,69 @@ impl Backend for WindowsBackend {
             return None;
         }
         window_info(hwnd as isize)
+    }
+
+    fn screen_size(&self) -> (i32, i32) {
+        unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
+    }
+
+    fn pixel(&self, x: i32, y: i32) -> (u8, u8, u8) {
+        unsafe {
+            let dc = GetDC(std::ptr::null_mut());
+            let c = GetPixel(dc, x, y); // COLORREF = 0x00BBGGRR
+            ReleaseDC(std::ptr::null_mut(), dc);
+            ((c & 0xFF) as u8, ((c >> 8) & 0xFF) as u8, ((c >> 16) & 0xFF) as u8)
+        }
+    }
+
+    fn capture(&self, x: i32, y: i32, w: i32, h: i32) -> Option<CapturedImage> {
+        if w <= 0 || h <= 0 {
+            return None;
+        }
+        unsafe {
+            let screen_dc = GetDC(std::ptr::null_mut());
+            if screen_dc.is_null() {
+                return None;
+            }
+            let mem_dc = CreateCompatibleDC(screen_dc);
+            let bmp = CreateCompatibleBitmap(screen_dc, w, h);
+            let old = SelectObject(mem_dc, bmp);
+            BitBlt(mem_dc, 0, 0, w, h, screen_dc, x, y, SRCCOPY);
+
+            let mut bmi: BITMAPINFO = std::mem::zeroed();
+            bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+            bmi.bmiHeader.biWidth = w;
+            bmi.bmiHeader.biHeight = -h; // top-down
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB as u32;
+
+            let mut buf = vec![0u8; (w * h * 4) as usize];
+            GetDIBits(
+                mem_dc,
+                bmp,
+                0,
+                h as u32,
+                buf.as_mut_ptr() as *mut core::ffi::c_void,
+                &mut bmi,
+                DIB_RGB_COLORS,
+            );
+
+            SelectObject(mem_dc, old);
+            DeleteObject(bmp);
+            DeleteDC(mem_dc);
+            ReleaseDC(std::ptr::null_mut(), screen_dc);
+
+            // GDI returns BGRA; swap to RGBA.
+            for px in buf.chunks_exact_mut(4) {
+                px.swap(0, 2);
+            }
+            Some(CapturedImage {
+                w: w as u32,
+                h: h as u32,
+                rgba: buf,
+            })
+        }
     }
 
     fn register_hotkey(&self, id: i32, spec: &str) -> Result<(), String> {

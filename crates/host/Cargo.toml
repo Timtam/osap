@@ -6,9 +6,10 @@ license = "GPL-3.0-or-later"
 
 [dependencies]
 anyhow = "1.0.102"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 mlua = { version = "0.11.6", features = ["luau", "error-send"] }
 module-manifest = { path = "../module-manifest" }
 tts = "0.26.3"
 
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Threading", "Win32_UI_Accessibility"] }
+windows-sys = { version = "0.61.2", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Threading", "Win32_UI_Accessibility", "Win32_Graphics_Gdi"] }

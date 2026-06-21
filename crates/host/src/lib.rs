@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use mlua::{Function, Lua, RegistryKey, Table};
 use tts::Tts;
 
-use backend::{Backend, HostEvents, WinInfo};
+use backend::{Backend, CapturedImage, HostEvents, WinInfo};
 use module_manifest::LoadedModule;
 
 /// Luau prelude that adds the OS-gated `host.window.find`/`findAll` matcher on
@@ -229,6 +229,84 @@ fn install_host_api(lua: &Lua, state: &Rc<RefCell<HostState>>, backend: &Rc<dyn 
     )?;
     host.set("window", win)?;
 
+    // host.screen.pixel(x,y) / .size() / .imageSearch(template, { region, tolerance })
+    let screen = lua.create_table()?;
+    let b_pixel = backend.clone();
+    screen.set(
+        "pixel",
+        lua.create_function(move |lua, (x, y): (i32, i32)| {
+            let (r, g, b) = b_pixel.pixel(x, y);
+            let t = lua.create_table()?;
+            t.set("r", r)?;
+            t.set("g", g)?;
+            t.set("b", b)?;
+            t.set("hex", format!("#{r:02X}{g:02X}{b:02X}"))?;
+            Ok(t)
+        })?,
+    )?;
+    let b_size = backend.clone();
+    screen.set(
+        "size",
+        lua.create_function(move |lua, ()| {
+            let (w, h) = b_size.screen_size();
+            let t = lua.create_table()?;
+            t.set("w", w)?;
+            t.set("h", h)?;
+            Ok(t)
+        })?,
+    )?;
+    let b_search = backend.clone();
+    let s_search = state.clone();
+    screen.set(
+        "imageSearch",
+        lua.create_function(
+            move |lua, (template, opts): (String, Option<Table>)| {
+                let path = s_search.borrow().resolve(&template);
+                let img = image::open(&path)
+                    .map_err(|e| {
+                        mlua::Error::external(format!(
+                            "imageSearch: cannot open '{}': {e}",
+                            path.display()
+                        ))
+                    })?
+                    .to_rgba8();
+                let (tw, th) = (img.width(), img.height());
+                let (sw, sh) = b_search.screen_size();
+                let (rx, ry, rw, rh) =
+                    match opts.as_ref().and_then(|o| o.get::<Table>("region").ok()) {
+                        Some(region) => {
+                            let x1: i32 = region.get("x1").or_else(|_| region.get(1)).unwrap_or(0);
+                            let y1: i32 = region.get("y1").or_else(|_| region.get(2)).unwrap_or(0);
+                            let x2: i32 = region.get("x2").or_else(|_| region.get(3)).unwrap_or(sw);
+                            let y2: i32 = region.get("y2").or_else(|_| region.get(4)).unwrap_or(sh);
+                            (x1, y1, (x2 - x1).max(0), (y2 - y1).max(0))
+                        }
+                        None => (0, 0, sw, sh),
+                    };
+                let tol: u8 = opts
+                    .as_ref()
+                    .and_then(|o| o.get::<u8>("tolerance").ok())
+                    .unwrap_or(0);
+                let cap = match b_search.capture(rx, ry, rw, rh) {
+                    Some(c) => c,
+                    None => return Ok(None),
+                };
+                match find_template(&cap, tw, th, img.as_raw(), tol) {
+                    Some((ox, oy)) => {
+                        let t = lua.create_table()?;
+                        t.set("x", rx + ox as i32)?;
+                        t.set("y", ry + oy as i32)?;
+                        t.set("w", tw)?;
+                        t.set("h", th)?;
+                        Ok(Some(t))
+                    }
+                    None => Ok(None),
+                }
+            },
+        )?,
+    )?;
+    host.set("screen", screen)?;
+
     // host.path(rel) -> real path (escape hatch)
     let s2 = state.clone();
     host.set(
@@ -264,6 +342,41 @@ fn window_has_triggers(lua: &Lua) -> bool {
         has.call::<bool>(())
     })()
     .unwrap_or(false)
+}
+
+/// Naive template search over a captured region (early-out per position; compares
+/// RGB and honors the template's alpha as a mask). Returns the top-left offset.
+fn find_template(hay: &CapturedImage, tw: u32, th: u32, tmpl: &[u8], tol: u8) -> Option<(u32, u32)> {
+    if tw == 0 || th == 0 || tw > hay.w || th > hay.h {
+        return None;
+    }
+    for oy in 0..=(hay.h - th) {
+        for ox in 0..=(hay.w - tw) {
+            if matches_at(hay, ox, oy, tw, th, tmpl, tol) {
+                return Some((ox, oy));
+            }
+        }
+    }
+    None
+}
+
+fn matches_at(hay: &CapturedImage, ox: u32, oy: u32, tw: u32, th: u32, tmpl: &[u8], tol: u8) -> bool {
+    let tol = tol as i16;
+    for ty in 0..th {
+        for tx in 0..tw {
+            let ti = ((ty * tw + tx) * 4) as usize;
+            if tmpl[ti + 3] == 0 {
+                continue; // transparent template pixel = wildcard
+            }
+            let hi = (((oy + ty) * hay.w + (ox + tx)) * 4) as usize;
+            for c in 0..3 {
+                if (hay.rgba[hi + c] as i16 - tmpl[ti + c] as i16).abs() > tol {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Converts a native window snapshot into the Lua table modules see:
