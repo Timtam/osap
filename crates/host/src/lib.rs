@@ -6,11 +6,12 @@
 //! bound to that module's root + the shared services.
 
 mod backend;
+mod config;
 mod gui;
 mod logging;
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -44,6 +45,8 @@ struct Shared {
     next_id: Cell<i32>,
     /// module_idx → root directory.
     roots: RefCell<Vec<PathBuf>>,
+    /// module_idx → module id (for persisting the disabled set).
+    ids: RefCell<Vec<String>>,
     /// module_idx → enabled.
     enabled: RefCell<Vec<bool>>,
     /// Global hotkey id → its registration (owning module, VM, callback, spec).
@@ -80,11 +83,11 @@ impl Shared {
     /// Enables or disables a module at runtime: (un)registers its OS hotkeys and
     /// recomputes the captured-key set. The dispatcher already skips disabled
     /// modules' hotkeys/keys/triggers via the `enabled` flag.
-    fn set_enabled(&self, idx: usize, enabled: bool) {
+    fn apply_enabled(&self, idx: usize, enabled: bool) -> bool {
         {
             let mut en = self.enabled.borrow_mut();
             if idx >= en.len() || en[idx] == enabled {
-                return;
+                return false;
             }
             en[idx] = enabled;
         }
@@ -103,6 +106,28 @@ impl Shared {
             "manager",
             &format!("module {idx} {}", if enabled { "enabled" } else { "disabled" }),
         );
+        true
+    }
+
+    /// As [`Self::apply_enabled`], persisting the new disabled-set to the
+    /// portable config. Used by the GUI toggle.
+    fn set_enabled(&self, idx: usize, enabled: bool) {
+        if self.apply_enabled(idx, enabled) {
+            self.save_config();
+        }
+    }
+
+    /// Writes the currently-disabled module ids to the portable config file.
+    fn save_config(&self) {
+        let ids = self.ids.borrow();
+        let enabled = self.enabled.borrow();
+        let disabled: Vec<String> = ids
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !enabled.get(*i).copied().unwrap_or(true))
+            .map(|(_, id)| id.clone())
+            .collect();
+        config::save_disabled(&disabled);
     }
 }
 
@@ -118,6 +143,8 @@ struct Module {
 pub struct Manager {
     shared: Rc<Shared>,
     modules: Vec<Module>,
+    /// Module ids the user disabled in a previous run (from the portable config).
+    disabled_ids: HashSet<String>,
 }
 
 impl Manager {
@@ -138,6 +165,7 @@ impl Manager {
             audio,
             next_id: Cell::new(0),
             roots: RefCell::new(Vec::new()),
+            ids: RefCell::new(Vec::new()),
             enabled: RefCell::new(Vec::new()),
             hotkeys: RefCell::new(HashMap::new()),
             keys: RefCell::new(Vec::new()),
@@ -145,6 +173,7 @@ impl Manager {
         Ok(Self {
             shared,
             modules: Vec::new(),
+            disabled_ids: config::load_disabled(),
         })
     }
 
@@ -167,6 +196,7 @@ impl Manager {
         }
 
         self.shared.roots.borrow_mut().push(module.root.clone());
+        self.shared.ids.borrow_mut().push(module.manifest.id.clone());
         self.shared.enabled.borrow_mut().push(true);
 
         let lua = Lua::new();
@@ -181,6 +211,13 @@ impl Manager {
             .set_name(entry.display().to_string())
             .exec()
             .with_context(|| format!("error running module '{}'", module.manifest.id))?;
+
+        // Honor a disabled state persisted from a previous run: the module's
+        // entry has just registered its hotkeys/keys, so disable now to revoke
+        // them (and exclude its captured keys).
+        if self.disabled_ids.contains(&module.manifest.id) {
+            self.shared.apply_enabled(idx, false);
+        }
 
         self.modules.push(Module {
             id: module.manifest.id,
