@@ -17,12 +17,14 @@ This loads the example module (`module.toml` → `src/main.luau`) and has it spe
 
 Try the global-hotkey demo (stays resident): `cargo run -p app -- modules/hotkey`, then press **Ctrl+Alt+H** to hear it speak. Ctrl+C to quit.
 
+Try the first self-voicing **overlay** (stays resident): `cargo run -p app -- modules/overlay`, then navigate with **Ctrl+Alt+Left/Right** and activate with **Ctrl+Alt+Enter** (or the per-control hotkeys **Ctrl+Alt+1/2/3**).
+
 ## Structure
 
 - `crates/module-manifest` — `module.toml` parsing + module loading (dev: unpacked directory).
-- `crates/host` — Luau runtime + `host` API (`log`/`speech`/`hotkey`/`window`/`os`/`screen`/`ocr`/`input`/`path`/`resource`). The OS is reached through a `Backend` trait (`crates/host/src/backend/`, one impl per platform; Windows real, others stub). The OS-gated window matcher (`find`/`findAll`) is a Luau prelude.
+- `crates/host` — Luau runtime + `host` API (`log`/`speech`/`sound`/`hotkey`/`window`/`os`/`screen`/`ocr`/`input`/`overlay`/`path`/`resource`). The OS is reached through a `Backend` trait (`crates/host/src/backend/`, one impl per platform; Windows real, others stub). The OS-gated window matcher (`find`/`findAll`) is a Luau prelude.
 - `crates/app` — binary `automation-platform`, loads & runs a module.
-- `modules/hello`, `modules/hotkey`, `modules/window`, `modules/window-trigger`, `modules/screen`, `modules/ocr`, `modules/input` — example modules (speak-once; global-hotkey trigger; window/os inspection; foreground-change trigger; screen capture & image search; OCR; mouse/keyboard input).
+- `modules/hello`, `modules/hotkey`, `modules/window`, `modules/window-trigger`, `modules/screen`, `modules/ocr`, `modules/input`, `modules/sound`, `modules/overlay` — example modules (speak-once; global-hotkey trigger; window/os inspection; foreground-change trigger; screen capture & image search; OCR; mouse/keyboard input; audio playback; self-voicing overlay).
 - `docs/` — design documents (see below).
 - `TODO.md` — backlog & implementation slices.
 

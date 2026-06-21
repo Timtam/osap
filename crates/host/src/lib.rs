@@ -23,6 +23,9 @@ use module_manifest::LoadedModule;
 /// top of the native `host.window.list`/`active` bindings.
 const WINDOW_PRELUDE: &str = include_str!("window_prelude.luau");
 
+/// Luau prelude implementing the `host.overlay` self-voicing control-tree runtime.
+const OVERLAY_PRELUDE: &str = include_str!("overlay_prelude.luau");
+
 /// Shared host state that the `host` API closures access via `Rc<RefCell<…>>`.
 struct HostState {
     root: PathBuf,
@@ -30,6 +33,9 @@ struct HostState {
     /// Registered global hotkeys: backend id → Luau callback (kept in the Lua registry).
     hotkeys: Vec<(i32, RegistryKey)>,
     hotkey_counter: i32,
+    /// Audio output stream (kept alive so detached sounds keep playing) + its handle.
+    _audio_stream: Option<rodio::OutputStream>,
+    audio: Option<rodio::OutputStreamHandle>,
 }
 
 impl HostState {
@@ -96,11 +102,20 @@ pub fn run_module(dir: impl AsRef<Path>) -> Result<()> {
     let backend = backend::platform();
 
     let tts = Tts::default().context("failed to initialize TTS engine")?;
+    let (audio_stream, audio_handle) = match rodio::OutputStream::try_default() {
+        Ok((s, h)) => (Some(s), Some(h)),
+        Err(e) => {
+            eprintln!("  [sound] no audio output device: {e}");
+            (None, None)
+        }
+    };
     let state = Rc::new(RefCell::new(HostState {
         root: module.root.clone(),
         tts,
         hotkeys: Vec::new(),
         hotkey_counter: 0,
+        _audio_stream: audio_stream,
+        audio: audio_handle,
     }));
 
     let lua = Lua::new();
@@ -109,6 +124,10 @@ pub fn run_module(dir: impl AsRef<Path>) -> Result<()> {
         .set_name("window_prelude")
         .exec()
         .context("failed to load host.window matcher prelude")?;
+    lua.load(OVERLAY_PRELUDE)
+        .set_name("overlay_prelude")
+        .exec()
+        .context("failed to load host.overlay runtime")?;
 
     let entry = module.entry_path();
     let code = std::fs::read_to_string(&entry)
@@ -390,6 +409,32 @@ fn install_host_api(lua: &Lua, state: &Rc<RefCell<HostState>>, backend: &Rc<dyn 
         })?,
     )?;
     host.set("input", input)?;
+
+    // host.sound.play(path) — fire-and-forget playback of a bundled audio asset
+    let sound = lua.create_table()?;
+    let s_sound = state.clone();
+    sound.set(
+        "play",
+        lua.create_function(move |_, rel: String| {
+            let st = s_sound.borrow();
+            if let Some(handle) = &st.audio {
+                let path = st.resolve(&rel);
+                let play = || -> anyhow::Result<()> {
+                    let file = std::io::BufReader::new(std::fs::File::open(&path)?);
+                    let source = rodio::Decoder::new(file)?;
+                    let sink = rodio::Sink::try_new(handle)?;
+                    sink.append(source);
+                    sink.detach();
+                    Ok(())
+                };
+                if let Err(e) = play() {
+                    eprintln!("  [sound] cannot play '{}': {e}", path.display());
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+    host.set("sound", sound)?;
 
     // host.path(rel) -> real path (escape hatch)
     let s2 = state.clone();
