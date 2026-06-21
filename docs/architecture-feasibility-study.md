@@ -96,7 +96,7 @@ The system is a **Cargo workspace** with a multi-process runtime model.
 
 ### Process/isolation model
 
-**Multi-process is the foundational model** (not single-process): (1) crash isolation — a crashing user module does not take down the global hotkey listener; (2) clean permission boundaries (macOS TCC per bundle/process); (3) privilege separation (privileged `uinput` helper on Linux separated from the script worker). **Trade-off:** multi-process IPC and hotkey latency pull in opposite directions → mitigation: event detection/matching in the daemon, only hits to the worker. The final worker granularity hangs on the performance budget.
+**Multi-process is the foundational model** (not single-process): (1) crash isolation — a crashing user module does not take down the global hotkey listener; (2) clean permission boundaries (macOS TCC per bundle/process); (3) privilege separation (privileged `uinput` helper on Linux separated from the script worker). **Trade-off:** multi-process IPC and hotkey latency pull in opposite directions → mitigation: event detection/matching in the daemon, only hits to the worker. The final worker granularity hangs on the performance budget. **Refinement (decided):** script (Luau) modules are *not* one-process-per-module — one daemon process loads all enabled modules concurrently, one lightweight VM each, with dynamic enable/disable; only the untrusted-native-FFI tier runs out-of-process. See [module-runtime-and-lifecycle.md](module-runtime-and-lifecycle.md).
 
 ---
 

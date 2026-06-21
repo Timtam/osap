@@ -31,6 +31,7 @@ Try the global-hotkey demo (stays resident): `cargo run -p app -- modules/hotkey
 - `architecture-feasibility-study.md` — stack decisions, feasibility matrix, risks.
 - `host-api-capability-catalog.md` — the versioned host API as the single source of truth.
 - `module-package-format.md` — package format (ZIP, TOML manifest, resource resolution).
+- `module-runtime-and-lifecycle.md` — multi-module runtime (one process, many modules), lifecycle, dynamic enable/disable.
 - `window-matching.md` — OS-gated window matcher + trigger system.
 - `reahotkey-port-analysis.md` — port plan for the ReaHotkey overlays to macOS.
 - `prior-art-vocr.md` — proven macOS techniques (VOCR).

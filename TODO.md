@@ -10,6 +10,7 @@ Architecture and feasibility foundation: [docs/architecture-feasibility-study.md
 - [ ] **Slice 3:** `host.window` (matcher + `active`/`find`) + `host.os` — window detection first-class.
 - [ ] **Slice 4:** Introduce an OS-backend trait abstraction (Windows first), preparing the macOS backend.
 - [ ] **Module-package loader:** ZIP + extract-on-install (currently only the unpacked dev directory).
+- [ ] **Module manager (multi-module runtime):** load all *enabled* modules concurrently in one process (one Luau VM each), shared event loop multiplexing triggers; per-module registration ownership so triggers can be revoked; dynamic enable/disable + reload via a control surface (GUI/tray + CLI/IPC); config persists the enabled set; conflict detection (e.g. duplicate hotkeys). Out-of-process only for the untrusted-native-FFI tier. See [docs/module-runtime-and-lifecycle.md](docs/module-runtime-and-lifecycle.md).
 - [ ] Finalize the host's license (currently the placeholder `GPL-3.0-or-later`; a permissive one might be more flexible for a module ecosystem).
 
 ## Documentation
