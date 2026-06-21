@@ -1,0 +1,13 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[[bin]]
+name = "automation-platform"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.102"
+host = { path = "../host" }

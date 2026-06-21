@@ -1,0 +1,11 @@
+[package]
+name = "host"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+anyhow = "1.0.102"
+mlua = { version = "0.11.6", features = ["luau", "error-send"] }
+module-manifest = { path = "../module-manifest" }
+tts = "0.26.3"
