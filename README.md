@@ -15,7 +15,11 @@ cargo run -p app -- modules/hello
 
 This loads the example module (`module.toml` → `src/main.luau`) and has it speak via the host API (tts-rs). The default module path is `modules/hello`.
 
-Try the global-hotkey demo (stays resident): `cargo run -p app -- modules/hotkey`, then press **Ctrl+Alt+H** to hear it speak. Ctrl+C to quit.
+> **Windows build note:** wxDragon compiles wxWidgets from source on first build. Set `LIBCLANG_PATH` to your VS/LLVM `bin` (e.g. `…\VC\Tools\Llvm\x64\bin`) and have Ninja on `PATH`. The first build takes several minutes; later builds reuse the artifacts.
+
+Resident modules (those that register hotkeys, capture keys, or watch windows) open a small **native window** (wxDragon); wxWidgets owns the event loop and our OS events are pumped alongside it, so global hotkeys keep working while the window is open. Close the window to quit. Set `AUTOMATION_PLATFORM_HEADLESS=1` to run without a window (Ctrl+C to quit).
+
+Try the global-hotkey demo: `cargo run -p app -- modules/hotkey`, then press **Ctrl+Alt+H** to hear it speak — it works whether the window or another app is focused. Close the window to quit.
 
 Try the first self-voicing **overlay** (stays resident): `cargo run -p app -- modules/overlay`, then navigate with **Ctrl+Alt+Left/Right** and activate with **Ctrl+Alt+Enter** (or the per-control hotkeys **Ctrl+Alt+1/2/3**).
 
@@ -27,7 +31,8 @@ A module can be loaded either as an unpacked directory (dev) or as a **`.zip` pa
 
 - `crates/module-manifest` — `module.toml` parsing + module loading (dev: unpacked directory).
 - `crates/host` — **module manager** + Luau runtime + `host` API (`log`/`speech`/`sound`/`hotkey`/`keys`/`window`/`os`/`screen`/`ocr`/`input`/`overlay`/`path`/`resource`). Loads many modules concurrently (one VM each; shared backend/TTS/audio + one event loop, central event routing). The OS is reached through a `Backend` trait (`crates/host/src/backend/`, one impl per platform; Windows real, others stub); the window matcher + overlay runtime are Luau preludes.
-- `crates/app` — binary `automation-platform`, loads & runs one or more modules: `automation-platform <dir1> <dir2> …`.
+- `crates/app` — binary `automation-platform`, loads & runs one or more modules: `automation-platform <dir1> <dir2> …`. Embeds a Windows manifest (Common Controls v6 + DPI awareness) via `build.rs`.
+- `crates/host/src/gui.rs` — minimal wxDragon host: opens the window and hands wxWidgets the event loop, draining our OS events via a `Timer` tick (event-loop coexistence).
 - `modules/hello`, `modules/hotkey`, `modules/window`, `modules/window-trigger`, `modules/screen`, `modules/ocr`, `modules/input`, `modules/sound`, `modules/overlay`, `modules/overlay-attach`, `modules/keys` — example modules (speak-once; global-hotkey trigger; window/os inspection; foreground-change trigger; screen capture & image search; OCR; mouse/keyboard input; audio playback; self-voicing overlay; context-bound overlay; low-level key capture).
 - `docs/` — design documents (see below).
 - `TODO.md` — backlog & implementation slices.

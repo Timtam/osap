@@ -6,6 +6,7 @@
 //! bound to that module's root + the shared services.
 
 mod backend;
+mod gui;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -150,16 +151,35 @@ impl Manager {
                     .map_err(|e| anyhow::anyhow!("{e}"))
                     .context("failed to watch foreground windows")?;
             }
-            println!("» Listening for events — press Ctrl+C to quit.");
-            let backend = self.shared.backend.clone();
-            let mut dispatcher = Dispatcher {
-                shared: &self.shared,
-                modules: &self.modules,
-            };
-            backend
-                .run_event_loop(&mut dispatcher)
+            if std::env::var_os("AUTOMATION_PLATFORM_HEADLESS").is_some() {
+                // No window: block on the platform message loop. Same event
+                // delivery as the GUI path; useful for testing/automation.
+                println!("» Listening for events (headless) — press Ctrl+C to quit.");
+                let backend = self.shared.backend.clone();
+                let mut dispatcher = Dispatcher {
+                    shared: &self.shared,
+                    modules: &self.modules,
+                };
+                backend
+                    .run_event_loop(&mut dispatcher)
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+                    .context("event loop failed")?;
+            } else {
+                // wxWidgets owns the loop; drain our OS events from its timer tick.
+                println!("» Window open — modules are active. Close the window to quit.");
+                let backend = self.shared.backend.clone();
+                let shared = self.shared.clone();
+                let modules = Rc::new(std::mem::take(&mut self.modules));
+                gui::run_gui(move || {
+                    let mut dispatcher = Dispatcher {
+                        shared: &shared,
+                        modules: &modules[..],
+                    };
+                    backend.pump_pending(&mut dispatcher);
+                })
                 .map_err(|e| anyhow::anyhow!("{e}"))
-                .context("event loop failed")?;
+                .context("wx GUI loop failed")?;
+            }
         } else {
             self.wait_for_speech();
         }

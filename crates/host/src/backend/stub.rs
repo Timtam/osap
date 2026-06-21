@@ -69,4 +69,6 @@ impl Backend for StubBackend {
     fn run_event_loop(&self, _events: &mut dyn HostEvents) -> Result<(), String> {
         Ok(())
     }
+
+    fn pump_pending(&self, _events: &mut dyn HostEvents) {}
 }

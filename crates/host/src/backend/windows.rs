@@ -3,7 +3,7 @@
 //! foreground-change events (`SetWinEventHook`), and screen capture (GDI).
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
 use super::{Backend, CapturedImage, HostEvents, MouseButton, OcrText, OcrWord, WinInfo};
 
@@ -25,19 +25,28 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, VK_CONTROL, VK_MENU, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, EnumWindows, GetClassNameW, GetCursorPos, GetForegroundWindow,
-    GetMessageW, GetSystemMetrics, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, IsWindowVisible, PostThreadMessageW, SetCursorPos, SetWindowsHookExW,
-    TranslateMessage, EVENT_SYSTEM_FOREGROUND, HC_ACTION, KBDLLHOOKSTRUCT, MSG, SM_CXSCREEN,
-    SM_CYSCREEN, WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_NULL,
-    WM_SYSKEYDOWN, WM_SYSKEYUP,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumWindows, GetClassNameW,
+    GetCursorPos, GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+    PostThreadMessageW, RegisterClassW, SetCursorPos, SetWindowsHookExW, TranslateMessage,
+    EVENT_SYSTEM_FOREGROUND, HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, SM_CXSCREEN, SM_CYSCREEN,
+    WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_NULL, WM_SYSKEYDOWN,
+    WM_SYSKEYUP, WNDCLASSW,
 };
 
 thread_local! {
     /// HWNDs whose window became foreground, queued by the WinEvent hook and
     /// drained by the event loop on the same thread.
     static FOREGROUND_QUEUE: RefCell<Vec<isize>> = RefCell::new(Vec::new());
+    /// Hotkey ids received by the message-only window proc, drained by the loop.
+    static HOTKEY_QUEUE: RefCell<Vec<i32>> = RefCell::new(Vec::new());
 }
+
+/// HWND (as isize) of the lazily-created message-only window that owns global
+/// hotkeys, so `WM_HOTKEY` is routed to our window proc by `DispatchMessage`
+/// and survives a foreign message loop (e.g. wxWidgets', which would drop a
+/// NULL-hwnd thread message).
+static HOTKEY_HWND: AtomicIsize = AtomicIsize::new(0);
 
 /// Thread id of the event loop, so the WinEvent hook can wake `GetMessage`.
 static HOOK_THREAD: AtomicU32 = AtomicU32::new(0);
@@ -239,7 +248,8 @@ impl Backend for WindowsBackend {
 
     fn register_hotkey(&self, id: i32, spec: &str) -> Result<(), String> {
         let (mods, vk) = parse_spec(spec)?;
-        let ok = unsafe { RegisterHotKey(std::ptr::null_mut(), id, mods | MOD_NOREPEAT, vk) };
+        let hwnd = hotkey_window();
+        let ok = unsafe { RegisterHotKey(hwnd, id, mods | MOD_NOREPEAT, vk) };
         if ok == 0 {
             return Err(format!(
                 "RegisterHotKey failed for '{spec}' (already in use by another app?)"
@@ -249,8 +259,9 @@ impl Backend for WindowsBackend {
     }
 
     fn unregister_hotkey(&self, id: i32) {
+        let hwnd = HOTKEY_HWND.load(Ordering::Relaxed) as HWND;
         unsafe {
-            UnregisterHotKey(std::ptr::null_mut(), id);
+            UnregisterHotKey(hwnd, id);
         }
     }
 
@@ -299,28 +310,32 @@ impl Backend for WindowsBackend {
             if res == 0 || res == -1 {
                 break; // WM_QUIT or error
             }
-            if msg.message == WM_HOTKEY {
-                events.on_hotkey(msg.wParam as i32);
-            }
             unsafe {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
-            // The WinEvent hook ran during dispatch and queued foreground changes.
-            let pending: Vec<isize> =
-                FOREGROUND_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
-            for hwnd in pending {
-                if let Some(win) = window_info(hwnd) {
-                    events.on_window_activate(win);
-                }
-            }
-            let pending_keys: Vec<(u32, u8)> =
-                KEY_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
-            for (vk, mask) in pending_keys {
-                events.on_key(vk, mask);
-            }
+            // Hotkeys reach our window proc during dispatch; the hooks queued
+            // foreground/key events on this thread. Drain them all.
+            self.pump_pending(events);
         }
         Ok(())
+    }
+
+    fn pump_pending(&self, events: &mut dyn HostEvents) {
+        let hotkeys: Vec<i32> = HOTKEY_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
+        for id in hotkeys {
+            events.on_hotkey(id);
+        }
+        let pending: Vec<isize> = FOREGROUND_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
+        for hwnd in pending {
+            if let Some(win) = window_info(hwnd) {
+                events.on_window_activate(win);
+            }
+        }
+        let pending_keys: Vec<(u32, u8)> = KEY_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
+        for (vk, mask) in pending_keys {
+            events.on_key(vk, mask);
+        }
     }
 }
 
@@ -328,6 +343,64 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
     let vec = &mut *(lparam as *mut Vec<isize>);
     vec.push(hwnd as isize);
     1 // TRUE — keep enumerating
+}
+
+/// Lazily creates a hidden message-only window that owns our global hotkeys.
+/// Registering hotkeys against a real window (rather than NULL) means
+/// `WM_HOTKEY` is dispatched to [`hotkey_wndproc`] by whichever loop pumps the
+/// thread — including wxWidgets' — instead of being a NULL-hwnd thread message
+/// the GUI loop would silently discard.
+fn hotkey_window() -> HWND {
+    let existing = HOTKEY_HWND.load(Ordering::Relaxed);
+    if existing != 0 {
+        return existing as HWND;
+    }
+    unsafe {
+        let hmod = GetModuleHandleW(std::ptr::null());
+        let class_name: Vec<u16> = "AutomationPlatformHotkeys\0".encode_utf16().collect();
+        let wc = WNDCLASSW {
+            style: 0,
+            lpfnWndProc: Some(hotkey_wndproc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: hmod,
+            hIcon: std::ptr::null_mut(),
+            hCursor: std::ptr::null_mut(),
+            hbrBackground: std::ptr::null_mut(),
+            lpszMenuName: std::ptr::null(),
+            lpszClassName: class_name.as_ptr(),
+        };
+        RegisterClassW(&wc); // ignored if the class is already registered
+        let hwnd = CreateWindowExW(
+            0,
+            class_name.as_ptr(),
+            std::ptr::null(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            HWND_MESSAGE,
+            std::ptr::null_mut(),
+            hmod,
+            std::ptr::null(),
+        );
+        HOTKEY_HWND.store(hwnd as isize, Ordering::Relaxed);
+        hwnd
+    }
+}
+
+unsafe extern "system" fn hotkey_wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if msg == WM_HOTKEY {
+        HOTKEY_QUEUE.with(|q| q.borrow_mut().push(wparam as i32));
+        return 0;
+    }
+    DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
 unsafe extern "system" fn win_event_proc(

@@ -98,6 +98,12 @@ pub trait Backend {
     /// Runs the platform event loop, dispatching OS events into `events`.
     /// Blocks until the process is terminated.
     fn run_event_loop(&self, events: &mut dyn HostEvents) -> Result<(), String>;
+
+    /// Drains OS events accumulated since the last call (hotkeys, foreground
+    /// changes, captured keys) into `events`. Non-blocking — meant to be driven
+    /// from a host-owned loop such as a GUI timer tick, where the GUI toolkit
+    /// (not us) owns the message pump.
+    fn pump_pending(&self, events: &mut dyn HostEvents);
 }
 
 /// Sink for OS events, implemented by the host to bridge into Luau callbacks.
