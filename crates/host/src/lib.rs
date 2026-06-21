@@ -33,8 +33,8 @@ struct HostState {
     /// Registered global hotkeys: backend id → Luau callback (kept in the Lua registry).
     hotkeys: Vec<(i32, RegistryKey)>,
     hotkey_counter: i32,
-    /// Captured low-level keys: vk → Luau callback (kept in the Lua registry).
-    keys: Vec<(u32, RegistryKey)>,
+    /// Captured low-level keys: (vk, modifier-mask) → Luau callback (in the registry).
+    keys: Vec<(u32, u8, RegistryKey)>,
     /// Audio output stream (kept alive so detached sounds keep playing) + its handle.
     _audio_stream: Option<rodio::OutputStream>,
     audio: Option<rodio::OutputStreamHandle>,
@@ -84,23 +84,24 @@ impl HostEvents for Dispatcher<'_> {
         }
     }
 
-    fn on_key(&mut self, vk: u32, shift: bool, ctrl: bool, alt: bool) {
+    fn on_key(&mut self, vk: u32, mods: u8) {
         let func: Option<Function> = {
             let st = self.state.borrow();
             st.keys
                 .iter()
-                .find(|(k, _)| *k == vk)
-                .and_then(|(_, key)| self.lua.registry_value::<Function>(key).ok())
+                .find(|(k, m, _)| *k == vk && *m == mods)
+                .and_then(|(_, _, key)| self.lua.registry_value::<Function>(key).ok())
         };
         if let Some(f) = func {
-            let mods = self.lua.create_table().ok();
-            if let Some(m) = &mods {
-                let _ = m.set("shift", shift);
-                let _ = m.set("ctrl", ctrl);
-                let _ = m.set("alt", alt);
+            let table = self.lua.create_table().ok();
+            if let Some(t) = &table {
+                let _ = t.set("shift", mods & backend::MASK_SHIFT != 0);
+                let _ = t.set("ctrl", mods & backend::MASK_CTRL != 0);
+                let _ = t.set("alt", mods & backend::MASK_ALT != 0);
+                let _ = t.set("win", mods & backend::MASK_WIN != 0);
             }
-            let res = match mods {
-                Some(m) => f.call::<()>(m),
+            let res = match table {
+                Some(t) => f.call::<()>(t),
                 None => f.call::<()>(()),
             };
             if let Err(e) = res {
@@ -261,17 +262,18 @@ fn install_host_api(lua: &Lua, state: &Rc<RefCell<HostState>>, backend: &Rc<dyn 
     let b_kcap = backend.clone();
     keys.set(
         "capture",
-        lua.create_function(move |lua, (name, cb): (String, Function)| {
-            let vk = backend::key_to_vk(&name)
-                .ok_or_else(|| mlua::Error::external(format!("unknown key '{name}'")))?;
+        lua.create_function(move |lua, (spec, cb): (String, Function)| {
+            let (vk, mask) = backend::key_spec(&spec)
+                .ok_or_else(|| mlua::Error::external(format!("unknown key spec '{spec}'")))?;
             let key = lua.create_registry_value(cb)?;
             {
                 let mut st = s_kcap.borrow_mut();
-                st.keys.retain(|(k, _)| *k != vk);
-                st.keys.push((vk, key));
+                st.keys.retain(|(k, m, _)| !(*k == vk && *m == mask));
+                st.keys.push((vk, mask, key));
             }
-            let vks: Vec<u32> = s_kcap.borrow().keys.iter().map(|(k, _)| *k).collect();
-            b_kcap.set_captured_keys(&vks);
+            let set: Vec<(u32, u8)> =
+                s_kcap.borrow().keys.iter().map(|(k, m, _)| (*k, *m)).collect();
+            b_kcap.set_captured_keys(&set);
             b_kcap.watch_keys().map_err(mlua::Error::external)?;
             Ok(())
         })?,
@@ -280,11 +282,12 @@ fn install_host_api(lua: &Lua, state: &Rc<RefCell<HostState>>, backend: &Rc<dyn 
     let b_krel = backend.clone();
     keys.set(
         "release",
-        lua.create_function(move |_, name: String| {
-            if let Some(vk) = backend::key_to_vk(&name) {
-                s_krel.borrow_mut().keys.retain(|(k, _)| *k != vk);
-                let vks: Vec<u32> = s_krel.borrow().keys.iter().map(|(k, _)| *k).collect();
-                b_krel.set_captured_keys(&vks);
+        lua.create_function(move |_, spec: String| {
+            if let Some((vk, mask)) = backend::key_spec(&spec) {
+                s_krel.borrow_mut().keys.retain(|(k, m, _)| !(*k == vk && *m == mask));
+                let set: Vec<(u32, u8)> =
+                    s_krel.borrow().keys.iter().map(|(k, m, _)| (*k, *m)).collect();
+                b_krel.set_captured_keys(&set);
             }
             Ok(())
         })?,

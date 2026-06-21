@@ -29,7 +29,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetMessageW, GetSystemMetrics, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
     GetWindowThreadProcessId, IsWindowVisible, PostThreadMessageW, SetCursorPos, SetWindowsHookExW,
     TranslateMessage, EVENT_SYSTEM_FOREGROUND, HC_ACTION, KBDLLHOOKSTRUCT, MSG, SM_CXSCREEN,
-    SM_CYSCREEN, WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT, WM_HOTKEY, WM_KEYDOWN, WM_NULL, WM_SYSKEYDOWN,
+    SM_CYSCREEN, WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_NULL,
+    WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 thread_local! {
@@ -42,10 +43,10 @@ thread_local! {
 static HOOK_THREAD: AtomicU32 = AtomicU32::new(0);
 
 thread_local! {
-    /// Virtual-key codes currently intercepted (and suppressed) by the keyboard hook.
-    static CAPTURED_KEYS: RefCell<Vec<u32>> = RefCell::new(Vec::new());
-    /// Captured key-downs (vk, shift, ctrl, alt) queued for the event loop.
-    static KEY_QUEUE: RefCell<Vec<(u32, bool, bool, bool)>> = RefCell::new(Vec::new());
+    /// (vk, modifier-mask) pairs currently intercepted (+ suppressed) by the hook.
+    static CAPTURED_KEYS: RefCell<Vec<(u32, u8)>> = RefCell::new(Vec::new());
+    /// Captured key-downs (vk, modifier-mask) queued for the event loop.
+    static KEY_QUEUE: RefCell<Vec<(u32, u8)>> = RefCell::new(Vec::new());
 }
 
 static KEY_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -273,8 +274,8 @@ impl Backend for WindowsBackend {
         Ok(())
     }
 
-    fn set_captured_keys(&self, vks: &[u32]) {
-        CAPTURED_KEYS.with(|c| *c.borrow_mut() = vks.to_vec());
+    fn set_captured_keys(&self, keys: &[(u32, u8)]) {
+        CAPTURED_KEYS.with(|c| *c.borrow_mut() = keys.to_vec());
     }
 
     fn watch_keys(&self) -> Result<(), String> {
@@ -313,10 +314,10 @@ impl Backend for WindowsBackend {
                     events.on_window_activate(win);
                 }
             }
-            let pending_keys: Vec<(u32, bool, bool, bool)> =
+            let pending_keys: Vec<(u32, u8)> =
                 KEY_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
-            for (vk, shift, ctrl, alt) in pending_keys {
-                events.on_key(vk, shift, ctrl, alt);
+            for (vk, mask) in pending_keys {
+                events.on_key(vk, mask);
             }
         }
         Ok(())
@@ -354,20 +355,37 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
     if code == HC_ACTION as i32 {
         let kb = &*(lparam as *const KBDLLHOOKSTRUCT);
         let vk = kb.vkCode;
-        if CAPTURED_KEYS.with(|c| c.borrow().contains(&vk)) {
-            let msg = wparam as u32;
-            if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
-                let down = |k: u16| (GetKeyState(k as i32) as u16 & 0x8000) != 0;
-                KEY_QUEUE.with(|q| {
-                    q.borrow_mut()
-                        .push((vk, down(VK_SHIFT), down(VK_CONTROL), down(VK_MENU)))
-                });
-                let tid = HOOK_THREAD.load(Ordering::Relaxed);
-                if tid != 0 {
-                    PostThreadMessageW(tid, WM_NULL, 0, 0);
-                }
+        let msg = wparam as u32;
+        let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+        let is_up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
+        if is_down || is_up {
+            let down = |k: u16| (GetKeyState(k as i32) as u16 & 0x8000) != 0;
+            let mut mask: u8 = 0;
+            if down(VK_SHIFT) {
+                mask |= 1;
             }
-            return 1; // suppress both down and up of captured keys
+            if down(VK_CONTROL) {
+                mask |= 2;
+            }
+            if down(VK_MENU) {
+                mask |= 4;
+            }
+            if down(0x5B) || down(0x5C) {
+                mask |= 8; // VK_LWIN / VK_RWIN
+            }
+            // Match only the exact combo, so "Tab" (mask 0) leaves Alt+Tab alone.
+            let matched =
+                CAPTURED_KEYS.with(|c| c.borrow().iter().any(|&(v, m)| v == vk && m == mask));
+            if matched {
+                if is_down {
+                    KEY_QUEUE.with(|q| q.borrow_mut().push((vk, mask)));
+                    let tid = HOOK_THREAD.load(Ordering::Relaxed);
+                    if tid != 0 {
+                        PostThreadMessageW(tid, WM_NULL, 0, 0);
+                    }
+                }
+                return 1; // suppress the matched combo (down + up)
+            }
         }
     }
     CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)

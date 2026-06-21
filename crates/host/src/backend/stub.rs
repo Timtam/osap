@@ -61,7 +61,7 @@ impl Backend for StubBackend {
         Ok(())
     }
 
-    fn set_captured_keys(&self, _vks: &[u32]) {}
+    fn set_captured_keys(&self, _keys: &[(u32, u8)]) {}
     fn watch_keys(&self) -> Result<(), String> {
         Ok(())
     }

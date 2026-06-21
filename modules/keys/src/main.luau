@@ -7,13 +7,12 @@ local capturing = false
 host.hotkey.register("Ctrl+Alt+O", function()
   capturing = not capturing
   if capturing then
-    host.keys.capture("Tab", function(m)
-      host.speech.output(m.shift and "Shift Tab intercepted" or "Tab intercepted", { interrupt = true })
-    end)
-    host.keys.capture("Escape", function()
-      host.speech.output("Escape intercepted", { interrupt = true })
-    end)
-    host.speech.output("Key capture on. Tab and Escape are now intercepted.", { interrupt = true })
+    -- Plain Tab and Shift+Tab are captured; Alt+Tab is NOT (different combo),
+    -- so window switching keeps working.
+    host.keys.capture("Tab", function() host.speech.output("Tab intercepted", { interrupt = true }) end)
+    host.keys.capture("Shift+Tab", function() host.speech.output("Shift Tab intercepted", { interrupt = true }) end)
+    host.keys.capture("Escape", function() host.speech.output("Escape intercepted", { interrupt = true }) end)
+    host.speech.output("Key capture on. Plain Tab, Shift Tab and Escape are intercepted; Alt Tab still works.", { interrupt = true })
   else
     host.keys.releaseAll()
     host.speech.output("Key capture off.", { interrupt = true })

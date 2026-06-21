@@ -87,9 +87,11 @@ pub trait Backend {
     /// Starts watching foreground-window changes (delivered as `on_window_activate`).
     fn watch_foreground(&self) -> Result<(), String>;
 
-    /// Sets the virtual-key codes to intercept + suppress via the low-level
-    /// keyboard hook; captured keys are delivered as `on_key`.
-    fn set_captured_keys(&self, vks: &[u32]);
+    /// Sets the (vk, modifier-mask) pairs to intercept + suppress via the
+    /// low-level keyboard hook; captured keys are delivered as `on_key`. A pair
+    /// matches only when the pressed modifier state equals the mask (so "Tab"
+    /// (mask 0) does not swallow Alt+Tab).
+    fn set_captured_keys(&self, keys: &[(u32, u8)]);
     /// Installs the low-level keyboard hook (idempotent).
     fn watch_keys(&self) -> Result<(), String>;
 
@@ -102,7 +104,8 @@ pub trait Backend {
 pub trait HostEvents {
     fn on_hotkey(&mut self, id: i32);
     fn on_window_activate(&mut self, win: WinInfo);
-    fn on_key(&mut self, vk: u32, shift: bool, ctrl: bool, alt: bool);
+    /// A captured key fired; `mods` is the pressed modifier bitmask (MASK_*).
+    fn on_key(&mut self, vk: u32, mods: u8);
 }
 
 /// Maps a friendly key name ("Tab", "a", "F1", "Right", "Escape") to a Win32
@@ -141,6 +144,33 @@ pub fn key_to_vk(name: &str) -> Option<u32> {
         "pagedown" => 0x22,
         _ => return None,
     })
+}
+
+/// Modifier bitmask for `host.keys` (matches the pressed modifier state exactly).
+pub const MASK_SHIFT: u8 = 1;
+pub const MASK_CTRL: u8 = 2;
+pub const MASK_ALT: u8 = 4;
+pub const MASK_WIN: u8 = 8;
+
+/// Parses a key spec like "Tab", "Shift+Tab", "Ctrl+Right" into (vk, modifier mask).
+pub fn key_spec(spec: &str) -> Option<(u32, u8)> {
+    let parts: Vec<&str> = spec
+        .split('+')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let (key, mods) = parts.split_last()?;
+    let mut mask = 0u8;
+    for m in mods {
+        mask |= match m.to_ascii_lowercase().as_str() {
+            "shift" => MASK_SHIFT,
+            "ctrl" | "control" => MASK_CTRL,
+            "alt" | "option" => MASK_ALT,
+            "win" | "super" | "cmd" | "command" | "meta" => MASK_WIN,
+            _ => return None,
+        };
+    }
+    Some((key_to_vk(key)?, mask))
 }
 
 /// The backend for the current platform.
