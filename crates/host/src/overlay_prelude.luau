@@ -283,6 +283,12 @@ end
 function Overlay:attachEmbedded(spec, opts)
   local hosts = spec.hosts or { spec.host }
   local pattern = spec.control
+  -- Optional identity check: the control class often matches *any* plugin in a
+  -- host (e.g. REAPER's "Plugin<ptr>"), so `spec.identify(control)` confirms it
+  -- is really this plugin (via UIA / OCR landmark / image search — the module's
+  -- choice). Cached per control HWND, since such a check is costly.
+  local identify = spec.identify
+  local idCache = {}
   local function pluginControl()
     local active = host.window.active()
     if not active then return nil end
@@ -292,7 +298,15 @@ function Overlay:attachEmbedded(spec, opts)
     end
     if not hostOk then return nil end
     for _, c in ipairs(host.window.focusChain()) do
-      if string.match(c.class, pattern) then return c end
+      if string.match(c.class, pattern) then
+        if not identify then return c end
+        local ok = idCache[c.id]
+        if ok == nil then
+          ok = identify(c) == true
+          idCache[c.id] = ok
+        end
+        if ok then return c end
+      end
     end
     return nil
   end

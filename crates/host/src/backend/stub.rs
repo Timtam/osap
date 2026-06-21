@@ -67,6 +67,9 @@ impl Backend for StubBackend {
     fn window_focus_chain(&self) -> Vec<ControlInfo> {
         Vec::new()
     }
+    fn uia_find(&self, _hwnd: isize, _name: &str, _control_type: i32) -> bool {
+        false
+    }
     fn set_captured_keys(&self, _keys: &[(u32, u8)]) {}
     fn set_key_scope(&self, _to_foreground: bool) {}
     fn watch_keys(&self) -> Result<(), String> {

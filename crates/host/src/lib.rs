@@ -749,6 +749,18 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<()> {
     )?;
     host.set("window", win)?;
 
+    // host.uia.find(hwnd, name, controlType) — does the window's UI Automation
+    // subtree contain an element with that Name + ControlType? (Plugin identity.)
+    let uia = lua.create_table()?;
+    let sh = shared.clone();
+    uia.set(
+        "find",
+        lua.create_function(move |_, (hwnd, name, ctype): (isize, String, i32)| {
+            Ok(sh.backend.uia_find(hwnd, &name, ctype))
+        })?,
+    )?;
+    host.set("uia", uia)?;
+
     // host.screen.pixel / .size / .imageSearch
     let screen = lua.create_table()?;
     let sh = shared.clone();

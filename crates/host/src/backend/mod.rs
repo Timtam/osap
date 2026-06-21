@@ -9,6 +9,8 @@ use std::rc::Rc;
 mod windows;
 #[cfg(windows)]
 mod paddle_ocr;
+#[cfg(windows)]
+mod uia;
 #[cfg(not(windows))]
 mod stub;
 
@@ -88,6 +90,10 @@ pub trait Backend {
     /// top-level window — for detecting whether focus is inside an embedded
     /// plugin's control (which a foreground check alone can't see).
     fn window_focus_chain(&self) -> Vec<ControlInfo>;
+
+    /// Whether `hwnd`'s UI Automation subtree contains an element with the given
+    /// Name + ControlType — for confirming a plugin's identity.
+    fn uia_find(&self, hwnd: isize, name: &str, control_type: i32) -> bool;
 
     /// Size of the primary display in pixels.
     fn screen_size(&self) -> (i32, i32);

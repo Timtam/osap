@@ -35,4 +35,22 @@ local dawHosts = {
 -- embedded in a DAW host window; deactivate on leaving. naturalNav = Tab /
 -- Shift+Tab / Enter captured + suppressed, so it feels like ReaHotkey.
 ov:attach(sforzando, { naturalNav = true })
-ov:attachEmbedded({ hosts = dawHosts, control = "^Plugin%x+$" }, { naturalNav = true })
+ov:attachEmbedded({
+  hosts = dawHosts,
+  control = "^Plugin%x+$",
+  -- "^Plugin%x+$" matches any REAPER plugin, so confirm it's actually sforzando:
+  -- read the "sforzando" wordmark in the header (relative to the plugin control).
+  -- ReaHotkey uses UIA (a Pane named "PlogueXMLGUI"); this OCR landmark is the
+  -- UIA-free check (UIA-based identity to be added alongside).
+  identify = function(ctrl)
+    -- UIA (as ReaHotkey): sforzando's GUI is a Pane (50033 = UIA_PaneControlTypeId)
+    -- named "PlogueXMLGUI".
+    if host.uia and host.uia.find(ctrl.id, "PlogueXMLGUI", 50033) then
+      return true
+    end
+    -- Fallback: read the "sforzando" wordmark in the header.
+    local ox, oy = ctrl.client.x, ctrl.client.y
+    local r = host.ocr.recognize({ region = { ox + 605, oy + 33, ox + 762, oy + 70 } })
+    return string.find(string.lower(r.text or ""), "sforzando", 1, true) ~= nil
+  end,
+}, { naturalNav = true })

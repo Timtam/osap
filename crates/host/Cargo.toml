@@ -16,7 +16,7 @@ tts = { version = "0.26.3", features = ["tolk"] }
 wxdragon = "0.9.15"
 
 [target."cfg(windows)".dependencies]
-windows = { version = "0.58", features = ["Media_Ocr", "Graphics_Imaging", "Globalization", "Foundation", "Security_Cryptography", "Win32_System_WinRT", "Storage_Streams"] }
+windows = { version = "0.58", features = ["Media_Ocr", "Graphics_Imaging", "Globalization", "Foundation", "Security_Cryptography", "Win32_System_WinRT", "Storage_Streams", "Win32_UI_Accessibility", "Win32_System_Com", "Win32_System_Variant"] }
 # Secondary OCR engine (in-process, FFI): PaddleOCR recognition model via ONNX
 # Runtime, used as a fallback for text Windows.Media.Ocr won't read (lone digits).
 ort = { version = "=2.0.0-rc.10", features = ["download-binaries", "copy-dylibs", "ndarray"] }

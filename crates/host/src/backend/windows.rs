@@ -140,6 +140,10 @@ impl Backend for WindowsBackend {
         }
     }
 
+    fn uia_find(&self, hwnd: isize, name: &str, control_type: i32) -> bool {
+        super::uia::uia_find(hwnd, name, control_type)
+    }
+
     fn screen_size(&self) -> (i32, i32) {
         unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
     }
