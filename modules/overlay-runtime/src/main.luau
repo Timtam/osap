@@ -5,6 +5,16 @@
 -- Lean first version: StaticText / HotspotButton / CustomButton / OCRButton,
 -- keyboard navigation via non-conflicting hotkeys, speech composition
 -- "label, type[, value]". Context-scoping + key suppression come later.
+--
+-- NOTE: this file serves a dual role — it is BOTH the overlay prelude the host
+-- exec's into every module VM AND the code module com.platform.overlay that a
+-- dependent eval's via host.require (the trailing `return O` is what that path
+-- captures). It assumes window_prelude has already run in the same VM:
+-- host.window.test / onTrigger / onFocus are window_prelude helpers, not native
+-- primitives. The host injects window_prelude immediately before this file, so
+-- it always holds today; when the overlay injection is removed (migration step
+-- 4), window_prelude must stay injected (or become a module dependency) so
+-- attach()/attachEmbedded() keep working.
 
 local O = {}
 host.overlay = O
@@ -538,3 +548,8 @@ function O.container(spec)
   ov:_startMenuWatch()
   return ov
 end
+
+-- Exposed as the code module com.platform.overlay: dependents receive O via
+-- host.require. Also include_str'd by the host as the injected prelude, where
+-- exec() discards this return value.
+return O

@@ -25,7 +25,13 @@ use backend::{Backend, CapturedImage, ControlInfo, HostEvents, MouseButton, WinI
 use module_manifest::LoadedModule;
 
 const WINDOW_PRELUDE: &str = include_str!("window_prelude.luau");
-const OVERLAY_PRELUDE: &str = include_str!("overlay_prelude.luau");
+// The overlay runtime now lives as the code module `com.platform.overlay`
+// (modules/overlay-runtime). It is still include_str'd here and injected into
+// every VM so modules that don't yet depend on it keep `host.overlay`. The
+// trailing `return O` in that file is discarded by exec() (this injection) and
+// used by eval() when the module is loaded via host.require. The injection goes
+// away once every overlay user migrates to depending on the module.
+const OVERLAY_PRELUDE: &str = include_str!("../../../modules/overlay-runtime/src/main.luau");
 
 /// A registered global hotkey: which module owns it, the VM + callback to fire,
 /// and the spec so it can be re-registered with the OS after a disable/enable.

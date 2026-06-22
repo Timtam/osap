@@ -1,0 +1,9 @@
+id = "com.platform.overlay"
+name = "Overlay runtime"
+version = "0.1.0"
+# Loaded into the VM of every module that depends on it, so its functions
+# (O.new, O.container, the Overlay methods) are reachable via host.require.
+code_module = true
+
+[capabilities]
+require = ["window", "uia", "screen", "ocr", "input", "speech", "hotkey", "keys", "timer", "log"]
