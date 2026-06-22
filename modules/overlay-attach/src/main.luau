@@ -2,7 +2,8 @@
 -- Notepad window is focused and deactivates when you switch away. Its hotkeys
 -- (Ctrl+Alt+1/3, Ctrl+Alt+Left/Right/Enter) are live only while active.
 
-local ov = host.overlay.new("Notepad")
+local O = host.require("com.platform.overlay")
+local ov = O.new("Notepad")
 
 ov:addStaticText("Notepad helper")
 

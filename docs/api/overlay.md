@@ -96,7 +96,7 @@ ov:activate(3)     -- activate the 3rd control
 
 ## O:setControls(controls)
 
-Replaces the entire control set at runtime: unregisters/re-registers hotkeys if active and resets focus to the first focusable control. `controls: {Control}` (array of control tables). Used by container overlays when the detected library changes. Returns nothing.
+Replaces the entire control set at runtime: unregisters/re-registers hotkeys if active and resets focus to the first focusable control. `controls: {Control}` (array of control tables). Used to swap a Kontakt base overlay for a library's header + controls. Returns nothing.
 
 ## O:show()
 
@@ -132,63 +132,15 @@ ov:attachEmbedded({
 }, { naturalNav = true })
 ```
 
-## O.container(spec)
+## Plugin base + library overlays (inheritance model)
 
-Creates a **container overlay** bound to an embedded plugin that hosts swappable sub-overlays (e.g. Kontakt hosting a sample library). It attaches to the plugin via `attachEmbedded`, then watches for libraries registered under a `contract` (through `host.providers`) and mounts the matching one's controls after its own generic `header`. Library overlays are plain **data** (no Lua crosses module VMs); the container interprets them.
-
-`spec` fields:
-- `label: string?` — overlay label (default `"Plugin"`).
-- `hosts` / `host` / `control` / `identify` — passed through to `attachEmbedded` (the host matchers, the control-class pattern, and the per-control identity check).
-- `variants: {{ name: string, offset: {number, number}, identify: ((control) -> boolean)? }}?` — per-version parameters; the first variant whose `identify` passes (or has none) supplies the coordinate `offset` applied to library coordinates, so libraries auto-adapt without knowing the plugin version. Cached per control id. Defaults to a single variant built from `spec.label` / `spec.offset` / `spec.identify`.
-- `offset: {number, number}?` — default coordinate shift when no `variants` given (default `{0, 0}`).
-- `contract: string` — the provider contract key under which library descriptors are registered.
-- `header: {Control}?` — the generic, always-present control set mounted before any library's controls (default `{}`).
-- `naturalNav: boolean?`, `hoverToRead: boolean?` — forwarded to the embedded attach.
-- `pollMs: number?` — landmark-detection poll interval in ms (default `500`).
-
-Returns the configured `Overlay` (container). On creation it starts a self-rescheduling **library-detection poll** (image-matching each descriptor's `image` landmark inside the plugin rect; sticky on the current library) and a **menu-watch** (UIA control type `50009` = Menu) that, under `naturalNav`, tells the key hook to let captured nav keys pass through to a plugin's own (non-Win32) menu.
-
-### Library descriptor data format
-
-A provider registered under the container's `contract` returns plain data of the shape:
-
-```lua
-{
-  provides = "kontakt-library",       -- the contract string
-  libraries = {
-    {
-      name = "Session Strings",
-      vendor = "Native Instruments",
-      image = "session_strings_landmark.png",  -- landmark for detection
-      controls = {
-        -- coordinates are origin-relative (base coords; the container
-        -- shifts them by the active variant's offset before mounting)
-        { kind = "static",  label = "Articulation" },
-        { kind = "hotspot", label = "Legato", at = { 100, 200 } },
-        { kind = "custom",  label = "Reset", hotkey = "Alt+R" },
-        { kind = "ocr",     label = "Dynamics", region = { 40, 60, 180, 84 } },
-        { kind = "gtoggle", label = "Reverb", region = { 300, 60, 330, 90 },
-          onImage = "rev_on.png", offImage = "rev_off.png" },
-      },
-    },
-  },
-}
-```
-
-Each library's `controls[].kind` is one of `static`, `hotspot`, `custom`, `ocr`, `gtoggle` (same shapes as the `O:add*` builders), with coordinates relative to the plugin origin. The container flattens `libraries` from all providers under the contract, detects the loaded one by image-matching its `image` landmark in the plugin rect, then mounts `header` followed by the library's offset-shifted controls and announces `"<label>, <library name>"` (or `"<label>, no library"` when none matches).
-
-```lua
-local ov = O.container({
-  label = "Kontakt",
-  hosts = { { title = "REAPER" } },
-  control = "Plugin",
-  contract = "kontakt-library",
-  header = { { kind = "custom", label = "Browse", onActivate = browse } },
-  variants = {
-    { name = "Kontakt 8", offset = { 0, 0 },  identify = isK8 },
-    { name = "Kontakt 7", offset = { 0, -24 }, identify = isK7 },
-  },
-  naturalNav = true,
-})
-```
+A plugin like Kontakt is a **base overlay** (its generic header) plus separate
+**library overlays** that inherit it and take over when their landmark is on
+screen — they compete on one arbiter `slot` by `specificity` (see `host.arbiter`).
+The base and each library are built with `O.new`, `attachEmbedded` (passing
+`slot`, `specificity`, a fresh `present` landmark gate, and `pollMatch`), and
+`setControls`. The Kontakt framework lives in the `com.platform.kontakt` module;
+a library module depends on it and calls `kontakt.library({ name, image,
+controls })`. See [Nested overlays design](../nested-overlays-design.md). (The
+earlier single `O.container` + `host.providers` data model has been removed.)
 

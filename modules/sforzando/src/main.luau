@@ -12,7 +12,8 @@ local sforzando = {
   windows = { class = "PLGWindowClass" },
 }
 
-local ov = host.overlay.new("sforzando")
+local O = host.require("com.platform.overlay")
+local ov = O.new("sforzando")
 
 -- OCR regions are relative to the plugin window's top-left (x1, y1, x2, y2),
 -- as measured by ReaHotkey's overlay designer.

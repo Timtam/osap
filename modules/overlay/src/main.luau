@@ -1,8 +1,9 @@
--- A first self-voicing overlay built on host.overlay. Stays resident; navigate
+-- A first self-voicing overlay built on com.platform.overlay. Stays resident; navigate
 -- with Ctrl+Alt+Left/Right, activate with Ctrl+Alt+Enter, or use the per-control
 -- hotkeys Ctrl+Alt+1/2/3. (Non-destructive: no hotspot clicks in this demo.)
 
-local ov = host.overlay.new("Demo")
+local O = host.require("com.platform.overlay")
+local ov = O.new("Demo")
 
 ov:addStaticText("Demo overlay")
 

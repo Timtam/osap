@@ -1,23 +1,18 @@
--- host.overlay runtime: a self-voicing virtual control tree layered over the
--- primitives (speech / input / ocr / hotkey). This is the ReaHotkey "overlay"
--- concept in our system. See docs/reahotkey-port-analysis.md.
+-- Overlay runtime — the code module `com.platform.overlay`. A self-voicing
+-- virtual control tree layered over the primitives (speech / input / ocr /
+-- hotkey); the ReaHotkey "overlay" concept in our system. A module that needs it
+-- declares a dependency and gets O via host.require — the trailing `return O` is
+-- what that captures. See docs/reahotkey-port-analysis.md.
 --
--- Lean first version: StaticText / HotspotButton / CustomButton / OCRButton,
--- keyboard navigation via non-conflicting hotkeys, speech composition
--- "label, type[, value]". Context-scoping + key suppression come later.
+-- Controls: StaticText / HotspotButton / CustomButton / OCRButton / gtoggle;
+-- keyboard navigation; speech composition "label, type[, value]".
 --
--- NOTE: this file serves a dual role — it is BOTH the overlay prelude the host
--- exec's into every module VM AND the code module com.platform.overlay that a
--- dependent eval's via host.require (the trailing `return O` is what that path
--- captures). It assumes window_prelude has already run in the same VM:
--- host.window.test / onTrigger / onFocus are window_prelude helpers, not native
--- primitives. The host injects window_prelude immediately before this file, so
--- it always holds today; when the overlay injection is removed (migration step
--- 4), window_prelude must stay injected (or become a module dependency) so
--- attach()/attachEmbedded() keep working.
+-- NOTE: this assumes window_prelude has run in the same VM — host.window.test /
+-- onTrigger / onFocus are window_prelude helpers, not native primitives. The host
+-- still injects window_prelude into every VM, so it always holds; if that ever
+-- changes, the overlay must depend on a window module instead.
 
 local O = {}
-host.overlay = O
 
 -- Navigation hotkeys (non-conflicting on purpose; final UX will use Tab/arrows
 -- with context-scoping + key suppression).
@@ -476,15 +471,9 @@ function Overlay:attachEmbedded(spec, opts)
   ensureTrigger(self, opts)
 end
 
--- ===== Container overlays: a plugin that hosts swappable sub-overlays =========
--- (e.g. Kontakt hosting a sample library). The container attaches to the plugin,
--- then watches for libraries registered under a `contract` (via host.providers)
--- and mounts the matching one's controls after its own generic header. Library
--- overlays are plain DATA (no Lua crosses module VMs); the container interprets
--- them. See docs/nested-overlays-design.md.
-
--- Replaces the control set at runtime (when the detected library changes),
--- re-registering hotkeys and resetting focus to the first focusable control.
+-- Replaces the control set at runtime (e.g. a Kontakt base overlay vs a library's
+-- header + controls), re-registering hotkeys and resetting focus to the first
+-- focusable control.
 function Overlay:setControls(controls)
   if self.active then self:_unregisterHotkeys() end
   self.controls = controls
@@ -495,100 +484,6 @@ function Overlay:setControls(controls)
       if isFocusable(self, i) then self.focus = i break end
     end
   end
-end
-
--- Resolves which plugin variant (e.g. Kontakt 7 vs 8) is in front and sets the
--- container's coordinate offset accordingly, so a library's base coordinates
--- auto-adapt without the library knowing the version. Cached per control id.
-function Overlay:_resolveVariant(ctrl)
-  local off = self._variantCache[ctrl.id]
-  if off == nil then
-    off = self._variants[1].offset or { 0, 0 }
-    for _, v in ipairs(self._variants) do
-      if (not v.identify) or v.identify(ctrl) then
-        off = v.offset or { 0, 0 }
-        self._variantName = v.name
-        break
-      end
-    end
-    self._variantCache[ctrl.id] = off
-  end
-  self._offset = off
-end
-
--- All library descriptors registered under this container's contract, flattened.
-function Overlay:_libraries()
-  local out = {}
-  for _, p in ipairs(host.providers(self._contract)) do
-    for _, lib in ipairs(p.libraries or {}) do
-      out[#out + 1] = lib
-    end
-  end
-  return out
-end
-
--- Shifts a library control's authored (base) coordinates by the container's
--- per-host offset.
-function Overlay:_applyOffset(c)
-  local dx, dy = self._offset[1], self._offset[2]
-  local out =
-    { kind = c.kind, label = c.label, hotkey = c.hotkey, onImage = c.onImage, offImage = c.offImage }
-  if c.at then out.at = { c.at[1] + dx, c.at[2] + dy } end
-  if c.region then
-    out.region = { c.region[1] + dx, c.region[2] + dy, c.region[3] + dx, c.region[4] + dy }
-  end
-  return out
-end
-
--- Mounts a library (header first, then its offset-shifted controls) as the active
--- control set and announces it. nil = the NoLibrary resting state (header only).
-function Overlay:_mountLibrary(lib)
-  self._current = lib or false
-  self._mounted = true
-  local controls = {}
-  for _, c in ipairs(self._header) do controls[#controls + 1] = c end
-  if lib then
-    for _, c in ipairs(lib.controls or {}) do controls[#controls + 1] = self:_applyOffset(c) end
-  end
-  self:setControls(controls)
-  host.speech.output(self.label .. ", " .. (lib and lib.name or "no library"), { interrupt = true })
-end
-
--- Detects the loaded library by image-matching each descriptor's landmark in the
--- plugin rect. Sticky: keeps the current one while its landmark still matches.
-function Overlay:_detectLibrary()
-  if not self.activeCtx then return end
-  local ctrl = self.activeCtx.origin()
-  if not ctrl or not ctrl.client or not ctrl.bounds then return end
-  self:_resolveVariant(ctrl)
-  local ox, oy = ctrl.client.x, ctrl.client.y
-  local region = { ox, oy, ox + ctrl.bounds.w, oy + ctrl.bounds.h }
-  -- A library descriptor comes from another (decentralised) module, so guard the
-  -- image search: a bad path / error skips that library, never breaks detection.
-  local function found(image)
-    if not image then return false end
-    local ok, res = pcall(host.screen.imageSearch, image, { region = region })
-    return ok and res ~= nil
-  end
-  if self._current and found(self._current.image) then return end
-  for _, lib in ipairs(self:_libraries()) do
-    if found(lib.image) then
-      if not self._current or self._current.name ~= lib.name then self:_mountLibrary(lib) end
-      return
-    end
-  end
-  -- Nothing matched → NoLibrary (header only). Mount it when switching away from
-  -- a library, or on the first detection so the header always appears.
-  if self._current or not self._mounted then self:_mountLibrary(nil) end
-end
-
--- Recurring landmark poll (only while active), self-rescheduling.
-function Overlay:_startLibraryPoll()
-  local function tick()
-    if self.active and self._contract then self:_detectLibrary() end
-    host.timer.after(self._pollMs, tick)
-  end
-  host.timer.after(self._pollMs, tick)
 end
 
 -- While active, watch (via UIA, control type 50009 = Menu) for a menu open inside
@@ -606,45 +501,6 @@ function Overlay:_startMenuWatch()
   end)
 end
 
--- Creates a container overlay bound to an embedded plugin (`hosts`/`control`/
--- `identify`), watching libraries registered under `contract`. `offset` is the
--- per-host coordinate shift applied to a library's base coordinates; `header` is
--- the generic always-present control set.
-function O.container(spec)
-  local ov = O.new(spec.label or "Plugin")
-  -- Variants let the parent (e.g. Kontakt) carry per-version parameters (offset,
-  -- and more later): each has its own `identify`; the active one's offset is
-  -- applied, so a library's coordinates auto-adapt without knowing the version.
-  ov._variants = spec.variants
-    or { { name = spec.label, offset = spec.offset or { 0, 0 }, identify = spec.identify } }
-  ov._offset = ov._variants[1].offset or { 0, 0 }
-  ov._variantCache = {}
-  ov._contract = spec.contract
-  ov._header = spec.header or {}
-  ov._current = false
-  ov._mounted = false
-  ov._pollMs = spec.pollMs or 500
-  local variants = ov._variants
-  ov:attachEmbedded(
-    {
-      hosts = spec.hosts,
-      host = spec.host,
-      control = spec.control,
-      identify = function(c)
-        for _, v in ipairs(variants) do
-          if (not v.identify) or v.identify(c) then return true end
-        end
-        return false
-      end,
-    },
-    { naturalNav = spec.naturalNav, hoverToRead = spec.hoverToRead }
-  )
-  ov:_startLibraryPoll()
-  ov:_startMenuWatch()
-  return ov
-end
-
--- Exposed as the code module com.platform.overlay: dependents receive O via
--- host.require. Also include_str'd by the host as the injected prelude, where
--- exec() discards this return value.
+-- Exposed as the code module com.platform.overlay: a module that depends on it
+-- receives O via host.require (the trailing return is what that captures).
 return O
