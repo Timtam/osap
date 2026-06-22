@@ -8,6 +8,7 @@
 mod backend;
 mod gui;
 mod logging;
+pub mod registry;
 mod settings;
 
 use std::cell::{Cell, RefCell};
