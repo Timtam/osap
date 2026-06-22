@@ -95,6 +95,10 @@ pub trait Backend {
     /// Name + ControlType — for confirming a plugin's identity.
     fn uia_find(&self, hwnd: isize, name: &str, control_type: i32) -> bool;
 
+    /// Screen-pixel centre of that UIA element (to click it), or None if not
+    /// found / it has no on-screen rect.
+    fn uia_locate(&self, hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i32)>;
+
     /// Size of the primary display in pixels.
     fn screen_size(&self) -> (i32, i32);
     /// Color (r, g, b) of the pixel at screen coordinates.
@@ -135,6 +139,9 @@ pub trait Backend {
     /// brings another window to the foreground) receives the keys natively
     /// (ReaHotkey's `HotIf WinActive` model).
     fn set_key_scope(&self, to_foreground: bool);
+    /// Marks a (Qt/UIA) menu as open/closed in the focused plugin, so captured
+    /// nav keys pass through to it (the Win32 menu check misses plugin menus).
+    fn set_menu_open(&self, open: bool);
     /// Installs the low-level keyboard hook (idempotent).
     fn watch_keys(&self) -> Result<(), String>;
 

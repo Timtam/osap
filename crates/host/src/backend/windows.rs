@@ -72,6 +72,11 @@ static FG_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 /// control opened (another window) gets Tab/Enter natively, ReaHotkey-style.
 static KEY_SCOPE: AtomicIsize = AtomicIsize::new(0);
 
+/// Set by an overlay while a (Qt/UIA) menu is open in the focused plugin, so its
+/// captured nav keys (Tab/Enter) pass through to the menu. The Win32 menu check
+/// (`popup_menu_open`) only sees `#32768` menus, not a plugin's own Qt menus.
+static MENU_OPEN: AtomicBool = AtomicBool::new(false);
+
 pub struct WindowsBackend;
 
 impl WindowsBackend {
@@ -143,6 +148,10 @@ impl Backend for WindowsBackend {
 
     fn uia_find(&self, hwnd: isize, name: &str, control_type: i32) -> bool {
         super::uia::uia_find(hwnd, name, control_type)
+    }
+
+    fn uia_locate(&self, hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i32)> {
+        super::uia::uia_locate(hwnd, name, control_type)
     }
 
     fn screen_size(&self) -> (i32, i32) {
@@ -448,6 +457,10 @@ impl Backend for WindowsBackend {
         KEY_SCOPE.store(hwnd, Ordering::Relaxed);
     }
 
+    fn set_menu_open(&self, open: bool) {
+        MENU_OPEN.store(open, Ordering::Relaxed);
+    }
+
     fn watch_keys(&self) -> Result<(), String> {
         if KEY_HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
             return Ok(()); // already installed
@@ -672,7 +685,7 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                 // owned by the plugin, so the foreground doesn't change.
                 let scope = KEY_SCOPE.load(Ordering::Relaxed);
                 let in_scope = scope == 0 || GetForegroundWindow() as isize == scope;
-                if in_scope && !popup_menu_open() {
+                if in_scope && !popup_menu_open() && !MENU_OPEN.load(Ordering::Relaxed) {
                     if is_down {
                         KEY_QUEUE.with(|q| q.borrow_mut().push((vk, mask)));
                         let tid = HOOK_THREAD.load(Ordering::Relaxed);

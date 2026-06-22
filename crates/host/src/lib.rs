@@ -766,6 +766,26 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<()> {
         })?,
     )?;
 
+    // host.providers(contract) — every loaded module whose exports declare
+    // `provides = "<contract>"`, as a list of those export tables (data only).
+    // Lets a container module discover extension modules — e.g. plugin-library
+    // overlays — with no central list; live, so a hot-loaded provider shows up on
+    // the next query.
+    let sh = shared.clone();
+    host.set(
+        "providers",
+        lua.create_function(move |lua, contract: String| {
+            let exports = sh.exports.borrow();
+            let arr = lua.create_table()?;
+            for v in exports.values() {
+                if v.get("provides").and_then(|p| p.as_str()) == Some(contract.as_str()) {
+                    arr.push(lua.to_value(v)?)?;
+                }
+            }
+            Ok(arr)
+        })?,
+    )?;
+
     // host.speech.output(text, { interrupt = true })  (do not echo to console:
     // a screen reader would read the terminal and double the speech)
     let speech = lua.create_table()?;
@@ -866,6 +886,16 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<()> {
             Ok(())
         })?,
     )?;
+    // host.keys.menuOpen(open) — while a plugin's own (Qt/UIA) menu is open, let
+    // captured nav keys (Tab/Enter) pass through to it instead of the overlay.
+    let sh = shared.clone();
+    keys.set(
+        "menuOpen",
+        lua.create_function(move |_, open: bool| {
+            sh.backend.set_menu_open(open);
+            Ok(())
+        })?,
+    )?;
     host.set("keys", keys)?;
 
     // host.timer: one-shot delayed callbacks, fired from the event-loop tick.
@@ -955,6 +985,23 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<()> {
         "find",
         lua.create_function(move |_, (hwnd, name, ctype): (isize, String, i32)| {
             Ok(sh.backend.uia_find(hwnd, &name, ctype))
+        })?,
+    )?;
+    // host.uia.locate(hwnd, name, controlType) -> { x, y } (screen centre of the
+    // matching element, to click it) or nil. For driving plugin UI via UIA.
+    let sh = shared.clone();
+    uia.set(
+        "locate",
+        lua.create_function(move |lua, (hwnd, name, ctype): (isize, String, i32)| {
+            match sh.backend.uia_locate(hwnd, &name, ctype) {
+                Some((x, y)) => {
+                    let t = lua.create_table()?;
+                    t.set("x", x)?;
+                    t.set("y", y)?;
+                    Ok(Some(t))
+                }
+                None => Ok(None),
+            }
         })?,
     )?;
     host.set("uia", uia)?;
@@ -1152,7 +1199,11 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<()> {
     host.set(
         "path",
         lua.create_function(move |_, rel: String| {
-            Ok(sh.root(idx).join(&rel).to_string_lossy().to_string())
+            // Absolute, so a path handed to another module (e.g. a library's image
+            // searched by its container) resolves correctly regardless of that
+            // module's own working directory.
+            let p = sh.root(idx).join(&rel);
+            Ok(std::path::absolute(&p).unwrap_or(p).to_string_lossy().to_string())
         })?,
     )?;
 

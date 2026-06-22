@@ -1,0 +1,10 @@
+id = "com.platform.cinematic-studio-strings"
+name = "Cinematic Studio Series"
+version = "0.1.0"
+engine_api = ">=0.1, <0.2"
+entry = "src/main.luau"
+license = "MIT"
+dependencies = ["com.platform.kontakt"]
+
+[capabilities]
+require = ["path"]

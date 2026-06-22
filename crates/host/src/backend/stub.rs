@@ -70,8 +70,12 @@ impl Backend for StubBackend {
     fn uia_find(&self, _hwnd: isize, _name: &str, _control_type: i32) -> bool {
         false
     }
+    fn uia_locate(&self, _hwnd: isize, _name: &str, _control_type: i32) -> Option<(i32, i32)> {
+        None
+    }
     fn set_captured_keys(&self, _keys: &[(u32, u8)]) {}
     fn set_key_scope(&self, _to_foreground: bool) {}
+    fn set_menu_open(&self, _open: bool) {}
     fn watch_keys(&self) -> Result<(), String> {
         Ok(())
     }

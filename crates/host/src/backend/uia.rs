@@ -7,11 +7,12 @@ use std::cell::RefCell;
 
 use windows::core::{BSTR, VARIANT};
 use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::Accessibility::{
+    CUIAutomation, IUIAutomation, IUIAutomationElement, TreeScope_Subtree,
+    UIA_ControlTypePropertyId, UIA_NamePropertyId,
+};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
-};
-use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, TreeScope_Subtree, UIA_ControlTypePropertyId, UIA_NamePropertyId,
 };
 
 thread_local! {
@@ -19,9 +20,9 @@ thread_local! {
     static AUTOMATION: RefCell<Option<IUIAutomation>> = RefCell::new(None);
 }
 
-/// True if `hwnd`'s UIA subtree contains an element whose Name == `name` and
-/// ControlType == `control_type`. Never panics; any failure or no-match → false.
-pub fn uia_find(hwnd: isize, name: &str, control_type: i32) -> bool {
+/// Finds the first element in `hwnd`'s UIA subtree whose Name == `name` and
+/// ControlType == `control_type`. Never panics; any failure / no-match → None.
+fn find_element(hwnd: isize, name: &str, control_type: i32) -> Option<IUIAutomationElement> {
     AUTOMATION.with(|cell| unsafe {
         // The app's main thread already RoInitialize's COM (MTA) for WinRT OCR;
         // this is a harmless S_FALSE there and initializes the MTA otherwise.
@@ -29,39 +30,49 @@ pub fn uia_find(hwnd: isize, name: &str, control_type: i32) -> bool {
 
         let mut borrow = cell.borrow_mut();
         if borrow.is_none() {
-            match CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
-                Ok(a) => *borrow = Some(a),
-                Err(_) => return false,
-            }
+            *borrow =
+                CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+                    .ok();
         }
-        let automation = borrow.as_ref().unwrap();
+        let automation = borrow.as_ref()?;
 
-        let element = match automation.ElementFromHandle(HWND(hwnd as *mut _)) {
-            Ok(e) => e,
-            Err(_) => return false,
-        };
+        let element = automation.ElementFromHandle(HWND(hwnd as *mut _)).ok()?;
 
-        // Name == `name` (VT_BSTR) AND ControlType == `control_type` (VT_I4). The
-        // VARIANTs own their data and free it on drop (no manual SysFreeString).
-        let v_name: VARIANT = BSTR::from(name).into();
-        let cond_name = match automation.CreatePropertyCondition(UIA_NamePropertyId, &v_name) {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
+        // ControlType == `control_type` (VT_I4), AND Name == `name` (VT_BSTR) when
+        // a name is given; an empty name means "any element of this type" (e.g.
+        // detecting an open Menu). VARIANTs free their data on drop.
         let v_ctype: VARIANT = control_type.into();
-        let cond_ctype =
-            match automation.CreatePropertyCondition(UIA_ControlTypePropertyId, &v_ctype) {
-                Ok(c) => c,
-                Err(_) => return false,
-            };
-        let cond = match automation.CreateAndCondition(&cond_name, &cond_ctype) {
-            Ok(c) => c,
-            Err(_) => return false,
+        let cond_ctype = automation
+            .CreatePropertyCondition(UIA_ControlTypePropertyId, &v_ctype)
+            .ok()?;
+        let cond = if name.is_empty() {
+            cond_ctype
+        } else {
+            let v_name: VARIANT = BSTR::from(name).into();
+            let cond_name = automation.CreatePropertyCondition(UIA_NamePropertyId, &v_name).ok()?;
+            automation.CreateAndCondition(&cond_name, &cond_ctype).ok()?
         };
 
         // FindFirst is on the element; TreeScope_Subtree includes the element
-        // itself. A no-match comes back as Err in windows-rs (null → Err), so
-        // is_ok() == "found".
-        element.FindFirst(TreeScope_Subtree, &cond).is_ok()
+        // itself. A no-match comes back as Err in windows-rs (null → Err).
+        element.FindFirst(TreeScope_Subtree, &cond).ok()
     })
+}
+
+/// True if `hwnd`'s UIA subtree contains an element with that Name + ControlType.
+pub fn uia_find(hwnd: isize, name: &str, control_type: i32) -> bool {
+    find_element(hwnd, name, control_type).is_some()
+}
+
+/// The screen-pixel centre of that element's bounding rectangle (to click it), or
+/// None if not found / it has no on-screen rect.
+pub fn uia_locate(hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i32)> {
+    let element = find_element(hwnd, name, control_type)?;
+    unsafe {
+        let r = element.CurrentBoundingRectangle().ok()?;
+        if r.right <= r.left || r.bottom <= r.top {
+            return None; // collapsed / off-screen
+        }
+        Some(((r.left + r.right) / 2, (r.top + r.bottom) / 2))
+    }
 }
