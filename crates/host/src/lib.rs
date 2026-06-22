@@ -302,19 +302,26 @@ fn load_module(
         anyhow::bail!("dependency cycle involving module '{id}'");
     }
     let parent = dir.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-    for dep_id in module.manifest.dependencies.clone() {
-        if modules.borrow().iter().any(|m| m.id == dep_id) {
-            continue;
+    // Resolve + load dependencies first, in a scope so `id` leaves the in-progress
+    // set on every exit (including an error) — keeping insert/remove symmetric so
+    // a missing/failing dependency can't leave a stale cycle-detection entry.
+    let deps = (|| -> Result<()> {
+        for dep_id in module.manifest.dependencies.clone() {
+            if modules.borrow().iter().any(|m| m.id == dep_id) {
+                continue;
+            }
+            let dep_dir = find_sibling_module(&parent, &dep_id).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "module '{id}' depends on '{dep_id}', not found in {}",
+                    parent.display()
+                )
+            })?;
+            load_module(shared, modules, disabled_ids, loading, &dep_dir)?;
         }
-        let dep_dir = find_sibling_module(&parent, &dep_id).ok_or_else(|| {
-            anyhow::anyhow!(
-                "module '{id}' depends on '{dep_id}', not found in {}",
-                parent.display()
-            )
-        })?;
-        load_module(shared, modules, disabled_ids, loading, &dep_dir)?;
-    }
+        Ok(())
+    })();
     loading.remove(&id);
+    deps?;
 
     let idx = modules.borrow().len();
     logging::line(
