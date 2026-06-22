@@ -591,6 +591,42 @@ fn collect_code_deps(
     Ok(())
 }
 
+/// Runs `code` with `host` passed as a parameter — `function(host) <code> end` —
+/// so the chunk and every closure it creates capture this exact host table, not
+/// the VM global. Used to give a code dependency its own identity-scoped host.
+/// Returns whatever the chunk returns. (Because the code becomes a function body,
+/// a `code_module`'s file must not use top-level `...` varargs.)
+fn eval_on_host(lua: &Lua, host: &Table, code: &str, name: &str) -> Result<mlua::Value> {
+    let factory: Function =
+        lua.load(format!("return function(host) {code}\nend")).set_name(name).eval()?;
+    Ok(factory.call::<mlua::Value>(host.clone())?)
+}
+
+/// Builds the host a code dependency runs with: its identity facilities
+/// (path / resource / settings / config / screen / sound — anchored to the
+/// module's id + root) are scoped to `dep_idx`, while everything else (ownership:
+/// hotkeys / keys / timers / arbiter; plus window / uia / input / speech / …)
+/// falls through to `host_owner` (this VM's host) via the metatable. So a shared
+/// base module's settings stay under the base's id, while the hotkeys/timers its
+/// code registers belong to the VM owner (disable the owner and they go too).
+fn build_dep_host(
+    lua: &Lua,
+    shared: &Rc<Shared>,
+    host_owner: &Table,
+    dep_idx: usize,
+) -> Result<Table> {
+    let dep_full = install_host_api(lua, shared, dep_idx)?;
+    let host = lua.create_table()?;
+    for key in ["path", "resource", "settings", "config", "screen", "sound"] {
+        let v: mlua::Value = dep_full.get(key)?;
+        host.set(key, v)?;
+    }
+    let mt = lua.create_table()?;
+    mt.set("__index", host_owner)?;
+    host.set_metatable(Some(mt))?;
+    Ok(host)
+}
+
 fn load_module(
     shared: &Rc<Shared>,
     modules: &Rc<RefCell<Vec<Module>>>,
@@ -656,7 +692,12 @@ fn load_module(
     // roll the pushes (and any side effects the partial entry registered) back.
     let lua = Lua::new();
     let loaded = (|| -> Result<()> {
-        install_host_api(&lua, shared, idx).context("failed to install host API")?;
+        // This VM's host: identity (settings/resource/path) + ownership (hotkeys/
+        // timers/keys/arbiter) scoped to the loaded module (idx). Set as the global
+        // so the module's own entry + the host's dispatch (window triggers, settings
+        // onChange) resolve it; code dependencies get an identity-scoped variant.
+        let host_m = install_host_api(&lua, shared, idx).context("failed to install host API")?;
+        lua.globals().set("host", &host_m)?;
         lua.load(WINDOW_PRELUDE).set_name("window_prelude").exec()?;
 
         // Top-down dependency loading: evaluate each `code_module` dependency
@@ -677,10 +718,25 @@ fn load_module(
             let dep_code = std::fs::read_to_string(dep_entry).with_context(|| {
                 format!("dependency '{dep_id}' entry not readable: {}", dep_entry.display())
             })?;
-            let dep_ret: mlua::Value = lua
-                .load(dep_code)
-                .set_name(dep_entry.display().to_string())
-                .eval()
+            // Run the dependency's code with a host whose identity facilities are
+            // scoped to the DEPENDENCY's id (so e.g. a shared base module's settings
+            // stay under the base's id), while ownership + everything else falls
+            // through to this VM's host. Passed as a parameter so the dependency's
+            // closures capture it.
+            // The dep is guaranteed already loaded (dependencies resolve before this
+            // VM is built), so its id is in shared.ids. Fail loud rather than fall
+            // back to the owner idx, which would silently mis-scope the dep's
+            // identity — the very corruption this scoping prevents.
+            let dep_idx = shared
+                .ids
+                .borrow()
+                .iter()
+                .position(|i| i == dep_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("code dependency '{dep_id}' of '{id}' not in the module table")
+                })?;
+            let host_dep = build_dep_host(&lua, shared, &host_m, dep_idx)?;
+            let dep_ret = eval_on_host(&lua, &host_dep, &dep_code, &dep_entry.display().to_string())
                 .with_context(|| format!("error running dependency '{dep_id}' of '{id}'"))?;
             if let mlua::Value::Table(_) = dep_ret {
                 reg.set(dep_id.as_str(), dep_ret)?;
@@ -1085,7 +1141,7 @@ impl HostEvents for Dispatcher<'_> {
     }
 }
 
-fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<()> {
+fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table> {
     let host = lua.create_table()?;
 
     // host.log.info(msg)
@@ -1725,8 +1781,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<()> {
     )?;
     host.set("arbiter", arbiter)?;
 
-    lua.globals().set("host", host)?;
-    Ok(())
+    Ok(host)
 }
 
 /// Converts a Luau value into a stored setting value (scalars only).

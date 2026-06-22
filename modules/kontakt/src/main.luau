@@ -121,6 +121,9 @@ return {
 
   -- Called from a sample-library module (this file runs in its VM): an inheriting
   -- overlay that wins over the base when `lib.image` is on screen inside Kontakt.
+  -- `lib.image` (and any control on/offImage) MUST be an ABSOLUTE path (use
+  -- host.path) — the imageSearch below runs in Kontakt's identity scope, so a
+  -- relative path would resolve under Kontakt's root, not the library's.
   library = function(lib)
     local ov = O.new("Kontakt — " .. (lib.name or "library"))
     local controls = header()
