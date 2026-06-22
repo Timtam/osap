@@ -130,8 +130,9 @@ local function speakControl(self, index, moveMouse)
 end
 
 local function isFocusable(self, index)
-  local c = self.controls[index]
-  return c and c.kind ~= "static" -- skip static text when navigating
+  -- All controls are focus stops: static text is Tab-reachable and announced, it
+  -- just has no activation (Enter does nothing on it).
+  return self.controls[index] ~= nil
 end
 
 function Overlay:focusNext()

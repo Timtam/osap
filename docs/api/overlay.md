@@ -7,7 +7,7 @@ The overlay API is exposed as `host.overlay` (aliased `O` throughout). `O.new` r
 
 Source: `C:/scripts/operating-system-automation-platform/crates/host/src/overlay_prelude.luau`.
 
-Control **kinds**: `static`, `hotspot`, `custom`, `ocr`, `gtoggle`. The spoken type label is `""` (static), `"button"` (hotspot/custom/ocr), `"toggle button"` (gtoggle). `static` controls are skipped during navigation.
+Control **kinds**: `static`, `hotspot`, `custom`, `ocr`, `gtoggle`. The spoken type label is `""` (static), `"button"` (hotspot/custom/ocr), `"toggle button"` (gtoggle). **Every kind is a focus stop** — `static` text is Tab-reachable and read aloud, it just has no activation (Enter does nothing on it).
 
 ## O.new(label)
 
@@ -21,7 +21,7 @@ local ov = O.new("My Plugin")
 
 ## O:addStaticText(label)
 
-Appends a non-focusable static text control (skipped when navigating). `label: string`.
+Appends a static text control: Tab-reachable and read aloud on focus, but with no activation (Enter does nothing). `label: string`.
 
 Returns the control table `{ kind = "static", label = label }`.
 
@@ -79,11 +79,11 @@ ov:addGraphicalToggle({
 
 ## O:focusNext()
 
-Moves focus to the next focusable control (wrapping, skipping `static`) and speaks it, moving the mouse onto OCR controls if `hoverToRead` is set. No-op when there are no controls. Returns nothing.
+Moves focus to the next control (wrapping) and speaks it, moving the mouse onto OCR controls if `hoverToRead` is set. No-op when there are no controls. Returns nothing.
 
 ## O:focusPrev()
 
-Moves focus to the previous focusable control (wrapping, skipping `static`) and speaks it. No-op when empty. Returns nothing.
+Moves focus to the previous control (wrapping) and speaks it. No-op when empty. Returns nothing.
 
 ## O:activate(index)
 
