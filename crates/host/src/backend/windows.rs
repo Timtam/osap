@@ -65,6 +65,7 @@ thread_local! {
 }
 
 static KEY_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
+static FG_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 
 /// HWND (isize) the captured-key suppression is scoped to (0 = global). The hook
 /// only intercepts a captured key while this window is foreground — so a menu a
@@ -393,6 +394,13 @@ impl Backend for WindowsBackend {
     }
 
     fn watch_foreground(&self) -> Result<(), String> {
+        // Idempotent: one foreground/focus hook pair serves every module (the
+        // dispatcher routes events to whichever module has a matching trigger),
+        // so a module loaded later — at startup or hot-loaded at runtime — only
+        // needs the hooks present, not re-installed. Guard like watch_keys.
+        if FG_HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
         HOOK_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
         let hook = unsafe {
             SetWinEventHook(
@@ -406,6 +414,7 @@ impl Backend for WindowsBackend {
             )
         };
         if hook.is_null() {
+            FG_HOOK_INSTALLED.store(false, Ordering::SeqCst);
             return Err("SetWinEventHook failed".to_string());
         }
         // Also track focus changes within a window — focusing into a plugin

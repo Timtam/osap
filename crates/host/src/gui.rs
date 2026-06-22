@@ -50,6 +50,7 @@ pub fn run_gui(
     modules: Vec<ModuleInfo>,
     on_toggle: impl FnMut(usize, bool) + 'static,
     on_set: impl FnMut(usize, String, settings::Value) + 'static,
+    on_install: impl Fn(std::path::PathBuf) -> Result<(String, bool), String> + 'static,
     mut pump: impl FnMut() + 'static,
 ) -> Result<(), Box<dyn std::error::Error>> {
     wxdragon::main(move |app| {
@@ -251,6 +252,7 @@ pub fn run_gui(
             Browse(Vec<crate::registry::RemoteModule>),
             BrowseStatus(String),
             Updates(Vec<(String, String)>), // (module id, repo)
+            Installed(std::path::PathBuf),  // hot-load a freshly installed module
             Done(String),                   // a modal result message
         }
         let inbox: Arc<Mutex<Vec<Job>>> = Arc::new(Mutex::new(Vec::new()));
@@ -317,7 +319,10 @@ pub fn run_gui(
                 let inbox = inbox.clone();
                 std::thread::spawn(move || {
                     let job = match crate::registry::install(&full_name) {
-                        Ok(m) => Job::Done(format!("Installed {}. Restart to load it.", m.id)),
+                        Ok(_) => {
+                            let repo = full_name.rsplit('/').next().unwrap_or(&full_name);
+                            Job::Installed(crate::registry::modules_dir().join(repo))
+                        }
                         Err(e) => Job::Done(format!("Install failed: {e}")),
                     };
                     inbox.lock().unwrap().push(job);
@@ -448,6 +453,22 @@ pub fn run_gui(
                             }
                             updates_status.set_label(&format!("{} update(s) available.", v.len()));
                             *update_results.borrow_mut() = v;
+                        }
+                        Job::Installed(dir) => {
+                            let msg = match on_install(dir) {
+                                Ok((id, true)) => format!(
+                                    "Installed and loaded \u{201c}{id}\u{201d} — it's running now. \
+                                     Restart to manage it in this list."
+                                ),
+                                Ok((id, false)) => format!(
+                                    "Installed \u{201c}{id}\u{201d} to disk, but a copy is already \
+                                     running. Restart to apply the update."
+                                ),
+                                Err(e) => format!(
+                                    "Installed, but loading failed:\n{e}\n\nRestart the app to retry."
+                                ),
+                            };
+                            modal_message(&frame, "Installed", &msg, false);
                         }
                         Job::Done(msg) => {
                             modal_message(&frame, "Modules", &msg, false);

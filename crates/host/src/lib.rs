@@ -125,6 +125,38 @@ impl Shared {
         true
     }
 
+    /// Rolls back every module-indexed collection to `n` modules: truncates the
+    /// four parallel vectors and drops any hotkeys/keys/timers/on-change/exports
+    /// the partial load registered (unregistering OS hotkeys). Used when a
+    /// runtime hot-load fails part-way so the shared state stays aligned with
+    /// `modules` (at startup a failed load aborts the process, so this only
+    /// matters for hot-loading into a running app).
+    fn rollback_to(&self, n: usize, failed_id: &str) {
+        let stale: Vec<i32> = self
+            .hotkeys
+            .borrow()
+            .iter()
+            .filter(|(_, reg)| reg.module_idx >= n)
+            .map(|(id, _)| *id)
+            .collect();
+        {
+            let mut hk = self.hotkeys.borrow_mut();
+            for id in stale {
+                self.backend.unregister_hotkey(id);
+                hk.remove(&id);
+            }
+        }
+        self.keys.borrow_mut().retain(|(_, _, idx, ..)| *idx < n);
+        self.on_change.borrow_mut().retain(|(idx, _), _| *idx < n);
+        self.timers.borrow_mut().retain(|(_, idx, ..)| *idx < n);
+        self.roots.borrow_mut().truncate(n);
+        self.ids.borrow_mut().truncate(n);
+        self.enabled.borrow_mut().truncate(n);
+        self.schemas.borrow_mut().truncate(n);
+        self.exports.borrow_mut().remove(failed_id);
+        self.refresh_captured();
+    }
+
     /// As [`Self::apply_enabled`], persisting the new disabled-set to the
     /// portable config. Used by the GUI toggle.
     fn set_enabled(&self, idx: usize, enabled: bool) {
@@ -249,10 +281,130 @@ struct Module {
     lua: Lua,
 }
 
+/// Loads a module from an unpacked directory and runs its entry point, appending
+/// it to the shared module list. Declared dependencies are loaded first
+/// (auto-discovered among sibling directories), so their exports are available
+/// via `host.require`. Returns the loaded module's id. Used both at startup and
+/// at runtime — hot-loading a freshly installed module into the running app.
+fn load_module(
+    shared: &Rc<Shared>,
+    modules: &Rc<RefCell<Vec<Module>>>,
+    disabled_ids: &HashSet<String>,
+    loading: &mut HashSet<String>,
+    dir: &Path,
+) -> Result<(String, bool)> {
+    let module = LoadedModule::load(dir)?;
+    let id = module.manifest.id.clone();
+    if modules.borrow().iter().any(|m| m.id == id) {
+        return Ok((id, false)); // already loaded (e.g. a shared dependency)
+    }
+    if !loading.insert(id.clone()) {
+        anyhow::bail!("dependency cycle involving module '{id}'");
+    }
+    let parent = dir.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+    for dep_id in module.manifest.dependencies.clone() {
+        if modules.borrow().iter().any(|m| m.id == dep_id) {
+            continue;
+        }
+        let dep_dir = find_sibling_module(&parent, &dep_id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "module '{id}' depends on '{dep_id}', not found in {}",
+                parent.display()
+            )
+        })?;
+        load_module(shared, modules, disabled_ids, loading, &dep_dir)?;
+    }
+    loading.remove(&id);
+
+    let idx = modules.borrow().len();
+    logging::line(
+        "manager",
+        &format!(
+            "loading module: {} v{} (id {})",
+            module.manifest.name, module.manifest.version, module.manifest.id
+        ),
+    );
+    if !module.manifest.capabilities.require.is_empty() {
+        logging::line(
+            "manager",
+            &format!("  capabilities: {}", module.manifest.capabilities.require.join(", ")),
+        );
+    }
+
+    shared.roots.borrow_mut().push(module.root.clone());
+    shared.ids.borrow_mut().push(module.manifest.id.clone());
+    shared.enabled.borrow_mut().push(true);
+    shared.schemas.borrow_mut().push(HashMap::new());
+
+    // Everything past the four parallel-vector pushes above is fallible
+    // (install, prelude, reading + running the entry, exports conversion). At
+    // startup a failure aborts the process, but a runtime hot-load must never
+    // leave the shared vectors longer than `modules` — that would mis-index
+    // every later module. Run the fallible work in a scope and, on any error,
+    // roll the pushes (and any side effects the partial entry registered) back.
+    let lua = Lua::new();
+    let loaded = (|| -> Result<()> {
+        install_host_api(&lua, shared, idx).context("failed to install host API")?;
+        lua.load(WINDOW_PRELUDE).set_name("window_prelude").exec()?;
+        lua.load(OVERLAY_PRELUDE).set_name("overlay_prelude").exec()?;
+
+        let entry = module.entry_path();
+        let code = std::fs::read_to_string(&entry)
+            .with_context(|| format!("entry point not readable: {}", entry.display()))?;
+        let ret: mlua::Value = lua
+            .load(code)
+            .set_name(entry.display().to_string())
+            .eval()
+            .with_context(|| format!("error running module '{}'", module.manifest.id))?;
+        // A library module returns a table of data; expose it to dependents via
+        // host.require (data only — Lua functions can't cross module VMs).
+        if let mlua::Value::Table(_) = ret {
+            let exported: serde_json::Value = lua.from_value(ret).with_context(|| {
+                format!("module '{}' exports must be plain data", module.manifest.id)
+            })?;
+            shared
+                .exports
+                .borrow_mut()
+                .insert(module.manifest.id.clone(), exported);
+        }
+        Ok(())
+    })();
+    if let Err(e) = loaded {
+        shared.rollback_to(idx, &id);
+        return Err(e);
+    }
+
+    // If the module registered window triggers, ensure the foreground/focus hook
+    // is armed (idempotent) — covers a trigger module hot-loaded into an app that
+    // started without one, mirroring how captured keys self-arm at capture time.
+    if window_has_triggers(&lua) {
+        if let Err(e) = shared.backend.watch_foreground() {
+            logging::line("manager", &format!("watch_foreground failed: {e}"));
+        }
+    }
+
+    // Honor a disabled state persisted from a previous run: the module's entry
+    // has just registered its hotkeys/keys, so disable now to revoke them (and
+    // exclude its captured keys).
+    if disabled_ids.contains(&module.manifest.id) {
+        shared.apply_enabled(idx, false);
+    }
+
+    modules.borrow_mut().push(Module {
+        id: module.manifest.id,
+        name: module.manifest.name,
+        version: module.manifest.version,
+        dependencies: module.manifest.dependencies,
+        lua,
+    });
+    debug_assert_eq!(shared.ids.borrow().len(), modules.borrow().len());
+    Ok((id, true))
+}
+
 /// Loads and runs many modules concurrently in one process.
 pub struct Manager {
     shared: Rc<Shared>,
-    modules: Vec<Module>,
+    modules: Rc<RefCell<Vec<Module>>>,
     /// Module ids the user disabled in a previous run (from the portable config).
     disabled_ids: HashSet<String>,
     /// Module ids currently being loaded — for dependency-cycle detection.
@@ -284,7 +436,7 @@ impl Manager {
         });
         Ok(Self {
             shared,
-            modules: Vec::new(),
+            modules: Rc::new(RefCell::new(Vec::new())),
             disabled_ids,
             loading: HashSet::new(),
         })
@@ -294,89 +446,13 @@ impl Manager {
     /// Declared dependencies are loaded first (auto-discovered among sibling
     /// module directories), so their exports are available via `host.require`.
     pub fn load(&mut self, dir: impl AsRef<Path>) -> Result<()> {
-        let dir = dir.as_ref();
-        let module = LoadedModule::load(dir)?;
-        let id = module.manifest.id.clone();
-        if self.modules.iter().any(|m| m.id == id) {
-            return Ok(()); // already loaded (e.g. a shared dependency)
-        }
-        if !self.loading.insert(id.clone()) {
-            anyhow::bail!("dependency cycle involving module '{id}'");
-        }
-        let parent = dir.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-        for dep_id in module.manifest.dependencies.clone() {
-            if self.modules.iter().any(|m| m.id == dep_id) {
-                continue;
-            }
-            let dep_dir = find_sibling_module(&parent, &dep_id).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "module '{id}' depends on '{dep_id}', not found in {}",
-                    parent.display()
-                )
-            })?;
-            self.load(dep_dir)?;
-        }
-        self.loading.remove(&id);
-
-        let idx = self.modules.len();
-        logging::line(
-            "manager",
-            &format!(
-                "loading module: {} v{} (id {})",
-                module.manifest.name, module.manifest.version, module.manifest.id
-            ),
-        );
-        if !module.manifest.capabilities.require.is_empty() {
-            logging::line(
-                "manager",
-                &format!("  capabilities: {}", module.manifest.capabilities.require.join(", ")),
-            );
-        }
-
-        self.shared.roots.borrow_mut().push(module.root.clone());
-        self.shared.ids.borrow_mut().push(module.manifest.id.clone());
-        self.shared.enabled.borrow_mut().push(true);
-        self.shared.schemas.borrow_mut().push(HashMap::new());
-
-        let lua = Lua::new();
-        install_host_api(&lua, &self.shared, idx).context("failed to install host API")?;
-        lua.load(WINDOW_PRELUDE).set_name("window_prelude").exec()?;
-        lua.load(OVERLAY_PRELUDE).set_name("overlay_prelude").exec()?;
-
-        let entry = module.entry_path();
-        let code = std::fs::read_to_string(&entry)
-            .with_context(|| format!("entry point not readable: {}", entry.display()))?;
-        let ret: mlua::Value = lua
-            .load(code)
-            .set_name(entry.display().to_string())
-            .eval()
-            .with_context(|| format!("error running module '{}'", module.manifest.id))?;
-        // A library module returns a table of data; expose it to dependents via
-        // host.require (data only — Lua functions can't cross module VMs).
-        if let mlua::Value::Table(_) = ret {
-            let exported: serde_json::Value = lua.from_value(ret).with_context(|| {
-                format!("module '{}' exports must be plain data", module.manifest.id)
-            })?;
-            self.shared
-                .exports
-                .borrow_mut()
-                .insert(module.manifest.id.clone(), exported);
-        }
-
-        // Honor a disabled state persisted from a previous run: the module's
-        // entry has just registered its hotkeys/keys, so disable now to revoke
-        // them (and exclude its captured keys).
-        if self.disabled_ids.contains(&module.manifest.id) {
-            self.shared.apply_enabled(idx, false);
-        }
-
-        self.modules.push(Module {
-            id: module.manifest.id,
-            name: module.manifest.name,
-            version: module.manifest.version,
-            dependencies: module.manifest.dependencies,
-            lua,
-        });
+        load_module(
+            &self.shared,
+            &self.modules,
+            &self.disabled_ids,
+            &mut self.loading,
+            dir.as_ref(),
+        )?;
         Ok(())
     }
 
@@ -385,7 +461,7 @@ impl Manager {
     pub fn run(&mut self) -> Result<()> {
         let has_hotkeys = !self.shared.hotkeys.borrow().is_empty();
         let has_keys = !self.shared.keys.borrow().is_empty();
-        let has_triggers = self.modules.iter().any(|m| window_has_triggers(&m.lua));
+        let has_triggers = self.modules.borrow().iter().any(|m| window_has_triggers(&m.lua));
 
         if has_hotkeys || has_keys || has_triggers {
             if has_triggers {
@@ -400,9 +476,10 @@ impl Manager {
                 // delivery as the GUI path; useful for testing/automation.
                 logging::line("manager", "listening for events (headless)");
                 let backend = self.shared.backend.clone();
+                let mods = self.modules.borrow();
                 let mut dispatcher = Dispatcher {
                     shared: &self.shared,
-                    modules: &self.modules,
+                    modules: &mods[..],
                 };
                 backend
                     .run_event_loop(&mut dispatcher)
@@ -419,11 +496,13 @@ impl Manager {
                 // its dependents).
                 let depended: HashSet<String> = self
                     .modules
+                    .borrow()
                     .iter()
                     .flat_map(|m| m.dependencies.iter().cloned())
                     .collect();
                 let module_infos: Vec<gui::ModuleInfo> = self
                     .modules
+                    .borrow()
                     .iter()
                     .enumerate()
                     .map(|(i, m)| {
@@ -464,15 +543,32 @@ impl Manager {
                 let shared = self.shared.clone();
                 let toggle_shared = self.shared.clone();
                 let set_shared = self.shared.clone();
-                let modules = Rc::new(std::mem::take(&mut self.modules));
+                let modules = self.modules.clone();
+                let load_shared = self.shared.clone();
+                let load_modules = self.modules.clone();
+                let load_disabled = self.disabled_ids.clone();
                 gui::run_gui(
                     module_infos,
                     move |idx, enabled| toggle_shared.set_enabled(idx, enabled),
                     move |idx, key, value| set_shared.set_setting(idx, &key, value),
+                    // Hot-load a freshly installed module into the running app so
+                    // it's usable without a restart. Returns the module id, or an
+                    // error string if loading failed.
+                    move |dir: std::path::PathBuf| {
+                        load_module(
+                            &load_shared,
+                            &load_modules,
+                            &load_disabled,
+                            &mut HashSet::new(),
+                            &dir,
+                        )
+                        .map_err(|e| format!("{e:#}"))
+                    },
                     move || {
+                        let mods = modules.borrow();
                         let mut dispatcher = Dispatcher {
                             shared: &shared,
-                            modules: &modules[..],
+                            modules: &mods[..],
                         };
                         backend.pump_pending(&mut dispatcher);
                         shared.fire_due_timers();
