@@ -286,6 +286,37 @@ struct Module {
 /// (auto-discovered among sibling directories), so their exports are available
 /// via `host.require`. Returns the loaded module's id. Used both at startup and
 /// at runtime — hot-loading a freshly installed module into the running app.
+/// Collects, in dependency order, the transitive set of `code_module`
+/// dependencies whose code must be evaluated inside a dependent's VM (so their
+/// functions — not just data — are reachable via `host.require`). Non-code
+/// dependencies are marked visited but not collected: they stay on the data
+/// path, and a dependent never pulls their code (or their deps' code) into its
+/// VM. `seen` guards cycles/repeats; `out` ends topologically sorted (a
+/// dependency precedes the modules that depend on it).
+fn collect_code_deps(
+    parent: &Path,
+    dep_ids: &[String],
+    out: &mut Vec<(String, std::path::PathBuf)>,
+    seen: &mut HashSet<String>,
+) -> Result<()> {
+    for dep_id in dep_ids {
+        if !seen.insert(dep_id.clone()) {
+            continue; // already visited
+        }
+        let dir = find_sibling_module(parent, dep_id).ok_or_else(|| {
+            anyhow::anyhow!("dependency '{dep_id}' not found in {}", parent.display())
+        })?;
+        let lm = LoadedModule::load(&dir)?;
+        if !lm.manifest.code_module {
+            continue; // legacy data dependency — not loaded into the VM
+        }
+        // Its own code-module deps first, so they're registered before it runs.
+        collect_code_deps(parent, &lm.manifest.dependencies, out, seen)?;
+        out.push((dep_id.clone(), lm.entry_path()));
+    }
+    Ok(())
+}
+
 fn load_module(
     shared: &Rc<Shared>,
     modules: &Rc<RefCell<Vec<Module>>>,
@@ -355,6 +386,34 @@ fn load_module(
         lua.load(WINDOW_PRELUDE).set_name("window_prelude").exec()?;
         lua.load(OVERLAY_PRELUDE).set_name("overlay_prelude").exec()?;
 
+        // Top-down dependency loading: evaluate each `code_module` dependency
+        // (transitively, in dependency order) *inside this VM* and record its
+        // returned module object in the per-VM `__module_exports` registry, so the
+        // dependent's `host.require(id)` gets its functions, not just data. Legacy
+        // (non-code) dependencies are skipped here and stay on the data path.
+        let reg = lua.create_table()?;
+        lua.set_named_registry_value("__module_exports", reg.clone())?;
+        let mut code_deps: Vec<(String, std::path::PathBuf)> = Vec::new();
+        collect_code_deps(
+            &parent,
+            &module.manifest.dependencies,
+            &mut code_deps,
+            &mut HashSet::new(),
+        )?;
+        for (dep_id, dep_entry) in &code_deps {
+            let dep_code = std::fs::read_to_string(dep_entry).with_context(|| {
+                format!("dependency '{dep_id}' entry not readable: {}", dep_entry.display())
+            })?;
+            let dep_ret: mlua::Value = lua
+                .load(dep_code)
+                .set_name(dep_entry.display().to_string())
+                .eval()
+                .with_context(|| format!("error running dependency '{dep_id}' of '{id}'"))?;
+            if let mlua::Value::Table(_) = dep_ret {
+                reg.set(dep_id.as_str(), dep_ret)?;
+            }
+        }
+
         let entry = module.entry_path();
         let code = std::fs::read_to_string(&entry)
             .with_context(|| format!("entry point not readable: {}", entry.display()))?;
@@ -363,16 +422,18 @@ fn load_module(
             .set_name(entry.display().to_string())
             .eval()
             .with_context(|| format!("error running module '{}'", module.manifest.id))?;
-        // A library module returns a table of data; expose it to dependents via
-        // host.require (data only — Lua functions can't cross module VMs).
-        if let mlua::Value::Table(_) = ret {
-            let exported: serde_json::Value = lua.from_value(ret).with_context(|| {
-                format!("module '{}' exports must be plain data", module.manifest.id)
-            })?;
-            shared
-                .exports
-                .borrow_mut()
-                .insert(module.manifest.id.clone(), exported);
+        // Publish the module's returned table as a cross-VM *data* export for the
+        // legacy host.require path + host.providers discovery. A `code_module`
+        // typically returns functions (consumed in-VM via the registry above);
+        // those aren't serializable, so the data export is best-effort — skipped
+        // rather than fatal when the return isn't plain data.
+        if let mlua::Value::Table(_) = &ret {
+            if let Ok(exported) = lua.from_value::<serde_json::Value>(ret.clone()) {
+                shared
+                    .exports
+                    .borrow_mut()
+                    .insert(module.manifest.id.clone(), exported);
+            }
         }
         Ok(())
     })();
@@ -749,13 +810,21 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<()> {
     )?;
     host.set("log", log)?;
 
-    // host.require(id) — the data a dependency module exported (declared in the
-    // manifest `dependencies`; a library module exposes data by returning a
-    // table). Data only — functions can't cross module VMs.
+    // host.require(id) — access a declared dependency. A `code_module` dependency
+    // is evaluated *inside this VM* (top-down loading), so this returns its module
+    // object with functions intact (looked up in the per-VM `__module_exports`
+    // registry). Otherwise it falls back to the legacy cross-VM path: the
+    // dependency's serialized data export (functions can't cross VMs that way).
     let sh = shared.clone();
     host.set(
         "require",
-        lua.create_function(move |lua, id: String| {
+        lua.create_function(move |lua, id: String| -> mlua::Result<mlua::Value> {
+            if let Ok(reg) = lua.named_registry_value::<mlua::Table>("__module_exports") {
+                let m: mlua::Value = reg.get(id.as_str())?;
+                if !m.is_nil() {
+                    return Ok(m);
+                }
+            }
             let exports = sh.exports.borrow();
             match exports.get(&id) {
                 Some(v) => lua.to_value(v),

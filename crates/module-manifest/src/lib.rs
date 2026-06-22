@@ -23,6 +23,14 @@ pub struct ModuleManifest {
     /// via `host.require`). Loaded first; auto-discovered among sibling modules.
     #[serde(default)]
     pub dependencies: Vec<String>,
+    /// When true, this module's *code* is evaluated inside the VM of every module
+    /// that depends on it, so its functions — not just serialized data — are
+    /// reachable through `host.require`. Default (false) keeps the legacy
+    /// data-only export path. Migration flag: the long-term model loads every
+    /// dependency this way (one VM per dependency tree); see
+    /// `docs/nested-overlays-design.md`.
+    #[serde(default)]
+    pub code_module: bool,
     #[serde(default)]
     pub capabilities: Capabilities,
 }
