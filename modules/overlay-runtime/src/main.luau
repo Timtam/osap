@@ -40,6 +40,12 @@ function O.new(label)
       contexts = {},
       activeCtx = false,
       triggerSet = false,
+      -- Arbiter participation (set when attached with a `slot`): the host elects
+      -- which competing overlay is active by specificity, instead of this overlay
+      -- activating itself directly. false until attached with a slot.
+      _slot = false,
+      _claim = false,
+      _specificity = 0,
     },
     Overlay
   )
@@ -281,34 +287,77 @@ function Overlay:_deactivate()
   self:_unregisterHotkeys()
 end
 
--- Registers the single foreground trigger (once) that drives activation across
--- all of the overlay's contexts: the first context that matches the focused
--- window wins and supplies the coordinate origin.
+-- Re-evaluates the overlay's contexts against the current state (active window +
+-- focus chain): the first matching context wins and supplies the coordinate
+-- origin. In arbiter mode (attached with a `slot`) the match is reported to the
+-- host arbiter, which decides — by specificity, across every overlay on that slot
+-- — whether this overlay activates; otherwise the overlay activates/deactivates
+-- itself directly (the legacy single-overlay path).
+function Overlay:_recheck()
+  local matched = false
+  for _, ctx in ipairs(self.contexts) do
+    if ctx.match() then
+      self.activeCtx = ctx
+      matched = true
+      break
+    end
+  end
+  if not matched then self.activeCtx = false end
+  if self._slot then
+    host.arbiter.setMatching(self._slot, self._claim, matched)
+  elseif matched then
+    self:_activate()
+  else
+    self:_deactivate()
+  end
+end
+
+-- Registers the single foreground/focus trigger (once) that drives _recheck
+-- across all of the overlay's contexts. With `opts.slot` the overlay joins the
+-- host arbiter for that slot at `opts.specificity` (a base overlay and the
+-- overlays inheriting it MUST pass the same slot string, fixed on the first
+-- attach); the arbiter then drives _activate/_deactivate. (Overlays whose match
+-- changes with no window event — e.g. a library landmark appearing inside an
+-- already-focused plugin — get a polled re-check in step 4 part 2, on a
+-- disable-safe host timer.)
 local function ensureTrigger(self, opts)
   if opts then
     self.naturalNav = opts.naturalNav == true
     self.hoverToRead = opts.hoverToRead == true
+    -- Arbiter mode is fixed by the first attach that carries a slot; an overlay
+    -- competes on exactly one slot. A later attach with a different slot is a
+    -- mistake (its context would silently fold into the first slot's claim), so
+    -- log it rather than rebind.
+    if opts.slot then
+      if not self._slot then
+        self._slot = opts.slot
+        self._specificity = opts.specificity or 0
+        self._claim = host.arbiter.register(
+          self._slot,
+          self._specificity,
+          function() self:_activate() end,
+          function() self:_deactivate() end
+        )
+      elseif opts.slot ~= self._slot then
+        host.log.info(
+          "overlay '"
+            .. tostring(self.label)
+            .. "' already bound to arbiter slot '"
+            .. self._slot
+            .. "', ignoring '"
+            .. opts.slot
+            .. "'"
+        )
+      end
+    end
   end
   if self.triggerSet then return end
   self.triggerSet = true
-  -- Re-evaluate the contexts from the *current* state (active window + focus
-  -- chain): the first context that matches wins and supplies the origin.
-  local function check()
-    for _, ctx in ipairs(self.contexts) do
-      if ctx.match() then
-        self.activeCtx = ctx
-        self:_activate()
-        return
-      end
-    end
-    self.activeCtx = false
-    self:_deactivate()
-  end
   -- Foreground changes AND focus changes (the latter catches focus moving into
   -- an embedded plugin without a foreground change).
-  host.window.onTrigger({}, { on = "activate" }, function() check() end)
-  host.window.onFocus(function() check() end)
-  check()
+  host.window.onTrigger({}, { on = "activate" }, function() self:_recheck() end)
+  host.window.onFocus(function() self:_recheck() end)
+  self:_recheck()
 end
 
 -- Context-bound (standalone): active while a window matching `matcher` is
