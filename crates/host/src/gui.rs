@@ -247,12 +247,17 @@ pub fn run_gui(
                 };
                 let found = {
                     let rb = rows.borrow();
+                    let graph: Vec<(String, Vec<String>)> =
+                        rb.iter().map(|x| (x.id.clone(), x.dependencies.clone())).collect();
                     rb.iter().find(|r| native_checkboxes::same(&r.item, &sel)).map(|r| {
-                        let needed_by: Vec<String> = rb
-                            .iter()
-                            .filter(|x| x.dependencies.iter().any(|d| *d == r.id))
-                            .map(|x| format!("{} ({})", x.name, x.id))
-                            .collect();
+                        // Block if any loaded module *transitively* depends on this one —
+                        // removing it would break them (not just its direct dependents).
+                        let needed_by: Vec<String> =
+                            crate::registry::transitive_dependents(&r.id, &graph)
+                                .iter()
+                                .filter_map(|did| rb.iter().find(|x| &x.id == did))
+                                .map(|x| format!("{} ({})", x.name, x.id))
+                                .collect();
                         (r.id.clone(), r.module_idx, needed_by)
                     })
                 };
@@ -286,6 +291,18 @@ pub fn run_gui(
                 let msg = match crate::registry::uninstall(&id) {
                     Ok(true) => {
                         on_remove(module_idx); // revoke its hotkeys/keys/triggers now
+                        // Dependencies only this module pulled in, now needed by nothing
+                        // else (cascading) — offer to remove them too. Computed from the
+                        // graph that still includes the module being removed.
+                        let orphan_ids: Vec<String> = {
+                            let rb = rows.borrow();
+                            let graph: Vec<(String, Vec<String>)> =
+                                rb.iter().map(|x| (x.id.clone(), x.dependencies.clone())).collect();
+                            crate::registry::orphaned_by(std::slice::from_ref(&id), &graph)
+                                .into_iter()
+                                .filter(|oid| rb.iter().any(|x| &x.id == oid))
+                                .collect()
+                        };
                         let pos = rows.borrow().iter().position(|r| r.id == id);
                         if let Some(pos) = pos {
                             let removed = rows.borrow_mut().remove(pos);
@@ -293,7 +310,36 @@ pub fn run_gui(
                             list.delete(&removed.item);
                         }
                         settings_btn.enable(false);
-                        format!("Uninstalled and disabled \u{201c}{id}\u{201d}.")
+                        if !orphan_ids.is_empty()
+                            && modal_message(
+                                &frame,
+                                "Remove unused dependencies?",
+                                &format!(
+                                    "These were only needed by \u{201c}{id}\u{201d} and are now \
+                                     unused:\n\u{2022} {}\n\nRemove them too?",
+                                    orphan_ids.join("\n\u{2022} ")
+                                ),
+                                true,
+                            )
+                        {
+                            for oid in &orphan_ids {
+                                let _ = crate::registry::uninstall(oid);
+                                let pos = rows.borrow().iter().position(|r| &r.id == oid);
+                                if let Some(p) = pos {
+                                    let removed = rows.borrow_mut().remove(p);
+                                    states.borrow_mut().remove(p);
+                                    on_remove(removed.module_idx);
+                                    list.delete(&removed.item);
+                                }
+                            }
+                            format!(
+                                "Uninstalled \u{201c}{id}\u{201d} and {} now-unused dependenc{}.",
+                                orphan_ids.len(),
+                                if orphan_ids.len() == 1 { "y" } else { "ies" }
+                            )
+                        } else {
+                            format!("Uninstalled and disabled \u{201c}{id}\u{201d}.")
+                        }
                     }
                     Ok(false) => format!("\u{201c}{id}\u{201d} has no installed files to remove."),
                     Err(e) => format!("Could not uninstall {id}: {e}"),

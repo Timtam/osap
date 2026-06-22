@@ -125,10 +125,38 @@ fn cmd_update() -> Result<()> {
 
 fn cmd_uninstall(id: Option<&str>) -> Result<()> {
     let id = id.ok_or_else(|| anyhow::anyhow!("usage: uninstall <module-id>"))?;
-    if registry::uninstall(id)? {
-        println!("Uninstalled {id}.");
-    } else {
+    let installed = registry::installed();
+    if !installed.iter().any(|m| m.id == id) {
         println!("No installed module with id '{id}'.");
+        return Ok(());
+    }
+    let graph: Vec<(String, Vec<String>)> =
+        installed.iter().map(|m| (m.id.clone(), m.dependencies.clone())).collect();
+
+    // Block if another installed module transitively depends on it.
+    let needed_by = registry::transitive_dependents(id, &graph);
+    if !needed_by.is_empty() {
+        println!("Can't uninstall '{id}': required by {}. Remove those first.", needed_by.join(", "));
+        return Ok(());
+    }
+
+    registry::uninstall(id)?;
+    println!("Uninstalled {id}.");
+
+    // Offer to remove dependencies it pulled in that nothing else needs (cascades).
+    let orphans = registry::orphaned_by(std::slice::from_ref(&id.to_string()), &graph);
+    if !orphans.is_empty() {
+        print!("Also remove now-unused dependencies ({})? [y/N] ", orphans.join(", "));
+        std::io::stdout().flush().ok();
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            for oid in &orphans {
+                if registry::uninstall(oid)? {
+                    println!("Uninstalled {oid}.");
+                }
+            }
+        }
     }
     Ok(())
 }

@@ -31,6 +31,8 @@ pub struct InstalledModule {
     pub name: String,
     pub version: String,
     pub dir: PathBuf,
+    /// Ids this module declares as dependencies (for the install/uninstall graph).
+    pub dependencies: Vec<String>,
     /// (repo, branch, commit sha) it was installed from, if installed remotely.
     pub source: Option<Source>,
 }
@@ -188,6 +190,7 @@ pub fn installed() -> Vec<InstalledModule> {
                 id: m.manifest.id,
                 name: m.manifest.name,
                 version: m.manifest.version,
+                dependencies: m.manifest.dependencies,
                 source: read_source(&dir),
                 dir,
             });
@@ -214,6 +217,111 @@ pub fn update_available(m: &InstalledModule) -> Option<String> {
     let src = m.source.as_ref()?;
     let latest = latest_sha(&src.repo, &src.branch).ok()?;
     (!latest.is_empty() && latest != src.sha).then_some(latest)
+}
+
+// --- Dependency graph (install/uninstall) -------------------------------------
+// `graph` is a slice of (module id, its declared dependency ids) — build it from
+// `installed()` (id + dependencies). Pure functions, so they're unit-tested.
+
+/// Module ids that **transitively** depend on `id` — removing `id` would break
+/// them, so they must be removed first (or block the uninstall).
+pub fn transitive_dependents(id: &str, graph: &[(String, Vec<String>)]) -> Vec<String> {
+    use std::collections::HashSet;
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut stack = vec![id.to_string()];
+    while let Some(cur) = stack.pop() {
+        for (mid, deps) in graph {
+            if deps.iter().any(|d| d == &cur) && seen.insert(mid.clone()) {
+                out.push(mid.clone());
+                stack.push(mid.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Installed dependency modules left **orphaned** — needed by nothing that
+/// survives — when every id in `removing` is uninstalled. Cascades: an orphan's
+/// own now-unneeded dependencies are orphaned too. Use to offer cleanup after a
+/// removal.
+pub fn orphaned_by(removing: &[String], graph: &[(String, Vec<String>)]) -> Vec<String> {
+    use std::collections::HashSet;
+    let installed: HashSet<&str> = graph.iter().map(|(m, _)| m.as_str()).collect();
+    let mut gone: HashSet<String> = removing.iter().cloned().collect();
+    let mut orphans: Vec<String> = Vec::new();
+    loop {
+        let mut next: Option<String> = None;
+        'scan: for (mid, deps) in graph {
+            if !gone.contains(mid) {
+                continue; // only the deps that a removed module pulled in
+            }
+            for d in deps {
+                if !installed.contains(d.as_str()) || gone.contains(d) {
+                    continue;
+                }
+                let still_needed = graph
+                    .iter()
+                    .any(|(m, ds)| !gone.contains(m) && ds.iter().any(|x| x == d));
+                if !still_needed {
+                    next = Some(d.clone());
+                    break 'scan;
+                }
+            }
+        }
+        match next {
+            Some(d) => {
+                gone.insert(d.clone());
+                orphans.push(d);
+            }
+            None => break,
+        }
+    }
+    orphans
+}
+
+#[cfg(test)]
+mod graph_tests {
+    use super::*;
+    fn g(pairs: &[(&str, &[&str])]) -> Vec<(String, Vec<String>)> {
+        pairs
+            .iter()
+            .map(|(id, deps)| (id.to_string(), deps.iter().map(|s| s.to_string()).collect()))
+            .collect()
+    }
+    // css -> kontakt -> {overlay, daw}; sforzando -> {overlay, daw}.
+    fn sample() -> Vec<(String, Vec<String>)> {
+        g(&[
+            ("css", &["kontakt"]),
+            ("kontakt", &["overlay", "daw"]),
+            ("sforzando", &["overlay", "daw"]),
+            ("overlay", &[]),
+            ("daw", &[]),
+        ])
+    }
+    #[test]
+    fn dependents_walk_the_whole_chain() {
+        let graph = sample();
+        let mut d = transitive_dependents("overlay", &graph);
+        d.sort();
+        assert_eq!(d, ["css", "kontakt", "sforzando"]);
+        let mut k = transitive_dependents("kontakt", &graph);
+        k.sort();
+        assert_eq!(k, ["css"]);
+        assert!(transitive_dependents("css", &graph).is_empty());
+    }
+    #[test]
+    fn orphans_cascade_but_spare_still_needed() {
+        let graph = sample();
+        // Removing css orphans only kontakt — overlay+daw are still needed by sforzando.
+        let mut o = orphaned_by(&["css".into()], &graph);
+        o.sort();
+        assert_eq!(o, ["kontakt"]);
+        // Removing css AND sforzando cascades: kontakt, then overlay, then daw.
+        let mut o2 = orphaned_by(&["css".into(), "sforzando".into()], &graph);
+        o2.sort();
+        assert_eq!(o2, ["daw", "kontakt", "overlay"]);
+    }
 }
 
 fn read_source(dir: &Path) -> Option<Source> {
