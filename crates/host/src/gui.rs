@@ -10,6 +10,7 @@
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use wxdragon::prelude::*;
 
@@ -114,25 +115,36 @@ pub fn run_gui(
         let bs = BoxSizer::builder(Orientation::Vertical).build();
         bs.add(
             &StaticText::builder(&browse)
-                .with_label("Browse + install modules from GitHub — coming in the next step.")
+                .with_label("Search the module registry (public GitHub repos):")
                 .build(),
             0,
-            SizerFlag::All,
+            SizerFlag::Left | SizerFlag::Top,
             12,
         );
+        let search = TextCtrl::builder(&browse).build();
+        search.set_name("Search modules");
+        bs.add(&search, 0, SizerFlag::All | SizerFlag::Expand, 12);
+        let search_btn = Button::builder(&browse).with_label("Search").build();
+        bs.add(&search_btn, 0, SizerFlag::All, 6);
+        let browse_list = ListBox::builder(&browse).build();
+        bs.add(&browse_list, 1, SizerFlag::All | SizerFlag::Expand, 12);
+        let install_btn = Button::builder(&browse).with_label("Install selected").build();
+        bs.add(&install_btn, 0, SizerFlag::All, 6);
+        let browse_status = StaticText::builder(&browse).with_label("").build();
+        bs.add(&browse_status, 0, SizerFlag::All, 6);
         browse.set_sizer(bs, true);
         notebook.add_page(&browse, "Browse", false, None);
 
         let updates = Panel::builder(&notebook).build();
         let us = BoxSizer::builder(Orientation::Vertical).build();
-        us.add(
-            &StaticText::builder(&updates)
-                .with_label("Check + apply module updates — coming in the next step.")
-                .build(),
-            0,
-            SizerFlag::All,
-            12,
-        );
+        let check_btn = Button::builder(&updates).with_label("Check for updates").build();
+        us.add(&check_btn, 0, SizerFlag::All, 12);
+        let updates_list = ListBox::builder(&updates).build();
+        us.add(&updates_list, 1, SizerFlag::All | SizerFlag::Expand, 12);
+        let update_btn = Button::builder(&updates).with_label("Update selected").build();
+        us.add(&update_btn, 0, SizerFlag::All, 6);
+        let updates_status = StaticText::builder(&updates).with_label("").build();
+        us.add(&updates_status, 0, SizerFlag::All, 6);
         updates.set_sizer(us, true);
         notebook.add_page(&updates, "Updates", false, None);
 
@@ -191,9 +203,7 @@ pub fn run_gui(
                 };
                 let idx = idx_map[row];
                 if settings_by_module[idx].is_empty() {
-                    MessageDialog::builder(&frame, "This module has no settings.", "Settings")
-                        .build()
-                        .show_modal();
+                    modal_message(&frame, "Settings", "This module has no settings.", false);
                     return;
                 }
                 open_settings_dialog(&frame, idx, &settings_by_module[idx], &on_set);
@@ -213,18 +223,16 @@ pub fn run_gui(
                     return;
                 };
                 let id = &row_ids[row];
-                let confirm = MessageDialog::builder(
+                let confirm = modal_message(
                     &frame,
+                    "Uninstall module",
                     &format!(
                         "Remove the installed files for \u{201c}{id}\u{201d}?\n\n\
                          The running instance keeps going until you restart."
                     ),
-                    "Uninstall module",
-                )
-                .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
-                .build()
-                .show_modal();
-                if confirm != ID_YES {
+                    true,
+                );
+                if !confirm {
                     return;
                 }
                 let msg = match crate::registry::uninstall(id) {
@@ -232,7 +240,131 @@ pub fn run_gui(
                     Ok(false) => format!("\u{201c}{id}\u{201d} has no installed files to remove."),
                     Err(e) => format!("Could not uninstall {id}: {e}"),
                 };
-                MessageDialog::builder(&frame, &msg, "Uninstall").build().show_modal();
+                modal_message(&frame, "Uninstall", &msg, false);
+            });
+        }
+
+        // ----- Browse / Updates: background HTTP (GitHub) delivered to the GUI
+        // thread via a shared inbox drained on the timer tick (wxdragon has no
+        // CallAfter). Threads only move owned data; controls stay on this thread.
+        enum Job {
+            Browse(Vec<crate::registry::RemoteModule>),
+            BrowseStatus(String),
+            Updates(Vec<(String, String)>), // (module id, repo)
+            Done(String),                   // a modal result message
+        }
+        let inbox: Arc<Mutex<Vec<Job>>> = Arc::new(Mutex::new(Vec::new()));
+        let browse_results: Rc<RefCell<Vec<crate::registry::RemoteModule>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        let update_results: Rc<RefCell<Vec<(String, String)>>> = Rc::new(RefCell::new(Vec::new()));
+
+        // Search.
+        {
+            let (inbox, browse_status) = (inbox.clone(), browse_status);
+            search_btn.on_click(move |_| {
+                let query = search.get_value();
+                browse_status.set_label("Searching…");
+                let inbox = inbox.clone();
+                std::thread::spawn(move || {
+                    let job = match crate::registry::search(query.trim()) {
+                        Ok(v) => Job::Browse(v),
+                        Err(e) => Job::BrowseStatus(format!("Search failed: {e}")),
+                    };
+                    inbox.lock().unwrap().push(job);
+                });
+            });
+        }
+
+        // Install selected (review capabilities first).
+        {
+            let (browse_results, browse_status, inbox) =
+                (browse_results.clone(), browse_status, inbox.clone());
+            install_btn.on_click(move |_| {
+                let Some(row) = browse_list.get_selection() else {
+                    return;
+                };
+                let (full_name, branch) = {
+                    let results = browse_results.borrow();
+                    let Some(rm) = results.get(row as usize) else {
+                        return;
+                    };
+                    (rm.full_name.clone(), rm.default_branch.clone())
+                };
+                browse_status.set_label("Fetching manifest…");
+                let manifest = match crate::registry::fetch_manifest(&full_name, &branch) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        browse_status.set_label(&format!("Failed: {e}"));
+                        return;
+                    }
+                };
+                browse_status.set_label("");
+                let caps = &manifest.capabilities.require;
+                let caps_str = if caps.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    caps.join("\n\u{2022} ")
+                };
+                let msg = format!(
+                    "\u{201c}{}\u{201d} v{} ({})\n\nRequested capabilities:\n\u{2022} {}\n\nInstall this module?",
+                    manifest.name, manifest.version, manifest.id, caps_str
+                );
+                let ok = modal_message(&frame, "Review capabilities", &msg, true);
+                if !ok {
+                    return;
+                }
+                browse_status.set_label(&format!("Installing {full_name}…"));
+                let inbox = inbox.clone();
+                std::thread::spawn(move || {
+                    let job = match crate::registry::install(&full_name) {
+                        Ok(m) => Job::Done(format!("Installed {}. Restart to load it.", m.id)),
+                        Err(e) => Job::Done(format!("Install failed: {e}")),
+                    };
+                    inbox.lock().unwrap().push(job);
+                });
+            });
+        }
+
+        // Check for updates.
+        {
+            let (inbox, updates_status) = (inbox.clone(), updates_status);
+            check_btn.on_click(move |_| {
+                updates_status.set_label("Checking…");
+                let inbox = inbox.clone();
+                std::thread::spawn(move || {
+                    let mut updatable = Vec::new();
+                    for m in crate::registry::installed() {
+                        if crate::registry::update_available(&m).is_some() {
+                            if let Some(src) = &m.source {
+                                updatable.push((m.id.clone(), src.repo.clone()));
+                            }
+                        }
+                    }
+                    inbox.lock().unwrap().push(Job::Updates(updatable));
+                });
+            });
+        }
+
+        // Update selected.
+        {
+            let (update_results, updates_status, inbox) =
+                (update_results.clone(), updates_status, inbox.clone());
+            update_btn.on_click(move |_| {
+                let Some(row) = updates_list.get_selection() else {
+                    return;
+                };
+                let Some((id, repo)) = update_results.borrow().get(row as usize).cloned() else {
+                    return;
+                };
+                updates_status.set_label(&format!("Updating {id}…"));
+                let inbox = inbox.clone();
+                std::thread::spawn(move || {
+                    let job = match crate::registry::install(&repo) {
+                        Ok(m) => Job::Done(format!("Updated {}. Restart to apply.", m.id)),
+                        Err(e) => Job::Done(format!("Update failed: {e}")),
+                    };
+                    inbox.lock().unwrap().push(job);
+                });
             });
         }
 
@@ -286,7 +418,44 @@ pub fn run_gui(
         // closure returns *before* the loop runs, so the timer must outlive it —
         // leak it for the app's lifetime (its Drop would stop the wxTimer).
         let timer = Timer::new(&frame);
-        timer.on_tick(move |_event| pump());
+        {
+            let inbox = inbox.clone();
+            timer.on_tick(move |_event| {
+                pump();
+                // Drain background-job results and apply them on the GUI thread.
+                let jobs: Vec<Job> = std::mem::take(&mut *inbox.lock().unwrap());
+                for job in jobs {
+                    match job {
+                        Job::Browse(v) => {
+                            browse_list.clear();
+                            for r in &v {
+                                let desc = if r.description.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" — {}", r.description)
+                                };
+                                browse_list
+                                    .append(&format!("{}{}  ({} stars)", r.full_name, desc, r.stars));
+                            }
+                            browse_status.set_label(&format!("{} result(s).", v.len()));
+                            *browse_results.borrow_mut() = v;
+                        }
+                        Job::BrowseStatus(s) => browse_status.set_label(&s),
+                        Job::Updates(v) => {
+                            updates_list.clear();
+                            for (id, repo) in &v {
+                                updates_list.append(&format!("{id}  ({repo})"));
+                            }
+                            updates_status.set_label(&format!("{} update(s) available.", v.len()));
+                            *update_results.borrow_mut() = v;
+                        }
+                        Job::Done(msg) => {
+                            modal_message(&frame, "Modules", &msg, false);
+                        }
+                    }
+                }
+            });
+        }
         timer.start(15, false);
         std::mem::forget(timer);
 
@@ -321,6 +490,62 @@ fn number_to_string(v: &settings::Value) -> String {
         settings::Value::Int(i) => i.to_string(),
         settings::Value::Float(f) => f.to_string(),
         _ => "0".to_string(),
+    }
+}
+
+/// A modal message dialog whose body text is screen-reader-accessible: the
+/// message lives in a focused, read-only multiline text control. (A bare
+/// StaticText isn't focusable, so a wxMessageDialog's body is only reachable by
+/// object navigation — this is read aloud on open.) Returns whether the user
+/// confirmed (Yes); an OK-only dialog always returns true.
+fn modal_message(parent: &Frame, title: &str, message: &str, yes_no: bool) -> bool {
+    let dialog = Dialog::builder(parent, title).build();
+    let panel = Panel::builder(&dialog).build();
+    let sizer = BoxSizer::builder(Orientation::Vertical).build();
+
+    let text = TextCtrl::builder(&panel)
+        .with_style(TextCtrlStyle::MultiLine | TextCtrlStyle::ReadOnly)
+        .build();
+    text.set_value(message);
+    text.set_name(title);
+    sizer.add(&text, 1, SizerFlag::All | SizerFlag::Expand, 12);
+
+    let buttons = BoxSizer::builder(Orientation::Horizontal).build();
+    if yes_no {
+        let yes = Button::builder(&panel).with_label("Yes").build();
+        let no = Button::builder(&panel).with_label("No").build();
+        {
+            let d = dialog;
+            yes.on_click(move |_| d.end_modal(ID_YES));
+        }
+        {
+            let d = dialog;
+            no.on_click(move |_| d.end_modal(ID_NO));
+        }
+        buttons.add(&yes, 0, SizerFlag::All, 6);
+        buttons.add(&no, 0, SizerFlag::All, 6);
+    } else {
+        let ok = Button::builder(&panel).with_label("OK").build();
+        {
+            let d = dialog;
+            ok.on_click(move |_| d.end_modal(ID_OK));
+        }
+        buttons.add(&ok, 0, SizerFlag::All, 6);
+    }
+    sizer.add_sizer(&buttons, 0, SizerFlag::AlignRight | SizerFlag::All, 6);
+
+    panel.set_sizer(sizer, true);
+    let dlg_sizer = BoxSizer::builder(Orientation::Vertical).build();
+    dlg_sizer.add(&panel, 1, SizerFlag::Expand, 0);
+    dialog.set_sizer_and_fit(dlg_sizer, true);
+
+    text.set_focus(); // read the message aloud when the dialog opens
+    let res = dialog.show_modal();
+    dialog.destroy();
+    if yes_no {
+        res == ID_YES
+    } else {
+        true
     }
 }
 
