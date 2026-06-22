@@ -42,6 +42,31 @@ struct HotkeyReg {
     spec: String,
 }
 
+/// One overlay's claim on an arbiter slot: which module/VM owns it, how specific
+/// it is, whether it currently matches, and the callbacks to (de)activate it.
+struct ArbiterClaim {
+    handle: i64,
+    module_idx: usize,
+    specificity: i64,
+    lua: Lua,
+    on_activate: RegistryKey,
+    on_deactivate: RegistryKey,
+    matching: bool,
+}
+
+/// A competition group of overlays: at most one claim (the matching one of
+/// highest specificity) is active at a time.
+#[derive(Default)]
+struct ArbiterSlot {
+    claims: Vec<ArbiterClaim>,
+    active: Option<i64>,
+    /// Re-entrancy guard: true while [`Shared::arbiter_resolve`] is firing this
+    /// slot's callbacks (which may legally call back into the arbiter).
+    resolving: bool,
+    /// Set when a (possibly re-entrant) change needs another resolve pass.
+    dirty: bool,
+}
+
 /// Services shared by every module: the OS backend, one speech engine, one audio
 /// output, the global hotkey-id counter, and the central event routing.
 struct Shared {
@@ -75,6 +100,13 @@ struct Shared {
     /// Data exported by library modules (module id → value), exposed to dependent
     /// modules via `host.require`. Data only — Lua functions can't cross VMs.
     exports: RefCell<HashMap<String, serde_json::Value>>,
+    /// Overlay arbiter: slot key → competing claims. Only the matching claim of
+    /// highest specificity in a slot is active; cross-VM, so an inheriting overlay
+    /// (higher specificity) suppresses its base when it matches. See
+    /// docs/nested-overlays-design.md.
+    arbiter: RefCell<HashMap<String, ArbiterSlot>>,
+    /// Monotonic id source for arbiter claim handles.
+    next_arbiter: Cell<i64>,
 }
 
 impl Shared {
@@ -124,6 +156,18 @@ impl Shared {
             }
         }
         self.refresh_captured();
+        // A disabled module must not stay the active overlay (and an enabled one
+        // may now win): re-elect every arbiter slot it participates in.
+        let slots: Vec<String> = self
+            .arbiter
+            .borrow()
+            .iter()
+            .filter(|(_, s)| s.claims.iter().any(|c| c.module_idx == idx))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for slot in slots {
+            self.arbiter_resolve(&slot);
+        }
         logging::line(
             "manager",
             &format!("module {idx} {}", if enabled { "enabled" } else { "disabled" }),
@@ -155,12 +199,212 @@ impl Shared {
         self.keys.borrow_mut().retain(|(_, _, idx, ..)| *idx < n);
         self.on_change.borrow_mut().retain(|(idx, _), _| *idx < n);
         self.timers.borrow_mut().retain(|(_, idx, ..)| *idx < n);
+        {
+            // Drop arbiter claims owned by the rolled-back modules; clear a now-
+            // dangling active winner and re-elect that slot, so a surviving lower-
+            // specificity matcher (e.g. a base overlay suppressed under the dropped
+            // one) takes over — set_matching won't, its match state is unchanged.
+            let mut to_resolve: Vec<String> = Vec::new();
+            {
+                let mut map = self.arbiter.borrow_mut();
+                for (slot, s) in map.iter_mut() {
+                    s.claims.retain(|c| c.module_idx < n);
+                    if s.active.is_some_and(|a| !s.claims.iter().any(|c| c.handle == a)) {
+                        s.active = None;
+                        to_resolve.push(slot.clone());
+                    }
+                }
+                map.retain(|_, s| !s.claims.is_empty());
+            }
+            for slot in to_resolve {
+                self.arbiter_resolve(&slot);
+            }
+        }
         self.roots.borrow_mut().truncate(n);
         self.ids.borrow_mut().truncate(n);
         self.enabled.borrow_mut().truncate(n);
         self.schemas.borrow_mut().truncate(n);
         self.exports.borrow_mut().remove(failed_id);
         self.refresh_captured();
+    }
+
+    /// Registers an overlay claim on `slot` and returns its handle. The claim is
+    /// initially not matching; the owner reports matches via `arbiter_set_matching`.
+    fn arbiter_register(
+        &self,
+        slot: String,
+        module_idx: usize,
+        specificity: i64,
+        lua: Lua,
+        on_activate: RegistryKey,
+        on_deactivate: RegistryKey,
+    ) -> i64 {
+        let handle = self.next_arbiter.get() + 1;
+        self.next_arbiter.set(handle);
+        self.arbiter.borrow_mut().entry(slot).or_default().claims.push(ArbiterClaim {
+            handle,
+            module_idx,
+            specificity,
+            lua,
+            on_activate,
+            on_deactivate,
+            matching: false,
+        });
+        handle
+    }
+
+    /// Reports whether claim `handle` currently matches in `slot`; re-elects the
+    /// slot winner and drives onDeactivate/onActivate on a change.
+    fn arbiter_set_matching(&self, slot: &str, handle: i64, matching: bool) {
+        {
+            let mut map = self.arbiter.borrow_mut();
+            let Some(s) = map.get_mut(slot) else {
+                logging::line("arbiter", &format!("setMatching: unknown slot '{slot}'"));
+                return;
+            };
+            let Some(c) = s.claims.iter_mut().find(|c| c.handle == handle) else {
+                logging::line(
+                    "arbiter",
+                    &format!("setMatching: unknown handle {handle} in slot '{slot}'"),
+                );
+                return;
+            };
+            if c.matching == matching {
+                return;
+            }
+            c.matching = matching;
+        }
+        self.arbiter_resolve(slot);
+    }
+
+    /// Removes claim `handle` from `slot` and re-elects (promoting the next winner
+    /// if the removed claim was active).
+    fn arbiter_unregister(&self, slot: &str, handle: i64) {
+        let (removed, was_active) = {
+            let mut map = self.arbiter.borrow_mut();
+            let Some(s) = map.get_mut(slot) else { return };
+            let was_active = s.active == Some(handle);
+            let removed = s
+                .claims
+                .iter()
+                .position(|c| c.handle == handle)
+                .map(|p| s.claims.remove(p));
+            if was_active {
+                s.active = None;
+            }
+            (removed, was_active)
+        };
+        if let Some(c) = removed {
+            // If it was the active winner, run its onDeactivate so the overlay
+            // tears down its activation (idempotent — _deactivate guards on its
+            // own state) before the callbacks are freed; arbiter_resolve below
+            // then promotes the next matcher.
+            if was_active {
+                if let Ok(f) = c.lua.registry_value::<Function>(&c.on_deactivate) {
+                    if let Err(e) = f.call::<()>(()) {
+                        logging::line("arbiter", &format!("onDeactivate error: {e}"));
+                    }
+                }
+            }
+            // Free the callback registry values — an overlay can tear down a
+            // single claim while its VM lives on, so they would otherwise linger.
+            let _ = c.lua.remove_registry_value(c.on_activate);
+            let _ = c.lua.remove_registry_value(c.on_deactivate);
+        }
+        self.arbiter_resolve(slot);
+    }
+
+    /// The handle of the slot's currently-active claim, if any. Lets an overlay
+    /// (or a debugger) confirm whether it is the active winner rather than trust a
+    /// locally-mirrored flag.
+    fn arbiter_winner(&self, slot: &str) -> Option<i64> {
+        self.arbiter.borrow().get(slot).and_then(|s| s.active)
+    }
+
+    /// Elects the winner of `slot` — the matching claim of highest specificity
+    /// owned by an enabled module — and, if it changed, deactivates the previous
+    /// winner then activates the new one.
+    ///
+    /// Lua callbacks fire outside the arbiter borrow and may call back into the
+    /// arbiter for this slot (an overlay re-evaluating its own match inside
+    /// onActivate, a library poll, etc.). Rather than recurse — which would
+    /// commit `active` then run a stale activation — a re-entrant call just marks
+    /// the slot dirty, and this loop re-resolves to a fixpoint, so transitions
+    /// fire in order and each onActivate pairs with exactly one later
+    /// onDeactivate. Ties on specificity break on the (monotonic) handle, so the
+    /// winner is deterministic and unaffected by claim insertion/removal order.
+    fn arbiter_resolve(&self, slot: &str) {
+        {
+            let mut map = self.arbiter.borrow_mut();
+            let Some(s) = map.get_mut(slot) else { return };
+            if s.resolving {
+                s.dirty = true;
+                return;
+            }
+            s.resolving = true;
+            s.dirty = true;
+        }
+        // Bounded so a pathological oscillating callback is logged rather than
+        // hanging the event loop; sane overlays settle in one or two passes.
+        for _ in 0..100 {
+            let mut deactivate: Option<Function> = None;
+            let mut activate: Option<Function> = None;
+            {
+                let mut map = self.arbiter.borrow_mut();
+                let Some(s) = map.get_mut(slot) else { return };
+                if !s.dirty {
+                    s.resolving = false;
+                    return;
+                }
+                s.dirty = false;
+                let winner = {
+                    let enabled = self.enabled.borrow();
+                    s.claims
+                        .iter()
+                        .filter(|c| {
+                            c.matching && enabled.get(c.module_idx).copied().unwrap_or(false)
+                        })
+                        .max_by_key(|c| (c.specificity, c.handle))
+                        .map(|c| c.handle)
+                };
+                if winner == s.active {
+                    s.resolving = false;
+                    return;
+                }
+                if let Some(old) = s.active {
+                    if let Some(c) = s.claims.iter().find(|c| c.handle == old) {
+                        deactivate = c.lua.registry_value::<Function>(&c.on_deactivate).ok();
+                    }
+                }
+                if let Some(neu) = winner {
+                    if let Some(c) = s.claims.iter().find(|c| c.handle == neu) {
+                        activate = c.lua.registry_value::<Function>(&c.on_activate).ok();
+                    }
+                }
+                s.active = winner;
+            }
+            if let Some(f) = deactivate {
+                if let Err(e) = f.call::<()>(()) {
+                    logging::line("arbiter", &format!("onDeactivate error: {e}"));
+                }
+            }
+            if let Some(f) = activate {
+                if let Err(e) = f.call::<()>(()) {
+                    logging::line("arbiter", &format!("onActivate error: {e}"));
+                }
+            }
+        }
+        {
+            let mut map = self.arbiter.borrow_mut();
+            if let Some(s) = map.get_mut(slot) {
+                s.resolving = false;
+                s.dirty = false;
+            }
+        }
+        logging::line(
+            "arbiter",
+            &format!("slot '{slot}' did not settle in 100 passes (callback oscillation?)"),
+        );
     }
 
     /// As [`Self::apply_enabled`], persisting the new disabled-set to the
@@ -543,6 +787,8 @@ impl Manager {
             dirty: Cell::new(false),
             timers: RefCell::new(Vec::new()),
             exports: RefCell::new(HashMap::new()),
+            arbiter: RefCell::new(HashMap::new()),
+            next_arbiter: Cell::new(0),
         });
         Ok(Self {
             shared,
@@ -1369,6 +1615,62 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<()> {
     )?;
     host.set("settings", settings_api.clone())?;
     host.set("config", settings_api)?; // catalog-compat alias (host.config.get/set)
+
+    // host.arbiter — cross-VM overlay election (see Shared::arbiter_*). Overlays
+    // competing for the same `slot` register a claim with a `specificity`; only
+    // the matching claim of highest specificity is active. The host drives the new
+    // winner's onActivate and the old winner's onDeactivate on every change —
+    // including poll-driven ones with no window event (a library landmark
+    // appearing/vanishing inside a plugin). Low-level: the overlay runtime wraps it.
+    //
+    // Conventions the overlay runtime must uphold at step 4: a base overlay and the
+    // overlays that inherit it MUST pass byte-identical `slot` strings (derive it
+    // from a shared id — the plugin contract / attachEmbedded host+control spec —
+    // not a hand-typed literal, else they silently never suppress each other).
+    // `specificity` is a static tier: base = 0, an inheriting overlay = base + 1;
+    // "which library" is expressed by separate library overlays each matching only
+    // their own landmark, not by mutating specificity. Handles are small monotonic
+    // ints (well within Luau's 2^53 exact-integer range).
+    let arbiter = lua.create_table()?;
+    let sh = shared.clone();
+    arbiter.set(
+        "register",
+        lua.create_function(
+            move |lua,
+                  (slot, specificity, on_activate, on_deactivate): (
+                String,
+                i64,
+                Function,
+                Function,
+            )| {
+                let ak = lua.create_registry_value(on_activate)?;
+                let dk = lua.create_registry_value(on_deactivate)?;
+                Ok(sh.arbiter_register(slot, idx, specificity, lua.clone(), ak, dk))
+            },
+        )?,
+    )?;
+    let sh = shared.clone();
+    arbiter.set(
+        "setMatching",
+        lua.create_function(move |_, (slot, handle, matching): (String, i64, bool)| {
+            sh.arbiter_set_matching(&slot, handle, matching);
+            Ok(())
+        })?,
+    )?;
+    let sh = shared.clone();
+    arbiter.set(
+        "unregister",
+        lua.create_function(move |_, (slot, handle): (String, i64)| {
+            sh.arbiter_unregister(&slot, handle);
+            Ok(())
+        })?,
+    )?;
+    let sh = shared.clone();
+    arbiter.set(
+        "winner",
+        lua.create_function(move |_, slot: String| Ok(sh.arbiter_winner(&slot)))?,
+    )?;
+    host.set("arbiter", arbiter)?;
 
     lua.globals().set("host", host)?;
     Ok(())
