@@ -465,7 +465,9 @@ pub fn run_gui(
                     // Always deliver a result, even on an unexpected panic, so the
                     // buttons can never get stuck disabled.
                     let job = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        match crate::registry::install(&full_name) {
+                        // Install the whole dependency tree, not just this repo; the
+                        // hot-load resolves the now-installed deps as siblings.
+                        match crate::registry::install_tree(&full_name) {
                             Ok(_) => {
                                 let repo = full_name.rsplit('/').next().unwrap_or(&full_name);
                                 Job::Installed(crate::registry::modules_dir().join(repo))
@@ -530,7 +532,22 @@ pub fn run_gui(
                 std::thread::spawn(move || {
                     let job = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         match crate::registry::install(&repo) {
-                            Ok(m) => Job::Done(format!("Updated {}. Restart to apply.", m.id)),
+                            Ok(m) => {
+                                // Modules that inherit this one hold a copy of its code
+                                // and reload it on the next start (the cascade is via
+                                // restart for now — no live hot-reload yet).
+                                let graph: Vec<(String, Vec<String>)> = crate::registry::installed()
+                                    .into_iter()
+                                    .map(|x| (x.id, x.dependencies))
+                                    .collect();
+                                let deps = crate::registry::transitive_dependents(&m.id, &graph);
+                                let extra = if deps.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" Dependents reload with it: {}.", deps.join(", "))
+                                };
+                                Job::Done(format!("Updated {}. Restart to apply.{extra}", m.id))
+                            }
                             Err(e) => Job::Done(format!("Update failed: {e}")),
                         }
                     }))

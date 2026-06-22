@@ -174,6 +174,59 @@ pub fn install(full_name: &str) -> Result<ModuleManifest> {
         .manifest)
 }
 
+/// Installs `full_name` and, recursively, every dependency it declares that isn't
+/// already installed — resolving each dependency id to a repo via the module-topic
+/// search. Returns every newly-installed manifest (the caller hot-loads them). The
+/// capability review is the caller's responsibility (as with [`install`]).
+pub fn install_tree(full_name: &str) -> Result<Vec<ModuleManifest>> {
+    use std::collections::{HashMap, HashSet};
+    let mut have: HashSet<String> = installed().into_iter().map(|m| m.id).collect();
+    let mut installed_now: Vec<ModuleManifest> = Vec::new();
+    let mut queue: Vec<String> = vec![full_name.to_string()];
+    let mut seen_repo: HashSet<String> = HashSet::new();
+    // id -> repo, built once from the topic, only if an unresolved dependency appears.
+    let mut index: Option<HashMap<String, String>> = None;
+    while let Some(repo) = queue.pop() {
+        if !seen_repo.insert(repo.clone()) {
+            continue;
+        }
+        let m = install(&repo)?;
+        let (id, deps) = (m.id.clone(), m.dependencies.clone());
+        have.insert(id.clone());
+        installed_now.push(m);
+        let missing: Vec<String> = deps.into_iter().filter(|d| !have.contains(d)).collect();
+        if missing.is_empty() {
+            continue;
+        }
+        if index.is_none() {
+            index = Some(topic_index()?);
+        }
+        let idx = index.as_ref().unwrap();
+        for dep in missing {
+            match idx.get(&dep) {
+                Some(dep_repo) => queue.push(dep_repo.clone()),
+                None => anyhow::bail!(
+                    "dependency '{dep}' of '{id}' was not found among '{MODULE_TOPIC}' modules"
+                ),
+            }
+        }
+    }
+    Ok(installed_now)
+}
+
+/// Maps every module id published under the topic to its repo (owner/repo), by
+/// fetching each candidate's `module.toml`. Used to resolve dependency ids; the
+/// first (highest-starred) repo claiming an id wins.
+fn topic_index() -> Result<std::collections::HashMap<String, String>> {
+    let mut map = std::collections::HashMap::new();
+    for c in search("")? {
+        if let Ok(m) = fetch_manifest(&c.full_name, &c.default_branch) {
+            map.entry(m.id).or_insert(c.full_name);
+        }
+    }
+    Ok(map)
+}
+
 /// Lists modules installed in the portable modules directory.
 pub fn installed() -> Vec<InstalledModule> {
     let mut out = Vec::new();

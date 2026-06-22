@@ -76,7 +76,13 @@ fn cmd_install(full_name: Option<&str>) -> Result<()> {
         "Requested capabilities: {}",
         if caps.is_empty() { "(none)".to_string() } else { caps.join(", ") }
     );
-    print!("Install this module? [y/N] ");
+    if !manifest.dependencies.is_empty() {
+        println!("Dependencies (fetched too if missing): {}", manifest.dependencies.join(", "));
+    }
+    print!(
+        "Install this module{}? [y/N] ",
+        if manifest.dependencies.is_empty() { "" } else { " and its dependencies" }
+    );
     std::io::stdout().flush().ok();
     let mut answer = String::new();
     std::io::stdin().read_line(&mut answer)?;
@@ -85,8 +91,12 @@ fn cmd_install(full_name: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
-    let installed = registry::install(full_name)?;
-    println!("Installed {} into {}", installed.id, registry::modules_dir().display());
+    // Resolve + fetch the whole dependency tree, not just this repo.
+    let installed = registry::install_tree(full_name)?;
+    println!("Installed {} module(s) into {}:", installed.len(), registry::modules_dir().display());
+    for m in &installed {
+        println!("  {} v{} ({})", m.name, m.version, m.id);
+    }
     Ok(())
 }
 
