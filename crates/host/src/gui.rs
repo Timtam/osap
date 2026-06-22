@@ -36,6 +36,9 @@ pub struct ModuleInfo {
     pub version: String,
     pub id: String,
     pub enabled: bool,
+    /// A module something else depends on (shared data via host.require) — hidden
+    /// from the toggle list so a dependency can't be disabled from under it.
+    pub library: bool,
     pub settings: Vec<SettingDesc>,
 }
 
@@ -55,51 +58,89 @@ pub fn run_gui(
 
         let frame = Frame::builder()
             .with_title("Automation Platform — Modules")
-            .with_size(Size::new(480, 400))
+            .with_size(Size::new(560, 470))
             .build();
 
         let panel = Panel::builder(&frame).build();
         let sizer = BoxSizer::builder(Orientation::Vertical).build();
+        let notebook = Notebook::builder(&panel).build();
 
-        let heading = StaticText::builder(&panel)
-            .with_label("Loaded modules — uncheck to disable, check to enable:")
+        // ===== "Installed" tab =====
+        let installed = Panel::builder(&notebook).build();
+        let is = BoxSizer::builder(Orientation::Vertical).build();
+        let heading = StaticText::builder(&installed)
+            .with_label("Installed modules — uncheck to disable, check to enable:")
             .build();
-        sizer.add(&heading, 0, SizerFlag::All, 12);
+        is.add(&heading, 0, SizerFlag::All, 12);
 
         // A native tree control with TVS_CHECKBOXES: real OS checkboxes that
-        // expose the proper toggle state to the screen reader (UIA), unlike a
-        // generic/owner-drawn list. TVS_CHECKBOXES must be enabled *before*
-        // items are inserted.
-        let list = TreeCtrl::builder(&panel)
+        // expose the proper toggle state to the screen reader (UIA). Must be
+        // enabled *before* items are inserted. Library modules are skipped.
+        let list = TreeCtrl::builder(&installed)
             .with_style(TreeCtrlStyle::HideRoot | TreeCtrlStyle::Single | TreeCtrlStyle::NoLines)
             .build();
         let hwnd = list.get_handle();
         native_checkboxes::enable(hwnd);
-        let mut items: Vec<TreeItemId> = Vec::with_capacity(modules.len());
+        let mut items: Vec<TreeItemId> = Vec::new();
+        let mut idx_map: Vec<usize> = Vec::new(); // displayed row -> module index
+        let mut row_ids: Vec<String> = Vec::new();
         if let Some(root) = list.add_root("Modules", None, None) {
-            for m in &modules {
+            for (i, m) in modules.iter().enumerate() {
+                if m.library {
+                    continue;
+                }
                 let label = format!("{}  v{}   ({})", m.name, m.version, m.id);
                 if let Some(item) = list.append_item(&root, &label, None, None) {
                     native_checkboxes::set(hwnd, &item, m.enabled);
                     items.push(item);
+                    idx_map.push(i);
+                    row_ids.push(m.id.clone());
                 }
             }
         }
-        sizer.add(&list, 1, SizerFlag::All | SizerFlag::Expand, 12);
+        is.add(&list, 1, SizerFlag::All | SizerFlag::Expand, 12);
 
+        let inst_buttons = BoxSizer::builder(Orientation::Horizontal).build();
+        let settings_btn = Button::builder(&installed).with_label("Settings…").build();
+        let uninstall_btn = Button::builder(&installed).with_label("Uninstall").build();
+        inst_buttons.add(&settings_btn, 0, SizerFlag::All, 6);
+        inst_buttons.add(&uninstall_btn, 0, SizerFlag::All, 6);
+        is.add_sizer(&inst_buttons, 0, SizerFlag::All, 6);
+        installed.set_sizer(is, true);
+        notebook.add_page(&installed, "Installed", true, None);
+
+        // ===== "Browse" + "Updates" tabs (wired up in the next step) =====
+        let browse = Panel::builder(&notebook).build();
+        let bs = BoxSizer::builder(Orientation::Vertical).build();
+        bs.add(
+            &StaticText::builder(&browse)
+                .with_label("Browse + install modules from GitHub — coming in the next step.")
+                .build(),
+            0,
+            SizerFlag::All,
+            12,
+        );
+        browse.set_sizer(bs, true);
+        notebook.add_page(&browse, "Browse", false, None);
+
+        let updates = Panel::builder(&notebook).build();
+        let us = BoxSizer::builder(Orientation::Vertical).build();
+        us.add(
+            &StaticText::builder(&updates)
+                .with_label("Check + apply module updates — coming in the next step.")
+                .build(),
+            0,
+            SizerFlag::All,
+            12,
+        );
+        updates.set_sizer(us, true);
+        notebook.add_page(&updates, "Updates", false, None);
+
+        sizer.add(&notebook, 1, SizerFlag::All | SizerFlag::Expand, 0);
         let hint = StaticText::builder(&panel)
-            .with_label(
-                "Closing this window hides it to the system tray; modules keep running.\n\
-                 Reopen it from the tray icon (double-click), or choose Quit to exit.",
-            )
+            .with_label("Closing this window hides it to the tray; modules keep running. Quit from the tray icon.")
             .build();
         sizer.add(&hint, 0, SizerFlag::All, 12);
-
-        let settings_btn = Button::builder(&panel)
-            .with_label("Settings for selected module…")
-            .build();
-        sizer.add(&settings_btn, 0, SizerFlag::All, 12);
-
         panel.set_sizer(sizer, true);
 
         // Detect native checkbox toggles (mouse click on the box, or Space on
@@ -108,22 +149,26 @@ pub fn run_gui(
         // already in place. We diff every row against the last-known states and
         // report the change(s).
         let states = Rc::new(RefCell::new(
-            modules.iter().map(|m| m.enabled).collect::<Vec<bool>>(),
+            idx_map.iter().map(|&i| modules[i].enabled).collect::<Vec<bool>>(),
         ));
         let items = Rc::new(items);
+        let idx_map = Rc::new(idx_map);
+        let row_ids = Rc::new(row_ids);
         let on_toggle: Rc<RefCell<Box<dyn FnMut(usize, bool)>>> =
             Rc::new(RefCell::new(Box::new(on_toggle)));
         {
-            let (items, states, on_toggle) = (items.clone(), states.clone(), on_toggle.clone());
+            let (items, idx_map, states, on_toggle) =
+                (items.clone(), idx_map.clone(), states.clone(), on_toggle.clone());
             list.on_mouse_left_up(move |e| {
-                sync_checks(hwnd, &items, &states, &on_toggle);
+                sync_checks(hwnd, &items, &idx_map, &states, &on_toggle);
                 e.skip(true);
             });
         }
         {
-            let (items, states, on_toggle) = (items.clone(), states.clone(), on_toggle.clone());
+            let (items, idx_map, states, on_toggle) =
+                (items.clone(), idx_map.clone(), states.clone(), on_toggle.clone());
             list.on_key_up(move |e| {
-                sync_checks(hwnd, &items, &states, &on_toggle);
+                sync_checks(hwnd, &items, &idx_map, &states, &on_toggle);
                 e.skip(true);
             });
         }
@@ -134,16 +179,17 @@ pub fn run_gui(
         let on_set: Rc<RefCell<Box<dyn FnMut(usize, String, settings::Value)>>> =
             Rc::new(RefCell::new(Box::new(on_set)));
         {
-            let (items, settings_by_module, on_set) =
-                (items.clone(), settings_by_module.clone(), on_set.clone());
+            let (items, idx_map, settings_by_module, on_set) =
+                (items.clone(), idx_map.clone(), settings_by_module.clone(), on_set.clone());
             settings_btn.on_click(move |_| {
                 let Some(sel) = list.get_selection() else {
                     return;
                 };
-                let Some(idx) = items.iter().position(|it| native_checkboxes::same(it, &sel))
+                let Some(row) = items.iter().position(|it| native_checkboxes::same(it, &sel))
                 else {
                     return;
                 };
+                let idx = idx_map[row];
                 if settings_by_module[idx].is_empty() {
                     MessageDialog::builder(&frame, "This module has no settings.", "Settings")
                         .build()
@@ -151,6 +197,42 @@ pub fn run_gui(
                     return;
                 }
                 open_settings_dialog(&frame, idx, &settings_by_module[idx], &on_set);
+            });
+        }
+
+        // "Uninstall" removes the selected module's installed files (the running
+        // instance keeps going until restart).
+        {
+            let (items, row_ids) = (items.clone(), row_ids.clone());
+            uninstall_btn.on_click(move |_| {
+                let Some(sel) = list.get_selection() else {
+                    return;
+                };
+                let Some(row) = items.iter().position(|it| native_checkboxes::same(it, &sel))
+                else {
+                    return;
+                };
+                let id = &row_ids[row];
+                let confirm = MessageDialog::builder(
+                    &frame,
+                    &format!(
+                        "Remove the installed files for \u{201c}{id}\u{201d}?\n\n\
+                         The running instance keeps going until you restart."
+                    ),
+                    "Uninstall module",
+                )
+                .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
+                .build()
+                .show_modal();
+                if confirm != ID_YES {
+                    return;
+                }
+                let msg = match crate::registry::uninstall(id) {
+                    Ok(true) => format!("Uninstalled {id}. Restart to fully apply."),
+                    Ok(false) => format!("\u{201c}{id}\u{201d} has no installed files to remove."),
+                    Err(e) => format!("Could not uninstall {id}: {e}"),
+                };
+                MessageDialog::builder(&frame, &msg, "Uninstall").build().show_modal();
             });
         }
 
@@ -378,18 +460,19 @@ fn open_settings_dialog(
 fn sync_checks(
     hwnd: *mut c_void,
     items: &[TreeItemId],
+    idx_map: &[usize],
     states: &RefCell<Vec<bool>>,
     on_toggle: &RefCell<Box<dyn FnMut(usize, bool)>>,
 ) {
     let mut states = states.borrow_mut();
     let mut cb = on_toggle.borrow_mut();
-    for (idx, item) in items.iter().enumerate() {
+    for (row, item) in items.iter().enumerate() {
         let now = native_checkboxes::get(hwnd, item);
-        if states.get(idx).copied() != Some(now) {
-            if let Some(slot) = states.get_mut(idx) {
+        if states.get(row).copied() != Some(now) {
+            if let Some(slot) = states.get_mut(row) {
                 *slot = now;
             }
-            cb(idx, now);
+            cb(idx_map[row], now); // report the real module index
         }
     }
 }

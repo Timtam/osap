@@ -243,6 +243,9 @@ struct Module {
     id: String,
     name: String,
     version: String,
+    /// Ids this module depends on (used to mark depended-upon modules as
+    /// libraries, hidden from the manager's toggle list).
+    dependencies: Vec<String>,
     lua: Lua,
 }
 
@@ -371,6 +374,7 @@ impl Manager {
             id: module.manifest.id,
             name: module.manifest.name,
             version: module.manifest.version,
+            dependencies: module.manifest.dependencies,
             lua,
         });
         Ok(())
@@ -409,6 +413,15 @@ impl Manager {
                 // wxWidgets owns the loop. Snapshot the module list for the tray
                 // manager window, then drain our OS events from its timer tick.
                 logging::line("manager", "module manager running in the system tray");
+                // Modules that something else depends on are libraries (shared
+                // data via host.require) — flagged so the manager hides them from
+                // the toggle list (a dependency shouldn't be disabled from under
+                // its dependents).
+                let depended: HashSet<String> = self
+                    .modules
+                    .iter()
+                    .flat_map(|m| m.dependencies.iter().cloned())
+                    .collect();
                 let module_infos: Vec<gui::ModuleInfo> = self
                     .modules
                     .iter()
@@ -442,6 +455,7 @@ impl Manager {
                             version: m.version.clone(),
                             id: m.id.clone(),
                             enabled: self.shared.enabled.borrow().get(i).copied().unwrap_or(true),
+                            library: depended.contains(&m.id),
                             settings,
                         }
                     })

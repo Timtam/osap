@@ -20,7 +20,17 @@ fn main() -> Result<()> {
         Some("uninstall") => cmd_uninstall(args.get(1).map(String::as_str)),
         _ => {
             let dirs = if args.is_empty() {
-                vec!["modules/hello".to_string()]
+                // No args: run every installed module (portable modules dir next
+                // to the exe). Fall back to the dev example if nothing's installed.
+                let installed: Vec<String> = registry::installed()
+                    .into_iter()
+                    .map(|m| m.dir.to_string_lossy().into_owned())
+                    .collect();
+                if installed.is_empty() {
+                    vec!["modules/hello".to_string()]
+                } else {
+                    installed
+                }
             } else {
                 args
             };
