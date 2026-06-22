@@ -406,18 +406,39 @@ function Overlay:attachEmbedded(spec, opts)
   local function pluginControl()
     local active = host.window.active()
     if not active then return nil end
+    local chrome = nil
     local hostOk = false
     for _, h in ipairs(hosts) do
-      if host.window.test(h, active) then hostOk = true break end
+      if host.window.test(h, active) then
+        hostOk = true
+        chrome = h.chrome
+        break
+      end
     end
     if not hostOk then return nil end
+    local focusChain = host.window.focusChain()
+    -- Focus gate (ReaHotkey-style): only treat the plugin as focused when the
+    -- keyboard focus is NOT on one of the DAW's own chrome controls (its FX list,
+    -- track list, transport, …), supplied per host as `chrome` patterns. Without
+    -- it the overlay activates whenever the plugin control is merely a *child* of
+    -- the focused host window — e.g. while browsing REAPER's FX list with Kontakt
+    -- selected, before the plugin GUI itself is focused. focusChain()[1] is the
+    -- focused control (GetGUIThreadInfo's hwndFocus).
+    if chrome then
+      local focused = focusChain[1]
+      if focused then
+        for _, pat in ipairs(chrome) do
+          if string.match(focused.class, pat) then return nil end
+        end
+      end
+    end
     -- Enumerate the active (plugin host) window's child controls — like
     -- ReaHotkey's WinGetControls — with the keyboard-focus chain as a fallback.
     -- The plugin control is often NOT on the focus chain (e.g. Kontakt's Qt window
     -- keeps the Win32 focus on the host window, with the Qt control a *child* — not
     -- an ancestor), so child enumeration is the reliable path.
     local candidates = host.window.controls()
-    for _, c in ipairs(host.window.focusChain()) do
+    for _, c in ipairs(focusChain) do
       candidates[#candidates + 1] = c
     end
     for _, c in ipairs(candidates) do
