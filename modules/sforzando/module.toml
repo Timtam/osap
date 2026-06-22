@@ -2,6 +2,7 @@ id = "com.reahotkey.sforzando"
 name = "Sforzando overlay"
 version = "0.1.0"
 license = "GPL-3.0-or-later"
+dependencies = ["com.platform.daw-hosts"]
 
 [capabilities]
 require = ["window", "overlay", "ocr", "speech", "hotkey"]

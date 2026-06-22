@@ -19,6 +19,10 @@ pub struct ModuleManifest {
     pub engine_api: Option<String>,
     #[serde(default)]
     pub license: Option<String>,
+    /// Ids of other modules this one depends on (their exports become available
+    /// via `host.require`). Loaded first; auto-discovered among sibling modules.
+    #[serde(default)]
+    pub dependencies: Vec<String>,
     #[serde(default)]
     pub capabilities: Capabilities,
 }

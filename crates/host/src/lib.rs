@@ -17,7 +17,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use mlua::{Function, Lua, RegistryKey, Table};
+use mlua::{Function, Lua, LuaSerdeExt, RegistryKey, Table};
 use tts::Tts;
 
 use backend::{Backend, CapturedImage, ControlInfo, HostEvents, MouseButton, WinInfo};
@@ -65,6 +65,9 @@ struct Shared {
     dirty: Cell<bool>,
     /// One-shot timers: (deadline, module_idx, VM, callback), fired from the tick.
     timers: RefCell<Vec<(Instant, usize, Lua, RegistryKey)>>,
+    /// Data exported by library modules (module id → value), exposed to dependent
+    /// modules via `host.require`. Data only — Lua functions can't cross VMs.
+    exports: RefCell<HashMap<String, serde_json::Value>>,
 }
 
 impl Shared {
@@ -248,6 +251,8 @@ pub struct Manager {
     modules: Vec<Module>,
     /// Module ids the user disabled in a previous run (from the portable config).
     disabled_ids: HashSet<String>,
+    /// Module ids currently being loaded — for dependency-cycle detection.
+    loading: HashSet<String>,
 }
 
 impl Manager {
@@ -271,17 +276,44 @@ impl Manager {
             on_change: RefCell::new(HashMap::new()),
             dirty: Cell::new(false),
             timers: RefCell::new(Vec::new()),
+            exports: RefCell::new(HashMap::new()),
         });
         Ok(Self {
             shared,
             modules: Vec::new(),
             disabled_ids,
+            loading: HashSet::new(),
         })
     }
 
     /// Loads a module from an unpacked directory and runs its entry point.
+    /// Declared dependencies are loaded first (auto-discovered among sibling
+    /// module directories), so their exports are available via `host.require`.
     pub fn load(&mut self, dir: impl AsRef<Path>) -> Result<()> {
+        let dir = dir.as_ref();
         let module = LoadedModule::load(dir)?;
+        let id = module.manifest.id.clone();
+        if self.modules.iter().any(|m| m.id == id) {
+            return Ok(()); // already loaded (e.g. a shared dependency)
+        }
+        if !self.loading.insert(id.clone()) {
+            anyhow::bail!("dependency cycle involving module '{id}'");
+        }
+        let parent = dir.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+        for dep_id in module.manifest.dependencies.clone() {
+            if self.modules.iter().any(|m| m.id == dep_id) {
+                continue;
+            }
+            let dep_dir = find_sibling_module(&parent, &dep_id).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "module '{id}' depends on '{dep_id}', not found in {}",
+                    parent.display()
+                )
+            })?;
+            self.load(dep_dir)?;
+        }
+        self.loading.remove(&id);
+
         let idx = self.modules.len();
         logging::line(
             "manager",
@@ -310,10 +342,22 @@ impl Manager {
         let entry = module.entry_path();
         let code = std::fs::read_to_string(&entry)
             .with_context(|| format!("entry point not readable: {}", entry.display()))?;
-        lua.load(code)
+        let ret: mlua::Value = lua
+            .load(code)
             .set_name(entry.display().to_string())
-            .exec()
+            .eval()
             .with_context(|| format!("error running module '{}'", module.manifest.id))?;
+        // A library module returns a table of data; expose it to dependents via
+        // host.require (data only — Lua functions can't cross module VMs).
+        if let mlua::Value::Table(_) = ret {
+            let exported: serde_json::Value = lua.from_value(ret).with_context(|| {
+                format!("module '{}' exports must be plain data", module.manifest.id)
+            })?;
+            self.shared
+                .exports
+                .borrow_mut()
+                .insert(module.manifest.id.clone(), exported);
+        }
 
         // Honor a disabled state persisted from a previous run: the module's
         // entry has just registered its hotkeys/keys, so disable now to revoke
@@ -567,6 +611,23 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<()> {
         })?,
     )?;
     host.set("log", log)?;
+
+    // host.require(id) — the data a dependency module exported (declared in the
+    // manifest `dependencies`; a library module exposes data by returning a
+    // table). Data only — functions can't cross module VMs.
+    let sh = shared.clone();
+    host.set(
+        "require",
+        lua.create_function(move |lua, id: String| {
+            let exports = sh.exports.borrow();
+            match exports.get(&id) {
+                Some(v) => lua.to_value(v),
+                None => Err(mlua::Error::external(format!(
+                    "required module '{id}' is not loaded or exports nothing"
+                ))),
+            }
+        })?,
+    )?;
 
     // host.speech.output(text, { interrupt = true })  (do not echo to console:
     // a screen reader would read the terminal and double the speech)
@@ -1182,6 +1243,22 @@ fn matches_at(hay: &CapturedImage, ox: u32, oy: u32, tw: u32, th: u32, tmpl: &[u
 
 /// Converts a native window snapshot into the Lua table modules see:
 /// `{ id, title, class, app = { name, exe, pid }, bounds = { x, y, w, h } }`.
+/// Finds a sibling module directory (under `parent`) whose manifest id matches —
+/// for auto-discovering declared dependencies.
+fn find_sibling_module(parent: &Path, id: &str) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(parent).ok()?.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            if let Ok(m) = LoadedModule::load_dir(&p) {
+                if m.manifest.id == id {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn control_to_table(lua: &Lua, c: &ControlInfo) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     t.set("id", c.hwnd)?;
