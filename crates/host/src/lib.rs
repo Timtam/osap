@@ -107,6 +107,11 @@ struct Shared {
     arbiter: RefCell<HashMap<String, ArbiterSlot>>,
     /// Monotonic id source for arbiter claim handles.
     next_arbiter: Cell<i64>,
+    /// Recurring timers: (next deadline, interval, module_idx, VM, callback). Fired
+    /// from the tick and re-armed even while the owning module is disabled, so a
+    /// poll resumes on re-enable instead of dying (unlike a Lua self-rescheduling
+    /// host.timer.after chain, whose reschedule is skipped while disabled).
+    recurring: RefCell<Vec<(Instant, Duration, usize, Lua, RegistryKey)>>,
 }
 
 impl Shared {
@@ -199,6 +204,7 @@ impl Shared {
         self.keys.borrow_mut().retain(|(_, _, idx, ..)| *idx < n);
         self.on_change.borrow_mut().retain(|(idx, _), _| *idx < n);
         self.timers.borrow_mut().retain(|(_, idx, ..)| *idx < n);
+        self.recurring.borrow_mut().retain(|(_, _, idx, ..)| *idx < n);
         {
             // Drop arbiter claims owned by the rolled-back modules; clear a now-
             // dangling active winner and re-elect that slot, so a surviving lower-
@@ -466,6 +472,28 @@ impl Shared {
             }
             let _ = lua.remove_registry_value(cb);
         }
+
+        // Recurring timers: re-arm every due one (so the schedule survives a
+        // disable), but fire only those whose module is enabled.
+        let mut due_recurring: Vec<(usize, Function)> = Vec::new();
+        {
+            let mut rec = self.recurring.borrow_mut();
+            for t in rec.iter_mut() {
+                if t.0 <= now {
+                    t.0 = now + t.1;
+                    if let Ok(f) = t.3.registry_value::<Function>(&t.4) {
+                        due_recurring.push((t.2, f));
+                    }
+                }
+            }
+        }
+        for (idx, f) in due_recurring {
+            if self.enabled.borrow().get(idx).copied().unwrap_or(false) {
+                if let Err(e) = f.call::<()>(()) {
+                    logging::line("timer", &format!("recurring callback error: {e}"));
+                }
+            }
+        }
     }
 
     /// Applies a setting change from the GUI: validates against the schema,
@@ -685,6 +713,19 @@ fn load_module(
                     .insert(module.manifest.id.clone(), exported);
             }
         }
+        // A module's returned table may carry an `activate` function: its standalone
+        // side effects (e.g. creating its base overlay). It runs here, in the
+        // module's OWN VM only — NOT when this module's code is evaluated as a code
+        // dependency inside another module's VM (collect_code_deps stores the
+        // returned table without activating). So a base overlay is created once, in
+        // its own module, and never duplicated in every dependent that inherits it.
+        if let mlua::Value::Table(t) = &ret {
+            if let Ok(mlua::Value::Function(activate)) = t.get::<mlua::Value>("activate") {
+                activate.call::<()>(()).with_context(|| {
+                    format!("error activating module '{}'", module.manifest.id)
+                })?;
+            }
+        }
         Ok(())
     })();
     if let Err(e) = loaded {
@@ -789,6 +830,7 @@ impl Manager {
             exports: RefCell::new(HashMap::new()),
             arbiter: RefCell::new(HashMap::new()),
             next_arbiter: Cell::new(0),
+            recurring: RefCell::new(Vec::new()),
         });
         Ok(Self {
             shared,
@@ -1228,6 +1270,22 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<()> {
             let key = lua.create_registry_value(cb)?;
             let deadline = Instant::now() + Duration::from_millis(ms);
             sh.timers.borrow_mut().push((deadline, idx, lua.clone(), key));
+            Ok(())
+        })?,
+    )?;
+    let sh = shared.clone();
+    timer.set(
+        "every",
+        // Recurring timer. Unlike a Lua self-rescheduling host.timer.after, this
+        // survives a disable/enable cycle (the schedule is re-armed by the host),
+        // so it's the right tool for a poll (e.g. watching for a plugin library's
+        // landmark to appear).
+        lua.create_function(move |lua, (ms, cb): (u64, Function)| {
+            let key = lua.create_registry_value(cb)?;
+            let interval = Duration::from_millis(ms.max(1));
+            sh.recurring
+                .borrow_mut()
+                .push((Instant::now() + interval, interval, idx, lua.clone(), key));
             Ok(())
         })?,
     )?;

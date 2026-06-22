@@ -7,4 +7,6 @@ license = "MIT"
 dependencies = ["com.platform.kontakt"]
 
 [capabilities]
-require = ["path"]
+# This module inherits Kontakt's framework (the overlay machinery runs in this
+# VM), so its effective capability surface is the union with Kontakt's.
+require = ["window", "uia", "screen", "input", "speech", "hotkey", "keys", "timer", "log", "path"]

@@ -46,6 +46,9 @@ function O.new(label)
       _slot = false,
       _claim = false,
       _specificity = 0,
+      -- Optional function(control) -> dx, dy shifting the coordinate origin (a
+      -- container library uses it for the host version's content offset).
+      _originOffset = false,
     },
     Overlay
   )
@@ -97,7 +100,16 @@ local TYPE_LABEL =
 local function originOf(self)
   if self.activeCtx then
     local o = self.activeCtx.origin()
-    if o and o.client then return o.client.x, o.client.y end
+    if o and o.client then
+      -- An optional per-overlay offset shifts the whole coordinate frame: a
+      -- container library overlay uses it for the host version's content shift
+      -- (e.g. Kontakt 8 nudges content +29 px down vs Kontakt 7), resolved per
+      -- active control, so authored coordinates adapt without the library knowing
+      -- the host version.
+      local dx, dy = 0, 0
+      if self._originOffset then dx, dy = self._originOffset(o) end
+      return o.client.x + dx, o.client.y + dy
+    end
   end
   return 0, 0
 end
@@ -316,10 +328,10 @@ end
 -- across all of the overlay's contexts. With `opts.slot` the overlay joins the
 -- host arbiter for that slot at `opts.specificity` (a base overlay and the
 -- overlays inheriting it MUST pass the same slot string, fixed on the first
--- attach); the arbiter then drives _activate/_deactivate. (Overlays whose match
--- changes with no window event — e.g. a library landmark appearing inside an
--- already-focused plugin — get a polled re-check in step 4 part 2, on a
--- disable-safe host timer.)
+-- attach); the arbiter then drives _activate/_deactivate. `opts.pollMatch` (ms)
+-- additionally re-reports the match on a disable-safe recurring host timer, for
+-- matches that change with no window event (a library landmark appearing inside
+-- an already-focused plugin).
 local function ensureTrigger(self, opts)
   if opts then
     self.naturalNav = opts.naturalNav == true
@@ -338,6 +350,9 @@ local function ensureTrigger(self, opts)
           function() self:_activate() end,
           function() self:_deactivate() end
         )
+        if opts.pollMatch then
+          host.timer.every(opts.pollMatch, function() self:_recheck() end)
+        end
       elseif opts.slot ~= self._slot then
         host.log.info(
           "overlay '"
@@ -423,8 +438,18 @@ function Overlay:attachEmbedded(spec, opts)
     end
     return nil
   end
+  -- The match also requires spec.present(control) when given — a per-call check,
+  -- NOT cached like identify, so a condition that changes while the same control
+  -- stays focused (a library loading/unloading inside an embedded plugin) is
+  -- re-evaluated each time. origin still resolves to the control either way.
+  local function matched()
+    local c = pluginControl()
+    if not c then return false end
+    if spec.present and not spec.present(c) then return false end
+    return true
+  end
   self.contexts[#self.contexts + 1] = {
-    match = function() return pluginControl() ~= nil end,
+    match = matched,
     origin = function() return pluginControl() end,
   }
   ensureTrigger(self, opts)
@@ -549,15 +574,15 @@ end
 -- the plugin and tell the hook to let captured nav keys pass through to it — a
 -- plugin's own (Qt) menu is not a Win32 #32768 menu, so the hook can't see it.
 function Overlay:_startMenuWatch()
-  local function tick()
+  -- Disable-safe recurring poll (survives a disable/enable cycle, unlike a Lua
+  -- self-rescheduling host.timer.after).
+  host.timer.every(150, function()
     if self.active and self.naturalNav then
       local ctrl = self.activeCtx and self.activeCtx.origin()
       local open = ctrl ~= nil and ctrl.id ~= nil and host.uia.find(ctrl.id, "", 50009) == true
       host.keys.menuOpen(open)
     end
-    host.timer.after(150, tick)
-  end
-  host.timer.after(150, tick)
+  end)
 end
 
 -- Creates a container overlay bound to an embedded plugin (`hosts`/`control`/

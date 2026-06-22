@@ -1,15 +1,17 @@
--- Cinematic Studio Series — Kontakt sample-library overlay, as DATA only (no Lua
--- crosses module VMs). The kontakt container detects the loaded library by its
--- landmark image and renders these controls. Coordinates are authored in the
--- Kontakt 7 frame; the container applies its per-host offset. Ported from
--- ReaHotkey's CinematicStudioSeries overlay. Depends on com.platform.kontakt.
+-- Cinematic Studio Strings — a Kontakt sample-library overlay that INHERITS the
+-- Kontakt module. It depends on com.platform.kontakt (so Kontakt's framework is
+-- evaluated in this VM) and registers an inheriting overlay that takes over from
+-- Kontakt's base whenever this library's landmark is on screen. Controls are
+-- authored in the Kontakt 7 frame; Kontakt applies the version offset. Ported
+-- from ReaHotkey's CinematicStudioSeries overlay.
 
+local kontakt = host.require("com.platform.kontakt")
 local function img(rel) return host.path(rel) end
 
 return {
-  provides = "kontakt.library",
-  libraries = {
-    {
+  -- Standalone side effect (this module's own VM): register the library overlay.
+  activate = function()
+    kontakt.library({
       name = "Cinematic Studio Strings",
       vendor = "Cinematic Studio Series",
       image = img("images/CinematicStudioStrings/Product.png"),
@@ -27,6 +29,6 @@ return {
           offImage = img("images/CinematicStudioStrings/MixOff.png"),
         },
       },
-    },
-  },
+    })
+  end,
 }
