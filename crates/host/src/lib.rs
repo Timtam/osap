@@ -401,6 +401,42 @@ fn load_module(
     Ok((id, true))
 }
 
+/// Builds the manager's display row for module `idx`: its settings (schema +
+/// stored/default values), enabled state, and declared dependencies. Used both
+/// for the startup snapshot and when a hot-loaded module is added to the list.
+fn module_info(shared: &Shared, m: &Module, idx: usize) -> gui::ModuleInfo {
+    let mut settings: Vec<gui::SettingDesc> = {
+        let schemas = shared.schemas.borrow();
+        let store = shared.store.borrow();
+        schemas
+            .get(idx)
+            .map(|map| {
+                map.iter()
+                    .map(|(key, f)| gui::SettingDesc {
+                        key: key.clone(),
+                        label: f.label.clone(),
+                        kind: f.kind,
+                        value: store.get(&m.id, key).unwrap_or_else(|| f.default.clone()),
+                        min: f.min,
+                        max: f.max,
+                        choices: f.choices.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    settings.sort_by(|a, b| a.label.cmp(&b.label));
+    gui::ModuleInfo {
+        name: m.name.clone(),
+        version: m.version.clone(),
+        id: m.id.clone(),
+        module_idx: idx,
+        enabled: shared.enabled.borrow().get(idx).copied().unwrap_or(true),
+        dependencies: m.dependencies.clone(),
+        settings,
+    }
+}
+
 /// Loads and runs many modules concurrently in one process.
 pub struct Manager {
     shared: Rc<Shared>,
@@ -462,8 +498,12 @@ impl Manager {
         let has_hotkeys = !self.shared.hotkeys.borrow().is_empty();
         let has_keys = !self.shared.keys.borrow().is_empty();
         let has_triggers = self.modules.borrow().iter().any(|m| window_has_triggers(&m.lua));
+        let headless = std::env::var_os("AUTOMATION_PLATFORM_HEADLESS").is_some();
 
-        if has_hotkeys || has_keys || has_triggers {
+        // The tray manager is shown whenever there's a window (non-headless), even
+        // with nothing loaded yet, so modules can be browsed/installed/managed.
+        // Headless has no window, so it only runs with an OS trigger registered.
+        if has_hotkeys || has_keys || has_triggers || !headless {
             if has_triggers {
                 self.shared
                     .backend
@@ -471,7 +511,7 @@ impl Manager {
                     .map_err(|e| anyhow::anyhow!("{e}"))
                     .context("failed to watch foreground windows")?;
             }
-            if std::env::var_os("AUTOMATION_PLATFORM_HEADLESS").is_some() {
+            if headless {
                 // No window: block on the platform message loop. Same event
                 // delivery as the GUI path; useful for testing/automation.
                 logging::line("manager", "listening for events (headless)");
@@ -490,54 +530,12 @@ impl Manager {
                 // wxWidgets owns the loop. Snapshot the module list for the tray
                 // manager window, then drain our OS events from its timer tick.
                 logging::line("manager", "module manager running in the system tray");
-                // Modules that something else depends on are libraries (shared
-                // data via host.require) — flagged so the manager hides them from
-                // the toggle list (a dependency shouldn't be disabled from under
-                // its dependents).
-                let depended: HashSet<String> = self
-                    .modules
-                    .borrow()
-                    .iter()
-                    .flat_map(|m| m.dependencies.iter().cloned())
-                    .collect();
                 let module_infos: Vec<gui::ModuleInfo> = self
                     .modules
                     .borrow()
                     .iter()
                     .enumerate()
-                    .map(|(i, m)| {
-                        let mut settings: Vec<gui::SettingDesc> = {
-                            let schemas = self.shared.schemas.borrow();
-                            let store = self.shared.store.borrow();
-                            schemas
-                                .get(i)
-                                .map(|map| {
-                                    map.iter()
-                                        .map(|(key, f)| gui::SettingDesc {
-                                            key: key.clone(),
-                                            label: f.label.clone(),
-                                            kind: f.kind,
-                                            value: store
-                                                .get(&m.id, key)
-                                                .unwrap_or_else(|| f.default.clone()),
-                                            min: f.min,
-                                            max: f.max,
-                                            choices: f.choices.clone(),
-                                        })
-                                        .collect()
-                                })
-                                .unwrap_or_default()
-                        };
-                        settings.sort_by(|a, b| a.label.cmp(&b.label));
-                        gui::ModuleInfo {
-                            name: m.name.clone(),
-                            version: m.version.clone(),
-                            id: m.id.clone(),
-                            enabled: self.shared.enabled.borrow().get(i).copied().unwrap_or(true),
-                            library: depended.contains(&m.id),
-                            settings,
-                        }
-                    })
+                    .map(|(i, m)| module_info(&self.shared, m, i))
                     .collect();
                 let backend = self.shared.backend.clone();
                 let shared = self.shared.clone();
@@ -547,6 +545,7 @@ impl Manager {
                 let load_shared = self.shared.clone();
                 let load_modules = self.modules.clone();
                 let load_disabled = self.disabled_ids.clone();
+                let remove_shared = self.shared.clone();
                 gui::run_gui(
                     module_infos,
                     move |idx, enabled| toggle_shared.set_enabled(idx, enabled),
@@ -555,14 +554,34 @@ impl Manager {
                     // it's usable without a restart. Returns the module id, or an
                     // error string if loading failed.
                     move |dir: std::path::PathBuf| {
-                        load_module(
+                        let before = load_modules.borrow().len();
+                        match load_module(
                             &load_shared,
                             &load_modules,
                             &load_disabled,
                             &mut HashSet::new(),
                             &dir,
-                        )
-                        .map_err(|e| format!("{e:#}"))
+                        ) {
+                            // Report every newly loaded module, not just the target
+                            // — a hot-load can pull in not-yet-loaded dependencies,
+                            // which must get list rows too. They're appended in load
+                            // order (dependencies before the module that needs them).
+                            Ok((id, true)) => {
+                                let mods = load_modules.borrow();
+                                let infos = (before..mods.len())
+                                    .map(|i| module_info(&load_shared, &mods[i], i))
+                                    .collect::<Vec<_>>();
+                                Ok((id, infos))
+                            }
+                            Ok((id, false)) => Ok((id, Vec::new())),
+                            Err(e) => Err(format!("{e:#}")),
+                        }
+                    },
+                    // Disable a module at runtime when its files are removed (revoke
+                    // its hotkeys/keys/triggers) — no restart needed, and not
+                    // persisted, so re-installing it later loads it enabled again.
+                    move |idx| {
+                        remove_shared.apply_enabled(idx, false);
                     },
                     move || {
                         let mods = modules.borrow();

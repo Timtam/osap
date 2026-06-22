@@ -7,7 +7,7 @@
 //! their management), closing it (X) hides it back to the tray, and only the
 //! tray "Quit" actually exits. Double-clicking the tray icon reopens it.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -31,16 +31,44 @@ pub struct SettingDesc {
     pub choices: Option<Vec<String>>,
 }
 
-/// One row in the module-manager list.
+/// One module as the manager needs it to render + manage a row.
 pub struct ModuleInfo {
     pub name: String,
     pub version: String,
     pub id: String,
+    /// This module's index in the manager's module list — passed back to the
+    /// toggle / settings callbacks.
+    pub module_idx: usize,
     pub enabled: bool,
-    /// A module something else depends on (shared data via host.require) — hidden
-    /// from the toggle list so a dependency can't be disabled from under it.
-    pub library: bool,
+    /// Ids this module depends on — used to block uninstalling a module that
+    /// another currently-loaded module still needs.
+    pub dependencies: Vec<String>,
     pub settings: Vec<SettingDesc>,
+}
+
+/// One built row in the Installed list: its tree item plus what the handlers
+/// need — the module index (toggle/settings callbacks), id + name (messages),
+/// its settings, and the ids it depends on (to block removing a needed module).
+struct Row {
+    item: TreeItemId,
+    module_idx: usize,
+    id: String,
+    name: String,
+    settings: Vec<SettingDesc>,
+    dependencies: Vec<String>,
+}
+
+impl Row {
+    fn new(item: TreeItemId, info: &ModuleInfo) -> Self {
+        Row {
+            item,
+            module_idx: info.module_idx,
+            id: info.id.clone(),
+            name: info.name.clone(),
+            settings: info.settings.clone(),
+            dependencies: info.dependencies.clone(),
+        }
+    }
 }
 
 /// Runs the tray-resident module manager. `on_toggle(idx, enabled)` fires when
@@ -50,7 +78,8 @@ pub fn run_gui(
     modules: Vec<ModuleInfo>,
     on_toggle: impl FnMut(usize, bool) + 'static,
     on_set: impl FnMut(usize, String, settings::Value) + 'static,
-    on_install: impl Fn(std::path::PathBuf) -> Result<(String, bool), String> + 'static,
+    on_install: impl Fn(std::path::PathBuf) -> Result<(String, Vec<ModuleInfo>), String> + 'static,
+    on_remove: impl Fn(usize) + 'static,
     mut pump: impl FnMut() + 'static,
 ) -> Result<(), Box<dyn std::error::Error>> {
     wxdragon::main(move |app| {
@@ -77,26 +106,22 @@ pub fn run_gui(
 
         // A native tree control with TVS_CHECKBOXES: real OS checkboxes that
         // expose the proper toggle state to the screen reader (UIA). Must be
-        // enabled *before* items are inserted. Library modules are skipped.
+        // enabled *before* items are inserted. Every module is listed (libraries
+        // too — they just can't be removed while something needs them). The root
+        // is kept so a row can be appended live when a module is hot-loaded.
         let list = TreeCtrl::builder(&installed)
             .with_style(TreeCtrlStyle::HideRoot | TreeCtrlStyle::Single | TreeCtrlStyle::NoLines)
             .build();
         let hwnd = list.get_handle();
         native_checkboxes::enable(hwnd);
-        let mut items: Vec<TreeItemId> = Vec::new();
-        let mut idx_map: Vec<usize> = Vec::new(); // displayed row -> module index
-        let mut row_ids: Vec<String> = Vec::new();
-        if let Some(root) = list.add_root("Modules", None, None) {
-            for (i, m) in modules.iter().enumerate() {
-                if m.library {
-                    continue;
-                }
+        let root = list.add_root("Modules", None, None);
+        let mut rows: Vec<Row> = Vec::new();
+        if let Some(root) = &root {
+            for m in modules.iter() {
                 let label = format!("{}  v{}   ({})", m.name, m.version, m.id);
-                if let Some(item) = list.append_item(&root, &label, None, None) {
+                if let Some(item) = list.append_item(root, &label, None, None) {
                     native_checkboxes::set(hwnd, &item, m.enabled);
-                    items.push(item);
-                    idx_map.push(i);
-                    row_ids.push(m.id.clone());
+                    rows.push(Row::new(item, m));
                 }
             }
         }
@@ -156,88 +181,120 @@ pub fn run_gui(
         sizer.add(&hint, 0, SizerFlag::All, 12);
         panel.set_sizer(sizer, true);
 
-        // Detect native checkbox toggles (mouse click on the box, or Space on
-        // the focused row). The native control flips the state itself — it
-        // toggles on button-/key-*down*, so by the *up* event the new state is
-        // already in place. We diff every row against the last-known states and
-        // report the change(s).
+        // Detect native checkbox toggles (mouse click on the box, or Space on the
+        // focused row). The native control flips state on the *down* event, so by
+        // the *up* event the new state is in place; diff each row against the
+        // last-known and report via the real module index.
         let states = Rc::new(RefCell::new(
-            idx_map.iter().map(|&i| modules[i].enabled).collect::<Vec<bool>>(),
+            rows.iter().map(|r| modules[r.module_idx].enabled).collect::<Vec<bool>>(),
         ));
-        let items = Rc::new(items);
-        let idx_map = Rc::new(idx_map);
-        let row_ids = Rc::new(row_ids);
+        let rows = Rc::new(RefCell::new(rows));
         let on_toggle: Rc<RefCell<Box<dyn FnMut(usize, bool)>>> =
             Rc::new(RefCell::new(Box::new(on_toggle)));
+        settings_btn.enable(false); // refreshed on selection (mouse-up / key-up)
         {
-            let (items, idx_map, states, on_toggle) =
-                (items.clone(), idx_map.clone(), states.clone(), on_toggle.clone());
+            let (rows, states, on_toggle) = (rows.clone(), states.clone(), on_toggle.clone());
             list.on_mouse_left_up(move |e| {
-                sync_checks(hwnd, &items, &idx_map, &states, &on_toggle);
+                sync_checks(hwnd, &rows.borrow(), &states, &on_toggle);
+                refresh_settings_btn(&list, &rows.borrow(), &settings_btn);
                 e.skip(true);
             });
         }
         {
-            let (items, idx_map, states, on_toggle) =
-                (items.clone(), idx_map.clone(), states.clone(), on_toggle.clone());
+            let (rows, states, on_toggle) = (rows.clone(), states.clone(), on_toggle.clone());
             list.on_key_up(move |e| {
-                sync_checks(hwnd, &items, &idx_map, &states, &on_toggle);
+                sync_checks(hwnd, &rows.borrow(), &states, &on_toggle);
+                refresh_settings_btn(&list, &rows.borrow(), &settings_btn);
                 e.skip(true);
             });
         }
 
         // "Settings…" opens a per-module dialog with native controls.
-        let settings_by_module: Rc<Vec<Vec<SettingDesc>>> =
-            Rc::new(modules.iter().map(|m| m.settings.clone()).collect());
         let on_set: Rc<RefCell<Box<dyn FnMut(usize, String, settings::Value)>>> =
             Rc::new(RefCell::new(Box::new(on_set)));
         {
-            let (items, idx_map, settings_by_module, on_set) =
-                (items.clone(), idx_map.clone(), settings_by_module.clone(), on_set.clone());
+            let (rows, on_set) = (rows.clone(), on_set.clone());
             settings_btn.on_click(move |_| {
                 let Some(sel) = list.get_selection() else {
                     return;
                 };
-                let Some(row) = items.iter().position(|it| native_checkboxes::same(it, &sel))
-                else {
+                let found = {
+                    let rb = rows.borrow();
+                    rb.iter()
+                        .find(|r| native_checkboxes::same(&r.item, &sel))
+                        .map(|r| (r.module_idx, r.settings.clone()))
+                };
+                let Some((module_idx, settings)) = found else {
                     return;
                 };
-                let idx = idx_map[row];
-                if settings_by_module[idx].is_empty() {
+                if settings.is_empty() {
                     modal_message(&frame, "Settings", "This module has no settings.", false);
                     return;
                 }
-                open_settings_dialog(&frame, idx, &settings_by_module[idx], &on_set);
+                open_settings_dialog(&frame, module_idx, &settings, &on_set);
             });
         }
 
-        // "Uninstall" removes the selected module's installed files (the running
-        // instance keeps going until restart).
+        // "Uninstall" removes the selected module's files AND disables it in the
+        // running app immediately (revoking its hotkeys/keys/triggers) + drops its
+        // row — no restart needed. A module another currently-loaded module
+        // depends on can't be removed.
         {
-            let (items, row_ids) = (items.clone(), row_ids.clone());
+            let (rows, states, settings_btn) = (rows.clone(), states.clone(), settings_btn);
             uninstall_btn.on_click(move |_| {
                 let Some(sel) = list.get_selection() else {
                     return;
                 };
-                let Some(row) = items.iter().position(|it| native_checkboxes::same(it, &sel))
-                else {
+                let found = {
+                    let rb = rows.borrow();
+                    rb.iter().find(|r| native_checkboxes::same(&r.item, &sel)).map(|r| {
+                        let needed_by: Vec<String> = rb
+                            .iter()
+                            .filter(|x| x.dependencies.iter().any(|d| *d == r.id))
+                            .map(|x| format!("{} ({})", x.name, x.id))
+                            .collect();
+                        (r.id.clone(), r.module_idx, needed_by)
+                    })
+                };
+                let Some((id, module_idx, needed_by)) = found else {
                     return;
                 };
-                let id = &row_ids[row];
-                let confirm = modal_message(
+                if !needed_by.is_empty() {
+                    modal_message(
+                        &frame,
+                        "Can't uninstall",
+                        &format!(
+                            "\u{201c}{id}\u{201d} is required by:\n\u{2022} {}\n\nRemove those \
+                             modules first.",
+                            needed_by.join("\n\u{2022} ")
+                        ),
+                        false,
+                    );
+                    return;
+                }
+                if !modal_message(
                     &frame,
                     "Uninstall module",
                     &format!(
-                        "Remove the installed files for \u{201c}{id}\u{201d}?\n\n\
-                         The running instance keeps going until you restart."
+                        "Remove \u{201c}{id}\u{201d}? It is disabled immediately and won't load \
+                         after a restart."
                     ),
                     true,
-                );
-                if !confirm {
+                ) {
                     return;
                 }
-                let msg = match crate::registry::uninstall(id) {
-                    Ok(true) => format!("Uninstalled {id}. Restart to fully apply."),
+                let msg = match crate::registry::uninstall(&id) {
+                    Ok(true) => {
+                        on_remove(module_idx); // revoke its hotkeys/keys/triggers now
+                        let pos = rows.borrow().iter().position(|r| r.id == id);
+                        if let Some(pos) = pos {
+                            let removed = rows.borrow_mut().remove(pos);
+                            states.borrow_mut().remove(pos);
+                            list.delete(&removed.item);
+                        }
+                        settings_btn.enable(false);
+                        format!("Uninstalled and disabled \u{201c}{id}\u{201d}.")
+                    }
                     Ok(false) => format!("\u{201c}{id}\u{201d} has no installed files to remove."),
                     Err(e) => format!("Could not uninstall {id}: {e}"),
                 };
@@ -259,6 +316,10 @@ pub fn run_gui(
         let browse_results: Rc<RefCell<Vec<crate::registry::RemoteModule>>> =
             Rc::new(RefCell::new(Vec::new()));
         let update_results: Rc<RefCell<Vec<(String, String)>>> = Rc::new(RefCell::new(Vec::new()));
+        // True while an install OR update is running: the two are mutually
+        // exclusive (both write the same modules dir), so both buttons are
+        // disabled together and only re-enabled when the one in flight reports back.
+        let busy = Rc::new(Cell::new(false));
 
         // Search.
         {
@@ -279,9 +340,12 @@ pub fn run_gui(
 
         // Install selected (review capabilities first).
         {
-            let (browse_results, browse_status, inbox) =
-                (browse_results.clone(), browse_status, inbox.clone());
+            let (browse_results, browse_status, inbox, busy) =
+                (browse_results.clone(), browse_status, inbox.clone(), busy.clone());
             install_btn.on_click(move |_| {
+                if busy.get() {
+                    return;
+                }
                 let Some(row) = browse_list.get_selection() else {
                     return;
                 };
@@ -292,11 +356,38 @@ pub fn run_gui(
                     };
                     (rm.full_name.clone(), rm.default_branch.clone())
                 };
+                if crate::registry::installed().iter().any(|m| {
+                    m.source.as_ref().map(|s| s.repo.as_str()) == Some(full_name.as_str())
+                }) {
+                    modal_message(
+                        &frame,
+                        "Already installed",
+                        &format!(
+                            "\u{201c}{full_name}\u{201d} is already installed. Use the Updates \
+                             tab to upgrade it, or uninstall it first."
+                        ),
+                        false,
+                    );
+                    return;
+                }
+                // Lock install + update for the whole flow (manifest fetch, the
+                // confirm modal, the download) so neither can be started again.
+                busy.set(true);
+                install_btn.enable(false);
+                update_btn.enable(false);
                 browse_status.set_label("Fetching manifest…");
                 let manifest = match crate::registry::fetch_manifest(&full_name, &branch) {
                     Ok(m) => m,
                     Err(e) => {
                         browse_status.set_label(&format!("Failed: {e}"));
+                        busy.set(false);
+                        update_btn.enable(true);
+                        refresh_install_btn(
+                            &browse_list,
+                            &browse_results.borrow(),
+                            false,
+                            &install_btn,
+                        );
                         return;
                     }
                 };
@@ -311,22 +402,43 @@ pub fn run_gui(
                     "\u{201c}{}\u{201d} v{} ({})\n\nRequested capabilities:\n\u{2022} {}\n\nInstall this module?",
                     manifest.name, manifest.version, manifest.id, caps_str
                 );
-                let ok = modal_message(&frame, "Review capabilities", &msg, true);
-                if !ok {
+                if !modal_message(&frame, "Review capabilities", &msg, true) {
+                    busy.set(false);
+                    update_btn.enable(true);
+                    refresh_install_btn(
+                        &browse_list,
+                        &browse_results.borrow(),
+                        false,
+                        &install_btn,
+                    );
                     return;
                 }
                 browse_status.set_label(&format!("Installing {full_name}…"));
                 let inbox = inbox.clone();
                 std::thread::spawn(move || {
-                    let job = match crate::registry::install(&full_name) {
-                        Ok(_) => {
-                            let repo = full_name.rsplit('/').next().unwrap_or(&full_name);
-                            Job::Installed(crate::registry::modules_dir().join(repo))
+                    // Always deliver a result, even on an unexpected panic, so the
+                    // buttons can never get stuck disabled.
+                    let job = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        match crate::registry::install(&full_name) {
+                            Ok(_) => {
+                                let repo = full_name.rsplit('/').next().unwrap_or(&full_name);
+                                Job::Installed(crate::registry::modules_dir().join(repo))
+                            }
+                            Err(e) => Job::Done(format!("Install failed: {e}")),
                         }
-                        Err(e) => Job::Done(format!("Install failed: {e}")),
-                    };
+                    }))
+                    .unwrap_or_else(|_| Job::Done("Install failed (internal error).".to_string()));
                     inbox.lock().unwrap().push(job);
                 });
+            });
+        }
+
+        // Grey the Install button unless a not-yet-installed result is selected.
+        install_btn.enable(false);
+        {
+            let (browse_results, busy) = (browse_results.clone(), busy.clone());
+            browse_list.on_selection_changed(move |_| {
+                refresh_install_btn(&browse_list, &browse_results.borrow(), busy.get(), &install_btn);
             });
         }
 
@@ -352,22 +464,31 @@ pub fn run_gui(
 
         // Update selected.
         {
-            let (update_results, updates_status, inbox) =
-                (update_results.clone(), updates_status, inbox.clone());
+            let (update_results, updates_status, inbox, busy) =
+                (update_results.clone(), updates_status, inbox.clone(), busy.clone());
             update_btn.on_click(move |_| {
+                if busy.get() {
+                    return;
+                }
                 let Some(row) = updates_list.get_selection() else {
                     return;
                 };
                 let Some((id, repo)) = update_results.borrow().get(row as usize).cloned() else {
                     return;
                 };
+                busy.set(true);
+                install_btn.enable(false);
+                update_btn.enable(false);
                 updates_status.set_label(&format!("Updating {id}…"));
                 let inbox = inbox.clone();
                 std::thread::spawn(move || {
-                    let job = match crate::registry::install(&repo) {
-                        Ok(m) => Job::Done(format!("Updated {}. Restart to apply.", m.id)),
-                        Err(e) => Job::Done(format!("Update failed: {e}")),
-                    };
+                    let job = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        match crate::registry::install(&repo) {
+                            Ok(m) => Job::Done(format!("Updated {}. Restart to apply.", m.id)),
+                            Err(e) => Job::Done(format!("Update failed: {e}")),
+                        }
+                    }))
+                    .unwrap_or_else(|_| Job::Done("Update failed (internal error).".to_string()));
                     inbox.lock().unwrap().push(job);
                 });
             });
@@ -425,6 +546,7 @@ pub fn run_gui(
         let timer = Timer::new(&frame);
         {
             let inbox = inbox.clone();
+            let (rows, states, busy) = (rows.clone(), states.clone(), busy.clone());
             timer.on_tick(move |_event| {
                 pump();
                 // Drain background-job results and apply them on the GUI thread.
@@ -433,17 +555,35 @@ pub fn run_gui(
                     match job {
                         Job::Browse(v) => {
                             browse_list.clear();
+                            let installed: std::collections::HashSet<String> =
+                                crate::registry::installed()
+                                    .into_iter()
+                                    .filter_map(|m| m.source.map(|s| s.repo))
+                                    .collect();
                             for r in &v {
                                 let desc = if r.description.is_empty() {
                                     String::new()
                                 } else {
                                     format!(" — {}", r.description)
                                 };
-                                browse_list
-                                    .append(&format!("{}{}  ({} stars)", r.full_name, desc, r.stars));
+                                let tag = if installed.contains(&r.full_name) {
+                                    "  — installed"
+                                } else {
+                                    ""
+                                };
+                                browse_list.append(&format!(
+                                    "{}{}  ({} stars){}",
+                                    r.full_name, desc, r.stars, tag
+                                ));
                             }
                             browse_status.set_label(&format!("{} result(s).", v.len()));
                             *browse_results.borrow_mut() = v;
+                            refresh_install_btn(
+                                &browse_list,
+                                &browse_results.borrow(),
+                                busy.get(),
+                                &install_btn,
+                            );
                         }
                         Job::BrowseStatus(s) => browse_status.set_label(&s),
                         Job::Updates(v) => {
@@ -455,12 +595,42 @@ pub fn run_gui(
                             *update_results.borrow_mut() = v;
                         }
                         Job::Installed(dir) => {
+                            // Re-enable + clear busy up front, so even a panic in
+                            // on_install can't leave the buttons stuck disabled.
+                            busy.set(false);
+                            update_btn.enable(true);
+                            refresh_install_btn(
+                                &browse_list,
+                                &browse_results.borrow(),
+                                false,
+                                &install_btn,
+                            );
                             let msg = match on_install(dir) {
-                                Ok((id, true)) => format!(
-                                    "Installed and loaded \u{201c}{id}\u{201d} — it's running now. \
-                                     Restart to manage it in this list."
-                                ),
-                                Ok((id, false)) => format!(
+                                Ok((id, infos)) if !infos.is_empty() => {
+                                    // List every newly loaded module (a hot-load can
+                                    // pull in not-yet-loaded dependencies), so each
+                                    // is immediately toggleable / removable.
+                                    if let Some(root) = &root {
+                                        for info in &infos {
+                                            let label = format!(
+                                                "{}  v{}   ({})",
+                                                info.name, info.version, info.id
+                                            );
+                                            if let Some(item) =
+                                                list.append_item(root, &label, None, None)
+                                            {
+                                                native_checkboxes::set(hwnd, &item, info.enabled);
+                                                states.borrow_mut().push(info.enabled);
+                                                rows.borrow_mut().push(Row::new(item, info));
+                                            }
+                                        }
+                                    }
+                                    format!(
+                                        "Installed and loaded \u{201c}{id}\u{201d} — it's running \
+                                         now and listed below."
+                                    )
+                                }
+                                Ok((id, _)) => format!(
                                     "Installed \u{201c}{id}\u{201d} to disk, but a copy is already \
                                      running. Restart to apply the update."
                                 ),
@@ -471,6 +641,14 @@ pub fn run_gui(
                             modal_message(&frame, "Installed", &msg, false);
                         }
                         Job::Done(msg) => {
+                            busy.set(false);
+                            update_btn.enable(true);
+                            refresh_install_btn(
+                                &browse_list,
+                                &browse_results.borrow(),
+                                false,
+                                &install_btn,
+                            );
                             modal_message(&frame, "Modules", &msg, false);
                         }
                     }
@@ -529,6 +707,14 @@ fn modal_message(parent: &Frame, title: &str, message: &str, yes_no: bool) -> bo
         .build();
     text.set_value(message);
     text.set_name(title);
+    // Size to the content (~62 chars per 440px line) so a longer message isn't
+    // crammed into a narrow, heavily-wrapped box.
+    let lines: usize = message
+        .lines()
+        .map(|l| (l.chars().count().saturating_sub(1) / 62) + 1)
+        .sum::<usize>()
+        .max(1);
+    text.set_min_size(Size::new(440, ((lines as i32) * 20 + 36).clamp(70, 380)));
     sizer.add(&text, 1, SizerFlag::All | SizerFlag::Expand, 12);
 
     let buttons = BoxSizer::builder(Orientation::Horizontal).build();
@@ -701,24 +887,59 @@ fn open_settings_dialog(
     dialog.destroy();
 }
 
+/// Whether a repo (owner/repo) is already installed in the modules directory.
+fn repo_installed(full_name: &str) -> bool {
+    crate::registry::installed()
+        .iter()
+        .any(|m| m.source.as_ref().map(|s| s.repo.as_str()) == Some(full_name))
+}
+
+/// Enables the Install button only when a not-yet-installed result is selected
+/// and no install/update is in flight.
+fn refresh_install_btn(
+    list: &ListBox,
+    results: &[crate::registry::RemoteModule],
+    busy: bool,
+    btn: &Button,
+) {
+    let enabled = !busy
+        && list
+            .get_selection()
+            .and_then(|row| results.get(row as usize))
+            .map(|rm| !repo_installed(&rm.full_name))
+            .unwrap_or(false);
+    btn.enable(enabled);
+}
+
+/// Enables the Settings button only when the selected row's module actually has
+/// settings (and a row is selected at all) — so the user can't open an empty
+/// settings dialog.
+fn refresh_settings_btn(list: &TreeCtrl, rows: &[Row], settings_btn: &Button) {
+    let has_settings = list
+        .get_selection()
+        .and_then(|sel| rows.iter().find(|r| native_checkboxes::same(&r.item, &sel)))
+        .map(|r| !r.settings.is_empty())
+        .unwrap_or(false);
+    settings_btn.enable(has_settings);
+}
+
 /// Reads each row's native check state, reporting any that changed since the
 /// last call via `on_toggle`. Called after every mouse-up / key-up on the tree.
 fn sync_checks(
     hwnd: *mut c_void,
-    items: &[TreeItemId],
-    idx_map: &[usize],
+    rows: &[Row],
     states: &RefCell<Vec<bool>>,
     on_toggle: &RefCell<Box<dyn FnMut(usize, bool)>>,
 ) {
     let mut states = states.borrow_mut();
     let mut cb = on_toggle.borrow_mut();
-    for (row, item) in items.iter().enumerate() {
-        let now = native_checkboxes::get(hwnd, item);
-        if states.get(row).copied() != Some(now) {
-            if let Some(slot) = states.get_mut(row) {
+    for (i, row) in rows.iter().enumerate() {
+        let now = native_checkboxes::get(hwnd, &row.item);
+        if states.get(i).copied() != Some(now) {
+            if let Some(slot) = states.get_mut(i) {
                 *slot = now;
             }
-            cb(idx_map[row], now); // report the real module index
+            cb(row.module_idx, now); // report the real module index
         }
     }
 }
