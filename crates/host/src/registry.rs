@@ -191,7 +191,13 @@ pub fn install_tree(full_name: &str) -> Result<Vec<ModuleManifest>> {
             continue;
         }
         let m = install(&repo)?;
-        let (id, deps) = (m.id.clone(), m.dependencies.clone());
+        let (id, deps) = (
+            m.id.clone(),
+            m.dependencies
+                .iter()
+                .map(|s| module_manifest::dep_id(s).to_string())
+                .collect::<Vec<String>>(),
+        );
         have.insert(id.clone());
         installed_now.push(m);
         let missing: Vec<String> = deps.into_iter().filter(|d| !have.contains(d)).collect();
@@ -243,7 +249,12 @@ pub fn installed() -> Vec<InstalledModule> {
                 id: m.manifest.id,
                 name: m.manifest.name,
                 version: m.manifest.version,
-                dependencies: m.manifest.dependencies,
+                dependencies: m
+                    .manifest
+                    .dependencies
+                    .iter()
+                    .map(|s| module_manifest::dep_id(s).to_string())
+                    .collect(),
                 source: read_source(&dir),
                 dir,
             });

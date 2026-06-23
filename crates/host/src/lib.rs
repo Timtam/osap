@@ -734,8 +734,9 @@ fn collect_code_deps(
     out: &mut Vec<(String, std::path::PathBuf)>,
     seen: &mut HashSet<String>,
 ) -> Result<()> {
-    for dep_id in dep_ids {
-        if !seen.insert(dep_id.clone()) {
+    for spec in dep_ids {
+        let dep_id = module_manifest::dep_id(spec);
+        if !seen.insert(dep_id.to_string()) {
             continue; // already visited
         }
         let dir = find_sibling_module(parent, dep_id).ok_or_else(|| {
@@ -747,7 +748,32 @@ fn collect_code_deps(
         }
         // Its own code-module deps first, so they're registered before it runs.
         collect_code_deps(parent, &lm.manifest.dependencies, out, seen)?;
-        out.push((dep_id.clone(), lm.entry_path()));
+        out.push((dep_id.to_string(), lm.entry_path()));
+    }
+    Ok(())
+}
+
+/// Verifies a loaded dependency's version against a dependent's declared semver
+/// requirement (e.g. `"com.x >= 1.2"`). A requirement or dependency version that
+/// isn't valid semver is logged and skipped (best-effort) rather than blocking the
+/// load; a parseable-but-unsatisfied requirement fails the load with a clear error.
+fn check_dep_version(dependent: &str, dep_id: &str, req: &str, dep_version: &str) -> Result<()> {
+    let (vr, v) = match (semver::VersionReq::parse(req), semver::Version::parse(dep_version)) {
+        (Ok(vr), Ok(v)) => (vr, v),
+        _ => {
+            logging::line(
+                "manager",
+                &format!(
+                    "version check skipped: '{dep_id}' v{dep_version} vs requirement '{req}' (not semver)"
+                ),
+            );
+            return Ok(());
+        }
+    };
+    if !vr.matches(&v) {
+        anyhow::bail!(
+            "module '{dependent}' requires '{dep_id}' {req}, but the loaded version is v{dep_version}"
+        );
     }
     Ok(())
 }
@@ -861,6 +887,14 @@ mod guard_tests {
         assert_ne!(backend::key_spec("Ctrl+Alt+H"), backend::key_spec("Ctrl+H"));
         assert_ne!(backend::key_spec("Tab"), backend::key_spec("Shift+Tab"));
     }
+
+    #[test]
+    fn dep_version_check_enforces_semver_requirements() {
+        assert!(check_dep_version("a", "b", ">= 1.0.0", "1.2.0").is_ok());
+        assert!(check_dep_version("a", "b", ">= 2.0.0", "1.2.0").is_err());
+        assert!(check_dep_version("a", "b", "^0.1", "0.1.5").is_ok());
+        assert!(check_dep_version("a", "b", "^0.2", "0.1.5").is_err());
+    }
 }
 
 /// Builds module `idx`'s VM in place: installs its host, runs the window prelude,
@@ -957,17 +991,26 @@ fn load_module(
     // set on every exit (including an error) — keeping insert/remove symmetric so
     // a missing/failing dependency can't leave a stale cycle-detection entry.
     let deps = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
-        for dep_id in module.manifest.dependencies.clone() {
-            if modules.borrow().iter().any(|m| m.id == dep_id) {
-                continue;
+        for spec in module.manifest.dependencies.clone() {
+            let dep = module_manifest::dep_id(&spec);
+            if !modules.borrow().iter().any(|m| m.id == dep) {
+                let dep_dir = find_sibling_module(&parent, dep).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "module '{id}' depends on '{dep}', not found in {}",
+                        parent.display()
+                    )
+                })?;
+                load_module(shared, modules, disabled_ids, loading, &dep_dir)?;
             }
-            let dep_dir = find_sibling_module(&parent, &dep_id).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "module '{id}' depends on '{dep_id}', not found in {}",
-                    parent.display()
-                )
-            })?;
-            load_module(shared, modules, disabled_ids, loading, &dep_dir)?;
+            // Verify a declared min/compatible-version requirement against the
+            // now-loaded dependency (fails the load with a clear error if unmet).
+            if let Some(req) = module_manifest::dep_constraint(&spec) {
+                let found =
+                    modules.borrow().iter().find(|m| m.id == dep).map(|m| m.version.clone());
+                if let Some(ver) = found {
+                    check_dep_version(&id, dep, req, &ver)?;
+                }
+            }
         }
         Ok(())
     }))
@@ -1042,11 +1085,20 @@ fn load_module(
         }
     }
 
+    // Store the dependency IDS (stripped of any version constraint) — the
+    // install/uninstall graph + host.require match on ids; the constraint was
+    // already verified above.
+    let dep_ids: Vec<String> = module
+        .manifest
+        .dependencies
+        .iter()
+        .map(|s| module_manifest::dep_id(s).to_string())
+        .collect();
     modules.borrow_mut().push(Module {
         id: module.manifest.id,
         name: module.manifest.name,
         version: module.manifest.version,
-        dependencies: module.manifest.dependencies,
+        dependencies: dep_ids,
         lua,
     });
     debug_assert_eq!(shared.ids.borrow().len(), modules.borrow().len());
@@ -1121,7 +1173,12 @@ fn reload_module(
         m.lua = lua;
         m.name = module.manifest.name.clone();
         m.version = module.manifest.version.clone();
-        m.dependencies = module.manifest.dependencies.clone();
+        m.dependencies = module
+            .manifest
+            .dependencies
+            .iter()
+            .map(|s| module_manifest::dep_id(s).to_string())
+            .collect();
     }
     if window_has_triggers(&modules.borrow()[idx].lua) {
         if let Err(e) = shared.backend.watch_foreground() {

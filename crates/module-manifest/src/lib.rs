@@ -46,6 +46,22 @@ fn default_entry() -> String {
     "src/main.luau".to_string()
 }
 
+/// The module id of a dependency spec. A spec is either a bare id (`"com.x.y"`)
+/// or an id followed by a space-separated semver requirement (`"com.x.y >= 1.2"`);
+/// the id is everything up to the first whitespace.
+pub fn dep_id(spec: &str) -> &str {
+    spec.split_whitespace().next().unwrap_or("")
+}
+
+/// The version-constraint part of a dependency spec (the text after the id), or
+/// `None` for a bare id. e.g. `"com.x >= 1.2"` → `Some(">= 1.2")`.
+pub fn dep_constraint(spec: &str) -> Option<&str> {
+    let trimmed = spec.trim();
+    let ws = trimmed.find(char::is_whitespace)?;
+    let rest = trimmed[ws..].trim();
+    (!rest.is_empty()).then_some(rest)
+}
+
 /// A loaded module: package root + parsed manifest.
 #[derive(Debug)]
 pub struct LoadedModule {
@@ -121,5 +137,22 @@ impl LoadedModule {
                 .context("failed to extract module package")?;
         }
         Self::load_dir(cache)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn dependency_spec_parsing() {
+        // Bare id (backward compatible): no constraint.
+        assert_eq!(dep_id("com.x.y"), "com.x.y");
+        assert_eq!(dep_constraint("com.x.y"), None);
+        // Id + space-separated semver requirement.
+        assert_eq!(dep_id("com.x.y >= 1.2"), "com.x.y");
+        assert_eq!(dep_constraint("com.x.y >= 1.2"), Some(">= 1.2"));
+        // Surrounding / extra whitespace is tolerated.
+        assert_eq!(dep_id("  com.x.y   ^2  "), "com.x.y");
+        assert_eq!(dep_constraint("  com.x.y   ^2  "), Some("^2"));
     }
 }
