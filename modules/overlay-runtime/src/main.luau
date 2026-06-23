@@ -44,6 +44,9 @@ function O.new(label)
       -- Optional function(control) -> dx, dy shifting the coordinate origin (a
       -- container library uses it for the host version's content offset).
       _originOffset = false,
+      -- Optional gate fn(origin) -> bool: an extra activation condition ANDed on
+      -- top of the context match (e.g. a library's landmark image on screen).
+      _gate = false,
     },
     Overlay
   )
@@ -82,6 +85,29 @@ function Overlay:addGraphicalToggle(opts)
     offImage = opts.offImage,
     hotkey = opts.hotkey,
   })
+end
+
+-- An extra activation condition ANDed on top of the context match: `fn(origin)`
+-- (origin = the active context's coordinate window/control) returns whether this
+-- overlay should be active. A derived/library overlay uses it to gate on its own,
+-- more-specific landmark while sharing the base's window context.
+function Overlay:gate(fn)
+  self._gate = fn
+  return self
+end
+
+-- Convenience gate: active only while `image` is found within the active context's
+-- region (a library's product wordmark inside the plugin). `image` must be an
+-- ABSOLUTE path (host.path) — the imageSearch runs in the active context's identity
+-- scope, so a relative path would resolve under the wrong module root.
+function Overlay:landmark(image)
+  return self:gate(function(origin)
+    if not image or not origin or not origin.client or not origin.bounds then return false end
+    local region =
+      { origin.client.x, origin.client.y, origin.client.x + origin.bounds.w, origin.client.y + origin.bounds.h }
+    local ok, res = pcall(host.screen.imageSearch, image, { region = region })
+    return ok and res ~= nil
+  end)
 end
 
 local TYPE_LABEL =
@@ -310,6 +336,12 @@ function Overlay:_recheck()
     end
   end
   if not matched then self.activeCtx = false end
+  -- An extra gate (e.g. a library landmark) further narrows the match, evaluated
+  -- against the matched context's coordinate origin.
+  if matched and self._gate then
+    matched = self._gate(self.activeCtx.origin()) == true
+    if not matched then self.activeCtx = false end
+  end
   if self._slot then
     host.arbiter.setMatching(self._slot, self._claim, matched)
   elseif matched then
@@ -327,38 +359,34 @@ end
 -- additionally re-reports the match on a disable-safe recurring host timer, for
 -- matches that change with no window event (a library landmark appearing inside
 -- an already-focused plugin).
-local function ensureTrigger(self, opts)
-  if opts then
-    self.naturalNav = opts.naturalNav == true
-    self.hoverToRead = opts.hoverToRead == true
-    -- Arbiter mode is fixed by the first attach that carries a slot; an overlay
-    -- competes on exactly one slot. A later attach with a different slot is a
-    -- mistake (its context would silently fold into the first slot's claim), so
-    -- log it rather than rebind.
-    if opts.slot then
-      if not self._slot then
-        self._slot = opts.slot
-        self._specificity = opts.specificity or 0
-        self._claim = host.arbiter.register(
-          self._slot,
-          self._specificity,
-          function() self:_activate() end,
-          function() self:_deactivate() end
-        )
-        if opts.pollMatch then
-          host.timer.every(opts.pollMatch, function() self:_recheck() end)
-        end
-      elseif opts.slot ~= self._slot then
-        host.log.info(
-          "overlay '"
-            .. tostring(self.label)
-            .. "' already bound to arbiter slot '"
-            .. self._slot
-            .. "', ignoring '"
-            .. opts.slot
-            .. "'"
-        )
+-- Arbiter mode is fixed by the first join that carries a slot; an overlay competes
+-- on exactly one slot. A later join with a different slot is a mistake (its context
+-- would silently fold into the first slot's claim), so log it rather than rebind.
+-- Shared by attach* (via ensureTrigger) and derive.
+function Overlay:_join(slot, specificity, pollMs)
+  if slot then
+    if not self._slot then
+      self._slot = slot
+      self._specificity = specificity or 0
+      self._claim = host.arbiter.register(
+        self._slot,
+        self._specificity,
+        function() self:_activate() end,
+        function() self:_deactivate() end
+      )
+      if pollMs then
+        host.timer.every(pollMs, function() self:_recheck() end)
       end
+    elseif slot ~= self._slot then
+      host.log.info(
+        "overlay '"
+          .. tostring(self.label)
+          .. "' already bound to arbiter slot '"
+          .. self._slot
+          .. "', ignoring '"
+          .. slot
+          .. "'"
+      )
     end
   end
   if self.triggerSet then return end
@@ -368,6 +396,17 @@ local function ensureTrigger(self, opts)
   host.window.onTrigger({}, { on = "activate" }, function() self:_recheck() end)
   host.window.onFocus(function() self:_recheck() end)
   self:_recheck()
+end
+
+-- Sets the interaction flags from `opts`, then joins the arbiter + arms the trigger.
+local function ensureTrigger(self, opts)
+  if opts then
+    self.naturalNav = opts.naturalNav == true
+    self.hoverToRead = opts.hoverToRead == true
+    self:_join(opts.slot, opts.specificity, opts.pollMatch)
+  else
+    self:_join(nil, nil, nil)
+  end
 end
 
 -- Context-bound (standalone): active while a window matching `matcher` is
@@ -469,6 +508,30 @@ function Overlay:attachEmbedded(spec, opts)
     origin = function() return pluginControl() end,
   }
   ensureTrigger(self, opts)
+end
+
+-- Derives a child overlay from this one: it inherits this overlay's controls (a
+-- fresh list — `build(child)` then appends the child's own), its coordinate frame +
+-- interaction flags, and its activation context, and competes on the SAME arbiter
+-- slot one specificity higher (so the child wins over its parent when active). The
+-- child sets its own, more-specific gate in `build` (e.g. child:landmark(image)).
+-- This is how a sub-library composes onto a library — each level is itself a full
+-- overlay, assembled by the arbiter (React-portal style). The parent must already
+-- be attached (so its context + slot exist to inherit).
+function Overlay:derive(name, build)
+  local child = O.new(name or self.label)
+  for _, c in ipairs(self.controls) do
+    child.controls[#child.controls + 1] = c
+  end
+  for _, ctx in ipairs(self.contexts) do
+    child.contexts[#child.contexts + 1] = ctx
+  end
+  child._originOffset = self._originOffset
+  child.naturalNav = self.naturalNav
+  child.hoverToRead = self.hoverToRead
+  if build then build(child) end
+  child:_join(self._slot or nil, (self._specificity or 0) + 1, 500)
+  return child
 end
 
 -- Replaces the control set at runtime (e.g. a Kontakt base overlay vs a library's

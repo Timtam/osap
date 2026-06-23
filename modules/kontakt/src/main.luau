@@ -67,45 +67,42 @@ local function uiaClick(hwnd, name, ctype)
   return false
 end
 
--- A fresh copy of the generic, library-independent header (UIA-driven, robust
--- across versions), so each overlay owns its own control tables.
-local function header()
-  return {
-    {
-      kind = "custom",
-      label = "Kontakt file menu",
-      hotkey = "Alt+F",
-      onActivate = function(ov)
-        if uiaClick(pluginHwnd(ov), "Kontakt File Menu", BUTTON) then
-          host.keys.menuOpen(true) -- snappier than waiting for the menu-watch poll
-        end
-      end,
-    },
-    {
-      kind = "custom",
-      label = "Load instrument",
-      hotkey = "Ctrl+L",
-      onActivate = function(ov)
-        local hwnd = pluginHwnd(ov)
-        if uiaClick(hwnd, "Kontakt File Menu", BUTTON) then
-          host.timer.after(200, function() uiaClick(hwnd, "Load...", MENUITEM) end)
-        end
-      end,
-    },
-  }
+-- Adds the generic, library-independent header (UIA-driven, robust across versions)
+-- to `ov` with the functional builders — the same way any overlay is built. The
+-- onActivate closures take the ACTIVE overlay `o` (passed at activation), so they
+-- work unchanged in a derived/library overlay too.
+local function addHeader(ov)
+  ov:addCustomButton({
+    label = "Kontakt file menu",
+    hotkey = "Alt+F",
+    onActivate = function(o)
+      if uiaClick(pluginHwnd(o), "Kontakt File Menu", BUTTON) then
+        host.keys.menuOpen(true) -- snappier than waiting for the menu-watch poll
+      end
+    end,
+  })
+  ov:addCustomButton({
+    label = "Load instrument",
+    hotkey = "Ctrl+L",
+    onActivate = function(o)
+      local hwnd = pluginHwnd(o)
+      if uiaClick(hwnd, "Kontakt File Menu", BUTTON) then
+        host.timer.after(200, function() uiaClick(hwnd, "Load...", MENUITEM) end)
+      end
+    end,
+  })
 end
 
--- The embedded-attach spec shared by the base and every library overlay. `present`
--- is the library's landmark gate (nil for the base, always present when Kontakt
--- is focused).
-local function spec(present)
+-- The embedded-attach spec shared by the base and every library overlay. A
+-- library's landmark is now an overlay-level gate (ov:landmark), not part of the
+-- spec, so this is identical for the base and every library.
+local function spec()
   return {
     hosts = daw.all,
     -- NI Qt plugin control class (e.g. "Qt652QWindowIcon{GUID}1"). Loose match; the
     -- UIA name (anyKontakt) disambiguates Kontakt from other NI Qt plugins.
     control = "Qt%d+QWindowIcon",
     identify = anyKontakt,
-    present = present,
   }
 end
 
@@ -113,41 +110,35 @@ return {
   -- Standalone side effect, run only in Kontakt's own VM: the base overlay.
   activate = function()
     local ov = O.new("Kontakt")
-    ov:setControls(header())
-    ov:attachEmbedded(spec(nil), { slot = SLOT, specificity = 0, naturalNav = true })
+    addHeader(ov)
+    ov:attachEmbedded(spec(), { slot = SLOT, specificity = 0, naturalNav = true })
     ov:_startMenuWatch()
     host.log.info("Kontakt base overlay ready.")
   end,
 
-  -- Called from a sample-library module (this file runs in its VM): an inheriting
-  -- overlay that wins over the base when `lib.image` is on screen inside Kontakt.
-  -- `lib.image` (and any control on/offImage) MUST be an ABSOLUTE path (use
-  -- host.path) — the imageSearch below runs in Kontakt's identity scope, so a
-  -- relative path would resolve under Kontakt's root, not the library's.
-  library = function(lib)
-    local ov = O.new("Kontakt — " .. (lib.name or "library"))
-    local controls = header()
-    for _, c in ipairs(lib.controls or {}) do
-      controls[#controls + 1] = c
-    end
-    ov:setControls(controls)
+  -- Called from a sample-library module (this file runs in its VM): builds an
+  -- inheriting overlay that wins over the base when `landmark` is on screen inside
+  -- Kontakt. The library author adds its own controls in `build(ov)` with the same
+  -- functional builders used everywhere — ov:addStaticText / addHotspotButton /
+  -- addGraphicalToggle / addCustomButton — on top of the inherited header; no
+  -- declarative control tables. Controls are authored in the Kontakt 7 coordinate
+  -- frame; the per-control offset adapts them to the focused Kontakt version.
+  --
+  -- `landmark` (and any control on/offImage) MUST be an ABSOLUTE path (host.path) —
+  -- imageSearch runs in Kontakt's identity scope, so a relative path would resolve
+  -- under Kontakt's root, not the library's.
+  library = function(name, landmark, build)
+    local ov = O.new("Kontakt — " .. (name or "library"))
+    addHeader(ov)
     ov._originOffset = resolveOffset
-    -- Match = Kontakt focused AND this library's landmark visible. Checked fresh
-    -- (a library loads/unloads inside Kontakt with no window event), and pcall-
-    -- guarded so a bad image path skips rather than breaking detection.
-    local function landmark(c)
-      if not lib.image or not c.client or not c.bounds then return false end
-      local region =
-        { c.client.x, c.client.y, c.client.x + c.bounds.w, c.client.y + c.bounds.h }
-      local ok, res = pcall(host.screen.imageSearch, lib.image, { region = region })
-      return ok and res ~= nil
-    end
-    ov:attachEmbedded(
-      spec(landmark),
-      { slot = SLOT, specificity = 1, naturalNav = true, pollMatch = lib.pollMs or 500 }
-    )
+    if build then build(ov) end
+    -- Match = Kontakt focused (the embedded context) AND this library's landmark
+    -- visible (re-checked on the poll below, since a library loads/unloads inside
+    -- Kontakt with no window event).
+    if landmark then ov:landmark(landmark) end
+    ov:attachEmbedded(spec(), { slot = SLOT, specificity = 1, naturalNav = true, pollMatch = 500 })
     ov:_startMenuWatch()
-    host.log.info("Kontakt library overlay ready: " .. (lib.name or "library"))
+    host.log.info("Kontakt library overlay ready: " .. (name or "library"))
     return ov
   end,
 }

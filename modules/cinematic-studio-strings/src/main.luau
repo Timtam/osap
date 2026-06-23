@@ -10,25 +10,20 @@ local function img(rel) return host.path(rel) end
 
 return {
   -- Standalone side effect (this module's own VM): register the library overlay.
+  -- Controls are built functionally on top of Kontakt's inherited header.
   activate = function()
-    kontakt.library({
-      name = "Cinematic Studio Strings",
-      vendor = "Cinematic Studio Series",
-      image = img("images/CinematicStudioStrings/Product.png"),
-      controls = {
-        { kind = "static", label = "Cinematic Studio Strings" },
-        { kind = "hotspot", label = "Spot 1 Mic", at = { 35, 481 } },
-        { kind = "hotspot", label = "Spot 2 Mic", at = { 75, 481 } },
-        { kind = "hotspot", label = "Main Mic", at = { 115, 481 } },
-        { kind = "hotspot", label = "Room Mic", at = { 155, 481 } },
-        {
-          kind = "gtoggle",
-          label = "Mix Position",
-          region = { 188, 473, 220, 489 },
-          onImage = img("images/CinematicStudioStrings/MixOn.png"),
-          offImage = img("images/CinematicStudioStrings/MixOff.png"),
-        },
-      },
-    })
+    kontakt.library("Cinematic Studio Strings", img("images/CinematicStudioStrings/Product.png"), function(ov)
+      ov:addStaticText("Cinematic Studio Strings")
+      ov:addHotspotButton({ label = "Spot 1 Mic", at = { 35, 481 } })
+      ov:addHotspotButton({ label = "Spot 2 Mic", at = { 75, 481 } })
+      ov:addHotspotButton({ label = "Main Mic", at = { 115, 481 } })
+      ov:addHotspotButton({ label = "Room Mic", at = { 155, 481 } })
+      ov:addGraphicalToggle({
+        label = "Mix Position",
+        region = { 188, 473, 220, 489 },
+        onImage = img("images/CinematicStudioStrings/MixOn.png"),
+        offImage = img("images/CinematicStudioStrings/MixOff.png"),
+      })
+    end)
   end,
 }
