@@ -224,6 +224,72 @@ impl Shared {
         self.backend.set_captured_keys(&set);
     }
 
+    /// Removes every registration owned by module `idx` (hotkeys + their OS
+    /// registration, captured keys, settings `onChange`, timers, arbiter claims,
+    /// data export) WITHOUT touching the parallel vectors — for an in-place reload
+    /// that rebuilds the same index. Unlike `rollback_to` (a suffix truncation) this
+    /// targets a single module and leaves its roots/ids/enabled/schemas slots.
+    fn purge_module(&self, idx: usize) {
+        let stale: Vec<i32> = self
+            .hotkeys
+            .borrow()
+            .iter()
+            .filter(|(_, reg)| reg.module_idx == idx)
+            .map(|(id, _)| *id)
+            .collect();
+        {
+            let mut hk = self.hotkeys.borrow_mut();
+            for id in stale {
+                self.backend.unregister_hotkey(id);
+                hk.remove(&id);
+            }
+        }
+        self.keys.borrow_mut().retain(|(_, _, i, ..)| *i != idx);
+        self.on_change.borrow_mut().retain(|(i, _), _| *i != idx);
+        self.timers.borrow_mut().retain(|(_, i, ..)| *i != idx);
+        self.recurring.borrow_mut().retain(|(_, _, i, ..)| *i != idx);
+        let mut to_resolve: Vec<String> = Vec::new();
+        let mut deactivations: Vec<Function> = Vec::new();
+        {
+            let mut map = self.arbiter.borrow_mut();
+            for (slot, s) in map.iter_mut() {
+                // If this module owns the slot's ACTIVE claim, run its onDeactivate
+                // before dropping it — so an active overlay tears down its global
+                // side effects (key scope / menu-open) exactly once, mirroring
+                // arbiter_unregister. (Otherwise a reload of an active overlay would
+                // strand those process-global flags until the next activation.)
+                if let Some(active) = s.active {
+                    if let Some(c) =
+                        s.claims.iter().find(|c| c.handle == active && c.module_idx == idx)
+                    {
+                        if let Ok(f) = c.lua.registry_value::<Function>(&c.on_deactivate) {
+                            deactivations.push(f);
+                        }
+                    }
+                }
+                s.claims.retain(|c| c.module_idx != idx);
+                if s.active.is_some_and(|a| !s.claims.iter().any(|c| c.handle == a)) {
+                    s.active = None;
+                    to_resolve.push(slot.clone());
+                }
+            }
+            map.retain(|_, s| !s.claims.is_empty());
+        }
+        for f in deactivations {
+            if let Err(e) = call_guarded(&f, ()) {
+                logging::line("arbiter", &format!("onDeactivate error during purge: {e}"));
+            }
+        }
+        for slot in to_resolve {
+            self.arbiter_resolve(&slot);
+        }
+        let id = self.ids.borrow().get(idx).cloned();
+        if let Some(id) = id {
+            self.exports.borrow_mut().remove(&id);
+        }
+        self.refresh_captured();
+    }
+
     /// Enables or disables a module at runtime: (un)registers its OS hotkeys and
     /// recomputes the captured-key set. The dispatcher already skips disabled
     /// modules' hotkeys/keys/triggers via the `enabled` flag.
@@ -797,6 +863,80 @@ mod guard_tests {
     }
 }
 
+/// Builds module `idx`'s VM in place: installs its host, runs the window prelude,
+/// evaluates its code dependencies into the VM, runs its entry (publishing its data
+/// export), and runs its `activate`. Shared by initial load and reload; the caller
+/// owns the surrounding catch_unwind + rollback, and the module's parallel-vector
+/// slots (roots/ids/enabled/schemas at `idx`) must already be set up.
+fn populate_vm(
+    shared: &Rc<Shared>,
+    parent: &Path,
+    idx: usize,
+    module: &LoadedModule,
+    lua: &Lua,
+) -> Result<()> {
+    let id = &module.manifest.id;
+    // This VM's host: identity (settings/resource/path) + ownership (hotkeys/timers/
+    // keys/arbiter) scoped to the module (idx). Set as the global so its entry + the
+    // host's dispatch resolve it; code dependencies get an identity-scoped variant.
+    let host_m = install_host_api(lua, shared, idx).context("failed to install host API")?;
+    lua.globals().set("host", &host_m)?;
+    lua.load(WINDOW_PRELUDE).set_name("window_prelude").exec()?;
+
+    // Top-down dependency loading: evaluate each `code_module` dependency
+    // (transitively, in dependency order) inside this VM and record its returned
+    // object in the per-VM `__module_exports` registry, so host.require(id) gets its
+    // functions. Legacy (non-code) dependencies stay on the data path.
+    let reg = lua.create_table()?;
+    lua.set_named_registry_value("__module_exports", reg.clone())?;
+    let mut code_deps: Vec<(String, std::path::PathBuf)> = Vec::new();
+    collect_code_deps(parent, &module.manifest.dependencies, &mut code_deps, &mut HashSet::new())?;
+    for (dep_id, dep_entry) in &code_deps {
+        let dep_code = std::fs::read_to_string(dep_entry).with_context(|| {
+            format!("dependency '{dep_id}' entry not readable: {}", dep_entry.display())
+        })?;
+        // Run the dependency's code with a host whose identity facilities are scoped
+        // to the DEPENDENCY's id, while ownership + everything else falls through to
+        // this VM's host. The dep is already loaded (deps resolve first), so its id is
+        // in shared.ids; fail loud rather than silently mis-scope its identity.
+        let dep_idx = shared.ids.borrow().iter().position(|i| i == dep_id).ok_or_else(|| {
+            anyhow::anyhow!("code dependency '{dep_id}' of '{id}' not in the module table")
+        })?;
+        let host_dep = build_dep_host(lua, shared, &host_m, dep_idx)?;
+        let dep_ret = eval_on_host(lua, &host_dep, &dep_code, &dep_entry.display().to_string())
+            .with_context(|| format!("error running dependency '{dep_id}' of '{id}'"))?;
+        if let mlua::Value::Table(_) = dep_ret {
+            reg.set(dep_id.as_str(), dep_ret)?;
+        }
+    }
+
+    let entry = module.entry_path();
+    let code = std::fs::read_to_string(&entry)
+        .with_context(|| format!("entry point not readable: {}", entry.display()))?;
+    let ret: mlua::Value = lua
+        .load(code)
+        .set_name(entry.display().to_string())
+        .eval()
+        .with_context(|| format!("error running module '{id}'"))?;
+    // Publish the module's returned table as a best-effort cross-VM data export for
+    // the legacy host.require path (functions aren't serializable, so it's skipped
+    // rather than fatal when the return isn't plain data).
+    if let mlua::Value::Table(_) = &ret {
+        if let Ok(exported) = lua.from_value::<serde_json::Value>(ret.clone()) {
+            shared.exports.borrow_mut().insert(id.clone(), exported);
+        }
+    }
+    // A returned `activate` runs here, in the module's OWN VM only — never when this
+    // module is evaluated as a code dependency inside another VM — so e.g. a base
+    // overlay is created once, not duplicated in every dependent that inherits it.
+    if let mlua::Value::Table(t) = &ret {
+        if let Ok(mlua::Value::Function(activate)) = t.get::<mlua::Value>("activate") {
+            activate.call::<()>(()).with_context(|| format!("error activating module '{id}'"))?;
+        }
+    }
+    Ok(())
+}
+
 fn load_module(
     shared: &Rc<Shared>,
     modules: &Rc<RefCell<Vec<Module>>>,
@@ -881,93 +1021,8 @@ fn load_module(
     // by design). mlua re-raises a panicking host fn across the call boundary;
     // catch_unwind turns it into a load error. RefCell borrows release on unwind,
     // so the rollback below can clean up the partial registrations safely.
-    let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
-        // This VM's host: identity (settings/resource/path) + ownership (hotkeys/
-        // timers/keys/arbiter) scoped to the loaded module (idx). Set as the global
-        // so the module's own entry + the host's dispatch (window triggers, settings
-        // onChange) resolve it; code dependencies get an identity-scoped variant.
-        let host_m = install_host_api(&lua, shared, idx).context("failed to install host API")?;
-        lua.globals().set("host", &host_m)?;
-        lua.load(WINDOW_PRELUDE).set_name("window_prelude").exec()?;
-
-        // Top-down dependency loading: evaluate each `code_module` dependency
-        // (transitively, in dependency order) *inside this VM* and record its
-        // returned module object in the per-VM `__module_exports` registry, so the
-        // dependent's `host.require(id)` gets its functions, not just data. Legacy
-        // (non-code) dependencies are skipped here and stay on the data path.
-        let reg = lua.create_table()?;
-        lua.set_named_registry_value("__module_exports", reg.clone())?;
-        let mut code_deps: Vec<(String, std::path::PathBuf)> = Vec::new();
-        collect_code_deps(
-            &parent,
-            &module.manifest.dependencies,
-            &mut code_deps,
-            &mut HashSet::new(),
-        )?;
-        for (dep_id, dep_entry) in &code_deps {
-            let dep_code = std::fs::read_to_string(dep_entry).with_context(|| {
-                format!("dependency '{dep_id}' entry not readable: {}", dep_entry.display())
-            })?;
-            // Run the dependency's code with a host whose identity facilities are
-            // scoped to the DEPENDENCY's id (so e.g. a shared base module's settings
-            // stay under the base's id), while ownership + everything else falls
-            // through to this VM's host. Passed as a parameter so the dependency's
-            // closures capture it.
-            // The dep is guaranteed already loaded (dependencies resolve before this
-            // VM is built), so its id is in shared.ids. Fail loud rather than fall
-            // back to the owner idx, which would silently mis-scope the dep's
-            // identity — the very corruption this scoping prevents.
-            let dep_idx = shared
-                .ids
-                .borrow()
-                .iter()
-                .position(|i| i == dep_id)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("code dependency '{dep_id}' of '{id}' not in the module table")
-                })?;
-            let host_dep = build_dep_host(&lua, shared, &host_m, dep_idx)?;
-            let dep_ret = eval_on_host(&lua, &host_dep, &dep_code, &dep_entry.display().to_string())
-                .with_context(|| format!("error running dependency '{dep_id}' of '{id}'"))?;
-            if let mlua::Value::Table(_) = dep_ret {
-                reg.set(dep_id.as_str(), dep_ret)?;
-            }
-        }
-
-        let entry = module.entry_path();
-        let code = std::fs::read_to_string(&entry)
-            .with_context(|| format!("entry point not readable: {}", entry.display()))?;
-        let ret: mlua::Value = lua
-            .load(code)
-            .set_name(entry.display().to_string())
-            .eval()
-            .with_context(|| format!("error running module '{}'", module.manifest.id))?;
-        // Publish the module's returned table as a cross-VM *data* export for the
-        // legacy host.require path + host.providers discovery. A `code_module`
-        // typically returns functions (consumed in-VM via the registry above);
-        // those aren't serializable, so the data export is best-effort — skipped
-        // rather than fatal when the return isn't plain data.
-        if let mlua::Value::Table(_) = &ret {
-            if let Ok(exported) = lua.from_value::<serde_json::Value>(ret.clone()) {
-                shared
-                    .exports
-                    .borrow_mut()
-                    .insert(module.manifest.id.clone(), exported);
-            }
-        }
-        // A module's returned table may carry an `activate` function: its standalone
-        // side effects (e.g. creating its base overlay). It runs here, in the
-        // module's OWN VM only — NOT when this module's code is evaluated as a code
-        // dependency inside another module's VM (collect_code_deps stores the
-        // returned table without activating). So a base overlay is created once, in
-        // its own module, and never duplicated in every dependent that inherits it.
-        if let mlua::Value::Table(t) = &ret {
-            if let Ok(mlua::Value::Function(activate)) = t.get::<mlua::Value>("activate") {
-                activate.call::<()>(()).with_context(|| {
-                    format!("error activating module '{}'", module.manifest.id)
-                })?;
-            }
-        }
-        Ok(())
+    let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        populate_vm(shared, &parent, idx, &module, &lua)
     }))
     .unwrap_or_else(|p| {
         Err(anyhow::anyhow!("panic while loading module '{id}': {}", panic_text(&p)))
@@ -996,6 +1051,91 @@ fn load_module(
     });
     debug_assert_eq!(shared.ids.borrow().len(), modules.borrow().len());
     Ok((id, true))
+}
+
+/// Reloads module `idx` in place from its source directory: re-reads the manifest,
+/// purges the running module's registrations, and rebuilds its VM under the SAME
+/// index (other modules' indices are unaffected — a suffix-only `rollback_to` can't
+/// drop a middle module). The enabled flag + persisted settings are kept. Returns
+/// the ids of loaded modules that hold this one's code as a (transitive) dependency
+/// — they keep the OLD copy until restarted (a live cascade is a separate TODO). On
+/// a rebuild error the module is left unregistered (effectively unloaded) with its
+/// store rolled back, and the error returned; a later successful reload recovers.
+fn reload_module(
+    shared: &Rc<Shared>,
+    modules: &Rc<RefCell<Vec<Module>>>,
+    idx: usize,
+) -> Result<Vec<String>> {
+    let (dir, old_id) = {
+        let dir = shared
+            .roots
+            .borrow()
+            .get(idx)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("module index {idx} out of range"))?;
+        let id = modules
+            .borrow()
+            .get(idx)
+            .map(|m| m.id.clone())
+            .ok_or_else(|| anyhow::anyhow!("module index {idx} out of range"))?;
+        (dir, id)
+    };
+    // Re-read BEFORE purging, so a now-broken manifest leaves the running module intact.
+    let module = LoadedModule::load(&dir)
+        .with_context(|| format!("reloading '{old_id}' from {}", dir.display()))?;
+    if module.manifest.id != old_id {
+        anyhow::bail!(
+            "reloaded module changed its id ('{old_id}' -> '{}'); restart to apply",
+            module.manifest.id
+        );
+    }
+    let parent = dir.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+
+    let store_snapshot = shared.store.borrow().snapshot(&old_id);
+    shared.purge_module(idx);
+    if let Some(s) = shared.schemas.borrow_mut().get_mut(idx) {
+        s.clear();
+    }
+
+    let lua = Lua::new();
+    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        populate_vm(shared, &parent, idx, &module, &lua)
+    }))
+    .unwrap_or_else(|p| {
+        Err(anyhow::anyhow!("panic while reloading module '{old_id}': {}", panic_text(&p)))
+    });
+    if let Err(e) = built {
+        // A partial rebuild may have registered hotkeys/keys against the fresh VM
+        // (about to be dropped) — purge again so nothing dangles; restore the store.
+        shared.purge_module(idx);
+        shared.store.borrow_mut().restore(&old_id, store_snapshot);
+        return Err(e);
+    }
+
+    // Swap in the fresh VM (the old one, already unregistered, drops here).
+    {
+        let mut mods = modules.borrow_mut();
+        let m = mods
+            .get_mut(idx)
+            .ok_or_else(|| anyhow::anyhow!("module index {idx} out of range"))?;
+        m.lua = lua;
+        m.name = module.manifest.name.clone();
+        m.version = module.manifest.version.clone();
+        m.dependencies = module.manifest.dependencies.clone();
+    }
+    if window_has_triggers(&modules.borrow()[idx].lua) {
+        if let Err(e) = shared.backend.watch_foreground() {
+            logging::line("manager", &format!("watch_foreground failed: {e}"));
+        }
+    }
+    logging::line("manager", &format!("reloaded module: {old_id}"));
+
+    let graph: Vec<(String, Vec<String>)> = modules
+        .borrow()
+        .iter()
+        .map(|m| (m.id.clone(), m.dependencies.clone()))
+        .collect();
+    Ok(registry::transitive_dependents(&old_id, &graph))
 }
 
 /// Builds the manager's display row for module `idx`: its settings (schema +
@@ -1148,6 +1288,8 @@ impl Manager {
                 let load_modules = self.modules.clone();
                 let load_disabled = self.disabled_ids.clone();
                 let remove_shared = self.shared.clone();
+                let reload_shared = self.shared.clone();
+                let reload_modules = self.modules.clone();
                 let errors_shared = self.shared.clone();
                 gui::run_gui(
                     module_infos,
@@ -1185,6 +1327,16 @@ impl Manager {
                     // persisted, so re-installing it later loads it enabled again.
                     move |idx| {
                         remove_shared.apply_enabled(idx, false);
+                    },
+                    // Reload the selected module's VM in place from its source dir.
+                    move |idx| {
+                        let deps = reload_module(&reload_shared, &reload_modules, idx)
+                            .map_err(|e| format!("{e:#}"))?;
+                        let info = {
+                            let mods = reload_modules.borrow();
+                            module_info(&reload_shared, &mods[idx], idx)
+                        };
+                        Ok((info, deps))
                     },
                     move || {
                         let mods = modules.borrow();

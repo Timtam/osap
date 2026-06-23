@@ -80,6 +80,7 @@ pub fn run_gui(
     on_set: impl FnMut(usize, String, settings::Value) + 'static,
     on_install: impl Fn(std::path::PathBuf) -> Result<(String, Vec<ModuleInfo>), String> + 'static,
     on_remove: impl Fn(usize) + 'static,
+    on_reload: impl Fn(usize) -> Result<(ModuleInfo, Vec<String>), String> + 'static,
     mut pump: impl FnMut() + 'static,
     mut drain_errors: impl FnMut() -> Vec<(String, String)> + 'static,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -130,8 +131,10 @@ pub fn run_gui(
 
         let inst_buttons = BoxSizer::builder(Orientation::Horizontal).build();
         let settings_btn = Button::builder(&installed).with_label("Settings…").build();
+        let reload_btn = Button::builder(&installed).with_label("Reload").build();
         let uninstall_btn = Button::builder(&installed).with_label("Uninstall").build();
         inst_buttons.add(&settings_btn, 0, SizerFlag::All, 6);
+        inst_buttons.add(&reload_btn, 0, SizerFlag::All, 6);
         inst_buttons.add(&uninstall_btn, 0, SizerFlag::All, 6);
         is.add_sizer(&inst_buttons, 0, SizerFlag::All, 6);
         installed.set_sizer(is, true);
@@ -193,11 +196,13 @@ pub fn run_gui(
         let on_toggle: Rc<RefCell<Box<dyn FnMut(usize, bool)>>> =
             Rc::new(RefCell::new(Box::new(on_toggle)));
         settings_btn.enable(false); // refreshed on selection (mouse-up / key-up)
+        reload_btn.enable(false); // any selected module can be reloaded
         {
             let (rows, states, on_toggle) = (rows.clone(), states.clone(), on_toggle.clone());
             list.on_mouse_left_up(move |e| {
                 sync_checks(hwnd, &rows.borrow(), &states, &on_toggle);
                 refresh_settings_btn(&list, &rows.borrow(), &settings_btn);
+                reload_btn.enable(list.get_selection().is_some());
                 e.skip(true);
             });
         }
@@ -206,6 +211,7 @@ pub fn run_gui(
             list.on_key_up(move |e| {
                 sync_checks(hwnd, &rows.borrow(), &states, &on_toggle);
                 refresh_settings_btn(&list, &rows.borrow(), &settings_btn);
+                reload_btn.enable(list.get_selection().is_some());
                 e.skip(true);
             });
         }
@@ -233,6 +239,67 @@ pub fn run_gui(
                     return;
                 }
                 open_settings_dialog(&frame, module_idx, &settings, &on_set);
+            });
+        }
+
+        // "Reload" rebuilds the selected module's VM in place from its source dir
+        // (edit a dev module + reload without restarting the app). Dependents that
+        // hold its code keep the old copy until restarted.
+        {
+            let rows = rows.clone();
+            reload_btn.on_click(move |_| {
+                let Some(sel) = list.get_selection() else {
+                    return;
+                };
+                let idx = {
+                    let rb = rows.borrow();
+                    rb.iter()
+                        .find(|r| native_checkboxes::same(&r.item, &sel))
+                        .map(|r| r.module_idx)
+                };
+                let Some(idx) = idx else {
+                    return;
+                };
+                match on_reload(idx) {
+                    Ok((info, deps)) => {
+                        // The reload may have changed the schema, the declared
+                        // dependencies (which the Uninstall guard reasons over — a
+                        // stale set could drop a module a live one now needs), and the
+                        // name/version. Refresh all of them on the row + its label.
+                        {
+                            let mut rb = rows.borrow_mut();
+                            if let Some(r) = rb.iter_mut().find(|r| r.module_idx == idx) {
+                                r.settings = info.settings.clone();
+                                r.dependencies = info.dependencies.clone();
+                                r.name = info.name.clone();
+                                list.set_item_text(
+                                    &r.item,
+                                    &format!("{}  v{}   ({})", info.name, info.version, info.id),
+                                );
+                            }
+                        }
+                        let msg = if deps.is_empty() {
+                            format!("Module \u{201c}{}\u{201d} reloaded.", info.name)
+                        } else {
+                            format!(
+                                "Module \u{201c}{}\u{201d} reloaded. Restart to apply the change in modules that depend on it: {}.",
+                                info.name,
+                                deps.join(", ")
+                            )
+                        };
+                        modal_message(&frame, "Reloaded", &msg, false);
+                    }
+                    Err(e) => {
+                        modal_message(
+                            &frame,
+                            "Reload failed",
+                            &format!(
+                                "{e}\n\nThe module is now inactive — its hotkeys, keys and triggers were revoked. Fix the error in its source and press Reload again to restore it."
+                            ),
+                            false,
+                        );
+                    }
+                }
             });
         }
 
