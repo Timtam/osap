@@ -758,18 +758,26 @@ fn collect_code_deps(
 /// isn't valid semver is logged and skipped (best-effort) rather than blocking the
 /// load; a parseable-but-unsatisfied requirement fails the load with a clear error.
 fn check_dep_version(dependent: &str, dep_id: &str, req: &str, dep_version: &str) -> Result<()> {
-    let (vr, v) = match (semver::VersionReq::parse(req), semver::Version::parse(dep_version)) {
-        (Ok(vr), Ok(v)) => (vr, v),
-        _ => {
+    // An unparseable requirement is a module-author typo we can't act on — log + skip
+    // (best-effort) rather than block the load.
+    let vr = match semver::VersionReq::parse(req) {
+        Ok(vr) => vr,
+        Err(_) => {
             logging::line(
                 "manager",
-                &format!(
-                    "version check skipped: '{dep_id}' v{dep_version} vs requirement '{req}' (not semver)"
-                ),
+                &format!("version check skipped: requirement '{req}' for '{dep_id}' is not valid semver"),
             );
             return Ok(());
         }
     };
+    // The requirement IS valid, so a non-semver dependency version is a hard error:
+    // silently NOT enforcing a real constraint (e.g. because the dependency has a
+    // 2-part `version = "1.2"`) would defeat its purpose.
+    let v = semver::Version::parse(dep_version).map_err(|_| {
+        anyhow::anyhow!(
+            "module '{dependent}' requires '{dep_id}' {req}, but its version '{dep_version}' is not valid semver"
+        )
+    })?;
     if !vr.matches(&v) {
         anyhow::bail!(
             "module '{dependent}' requires '{dep_id}' {req}, but the loaded version is v{dep_version}"
@@ -894,6 +902,9 @@ mod guard_tests {
         assert!(check_dep_version("a", "b", ">= 2.0.0", "1.2.0").is_err());
         assert!(check_dep_version("a", "b", "^0.1", "0.1.5").is_ok());
         assert!(check_dep_version("a", "b", "^0.2", "0.1.5").is_err());
+        // A valid requirement but a non-semver (2-part) dependency version is a hard
+        // error — the constraint must not silently no-op.
+        assert!(check_dep_version("a", "b", ">= 1.0.0", "1.2").is_err());
     }
 }
 

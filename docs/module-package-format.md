@@ -33,6 +33,12 @@ engine_api = ">=1.0, <2.0"      # API version range, see study §6
 entry      = "src/main.luau"    # Default, optional
 license    = "MIT"
 
+# Other modules loaded first; their exports become reachable via host.require(id).
+# Each entry is a module id plus an OPTIONAL space-separated semver requirement,
+# verified at load (a bare id accepts any version). Auto-discovered among sibling
+# modules / fetched on install.
+dependencies = ["com.example.daw-hosts", "com.platform.kontakt >= 1.2, < 2"]
+
 [capabilities]                  # Default-deny, see study §7
 require = ["window.read", "input.click", "screen.imagesearch", "ocr", "speech"]
 # "ffi.native" only if native/ is used — highest level, signature-required
