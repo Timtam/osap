@@ -121,9 +121,9 @@ fn cmd_update() -> Result<()> {
     let mods = registry::installed();
     let mut updated = 0;
     for m in &mods {
-        if registry::update_available(m).is_some() {
+        if let Some(new_version) = registry::update_available(m) {
             if let Some(src) = &m.source {
-                println!("Updating {} ({})...", m.id, src.repo);
+                println!("Updating {} ({}): v{} -> v{new_version}...", m.id, src.repo, m.version);
                 registry::install(&src.repo)?;
                 updated += 1;
             }

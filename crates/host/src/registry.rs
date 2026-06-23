@@ -264,12 +264,21 @@ pub fn uninstall(id: &str) -> Result<bool> {
     Ok(false)
 }
 
-/// If a remotely-installed module has a newer commit upstream, returns the new
-/// SHA; otherwise `None`.
+/// If a remotely-installed module has a newer **version** upstream (its
+/// `module.toml` `version` parses as semver and is greater than the installed
+/// one), returns that new version; otherwise `None`. Commits *between* releases no
+/// longer trigger an update — only a version bump does. Falls back to the legacy
+/// "any newer commit" signal when either version isn't valid semver.
 pub fn update_available(m: &InstalledModule) -> Option<String> {
     let src = m.source.as_ref()?;
-    let latest = latest_sha(&src.repo, &src.branch).ok()?;
-    (!latest.is_empty() && latest != src.sha).then_some(latest)
+    let upstream = fetch_manifest(&src.repo, &src.branch).ok()?;
+    match (semver::Version::parse(&upstream.version), semver::Version::parse(&m.version)) {
+        (Ok(up), Ok(cur)) => (up > cur).then_some(upstream.version),
+        _ => {
+            let latest = latest_sha(&src.repo, &src.branch).ok()?;
+            (!latest.is_empty() && latest != src.sha).then_some(latest)
+        }
+    }
 }
 
 // --- Dependency graph (install/uninstall) -------------------------------------

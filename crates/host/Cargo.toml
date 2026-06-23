@@ -10,6 +10,7 @@ image = { version = "0.25.10", default-features = false, features = ["png"] }
 mlua = { version = "0.11.6", features = ["luau", "error-send", "serialize"] }
 module-manifest = { path = "../module-manifest" }
 rodio = "0.20"
+semver = "1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
 ureq = "3"

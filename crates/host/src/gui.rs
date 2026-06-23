@@ -422,14 +422,15 @@ pub fn run_gui(
         enum Job {
             Browse(Vec<crate::registry::RemoteModule>),
             BrowseStatus(String),
-            Updates(Vec<(String, String)>), // (module id, repo)
+            Updates(Vec<(String, String, String)>), // (module id, repo, "vX → vY")
             Installed(std::path::PathBuf),  // hot-load a freshly installed module
             Done(String),                   // a modal result message
         }
         let inbox: Arc<Mutex<Vec<Job>>> = Arc::new(Mutex::new(Vec::new()));
         let browse_results: Rc<RefCell<Vec<crate::registry::RemoteModule>>> =
             Rc::new(RefCell::new(Vec::new()));
-        let update_results: Rc<RefCell<Vec<(String, String)>>> = Rc::new(RefCell::new(Vec::new()));
+        let update_results: Rc<RefCell<Vec<(String, String, String)>>> =
+            Rc::new(RefCell::new(Vec::new()));
         // True while an install OR update is running: the two are mutually
         // exclusive (both write the same modules dir), so both buttons are
         // disabled together and only re-enabled when the one in flight reports back.
@@ -567,9 +568,13 @@ pub fn run_gui(
                 std::thread::spawn(move || {
                     let mut updatable = Vec::new();
                     for m in crate::registry::installed() {
-                        if crate::registry::update_available(&m).is_some() {
+                        if let Some(new_version) = crate::registry::update_available(&m) {
                             if let Some(src) = &m.source {
-                                updatable.push((m.id.clone(), src.repo.clone()));
+                                updatable.push((
+                                    m.id.clone(),
+                                    src.repo.clone(),
+                                    format!("v{} \u{2192} v{new_version}", m.version),
+                                ));
                             }
                         }
                     }
@@ -589,7 +594,7 @@ pub fn run_gui(
                 let Some(row) = updates_list.get_selection() else {
                     return;
                 };
-                let Some((id, repo)) = update_results.borrow().get(row as usize).cloned() else {
+                let Some((id, repo, _)) = update_results.borrow().get(row as usize).cloned() else {
                     return;
                 };
                 busy.set(true);
@@ -740,8 +745,8 @@ pub fn run_gui(
                         Job::BrowseStatus(s) => browse_status.set_label(&s),
                         Job::Updates(v) => {
                             updates_list.clear();
-                            for (id, repo) in &v {
-                                updates_list.append(&format!("{id}  ({repo})"));
+                            for (id, repo, transition) in &v {
+                                updates_list.append(&format!("{id}  {transition}  ({repo})"));
                             }
                             updates_status.set_label(&format!("{} update(s) available.", v.len()));
                             *update_results.borrow_mut() = v;
