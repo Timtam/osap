@@ -108,6 +108,13 @@ struct Shared {
     /// poll resumes on re-enable instead of dying (unlike a Lua self-rescheduling
     /// host.timer.after chain, whose reschedule is skipped while disabled).
     recurring: RefCell<Vec<(Instant, Duration, usize, Lua, RegistryKey)>>,
+    /// Module callback failures (Lua errors + caught panics) queued for the GUI to
+    /// show in an accessible dialog, as (title, message). Drained each tick.
+    errors: RefCell<Vec<(String, String)>>,
+    /// Dedup keys (id+context) so a module's fault in a given context dialogs once
+    /// per enabled session (cleared on toggle); the full message still goes to the
+    /// log every time. Keyed coarsely so a per-tick-varying message can't flood.
+    error_seen: RefCell<HashSet<String>>,
 }
 
 impl Shared {
@@ -118,6 +125,27 @@ impl Shared {
         let id = self.next_id.get() + 1;
         self.next_id.set(id);
         id
+    }
+
+    /// Logs a module callback failure (a Lua error or a caught Rust panic) and
+    /// queues it — deduped — for the GUI to surface in an accessible error dialog.
+    fn report_callback_error(&self, module_idx: usize, context: &str, message: &str) {
+        let id = self.ids.borrow().get(module_idx).cloned().unwrap_or_else(|| "?".into());
+        logging::line(context, &format!("[{id}] {message}"));
+        let key = format!("{id}\u{1}{context}");
+        if self.error_seen.borrow_mut().insert(key) {
+            self.errors.borrow_mut().push((
+                format!("Module error: {id}"),
+                format!(
+                    "The module \u{201c}{id}\u{201d} hit an error in a {context} callback:\n\n{message}"
+                ),
+            ));
+        }
+    }
+
+    /// Takes the queued module errors for the GUI to display (called each tick).
+    fn drain_errors(&self) -> Vec<(String, String)> {
+        std::mem::take(&mut *self.errors.borrow_mut())
     }
     /// Recomputes the global captured-key set from *enabled* modules and updates
     /// the hook (so a disabled module's keys are no longer suppressed).
@@ -145,6 +173,12 @@ impl Shared {
                 return false;
             }
             en[idx] = enabled;
+        }
+        // Fresh error-dialog slate on toggle: drop this module's dedup keys so a
+        // still-present fault re-surfaces (rather than staying log-only) next run.
+        if let Some(id) = self.ids.borrow().get(idx).cloned() {
+            let prefix = format!("{id}\u{1}");
+            self.error_seen.borrow_mut().retain(|k| !k.starts_with(&prefix));
         }
         for (id, reg) in self.hotkeys.borrow().iter() {
             if reg.module_idx != idx {
@@ -303,7 +337,7 @@ impl Shared {
             // then promotes the next matcher.
             if was_active {
                 if let Ok(f) = c.lua.registry_value::<Function>(&c.on_deactivate) {
-                    if let Err(e) = f.call::<()>(()) {
+                    if let Err(e) = call_guarded(&f, ()) {
                         logging::line("arbiter", &format!("onDeactivate error: {e}"));
                     }
                 }
@@ -386,12 +420,12 @@ impl Shared {
                 s.active = winner;
             }
             if let Some(f) = deactivate {
-                if let Err(e) = f.call::<()>(()) {
+                if let Err(e) = call_guarded(&f, ()) {
                     logging::line("arbiter", &format!("onDeactivate error: {e}"));
                 }
             }
             if let Some(f) = activate {
-                if let Err(e) = f.call::<()>(()) {
+                if let Err(e) = call_guarded(&f, ()) {
                     logging::line("arbiter", &format!("onActivate error: {e}"));
                 }
             }
@@ -461,8 +495,8 @@ impl Shared {
         for (idx, lua, cb) in due {
             if self.enabled.borrow().get(idx).copied().unwrap_or(false) {
                 if let Ok(f) = lua.registry_value::<Function>(&cb) {
-                    if let Err(e) = f.call::<()>(()) {
-                        logging::line("timer", &format!("callback error: {e}"));
+                    if let Err(e) = call_guarded(&f, ()) {
+                        self.report_callback_error(idx, "timer", &e);
                     }
                 }
             }
@@ -485,8 +519,8 @@ impl Shared {
         }
         for (idx, f) in due_recurring {
             if self.enabled.borrow().get(idx).copied().unwrap_or(false) {
-                if let Err(e) = f.call::<()>(()) {
-                    logging::line("timer", &format!("recurring callback error: {e}"));
+                if let Err(e) = call_guarded(&f, ()) {
+                    self.report_callback_error(idx, "timer", &e);
                 }
             }
         }
@@ -537,8 +571,8 @@ impl Shared {
             let old_v = old
                 .and_then(|o| value_to_lua(&lua, o).ok())
                 .unwrap_or(mlua::Value::Nil);
-            if let Err(e) = f.call::<()>((new_v, old_v)) {
-                logging::line("settings", &format!("onChange error ({key}): {e}"));
+            if let Err(e) = call_guarded(&f, (new_v, old_v)) {
+                self.report_callback_error(idx, &format!("settings onChange ({key})"), &e);
             }
         }
     }
@@ -625,6 +659,53 @@ fn build_dep_host(
     mt.set("__index", host_owner)?;
     host.set_metatable(Some(mt))?;
     Ok(host)
+}
+
+/// Calls a no-arg-or-args Lua callback, catching BOTH a Lua error and a Rust
+/// panic (re-raised across the mlua boundary), so a faulting module's callback can
+/// never abort the process. Returns a human-readable error string.
+fn call_guarded<A: mlua::IntoLuaMulti>(f: &Function, args: A) -> Result<(), String> {
+    guard(|| f.call::<()>(args))
+}
+
+/// Runs `f` (an mlua-returning closure, e.g. the window-trigger dispatch),
+/// catching BOTH a Lua error and a re-raised Rust panic, so a faulting module
+/// can never abort the process. Returns a human-readable error string.
+fn guard<F: FnOnce() -> mlua::Result<()>>(f: F) -> Result<(), String> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(p) => Err(panic_text(&p)),
+    }
+}
+
+fn panic_text(p: &Box<dyn std::any::Any + Send>) -> String {
+    p.downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| p.downcast_ref::<String>().cloned())
+        .map(|s| format!("Rust panic: {s}"))
+        .unwrap_or_else(|| "Rust panic (no message)".into())
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+    #[test]
+    fn guard_catches_lua_error_and_rust_panic() {
+        let lua = Lua::new();
+        // A Lua error in a callback is surfaced as a string, not a crash.
+        let err: Function = lua.load("return function() error('boom') end").eval().unwrap();
+        assert!(call_guarded(&err, ()).unwrap_err().contains("boom"));
+        // A clean callback succeeds.
+        let ok: Function = lua.load("return function() end").eval().unwrap();
+        assert!(call_guarded(&ok, ()).is_ok());
+        // A Rust panic is caught too (silence the hook so the test output is clean).
+        let saved = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let p = guard(|| panic!("kaboom")).unwrap_err();
+        std::panic::set_hook(saved);
+        assert!(p.contains("kaboom"));
+    }
 }
 
 fn load_module(
@@ -882,6 +963,8 @@ impl Manager {
             arbiter: RefCell::new(HashMap::new()),
             next_arbiter: Cell::new(0),
             recurring: RefCell::new(Vec::new()),
+            errors: RefCell::new(Vec::new()),
+            error_seen: RefCell::new(HashSet::new()),
         });
         Ok(Self {
             shared,
@@ -959,6 +1042,7 @@ impl Manager {
                 let load_modules = self.modules.clone();
                 let load_disabled = self.disabled_ids.clone();
                 let remove_shared = self.shared.clone();
+                let errors_shared = self.shared.clone();
                 gui::run_gui(
                     module_infos,
                     move |idx, enabled| toggle_shared.set_enabled(idx, enabled),
@@ -1006,6 +1090,7 @@ impl Manager {
                         shared.fire_due_timers();
                         shared.flush_if_dirty();
                     },
+                    move || errors_shared.drain_errors(),
                 )
                 .map_err(|e| anyhow::anyhow!("{e}"))
                 .context("wx GUI loop failed")?;
@@ -1062,15 +1147,15 @@ impl HostEvents for Dispatcher<'_> {
                     reg.lua
                         .registry_value::<Function>(&reg.cb)
                         .ok()
-                        .map(|f| (reg.lua.clone(), f))
+                        .map(|f| (reg.module_idx, f))
                 } else {
                     None
                 }
             })
         };
-        if let Some((_lua, f)) = found {
-            if let Err(e) = f.call::<()>(()) {
-                logging::line("hotkey", &format!("callback error: {e}"));
+        if let Some((idx, f)) = found {
+            if let Err(e) = call_guarded(&f, ()) {
+                self.shared.report_callback_error(idx, "hotkey", &e);
             }
         }
     }
@@ -1080,11 +1165,11 @@ impl HostEvents for Dispatcher<'_> {
             let keys = self.shared.keys.borrow();
             keys.iter()
                 .find(|(k, m, idx, ..)| *k == vk && *m == mods && self.enabled(*idx))
-                .and_then(|(_, _, _, lua, key)| {
-                    lua.registry_value::<Function>(key).ok().map(|f| (lua.clone(), f))
+                .and_then(|(_, _, idx, lua, key)| {
+                    lua.registry_value::<Function>(key).ok().map(|f| (*idx, lua.clone(), f))
                 })
         };
-        if let Some((lua, f)) = found {
+        if let Some((idx, lua, f)) = found {
             let table = lua.create_table().ok();
             if let Some(t) = &table {
                 let _ = t.set("shift", mods & backend::MASK_SHIFT != 0);
@@ -1093,11 +1178,11 @@ impl HostEvents for Dispatcher<'_> {
                 let _ = t.set("win", mods & backend::MASK_WIN != 0);
             }
             let res = match table {
-                Some(t) => f.call::<()>(t),
-                None => f.call::<()>(()),
+                Some(t) => call_guarded(&f, t),
+                None => call_guarded(&f, ()),
             };
             if let Err(e) = res {
-                logging::line("keys", &format!("callback error: {e}"));
+                self.shared.report_callback_error(idx, "key", &e);
             }
         }
     }
@@ -1111,14 +1196,13 @@ impl HostEvents for Dispatcher<'_> {
                 Ok(t) => t,
                 Err(_) => continue,
             };
-            let res = (|| -> mlua::Result<()> {
+            if let Err(e) = guard(|| {
                 let host: Table = m.lua.globals().get("host")?;
                 let window: Table = host.get("window")?;
                 let dispatch: Function = window.get("_dispatchActivate")?;
                 dispatch.call::<()>(table)
-            })();
-            if let Err(e) = res {
-                logging::line("trigger", &format!("dispatch error ({}): {e}", m.id));
+            }) {
+                self.shared.report_callback_error(idx, "window trigger", &e);
             }
         }
     }
@@ -1128,14 +1212,13 @@ impl HostEvents for Dispatcher<'_> {
             if !self.enabled(idx) {
                 continue;
             }
-            let res = (|| -> mlua::Result<()> {
+            if let Err(e) = guard(|| {
                 let host: Table = m.lua.globals().get("host")?;
                 let window: Table = host.get("window")?;
                 let dispatch: Function = window.get("_dispatchFocus")?;
                 dispatch.call::<()>(())
-            })();
-            if let Err(e) = res {
-                logging::line("focus", &format!("dispatch error ({}): {e}", m.id));
+            }) {
+                self.shared.report_callback_error(idx, "focus change", &e);
             }
         }
     }

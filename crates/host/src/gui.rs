@@ -81,6 +81,7 @@ pub fn run_gui(
     on_install: impl Fn(std::path::PathBuf) -> Result<(String, Vec<ModuleInfo>), String> + 'static,
     on_remove: impl Fn(usize) + 'static,
     mut pump: impl FnMut() + 'static,
+    mut drain_errors: impl FnMut() -> Vec<(String, String)> + 'static,
 ) -> Result<(), Box<dyn std::error::Error>> {
     wxdragon::main(move |app| {
         // The window is a background manager: hiding/closing it must not quit the
@@ -610,8 +611,29 @@ pub fn run_gui(
         {
             let inbox = inbox.clone();
             let (rows, states, busy) = (rows.clone(), states.clone(), busy.clone());
+            // Re-entrancy guard: the modal dialogs below run a NESTED wx event loop,
+            // during which this continuous timer keeps firing and re-enters on_tick.
+            // Bail on re-entry so we don't pump module callbacks — or stack further
+            // dialogs — behind an already-open modal.
+            let in_tick = Rc::new(std::cell::Cell::new(false));
             timer.on_tick(move |_event| {
+                if in_tick.replace(true) {
+                    return;
+                }
+                struct Reset<'a>(&'a std::cell::Cell<bool>);
+                impl Drop for Reset<'_> {
+                    fn drop(&mut self) {
+                        self.0.set(false);
+                    }
+                }
+                let _reset = Reset(&in_tick);
                 pump();
+                // Surface any module callback failures collected during pump() in an
+                // accessible dialog (deduped + queued host-side), so a faulting module
+                // is visible (and isolated) rather than silently logged or a crash.
+                for (title, msg) in drain_errors() {
+                    modal_message(&frame, &title, &msg, false);
+                }
                 // Drain background-job results and apply them on the GUI thread.
                 let jobs: Vec<Job> = std::mem::take(&mut *inbox.lock().unwrap());
                 for job in jobs {
