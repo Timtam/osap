@@ -89,7 +89,7 @@ impl Field {
 }
 
 /// One module's record in the store: its enabled flag + persisted settings.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ModuleEntry {
     #[serde(default = "yes")]
     pub enabled: bool,
@@ -172,6 +172,27 @@ impl Store {
         self.modules.entry(id.to_string()).or_default().enabled = enabled;
     }
 
+    /// Clones the current record for `id` (if any). Used to snapshot a module's
+    /// persisted state before a fallible (re)load, so a partial load's settings
+    /// writes can be rolled back without disturbing a prior successful run's values.
+    pub fn snapshot(&self, id: &str) -> Option<ModuleEntry> {
+        self.modules.get(id).cloned()
+    }
+
+    /// Restores a record captured by [`Store::snapshot`]: re-inserts the prior
+    /// entry, or removes the module entirely if there was none — discarding any
+    /// settings a failed load wrote (the store half of load rollback).
+    pub fn restore(&mut self, id: &str, entry: Option<ModuleEntry>) {
+        match entry {
+            Some(e) => {
+                self.modules.insert(id.to_string(), e);
+            }
+            None => {
+                self.modules.remove(id);
+            }
+        }
+    }
+
     /// Module ids present in the store and marked disabled.
     pub fn disabled_ids(&self) -> HashSet<String> {
         self.modules
@@ -211,4 +232,37 @@ fn migrate_legacy() -> Option<Store> {
     store.save();
     let _ = std::fs::rename(&legacy, dir().join("disabled-modules.txt.bak"));
     Some(store)
+}
+
+#[cfg(test)]
+mod store_rollback_tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_then_restore_rolls_back_a_partial_load() {
+        let mut s = Store::empty();
+        // A prior successful run persisted a value.
+        s.set("m", "vol", Value::Int(7));
+        let snap = s.snapshot("m");
+        // A later (re)load partially runs: overwrites a key, adds another, then fails.
+        s.set("m", "vol", Value::Int(99));
+        s.set("m", "extra", Value::Bool(true));
+        s.restore("m", snap);
+        // The prior value is intact; the partial load's writes are discarded.
+        assert_eq!(s.get("m", "vol"), Some(Value::Int(7)));
+        assert_eq!(s.get("m", "extra"), None);
+    }
+
+    #[test]
+    fn restore_removes_the_orphan_of_a_first_time_failed_load() {
+        let mut s = Store::empty();
+        let snap = s.snapshot("new"); // no prior entry
+        assert!(snap.is_none());
+        // A first load writes settings, then fails.
+        s.set("new", "k", Value::Str("x".into()));
+        s.restore("new", snap);
+        // No orphan section left behind for a module that never finished loading.
+        assert!(s.get("new", "k").is_none());
+        assert!(s.snapshot("new").is_none());
+    }
 }

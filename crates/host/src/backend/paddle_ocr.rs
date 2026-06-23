@@ -71,8 +71,11 @@ pub fn recognize(cap: &CapturedImage) -> Option<String> {
 
 /// Loads the model and warms the inference graph on a background thread, so the
 /// first real OCR doesn't pay the (one-time, hundreds-of-ms) init cost on the
-/// hot path. No-op if the model files aren't present.
-pub fn warmup() {
+/// hot path. No-op if the model files aren't present. Returns the thread handle:
+/// the caller MUST join it before the process exits, or a fast exit can tear the
+/// process down while this thread is still inside ONNX Runtime init, racing ort's
+/// static cleanup (an access violation — the "headless segfault").
+pub fn warmup() -> std::thread::JoinHandle<()> {
     std::thread::spawn(|| {
         let Some(eng) = engine() else { return };
         let dummy = image::RgbImage::from_pixel(40, 16, image::Rgb([20, 20, 20]));
@@ -82,7 +85,7 @@ pub fn warmup() {
                 let _ = session.run(ort::inputs![tensor]);
             }
         }
-    });
+    })
 }
 
 /// Crops to the content bounding box (pixels far from the corner background) and

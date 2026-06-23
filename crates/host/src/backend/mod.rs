@@ -232,10 +232,16 @@ pub fn key_spec(spec: &str) -> Option<(u32, u8)> {
 }
 
 /// Warms up the secondary OCR engine (loads its model off the hot path) so the
-/// first OCR after launch is instant. No-op where it isn't available.
-pub fn warmup_ocr() {
+/// first OCR after launch is instant. Returns the warmup thread's handle (where
+/// available) so the caller can join it before the process exits — a detached
+/// thread still inside ONNX Runtime init when the process tears down races ort's
+/// static cleanup and faults (the headless / fast-exit "segfault").
+pub fn warmup_ocr() -> Option<std::thread::JoinHandle<()>> {
     #[cfg(windows)]
-    paddle_ocr::warmup();
+    let h = Some(paddle_ocr::warmup());
+    #[cfg(not(windows))]
+    let h: Option<std::thread::JoinHandle<()>> = None;
+    h
 }
 
 /// The backend for the current platform.

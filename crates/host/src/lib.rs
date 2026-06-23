@@ -706,6 +706,23 @@ mod guard_tests {
         std::panic::set_hook(saved);
         assert!(p.contains("kaboom"));
     }
+
+    #[test]
+    fn load_isolation_catches_panic_and_passes_errors() {
+        // Mirrors load_module's wrapper: a panic in the load closure becomes a load
+        // error (not a process abort), while a Lua error and success pass through.
+        let run = |body: fn() -> Result<()>| -> Result<()> {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(body))
+                .unwrap_or_else(|p| Err(anyhow::anyhow!("panic while loading: {}", panic_text(&p))))
+        };
+        let saved = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let panicked = run(|| panic!("load boom"));
+        std::panic::set_hook(saved);
+        assert!(panicked.unwrap_err().to_string().contains("load boom"));
+        assert!(run(|| Err(anyhow::anyhow!("lua err"))).unwrap_err().to_string().contains("lua err"));
+        assert!(run(|| Ok(())).is_ok());
+    }
 }
 
 fn load_module(
@@ -727,7 +744,7 @@ fn load_module(
     // Resolve + load dependencies first, in a scope so `id` leaves the in-progress
     // set on every exit (including an error) — keeping insert/remove symmetric so
     // a missing/failing dependency can't leave a stale cycle-detection entry.
-    let deps = (|| -> Result<()> {
+    let deps = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
         for dep_id in module.manifest.dependencies.clone() {
             if modules.borrow().iter().any(|m| m.id == dep_id) {
                 continue;
@@ -741,7 +758,10 @@ fn load_module(
             load_module(shared, modules, disabled_ids, loading, &dep_dir)?;
         }
         Ok(())
-    })();
+    }))
+    .unwrap_or_else(|p| {
+        Err(anyhow::anyhow!("panic while resolving dependencies of module '{id}': {}", panic_text(&p)))
+    });
     loading.remove(&id);
     deps?;
 
@@ -771,8 +791,21 @@ fn load_module(
     // leave the shared vectors longer than `modules` — that would mis-index
     // every later module. Run the fallible work in a scope and, on any error,
     // roll the pushes (and any side effects the partial entry registered) back.
+    // Snapshot this module's persisted settings before the fallible load so a
+    // partial load's store writes (host.settings.define/set) roll back too —
+    // rollback_to undoes registrations but not the store. First load → snapshot is
+    // empty (the orphan entry is removed on failure); reload → the prior values are
+    // restored, never lost to a transient failure.
+    let store_snapshot = shared.store.borrow().snapshot(&id);
     let lua = Lua::new();
-    let loaded = (|| -> Result<()> {
+    // Catch a Lua error (propagated by `?`) OR a re-raised Rust panic from the
+    // module's OWN code — code-dependency eval, entry eval, or `activate` — so a
+    // faulty module fails to load and rolls back cleanly instead of aborting the
+    // app. This matters most on a runtime hot-load (a startup failure already aborts
+    // by design). mlua re-raises a panicking host fn across the call boundary;
+    // catch_unwind turns it into a load error. RefCell borrows release on unwind,
+    // so the rollback below can clean up the partial registrations safely.
+    let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
         // This VM's host: identity (settings/resource/path) + ownership (hotkeys/
         // timers/keys/arbiter) scoped to the loaded module (idx). Set as the global
         // so the module's own entry + the host's dispatch (window triggers, settings
@@ -859,9 +892,13 @@ fn load_module(
             }
         }
         Ok(())
-    })();
+    }))
+    .unwrap_or_else(|p| {
+        Err(anyhow::anyhow!("panic while loading module '{id}': {}", panic_text(&p)))
+    });
     if let Err(e) = loaded {
         shared.rollback_to(idx, &id);
+        shared.store.borrow_mut().restore(&id, store_snapshot);
         return Err(e);
     }
 
@@ -1118,12 +1155,22 @@ impl Manager {
 /// Convenience entry: load each directory as a module and run them together.
 pub fn run(dirs: &[String]) -> Result<()> {
     logging::init();
-    backend::warmup_ocr(); // preload the neural OCR model off the hot path
-    let mut manager = Manager::new()?;
-    for dir in dirs {
-        manager.load(dir)?;
+    let warmup = backend::warmup_ocr(); // preload the neural OCR model off the hot path
+    let result = (|| -> Result<()> {
+        let mut manager = Manager::new()?;
+        for dir in dirs {
+            manager.load(dir)?;
+        }
+        manager.run()
+    })();
+    // Join the OCR warmup before returning: otherwise its background thread can be
+    // mid native ONNX-Runtime init when the process tears down, racing ort's static
+    // cleanup → an access violation that surfaces as the headless / fast-exit
+    // "segfault". The thread is bounded (load the model + one dummy inference).
+    if let Some(h) = warmup {
+        let _ = h.join();
     }
-    manager.run()
+    result
 }
 
 /// Bridges OS events from the backend into the owning module's Luau callbacks.
