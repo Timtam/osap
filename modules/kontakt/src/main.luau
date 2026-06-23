@@ -34,22 +34,65 @@ local function anyKontakt(c)
   end
   return false
 end
--- Resolve a control's version offset (cached per control id — a UIA probe is
--- costly and the version is fixed for a given window).
+
+-- ── Komplete Kontrol nesting ──────────────────────────────────────────────────
+-- KK can itself host a Kontakt instance (DAW → KK → Kontakt → library). KK and
+-- Kontakt share the Qt control class and differ only by UIA name. EnumChildWindows
+-- enumerates the nested Kontakt control too, but ReaHotkey anchors a nested library
+-- on KK's control and crosses KK's chrome with a fixed content offset — we do the
+-- same, so the SAME library layout (authored in the bare-Kontakt frame) lands
+-- correctly without the library knowing anything about KK.
+local function isKK(c)
+  return host.uia.find(c.id, "Komplete Kontrol", 50032) or host.uia.find(c.id, "Komplete Kontrol", 50033)
+end
+-- KK chrome offset, from KK's control top-left to where Kontakt's content begins.
+-- TUNE against the real plugin (ReaHotkey uses ~190,111 for a library under KK); if
+-- the library overlay is shifted on screen, adjust these two numbers.
+local KK_OFFSET = { 190, 111 }
+-- Does the active host window contain a control passing `test` (a KK or a Kontakt
+-- container)? The two compete: a bare Kontakt defers to a wrapping KK, and a KK
+-- only counts as a host when it actually contains a Kontakt.
+local function hasControl(test)
+  for _, c in ipairs(host.window.controls()) do
+    if string.match(c.class, "Qt%d+QWindowIcon") and test(c) then return true end
+  end
+  return false
+end
+local function kkPresent() return hasControl(isKK) end
+local function kontaktPresent() return hasControl(anyKontakt) end
+
+-- Resolve a control's content offset (cached per control id — a UIA probe is costly
+-- and the host is fixed for a given window): KK's chrome offset when anchored on a
+-- KK container, otherwise the bare Kontakt version offset (K7 = 0, K8 = +29).
 local offsetCache = {}
 local function resolveOffset(c)
   local off = offsetCache[c.id]
   if off == nil then
-    off = { 0, 0 }
-    for _, v in ipairs(VARIANTS) do
-      if v.identify(c) then
-        off = v.offset
-        break
+    if isKK(c) then
+      off = KK_OFFSET
+      host.log.info(string.format(
+        "Kontakt nested in Komplete Kontrol — anchoring on KK, content offset (%d, %d)", off[1], off[2]
+      ))
+    else
+      off = { 0, 0 }
+      for _, v in ipairs(VARIANTS) do
+        if v.identify(c) then
+          off = v.offset
+          break
+        end
       end
     end
     offsetCache[c.id] = off
   end
   return off[1], off[2]
+end
+
+-- The plugin control to anchor on: prefer a KK container that is hosting Kontakt
+-- (so the KK offset places the library), else a bare Kontakt with no KK wrapping it.
+local function identifyHost(c)
+  if isKK(c) then return kontaktPresent() end
+  if anyKontakt(c) then return not kkPresent() end
+  return false
 end
 
 -- The focused Kontakt plugin window handle, from an overlay's active context.
@@ -100,9 +143,10 @@ local function spec()
   return {
     hosts = daw.all,
     -- NI Qt plugin control class (e.g. "Qt652QWindowIcon{GUID}1"). Loose match; the
-    -- UIA name (anyKontakt) disambiguates Kontakt from other NI Qt plugins.
+    -- UIA name (identifyHost) disambiguates Kontakt — and a KK that hosts it — from
+    -- other NI Qt plugins, and anchors a KK-nested Kontakt on the KK container.
     control = "Qt%d+QWindowIcon",
-    identify = anyKontakt,
+    identify = identifyHost,
   }
 end
 
