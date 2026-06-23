@@ -36,6 +36,9 @@ struct HotkeyReg {
     lua: Lua,
     cb: RegistryKey,
     spec: String,
+    /// The spec parsed to `(vk, modifier-mask)` for cross-module conflict
+    /// detection (`None` if unparseable — then conflict-checked only via the OS).
+    binding: Option<(u32, u8)>,
 }
 
 /// One overlay's claim on an arbiter slot: which module/VM owns it, how specific
@@ -127,20 +130,78 @@ impl Shared {
         id
     }
 
+    /// Logs + queues an accessible dialog `(title, message)`, deduped on
+    /// `dedup_key` (so a repeating issue surfaces once per enabled session).
+    fn queue_dialog(&self, dedup_key: String, title: String, message: String) {
+        if self.error_seen.borrow_mut().insert(dedup_key) {
+            self.errors.borrow_mut().push((title, message));
+        }
+    }
+
     /// Logs a module callback failure (a Lua error or a caught Rust panic) and
     /// queues it — deduped — for the GUI to surface in an accessible error dialog.
     fn report_callback_error(&self, module_idx: usize, context: &str, message: &str) {
         let id = self.ids.borrow().get(module_idx).cloned().unwrap_or_else(|| "?".into());
         logging::line(context, &format!("[{id}] {message}"));
-        let key = format!("{id}\u{1}{context}");
-        if self.error_seen.borrow_mut().insert(key) {
-            self.errors.borrow_mut().push((
-                format!("Module error: {id}"),
-                format!(
-                    "The module \u{201c}{id}\u{201d} hit an error in a {context} callback:\n\n{message}"
-                ),
-            ));
-        }
+        self.queue_dialog(
+            format!("{id}\u{1}{context}"),
+            format!("Module error: {id}"),
+            format!("The module \u{201c}{id}\u{201d} hit an error in a {context} callback:\n\n{message}"),
+        );
+    }
+
+    /// The enabled module that already owns global hotkey `binding` (if any) —
+    /// includes the registering module itself, so a redundant self-rebind is also
+    /// caught (and skipped) instead of failing against the OS.
+    fn hotkey_owner(&self, binding: (u32, u8)) -> Option<usize> {
+        let enabled = self.enabled.borrow();
+        self.hotkeys
+            .borrow()
+            .values()
+            .find(|reg| {
+                reg.binding == Some(binding) && enabled.get(reg.module_idx).copied().unwrap_or(false)
+            })
+            .map(|reg| reg.module_idx)
+    }
+
+    /// Whether module `idx` is currently enabled.
+    fn is_enabled(&self, idx: usize) -> bool {
+        self.enabled.borrow().get(idx).copied().unwrap_or(false)
+    }
+
+    /// Surfaces a cross-module binding clash (two modules want the same hotkey or
+    /// captured key): logs it + queues an accessible dialog naming both modules.
+    /// First-come keeps the binding; the later module stays loaded with it inactive.
+    fn report_conflict(&self, idx: usize, owner_idx: usize, kind: &str, spec: &str) {
+        let (me, owner) = {
+            let ids = self.ids.borrow();
+            (
+                ids.get(idx).cloned().unwrap_or_default(),
+                ids.get(owner_idx).cloned().unwrap_or_default(),
+            )
+        };
+        logging::line("conflict", &format!("[{me}] {kind} '{spec}' conflicts with [{owner}]"));
+        self.queue_dialog(
+            format!("{me}\u{1}conflict\u{1}{kind}\u{1}{spec}"),
+            "Binding conflict".to_string(),
+            format!(
+                "Module \u{201c}{me}\u{201d} tried to bind the {kind} {spec}, but module \u{201c}{owner}\u{201d} already uses it. {spec} stays with \u{201c}{owner}\u{201d} \u{2014} disable one of them (then restart) to switch."
+            ),
+        );
+    }
+
+    /// Surfaces a hotkey the OS itself rejected — held by another application, not
+    /// one of our modules (or an unparseable spec). The module stays loaded.
+    fn report_os_conflict(&self, idx: usize, kind: &str, spec: &str, err: &str) {
+        let me = self.ids.borrow().get(idx).cloned().unwrap_or_default();
+        logging::line("conflict", &format!("[{me}] {kind} '{spec}' rejected by OS: {err}"));
+        self.queue_dialog(
+            format!("{me}\u{1}osconflict\u{1}{kind}\u{1}{spec}"),
+            "Binding unavailable".to_string(),
+            format!(
+                "The {kind} {spec} for module \u{201c}{me}\u{201d} couldn\u{2019}t be registered \u{2014} another application already uses it system-wide."
+            ),
+        );
     }
 
     /// Takes the queued module errors for the GUI to display (called each tick).
@@ -723,6 +784,17 @@ mod guard_tests {
         assert!(run(|| Err(anyhow::anyhow!("lua err"))).unwrap_err().to_string().contains("lua err"));
         assert!(run(|| Ok(())).is_ok());
     }
+
+    #[test]
+    fn key_spec_is_stable_for_conflict_comparison() {
+        // Conflict detection compares backend::key_spec(spec) across modules, so
+        // equivalent specs must normalize identically (modifier order + case) and
+        // distinct combos must differ.
+        assert_eq!(backend::key_spec("Ctrl+Alt+H"), backend::key_spec("alt+ctrl+h"));
+        assert!(backend::key_spec("Ctrl+Alt+H").is_some());
+        assert_ne!(backend::key_spec("Ctrl+Alt+H"), backend::key_spec("Ctrl+H"));
+        assert_ne!(backend::key_spec("Tab"), backend::key_spec("Shift+Tab"));
+    }
 }
 
 fn load_module(
@@ -782,7 +854,11 @@ fn load_module(
 
     shared.roots.borrow_mut().push(module.root.clone());
     shared.ids.borrow_mut().push(module.manifest.id.clone());
-    shared.enabled.borrow_mut().push(true);
+    // Reflect the persisted enabled state up front (rather than enabled-then-
+    // revoked), so the module's entry registers — and conflict-checks — against its
+    // true target state: a disabled module records its bindings without claiming or
+    // contesting them.
+    shared.enabled.borrow_mut().push(!disabled_ids.contains(&module.manifest.id));
     shared.schemas.borrow_mut().push(HashMap::new());
 
     // Everything past the four parallel-vector pushes above is fallible
@@ -909,13 +985,6 @@ fn load_module(
         if let Err(e) = shared.backend.watch_foreground() {
             logging::line("manager", &format!("watch_foreground failed: {e}"));
         }
-    }
-
-    // Honor a disabled state persisted from a previous run: the module's entry
-    // has just registered its hotkeys/keys, so disable now to revoke them (and
-    // exclude its captured keys).
-    if disabled_ids.contains(&module.manifest.id) {
-        shared.apply_enabled(idx, false);
     }
 
     modules.borrow_mut().push(Module {
@@ -1356,17 +1425,42 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     hk.set(
         "register",
         lua.create_function(move |lua, (spec, cb): (String, Function)| {
+            let binding = backend::key_spec(&spec);
             let id = sh.alloc_id();
-            sh.backend.register_hotkey(id, &spec).map_err(mlua::Error::external)?;
+            // Only an ENABLED module actually claims the OS combo and can clash. A
+            // disabled (persisted-off) module just records its binding here so a
+            // later enable registers it — it neither registers with the OS nor
+            // contests a combo (avoids a spurious conflict for a module the user
+            // turned off, and keeps its binding so re-enable restores it).
+            if sh.is_enabled(idx) {
+                // Conflict: this combo is already held by another enabled module
+                // (surface the cross-module clash) or already by this one (a
+                // redundant self-rebind). Skip either way — first-come keeps it and
+                // the module stays loaded with this binding inactive.
+                if let Some(b) = binding {
+                    if let Some(owner) = sh.hotkey_owner(b) {
+                        if owner != idx {
+                            sh.report_conflict(idx, owner, "hotkey", &spec);
+                        }
+                        return Ok(0);
+                    }
+                }
+                if let Err(e) = sh.backend.register_hotkey(id, &spec) {
+                    // binding Some ⇒ a valid combo the OS rejected (another app holds
+                    // it) → surface as a conflict, keep the module loaded. binding
+                    // None ⇒ the spec didn't parse → a module-author bug; fail loudly
+                    // with the real error (matching host.keys.capture).
+                    if binding.is_some() {
+                        sh.report_os_conflict(idx, "hotkey", &spec, &e);
+                        return Ok(0);
+                    }
+                    return Err(mlua::Error::external(e));
+                }
+            }
             let key = lua.create_registry_value(cb)?;
             sh.hotkeys.borrow_mut().insert(
                 id,
-                HotkeyReg {
-                    module_idx: idx,
-                    lua: lua.clone(),
-                    cb: key,
-                    spec,
-                },
+                HotkeyReg { module_idx: idx, lua: lua.clone(), cb: key, spec, binding },
             );
             Ok(id)
         })?,
@@ -1390,6 +1484,11 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         lua.create_function(move |lua, (spec, cb): (String, Function)| {
             let (vk, mask) = backend::key_spec(&spec)
                 .ok_or_else(|| mlua::Error::external(format!("unknown key spec '{spec}'")))?;
+            // No cross-module conflict surfacing here: captured keys are routinely
+            // shared by window-scoped overlays (each active only while its own
+            // window is focused), so a duplicate is usually legitimate, not a clash.
+            // The dispatcher routes to the first match and refresh_captured filters
+            // by enabled; conflict dialogs are for process-wide hotkeys only.
             let key = lua.create_registry_value(cb)?;
             sh.keys
                 .borrow_mut()
