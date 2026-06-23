@@ -61,7 +61,7 @@ host.window.list()           -> Window[]
 
 ## Determining parameters (Inspector)
 
-The values needed per OS (Win32 class, AX role/subrole/identifier, bundle ID, control coordinates) are not determined by guessing — for this the tool ships a **window/control inspector** (à la AHK *Window Spy* / ReaHotkey *Overlay Designer*, but inspection only, without code generation; see [TODO](../TODO.md) → dev tools). It shows, live for the window/element under the cursor, all matchable parameters + geometry + pixel color, and is itself built on the first-class primitives (`host.window`/`host.a11y`/`host.screen`).
+The values needed per OS (Win32 class, AX role/subrole/identifier, bundle ID, control coordinates) are not determined by guessing — for this the tool ships a **window/control inspector** (à la AHK *Window Spy* / ReaHotkey *Overlay Designer*, but inspection only, without code generation; a project-backlog "dev tools" item). It shows, live for the window/element under the cursor, all matchable parameters + geometry + pixel color, and is itself built on the first-class primitives (`host.window`/`host.a11y`/`host.screen`).
 
 ## Triggers ("trigger-like system")
 

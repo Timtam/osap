@@ -23,9 +23,7 @@ const config = {
   organizationName: 'Timtam',
   projectName: 'operating-system-automation-platform',
 
-  // The existing notes link to a few files outside docs/ (e.g. ../TODO.md);
-  // warn rather than fail the build on those.
-  onBrokenLinks: 'warn',
+  onBrokenLinks: 'throw',
 
   i18n: {defaultLocale: 'en', locales: ['en']},
 

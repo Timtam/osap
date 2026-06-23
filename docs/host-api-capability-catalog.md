@@ -2,7 +2,7 @@
 
 *Status: Draft, 2026-06-21. Single source of truth for the module API. Belongs to [architecture-feasibility-study.md](architecture-feasibility-study.md) and [module-package-format.md](module-package-format.md).*
 
-This catalog is the **single machine-readable source** from which the following are generated: (a) the Luau type definitions for module authors, (b) the `[capabilities]` enum in the manifest, (c) the versioned web documentation (see [TODO](../TODO.md)). It is versioned under `engine_api` (additive change = minor, breaking = new major; study §6).
+This catalog is the **single machine-readable source** from which the following are generated: (a) the Luau type definitions for module authors, (b) the `[capabilities]` enum in the manifest, (c) the versioned web documentation (a project-backlog item). It is versioned under `engine_api` (additive change = minor, breaking = new major; study §6).
 
 ## 1. Model
 
