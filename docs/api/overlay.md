@@ -96,7 +96,7 @@ ov:activate(3)     -- activate the 3rd control
 
 ## O:setControls(controls)
 
-Replaces the entire control set at runtime: unregisters/re-registers hotkeys if active and resets focus to the first focusable control. `controls: {Control}` (array of control tables). Used to swap a Kontakt base overlay for a library's header + controls. Returns nothing.
+Replaces the entire control set at runtime: unregisters/re-registers hotkeys if active and resets focus to the first focusable control. `controls: {Control}` (array of control tables — the low-level form the `addX` builders produce; prefer the builders). Returns nothing.
 
 ## O:show()
 
@@ -122,7 +122,7 @@ Binds the overlay as an **embedded** context: active while keyboard focus is ins
 
 `spec: { hosts: {Matcher}?, host: Matcher?, control: string, identify: ((control) -> boolean)? }` — `hosts` is the list of acceptable DAW host-window matchers (falls back to `{ spec.host }`); `control` is a Luau pattern matched against candidate child/focus-chain control class names; `identify(control)` is an optional confirmation callback (UIA / OCR / image search), cached per control HWND, used because a host's plugin control class often matches any plugin (e.g. REAPER's `Plugin<ptr>`). Candidates come from `host.window.controls()` plus the `host.window.focusChain()`.
 
-`opts` is the same `{ naturalNav?, hoverToRead? }` as `attach`. Returns nothing.
+`opts: { naturalNav?, hoverToRead?, slot: string?, specificity: number?, pollMatch: number? }` — `naturalNav`/`hoverToRead` as in `attach`. With `slot` the overlay joins the host **arbiter** for that slot at `specificity` (a base and the overlays inheriting it pass the same slot; the most-specific *matching* one is active — see `host.arbiter`); `pollMatch` (ms) additionally re-checks the match on a recurring timer, for matches that change with no window event (a library landmark appearing inside an already-focused plugin). Returns nothing.
 
 ```lua
 ov:attachEmbedded({
@@ -132,15 +132,68 @@ ov:attachEmbedded({
 }, { naturalNav = true })
 ```
 
+## O:gate(fn) / O:landmark(image)
+
+`gate(fn)` sets an extra activation condition ANDed onto the context match:
+`fn(origin)` (origin = the active context's coordinate window/control) returns
+whether the overlay should be active. `landmark(image)` is the common case — a gate
+satisfied only while `image` (an **absolute** path, via `host.path`) is found within
+the active context's region. A derived / library overlay uses a landmark to take
+over from its base only when its product wordmark is on screen. Both return the
+overlay (chainable).
+
+```lua
+ov:landmark(host.path("images/MyLib/wordmark.png"))
+```
+
+## O:derive(name, build)
+
+The **composition** primitive. Derives a child overlay from this one: the child
+inherits this overlay's controls (a fresh copy), coordinate frame, interaction
+flags, and activation context, and competes on the **same arbiter slot one
+specificity higher** (so the child wins over its parent when both match).
+`build(child)` adds the child's own controls (with the functional builders) and a
+more-specific gate (`child:landmark(...)`). Recursive: a sub-library derives a
+library, each level a full overlay the arbiter assembles — React-portal style. The
+parent must already be attached (so its context + slot exist to inherit). Returns
+the child overlay.
+
+```lua
+local child = base:derive("Sub-library", function(c)
+  c:landmark(host.path("sub-wordmark.png"))
+  c:addHotspotButton({ label = "Extra control", at = { 40, 200 } })
+end)
+```
+
 ## Plugin base + library overlays (inheritance model)
 
 A plugin like Kontakt is a **base overlay** (its generic header) plus separate
 **library overlays** that inherit it and take over when their landmark is on
 screen — they compete on one arbiter `slot` by `specificity` (see `host.arbiter`).
-The base and each library are built with `O.new`, `attachEmbedded` (passing
-`slot`, `specificity`, a fresh `present` landmark gate, and `pollMatch`), and
-`setControls`. The Kontakt framework lives in the `com.platform.kontakt` module;
-a library module depends on it and calls `kontakt.library({ name, image,
-controls })`. See [Nested overlays design](../nested-overlays-design.md). (The
-earlier single `O.container` + `host.providers` data model has been removed.)
+Everything is built with the **same functional builders** used above; there is no
+declarative control table.
+
+The Kontakt framework lives in the `com.platform.kontakt` module. A library module
+depends on it and calls `kontakt.library(name, landmark, build)`, which returns an
+overlay that already carries Kontakt's inherited header, embedding, and version
+offset plus the `landmark` gate; `build(ov)` adds the library's own controls
+functionally:
+
+```lua
+local kontakt = host.require("com.platform.kontakt")
+kontakt.library("Cinematic Studio Strings", host.path("images/CSS/Product.png"), function(ov)
+  ov:addStaticText("Cinematic Studio Strings")
+  ov:addHotspotButton({ label = "Spot 1 Mic", at = { 35, 481 } })
+  ov:addGraphicalToggle({
+    label = "Mix Position", region = { 188, 473, 220, 489 },
+    onImage = host.path("images/CSS/MixOn.png"), offImage = host.path("images/CSS/MixOff.png"),
+  })
+end)
+```
+
+Under the hood the base + each library are `O.new` + the functional builders +
+`attachEmbedded` (with `slot` / `specificity` / `pollMatch`) + `ov:landmark(...)`; a
+further sub-library uses `O:derive` (above). See
+[Nested overlays design](../nested-overlays-design.md). (The earlier single
+`O.container` + `host.providers` data model has been removed.)
 
