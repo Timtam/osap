@@ -38,6 +38,10 @@ license    = "MIT"
 # verified at load (a bare id accepts any version). Auto-discovered among sibling
 # modules / fetched on install.
 dependencies = ["com.example.daw-hosts", "com.platform.kontakt >= 1.2, < 2"]
+code_module  = false            # true = this module's CODE (its functions) is
+                                # loaded into each dependent's VM, reachable via
+                                # host.require — not just serialized data. Set it on
+                                # base / library modules that others build on.
 
 [capabilities]                  # Default-deny, see study §7
 require = ["window.read", "input.click", "screen.imagesearch", "ocr", "speech"]

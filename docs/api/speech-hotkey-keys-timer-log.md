@@ -131,6 +131,20 @@ end)
 
 ---
 
+## host.timer.every(ms, callback)
+
+**Signature:** `host.timer.every(ms: number, callback: () -> ())` → `nil`
+
+Schedules a **recurring** callback to fire approximately every `ms` milliseconds, driven from the event-loop tick. Unlike a self-rescheduling `host.timer.after` chain, a recurring timer is **re-armed even while the owning module is disabled** (the callback is only *invoked* while enabled), so a poll resumes on re-enable instead of dying. There is no returned handle or per-timer cancel; it is released when the module is reloaded/unloaded. Use it for polling that must survive a disable/enable cycle — e.g. an overlay watching for a landmark to appear.
+
+```lua
+host.timer.every(150, function()
+  -- e.g. re-check whether a library landmark is on screen
+end)
+```
+
+---
+
 ## host.log.info(msg)
 
 **Signature:** `host.log.info(msg: string)` → `nil`

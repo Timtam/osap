@@ -2,6 +2,13 @@
 
 *Draft, 2026-06-21. Belongs to [architecture-feasibility-study.md](architecture-feasibility-study.md) (§3 process/isolation model) and [host-api-capability-catalog.md](host-api-capability-catalog.md).*
 
+> **Status:** much of this design is now implemented — see the
+> [Module Manager](module-manager.md) guide for the shipped behavior (enable/disable,
+> per-module settings, install/browse, version-based updates, hotkey-conflict
+> detection, in-place reload, and crash isolation). The CLI/IPC control surface
+> below is still partial: the CLI offers search/install/list/update/uninstall;
+> per-module enable/disable/reload is via the tray, not yet a scriptable IPC.
+
 ## Principle
 
 **One platform process hosts many modules concurrently — not one OS process per module.** All *enabled* modules are loaded together; the host multiplexes events (hotkeys, window triggers, …) to them. Modules can be enabled/disabled at runtime. Out-of-process isolation is reserved for the high-risk tier (untrusted native FFI), not the default.

@@ -3,11 +3,15 @@ title: "host.resource / host.path / host.settings / host.config / host.require /
 sidebar_position: 5
 ---
 
-These functions cover package-relative file access, per-module settings, and the
-decentralised cross-module data channel. Each module runs in its own isolated
-Luau VM; the **only** thing that crosses a module boundary is plain data
-(booleans, numbers, strings, and tables thereof) via `host.require` /
-`host.providers`. Lua functions, closures, and userdata cannot cross VMs.
+These functions cover package-relative file access, per-module settings, and
+cross-module dependencies. Each module runs in its own isolated Luau VM. *How
+much* crosses a module boundary depends on the dependency kind: a
+[**`code_module`**](../module-package-format.md) dependency has its *code*
+evaluated inside the dependent's VM, so its **functions** are reachable via
+`host.require` (the inheritance model — base/library modules work this way); a
+legacy (non-code) dependency exports only plain data (booleans, numbers, strings,
+and tables thereof) via `host.require` / `host.providers`, since raw values,
+closures, and userdata can't otherwise cross VMs.
 
 Paths are resolved relative to the *calling module's own root directory* (the
 unpacked package), which the host tracks per module — a module never sees
@@ -113,16 +117,23 @@ host.config.set("speed", 1.5) -- identical to host.settings.set("speed", 1.5)
 
 ## host.require(id)
 
-Returns the **data** that the dependency module `id` exported — i.e. the plain
-table it returned from its entry point — converted into a fresh Luau value. Data
-only: functions cannot cross module VMs. Raises an error if module `id` is not
-loaded or exported nothing.
+Returns the object that dependency `id` exported, where `id` is a module declared
+in this module's manifest `dependencies`. Raises an error if `id` is not loaded or
+exported nothing.
 
-- `id: string` — a module id declared in this module's manifest `dependencies`.
-- Returns: a Luau value (typically a `table`) mirroring the dependency's exports.
+- If `id` is a [**`code_module`**](../module-package-format.md), its code was
+  evaluated inside *this* VM, so `host.require` returns the live table it returned
+  — **functions intact**. You call its functions directly; this is how
+  inheritance / library modules build on a base module.
+- Otherwise (a legacy data dependency), it returns a fresh Luau value mirroring
+  the plain **data** the dependency exported (functions can't cross a VM this way).
 
 ```luau
--- the dependency module's entry returned `return { presets = {...}, version = 3 }`
+-- a code_module dependency exposing functions:
+local kontakt = host.require("com.platform.kontakt")
+kontakt.library({ name = "Cinematic Studio Strings", image = host.path("css.png") })
+
+-- a legacy data dependency: `return { presets = {...}, version = 3 }`
 local lib = host.require("com.example.preset-library")
 for _, p in ipairs(lib.presets) do ... end
 ```
