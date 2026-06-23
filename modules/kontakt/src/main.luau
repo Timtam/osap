@@ -147,6 +147,10 @@ local function spec()
     -- other NI Qt plugins, and anchors a KK-nested Kontakt on the KK container.
     control = "Qt%d+QWindowIcon",
     identify = identifyHost,
+    -- identifyHost is RELATIONAL (a bare Kontakt defers to a wrapping KK, a KK only
+    -- counts when it hosts Kontakt), so it must NOT be cached per HWND — KK's
+    -- container HWND is stable while a Kontakt is loaded into it.
+    cacheIdentity = false,
   }
 end
 

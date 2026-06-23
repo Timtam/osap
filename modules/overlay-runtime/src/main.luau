@@ -491,6 +491,14 @@ function Overlay:attachEmbedded(spec, opts)
   -- is really this plugin (via UIA / OCR landmark / image search — the module's
   -- choice). Cached per control HWND, since such a check is costly.
   local identify = spec.identify
+  -- identify may be RELATIONAL — its verdict depends on sibling controls, not just
+  -- this one (e.g. "this Kontakt is wrapped by a Komplete Kontrol, so defer to KK").
+  -- Such a spec sets cacheIdentity = false so the per-HWND cache below (which assumes
+  -- identify is a pure function of the single control) can't pin a stale verdict when
+  -- the neighbourhood changes — e.g. a Kontakt loaded into an already-open KK, whose
+  -- container HWND is stable, would otherwise keep its first (host-less) verdict and
+  -- the overlay would never attach.
+  local cacheId = spec.cacheIdentity ~= false
   local idCache = {}
   local function pluginControl()
     local active = host.window.active()
@@ -533,15 +541,20 @@ function Overlay:attachEmbedded(spec, opts)
     for _, c in ipairs(candidates) do
       if string.match(c.class, pattern) then
         if not identify then return c end
-        local ok = idCache[c.id]
-        if ok == nil then
-          ok = identify(c) == true
-          idCache[c.id] = ok
-          if host.log then
-            host.log.info(string.format(
-              "attachEmbedded: matched control [%s] id=%d, identify=%s", c.class, c.id, tostring(ok)
-            ))
+        local ok
+        if cacheId then
+          ok = idCache[c.id]
+          if ok == nil then
+            ok = identify(c) == true
+            idCache[c.id] = ok
+            if host.log then
+              host.log.info(string.format(
+                "attachEmbedded: matched control [%s] id=%d, identify=%s", c.class, c.id, tostring(ok)
+              ))
+            end
           end
+        else
+          ok = identify(c) == true -- relational spec: re-evaluate every recheck
         end
         if ok then return c end
       end
