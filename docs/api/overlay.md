@@ -165,6 +165,40 @@ local child = base:derive("Sub-library", function(c)
 end)
 ```
 
+## O:addSlot(name) / O:fill(name, build)
+
+Named **slots** let a base overlay reserve a position for child controls instead of
+forcing them to append at the end. `addSlot(name)` adds an invisible placeholder
+(skipped in navigation — an unfilled slot is 0 focus stops); a derived / library
+overlay calls `fill(name, build)`, and `build(slot)` adds controls with the usual
+builders — they land **at the slot's position**, so a base of `header + slot +
+footer` becomes `header + the child's controls + footer`. `fill` is a no-op if no
+such slot exists (e.g. already filled). Both return the overlay (chainable).
+
+```lua
+-- base:
+ov:addStaticText("Header")
+ov:addSlot("body")
+ov:addStaticText("Footer")
+-- a derived overlay fills the slot — its controls go between Header and Footer:
+child:fill("body", function(s)
+  s:addHotspotButton({ label = "Item", at = { 40, 200 } })
+end)
+```
+
+## O:replace(label, build)
+
+Overrides an inherited control: replaces the first control labelled `label` with the
+(first) control `build` adds, leaving the rest of the tree intact — use it in a
+derived overlay to change one inherited control without rebuilding the others. No-op
+if no control matches. Returns the overlay (chainable).
+
+```lua
+child:replace("Load instrument", function(o)
+  o:addCustomButton({ label = "Load instrument", onActivate = function(ov) --[[ custom ]] end })
+end)
+```
+
 ## Plugin base + library overlays (inheritance model)
 
 A plugin like Kontakt is a **base overlay** (its generic header) plus separate

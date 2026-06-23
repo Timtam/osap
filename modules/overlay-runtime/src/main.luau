@@ -110,6 +110,49 @@ function Overlay:landmark(image)
   end)
 end
 
+-- A named placeholder in the control tree: a base overlay reserves a slot, and a
+-- derived/library overlay fills it (via :fill) so its controls land at THIS
+-- position instead of appended at the end. An unfilled slot is skipped in nav.
+function Overlay:addSlot(name)
+  return add(self, { kind = "slot", name = name })
+end
+
+-- Fills the named slot with the controls `build` adds: the placeholder is replaced
+-- in place by them, so a base's `header + slot + footer` becomes `header + the
+-- child's controls + footer`. No-op if no such slot (e.g. already filled).
+function Overlay:fill(name, build)
+  local idx
+  for i, c in ipairs(self.controls) do
+    if c.kind == "slot" and c.name == name then
+      idx = i
+      break
+    end
+  end
+  if not idx then return self end
+  local tmp = O.new()
+  if build then build(tmp) end
+  table.remove(self.controls, idx)
+  for j, c in ipairs(tmp.controls) do
+    table.insert(self.controls, idx + j - 1, c)
+  end
+  return self
+end
+
+-- Overrides an inherited control: replaces the first control labelled `label` with
+-- the (first) control `build` adds, leaving the rest of the tree intact.
+function Overlay:replace(label, build)
+  if label == nil then return self end -- never match a label-less control on nil == nil
+  for i, c in ipairs(self.controls) do
+    if c.kind ~= "slot" and c.label == label then
+      local tmp = O.new()
+      if build then build(tmp) end
+      if tmp.controls[1] then self.controls[i] = tmp.controls[1] end
+      return self
+    end
+  end
+  return self
+end
+
 local TYPE_LABEL =
   { static = "", hotspot = "button", custom = "button", ocr = "button", gtoggle = "toggle button" }
 
@@ -179,29 +222,41 @@ local function speakControl(self, index, moveMouse)
 end
 
 local function isFocusable(self, index)
-  -- All controls are focus stops: static text is Tab-reachable and announced, it
-  -- just has no activation (Enter does nothing on it).
-  return self.controls[index] ~= nil
+  -- All real controls are focus stops: static text is Tab-reachable and announced,
+  -- it just has no activation (Enter does nothing on it). An UNFILLED slot is a
+  -- structural placeholder, skipped in navigation (an empty slot = 0 nav entries).
+  local c = self.controls[index]
+  return c ~= nil and c.kind ~= "slot"
 end
 
 function Overlay:focusNext()
   local n = #self.controls
   if n == 0 then return end
+  local found = false
   for _ = 1, n do
     self.focus = (self.focus % n) + 1
-    if isFocusable(self, self.focus) then break end
+    if isFocusable(self, self.focus) then
+      found = true
+      break
+    end
   end
-  speakControl(self, self.focus, true)
+  -- Nothing focusable (e.g. a control set that is only unfilled slots): don't
+  -- announce a phantom empty stop with interrupt.
+  if found then speakControl(self, self.focus, true) end
 end
 
 function Overlay:focusPrev()
   local n = #self.controls
   if n == 0 then return end
+  local found = false
   for _ = 1, n do
     self.focus = ((self.focus - 2) % n) + 1
-    if isFocusable(self, self.focus) then break end
+    if isFocusable(self, self.focus) then
+      found = true
+      break
+    end
   end
-  speakControl(self, self.focus, true)
+  if found then speakControl(self, self.focus, true) end
 end
 
 function Overlay:activate(index)
