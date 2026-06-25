@@ -104,30 +104,36 @@ end
 -- ABSOLUTE path (host.path) — the imageSearch runs in the active context's identity
 -- scope, so a relative path would resolve under the wrong module root.
 function Overlay:landmark(image)
-  -- A full-control template match is too slow to run on every poll (it blocks the
-  -- main thread). So remember where the landmark was last found and re-verify only a
-  -- tiny region there — the steady-state path while the library stays loaded — and
-  -- fall back to the full-region search only when that misses (load/unload), which
-  -- is rare.
-  local lastHit = nil
+  -- The template match runs on a worker thread (host.screen.imageSearchAsync) so the
+  -- detection poll never blocks the main thread on it. The gate returns the LAST
+  -- known result and kicks off a refresh (at most one in flight); when the result
+  -- lands, a state TRANSITION re-checks immediately (snappy activate/deactivate)
+  -- while the steady state stays cheap. Sticky: once found, only a tiny region around
+  -- the last hit is re-searched; a miss there falls back to the full region.
+  local lastHit, matched, pending = nil, false, false
   return self:gate(function(origin)
     if not image or not origin or not origin.client or not origin.bounds then
-      lastHit = nil
+      lastHit, matched = nil, false
       return false
     end
-    if lastHit then
-      local r = { lastHit.x - 6, lastHit.y - 6, lastHit.x + lastHit.w + 6, lastHit.y + lastHit.h + 6 }
-      local ok, res = pcall(host.screen.imageSearch, image, { region = r })
-      if ok and res then
-        lastHit = res
-        return true
+    if not pending then
+      pending = true
+      local region
+      if lastHit then
+        region = { lastHit.x - 6, lastHit.y - 6, lastHit.x + lastHit.w + 6, lastHit.y + lastHit.h + 6 }
+      else
+        region =
+          { origin.client.x, origin.client.y, origin.client.x + origin.bounds.w, origin.client.y + origin.bounds.h }
       end
+      host.screen.imageSearchAsync(image, { region = region }, function(hit)
+        pending = false
+        local was = matched
+        lastHit = hit or nil
+        matched = hit ~= nil
+        if matched ~= was then self:_recheck() end
+      end)
     end
-    local full =
-      { origin.client.x, origin.client.y, origin.client.x + origin.bounds.w, origin.client.y + origin.bounds.h }
-    local ok, res = pcall(host.screen.imageSearch, image, { region = full })
-    lastHit = (ok and res) or nil
-    return ok and res ~= nil
+    return matched
   end)
 end
 

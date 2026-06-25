@@ -118,6 +118,52 @@ struct Shared {
     /// per enabled session (cleared on toggle); the full message still goes to the
     /// log every time. Keyed coarsely so a per-tick-varying message can't flood.
     error_seen: RefCell<HashSet<String>>,
+    /// Async image search: queued template matches go to a worker thread; results
+    /// come back on the loop tick. Pending callbacks are keyed by request id and
+    /// touched only on the main thread.
+    image_tasks: std::sync::mpsc::Sender<ImageTask>,
+    image_results: std::sync::mpsc::Receiver<ImageResult>,
+    pending_image: RefCell<HashMap<u64, (Lua, RegistryKey, usize)>>,
+    next_image_id: Cell<u64>,
+}
+
+/// A queued async template match: the captured haystack + the template image, moved
+/// to the worker thread. `rx`/`ry` are the capture's screen origin (added back into
+/// the reported hit).
+struct ImageTask {
+    id: u64,
+    cap: CapturedImage,
+    tmpl: Vec<u8>,
+    tw: u32,
+    th: u32,
+    tol: u8,
+    rx: i32,
+    ry: i32,
+}
+
+/// The worker's answer: the hit rect in screen coords, or None.
+struct ImageResult {
+    id: u64,
+    hit: Option<(i32, i32, u32, u32)>,
+}
+
+/// The image-search worker: runs the CPU-heavy template match off the main thread so
+/// a detection poll never blocks it, posting each result back. Exits when the task
+/// sender is dropped (app teardown). It touches only owned data — no globals — so it
+/// is safe to leave running across process exit.
+fn spawn_image_worker(
+    tasks: std::sync::mpsc::Receiver<ImageTask>,
+    results: std::sync::mpsc::Sender<ImageResult>,
+) {
+    std::thread::spawn(move || {
+        while let Ok(t) = tasks.recv() {
+            let hit = find_template(&t.cap, t.tw, t.th, &t.tmpl, t.tol)
+                .map(|(ox, oy)| (t.rx + ox as i32, t.ry + oy as i32, t.tw, t.th));
+            if results.send(ImageResult { id: t.id, hit }).is_err() {
+                break; // main thread gone
+            }
+        }
+    });
 }
 
 impl Shared {
@@ -649,6 +695,38 @@ impl Shared {
                 if let Err(e) = call_guarded(&f, ()) {
                     self.report_callback_error(idx, "timer", &e);
                 }
+            }
+        }
+    }
+
+    /// Delivers finished async image-search results to their callbacks (driven by
+    /// the loop tick): each fires its stored callback with the hit table `{x,y,w,h}`
+    /// or nil, then drops the one-shot registry value.
+    fn fire_image_results(&self) {
+        while let Ok(res) = self.image_results.try_recv() {
+            let entry = self.pending_image.borrow_mut().remove(&res.id);
+            if let Some((lua, cb, idx)) = entry {
+                if self.enabled.borrow().get(idx).copied().unwrap_or(false) {
+                    if let Ok(f) = lua.registry_value::<Function>(&cb) {
+                        let arg = match res.hit {
+                            Some((x, y, w, h)) => match lua.create_table() {
+                                Ok(t) => {
+                                    let _ = t.set("x", x);
+                                    let _ = t.set("y", y);
+                                    let _ = t.set("w", w);
+                                    let _ = t.set("h", h);
+                                    mlua::Value::Table(t)
+                                }
+                                Err(_) => mlua::Value::Nil,
+                            },
+                            None => mlua::Value::Nil,
+                        };
+                        if let Err(e) = call_guarded(&f, arg) {
+                            self.report_callback_error(idx, "imageSearchAsync", &e);
+                        }
+                    }
+                }
+                let _ = lua.remove_registry_value(cb);
             }
         }
     }
@@ -1258,6 +1336,9 @@ impl Manager {
         let tts = Tts::default().context("failed to initialize TTS engine")?;
         let store = settings::Store::load();
         let disabled_ids = store.disabled_ids();
+        let (image_tasks, image_task_rx) = std::sync::mpsc::channel::<ImageTask>();
+        let (image_result_tx, image_results) = std::sync::mpsc::channel::<ImageResult>();
+        spawn_image_worker(image_task_rx, image_result_tx);
         let shared = Rc::new(Shared {
             backend,
             tts: RefCell::new(tts),
@@ -1279,6 +1360,10 @@ impl Manager {
             recurring: RefCell::new(Vec::new()),
             errors: RefCell::new(Vec::new()),
             error_seen: RefCell::new(HashSet::new()),
+            image_tasks,
+            image_results,
+            pending_image: RefCell::new(HashMap::new()),
+            next_image_id: Cell::new(0),
         });
         Ok(Self {
             shared,
@@ -1414,6 +1499,7 @@ impl Manager {
                         };
                         backend.pump_pending(&mut dispatcher);
                         shared.fire_due_timers();
+                        shared.fire_image_results();
                         shared.flush_if_dirty();
                     },
                     move || errors_shared.drain_errors(),
@@ -1980,6 +2066,54 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 None => Ok(None),
             }
         })?,
+    )?;
+    // host.screen.imageSearchAsync(image, opts, cb) — runs the template match on a
+    // worker thread and calls cb({x,y,w,h}) | cb(nil) on a later tick, so a detection
+    // poll never blocks the main thread on the (slow) match. The capture itself is
+    // done here (cheap); only the match is offloaded.
+    let sh = shared.clone();
+    screen.set(
+        "imageSearchAsync",
+        lua.create_function(
+            move |lua, (template, opts, cb): (String, Option<Table>, Function)| {
+                let path = sh.root(idx).join(&template);
+                let img = image::open(&path)
+                    .map_err(|e| {
+                        mlua::Error::external(format!(
+                            "imageSearchAsync: cannot open '{}': {e}",
+                            path.display()
+                        ))
+                    })?
+                    .to_rgba8();
+                let (tw, th) = (img.width(), img.height());
+                let (sw, sh_) = sh.backend.screen_size();
+                let (rx, ry, rw, rh) = read_region(opts.as_ref(), sw, sh_);
+                let tol: u8 = opts.as_ref().and_then(|o| o.get::<u8>("tolerance").ok()).unwrap_or(0);
+                match sh.backend.capture(rx, ry, rw, rh) {
+                    Some(cap) => {
+                        let id = sh.next_image_id.get() + 1;
+                        sh.next_image_id.set(id);
+                        let key = lua.create_registry_value(cb)?;
+                        sh.pending_image.borrow_mut().insert(id, (lua.clone(), key, idx));
+                        let _ = sh.image_tasks.send(ImageTask {
+                            id,
+                            cap,
+                            tmpl: img.into_raw(),
+                            tw,
+                            th,
+                            tol,
+                            rx,
+                            ry,
+                        });
+                    }
+                    // No capture (off-screen / collapsed region): report no match now.
+                    None => {
+                        let _ = cb.call::<()>(mlua::Value::Nil);
+                    }
+                }
+                Ok(())
+            },
+        )?,
     )?;
     host.set("screen", screen)?;
 
