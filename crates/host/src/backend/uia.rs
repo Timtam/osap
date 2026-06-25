@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use windows::core::{BSTR, VARIANT};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationElement, TreeScope_Subtree,
+    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTreeWalker, TreeScope_Subtree,
     UIA_ControlTypePropertyId, UIA_NamePropertyId,
 };
 use windows::Win32::System::Com::{
@@ -76,3 +76,141 @@ pub fn uia_locate(hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i3
         Some(((r.left + r.right) / 2, (r.top + r.bottom) / 2))
     }
 }
+
+/// Dev/diagnostic: walk `hwnd`'s UIA subtree in the RAW view and return the
+/// "interesting" elements — those with a non-empty Name, plus Qt window panes —
+/// as (depth, Name, ClassName, ControlType). Bounded (≤600 nodes, ≤16 deep). Used
+/// to discover the Name/ClassName/ControlType to key a plugin's identity on, e.g.
+/// a Kontakt rendered inside Komplete Kontrol's own Qt window.
+pub fn uia_dump(hwnd: isize) -> Vec<(i32, String, String, i32)> {
+    let mut out: Vec<(i32, String, String, i32)> = Vec::new();
+    AUTOMATION.with(|cell| unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let mut borrow = cell.borrow_mut();
+        if borrow.is_none() {
+            *borrow =
+                CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+                    .ok();
+        }
+        let automation = match borrow.as_ref() {
+            Some(a) => a,
+            None => return,
+        };
+        let root = match automation.ElementFromHandle(HWND(hwnd as *mut _)) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        // FindAll(Subtree, TrueCondition) — a flat list of all descendants, and
+        // unlike the raw TreeWalker it crosses UIA fragment boundaries (e.g. into a
+        // Kontakt rendered inside Komplete Kontrol). No depth; capped to stay bounded.
+        let cond = match automation.CreateTrueCondition() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let arr = match root.FindAll(TreeScope_Subtree, &cond) {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+        let len = arr.Length().unwrap_or(0).min(2000);
+        for i in 0..len {
+            if let Ok(el) = arr.GetElement(i) {
+                let name = el.CurrentName().map(|b| b.to_string()).unwrap_or_default();
+                let class = el.CurrentClassName().map(|b| b.to_string()).unwrap_or_default();
+                let ctype = el.CurrentControlType().map(|t| t.0).unwrap_or(0);
+                if !name.is_empty() || !class.is_empty() {
+                    out.push((0, name, class, ctype));
+                }
+            }
+        }
+    });
+    out
+}
+
+/// ReaHotkey's FindElement(ClassName) + WalkTree(path).Click port: find the first
+/// element in `hwnd`'s raw subtree whose ClassName CONTAINS `class_substr` and whose
+/// ControlType == `ctype`, then navigate ReaHotkey-WalkTree-style — `child` (>=1) =
+/// the nth child (first child + child-1 next siblings), then `sibling` raw-view
+/// siblings (negative = previous, positive = next) — and return that element's
+/// bounding-rect centre (to click it), or None if not found / off-screen. Closes
+/// KK's library browser (FileTypeSelector, child=0 sibling=-1) and Kontakt's
+/// What's-New dialog (WhatsNewScreen, child=2 sibling=0).
+pub fn uia_class_nav_point(
+    hwnd: isize,
+    class_substr: &str,
+    ctype: i32,
+    child: i32,
+    sibling: i32,
+) -> Option<(i32, i32)> {
+    AUTOMATION.with(|cell| unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let mut borrow = cell.borrow_mut();
+        if borrow.is_none() {
+            *borrow =
+                CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+                    .ok();
+        }
+        let automation = borrow.as_ref()?;
+        let root = automation.ElementFromHandle(HWND(hwnd as *mut _)).ok()?;
+        let walker = automation.RawViewWalker().ok()?;
+        let mut el = find_by_class(&walker, &root, class_substr, ctype, 0)?;
+        // WalkTree `n` (nth child): first child, then n-1 next siblings.
+        if child >= 1 {
+            el = walker.GetFirstChildElement(&el).ok()?;
+            let mut k = child - 1;
+            while k > 0 {
+                el = walker.GetNextSiblingElement(&el).ok()?;
+                k -= 1;
+            }
+        }
+        // WalkTree `-n` / `+n` (nth previous / next sibling).
+        let mut n = sibling;
+        while n < 0 {
+            el = walker.GetPreviousSiblingElement(&el).ok()?;
+            n += 1;
+        }
+        while n > 0 {
+            el = walker.GetNextSiblingElement(&el).ok()?;
+            n -= 1;
+        }
+        let r = el.CurrentBoundingRectangle().ok()?;
+        if r.right <= r.left || r.bottom <= r.top {
+            return None;
+        }
+        Some(((r.left + r.right) / 2, (r.top + r.bottom) / 2))
+    })
+}
+
+/// First element (depth-first, raw view) whose ControlType == `ctype` and whose
+/// ClassName contains `class_substr`. The raw TreeWalker descends INTO a Qt plugin's
+/// QML content (KK's library browser), which the condition-based FindAll does not —
+/// it stops at the QuickWindow. Returns an owned (AddRef'd) handle.
+unsafe fn find_by_class(
+    walker: &IUIAutomationTreeWalker,
+    el: &IUIAutomationElement,
+    class_substr: &str,
+    ctype: i32,
+    depth: i32,
+) -> Option<IUIAutomationElement> {
+    if depth > 25 {
+        return None;
+    }
+    let class = el.CurrentClassName().map(|b| b.to_string()).unwrap_or_default();
+    let t = el.CurrentControlType().map(|t| t.0).unwrap_or(0);
+    if t == ctype && class.contains(class_substr) {
+        return Some(el.clone());
+    }
+    let mut child = match walker.GetFirstChildElement(el) {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
+    loop {
+        if let Some(found) = find_by_class(walker, &child, class_substr, ctype, depth + 1) {
+            return Some(found);
+        }
+        child = match walker.GetNextSiblingElement(&child) {
+            Ok(n) => n,
+            Err(_) => return None,
+        };
+    }
+}
+

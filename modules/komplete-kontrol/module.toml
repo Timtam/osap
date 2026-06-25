@@ -1,0 +1,10 @@
+id = "com.platform.komplete-kontrol"
+name = "Komplete Kontrol"
+version = "0.1.0"
+engine_api = ">=0.1, <0.2"
+entry = "src/main.luau"
+license = "MIT"
+dependencies = ["com.platform.overlay", "com.platform.daw-hosts"]
+
+[capabilities]
+require = ["window", "uia", "input", "speech", "hotkey", "keys", "timer", "log"]

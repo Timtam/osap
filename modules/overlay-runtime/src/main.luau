@@ -47,6 +47,9 @@ function O.new(label)
       -- Optional gate fn(origin) -> bool: an extra activation condition ANDed on
       -- top of the context match (e.g. a library's landmark image on screen).
       _gate = false,
+      -- Optional module hook fn(overlay) fired each time the overlay becomes the
+      -- active one (e.g. Komplete Kontrol auto-closes its library browser).
+      _onActivate = false,
     },
     Overlay
   )
@@ -101,11 +104,29 @@ end
 -- ABSOLUTE path (host.path) — the imageSearch runs in the active context's identity
 -- scope, so a relative path would resolve under the wrong module root.
 function Overlay:landmark(image)
+  -- A full-control template match is too slow to run on every poll (it blocks the
+  -- main thread). So remember where the landmark was last found and re-verify only a
+  -- tiny region there — the steady-state path while the library stays loaded — and
+  -- fall back to the full-region search only when that misses (load/unload), which
+  -- is rare.
+  local lastHit = nil
   return self:gate(function(origin)
-    if not image or not origin or not origin.client or not origin.bounds then return false end
-    local region =
+    if not image or not origin or not origin.client or not origin.bounds then
+      lastHit = nil
+      return false
+    end
+    if lastHit then
+      local r = { lastHit.x - 6, lastHit.y - 6, lastHit.x + lastHit.w + 6, lastHit.y + lastHit.h + 6 }
+      local ok, res = pcall(host.screen.imageSearch, image, { region = r })
+      if ok and res then
+        lastHit = res
+        return true
+      end
+    end
+    local full =
       { origin.client.x, origin.client.y, origin.client.x + origin.bounds.w, origin.client.y + origin.bounds.h }
-    local ok, res = pcall(host.screen.imageSearch, image, { region = region })
+    local ok, res = pcall(host.screen.imageSearch, image, { region = full })
+    lastHit = (ok and res) or nil
     return ok and res ~= nil
   end)
 end
@@ -335,6 +356,13 @@ function Overlay:show()
   )
 end
 
+-- A module hook fired (with the overlay) each time it becomes the ACTIVE overlay —
+-- runs after the activation context is set, so origin()/pluginHwnd are available.
+function Overlay:onActivate(fn)
+  self._onActivate = fn
+  return self
+end
+
 function Overlay:_activate()
   if self.active then return end
   self.active = true
@@ -356,6 +384,7 @@ function Overlay:_activate()
     -- resume here once the plugin window is focused again.
     host.keys.scope(true)
   end
+  if self._onActivate then self._onActivate(self) end
   -- Announce the focused control shortly after the window gains focus, once the
   -- screen reader's window-title announcement has passed (so it isn't clobbered).
   if host.timer and self.focus > 0 then

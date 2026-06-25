@@ -54,7 +54,7 @@ local KK_OFFSET = { 190, 111 }
 -- only counts as a host when it actually contains a Kontakt.
 local function hasControl(test)
   for _, c in ipairs(host.window.controls()) do
-    if string.match(c.class, "Qt%d+QWindowIcon") and test(c) then return true end
+    if string.match(c.class, "Qt%d+.-QWindowIcon") and test(c) then return true end
   end
   return false
 end
@@ -110,6 +110,22 @@ local function uiaClick(hwnd, name, ctype)
   return false
 end
 
+-- Dismiss Kontakt's one-time "What's New" update dialog (ReaHotkey's
+-- CloseWhatsNewDialog): in the active window's UIA (GetUIAWindow), find the
+-- WhatsNewScreen pane (ControlType 50033) and click its 2nd child (the close
+-- button = WalkTree(2)). The dialog overlays the instrument — incl. the library's
+-- wordmark landmark — so without dismissing it the library overlay can't see its
+-- landmark. No-op when no dialog is up.
+local function closeWhatsNew()
+  local a = host.window.active()
+  if not a then return end
+  local p = host.uia.classNavPoint(a.id, "WhatsNewScreen", 50033, 2, 0)
+  if p then
+    host.input.click(p.x, p.y)
+    host.log.info(string.format("Kontakt: dismissed What's New dialog at (%d, %d)", p.x, p.y))
+  end
+end
+
 -- Adds the generic, library-independent header (UIA-driven, robust across versions)
 -- to `ov` with the functional builders — the same way any overlay is built. The
 -- onActivate closures take the ACTIVE overlay `o` (passed at activation), so they
@@ -142,10 +158,12 @@ end
 local function spec()
   return {
     hosts = daw.all,
-    -- NI Qt plugin control class (e.g. "Qt652QWindowIcon{GUID}1"). Loose match; the
-    -- UIA name (identifyHost) disambiguates Kontakt — and a KK that hosts it — from
-    -- other NI Qt plugins, and anchors a KK-nested Kontakt on the KK container.
-    control = "Qt%d+QWindowIcon",
+    -- NI Qt plugin control class — plain ("Qt652QWindowIcon{GUID}1", e.g. Kontakt)
+    -- OR NI-versioned ("Qt671NI_6_7_1_R3QWindowIcon{GUID}", e.g. Komplete Kontrol);
+    -- the ".-" spans the optional NI_<version> segment. Loose match; the UIA name
+    -- (identifyHost) disambiguates Kontakt — and a KK that hosts it — from other NI
+    -- Qt plugins, and anchors a KK-nested Kontakt on the KK container.
+    control = "Qt%d+.-QWindowIcon",
     identify = identifyHost,
     -- identifyHost is RELATIONAL (a bare Kontakt defers to a wrapping KK, a KK only
     -- counts when it hosts Kontakt), so it must NOT be cached per HWND — KK's
@@ -159,7 +177,15 @@ return {
   activate = function()
     local ov = O.new("Kontakt")
     addHeader(ov)
-    ov:attachEmbedded(spec(), { slot = SLOT, specificity = 0, naturalNav = true })
+    -- Whenever Kontakt becomes focused, dismiss any one-time "What's New" dialog so
+    -- it stops covering the instrument (and a library's landmark). Search the matched
+    -- control (the KK container when nested, the Kontakt control when bare) — its Qt
+    -- fragment holds the rendered UI; the raw walk does not descend from the DAW
+    -- window into it.
+    ov:onActivate(function() closeWhatsNew() end)
+    -- Specificity 1: above the Komplete Kontrol chrome overlay (0, com.platform
+    -- .komplete-kontrol) on the shared slot, below a library (2).
+    ov:attachEmbedded(spec(), { slot = SLOT, specificity = 1, naturalNav = true })
     ov:_startMenuWatch()
     host.log.info("Kontakt base overlay ready.")
   end,
@@ -184,7 +210,9 @@ return {
     -- visible (re-checked on the poll below, since a library loads/unloads inside
     -- Kontakt with no window event).
     if landmark then ov:landmark(landmark) end
-    ov:attachEmbedded(spec(), { slot = SLOT, specificity = 1, naturalNav = true, pollMatch = 500 })
+    -- Specificity 2: a library wins over both the Kontakt base (1) and the KK chrome
+    -- (0) on the shared slot whenever its landmark is present.
+    ov:attachEmbedded(spec(), { slot = SLOT, specificity = 2, naturalNav = true, pollMatch = 500 })
     ov:_startMenuWatch()
     host.log.info("Kontakt library overlay ready: " .. (name or "library"))
     return ov

@@ -1883,6 +1883,45 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             }
         })?,
     )?;
+    // host.uia.dump(hwnd) -> { {depth, name, class, ctype}, … } — diagnostic UIA
+    // tree walk (raw view) for discovering plugin identity properties.
+    let sh = shared.clone();
+    uia.set(
+        "dump",
+        lua.create_function(move |lua, hwnd: isize| {
+            let arr = lua.create_table()?;
+            for (i, (depth, name, class, ctype)) in sh.backend.uia_dump(hwnd).into_iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("depth", depth)?;
+                t.set("name", name)?;
+                t.set("class", class)?;
+                t.set("ctype", ctype)?;
+                arr.set(i + 1, t)?;
+            }
+            Ok(arr)
+        })?,
+    )?;
+    // host.uia.classNavPoint(hwnd, className, ctype, child, sibling) -> {x,y} | nil —
+    // click-point of the element reached from the first ClassName-contains +
+    // ControlType match by walking `child` (nth child) then `sibling` siblings. Ports
+    // ReaHotkey's FindElement(ClassName) + WalkTree(path).Click.
+    let sh = shared.clone();
+    uia.set(
+        "classNavPoint",
+        lua.create_function(
+            move |lua, (hwnd, class, ctype, child, sibling): (isize, String, i32, i32, i32)| {
+                match sh.backend.uia_class_nav_point(hwnd, &class, ctype, child, sibling) {
+                    Some((x, y)) => {
+                        let t = lua.create_table()?;
+                        t.set("x", x)?;
+                        t.set("y", y)?;
+                        Ok(Some(t))
+                    }
+                    None => Ok(None),
+                }
+            },
+        )?,
+    )?;
     host.set("uia", uia)?;
 
     // host.screen.pixel / .size / .imageSearch

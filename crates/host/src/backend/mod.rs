@@ -99,6 +99,24 @@ pub trait Backend {
     /// found / it has no on-screen rect.
     fn uia_locate(&self, hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i32)>;
 
+    /// Dev/diagnostic: the "interesting" elements of `hwnd`'s UIA subtree (raw
+    /// view), as (depth, Name, ClassName, ControlType). For discovering plugin
+    /// identity properties.
+    fn uia_dump(&self, hwnd: isize) -> Vec<(i32, String, String, i32)>;
+
+    /// Click-point (screen centre) of the element reached from the first element
+    /// whose ClassName contains `class_substr` + ControlType == `ctype` by walking
+    /// `child` (nth child, 0 = none) then `sibling` raw-view siblings. Ports
+    /// ReaHotkey FindElement(ClassName) + WalkTree (KK browser, Kontakt What's-New).
+    fn uia_class_nav_point(
+        &self,
+        hwnd: isize,
+        class_substr: &str,
+        ctype: i32,
+        child: i32,
+        sibling: i32,
+    ) -> Option<(i32, i32)>;
+
     /// Size of the primary display in pixels.
     fn screen_size(&self) -> (i32, i32);
     /// Color (r, g, b) of the pixel at screen coordinates.

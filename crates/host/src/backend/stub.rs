@@ -73,6 +73,19 @@ impl Backend for StubBackend {
     fn uia_locate(&self, _hwnd: isize, _name: &str, _control_type: i32) -> Option<(i32, i32)> {
         None
     }
+    fn uia_dump(&self, _hwnd: isize) -> Vec<(i32, String, String, i32)> {
+        Vec::new()
+    }
+    fn uia_class_nav_point(
+        &self,
+        _hwnd: isize,
+        _class_substr: &str,
+        _ctype: i32,
+        _child: i32,
+        _sibling: i32,
+    ) -> Option<(i32, i32)> {
+        None
+    }
     fn set_captured_keys(&self, _keys: &[(u32, u8)]) {}
     fn set_key_scope(&self, _to_foreground: bool) {}
     fn set_menu_open(&self, _open: bool) {}

@@ -154,6 +154,21 @@ impl Backend for WindowsBackend {
         super::uia::uia_locate(hwnd, name, control_type)
     }
 
+    fn uia_dump(&self, hwnd: isize) -> Vec<(i32, String, String, i32)> {
+        super::uia::uia_dump(hwnd)
+    }
+
+    fn uia_class_nav_point(
+        &self,
+        hwnd: isize,
+        class_substr: &str,
+        ctype: i32,
+        child: i32,
+        sibling: i32,
+    ) -> Option<(i32, i32)> {
+        super::uia::uia_class_nav_point(hwnd, class_substr, ctype, child, sibling)
+    }
+
     fn screen_size(&self) -> (i32, i32) {
         unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
     }
