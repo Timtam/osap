@@ -17,6 +17,18 @@ local daw = host.require("com.platform.daw-hosts")
 local SLOT = "com.platform.kontakt"
 local BUTTON, MENUITEM = 50000, 50011
 
+-- Opt-out (default ON): when a Kontakt instrument is focused inside Komplete Kontrol,
+-- auto-close KK's on-screen library browser so the instrument is revealed. On by
+-- default since that is the wanted behaviour under KK; reloading an instrument is done
+-- via KK hardware / its menu (Alt+M), both of which stay reachable. Turn it OFF in the
+-- manager's Settings dialog. As a kontakt setting it is identity-scoped, so it reads
+-- the same value whether the base or an inheriting library overlay (a different VM)
+-- checks it. (ReaHotkey's CloseKKBrowser defaults off; we default it on by choice.)
+local CLOSE_KK_BROWSER = "closeKKBrowser"
+host.settings.define(CLOSE_KK_BROWSER, true, {
+  label = "Automatically close Komplete Kontrol's library browser",
+})
+
 -- A Kontakt version's identity (UIA name + Window/Pane control type) + the content
 -- offset its libraries need.
 local function isKontakt(version)
@@ -126,6 +138,72 @@ local function closeWhatsNew()
   end
 end
 
+-- Close KK's library browser (ReaHotkey's CloseKKBrowser): find the browser pane
+-- (FileTypeSelector / TagCloudAccordionWithBrands) and click the toggle that precedes
+-- it. No-op when no browser is open / not nested. Auto-closing it once an instrument
+-- is loaded reveals the instrument (so the library's wordmark landmark is visible) —
+-- the user wanted this automatic, like the What's New dismiss, with no manual button.
+local function closeBrowser(hwnd)
+  if not hwnd then return end
+  local p = host.uia.classNavPoint(hwnd, "FileTypeSelector", 50018, 0, -1)
+    or host.uia.classNavPoint(hwnd, "TagCloudAccordionWithBrands", 50033, 0, -1)
+  if p then host.input.click(p.x, p.y) end
+end
+
+-- Fired whenever the Kontakt base/library overlay becomes focused: dismiss the
+-- one-time What's New dialog and auto-close KK's browser (both no-op when not
+-- applicable), so the loaded instrument is revealed without any manual button.
+local function onPluginActive(o)
+  closeWhatsNew()
+  if host.settings.get(CLOSE_KK_BROWSER) then
+    closeBrowser(pluginHwnd(o))
+  end
+end
+
+-- KK chrome controls, prepended to the Kontakt/library overlay but SHOWN ONLY while
+-- nested in KK (`when = nested`) — so while a library is loaded you can still reach
+-- KK's menu and library browser to load a DIFFERENT (incl. non-Kontakt) instrument.
+-- This is ReaHotkey's "KK header on top of the plugin overlay" composition, realized
+-- as conditional controls in one nav list (KK → Kontakt → library). They act on the
+-- matched control (the KK container when nested).
+local EDIT = 50004 -- UIA Edit control type: KK's library-browser search field
+local nestedCache = {}
+local function nested(o)
+  local ctrl = o.activeCtx and o.activeCtx.origin()
+  if not ctrl then return false end
+  local v = nestedCache[ctrl.id]
+  if v == nil then
+    v = isKK(ctrl)
+    nestedCache[ctrl.id] = v
+  end
+  return v == true
+end
+-- The inverse: shown only on a BARE Kontakt (no KK wrapping it). Kontakt's file menu /
+-- load is the bare way to load instruments; under KK you use KK's browser instead, so
+-- the Kontakt header is hidden when nested.
+local function bare(o)
+  return not nested(o)
+end
+local function addKKHeader(ov)
+  ov:addStaticText("Komplete Kontrol").when = nested
+  -- KK's menu is a fixed hotspot in KK's chrome at (297,17) relative to KK's RAW
+  -- client; pre-subtract KK_OFFSET so the overlay's content offset cancels back to it.
+  ov:addHotspotButton({
+    label = "Komplete Kontrol menu",
+    at = { 297 - KK_OFFSET[1], 17 - KK_OFFSET[2] },
+    hotkey = "Alt+M",
+  }).when = nested
+  ov:addCustomButton({
+    label = "Search library browser",
+    hotkey = "Alt+S",
+    onActivate = function(o)
+      local h = pluginHwnd(o)
+      local p = h and host.uia.locate(h, "", EDIT)
+      if p then host.input.click(p.x, p.y) end
+    end,
+  }).when = nested
+end
+
 -- Adds the generic, library-independent header (UIA-driven, robust across versions)
 -- to `ov` with the functional builders — the same way any overlay is built. The
 -- onActivate closures take the ACTIVE overlay `o` (passed at activation), so they
@@ -139,7 +217,7 @@ local function addHeader(ov)
         host.keys.menuOpen(true) -- snappier than waiting for the menu-watch poll
       end
     end,
-  })
+  }).when = bare
   ov:addCustomButton({
     label = "Load instrument",
     hotkey = "Ctrl+L",
@@ -149,7 +227,7 @@ local function addHeader(ov)
         host.timer.after(200, function() uiaClick(hwnd, "Load...", MENUITEM) end)
       end
     end,
-  })
+  }).when = bare
 end
 
 -- The embedded-attach spec shared by the base and every library overlay. A
@@ -176,13 +254,10 @@ return {
   -- Standalone side effect, run only in Kontakt's own VM: the base overlay.
   activate = function()
     local ov = O.new("Kontakt")
+    addKKHeader(ov)
     addHeader(ov)
-    -- Whenever Kontakt becomes focused, dismiss any one-time "What's New" dialog so
-    -- it stops covering the instrument (and a library's landmark). Search the matched
-    -- control (the KK container when nested, the Kontakt control when bare) — its Qt
-    -- fragment holds the rendered UI; the raw walk does not descend from the DAW
-    -- window into it.
-    ov:onActivate(function() closeWhatsNew() end)
+    -- On focus: dismiss the one-time What's New dialog + auto-close KK's browser.
+    ov:onActivate(onPluginActive)
     -- Specificity 1: above the Komplete Kontrol chrome overlay (0, com.platform
     -- .komplete-kontrol) on the shared slot, below a library (2).
     ov:attachEmbedded(spec(), { slot = SLOT, specificity = 1, naturalNav = true })
@@ -203,8 +278,10 @@ return {
   -- under Kontakt's root, not the library's.
   library = function(name, landmark, build)
     local ov = O.new("Kontakt — " .. (name or "library"))
+    addKKHeader(ov)
     addHeader(ov)
     ov._originOffset = resolveOffset
+    ov:onActivate(onPluginActive)
     if build then build(ov) end
     -- Match = Kontakt focused (the embedded context) AND this library's landmark
     -- visible (re-checked on the poll below, since a library loads/unloads inside

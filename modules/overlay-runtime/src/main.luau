@@ -251,9 +251,13 @@ end
 local function isFocusable(self, index)
   -- All real controls are focus stops: static text is Tab-reachable and announced,
   -- it just has no activation (Enter does nothing on it). An UNFILLED slot is a
-  -- structural placeholder, skipped in navigation (an empty slot = 0 nav entries).
+  -- structural placeholder, skipped in navigation (an empty slot = 0 nav entries). A
+  -- control with a `when` predicate is skipped while it returns non-true (e.g. KK
+  -- chrome controls, shown only while Kontakt is nested inside Komplete Kontrol).
   local c = self.controls[index]
-  return c ~= nil and c.kind ~= "slot"
+  if c == nil or c.kind == "slot" then return false end
+  if c.when and c.when(self) ~= true then return false end
+  return true
 end
 
 function Overlay:focusNext()
@@ -290,6 +294,7 @@ function Overlay:activate(index)
   local i = index or self.focus
   local c = self.controls[i]
   if not c then return end
+  if c.when and c.when(self) ~= true then return end -- a hidden control's hotkey no-ops
   if c.kind == "hotspot" and c.at then
     local ox, oy = originOf(self)
     host.input.click(ox + c.at[1], oy + c.at[2])
