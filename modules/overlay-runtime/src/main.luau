@@ -18,6 +18,15 @@ local O = {}
 -- with context-scoping + key suppression).
 local NAV = { next = "Ctrl+Alt+Right", prev = "Ctrl+Alt+Left", activate = "Ctrl+Alt+Return" }
 
+-- Image-match robustness. ReaHotkey matches templates exactly (variation 0); we add a
+-- per-channel colour tolerance plus a spread of scale factors, so a template still
+-- matches under minor render / colour-profile / DPI-scale differences instead of
+-- failing outright (which forced per-version re-captures). 1.0 is tried first, so an
+-- exact hit costs nothing extra and the other scales are only reached when it misses.
+-- An image control may override these with its own `tolerance` / `scales`.
+local MATCH_TOLERANCE = 20
+local MATCH_SCALES = { 1.0, 0.9, 1.1, 0.8, 1.2, 1.25, 0.75, 1.5, 0.67, 2.0 }
+
 local Overlay = {}
 Overlay.__index = Overlay
 
@@ -87,6 +96,9 @@ function Overlay:addGraphicalToggle(opts)
     onImage = opts.onImage,
     offImage = opts.offImage,
     hotkey = opts.hotkey,
+    -- Optional per-control overrides of the module-wide match robustness defaults.
+    tolerance = opts.tolerance,
+    scales = opts.scales,
   })
 end
 
@@ -125,7 +137,11 @@ function Overlay:landmark(image)
         region =
           { origin.client.x, origin.client.y, origin.client.x + origin.bounds.w, origin.client.y + origin.bounds.h }
       end
-      host.screen.imageSearchAsync(image, { region = region }, function(hit)
+      -- Tolerance but NO multi-scale here: the landmark searches the FULL plugin
+      -- region, and trying many scales over that (each a fresh full-region scan +
+      -- resize) is far too slow and starves the worker when 1.0 misses. Scaling is for
+      -- small regions (gtoggle); the wordmark is captured at this setup, so 1.0 fits.
+      host.screen.imageSearchAsync(image, { region = region, tolerance = MATCH_TOLERANCE }, function(hit)
         pending = false
         local was = matched
         lastHit = hit or nil
@@ -217,8 +233,13 @@ local function gtoggleState(self, c)
   if not c.region then return nil end
   local ox, oy = originOf(self)
   local region = { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] }
-  if c.onImage and host.screen.imageSearch(c.onImage, { region = region }) then return "on" end
-  if c.offImage and host.screen.imageSearch(c.offImage, { region = region }) then return "off" end
+  local opts = {
+    region = region,
+    tolerance = c.tolerance or MATCH_TOLERANCE,
+    scales = c.scales or MATCH_SCALES,
+  }
+  if c.onImage and host.screen.imageSearch(c.onImage, opts) then return "on" end
+  if c.offImage and host.screen.imageSearch(c.offImage, opts) then return "off" end
   return nil
 end
 
@@ -670,6 +691,66 @@ function Overlay:_startMenuWatch()
       host.keys.menuOpen(open)
     end
   end)
+end
+
+-- Calibration helper: capture the live on-screen pixels of the control labelled
+-- `label` — its exact region with the active origin/offset applied — to `path` (an
+-- absolute file path) as a PNG, for (re-)capturing an image control's on/off
+-- templates against the real plugin. Returns whether it saved. The overlay must be
+-- active (so the origin resolves to the focused plugin).
+function Overlay:captureControl(label, path)
+  if not self.active then
+    host.log.info("captureControl: overlay not active")
+    return false
+  end
+  for _, c in ipairs(self.controls) do
+    if c.region and c.label == label then
+      local ox, oy = originOf(self)
+      local region = { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] }
+      local ok = host.screen.save ~= nil and host.screen.save(path, { region = region })
+      host.log.info(string.format(
+        "captureControl '%s' region=(%d,%d,%d,%d) -> %s ok=%s",
+        label, region[1], region[2], region[3], region[4], path, tostring(ok)
+      ))
+      return ok == true
+    end
+  end
+  host.log.info("captureControl: no control labelled '" .. tostring(label) .. "' with a region")
+  return false
+end
+
+-- Like captureControl but for an arbitrary origin-relative region {x1,y1,x2,y2} — a
+-- wider context shot for calibration/inspection. Overlay must be active.
+function Overlay:captureRegion(region, path)
+  if not self.active then
+    host.log.info("captureRegion: overlay not active")
+    return false
+  end
+  local ox, oy = originOf(self)
+  local r = { ox + region[1], oy + region[2], ox + region[3], oy + region[4] }
+  local ok = host.screen.save ~= nil and host.screen.save(path, { region = r })
+  host.log.info(string.format(
+    "captureRegion (%d,%d,%d,%d) -> %s ok=%s", r[1], r[2], r[3], r[4], path, tostring(ok)
+  ))
+  return ok == true
+end
+
+-- Captures the WHOLE active plugin control (its client rect) to `path` — the full
+-- plugin UI, for locating controls and recomputing coordinates/offsets. Active only.
+function Overlay:captureFull(path)
+  if not self.active then
+    host.log.info("captureFull: overlay not active")
+    return false
+  end
+  local o = self.activeCtx and self.activeCtx.origin()
+  if not o or not o.client or not o.bounds then return false end
+  local r = { o.client.x, o.client.y, o.client.x + o.bounds.w, o.client.y + o.bounds.h }
+  local ok = host.screen.save ~= nil and host.screen.save(path, { region = r })
+  host.log.info(string.format(
+    "captureFull client=(%d,%d) bounds=%dx%d -> %s ok=%s",
+    o.client.x, o.client.y, o.bounds.w, o.bounds.h, path, tostring(ok)
+  ))
+  return ok == true
 end
 
 -- Exposed as the code module com.platform.overlay: a module that depends on it

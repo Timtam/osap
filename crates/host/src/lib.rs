@@ -137,6 +137,7 @@ struct ImageTask {
     tw: u32,
     th: u32,
     tol: u8,
+    scales: Vec<f32>,
     rx: i32,
     ry: i32,
 }
@@ -157,8 +158,8 @@ fn spawn_image_worker(
 ) {
     std::thread::spawn(move || {
         while let Ok(t) = tasks.recv() {
-            let hit = find_template(&t.cap, t.tw, t.th, &t.tmpl, t.tol)
-                .map(|(ox, oy)| (t.rx + ox as i32, t.ry + oy as i32, t.tw, t.th));
+            let hit = find_template_scaled(&t.cap, t.tw, t.th, &t.tmpl, t.tol, &t.scales)
+                .map(|(ox, oy, mw, mh)| (t.rx + ox as i32, t.ry + oy as i32, mw, mh));
             if results.send(ImageResult { id: t.id, hit }).is_err() {
                 break; // main thread gone
             }
@@ -2054,13 +2055,14 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 None => return Ok(None),
             };
             let tol: u8 = opts.as_ref().and_then(|o| o.get::<u8>("tolerance").ok()).unwrap_or(0);
-            match find_template(&cap, tw, th, img.as_raw(), tol) {
-                Some((ox, oy)) => {
+            let scales = read_scales(opts.as_ref());
+            match find_template_scaled(&cap, tw, th, img.as_raw(), tol, &scales) {
+                Some((ox, oy, mw, mh)) => {
                     let t = lua.create_table()?;
                     t.set("x", rx + ox as i32)?;
                     t.set("y", ry + oy as i32)?;
-                    t.set("w", tw)?;
-                    t.set("h", th)?;
+                    t.set("w", mw)?;
+                    t.set("h", mh)?;
                     Ok(Some(t))
                 }
                 None => Ok(None),
@@ -2089,6 +2091,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 let (sw, sh_) = sh.backend.screen_size();
                 let (rx, ry, rw, rh) = read_region(opts.as_ref(), sw, sh_);
                 let tol: u8 = opts.as_ref().and_then(|o| o.get::<u8>("tolerance").ok()).unwrap_or(0);
+                let scales = read_scales(opts.as_ref());
                 match sh.backend.capture(rx, ry, rw, rh) {
                     Some(cap) => {
                         let id = sh.next_image_id.get() + 1;
@@ -2102,6 +2105,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                             tw,
                             th,
                             tol,
+                            scales,
                             rx,
                             ry,
                         });
@@ -2114,6 +2118,31 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 Ok(())
             },
         )?,
+    )?;
+    // host.screen.save(path, opts?) — capture a screen region (opts.region, else the
+    // full screen) and write it to `path` (relative to the calling module's root; an
+    // absolute path is used as-is) as a PNG. Returns true on success. A calibration
+    // affordance: re-capture an image control's templates against the live plugin.
+    let sh = shared.clone();
+    screen.set(
+        "save",
+        lua.create_function(move |_, (path, opts): (String, Option<Table>)| {
+            let full = sh.root(idx).join(&path);
+            let (sw, sh_) = sh.backend.screen_size();
+            let (rx, ry, rw, rh) = read_region(opts.as_ref(), sw, sh_);
+            match sh.backend.capture(rx, ry, rw, rh) {
+                Some(cap) => match image::RgbaImage::from_raw(cap.w, cap.h, cap.rgba) {
+                    Some(img) => {
+                        img.save(&full).map_err(|e| {
+                            mlua::Error::external(format!("screen.save '{}': {e}", full.display()))
+                        })?;
+                        Ok(true)
+                    }
+                    None => Ok(false),
+                },
+                None => Ok(false),
+            }
+        })?,
     )?;
     host.set("screen", screen)?;
 
@@ -2501,6 +2530,18 @@ fn read_region(opts: Option<&Table>, sw: i32, sh: i32) -> (i32, i32, i32, i32) {
     }
 }
 
+/// Reads an optional `{ scales = { 1.0, 0.9, ... } }` list of scale factors for the
+/// template search; empty when absent (= a single 1.0 pass, i.e. no scaling).
+fn read_scales(opts: Option<&Table>) -> Vec<f32> {
+    let mut v = Vec::new();
+    if let Some(t) = opts.and_then(|o| o.get::<Table>("scales").ok()) {
+        for s in t.sequence_values::<f32>().flatten() {
+            v.push(s);
+        }
+    }
+    v
+}
+
 /// Naive template search over a captured region (early-out per position; compares
 /// RGB and honors the template's alpha as a mask). Returns the top-left offset.
 fn find_template(hay: &CapturedImage, tw: u32, th: u32, tmpl: &[u8], tol: u8) -> Option<(u32, u32)> {
@@ -2534,6 +2575,58 @@ fn matches_at(hay: &CapturedImage, ox: u32, oy: u32, tw: u32, th: u32, tmpl: &[u
         }
     }
     true
+}
+
+/// Resizes an RGBA template (`tw`×`th`) to `sw`×`sh` (bilinear), returning the new
+/// raw RGBA bytes. Falls back to the original bytes if the buffer can't be wrapped.
+fn resize_rgba(tmpl: &[u8], tw: u32, th: u32, sw: u32, sh: u32) -> Vec<u8> {
+    match image::RgbaImage::from_raw(tw, th, tmpl.to_vec()) {
+        Some(img) => {
+            image::imageops::resize(&img, sw, sh, image::imageops::FilterType::Triangle).into_raw()
+        }
+        None => tmpl.to_vec(),
+    }
+}
+
+/// Multi-scale template search: tries each factor in `scales` (the needle resized to
+/// factor·{tw,th}; 1.0 uses it as-is), returning the first match's top-left AND the
+/// matched (scaled) size. Empty `scales` = a single 1.0 pass (the plain search). 1.0,
+/// when present, is tried first, so an exact hit costs nothing extra and the other
+/// scales are only reached when it misses. Resized needles rely on `tol` (bilinear
+/// interpolation perturbs pixels), so pair scaling with a non-zero colour tolerance.
+fn find_template_scaled(
+    hay: &CapturedImage,
+    tw: u32,
+    th: u32,
+    tmpl: &[u8],
+    tol: u8,
+    scales: &[f32],
+) -> Option<(u32, u32, u32, u32)> {
+    let one = [1.0f32];
+    let list: &[f32] = if scales.is_empty() { &one } else { scales };
+    for &s in list {
+        if s <= 0.0 {
+            continue;
+        }
+        let (sw, sh) = if (s - 1.0).abs() < 1e-4 {
+            (tw, th)
+        } else {
+            (((tw as f32) * s).round() as u32, ((th as f32) * s).round() as u32)
+        };
+        if sw == 0 || sh == 0 || sw > hay.w || sh > hay.h {
+            continue;
+        }
+        let hit = if sw == tw && sh == th {
+            find_template(hay, tw, th, tmpl, tol)
+        } else {
+            let scaled = resize_rgba(tmpl, tw, th, sw, sh);
+            find_template(hay, sw, sh, &scaled, tol)
+        };
+        if let Some((ox, oy)) = hit {
+            return Some((ox, oy, sw, sh));
+        }
+    }
+    None
 }
 
 /// Converts a native window snapshot into the Lua table modules see:

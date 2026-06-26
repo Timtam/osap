@@ -122,19 +122,37 @@ local function uiaClick(hwnd, name, ctype)
   return false
 end
 
--- Dismiss Kontakt's one-time "What's New" update dialog (ReaHotkey's
--- CloseWhatsNewDialog): in the active window's UIA (GetUIAWindow), find the
--- WhatsNewScreen pane (ControlType 50033) and click its 2nd child (the close
--- button = WalkTree(2)). The dialog overlays the instrument — incl. the library's
--- wordmark landmark — so without dismissing it the library overlay can't see its
--- landmark. No-op when no dialog is up.
-local function closeWhatsNew()
-  local a = host.window.active()
-  if not a then return end
-  local p = host.uia.classNavPoint(a.id, "WhatsNewScreen", 50033, 2, 0)
+-- The Kontakt control whose UIA we drive (for the What's New dialog): when bare, the
+-- matched control IS Kontakt; when nested in KK the matched control is the KK
+-- container, so we find the SEPARATE nested Kontakt control (plain Qt class, "Kontakt
+-- N" UIA name) among the host window's controls. Its OWN handle roots the Kontakt UIA
+-- fragment — reachable from there even though it is NOT from the KK container or the
+-- host window (which is why driving it from the active window failed when nested).
+local function kontaktControl()
+  -- A KK container also reports the nested "Kontakt N" name in its subtree, so
+  -- anyKontakt alone matches it too; the REAL Kontakt control is a Kontakt that is NOT
+  -- a KK (its plain Qt class, not the NI-versioned KK class).
+  for _, c in ipairs(host.window.controls()) do
+    if string.match(c.class, "Qt%d+.-QWindowIcon") and anyKontakt(c) and not isKK(c) then
+      return c.id
+    end
+  end
+  return nil
+end
+
+-- Dismiss Kontakt's one-time "What's New" update dialog, ReaHotkey-style (UIA): find
+-- the WhatsNewScreen pane on the Kontakt control and click its close child
+-- (WalkTree(2)). This works for a Kontakt whose UI is exposed via UIA (running bare);
+-- a Kontakt NESTED in Komplete Kontrol exposes NO UIA tree (its "Kontakt N" control is
+-- a UIA leaf — the same reason nested detection is image-based), so this is a no-op
+-- there (a safe one — no false-clicking). No-op when no dialog is up.
+local function closeWhatsNew(o)
+  local hwnd = kontaktControl()
+  if not hwnd then return end
+  local p = host.uia.classNavPoint(hwnd, "WhatsNewScreen", 50033, 2, 0)
   if p then
     host.input.click(p.x, p.y)
-    host.log.info(string.format("Kontakt: dismissed What's New dialog at (%d, %d)", p.x, p.y))
+    host.log.info("Kontakt: dismissed What's New dialog (UIA)")
   end
 end
 
@@ -154,7 +172,7 @@ end
 -- one-time What's New dialog and auto-close KK's browser (both no-op when not
 -- applicable), so the loaded instrument is revealed without any manual button.
 local function onPluginActive(o)
-  closeWhatsNew()
+  closeWhatsNew(o)
   if host.settings.get(CLOSE_KK_BROWSER) then
     closeBrowser(pluginHwnd(o))
   end

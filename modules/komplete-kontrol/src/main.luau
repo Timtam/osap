@@ -37,6 +37,19 @@ local function pluginHwnd(ov)
   return ctrl and ctrl.id
 end
 
+-- Close KK's library browser: find the browser pane (FileTypeSelector / TagCloud
+-- AccordionWithBrands) and click the toggle that precedes it. No-op when not open.
+-- Kept as an accessible control here because an open browser HIDES the nested Kontakt
+-- control, so the Kontakt overlay (which otherwise auto-closes the browser) can't even
+-- detect Kontakt then — this KK overlay is the only one active, and without this you
+-- would have no accessible way to reveal the instrument again.
+local function closeBrowser(hwnd)
+  if not hwnd then return end
+  local p = host.uia.classNavPoint(hwnd, "FileTypeSelector", 50018, 0, -1)
+    or host.uia.classNavPoint(hwnd, "TagCloudAccordionWithBrands", 50033, 0, -1)
+  if p then host.input.click(p.x, p.y) end
+end
+
 return {
   -- Standalone side effect (this module's own VM): the KK base overlay.
   activate = function()
@@ -57,9 +70,15 @@ return {
         if p then host.input.click(p.x, p.y) end
       end,
     })
-    -- No auto-close / close button here: while KK is EMPTY the browser is how you
-    -- pick an instrument, so it must stay open. The Kontakt overlay auto-closes the
-    -- browser once an instrument is actually loaded (reveals it).
+    ov:addCustomButton({
+      label = "Close library browser",
+      hotkey = "Alt+L",
+      onActivate = function(o) closeBrowser(pluginHwnd(o)) end,
+    })
+    -- No AUTO-close here: while KK is empty the browser is how you pick an instrument,
+    -- so it must stay open. The Kontakt overlay auto-closes it once an instrument is
+    -- loaded; the manual control above covers the case where the browser is open OVER a
+    -- loaded instrument (then Kontakt is hidden and only this KK overlay is active).
     -- Tab / Shift+Tab navigate the header (like the Kontakt overlay), Enter
     -- activates; Alt+M / Alt+S are also global. The menu-watch hands the captured
     -- nav keys to KK's own Qt menu (opened by Alt+M) while it is open.
