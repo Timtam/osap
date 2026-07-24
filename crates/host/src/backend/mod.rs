@@ -117,6 +117,12 @@ pub trait Backend {
         sibling: i32,
     ) -> Option<(i32, i32)>;
 
+    /// Tab pass-through for a standalone plugin window: SetFocus the next
+    /// (`direction` >= 0) / previous keyboard-focusable descendant relative to the one
+    /// focused now, wrapping at the ends, and return its (Name, ControlType, 1-based
+    /// index, count) to announce. None if the window has no focusable descendants.
+    fn uia_focus_step(&self, hwnd: isize, direction: i32) -> Option<(String, i32, i32, i32)>;
+
     /// Size of the primary display in pixels.
     fn screen_size(&self) -> (i32, i32);
     /// Color (r, g, b) of the pixel at screen coordinates.

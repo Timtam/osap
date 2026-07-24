@@ -316,6 +316,16 @@ local function spec()
   }
 end
 
+-- The Kontakt STANDALONE application window (Kontakt N.exe running on its own, not
+-- embedded in a DAW): a top-level NINormalWindow titled "Kontakt 7" / "Kontakt 8".
+-- Mirrors ReaHotkey's Standalone.Register criteria. Unlike a KK-nested Kontakt (a UIA
+-- leaf), a standalone Kontakt is fully UIA-accessible.
+local KONTAKT_STANDALONE = {
+  title = { pattern = "^Kontakt %d" },
+  app = { exe = { contains = "Kontakt" } },
+  windows = { class = { prefix = "NINormalWindow" } },
+}
+
 return {
   -- Standalone side effect, run only in Kontakt's own VM: the base overlay.
   activate = function()
@@ -329,6 +339,31 @@ return {
     ov:attachEmbedded(spec(), { slot = SLOT, specificity = 1, naturalNav = true })
     ov:_startMenuWatch()
     host.log.info("Kontakt base overlay ready.")
+
+    -- STANDALONE overlay: Kontakt running as its OWN application (Kontakt N.exe), not
+    -- embedded in a DAW — a top-level NINormalWindow titled "Kontakt N". A SEPARATE
+    -- overlay from the embedded one, attached to the top-level window via attach().
+    -- Mirrors ReaHotkey's Kontakt StandaloneHeader: the Kontakt file menu (UIA-driven,
+    -- reusing the same "Kontakt File Menu" UIA button as the embedded header) plus a Tab
+    -- pass-through of the native UIA tree — a standalone Kontakt is fully UIA-accessible,
+    -- unlike a KK-nested one (which has no UIA tree). The pass-through (below) drives
+    -- Kontakt's own keyboard focus via host.uia.focusStep.
+    local sa = O.new("Kontakt")
+    sa:addCustomButton({
+      label = "Kontakt file menu",
+      hotkey = "Alt+F",
+      onActivate = function(o)
+        if uiaClick(pluginHwnd(o), "Kontakt File Menu", BUTTON) then
+          host.keys.menuOpen(true) -- snappier than waiting for the menu-watch poll
+        end
+      end,
+    })
+    -- Tab / Shift+Tab step through Kontakt's OWN focusable controls (its window doesn't
+    -- move focus on Tab itself) — ReaHotkey's Standalone Tab pass-through.
+    sa:enableUiaPassThrough()
+    sa:attach(KONTAKT_STANDALONE, { naturalNav = true })
+    sa:_startMenuWatch()
+    host.log.info("Kontakt standalone overlay ready.")
   end,
 
   -- Called from a sample-library module (this file runs in its VM): builds an

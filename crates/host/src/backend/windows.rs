@@ -224,6 +224,10 @@ impl Backend for WindowsBackend {
         super::uia::uia_class_nav_point(hwnd, class_substr, ctype, child, sibling)
     }
 
+    fn uia_focus_step(&self, hwnd: isize, direction: i32) -> Option<(String, i32, i32, i32)> {
+        super::uia::uia_focus_step(hwnd, direction)
+    }
+
     fn screen_size(&self) -> (i32, i32) {
         unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
     }

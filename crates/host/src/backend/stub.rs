@@ -90,6 +90,9 @@ impl Backend for StubBackend {
     ) -> Option<(i32, i32)> {
         None
     }
+    fn uia_focus_step(&self, _hwnd: isize, _direction: i32) -> Option<(String, i32, i32, i32)> {
+        None
+    }
     fn set_captured_keys(&self, _keys: &[(u32, u8)]) {}
     fn set_key_scope(&self, _to_foreground: bool) {}
     fn set_menu_open(&self, _open: bool) {}

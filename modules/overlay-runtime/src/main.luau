@@ -339,6 +339,26 @@ function Overlay:focusPrev()
   if found then speakControl(self, self.focus, true) end
 end
 
+-- Enable a standalone UIA Tab pass-through: Tab / Shift+Tab move keyboard focus through
+-- the attached window's OWN controls (via host.uia.focusStep) and announce each — for a
+-- plugin whose window doesn't move focus on Tab itself (Kontakt standalone). Return /
+-- Space / arrows are deliberately NOT captured, so the focused control handles them
+-- natively (toggle a check box, open a combo). The overlay's own actions stay on their
+-- global hotkeys. Ported from ReaHotkey's AddCustomPassThrough("Standalone", …).
+function Overlay:enableUiaPassThrough()
+  self._passThrough = function(o, dir)
+    local ctrl = o.activeCtx and o.activeCtx.origin()
+    local hwnd = ctrl and ctrl.id
+    if not hwnd then return end
+    -- Move the plugin's OWN keyboard focus to the next/previous control. We deliberately
+    -- do NOT announce it: SetFocus raises a real UIA focus event, so the screen reader
+    -- (NVDA) already reads the control — speaking it here too would double-announce.
+    -- (Our other controls are VIRTUAL, not real focus, so those we still announce.)
+    host.uia.focusStep(hwnd, dir)
+  end
+  return self
+end
+
 function Overlay:activate(index)
   local i = index or self.focus
   local c = self.controls[i]
@@ -389,9 +409,17 @@ function Overlay:_registerHotkeys()
     end
     -- Tab moves *between* elements; arrow keys are left for value changes within
     -- a control (standard interaction scheme), so we don't capture them here.
-    cap("Tab", function() self:focusNext() end)
-    cap("Shift+Tab", function() self:focusPrev() end)
-    cap("Return", function() self:activate() end)
+    if self._passThrough then
+      -- Standalone pass-through: Tab / Shift+Tab drive the plugin's native UIA focus.
+      -- Return / Space / arrows are LEFT uncaptured so the focused control handles them
+      -- natively; the overlay's own actions are reached via their global hotkeys.
+      cap("Tab", function() self._passThrough(self, 1) end)
+      cap("Shift+Tab", function() self._passThrough(self, -1) end)
+    else
+      cap("Tab", function() self:focusNext() end)
+      cap("Shift+Tab", function() self:focusPrev() end)
+      cap("Return", function() self:activate() end)
+    end
   else
     self.registered[#self.registered + 1] = host.hotkey.register(NAV.next, function() self:focusNext() end)
     self.registered[#self.registered + 1] = host.hotkey.register(NAV.prev, function() self:focusPrev() end)

@@ -15,6 +15,17 @@ local daw = host.require("com.platform.daw-hosts")
 local SLOT = "com.platform.kontakt" -- shared with kontakt so the arbiter composes
 local EDIT = 50004 -- UIA control type: Edit (KK's browser search field)
 
+-- The Komplete Kontrol STANDALONE application window (KK running on its own, not
+-- embedded in a DAW): a top-level NINormalWindow titled "Komplete Kontrol", exe
+-- "Komplete Kontrol.exe". Mirrors ReaHotkey's Standalone.Register criteria. Its native
+-- menu bar (File/Edit/View/Controller/Help) sits in the window chrome just above the
+-- client area, so those hotspots are authored at client-relative Y = -10.
+local STANDALONE = {
+  title = { exact = "Komplete Kontrol" },
+  app = { exe = { contains = "Komplete Kontrol" } },
+  windows = { class = { prefix = "NINormalWindow" } },
+}
+
 -- Opt-out setting (default ON): auto-close KK's library browser when this KK overlay
 -- becomes active with the browser open. An open browser HIDES a loaded instrument (that
 -- is exactly why the KK overlay — not the Kontakt/library overlay — is the active one),
@@ -127,5 +138,22 @@ return {
     ov:attachEmbedded(spec(), { slot = SLOT, specificity = 0, naturalNav = true })
     ov:_startMenuWatch()
     host.log.info("Komplete Kontrol base overlay ready.")
+
+    -- STANDALONE overlay: Komplete Kontrol running as its OWN application (not embedded
+    -- in a DAW). A SEPARATE overlay from the embedded one — its controls are KK's native
+    -- menu bar (ReaHotkey's StandaloneHeader). Attached to the top-level window via
+    -- attach() (origin = the window's client area); the menu bar sits in the chrome just
+    -- above the client, so the hotspots use Y = -10. Auto-closes the library browser on
+    -- activate like the embedded overlay (the opt-out setting is shared).
+    local sa = O.new("Komplete Kontrol")
+    sa:addHotspotButton({ label = "File menu", at = { 16, -10 }, hotkey = "Alt+F" })
+    sa:addHotspotButton({ label = "Edit menu", at = { 52, -10 }, hotkey = "Alt+E" })
+    sa:addHotspotButton({ label = "View menu", at = { 83, -10 }, hotkey = "Alt+V" })
+    sa:addHotspotButton({ label = "Controller menu", at = { 138, -10 }, hotkey = "Alt+C" })
+    sa:addHotspotButton({ label = "Help menu", at = { 194, -10 }, hotkey = "Alt+H" })
+    sa:onActivate(onKKActive)
+    sa:attach(STANDALONE, { naturalNav = true })
+    sa:_startMenuWatch()
+    host.log.info("Komplete Kontrol standalone overlay ready.")
   end,
 }

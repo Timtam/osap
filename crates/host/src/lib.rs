@@ -2140,6 +2140,27 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             },
         )?,
     )?;
+    // host.uia.focusStep(hwnd, direction) -> { name, ctype, index, count } | nil —
+    // Tab pass-through for a standalone plugin window: SetFocus the next (direction>=0)
+    // / previous keyboard-focusable descendant relative to the current focus, wrapping
+    // at the ends, and return the newly focused element so the overlay can announce it.
+    let sh = shared.clone();
+    uia.set(
+        "focusStep",
+        lua.create_function(move |lua, (hwnd, direction): (isize, i32)| {
+            match sh.backend.uia_focus_step(hwnd, direction) {
+                Some((name, ctype, index, count)) => {
+                    let t = lua.create_table()?;
+                    t.set("name", name)?;
+                    t.set("ctype", ctype)?;
+                    t.set("index", index)?;
+                    t.set("count", count)?;
+                    Ok(Some(t))
+                }
+                None => Ok(None),
+            }
+        })?,
+    )?;
     host.set("uia", uia)?;
 
     // host.screen.pixel / .size / .imageSearch

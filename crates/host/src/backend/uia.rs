@@ -8,8 +8,8 @@ use std::cell::RefCell;
 use windows::core::{BSTR, VARIANT};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTreeWalker, TreeScope_Subtree,
-    UIA_ControlTypePropertyId, UIA_NamePropertyId,
+    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTreeWalker,
+    TreeScope_Descendants, TreeScope_Subtree, UIA_ControlTypePropertyId, UIA_NamePropertyId,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
@@ -212,5 +212,107 @@ unsafe fn find_by_class(
             Err(_) => return None,
         };
     }
+}
+
+/// Tab pass-through for a standalone plugin window (e.g. Kontakt N.exe). Such a window
+/// does NOT move keyboard focus on Tab itself, so ReaHotkey — and this — drive it via
+/// UIA. Like ReaHotkey's standalone pass-through (its MainElement = window.ElementFromPath
+/// (1)), the Tab ring is scoped to the window's FIRST CHILD — the content area — so the
+/// window frame and the menu bar, which sit OUTSIDE that content subtree, drop out of the
+/// ring on their own (no control-type blocklist needed). Within that scope: enumerate the
+/// visible keyboard-focusable descendants in control-view order, find the one focused now,
+/// and `SetFocus` the NEXT (`direction` >= 0) / PREVIOUS one, wrapping at the ends. Any
+/// candidate that does not actually take focus (a container that redirects it, an item
+/// that ignores SetFocus) is skipped — verified by reading focus straight back. Re-
+/// enumerated every step, so it tracks a tree that shifts as the user navigates. Returns
+/// the newly focused element's (Name, ControlType, 1-based index, count) to announce, or
+/// None if the scope has no focusable descendant that accepts focus.
+pub fn uia_focus_step(hwnd: isize, direction: i32) -> Option<(String, i32, i32, i32)> {
+    AUTOMATION.with(|cell| unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let mut borrow = cell.borrow_mut();
+        if borrow.is_none() {
+            *borrow =
+                CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+                    .ok();
+        }
+        let automation = borrow.as_ref()?;
+        let root = automation.ElementFromHandle(HWND(hwnd as *mut _)).ok()?;
+
+        // Scope to the window's content area — its first child in the control view, i.e.
+        // ReaHotkey's ElementFromPath(1). This structurally drops the window frame and the
+        // menu bar (siblings of the content, not descendants of it) from the ring. Fall
+        // back to the window itself if it has no child.
+        let scope = automation
+            .ControlViewWalker()
+            .ok()
+            .and_then(|w| w.GetFirstChildElement(&root).ok())
+            .unwrap_or_else(|| root.clone());
+
+        // The scope's VISIBLE, keyboard-focusable descendants in control-view order — the
+        // same set NVDA would Tab through. TrueCondition + Rust-side filter avoids a bool
+        // VARIANT and matches uia_dump's proven path.
+        let cond = automation.CreateTrueCondition().ok()?;
+        let arr = scope.FindAll(TreeScope_Descendants, &cond).ok()?;
+        let len = arr.Length().unwrap_or(0);
+        let mut items: Vec<IUIAutomationElement> = Vec::new();
+        for i in 0..len {
+            if let Ok(el) = arr.GetElement(i) {
+                if !el.CurrentIsKeyboardFocusable().map(|b| b.as_bool()).unwrap_or(false) {
+                    continue;
+                }
+                if el.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false) {
+                    continue; // collapsed panel / hidden tab — not a real stop
+                }
+                items.push(el);
+            }
+        }
+        if items.is_empty() {
+            return None;
+        }
+        let count = items.len() as i32;
+
+        // Index of the element focused now, or -1 if focus is outside the ring.
+        let focused = automation.GetFocusedElement().ok();
+        let mut cur: i32 = -1;
+        if let Some(f) = focused.as_ref() {
+            for (i, el) in items.iter().enumerate() {
+                if automation.CompareElements(f, el).map(|b| b.as_bool()).unwrap_or(false) {
+                    cur = i as i32;
+                    break;
+                }
+            }
+        }
+
+        // Step in `direction`, wrapping at the ends, and skip any candidate that does not
+        // actually take focus (read focus back to confirm). Bounded by `count`, so it tries
+        // each element at most once before giving up.
+        let mut idx = cur;
+        for _ in 0..count {
+            idx = if idx < 0 {
+                if direction >= 0 { 0 } else { count - 1 }
+            } else if direction >= 0 {
+                (idx + 1) % count
+            } else {
+                (idx - 1 + count) % count
+            };
+            let el = &items[idx as usize];
+            if el.SetFocus().is_ok() {
+                let landed = automation
+                    .GetFocusedElement()
+                    .ok()
+                    .map(|f| {
+                        automation.CompareElements(&f, el).map(|b| b.as_bool()).unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                if landed {
+                    let name = el.CurrentName().map(|b| b.to_string()).unwrap_or_default();
+                    let ctype = el.CurrentControlType().map(|t| t.0).unwrap_or(0);
+                    return Some((name, ctype, idx + 1, count));
+                }
+            }
+        }
+        None
+    })
 }
 
