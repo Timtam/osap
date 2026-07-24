@@ -10,4 +10,4 @@ code_module = true
 dependencies = ["com.platform.overlay", "com.platform.daw-hosts"]
 
 [capabilities]
-require = ["window", "uia", "screen", "input", "speech", "hotkey", "keys", "timer", "log", "settings"]
+require = ["window", "uia", "screen", "ocr", "input", "speech", "hotkey", "keys", "timer", "log"]

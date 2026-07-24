@@ -17,17 +17,9 @@ local daw = host.require("com.platform.daw-hosts")
 local SLOT = "com.platform.kontakt"
 local BUTTON, MENUITEM = 50000, 50011
 
--- Opt-out (default ON): when a Kontakt instrument is focused inside Komplete Kontrol,
--- auto-close KK's on-screen library browser so the instrument is revealed. On by
--- default since that is the wanted behaviour under KK; reloading an instrument is done
--- via KK hardware / its menu (Alt+M), both of which stay reachable. Turn it OFF in the
--- manager's Settings dialog. As a kontakt setting it is identity-scoped, so it reads
--- the same value whether the base or an inheriting library overlay (a different VM)
--- checks it. (ReaHotkey's CloseKKBrowser defaults off; we default it on by choice.)
-local CLOSE_KK_BROWSER = "closeKKBrowser"
-host.settings.define(CLOSE_KK_BROWSER, true, {
-  label = "Automatically close Komplete Kontrol's library browser",
-})
+-- (The KK library-browser auto-close + its opt-out setting now live in the Komplete
+-- Kontrol module: an open browser hides the nested Kontakt, so the KK overlay — not
+-- this one — is the overlay active then, and is where the close belongs.)
 
 -- A Kontakt version's identity (UIA name + Window/Pane control type) + the content
 -- offset its libraries need.
@@ -58,9 +50,12 @@ local function isKK(c)
   return host.uia.find(c.id, "Komplete Kontrol", 50032) or host.uia.find(c.id, "Komplete Kontrol", 50033)
 end
 -- KK chrome offset, from KK's control top-left to where Kontakt's content begins.
--- TUNE against the real plugin (ReaHotkey uses ~190,111 for a library under KK); if
--- the library overlay is shifted on screen, adjust these two numbers.
-local KK_OFFSET = { 190, 111 }
+-- This is computed DYNAMICALLY at runtime (= nested Kontakt.client − KK.client, the
+-- exact inner content origin) by resolveOffset; the constant is only a transient
+-- fallback for the brief window before the nested Kontakt control is enumerable
+-- (e.g. while KK's library browser is still open and hides it). Live value ≈ 198,222
+-- (KK 6.7.1 + Kontakt 8.11); the old hardcoded 190,111 landed ~111 px too high.
+local KK_OFFSET = { 198, 222 }
 -- Does the active host window contain a control passing `test` (a KK or a Kontakt
 -- container)? The two compete: a bare Kontakt defers to a wrapping KK, and a KK
 -- only counts as a host when it actually contains a Kontakt.
@@ -73,30 +68,77 @@ end
 local function kkPresent() return hasControl(isKK) end
 local function kontaktPresent() return hasControl(anyKontakt) end
 
--- Resolve a control's content offset (cached per control id — a UIA probe is costly
--- and the host is fixed for a given window): KK's chrome offset when anchored on a
--- KK container, otherwise the bare Kontakt version offset (K7 = 0, K8 = +29).
+-- True if `inner`'s centre lies within `outer` (both are {x,y,w,h} screen rects).
+local function centreInside(outer, inner)
+  if not (outer and inner) then return false end
+  local cx, cy = inner.x + inner.w / 2, inner.y + inner.h / 2
+  return cx >= outer.x and cx <= outer.x + outer.w and cy >= outer.y and cy <= outer.y + outer.h
+end
+
+-- The nested Kontakt control (the plain Qt class, "Kontakt N" UIA name) among the
+-- host window's controls. A KK container also reports the nested "Kontakt N" name in
+-- its subtree, so anyKontakt alone matches it too; the REAL Kontakt control is a
+-- Kontakt that is NOT a KK (its plain Qt class, not the NI-versioned KK class). Its
+-- client rect IS the content origin, and its bounds are the content area on screen.
+-- With a `container` (the KK control being resolved), pick the Kontakt whose bounds
+-- sit inside it — so with two KK instances in one host window each KK pairs with ITS
+-- own nested Kontakt; an ambiguous match (none, or several, contained) returns nil so
+-- the caller uses a transient fallback instead of caching a wrong pairing. Without a
+-- container (the bare / standalone case) the first such control.
+local function findNestedKontakt(container)
+  local candidates = {}
+  for _, c in ipairs(host.window.controls()) do
+    if string.match(c.class, "Qt%d+.-QWindowIcon") and anyKontakt(c) and not isKK(c) then
+      candidates[#candidates + 1] = c
+    end
+  end
+  if not container then return candidates[1] end
+  local within = {}
+  for _, c in ipairs(candidates) do
+    if centreInside(container.bounds, c.bounds) then within[#within + 1] = c end
+  end
+  if #within == 1 then return within[1] end
+  if #within == 0 and #candidates == 1 then return candidates[1] end
+  return nil -- ambiguous: don't guess (caller falls back, uncached)
+end
+
+-- Resolve a control's content offset: when anchored on a KK container, the KK→content
+-- offset = the nested Kontakt control's client − KK's client, computed LIVE (the old
+-- hardcoded constant was wrong and unstable); otherwise the bare Kontakt version
+-- offset (K7 = 0, K8 = +29). Both branches cache only once the offset is positively
+-- resolved, so a transient miss (KK browser still hiding Kontakt; UIA not ready right
+-- after activation) returns a fallback WITHOUT pinning it. The KK cache key includes
+-- the container's size: the offset is invariant under window MOVES (both client
+-- origins shift together, so it stays valid and cached) but KK can reposition the
+-- embedded plugin on a RESIZE/reflow, which changes the size and so re-derives.
 local offsetCache = {}
 local function resolveOffset(c)
-  local off = offsetCache[c.id]
-  if off == nil then
-    if isKK(c) then
-      off = KK_OFFSET
+  if isKK(c) then
+    local key = c.id .. "|" .. (c.bounds and (c.bounds.w .. "x" .. c.bounds.h) or "?")
+    local cached = offsetCache[key]
+    if cached then return cached[1], cached[2] end
+    local kc = findNestedKontakt(c)
+    if kc and kc.client and c.client then
+      local off = { kc.client.x - c.client.x, kc.client.y - c.client.y }
+      offsetCache[key] = off
       host.log.info(string.format(
-        "Kontakt nested in Komplete Kontrol — anchoring on KK, content offset (%d, %d)", off[1], off[2]
+        "Kontakt nested in Komplete Kontrol — dynamic content offset (%d, %d) "
+          .. "[Kontakt.client (%d,%d) − KK.client (%d,%d)]",
+        off[1], off[2], kc.client.x, kc.client.y, c.client.x, c.client.y
       ))
-    else
-      off = { 0, 0 }
-      for _, v in ipairs(VARIANTS) do
-        if v.identify(c) then
-          off = v.offset
-          break
-        end
-      end
+      return off[1], off[2]
     end
-    offsetCache[c.id] = off
+    return KK_OFFSET[1], KK_OFFSET[2] -- not resolvable yet: transient, NOT cached
   end
-  return off[1], off[2]
+  local cached = offsetCache[c.id]
+  if cached then return cached[1], cached[2] end
+  for _, v in ipairs(VARIANTS) do
+    if v.identify(c) then
+      offsetCache[c.id] = v.offset
+      return v.offset[1], v.offset[2]
+    end
+  end
+  return 0, 0 -- version not yet identified (UIA not ready): transient, NOT cached
 end
 
 -- The plugin control to anchor on: prefer a KK container that is hosting Kontakt
@@ -122,60 +164,63 @@ local function uiaClick(hwnd, name, ctype)
   return false
 end
 
--- The Kontakt control whose UIA we drive (for the What's New dialog): when bare, the
--- matched control IS Kontakt; when nested in KK the matched control is the KK
--- container, so we find the SEPARATE nested Kontakt control (plain Qt class, "Kontakt
--- N" UIA name) among the host window's controls. Its OWN handle roots the Kontakt UIA
--- fragment — reachable from there even though it is NOT from the KK container or the
--- host window (which is why driving it from the active window failed when nested).
-local function kontaktControl()
-  -- A KK container also reports the nested "Kontakt N" name in its subtree, so
-  -- anyKontakt alone matches it too; the REAL Kontakt control is a Kontakt that is NOT
-  -- a KK (its plain Qt class, not the NI-versioned KK class).
-  for _, c in ipairs(host.window.controls()) do
-    if string.match(c.class, "Qt%d+.-QWindowIcon") and anyKontakt(c) and not isKK(c) then
-      return c.id
-    end
-  end
-  return nil
-end
+-- The What's New dialog's close (✕) glyph, for the image-based nested dismiss.
+local WHATSNEW_CLOSE = host.path("images/whatsnew-close.png")
+-- Bound the image-based search: the dialog is one-time (shows when Kontakt loads a
+-- fresh update) and modal, so a handful of attempts per plugin instance covers the
+-- load window; after that we stop scanning so the worker isn't probed on every
+-- focus-in for a dialog that will never reappear. Keyed by the Kontakt control id;
+-- a reloaded Kontakt gets a new id and a fresh budget. Set high once dismissed.
+local whatsNewTries = {}
+local WHATSNEW_MAX_TRIES = 6
 
--- Dismiss Kontakt's one-time "What's New" update dialog, ReaHotkey-style (UIA): find
--- the WhatsNewScreen pane on the Kontakt control and click its close child
--- (WalkTree(2)). This works for a Kontakt whose UI is exposed via UIA (running bare);
--- a Kontakt NESTED in Komplete Kontrol exposes NO UIA tree (its "Kontakt N" control is
--- a UIA leaf — the same reason nested detection is image-based), so this is a no-op
--- there (a safe one — no false-clicking). No-op when no dialog is up.
+-- Dismiss Kontakt's one-time "What's New" update dialog. Two strategies:
+--   • Bare Kontakt — ReaHotkey-style UIA: find the WhatsNewScreen pane on the Kontakt
+--     control and click its close child (WalkTree(2)).
+--   • Nested in KK — Kontakt exposes NO UIA tree (its "Kontakt N" control is a UIA leaf,
+--     the same reason nested detection is image-based), so UIA finds nothing; fall back
+--     to an IMAGE search for the close glyph within the nested Kontakt content area and
+--     click it. Async + single-scale + low tolerance + one click (NOT a multi-scale
+--     full-region scan, which would starve the worker); a miss = no dialog up (safe).
+-- No-op when no dialog is up either way.
 local function closeWhatsNew(o)
-  local hwnd = kontaktControl()
-  if not hwnd then return end
-  local p = host.uia.classNavPoint(hwnd, "WhatsNewScreen", 50033, 2, 0)
+  local kc = findNestedKontakt()
+  if not kc then return end
+  local p = host.uia.classNavPoint(kc.id, "WhatsNewScreen", 50033, 2, 0)
   if p then
     host.input.click(p.x, p.y)
     host.log.info("Kontakt: dismissed What's New dialog (UIA)")
+    return
+  end
+  -- Image fallback ONLY when nested in KK: there UIA can't reach Kontakt, so a UIA
+  -- miss is inconclusive and the dialog must be found by image. Bare Kontakt HAS a
+  -- UIA tree, so a UIA miss means there is genuinely no dialog — don't run a scan
+  -- (avoids needless worker probes and any image false-click) on the bare path.
+  local matched = o and o.activeCtx and o.activeCtx.origin()
+  if matched and isKK(matched) and kc.bounds then
+    local tries = whatsNewTries[kc.id] or 0
+    if tries >= WHATSNEW_MAX_TRIES then return end
+    whatsNewTries[kc.id] = tries + 1
+    local b = kc.bounds
+    host.screen.imageSearchAsync(
+      WHATSNEW_CLOSE,
+      { region = { b.x, b.y, b.x + b.w, b.y + b.h }, tolerance = 8 },
+      function(hit)
+        if hit then
+          host.input.click(hit.x + math.floor(hit.w / 2), hit.y + math.floor(hit.h / 2))
+          host.log.info("Kontakt: dismissed What's New dialog (image)")
+          whatsNewTries[kc.id] = WHATSNEW_MAX_TRIES -- done; stop scanning for this instance
+        end
+      end
+    )
   end
 end
 
--- Close KK's library browser (ReaHotkey's CloseKKBrowser): find the browser pane
--- (FileTypeSelector / TagCloudAccordionWithBrands) and click the toggle that precedes
--- it. No-op when no browser is open / not nested. Auto-closing it once an instrument
--- is loaded reveals the instrument (so the library's wordmark landmark is visible) —
--- the user wanted this automatic, like the What's New dismiss, with no manual button.
-local function closeBrowser(hwnd)
-  if not hwnd then return end
-  local p = host.uia.classNavPoint(hwnd, "FileTypeSelector", 50018, 0, -1)
-    or host.uia.classNavPoint(hwnd, "TagCloudAccordionWithBrands", 50033, 0, -1)
-  if p then host.input.click(p.x, p.y) end
-end
-
--- Fired whenever the Kontakt base/library overlay becomes focused: dismiss the
--- one-time What's New dialog and auto-close KK's browser (both no-op when not
--- applicable), so the loaded instrument is revealed without any manual button.
+-- Fired whenever the Kontakt base/library overlay becomes focused: dismiss the one-time
+-- What's New dialog (no-op when none is up). Closing KK's library browser is handled by
+-- the Komplete Kontrol overlay, which is the one active while the browser hides Kontakt.
 local function onPluginActive(o)
   closeWhatsNew(o)
-  if host.settings.get(CLOSE_KK_BROWSER) then
-    closeBrowser(pluginHwnd(o))
-  end
 end
 
 -- KK chrome controls, prepended to the Kontakt/library overlay but SHOWN ONLY while
@@ -205,10 +250,13 @@ end
 local function addKKHeader(ov)
   ov:addStaticText("Komplete Kontrol").when = nested
   -- KK's menu is a fixed hotspot in KK's chrome at (297,17) relative to KK's RAW
-  -- client; pre-subtract KK_OFFSET so the overlay's content offset cancels back to it.
+  -- client. It lives in KK's frame, NOT Kontakt's content frame, so `rawOrigin` makes
+  -- the overlay skip the content offset for it (the two-frame case): content controls
+  -- get the KK→content offset, this chrome control stays in KK's raw client.
   ov:addHotspotButton({
     label = "Komplete Kontrol menu",
-    at = { 297 - KK_OFFSET[1], 17 - KK_OFFSET[2] },
+    at = { 297, 17 },
+    rawOrigin = true,
     hotkey = "Alt+M",
   }).when = nested
   ov:addCustomButton({

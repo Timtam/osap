@@ -85,6 +85,61 @@ impl WindowsBackend {
     }
 }
 
+/// Stateless GDI screen-region capture (BitBlt → GetDIBits → RGBA, top-down). Free-
+/// standing (uses no `self`) so the async image worker can call it off the main thread
+/// without holding the non-`Send` `Rc<dyn Backend>`; `WindowsBackend::capture` and
+/// `capture_fn` both route through it. GDI screen reads are thread-safe; the ~1-frame
+/// DWM-compositor cost then lands on the worker, not the event loop.
+fn capture_screen(x: i32, y: i32, w: i32, h: i32) -> Option<CapturedImage> {
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    unsafe {
+        let screen_dc = GetDC(std::ptr::null_mut());
+        if screen_dc.is_null() {
+            return None;
+        }
+        let mem_dc = CreateCompatibleDC(screen_dc);
+        let bmp = CreateCompatibleBitmap(screen_dc, w, h);
+        let old = SelectObject(mem_dc, bmp);
+        BitBlt(mem_dc, 0, 0, w, h, screen_dc, x, y, SRCCOPY);
+
+        let mut bmi: BITMAPINFO = std::mem::zeroed();
+        bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        bmi.bmiHeader.biWidth = w;
+        bmi.bmiHeader.biHeight = -h; // top-down
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB as u32;
+
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        GetDIBits(
+            mem_dc,
+            bmp,
+            0,
+            h as u32,
+            buf.as_mut_ptr() as *mut core::ffi::c_void,
+            &mut bmi,
+            DIB_RGB_COLORS,
+        );
+
+        SelectObject(mem_dc, old);
+        DeleteObject(bmp);
+        DeleteDC(mem_dc);
+        ReleaseDC(std::ptr::null_mut(), screen_dc);
+
+        // GDI returns BGRA; swap to RGBA.
+        for px in buf.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+        Some(CapturedImage {
+            w: w as u32,
+            h: h as u32,
+            rgba: buf,
+        })
+    }
+}
+
 impl Backend for WindowsBackend {
     fn enumerate_windows(&self) -> Vec<WinInfo> {
         let mut hwnds: Vec<isize> = Vec::new();
@@ -183,53 +238,11 @@ impl Backend for WindowsBackend {
     }
 
     fn capture(&self, x: i32, y: i32, w: i32, h: i32) -> Option<CapturedImage> {
-        if w <= 0 || h <= 0 {
-            return None;
-        }
-        unsafe {
-            let screen_dc = GetDC(std::ptr::null_mut());
-            if screen_dc.is_null() {
-                return None;
-            }
-            let mem_dc = CreateCompatibleDC(screen_dc);
-            let bmp = CreateCompatibleBitmap(screen_dc, w, h);
-            let old = SelectObject(mem_dc, bmp);
-            BitBlt(mem_dc, 0, 0, w, h, screen_dc, x, y, SRCCOPY);
+        capture_screen(x, y, w, h)
+    }
 
-            let mut bmi: BITMAPINFO = std::mem::zeroed();
-            bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-            bmi.bmiHeader.biWidth = w;
-            bmi.bmiHeader.biHeight = -h; // top-down
-            bmi.bmiHeader.biPlanes = 1;
-            bmi.bmiHeader.biBitCount = 32;
-            bmi.bmiHeader.biCompression = BI_RGB as u32;
-
-            let mut buf = vec![0u8; (w * h * 4) as usize];
-            GetDIBits(
-                mem_dc,
-                bmp,
-                0,
-                h as u32,
-                buf.as_mut_ptr() as *mut core::ffi::c_void,
-                &mut bmi,
-                DIB_RGB_COLORS,
-            );
-
-            SelectObject(mem_dc, old);
-            DeleteObject(bmp);
-            DeleteDC(mem_dc);
-            ReleaseDC(std::ptr::null_mut(), screen_dc);
-
-            // GDI returns BGRA; swap to RGBA.
-            for px in buf.chunks_exact_mut(4) {
-                px.swap(0, 2);
-            }
-            Some(CapturedImage {
-                w: w as u32,
-                h: h as u32,
-                rgba: buf,
-            })
-        }
+    fn capture_fn(&self) -> fn(i32, i32, i32, i32) -> Option<CapturedImage> {
+        capture_screen
     }
 
     fn ocr(

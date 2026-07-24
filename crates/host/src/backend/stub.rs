@@ -26,6 +26,10 @@ impl Backend for StubBackend {
         None
     }
 
+    fn capture_fn(&self) -> fn(i32, i32, i32, i32) -> Option<CapturedImage> {
+        |_, _, _, _| None
+    }
+
     fn ocr(
         &self,
         _x: i32,

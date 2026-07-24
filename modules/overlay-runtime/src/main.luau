@@ -74,7 +74,10 @@ function Overlay:addStaticText(label)
 end
 
 function Overlay:addHotspotButton(opts)
-  return add(self, { kind = "hotspot", label = opts.label, at = opts.at, hotkey = opts.hotkey })
+  -- `rawOrigin` pins the control to the matched control's OWN client frame,
+  -- skipping the per-overlay content offset — for chrome controls (e.g. Komplete
+  -- Kontrol's menu) that live in the host frame, not the nested plugin's content.
+  return add(self, { kind = "hotspot", label = opts.label, at = opts.at, hotkey = opts.hotkey, rawOrigin = opts.rawOrigin })
 end
 
 function Overlay:addCustomButton(opts)
@@ -82,7 +85,10 @@ function Overlay:addCustomButton(opts)
 end
 
 function Overlay:addOCRButton(opts)
-  return add(self, { kind = "ocr", label = opts.label, region = opts.region, hotkey = opts.hotkey })
+  -- `readOnly` makes the control a pure announcer: focusing/activating re-reads the
+  -- region via OCR but does NOT click it. For value/label readouts sitting over a
+  -- drag knob or near a destructive control, where a click would change state.
+  return add(self, { kind = "ocr", label = opts.label, region = opts.region, hotkey = opts.hotkey, readOnly = opts.readOnly })
 end
 
 -- A toggle whose on/off state is read by image-matching its region against an
@@ -204,17 +210,26 @@ local TYPE_LABEL =
 -- window itself when standalone, or the embedded plugin's child control when
 -- hosted in a DAW. Re-resolved per call so it tracks window moves. (0, 0) when
 -- unattached. All control coordinates (OCR regions, hotspots) are relative to it.
-local function originOf(self)
+local function originOf(self, control)
   if self.activeCtx then
     local o = self.activeCtx.origin()
     if o and o.client then
       -- An optional per-overlay offset shifts the whole coordinate frame: a
       -- container library overlay uses it for the host version's content shift
-      -- (e.g. Kontakt 8 nudges content +29 px down vs Kontakt 7), resolved per
+      -- (e.g. Kontakt 8 nudges content +29 px down vs Kontakt 7; a Kontakt nested
+      -- in Komplete Kontrol re-anchors to KK's inner content origin), resolved per
       -- active control, so authored coordinates adapt without the library knowing
       -- the host version.
+      --
+      -- A control flagged `rawOrigin` opts OUT of that offset: it is authored in
+      -- the matched control's OWN client frame, not the nested plugin's content
+      -- frame. This lets one overlay mix two coordinate frames — content controls
+      -- (offset applied) and host-chrome controls like KK's menu hotspot (raw) —
+      -- which is exactly the KK→Kontakt nesting case (two frames).
       local dx, dy = 0, 0
-      if self._originOffset then dx, dy = self._originOffset(o) end
+      if self._originOffset and not (control and control.rawOrigin) then
+        dx, dy = self._originOffset(o)
+      end
       return o.client.x + dx, o.client.y + dy
     end
   end
@@ -222,7 +237,7 @@ local function originOf(self)
 end
 
 local function ocrCenter(self, c)
-  local ox, oy = originOf(self)
+  local ox, oy = originOf(self, c)
   return ox + math.floor((c.region[1] + c.region[3]) / 2),
     oy + math.floor((c.region[2] + c.region[4]) / 2)
 end
@@ -231,13 +246,26 @@ end
 -- on/off templates. Returns "on" / "off" / nil (unknown).
 local function gtoggleState(self, c)
   if not c.region then return nil end
-  local ox, oy = originOf(self)
+  local ox, oy = originOf(self, c)
   local region = { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] }
   local opts = {
     region = region,
     tolerance = c.tolerance or MATCH_TOLERANCE,
     scales = c.scales or MATCH_SCALES,
   }
+  -- One capture, both templates: the region is touched ONCE (not once per template,
+  -- each a ~1-frame screen read), and on/off are matched against the SAME frame — so a
+  -- toggle changing mid-repaint can't slip between two separate captures (which read
+  -- nil). The hit's 1-based index maps back to the on/off label.
+  if host.screen.imageSearchMulti then
+    local templates, labels = {}, {}
+    if c.onImage then templates[#templates + 1] = c.onImage; labels[#labels + 1] = "on" end
+    if c.offImage then templates[#templates + 1] = c.offImage; labels[#labels + 1] = "off" end
+    if #templates == 0 then return nil end
+    local idx = host.screen.imageSearchMulti(templates, opts)
+    return idx and labels[idx] or nil
+  end
+  -- Fallback for a host without imageSearchMulti: two separate captures.
   if c.onImage and host.screen.imageSearch(c.onImage, opts) then return "on" end
   if c.offImage and host.screen.imageSearch(c.offImage, opts) then return "off" end
   return nil
@@ -250,7 +278,7 @@ local function speakControl(self, index, moveMouse)
   local tl = TYPE_LABEL[c.kind]
   if tl ~= "" then parts[#parts + 1] = tl end
   if c.kind == "ocr" and c.region then
-    local ox, oy = originOf(self)
+    local ox, oy = originOf(self, c)
     local region = { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] }
     if moveMouse and self.hoverToRead then
       -- Move the mouse onto the control on focus — only for overlays that opt in.
@@ -317,19 +345,23 @@ function Overlay:activate(index)
   if not c then return end
   if c.when and c.when(self) ~= true then return end -- a hidden control's hotkey no-ops
   if c.kind == "hotspot" and c.at then
-    local ox, oy = originOf(self)
+    local ox, oy = originOf(self, c)
     host.input.click(ox + c.at[1], oy + c.at[2])
-    host.speech.output(c.label .. ", activated", { interrupt = true })
+    host.speech.output((c.label or "") .. ", activated", { interrupt = true })
   elseif c.kind == "custom" and c.onActivate then
     c.onActivate(self) -- the overlay, so a header control can reach the active context
   elseif c.kind == "ocr" and c.region then
-    -- An OCR button is a Button: re-read its label, then click the centre of
-    -- the region (it sits over a clickable element), like ReaHotkey.
+    -- An OCR button re-reads its label on activate. Unless it is `readOnly` (a pure
+    -- value/label announcer), it then clicks the region centre (it sits over a
+    -- clickable element), like ReaHotkey. A readOnly control just re-speaks — no
+    -- click — so navigating onto a readout near a destructive control is safe.
     speakControl(self, i, false)
-    local cx, cy = ocrCenter(self, c)
-    host.input.click(cx, cy)
+    if not c.readOnly then
+      local cx, cy = ocrCenter(self, c)
+      host.input.click(cx, cy)
+    end
   elseif c.kind == "gtoggle" and c.region then
-    local ox, oy = originOf(self)
+    local ox, oy = originOf(self, c)
     host.input.click(ox + math.floor((c.region[1] + c.region[3]) / 2),
       oy + math.floor((c.region[2] + c.region[4]) / 2))
     -- Re-read the new state once the UI redraws.
@@ -705,7 +737,7 @@ function Overlay:captureControl(label, path)
   end
   for _, c in ipairs(self.controls) do
     if c.region and c.label == label then
-      local ox, oy = originOf(self)
+      local ox, oy = originOf(self, c)
       local region = { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] }
       local ok = host.screen.save ~= nil and host.screen.save(path, { region = region })
       host.log.info(string.format(
@@ -751,6 +783,37 @@ function Overlay:captureFull(path)
     o.client.x, o.client.y, o.bounds.w, o.bounds.h, path, tostring(ok)
   ))
   return ok == true
+end
+
+-- Dev calibration: dump a content-frame-exact shot of the whole plugin content
+-- (`content-full.png`, where pixel (x,y) == authored content coordinate (x,y)) plus
+-- a small box around every positioned control, into `dir` (an absolute path), so
+-- re-derived coordinates can be verified against the live plugin in one shot.
+-- Skips rawOrigin (chrome-frame) controls. Active only.
+function Overlay:captureAll(dir)
+  if not self.active then
+    host.log.info("captureAll: overlay not active")
+    return false
+  end
+  local ox, oy = originOf(self)
+  host.log.info(string.format("captureAll: content origin=(%d,%d) -> %s", ox, oy, dir))
+  self:captureRegion({ 0, 0, 640, 430 }, dir .. "/content-full.png")
+  for _, c in ipairs(self.controls) do
+    if c.label and c.label ~= "" and not c.rawOrigin then
+      local cx, cy
+      if c.at then
+        cx, cy = c.at[1], c.at[2]
+      elseif c.region then
+        cx = math.floor((c.region[1] + c.region[3]) / 2)
+        cy = math.floor((c.region[2] + c.region[4]) / 2)
+      end
+      if cx then
+        local safe = string.gsub(c.label, "[^%w]", "_")
+        self:captureRegion({ cx - 34, cy - 26, cx + 34, cy + 26 }, string.format("%s/ctl-%s.png", dir, safe))
+      end
+    end
+  end
+  return true
 end
 
 -- Exposed as the code module com.platform.overlay: a module that depends on it

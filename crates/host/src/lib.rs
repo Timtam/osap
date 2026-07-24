@@ -15,7 +15,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use mlua::{Function, Lua, LuaSerdeExt, RegistryKey, Table};
@@ -125,21 +126,44 @@ struct Shared {
     image_results: std::sync::mpsc::Receiver<ImageResult>,
     pending_image: RefCell<HashMap<u64, (Lua, RegistryKey, usize)>>,
     next_image_id: Cell<u64>,
+    /// Decoded-template cache (path → (mtime, RGBA, last-used seq)); avoids re-reading +
+    /// re-decoding a PNG on every imageSearch / imageSearchAsync / imageSearchMulti call,
+    /// including the recurring landmark poll. Invalidated per-entry when the file's mtime
+    /// changes (a calibration re-capture), so a re-captured template is picked up live.
+    /// The seq is bumped on each access and used to evict the least-recently-used entry
+    /// once the cache exceeds TEMPLATE_CACHE_CAP — a safety valve against unbounded growth
+    /// (practically never hit: modules use a handful of fixed template paths). Main-thread
+    /// only (the worker holds an already-cloned Arc, never the map).
+    template_cache: RefCell<HashMap<PathBuf, (SystemTime, Arc<Decoded>, u64)>>,
+    /// Monotonic last-used stamp source for the template cache's LRU eviction.
+    template_seq: Cell<u64>,
+    /// Set by `host.window.recheck()`; drained on the tick to fire a cross-VM overlay
+    /// re-check (as an OS focus event would), for state changes an overlay itself caused.
+    recheck_requested: Cell<bool>,
 }
 
-/// A queued async template match: the captured haystack + the template image, moved
-/// to the worker thread. `rx`/`ry` are the capture's screen origin (added back into
-/// the reported hit).
+/// Max distinct template PNGs kept decoded in the cache before least-recently-used
+/// eviction. Far above any real module's fixed template count — purely a growth cap.
+const TEMPLATE_CACHE_CAP: usize = 64;
+
+/// A decoded template image (RGBA), shared behind an `Arc` and cached by path+mtime so
+/// repeated searches (e.g. the recurring landmark poll, a toggle's on/off pair) don't
+/// re-read and re-decode the PNG on every call.
+struct Decoded {
+    w: u32,
+    h: u32,
+    rgba: Vec<u8>,
+}
+
+/// A queued async template match. The worker CAPTURES `region` itself (off the main
+/// thread) then matches `tmpl` against it; `region` = (x, y, w, h) in screen coords,
+/// whose (x, y) is added back into the reported hit.
 struct ImageTask {
     id: u64,
-    cap: CapturedImage,
-    tmpl: Vec<u8>,
-    tw: u32,
-    th: u32,
+    region: (i32, i32, i32, i32),
+    tmpl: Arc<Decoded>,
     tol: u8,
     scales: Vec<f32>,
-    rx: i32,
-    ry: i32,
 }
 
 /// The worker's answer: the hit rect in screen coords, or None.
@@ -148,20 +172,62 @@ struct ImageResult {
     hit: Option<(i32, i32, u32, u32)>,
 }
 
-/// The image-search worker: runs the CPU-heavy template match off the main thread so
-/// a detection poll never blocks it, posting each result back. Exits when the task
-/// sender is dropped (app teardown). It touches only owned data — no globals — so it
-/// is safe to leave running across process exit.
+/// The image-search worker: CAPTURES each task's region and runs the CPU-heavy
+/// template match, both off the main thread, so neither the ~1-frame capture nor the
+/// match blocks the event loop. `capture` is the backend's stateless capture routine
+/// (a plain `fn` pointer, hence `Send`). Exits when the task sender is dropped (app
+/// teardown). Touches only owned data — safe to leave running across process exit.
+///
+/// FAN-OUT SHARING: after the first task, it briefly collects any others queued in the
+/// same tick (several libraries' landmark polls fire together, staggered by a few ms)
+/// into one batch, then CAPTURES EACH DISTINCT REGION ONCE and matches every task's
+/// template against its region's shared frame. So N libraries polling the same plugin
+/// region cost 1 capture per tick, not N — "one frame, many comparisons" over
+/// simultaneous consumers. Landmark polling isn't latency-critical, so the tiny
+/// collection wait is invisible; results are byte-for-byte what per-task capture gave.
 fn spawn_image_worker(
+    capture: fn(i32, i32, i32, i32) -> Option<CapturedImage>,
     tasks: std::sync::mpsc::Receiver<ImageTask>,
     results: std::sync::mpsc::Sender<ImageResult>,
 ) {
     std::thread::spawn(move || {
-        while let Ok(t) = tasks.recv() {
-            let hit = find_template_scaled(&t.cap, t.tw, t.th, &t.tmpl, t.tol, &t.scales)
-                .map(|(ox, oy, mw, mh)| (t.rx + ox as i32, t.ry + oy as i32, mw, mh));
-            if results.send(ImageResult { id: t.id, hit }).is_err() {
-                break; // main thread gone
+        let batch_window = Duration::from_millis(5);
+        while let Ok(first) = tasks.recv() {
+            // Collect this tick's batch: the first task, plus any queued within a short
+            // window (same-tick polls arrive microseconds-to-ms apart).
+            let mut batch = vec![first];
+            let deadline = Instant::now() + batch_window;
+            loop {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                match tasks.recv_timeout(deadline - now) {
+                    Ok(t) => batch.push(t),
+                    Err(_) => break, // window elapsed (batch complete) or sender dropped
+                }
+            }
+            // Capture each DISTINCT region once; match every task's template against its
+            // region's shared frame. The batch is small (one task per active library), so
+            // a linear region lookup is fine.
+            let mut frames: Vec<((i32, i32, i32, i32), Option<CapturedImage>)> = Vec::new();
+            for t in &batch {
+                let idx = match frames.iter().position(|(r, _)| *r == t.region) {
+                    Some(i) => i,
+                    None => {
+                        let (rx, ry, rw, rh) = t.region;
+                        frames.push((t.region, capture(rx, ry, rw, rh)));
+                        frames.len() - 1
+                    }
+                };
+                let (rx, ry, _, _) = t.region;
+                let hit = frames[idx].1.as_ref().and_then(|cap| {
+                    find_template_scaled(cap, t.tmpl.w, t.tmpl.h, &t.tmpl.rgba, t.tol, &t.scales)
+                        .map(|(ox, oy, mw, mh)| (rx + ox as i32, ry + oy as i32, mw, mh))
+                });
+                if results.send(ImageResult { id: t.id, hit }).is_err() {
+                    return; // main thread gone
+                }
             }
         }
     });
@@ -175,6 +241,47 @@ impl Shared {
         let id = self.next_id.get() + 1;
         self.next_id.set(id);
         id
+    }
+
+    /// Decodes a template PNG to RGBA, cached by path + mtime. Repeated searches of the
+    /// same template (the landmark poll, a toggle's on/off pair) reuse the decoded copy;
+    /// a re-captured template (changed mtime) is re-decoded, so calibration takes effect
+    /// without a restart. Returns a cheap `Arc` clone.
+    fn load_template(&self, path: &Path) -> mlua::Result<Arc<Decoded>> {
+        let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        // Cache hit (same path, unchanged mtime): bump the LRU stamp and return.
+        if let Some(mt) = mtime {
+            let mut cache = self.template_cache.borrow_mut();
+            if let Some(entry) = cache.get_mut(path) {
+                if entry.0 == mt {
+                    let seq = self.template_seq.get() + 1;
+                    self.template_seq.set(seq);
+                    entry.2 = seq;
+                    return Ok(entry.1.clone());
+                }
+            }
+        }
+        // Miss, or the file changed on disk: (re)decode.
+        let img = image::open(path)
+            .map_err(|e| {
+                mlua::Error::external(format!("cannot open template '{}': {e}", path.display()))
+            })?
+            .to_rgba8();
+        let dec = Arc::new(Decoded { w: img.width(), h: img.height(), rgba: img.into_raw() });
+        if let Some(mt) = mtime {
+            let seq = self.template_seq.get() + 1;
+            self.template_seq.set(seq);
+            let mut cache = self.template_cache.borrow_mut();
+            cache.insert(path.to_path_buf(), (mt, dec.clone(), seq));
+            // Growth cap: drop the least-recently-used entry if over capacity.
+            if cache.len() > TEMPLATE_CACHE_CAP {
+                let lru = cache.iter().min_by_key(|(_, v)| v.2).map(|(k, _)| k.clone());
+                if let Some(k) = lru {
+                    cache.remove(&k);
+                }
+            }
+        }
+        Ok(dec)
     }
 
     /// Logs + queues an accessible dialog `(title, message)`, deduped on
@@ -1339,7 +1446,9 @@ impl Manager {
         let disabled_ids = store.disabled_ids();
         let (image_tasks, image_task_rx) = std::sync::mpsc::channel::<ImageTask>();
         let (image_result_tx, image_results) = std::sync::mpsc::channel::<ImageResult>();
-        spawn_image_worker(image_task_rx, image_result_tx);
+        // Capture fn pointer taken before `backend` is moved into Shared — it's `Copy`
+        // and `Send`, so the worker can capture without the non-`Send` Rc backend.
+        spawn_image_worker(backend.capture_fn(), image_task_rx, image_result_tx);
         let shared = Rc::new(Shared {
             backend,
             tts: RefCell::new(tts),
@@ -1365,6 +1474,9 @@ impl Manager {
             image_results,
             pending_image: RefCell::new(HashMap::new()),
             next_image_id: Cell::new(0),
+            template_cache: RefCell::new(HashMap::new()),
+            template_seq: Cell::new(0),
+            recheck_requested: Cell::new(false),
         });
         Ok(Self {
             shared,
@@ -1501,6 +1613,11 @@ impl Manager {
                         backend.pump_pending(&mut dispatcher);
                         shared.fire_due_timers();
                         shared.fire_image_results();
+                        // A module asked for a re-check (host.window.recheck) after
+                        // changing plugin UI itself — dispatch it like an OS focus event.
+                        if shared.recheck_requested.replace(false) {
+                            dispatcher.on_focus_change();
+                        }
                         shared.flush_if_dirty();
                     },
                     move || errors_shared.drain_errors(),
@@ -1941,6 +2058,20 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             Ok(t)
         })?,
     )?;
+    // host.window.recheck() — request a cross-VM overlay re-check on the next tick
+    // (same effect as an OS focus event). For use after an overlay action that changes
+    // the plugin's detectable UI WITHOUT a focus event — e.g. Komplete Kontrol
+    // auto-closing its browser reveals the nested Kontakt, which nothing else would
+    // notice until the library landmark poll (~500 ms). Coalesced: any number of calls
+    // in one tick cost a single re-check.
+    let sh = shared.clone();
+    win.set(
+        "recheck",
+        lua.create_function(move |_, ()| {
+            sh.recheck_requested.set(true);
+            Ok(())
+        })?,
+    )?;
     host.set("window", win)?;
 
     // host.uia.find(hwnd, name, controlType) — does the window's UI Automation
@@ -2041,13 +2172,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     screen.set(
         "imageSearch",
         lua.create_function(move |lua, (template, opts): (String, Option<Table>)| {
-            let path = sh.root(idx).join(&template);
-            let img = image::open(&path)
-                .map_err(|e| {
-                    mlua::Error::external(format!("imageSearch: cannot open '{}': {e}", path.display()))
-                })?
-                .to_rgba8();
-            let (tw, th) = (img.width(), img.height());
+            let tmpl = sh.load_template(&sh.root(idx).join(&template))?;
             let (sw, sh_) = sh.backend.screen_size();
             let (rx, ry, rw, rh) = read_region(opts.as_ref(), sw, sh_);
             let cap = match sh.backend.capture(rx, ry, rw, rh) {
@@ -2056,7 +2181,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             };
             let tol: u8 = opts.as_ref().and_then(|o| o.get::<u8>("tolerance").ok()).unwrap_or(0);
             let scales = read_scales(opts.as_ref());
-            match find_template_scaled(&cap, tw, th, img.as_raw(), tol, &scales) {
+            match find_template_scaled(&cap, tmpl.w, tmpl.h, &tmpl.rgba, tol, &scales) {
                 Some((ox, oy, mw, mh)) => {
                     let t = lua.create_table()?;
                     t.set("x", rx + ox as i32)?;
@@ -2069,51 +2194,75 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             }
         })?,
     )?;
-    // host.screen.imageSearchAsync(image, opts, cb) — runs the template match on a
-    // worker thread and calls cb({x,y,w,h}) | cb(nil) on a later tick, so a detection
-    // poll never blocks the main thread on the (slow) match. The capture itself is
-    // done here (cheap); only the match is offloaded.
+
+    // host.screen.imageSearchMulti(templates, opts?) -> (index, {x,y,w,h}) | (nil, nil)
+    // Captures the region ONCE and tries each template path in order, returning the
+    // 1-based index of the first match plus its hit rect. One capture serves many
+    // comparisons (e.g. a toggle's on/off pair) — half the ~1-frame screen touches of
+    // two imageSearch calls, and both templates are matched against the SAME frame, so
+    // a state change mid-repaint can't fall between two separate captures. Sync, like
+    // imageSearch (AHK-style). Templates share the decode cache.
+    let sh = shared.clone();
+    screen.set(
+        "imageSearchMulti",
+        lua.create_function(move |lua, (templates, opts): (Table, Option<Table>)| {
+            let (sw, sh_) = sh.backend.screen_size();
+            let (rx, ry, rw, rh) = read_region(opts.as_ref(), sw, sh_);
+            let cap = match sh.backend.capture(rx, ry, rw, rh) {
+                Some(c) => c,
+                None => return Ok((mlua::Value::Nil, mlua::Value::Nil)),
+            };
+            let tol: u8 = opts.as_ref().and_then(|o| o.get::<u8>("tolerance").ok()).unwrap_or(0);
+            let scales = read_scales(opts.as_ref());
+            let mut i = 0i64;
+            for entry in templates.sequence_values::<String>() {
+                i += 1;
+                let tmpl = sh.load_template(&sh.root(idx).join(&entry?))?;
+                if let Some((ox, oy, mw, mh)) =
+                    find_template_scaled(&cap, tmpl.w, tmpl.h, &tmpl.rgba, tol, &scales)
+                {
+                    let t = lua.create_table()?;
+                    t.set("x", rx + ox as i32)?;
+                    t.set("y", ry + oy as i32)?;
+                    t.set("w", mw)?;
+                    t.set("h", mh)?;
+                    return Ok((mlua::Value::Integer(i), mlua::Value::Table(t)));
+                }
+            }
+            Ok((mlua::Value::Nil, mlua::Value::Nil))
+        })?,
+    )?;
+    // host.screen.imageSearchAsync(image, opts, cb) — offloads BOTH the region capture
+    // (the ~1-frame DWM-compositor cost) and the template match to a worker thread,
+    // calling cb({x,y,w,h}) | cb(nil) on a later tick, so a detection poll (e.g. the
+    // 500 ms landmark poll) never blocks the event loop on either. Only the template
+    // decode happens here, and it is cached.
     let sh = shared.clone();
     screen.set(
         "imageSearchAsync",
         lua.create_function(
             move |lua, (template, opts, cb): (String, Option<Table>, Function)| {
-                let path = sh.root(idx).join(&template);
-                let img = image::open(&path)
-                    .map_err(|e| {
-                        mlua::Error::external(format!(
-                            "imageSearchAsync: cannot open '{}': {e}",
-                            path.display()
-                        ))
-                    })?
-                    .to_rgba8();
-                let (tw, th) = (img.width(), img.height());
+                let tmpl = sh.load_template(&sh.root(idx).join(&template))?;
                 let (sw, sh_) = sh.backend.screen_size();
                 let (rx, ry, rw, rh) = read_region(opts.as_ref(), sw, sh_);
                 let tol: u8 = opts.as_ref().and_then(|o| o.get::<u8>("tolerance").ok()).unwrap_or(0);
                 let scales = read_scales(opts.as_ref());
-                match sh.backend.capture(rx, ry, rw, rh) {
-                    Some(cap) => {
-                        let id = sh.next_image_id.get() + 1;
-                        sh.next_image_id.set(id);
-                        let key = lua.create_registry_value(cb)?;
-                        sh.pending_image.borrow_mut().insert(id, (lua.clone(), key, idx));
-                        let _ = sh.image_tasks.send(ImageTask {
-                            id,
-                            cap,
-                            tmpl: img.into_raw(),
-                            tw,
-                            th,
-                            tol,
-                            scales,
-                            rx,
-                            ry,
-                        });
-                    }
-                    // No capture (off-screen / collapsed region): report no match now.
-                    None => {
-                        let _ = cb.call::<()>(mlua::Value::Nil);
-                    }
+                // The worker captures the region itself and ALWAYS posts a result (a
+                // capture failure becomes a no-match on the tick), so the pending
+                // callback is always drained.
+                let id = sh.next_image_id.get() + 1;
+                sh.next_image_id.set(id);
+                let key = lua.create_registry_value(cb)?;
+                sh.pending_image.borrow_mut().insert(id, (lua.clone(), key, idx));
+                if sh
+                    .image_tasks
+                    .send(ImageTask { id, region: (rx, ry, rw, rh), tmpl, tol, scales })
+                    .is_err()
+                {
+                    // Worker thread gone (should never happen — it's panic-proof): drop
+                    // the pending entry we just inserted so it can't leak (its registry
+                    // value is freed with it), instead of a callback that never fires.
+                    sh.pending_image.borrow_mut().remove(&id);
                 }
                 Ok(())
             },

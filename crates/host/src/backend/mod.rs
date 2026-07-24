@@ -124,6 +124,11 @@ pub trait Backend {
     /// Captures a screen region into an RGBA image.
     fn capture(&self, x: i32, y: i32, w: i32, h: i32) -> Option<CapturedImage>;
 
+    /// A pointer to the stateless screen-capture routine, so a worker thread can
+    /// capture without holding the (`Rc`, non-`Send`) backend. Same result as
+    /// `capture`, callable off the main thread (used by the async image worker).
+    fn capture_fn(&self) -> fn(i32, i32, i32, i32) -> Option<CapturedImage>;
+
     /// Recognizes text in a screen region.
     fn ocr(&self, x: i32, y: i32, w: i32, h: i32, lang: Option<&str>) -> Result<OcrText, String>;
 
