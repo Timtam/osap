@@ -21,7 +21,7 @@ Resident modules (those that register hotkeys, capture keys, or watch windows) s
 
 Try the global-hotkey demo: `cargo run -p app -- modules/hotkey`, then press **Ctrl+Alt+H** to hear it speak — it works whether the window is open or another app is focused. Quit from the tray icon to exit.
 
-Try the first self-voicing **overlay** (stays resident): `cargo run -p app -- modules/overlay`, then navigate with **Ctrl+Alt+Left/Right** and activate with **Ctrl+Alt+Enter** (or the per-control hotkeys **Ctrl+Alt+1/2/3**).
+Try a self-voicing **overlay**: `cargo run -p app -- modules/overlay-attach` — it activates while a **Notepad** window is focused. Navigate its controls with **Tab / Shift+Tab** and activate the focused one with **Enter** or **Space** (the per-control hotkeys **Ctrl+Alt+1/3** also work while it is active).
 
 Load **several modules at once** (they share one process, TTS, and event loop): `cargo run -p app -- modules/hotkey modules/window-trigger`.
 

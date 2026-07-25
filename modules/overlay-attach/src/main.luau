@@ -1,6 +1,7 @@
 -- A context-bound overlay (ReaHotkey-style): it activates automatically while a
--- Notepad window is focused and deactivates when you switch away. Its hotkeys
--- (Ctrl+Alt+1/3, Ctrl+Alt+Left/Right/Enter) are live only while active.
+-- Notepad window is focused and deactivates when you switch away. While active,
+-- Tab / Shift+Tab move between controls and Enter or Space activates the focused
+-- one; the per-control hotkeys (Ctrl+Alt+1/3) fire from anywhere it is active.
 
 local O = host.require("com.platform.overlay")
 local ov = O.new("Notepad")

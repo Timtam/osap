@@ -13,7 +13,7 @@ Control **kinds**: `static`, `hotspot`, `custom`, `ocr`, `gtoggle`. The spoken t
 
 Creates a new overlay object. `label: string?` (defaults to `"Overlay"`).
 
-Returns an `Overlay` (metatable-backed table) with fields `label`, `controls = {}`, `focus = 0`, `active = false`, `naturalNav = false`, `hoverToRead = false`, `contexts = {}`, `activeCtx = false`, and internal registration/key/trigger state.
+Returns an `Overlay` (metatable-backed table) with fields `label`, `controls = {}`, `focus = 0`, `active = false`, `hoverToRead = false`, `contexts = {}`, `activeCtx = false`, and internal registration/key/trigger state.
 
 ```lua
 local ov = O.new("My Plugin")
@@ -98,22 +98,14 @@ ov:activate(3)     -- activate the 3rd control
 
 Replaces the entire control set at runtime: unregisters/re-registers hotkeys if active and resets focus to the first focusable control. `controls: {Control}` (array of control tables — the low-level form the `addX` builders produce; prefer the builders). Returns nothing.
 
-## O:show()
-
-Always-on mode: immediately registers hotkeys and announces readiness over speech (`"<label> overlay ready. N controls. ..."`). Use this for an unattached overlay that should be live without a window trigger. Returns nothing.
-
-```lua
-ov:show()
-```
-
 ## O:attach(matcher, opts)
 
-Binds the overlay as a **standalone** context: active while a window matching `matcher` is the foreground/active window, with coordinates relative to that window's client area. `matcher` is a window matcher passed to `host.window.test`; `opts: { naturalNav: boolean?, hoverToRead: boolean?, resetFocusOnActivate: boolean? }?`.
+Binds the overlay as a **standalone** context: active while a window matching `matcher` is the foreground/active window, with coordinates relative to that window's client area. `matcher` is a window matcher passed to `host.window.test`; `opts: { hoverToRead: boolean? }?`.
 
-`naturalNav` (default `false`) captures and suppresses `Tab` / `Shift+Tab` / `Return` for native-style navigation while the overlay window is focused; otherwise navigation uses the fallback hotkeys `Ctrl+Alt+Right` / `Ctrl+Alt+Left` / `Ctrl+Alt+Return`. `hoverToRead` (default `false`) moves the mouse onto an OCR control on focus (some UIs only reveal values on hover). `resetFocusOnActivate` (default `false`) makes the overlay restart at its first control — and any tab control at its first tab — when a **genuinely new** dialog window opens, instead of resuming the last-focused control; set it for **transient dialogs** (which should open fresh after being closed), and leave it off for persistent plugin overlays (which should resume where the user was). The reset is gated on the origin window's identity (its HWND), so merely `Alt+Tab`-ing out of and back into the *same* still-open dialog resumes where the user was — only closing and reopening (a new window) resets. Registers the foreground/focus trigger once. Returns nothing.
+While active, the overlay captures and suppresses the navigation keys, scoped to its own window (so `Alt+Tab` and menus pass through natively): `Tab` / `Shift+Tab` move between controls, `Return` and `Space` activate the focused control, and — when the overlay has a tab control — `Left`/`Right`, `Ctrl+Tab`/`Ctrl+Shift+Tab` and `Ctrl+<n>` drive it. `Space` is released while an editable field (an `ocredit` control) is focused, so a literal space can be typed into it. On activation the overlay starts at its first control (and any tab control at its first tab) when a **genuinely new** window opened, but resumes the last-focused control when the *same* still-open window merely regained the foreground (`Alt+Tab` out and back); the two are told apart by the window's identity (its HWND). `hoverToRead` (default `false`) moves the mouse onto an OCR control on focus (some UIs only reveal values on hover). Registers the foreground/focus trigger once. Returns nothing.
 
 ```lua
-ov:attach({ title = "MySynth" }, { naturalNav = true })
+ov:attach({ title = "MySynth" })
 ```
 
 ## O:attachEmbedded(spec, opts)
@@ -122,14 +114,14 @@ Binds the overlay as an **embedded** context: active while keyboard focus is ins
 
 `spec: { hosts: {Matcher}?, host: Matcher?, control: string, identify: ((control) -> boolean)? }` — `hosts` is the list of acceptable DAW host-window matchers (falls back to `{ spec.host }`); `control` is a Luau pattern matched against candidate child/focus-chain control class names; `identify(control)` is an optional confirmation callback (UIA / OCR / image search), cached per control HWND, used because a host's plugin control class often matches any plugin (e.g. REAPER's `Plugin<ptr>`). Candidates come from `host.window.controls()` plus the `host.window.focusChain()`.
 
-`opts: { naturalNav?, hoverToRead?, resetFocusOnActivate?, slot: string?, specificity: number?, pollMatch: number? }` — `naturalNav`/`hoverToRead`/`resetFocusOnActivate` as in `attach`. With `slot` the overlay joins the host **arbiter** for that slot at `specificity` (a base and the overlays inheriting it pass the same slot; the most-specific *matching* one is active — see `host.arbiter`); `pollMatch` (ms) additionally re-checks the match on a recurring timer, for matches that change with no window event (a library landmark appearing inside an already-focused plugin). Returns nothing.
+`opts: { hoverToRead?, slot: string?, specificity: number?, pollMatch: number? }` — `hoverToRead` and the navigation / focus-reset behaviour are as in `attach`. With `slot` the overlay joins the host **arbiter** for that slot at `specificity` (a base and the overlays inheriting it pass the same slot; the most-specific *matching* one is active — see `host.arbiter`); `pollMatch` (ms) additionally re-checks the match on a recurring timer, for matches that change with no window event (a library landmark appearing inside an already-focused plugin). Returns nothing.
 
 ```lua
 ov:attachEmbedded({
   hosts = { { title = "REAPER" }, { title = "Cubase" } },
   control = "Plugin",
   identify = function(c) return host.uia.find(c.id, "MySynthGUI", 0) end,
-}, { naturalNav = true })
+})
 ```
 
 ## O:gate(fn) / O:landmark(image)

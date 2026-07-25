@@ -353,7 +353,7 @@ return {
     ov:onActivate(onPluginActive)
     -- Specificity 1: above the Komplete Kontrol chrome overlay (0, com.platform
     -- .komplete-kontrol) on the shared slot, below a library (2).
-    ov:attachEmbedded(spec(), { slot = SLOT, specificity = 1, naturalNav = true })
+    ov:attachEmbedded(spec(), { slot = SLOT, specificity = 1 })
     ov:_startMenuWatch()
     host.log.info("Kontakt base overlay ready.")
 
@@ -378,7 +378,7 @@ return {
     -- Tab / Shift+Tab step through Kontakt's OWN focusable controls (its window doesn't
     -- move focus on Tab itself) — ReaHotkey's Standalone Tab pass-through.
     sa:enableUiaPassThrough()
-    sa:attach(KONTAKT_STANDALONE, { naturalNav = true })
+    sa:attach(KONTAKT_STANDALONE)
     sa:_startMenuWatch()
     host.log.info("Kontakt standalone overlay ready.")
   end,
@@ -407,7 +407,7 @@ return {
     if landmark then ov:landmark(landmark) end
     -- Specificity 2: a library wins over both the Kontakt base (1) and the KK chrome
     -- (0) on the shared slot whenever its landmark is present.
-    ov:attachEmbedded(spec(), { slot = SLOT, specificity = 2, naturalNav = true, pollMatch = 500 })
+    ov:attachEmbedded(spec(), { slot = SLOT, specificity = 2, pollMatch = 500 })
     ov:_startMenuWatch()
     host.log.info("Kontakt library overlay ready: " .. (name or "library"))
     return ov

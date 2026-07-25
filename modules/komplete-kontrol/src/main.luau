@@ -197,7 +197,7 @@ return {
     -- Tab / Shift+Tab navigate the header (like the Kontakt overlay), Enter activates;
     -- Alt+M / Alt+S / Alt+L are also global. The menu-watch hands the captured nav keys
     -- to KK's own Qt menu (opened by Alt+M) while it is open.
-    ov:attachEmbedded(spec(), { slot = SLOT, specificity = 0, naturalNav = true })
+    ov:attachEmbedded(spec(), { slot = SLOT, specificity = 0 })
     ov:_startMenuWatch()
     host.log.info("Komplete Kontrol base overlay ready.")
 
@@ -219,7 +219,7 @@ return {
     -- the embedded KK chrome (0) does in a DAW. (The Kontakt module adds this KK window as
     -- a host, so its nested overlays can match here.) When the browser hides the nested
     -- Kontakt, this overlay is the active one and its onKKActive still auto-closes it.
-    sa:attach(STANDALONE, { slot = SLOT, specificity = 0, naturalNav = true })
+    sa:attach(STANDALONE, { slot = SLOT, specificity = 0 })
     sa:_startMenuWatch()
     host.log.info("Komplete Kontrol standalone overlay ready.")
 
@@ -263,7 +263,7 @@ return {
     }).when = tc:onTab(5)
     -- Close is available on every tab.
     prefs:addHotspotButton({ label = "Close", at = { 548, 473 } })
-    prefs:attach(PREFS, { naturalNav = true, resetFocusOnActivate = true })
+    prefs:attach(PREFS)
     host.log.info("Komplete Kontrol standalone Preferences overlay ready.")
 
     -- STANDALONE "Save preset" dialog overlay (#32770, empty title, ~360x160). Custom-
@@ -282,7 +282,7 @@ return {
     saveas:landmark(host.path("images/saveas-header.png"))
     -- Specificity 1 on the shared slot: with its "Save Preset" landmark present it beats
     -- the Scanning fallback (0) whenever this really is the Save-preset dialog.
-    saveas:attach(KK_UNTITLED_DIALOG, { slot = KK_DIALOG_SLOT, specificity = 1, naturalNav = true, resetFocusOnActivate = true })
+    saveas:attach(KK_UNTITLED_DIALOG, { slot = KK_DIALOG_SLOT, specificity = 1 })
     host.log.info("Komplete Kontrol standalone Save preset overlay ready.")
 
     -- STANDALONE "Scanning in progress" dialog overlay: shown while KK rescans its
@@ -322,7 +322,7 @@ return {
       end
       o._scanCommitted = false
     end)
-    scan:attach(KK_UNTITLED_DIALOG, { slot = KK_DIALOG_SLOT, specificity = 0, naturalNav = true, resetFocusOnActivate = true })
+    scan:attach(KK_UNTITLED_DIALOG, { slot = KK_DIALOG_SLOT, specificity = 0 })
     host.log.info("Komplete Kontrol standalone Scanning overlay ready.")
   end,
 }

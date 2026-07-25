@@ -28,9 +28,9 @@ ov:addOCRButton({ label = "Pitchbend range", region = { 576, 40, 602, 60 } })
 local daw = host.require("com.platform.daw-hosts")
 
 -- Activate while the sforzando window is focused (standalone) or while it is
--- embedded in a DAW host window; deactivate on leaving. naturalNav = Tab /
--- Shift+Tab / Enter captured + suppressed, so it feels like ReaHotkey.
-ov:attach(sforzando, { naturalNav = true })
+-- embedded in a DAW host window; deactivate on leaving. Navigation is Tab /
+-- Shift+Tab / Enter (and Space) captured + suppressed, so it feels like ReaHotkey.
+ov:attach(sforzando)
 ov:attachEmbedded({
   hosts = daw.all,
   control = "^Plugin%x+$",
@@ -49,4 +49,4 @@ ov:attachEmbedded({
     local r = host.ocr.recognize({ region = { ox + 605, oy + 33, ox + 762, oy + 70 } })
     return string.find(string.lower(r.text or ""), "sforzando", 1, true) ~= nil
   end,
-}, { naturalNav = true })
+})

@@ -14,10 +14,6 @@
 
 local O = {}
 
--- Navigation hotkeys (non-conflicting on purpose; final UX will use Tab/arrows
--- with context-scoping + key suppression).
-local NAV = { next = "Ctrl+Alt+Right", prev = "Ctrl+Alt+Left", activate = "Ctrl+Alt+Return" }
-
 -- Image-match robustness. ReaHotkey matches templates exactly (variation 0); we add a
 -- per-channel colour tolerance plus a spread of scale factors, so a template still
 -- matches under minor render / colour-profile / DPI-scale differences instead of
@@ -39,7 +35,6 @@ function O.new(label)
       registered = {},
       capturedKeys = {},
       active = false,
-      naturalNav = false,
       hoverToRead = false,
       contexts = {},
       activeCtx = false,
@@ -61,14 +56,10 @@ function O.new(label)
       _onActivate = false,
       -- Optional module hook fn(overlay) fired each time it stops being active.
       _onDeactivate = false,
-      -- When true (set via attach opts.resetFocusOnActivate), the overlay restarts at
-      -- its first control (and first tab) when a genuinely NEW dialog window opens,
-      -- instead of resuming the last-focused control — the right behaviour for a
-      -- transient dialog (which should open fresh after being closed), unlike a
-      -- persistent plugin overlay. The reset is gated on the origin window's identity
-      -- (see _activate) so merely Alt+Tab'ing out of and back into the SAME still-open
-      -- dialog resumes where the user was; _lastActiveId remembers that identity.
-      _resetFocus = false,
+      -- HWND (`.id`) of the window this overlay was last active on. On activation the
+      -- overlay restarts at its first control (and any tab control at tab 1) when this
+      -- differs — i.e. a genuinely NEW window opened — but resumes where the user was
+      -- when it's the SAME window regaining focus (Alt+Tab out and back). See _activate.
       _lastActiveId = false,
       -- Token of the dynamically (re)captured Space key, or false. Space activates the
       -- focused control like Return, but is released while an editable field is focused
@@ -537,56 +528,49 @@ function Overlay:_registerHotkeys()
       end
     end
   end
-  if self.naturalNav then
-    -- Capture (+ suppress) the normal navigation keys, ReaHotkey-style — only
-    -- while the overlay is active (its window is focused). Modifier-exact, so
-    -- Alt+Tab etc. pass through.
-    -- Track the token capture returns (not the spec): release must target THIS exact
-    -- registration, so another overlay in the same module re-capturing the same key
-    -- (e.g. KK chrome and its Preferences dialog both capturing Tab) isn't dropped when
-    -- this one deactivates. See host.keys.capture/release.
-    local function cap(spec, fn)
-      self.capturedKeys[#self.capturedKeys + 1] = host.keys.capture(spec, fn)
-    end
-    -- Tab moves *between* elements; arrow keys are left for value changes within
-    -- a control (standard interaction scheme), so we don't capture them here.
-    if self._passThrough then
-      -- Standalone pass-through: Tab / Shift+Tab drive the plugin's native UIA focus.
-      -- Return / Space / arrows are LEFT uncaptured so the focused control handles them
-      -- natively; the overlay's own actions are reached via their global hotkeys.
-      cap("Tab", function() self._passThrough(self, 1) end)
-      cap("Shift+Tab", function() self._passThrough(self, -1) end)
-    else
-      cap("Tab", function() self:focusNext() end)
-      cap("Shift+Tab", function() self:focusPrev() end)
-      cap("Return", function() self:activate() end)
-      -- Tab controls (ReaHotkey): Left/Right switch the tab when the tab control itself
-      -- is focused (LeftRightHK); Ctrl+Tab / Ctrl+Shift+Tab switch it from anywhere in
-      -- the overlay (ControlTab/ControlShiftTabHK); Ctrl+<n> jumps straight to tab n (our
-      -- addition). Captured only when this overlay has a tab control, so these keys stay
-      -- free everywhere else.
-      if self._hasTabControl then
-        cap("Left", function() self:switchTab(-1) end)
-        cap("Right", function() self:switchTab(1) end)
-        cap("Ctrl+Tab", function() self:cycleTab(1) end)
-        cap("Ctrl+Shift+Tab", function() self:cycleTab(-1) end)
-        local _, tcCtrl = findTabControl(self)
-        local ntabs = tcCtrl and #tcCtrl.tabs or 0
-        for n = 1, math.min(ntabs, 9) do
-          cap("Ctrl+" .. n, function() self:gotoTab(n) end)
-        end
-      end
-      -- Space activates the focused control like Return (standard Windows button
-      -- behaviour). It is captured/released as focus moves — NOT via the static `cap`
-      -- set above — so that while an editable field (ocredit) is focused the Space
-      -- reaches the field and the user can type a literal space (e.g. a preset name
-      -- with spaces). Set the initial state for the control focused right now.
-      self:_syncSpaceCapture()
-    end
+  -- Capture (+ suppress) the normal navigation keys, ReaHotkey-style — only while the
+  -- overlay is active (its window is focused). Modifier-exact, so Alt+Tab etc. pass
+  -- through. Track the token capture returns (not the spec): release must target THIS
+  -- exact registration, so another overlay in the same module re-capturing the same key
+  -- (e.g. KK chrome and its Preferences dialog both capturing Tab) isn't dropped when
+  -- this one deactivates. See host.keys.capture/release.
+  local function cap(spec, fn)
+    self.capturedKeys[#self.capturedKeys + 1] = host.keys.capture(spec, fn)
+  end
+  -- Tab moves *between* elements; arrow keys are left for value changes within a
+  -- control (standard interaction scheme), so we don't capture them here.
+  if self._passThrough then
+    -- Standalone pass-through: Tab / Shift+Tab drive the plugin's native UIA focus.
+    -- Return / Space / arrows are LEFT uncaptured so the focused control handles them
+    -- natively; the overlay's own actions are reached via their global hotkeys.
+    cap("Tab", function() self._passThrough(self, 1) end)
+    cap("Shift+Tab", function() self._passThrough(self, -1) end)
   else
-    self.registered[#self.registered + 1] = host.hotkey.register(NAV.next, function() self:focusNext() end)
-    self.registered[#self.registered + 1] = host.hotkey.register(NAV.prev, function() self:focusPrev() end)
-    self.registered[#self.registered + 1] = host.hotkey.register(NAV.activate, function() self:activate() end)
+    cap("Tab", function() self:focusNext() end)
+    cap("Shift+Tab", function() self:focusPrev() end)
+    cap("Return", function() self:activate() end)
+    -- Tab controls (ReaHotkey): Left/Right switch the tab when the tab control itself
+    -- is focused (LeftRightHK); Ctrl+Tab / Ctrl+Shift+Tab switch it from anywhere in
+    -- the overlay (ControlTab/ControlShiftTabHK); Ctrl+<n> jumps straight to tab n (our
+    -- addition). Captured only when this overlay has a tab control, so these keys stay
+    -- free everywhere else.
+    if self._hasTabControl then
+      cap("Left", function() self:switchTab(-1) end)
+      cap("Right", function() self:switchTab(1) end)
+      cap("Ctrl+Tab", function() self:cycleTab(1) end)
+      cap("Ctrl+Shift+Tab", function() self:cycleTab(-1) end)
+      local _, tcCtrl = findTabControl(self)
+      local ntabs = tcCtrl and #tcCtrl.tabs or 0
+      for n = 1, math.min(ntabs, 9) do
+        cap("Ctrl+" .. n, function() self:gotoTab(n) end)
+      end
+    end
+    -- Space activates the focused control like Return (standard Windows button
+    -- behaviour). It is captured/released as focus moves — NOT via the static `cap`
+    -- set above — so that while an editable field (ocredit) is focused the Space
+    -- reaches the field and the user can type a literal space (e.g. a preset name
+    -- with spaces). Set the initial state for the control focused right now.
+    self:_syncSpaceCapture()
   end
 end
 
@@ -608,11 +592,11 @@ end
 -- Keeps the Space-activates-the-focused-control capture in sync with the focused
 -- control's kind: captured for a normal (button-like) control, released while an
 -- editable field (ocredit) is focused so Space reaches it as typed text. Idempotent;
--- called on every focus move (and at registration). No-op unless this is an active,
--- naturalNav, non-pass-through overlay (pass-through overlays never capture Space —
--- the real plugin control handles it).
+-- called on every focus move (and at registration). No-op unless the overlay is active
+-- and not a pass-through overlay (pass-through overlays never capture Space — the real
+-- plugin control handles it).
 function Overlay:_syncSpaceCapture()
-  if not (self.active and self.naturalNav) or self._passThrough then
+  if not self.active or self._passThrough then
     return
   end
   local c = self.controls[self.focus]
@@ -625,16 +609,6 @@ function Overlay:_syncSpaceCapture()
   elseif not self._spaceToken then
     self._spaceToken = host.keys.capture("Space", function() self:activate() end)
   end
-end
-
--- Always-on: register hotkeys immediately and announce.
-function Overlay:show()
-  self:_registerHotkeys()
-  host.speech.output(
-    self.label .. " overlay ready. " .. #self.controls ..
-    " controls. Control alt left and right to navigate, control alt enter to activate.",
-    { interrupt = true }
-  )
 end
 
 -- A module hook fired (with the overlay) each time it becomes the ACTIVE overlay —
@@ -655,29 +629,25 @@ end
 function Overlay:_activate()
   if self.active then return end
   self.active = true
-  -- A dialog overlay (attached with resetFocusOnActivate) starts FRESH — focus back on
-  -- the first control, any tab control back on its first tab — but ONLY when a
-  -- genuinely NEW dialog window opens, NOT when the SAME still-open dialog merely
-  -- regained the foreground (Alt+Tab out and back), which should resume where the user
-  -- was. We tell them apart by the origin window's HWND (`.id`): closing then reopening
-  -- a dialog yields a new window (new id) → reset; Alt+Tab keeps the same id → resume.
-  -- (A dialog that reused the very same HWND across close/reopen would resume too, but
-  -- real KK dialogs are destroyed and recreated, so their id changes.) Clearing focus
-  -- here lets the `if self.focus == 0` block below re-pick the first focusable.
-  if self._resetFocus then
-    local origin = self.activeCtx and self.activeCtx.origin()
-    local id = (origin and origin.id) or false
-    if id ~= self._lastActiveId then
-      self.focus = 0
-      for _, c in ipairs(self.controls) do
-        if c.kind == "tabcontrol" then c._current = 1 end
-      end
+  -- The overlay starts FRESH — focus back on the first control, any tab control back on
+  -- its first tab — when it becomes active on a genuinely NEW window, but resumes where
+  -- the user was when the SAME still-open window merely regained the foreground (Alt+Tab
+  -- out and back). We tell them apart by the origin window's HWND (`.id`): closing then
+  -- reopening a window yields a new id → reset; Alt+Tab keeps the same id → resume. (A
+  -- window reusing the very same HWND across close/reopen would resume too, but these
+  -- plugin/dialog windows are destroyed and recreated, so their id changes.) Clearing
+  -- focus here lets the `if self.focus == 0` block below re-pick the first focusable.
+  local origin = self.activeCtx and self.activeCtx.origin()
+  local id = (origin and origin.id) or false
+  if id ~= self._lastActiveId then
+    self.focus = 0
+    for _, c in ipairs(self.controls) do
+      if c.kind == "tabcontrol" then c._current = 1 end
     end
-    self._lastActiveId = id
   end
-  -- Remember the last-focused control across deactivate/reactivate, so re-entering
-  -- the window (e.g. Alt+Tab out and back) resumes where you were — only pick the
-  -- first focusable control on the very first activation (or after a reset above).
+  self._lastActiveId = id
+  -- Pick the first focusable control after a reset (or on the very first activation);
+  -- otherwise self.focus still holds the resumed position.
   if self.focus == 0 then
     for i = 1, #self.controls do
       if isFocusable(self, i) then
@@ -687,12 +657,10 @@ function Overlay:_activate()
     end
   end
   self:_registerHotkeys()
-  if self.naturalNav then
-    -- Scope key suppression to this (now-foreground) window: when a control opens
-    -- a menu (another window comes forward), Tab/Enter pass to it natively, and
-    -- resume here once the plugin window is focused again.
-    host.keys.scope(true)
-  end
+  -- Scope key suppression to this (now-foreground) window: when a control opens a menu
+  -- (another window comes forward), Tab/Enter pass to it natively, and resume here once
+  -- the plugin window is focused again.
+  host.keys.scope(true)
   if self._onActivate then self._onActivate(self) end
   -- Announce the focused control shortly after the window gains focus, once the
   -- screen reader's window-title announcement has passed (so it isn't clobbered).
@@ -706,10 +674,8 @@ end
 function Overlay:_deactivate()
   if not self.active then return end
   self.active = false
-  if self.naturalNav then
-    host.keys.scope(false)
-    host.keys.menuOpen(false)
-  end
+  host.keys.scope(false)
+  host.keys.menuOpen(false)
   self:_unregisterHotkeys()
   if self._onDeactivate then self._onDeactivate(self) end
 end
@@ -795,9 +761,7 @@ end
 -- Sets the interaction flags from `opts`, then joins the arbiter + arms the trigger.
 local function ensureTrigger(self, opts)
   if opts then
-    self.naturalNav = opts.naturalNav == true
     self.hoverToRead = opts.hoverToRead == true
-    self._resetFocus = opts.resetFocusOnActivate == true
     self:_join(opts.slot, opts.specificity, opts.pollMatch)
   else
     self:_join(nil, nil, nil)
@@ -935,9 +899,7 @@ function Overlay:derive(name, build)
     child.contexts[#child.contexts + 1] = ctx
   end
   child._originOffset = self._originOffset
-  child.naturalNav = self.naturalNav
   child.hoverToRead = self.hoverToRead
-  child._resetFocus = self._resetFocus
   if build then build(child) end
   child:_join(self._slot or nil, (self._specificity or 0) + 1, 500)
   return child
@@ -968,7 +930,7 @@ function Overlay:_startMenuWatch()
   -- Disable-safe recurring poll (survives a disable/enable cycle, unlike a Lua
   -- self-rescheduling host.timer.after).
   host.timer.every(150, function()
-    if self.active and self.naturalNav then
+    if self.active then
       local ctrl = self.activeCtx and self.activeCtx.origin()
       local open = ctrl ~= nil and ctrl.id ~= nil and host.uia.find(ctrl.id, "", 50009) == true
       host.keys.menuOpen(open)
