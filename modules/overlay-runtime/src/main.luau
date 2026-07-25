@@ -70,6 +70,10 @@ function O.new(label)
       -- dialog resumes where the user was; _lastActiveId remembers that identity.
       _resetFocus = false,
       _lastActiveId = false,
+      -- Token of the dynamically (re)captured Space key, or false. Space activates the
+      -- focused control like Return, but is released while an editable field is focused
+      -- so the user can type spaces into it — see _syncSpaceCapture.
+      _spaceToken = false,
     },
     Overlay
   )
@@ -304,6 +308,9 @@ local function selectTab(self, c)
     local ox, oy = originOf(self, c)
     host.input.click(ox + tab.at[1], oy + tab.at[2])
   end
+  -- Focus is now on the tab control (a non-editable stop): make sure Space is captured
+  -- again if we arrived here from an editable field via Ctrl+Tab / Ctrl+<n>.
+  self:_syncSpaceCapture()
   host.speech.output(tabMessage(tab), { interrupt = true })
 end
 
@@ -435,7 +442,10 @@ function Overlay:focusNext()
   end
   -- Nothing focusable (e.g. a control set that is only unfilled slots): don't
   -- announce a phantom empty stop with interrupt.
-  if found then speakControl(self, self.focus, true) end
+  if found then
+    self:_syncSpaceCapture()
+    speakControl(self, self.focus, true)
+  end
 end
 
 function Overlay:focusPrev()
@@ -449,7 +459,10 @@ function Overlay:focusPrev()
       break
     end
   end
-  if found then speakControl(self, self.focus, true) end
+  if found then
+    self:_syncSpaceCapture()
+    speakControl(self, self.focus, true)
+  end
 end
 
 -- Enable a standalone UIA Tab pass-through: Tab / Shift+Tab move keyboard focus through
@@ -563,6 +576,12 @@ function Overlay:_registerHotkeys()
           cap("Ctrl+" .. n, function() self:gotoTab(n) end)
         end
       end
+      -- Space activates the focused control like Return (standard Windows button
+      -- behaviour). It is captured/released as focus moves — NOT via the static `cap`
+      -- set above — so that while an editable field (ocredit) is focused the Space
+      -- reaches the field and the user can type a literal space (e.g. a preset name
+      -- with spaces). Set the initial state for the control focused right now.
+      self:_syncSpaceCapture()
     end
   else
     self.registered[#self.registered + 1] = host.hotkey.register(NAV.next, function() self:focusNext() end)
@@ -580,6 +599,32 @@ function Overlay:_unregisterHotkeys()
     host.keys.release(token)
   end
   self.capturedKeys = {}
+  if self._spaceToken then
+    host.keys.release(self._spaceToken)
+    self._spaceToken = false
+  end
+end
+
+-- Keeps the Space-activates-the-focused-control capture in sync with the focused
+-- control's kind: captured for a normal (button-like) control, released while an
+-- editable field (ocredit) is focused so Space reaches it as typed text. Idempotent;
+-- called on every focus move (and at registration). No-op unless this is an active,
+-- naturalNav, non-pass-through overlay (pass-through overlays never capture Space —
+-- the real plugin control handles it).
+function Overlay:_syncSpaceCapture()
+  if not (self.active and self.naturalNav) or self._passThrough then
+    return
+  end
+  local c = self.controls[self.focus]
+  local editable = c ~= nil and c.kind == "ocredit"
+  if editable then
+    if self._spaceToken then
+      host.keys.release(self._spaceToken)
+      self._spaceToken = false
+    end
+  elseif not self._spaceToken then
+    self._spaceToken = host.keys.capture("Space", function() self:activate() end)
+  end
 end
 
 -- Always-on: register hotkeys immediately and announce.
@@ -906,10 +951,13 @@ function Overlay:setControls(controls)
   self.controls = controls
   self.focus = 0
   if self.active then
-    self:_registerHotkeys()
+    -- Pick the first focusable BEFORE re-registering, so _registerHotkeys' Space sync
+    -- sees the real focused control — an editable field (ocredit) that ends up first
+    -- must not have Space captured over it. Same order as _activate.
     for i = 1, #self.controls do
       if isFocusable(self, i) then self.focus = i break end
     end
+    self:_registerHotkeys()
   end
 end
 
