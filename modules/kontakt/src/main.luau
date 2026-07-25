@@ -13,6 +13,10 @@
 
 local O = host.require("com.platform.overlay")
 local daw = host.require("com.platform.daw-hosts")
+-- OPTIONAL dependency: Komplete Kontrol, if it's installed. Present → its exports (incl.
+-- the standalone-window matcher) are imported into this VM; absent → nil, and Kontakt-in-
+-- standalone-KK detection is simply off (bare Kontakt in a DAW never needs KK).
+local kk = host.tryRequire("com.platform.komplete-kontrol")
 
 local SLOT = "com.platform.kontakt"
 local BUTTON, MENUITEM = 50000, 50011
@@ -299,9 +303,22 @@ end
 -- The embedded-attach spec shared by the base and every library overlay. A
 -- library's landmark is now an overlay-level gate (ov:landmark), not part of the
 -- spec, so this is identical for the base and every library.
+--
+-- Hosts = the DAWs (from daw-hosts) PLUS, when Komplete Kontrol is installed, KK's own
+-- standalone window (imported via the optional `kk` dependency): KK running on its own
+-- hosts a Kontakt exactly like a DAW does (verified live — the KK NINormalWindow has the
+-- SAME two Qt children as DAW-embedded KK: the NI-versioned KK container control and,
+-- inside it, the plain-Qt nested Kontakt — so the same relational identity + dynamic
+-- KK→content offset apply). We reuse KK's OWN window matcher (kk.standaloneWindow) rather
+-- than treating KK as a DAW or duplicating its identity; if KK isn't installed, `kk` is
+-- nil and this host is simply omitted. In a DAW the KK lives inside a non-KK host, so
+-- daw.all still handles the DAW-embedded case (with its chrome gate) unchanged.
 local function spec()
+  local hosts = {}
+  for _, h in ipairs(daw.all) do hosts[#hosts + 1] = h end
+  if kk and kk.standaloneWindow then hosts[#hosts + 1] = kk.standaloneWindow end
   return {
-    hosts = daw.all,
+    hosts = hosts,
     -- NI Qt plugin control class — plain ("Qt652QWindowIcon{GUID}1", e.g. Kontakt)
     -- OR NI-versioned ("Qt671NI_6_7_1_R3QWindowIcon{GUID}", e.g. Komplete Kontrol);
     -- the ".-" spans the optional NI_<version> segment. Loose match; the UIA name

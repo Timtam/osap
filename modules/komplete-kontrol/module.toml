@@ -4,6 +4,11 @@ version = "0.1.0"
 engine_api = ">=0.1, <0.2"
 entry = "src/main.luau"
 license = "MIT"
+# code_module: this module's code is evaluated inside a dependent's VM so it can import
+# KK's exports (its standaloneWindow matcher) with functions/data intact — Kontakt
+# optionally depends on this to detect itself hosted in a standalone KK window. Its
+# `activate` side effect still runs only in its own VM.
+code_module = true
 dependencies = ["com.platform.overlay", "com.platform.daw-hosts"]
 
 [capabilities]

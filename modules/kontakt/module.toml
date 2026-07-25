@@ -8,6 +8,10 @@ license = "MIT"
 # + library()) is evaluated inside each library's VM via host.require.
 code_module = true
 dependencies = ["com.platform.overlay", "com.platform.daw-hosts"]
+# Optional: if Komplete Kontrol is also installed, import its standalone-window matcher
+# so a Kontakt nested inside a standalone KK is detected as a host. Not required — bare
+# Kontakt (in a DAW, no KK) loads fine without it, and host.tryRequire returns nil then.
+optional_dependencies = ["com.platform.komplete-kontrol"]
 
 [capabilities]
 require = ["window", "uia", "screen", "ocr", "input", "speech", "hotkey", "keys", "timer", "log"]

@@ -63,10 +63,11 @@ local KK_DIALOG_SLOT = "com.platform.kk-dialog"
 -- Turn OFF in the manager's Settings dialog if you keep the browser open on purpose
 -- (e.g. to browse for another instrument). (ReaHotkey's CloseKKBrowser defaults off; we
 -- default it on by choice.)
+-- The setting is DEFINED in activate(), NOT here at module level: this module is a
+-- `code_module`, so its code is evaluated inside every dependent's VM (e.g. Kontakt
+-- imports its standalone-window matcher). A module-level define would then register the
+-- setting in those VMs too; activate() runs only in this module's OWN VM.
 local CLOSE_KK_BROWSER = "closeKKBrowser"
-host.settings.define(CLOSE_KK_BROWSER, true, {
-  label = "Automatically close Komplete Kontrol's library browser",
-})
 
 -- A Komplete Kontrol Qt control (same Qt class as Kontakt; the UIA name is what
 -- distinguishes it). Non-relational, so the identity cache is safe here.
@@ -149,8 +150,19 @@ local function prefsAction(label, points)
 end
 
 return {
-  -- Standalone side effect (this module's own VM): the KK base overlay.
+  -- The KK standalone window matcher, EXPORTED so a dependent (Kontakt, which optionally
+  -- requires this module) can reuse it as a host — recognising a Kontakt nested inside a
+  -- standalone KK — without duplicating KK's window identity or depending on daw-hosts.
+  standaloneWindow = STANDALONE,
+
+  -- Standalone side effect (this module's own VM only — activate never runs when this
+  -- module is imported as a code dependency into another VM): the KK base overlay + the
+  -- standalone overlays + dialogs.
   activate = function()
+    -- Defined here (not at module level) so it only registers in this module's own VM.
+    host.settings.define(CLOSE_KK_BROWSER, true, {
+      label = "Automatically close Komplete Kontrol's library browser",
+    })
     local ov = O.new("Komplete Kontrol")
     ov:addStaticText("Komplete Kontrol")
     -- KK's hamburger menu — a fixed hotspot in KK's chrome (ReaHotkey: 297,17),
@@ -202,7 +214,12 @@ return {
     sa:addHotspotButton({ label = "Controller menu", at = { 138, -10 }, hotkey = "Alt+C" })
     sa:addHotspotButton({ label = "Help menu", at = { 194, -10 }, hotkey = "Alt+H" })
     sa:onActivate(onKKActive)
-    sa:attach(STANDALONE, { naturalNav = true })
+    -- Join the shared Kontakt arbiter slot at the LOWEST specificity, so a Kontakt (1) or
+    -- library (2) loaded inside this standalone KK takes over the same slot — exactly like
+    -- the embedded KK chrome (0) does in a DAW. (The Kontakt module adds this KK window as
+    -- a host, so its nested overlays can match here.) When the browser hides the nested
+    -- Kontakt, this overlay is the active one and its onKKActive still auto-closes it.
+    sa:attach(STANDALONE, { slot = SLOT, specificity = 0, naturalNav = true })
     sa:_startMenuWatch()
     host.log.info("Komplete Kontrol standalone overlay ready.")
 

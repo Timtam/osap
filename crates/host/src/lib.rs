@@ -917,25 +917,44 @@ struct Module {
 fn collect_code_deps(
     parent: &Path,
     dep_ids: &[String],
+    optional_dep_ids: &[String],
     out: &mut Vec<(String, std::path::PathBuf)>,
     seen: &mut HashSet<String>,
 ) -> Result<()> {
     for spec in dep_ids {
-        let dep_id = module_manifest::dep_id(spec);
-        if !seen.insert(dep_id.to_string()) {
-            continue; // already visited
-        }
-        let dir = find_sibling_module(parent, dep_id).ok_or_else(|| {
-            anyhow::anyhow!("dependency '{dep_id}' not found in {}", parent.display())
-        })?;
-        let lm = LoadedModule::load(&dir)?;
-        if !lm.manifest.code_module {
-            continue; // legacy data dependency — not loaded into the VM
-        }
-        // Its own code-module deps first, so they're registered before it runs.
-        collect_code_deps(parent, &lm.manifest.dependencies, out, seen)?;
-        out.push((dep_id.to_string(), lm.entry_path()));
+        collect_one_code_dep(parent, spec, false, out, seen)?;
     }
+    // Optional code deps: same, but a missing one is skipped (best-effort) instead of
+    // erroring, so the dependent still loads and just doesn't get its code/functions.
+    for spec in optional_dep_ids {
+        collect_one_code_dep(parent, spec, true, out, seen)?;
+    }
+    Ok(())
+}
+
+fn collect_one_code_dep(
+    parent: &Path,
+    spec: &str,
+    optional: bool,
+    out: &mut Vec<(String, std::path::PathBuf)>,
+    seen: &mut HashSet<String>,
+) -> Result<()> {
+    let dep_id = module_manifest::dep_id(spec);
+    if !seen.insert(dep_id.to_string()) {
+        return Ok(()); // already visited
+    }
+    let dir = match find_sibling_module(parent, dep_id) {
+        Some(d) => d,
+        None if optional => return Ok(()), // absent optional dependency — skip
+        None => anyhow::bail!("dependency '{dep_id}' not found in {}", parent.display()),
+    };
+    let lm = LoadedModule::load(&dir)?;
+    if !lm.manifest.code_module {
+        return Ok(()); // legacy data dependency — not loaded into the VM
+    }
+    // Its own code-module deps first (required + optional), so they're registered before it.
+    collect_code_deps(parent, &lm.manifest.dependencies, &lm.manifest.optional_dependencies, out, seen)?;
+    out.push((dep_id.to_string(), lm.entry_path()));
     Ok(())
 }
 
@@ -1121,7 +1140,13 @@ fn populate_vm(
     let reg = lua.create_table()?;
     lua.set_named_registry_value("__module_exports", reg.clone())?;
     let mut code_deps: Vec<(String, std::path::PathBuf)> = Vec::new();
-    collect_code_deps(parent, &module.manifest.dependencies, &mut code_deps, &mut HashSet::new())?;
+    collect_code_deps(
+        parent,
+        &module.manifest.dependencies,
+        &module.manifest.optional_dependencies,
+        &mut code_deps,
+        &mut HashSet::new(),
+    )?;
     for (dep_id, dep_entry) in &code_deps {
         let dep_code = std::fs::read_to_string(dep_entry).with_context(|| {
             format!("dependency '{dep_id}' entry not readable: {}", dep_entry.display())
@@ -1206,6 +1231,20 @@ fn load_module(
                     modules.borrow().iter().find(|m| m.id == dep).map(|m| m.version.clone());
                 if let Some(ver) = found {
                     check_dep_version(&id, dep, req, &ver)?;
+                }
+            }
+        }
+        // Optional dependencies: load each ONLY if it is actually present (already
+        // loaded, or discoverable as a sibling). A missing optional dependency is
+        // skipped silently — it never fails the load, and host.require of it returns nil
+        // (see the host.require binding) so the dependent adapts. No version gate: an
+        // optional dependency is best-effort, and failing the load on a mismatch would
+        // defeat the point.
+        for spec in module.manifest.optional_dependencies.clone() {
+            let dep = module_manifest::dep_id(&spec);
+            if !modules.borrow().iter().any(|m| m.id == dep) {
+                if let Some(dep_dir) = find_sibling_module(&parent, dep) {
+                    load_module(shared, modules, disabled_ids, loading, &dep_dir)?;
                 }
             }
         }
@@ -1799,6 +1838,27 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 None => Err(mlua::Error::external(format!(
                     "required module '{id}' is not loaded or exports nothing"
                 ))),
+            }
+        })?,
+    )?;
+
+    // host.tryRequire(id) — like host.require, but returns nil instead of erroring when
+    // the module isn't loaded. For an OPTIONAL dependency, so the module can adapt to
+    // whether it is present: `local kk = host.tryRequire(id); if kk then … end`.
+    let sh = shared.clone();
+    host.set(
+        "tryRequire",
+        lua.create_function(move |lua, id: String| -> mlua::Result<mlua::Value> {
+            if let Ok(reg) = lua.named_registry_value::<mlua::Table>("__module_exports") {
+                let m: mlua::Value = reg.get(id.as_str())?;
+                if !m.is_nil() {
+                    return Ok(m);
+                }
+            }
+            let exports = sh.exports.borrow();
+            match exports.get(&id) {
+                Some(v) => lua.to_value(v),
+                None => Ok(mlua::Value::Nil),
             }
         })?,
     )?;

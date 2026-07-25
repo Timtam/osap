@@ -23,6 +23,15 @@ pub struct ModuleManifest {
     /// via `host.require`). Loaded first; auto-discovered among sibling modules.
     #[serde(default)]
     pub dependencies: Vec<String>,
+    /// Ids of modules this one can USE if present but does not require. Each is
+    /// loaded (and, for a code_module, evaluated into this module's VM) only when it
+    /// is actually available; a missing one is skipped silently, and `host.require`
+    /// of it returns nil so the module can adapt. Same spec grammar as `dependencies`.
+    /// Unlike a hard dependency, an optional one never blocks the dependent from
+    /// loading, and removing it never blocks uninstall. (e.g. Kontakt optionally uses
+    /// Komplete Kontrol to detect itself hosted inside a standalone KK window.)
+    #[serde(default)]
+    pub optional_dependencies: Vec<String>,
     /// When true, this module's *code* is evaluated inside the VM of every module
     /// that depends on it, so its functions — not just serialized data — are
     /// reachable through `host.require`. Default (false) keeps the legacy
