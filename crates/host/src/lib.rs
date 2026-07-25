@@ -1863,25 +1863,13 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         })?,
     )?;
 
-    // host.providers(contract) — every loaded module whose exports declare
-    // `provides = "<contract>"`, as a list of those export tables (data only).
-    // Lets a container module discover extension modules — e.g. plugin-library
-    // overlays — with no central list; live, so a hot-loaded provider shows up on
-    // the next query.
-    let sh = shared.clone();
-    host.set(
-        "providers",
-        lua.create_function(move |lua, contract: String| {
-            let exports = sh.exports.borrow();
-            let arr = lua.create_table()?;
-            for v in exports.values() {
-                if v.get("provides").and_then(|p| p.as_str()) == Some(contract.as_str()) {
-                    arr.push(lua.to_value(v)?)?;
-                }
-            }
-            Ok(arr)
-        })?,
-    )?;
+    // (host.providers was removed: the `provides`/contract discovery mechanism went
+    // unused — the two collaboration patterns it was meant for are both solved more
+    // directly by the dependency system. An extension that extends a container depends on
+    // it (hard) and registers via its imported functions (e.g. a Kontakt library →
+    // Kontakt, calling kontakt.library); a module that merely CAN use another declares it
+    // as an OPTIONAL dependency and imports it with host.tryRequire when present (e.g.
+    // Kontakt → Komplete Kontrol). Neither needs contract discovery.)
 
     // host.speech.output(text, { interrupt = true })  (do not echo to console:
     // a screen reader would read the terminal and double the speech)

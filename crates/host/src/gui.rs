@@ -528,6 +528,29 @@ pub fn run_gui(
                     );
                     return;
                 }
+                // Offer the OPTIONAL dependencies (extra features, not required) as an
+                // opt-in: declining still installs the module + its required deps.
+                let optional_ids: Vec<String> = manifest
+                    .optional_dependencies
+                    .iter()
+                    .map(|s| s.split_whitespace().next().unwrap_or("").to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let accepted_optional: std::collections::HashSet<String> = if optional_ids.is_empty()
+                {
+                    std::collections::HashSet::new()
+                } else {
+                    let opt_msg = format!(
+                        "\u{201c}{}\u{201d} can also use these optional modules (extra features, not required):\n\u{2022} {}\n\nInstall them too?",
+                        manifest.name,
+                        optional_ids.join("\n\u{2022} ")
+                    );
+                    if modal_message(&frame, "Optional dependencies", &opt_msg, true) {
+                        optional_ids.into_iter().collect()
+                    } else {
+                        std::collections::HashSet::new()
+                    }
+                };
                 browse_status.set_label(&format!("Installing {full_name}…"));
                 let inbox = inbox.clone();
                 std::thread::spawn(move || {
@@ -536,7 +559,7 @@ pub fn run_gui(
                     let job = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         // Install the whole dependency tree, not just this repo; the
                         // hot-load resolves the now-installed deps as siblings.
-                        match crate::registry::install_tree(&full_name) {
+                        match crate::registry::install_tree(&full_name, &accepted_optional) {
                             Ok(_) => {
                                 let repo = full_name.rsplit('/').next().unwrap_or(&full_name);
                                 Job::Installed(crate::registry::modules_dir().join(repo))

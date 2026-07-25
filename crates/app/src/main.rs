@@ -79,6 +79,16 @@ fn cmd_install(full_name: Option<&str>) -> Result<()> {
     if !manifest.dependencies.is_empty() {
         println!("Dependencies (fetched too if missing): {}", manifest.dependencies.join(", "));
     }
+    // Optional dependencies are extra features, not required — listed + offered separately.
+    let optional_ids: Vec<String> = manifest
+        .optional_dependencies
+        .iter()
+        .map(|s| s.split_whitespace().next().unwrap_or("").to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !optional_ids.is_empty() {
+        println!("Optional dependencies (extra features, not required): {}", optional_ids.join(", "));
+    }
     print!(
         "Install this module{}? [y/N] ",
         if manifest.dependencies.is_empty() { "" } else { " and its dependencies" }
@@ -91,8 +101,21 @@ fn cmd_install(full_name: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
+    // Offer the optional dependencies (opt-in): declining still installs the module + its
+    // required deps.
+    let mut accepted_optional: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if !optional_ids.is_empty() {
+        print!("Also install its optional dependencies ({})? [y/N] ", optional_ids.join(", "));
+        std::io::stdout().flush().ok();
+        let mut opt_answer = String::new();
+        std::io::stdin().read_line(&mut opt_answer)?;
+        if matches!(opt_answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            accepted_optional.extend(optional_ids);
+        }
+    }
+
     // Resolve + fetch the whole dependency tree, not just this repo.
-    let installed = registry::install_tree(full_name)?;
+    let installed = registry::install_tree(full_name, &accepted_optional)?;
     println!("Installed {} module(s) into {}:", installed.len(), registry::modules_dir().display());
     for m in &installed {
         println!("  {} v{} ({})", m.name, m.version, m.id);

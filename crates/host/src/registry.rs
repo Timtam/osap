@@ -176,9 +176,17 @@ pub fn install(full_name: &str) -> Result<ModuleManifest> {
 
 /// Installs `full_name` and, recursively, every dependency it declares that isn't
 /// already installed — resolving each dependency id to a repo via the module-topic
-/// search. Returns every newly-installed manifest (the caller hot-loads them). The
-/// capability review is the caller's responsibility (as with [`install`]).
-pub fn install_tree(full_name: &str) -> Result<Vec<ModuleManifest>> {
+/// search. `accepted_optional` is the set of OPTIONAL-dependency ids the user chose to
+/// also install: an optional dep whose id is in the set is installed like a required one,
+/// but a required dep that can't be resolved is a hard error while an accepted optional
+/// that can't be resolved is skipped (logged) — installing the module never fails because
+/// an optional extra is unavailable. Returns every newly-installed manifest (the caller
+/// hot-loads them). The capability review is the caller's responsibility (as with
+/// [`install`]).
+pub fn install_tree(
+    full_name: &str,
+    accepted_optional: &std::collections::HashSet<String>,
+) -> Result<Vec<ModuleManifest>> {
     use std::collections::{HashMap, HashSet};
     let mut have: HashSet<String> = installed().into_iter().map(|m| m.id).collect();
     let mut installed_now: Vec<ModuleManifest> = Vec::new();
@@ -191,28 +199,43 @@ pub fn install_tree(full_name: &str) -> Result<Vec<ModuleManifest>> {
             continue;
         }
         let m = install(&repo)?;
-        let (id, deps) = (
-            m.id.clone(),
-            m.dependencies
-                .iter()
-                .map(|s| module_manifest::dep_id(s).to_string())
-                .collect::<Vec<String>>(),
-        );
+        let id = m.id.clone();
+        let deps: Vec<String> =
+            m.dependencies.iter().map(|s| module_manifest::dep_id(s).to_string()).collect();
+        // Only the optional deps the user accepted, and not already present.
+        let opt_deps: Vec<String> = m
+            .optional_dependencies
+            .iter()
+            .map(|s| module_manifest::dep_id(s).to_string())
+            .filter(|d| accepted_optional.contains(d))
+            .collect();
         have.insert(id.clone());
         installed_now.push(m);
-        let missing: Vec<String> = deps.into_iter().filter(|d| !have.contains(d)).collect();
-        if missing.is_empty() {
+        let missing_hard: Vec<String> = deps.into_iter().filter(|d| !have.contains(d)).collect();
+        let missing_opt: Vec<String> = opt_deps.into_iter().filter(|d| !have.contains(d)).collect();
+        if missing_hard.is_empty() && missing_opt.is_empty() {
             continue;
         }
         if index.is_none() {
             index = Some(topic_index()?);
         }
         let idx = index.as_ref().unwrap();
-        for dep in missing {
+        for dep in missing_hard {
             match idx.get(&dep) {
                 Some(dep_repo) => queue.push(dep_repo.clone()),
                 None => anyhow::bail!(
                     "dependency '{dep}' of '{id}' was not found among '{MODULE_TOPIC}' modules"
+                ),
+            }
+        }
+        for dep in missing_opt {
+            match idx.get(&dep) {
+                Some(dep_repo) => queue.push(dep_repo.clone()),
+                // Optional extra the user accepted but that isn't published — skip, don't
+                // fail the whole install.
+                None => crate::logging::line(
+                    "manager",
+                    &format!("optional dependency '{dep}' of '{id}' not found among '{MODULE_TOPIC}' modules — skipped"),
                 ),
             }
         }

@@ -1,5 +1,5 @@
 ---
-title: "host.resource / host.path / host.settings / host.config / host.require / host.providers"
+title: "host.resource / host.path / host.settings / host.config / host.require / host.tryRequire"
 sidebar_position: 5
 ---
 
@@ -10,8 +10,10 @@ much* crosses a module boundary depends on the dependency kind: a
 evaluated inside the dependent's VM, so its **functions** are reachable via
 `host.require` (the inheritance model — base/library modules work this way); a
 legacy (non-code) dependency exports only plain data (booleans, numbers, strings,
-and tables thereof) via `host.require` / `host.providers`, since raw values,
-closures, and userdata can't otherwise cross VMs.
+and tables thereof) via `host.require`, since raw values, closures, and userdata
+can't otherwise cross VMs. A dependency may also be **optional**
+(`optional_dependencies`): loaded only if present, and fetched with `host.tryRequire`,
+which returns `nil` when it isn't installed.
 
 Paths are resolved relative to the *calling module's own root directory* (the
 unpacked package), which the host tracks per module — a module never sees
@@ -26,7 +28,6 @@ working directory). It does not check that the file exists.
 
 ```luau
 local img = host.path("assets/kontakt.png") -- "C:\...\modules\my-mod\assets\kontakt.png"
-host.providers("plugin-overlay") -- e.g. pass img to a container module
 ```
 
 ## host.resource.read(rel)
@@ -119,7 +120,8 @@ host.config.set("speed", 1.5) -- identical to host.settings.set("speed", 1.5)
 
 Returns the object that dependency `id` exported, where `id` is a module declared
 in this module's manifest `dependencies`. Raises an error if `id` is not loaded or
-exported nothing.
+exported nothing — use [`host.tryRequire`](#hosttryrequireid) for an optional
+dependency that may be absent.
 
 - If `id` is a [**`code_module`**](../module-package-format.md), its code was
   evaluated inside *this* VM, so `host.require` returns the live table it returned
@@ -138,21 +140,23 @@ local lib = host.require("com.example.preset-library")
 for _, p in ipairs(lib.presets) do ... end
 ```
 
-## host.providers(contract)
+## host.tryRequire(id)
 
-Decentralised discovery: returns an array (`{ table }`) of the export tables of
-**every** loaded module whose exports declare `provides == contract`. No central
-registry — a container module finds its extension modules by contract string.
-The result is live: a hot-loaded provider appears on the next call. Data only.
+Like [`host.require`](#hostrequireid), but returns **nil** instead of raising when `id`
+isn't loaded — for an **optional dependency** (an id declared in the manifest's
+`optional_dependencies`, which is loaded, and for a `code_module` evaluated into this VM,
+only when it is actually present). The module adapts to whether the dependency is there.
 
-- `contract: string` — the contract id to match against each module's exported
-  `provides` field.
-- Returns: a sequence of export tables (empty if no module provides the contract).
+- `id: string` — a module id, typically one from this module's `optional_dependencies`.
+- Returns: the dependency's exported object (functions intact for a `code_module`) if it
+  is loaded, otherwise `nil`.
 
 ```luau
--- an extension module's entry returned `return { provides = "kontakt-overlay", name = "...", regions = {...} }`
-for _, ext in ipairs(host.providers("kontakt-overlay")) do
-  registerOverlay(ext.name, ext.regions)
+-- Kontakt optionally uses Komplete Kontrol to detect itself hosted in a standalone KK
+-- window; if KK isn't installed, `kk` is nil and that detection is simply off.
+local kk = host.tryRequire("com.platform.komplete-kontrol")
+if kk and kk.standaloneWindow then
+  hosts[#hosts + 1] = kk.standaloneWindow -- reuse KK's own exported window matcher
 end
 ```
 
