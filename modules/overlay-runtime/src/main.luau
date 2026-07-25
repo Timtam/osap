@@ -109,6 +109,15 @@ function Overlay:addOCRButton(opts)
   return add(self, { kind = "ocr", label = opts.label, region = opts.region, hotkey = opts.hotkey, readOnly = opts.readOnly })
 end
 
+-- An OCR-read EDIT field (ReaHotkey's OCREdit — a distinct control type from OCRButton,
+-- not a "button that types"): on focus it reads + announces the current value via OCR
+-- and clicks the field so the caret lands in the real edit control, letting the user type
+-- to change it (e.g. rename a preset) then Tab on to a Save button. Announced as an
+-- "edit", so a screen-reader user hears it is an editable field, not a button.
+function Overlay:addOCREdit(opts)
+  return add(self, { kind = "ocredit", label = opts.label, region = opts.region, hotkey = opts.hotkey })
+end
+
 -- A toggle whose on/off state is read by image-matching its region against an
 -- "on" and an "off" template (e.g. a Kontakt library's mix switch). Activating
 -- clicks the region centre. Coordinates are origin-relative.
@@ -221,8 +230,8 @@ function Overlay:replace(label, build)
 end
 
 local TYPE_LABEL =
-  { static = "", hotspot = "button", custom = "button", ocr = "button", gtoggle = "toggle button",
-    tabcontrol = "tab control" }
+  { static = "", hotspot = "button", custom = "button", ocr = "button", ocredit = "edit",
+    gtoggle = "toggle button", tabcontrol = "tab control" }
 
 -- Origin (top-left) of the overlay's coordinate space in screen pixels: the
 -- client-area top-left of the active context's coordinate window — the plugin
@@ -363,7 +372,7 @@ local function speakControl(self, index, moveMouse)
   local parts = { c.label or "" }
   local tl = TYPE_LABEL[c.kind]
   if tl ~= "" then parts[#parts + 1] = tl end
-  if c.kind == "ocr" and c.region then
+  if (c.kind == "ocr" or c.kind == "ocredit") and c.region then
     local ox, oy = originOf(self, c)
     local region = { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] }
     if moveMouse and self.hoverToRead then
@@ -375,6 +384,13 @@ local function speakControl(self, index, moveMouse)
     end
     local r = host.ocr.recognize({ region = region })
     parts[#parts + 1] = (r.text ~= "" and r.text or "no text")
+    -- An OCREdit drops the caret into the real edit control on focus, so the user can type
+    -- to change the value right away. Read first (clean), then click. `moveMouse` is true
+    -- only on a focus read, so navigating away doesn't re-click.
+    if c.kind == "ocredit" and moveMouse then
+      host.input.click(ox + math.floor((c.region[1] + c.region[3]) / 2),
+        oy + math.floor((c.region[2] + c.region[4]) / 2))
+    end
   end
   if c.kind == "gtoggle" then
     local st = gtoggleState(self, c)
@@ -456,13 +472,13 @@ function Overlay:activate(index)
     host.speech.output((c.label or "") .. ", activated", { interrupt = true })
   elseif c.kind == "custom" and c.onActivate then
     c.onActivate(self) -- the overlay, so a header control can reach the active context
-  elseif c.kind == "ocr" and c.region then
-    -- An OCR button re-reads its label on activate. Unless it is `readOnly` (a pure
-    -- value/label announcer), it then clicks the region centre (it sits over a
-    -- clickable element), like ReaHotkey. A readOnly control just re-speaks — no
-    -- click — so navigating onto a readout near a destructive control is safe.
+  elseif (c.kind == "ocr" or c.kind == "ocredit") and c.region then
+    -- An OCR control re-reads its label on activate. An OCRButton then clicks the region
+    -- centre (it sits over a clickable element), like ReaHotkey — unless it is `readOnly`
+    -- (a pure value/label announcer, safe next to a destructive control). An OCREdit
+    -- always clicks: activating it re-focuses the edit field for typing.
     speakControl(self, i, false)
-    if not c.readOnly then
+    if c.kind == "ocredit" or not c.readOnly then
       local cx, cy = ocrCenter(self, c)
       host.input.click(cx, cy)
     end

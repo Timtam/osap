@@ -151,7 +151,7 @@ impl Backend for WindowsBackend {
         unsafe {
             EnumWindows(Some(enum_proc), &mut hwnds as *mut Vec<isize> as LPARAM);
         }
-        hwnds.into_iter().filter_map(window_info).collect()
+        hwnds.into_iter().filter_map(|h| window_info(h, true)).collect()
     }
 
     fn active_window(&self) -> Option<WinInfo> {
@@ -159,7 +159,7 @@ impl Backend for WindowsBackend {
         if hwnd.is_null() {
             return None;
         }
-        window_info(hwnd as isize)
+        window_info(hwnd as isize, false)
     }
 
     fn window_controls(&self, hwnd_val: isize) -> Vec<ControlInfo> {
@@ -555,7 +555,7 @@ impl Backend for WindowsBackend {
         let pending: Vec<isize> = FOREGROUND_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
         let mut unmatched_fg = false;
         for hwnd in pending {
-            match window_info(hwnd) {
+            match window_info(hwnd, true) {
                 Some(win) => events.on_window_activate(win),
                 // Foreground, but not matchable yet — remember to re-check shortly.
                 None => unmatched_fg = true,
@@ -801,17 +801,22 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
     CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
 }
 
-fn window_info(hwnd_val: isize) -> Option<WinInfo> {
+// `require_title`: drop windows with no title (the default — keeps the window LIST and
+// the foreground-event stream free of untitled system windows). The ACTIVE window is
+// looked up with `false`, because a focused window is always relevant even when it has
+// no title — e.g. Komplete Kontrol's custom-drawn "Save preset" dialog is an untitled
+// #32770, and dropping it would make host.window.active() nil so nothing could match it.
+fn window_info(hwnd_val: isize, require_title: bool) -> Option<WinInfo> {
     let hwnd = hwnd_val as HWND;
     unsafe {
         if IsWindowVisible(hwnd) == 0 {
             return None;
         }
         let title_len = GetWindowTextLengthW(hwnd);
-        if title_len <= 0 {
+        if require_title && title_len <= 0 {
             return None; // skip windows without a title
         }
-        let mut buf: Vec<u16> = vec![0; title_len as usize + 1];
+        let mut buf: Vec<u16> = vec![0; title_len.max(0) as usize + 1];
         let n = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
         let title = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
 

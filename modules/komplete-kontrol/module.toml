@@ -7,4 +7,4 @@ license = "MIT"
 dependencies = ["com.platform.overlay", "com.platform.daw-hosts"]
 
 [capabilities]
-require = ["window", "uia", "input", "speech", "hotkey", "keys", "timer", "log", "settings"]
+require = ["window", "uia", "screen", "ocr", "input", "speech", "hotkey", "keys", "timer", "log", "settings", "path"]

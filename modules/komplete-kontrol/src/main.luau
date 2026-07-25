@@ -38,6 +38,18 @@ local PREFS = {
   windows = { class = "#32770" },
 }
 
+-- KK standalone's "Save preset" dialog: another custom-drawn #32770 owned by Komplete
+-- Kontrol.exe, but with an EMPTY title — so, unlike Preferences, it cannot be matched by
+-- title (and the Scanning dialog is likewise an untitled #32770). It is therefore
+-- identified the ReaHotkey way, by an image LANDMARK: its "Save Preset" header
+-- (images/saveas-header.png), gated on below. The `not "Preferences"` guard keeps this
+-- off the Preferences dialog so the image search never runs there.
+local SAVEAS = {
+  title = { ["not"] = "Preferences" },
+  app = { exe = { contains = "Komplete Kontrol" } },
+  windows = { class = "#32770" },
+}
+
 -- Opt-out setting (default ON): auto-close KK's library browser when this KK overlay
 -- becomes active with the browser open. An open browser HIDES a loaded instrument (that
 -- is exactly why the KK overlay — not the Kontakt/library overlay — is the active one),
@@ -232,5 +244,22 @@ return {
     prefs:addHotspotButton({ label = "Close", at = { 548, 473 } })
     prefs:attach(PREFS, { naturalNav = true })
     host.log.info("Komplete Kontrol standalone Preferences overlay ready.")
+
+    -- STANDALONE "Save preset" dialog overlay (#32770, empty title, ~360x160). Custom-
+    -- drawn with no UIA, so — like ReaHotkey — an OCR read-out for the name field plus
+    -- hotspot Save/Cancel, coordinates client-relative (measured on the current KK).
+    -- Identified by the "Save Preset" header image (landmark), which also disambiguates
+    -- it from the Scanning dialog (the other untitled #32770).
+    local saveas = O.new("Komplete Kontrol Save preset")
+    -- OCR region kept strictly INSIDE the field's dark interior (x22-334, y68-85 on the
+    -- current KK) — its four corners must land on the dark background, not the medium-grey
+    -- frame, or the OCR `tighten` step reads the whole input box as content and shrinks the
+    -- text to an unreadable, clipped sliver (it then returned just "c").
+    saveas:addOCREdit({ label = "Preset name", region = { 26, 70, 330, 83 } })
+    saveas:addHotspotButton({ label = "Save", at = { 218, 135 } })
+    saveas:addHotspotButton({ label = "Cancel", at = { 293, 135 } })
+    saveas:landmark(host.path("images/saveas-header.png"))
+    saveas:attach(SAVEAS, { naturalNav = true })
+    host.log.info("Komplete Kontrol standalone Save preset overlay ready.")
   end,
 }
