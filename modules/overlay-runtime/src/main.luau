@@ -59,6 +59,8 @@ function O.new(label)
       -- Optional module hook fn(overlay) fired each time the overlay becomes the
       -- active one (e.g. Komplete Kontrol auto-closes its library browser).
       _onActivate = false,
+      -- Optional module hook fn(overlay) fired each time it stops being active.
+      _onDeactivate = false,
     },
     Overlay
   )
@@ -585,6 +587,14 @@ function Overlay:onActivate(fn)
   return self
 end
 
+-- A module hook fired (with the overlay) each time it stops being the active overlay —
+-- the counterpart to onActivate. Used e.g. by the Komplete Kontrol scanning dialog to
+-- announce "scanning stopped" (and let its progress loop wind down) when it closes.
+function Overlay:onDeactivate(fn)
+  self._onDeactivate = fn
+  return self
+end
+
 function Overlay:_activate()
   if self.active then return end
   self.active = true
@@ -624,6 +634,7 @@ function Overlay:_deactivate()
     host.keys.menuOpen(false)
   end
   self:_unregisterHotkeys()
+  if self._onDeactivate then self._onDeactivate(self) end
 end
 
 -- Re-evaluates the overlay's contexts against the current state (active window +

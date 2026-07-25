@@ -38,17 +38,21 @@ local PREFS = {
   windows = { class = "#32770" },
 }
 
--- KK standalone's "Save preset" dialog: another custom-drawn #32770 owned by Komplete
--- Kontrol.exe, but with an EMPTY title — so, unlike Preferences, it cannot be matched by
--- title (and the Scanning dialog is likewise an untitled #32770). It is therefore
--- identified the ReaHotkey way, by an image LANDMARK: its "Save Preset" header
--- (images/saveas-header.png), gated on below. The `not "Preferences"` guard keeps this
--- off the Preferences dialog so the image search never runs there.
-local SAVEAS = {
+-- An UNTITLED #32770 dialog owned by Komplete Kontrol.exe. Both the "Save preset" and the
+-- "Scanning in progress" dialogs are untitled #32770s (only Preferences carries a title),
+-- so one window matcher fits both; they are told apart on a shared ARBITER slot by an
+-- image landmark + specificity — Save As has the "Save Preset" header and wins, Scanning
+-- is the fallback for any other untitled KK dialog. The `not "Preferences"` guard keeps
+-- both off the Preferences dialog (so the Save As image search never runs there).
+local KK_UNTITLED_DIALOG = {
   title = { ["not"] = "Preferences" },
   app = { exe = { contains = "Komplete Kontrol" } },
   windows = { class = "#32770" },
 }
+
+-- Arbiter slot the two untitled-dialog overlays compete on, so at most one is active and
+-- the more specific (Save As, with its landmark) wins over the Scanning fallback.
+local KK_DIALOG_SLOT = "com.platform.kk-dialog"
 
 -- Opt-out setting (default ON): auto-close KK's library browser when this KK overlay
 -- becomes active with the browser open. An open browser HIDES a loaded instrument (that
@@ -259,7 +263,49 @@ return {
     saveas:addHotspotButton({ label = "Save", at = { 218, 135 } })
     saveas:addHotspotButton({ label = "Cancel", at = { 293, 135 } })
     saveas:landmark(host.path("images/saveas-header.png"))
-    saveas:attach(SAVEAS, { naturalNav = true })
+    -- Specificity 1 on the shared slot: with its "Save Preset" landmark present it beats
+    -- the Scanning fallback (0) whenever this really is the Save-preset dialog.
+    saveas:attach(KK_UNTITLED_DIALOG, { slot = KK_DIALOG_SLOT, specificity = 1, naturalNav = true })
     host.log.info("Komplete Kontrol standalone Save preset overlay ready.")
+
+    -- STANDALONE "Scanning in progress" dialog overlay: shown while KK rescans its
+    -- library/plug-ins. It is another untitled #32770 with no distinguishing image, so it
+    -- is the FALLBACK on the shared slot (specificity 0) — active on an untitled KK dialog
+    -- only when the Save As overlay (1) does NOT claim it. Mirrors ReaHotkey: a static
+    -- "scanning in progress" text, re-announced every ~2 s while open, and "scanning
+    -- stopped" when it closes. Built to spec — could not be live-tested (needs a scan
+    -- running), so detection/timing may need tuning against a real scan.
+    local scan = O.new("Komplete Kontrol Scanning")
+    scan:addStaticText("Scanning in progress")
+    scan:onActivate(function(o)
+      -- The fallback overlay is briefly claimed on the shared slot while Save As's async
+      -- landmark is still resolving (opening/closing the Save preset dialog) — a transient
+      -- that must stay silent. So "commit" to being a real scan only after the overlay has
+      -- stayed active past that window; a transient claim deactivates first and commits
+      -- nothing. The first "scanning in progress" comes from the static text's focus
+      -- announcement; the commit only starts a self-rescheduling ~2 s progress ping that
+      -- winds itself down when the dialog closes.
+      o._scanCommitted = false
+      host.timer.after(800, function()
+        if not o.active then return end
+        o._scanCommitted = true
+        local function ping()
+          if not o.active then return end
+          host.speech.output("Scanning in progress", { interrupt = true })
+          host.timer.after(2000, ping)
+        end
+        host.timer.after(2000, ping)
+      end)
+    end)
+    scan:onDeactivate(function(o)
+      -- Only announce the end of a scan that actually started (committed) — never for a
+      -- transient claim during a Save As open/close.
+      if o._scanCommitted then
+        host.speech.output("Scanning stopped", { interrupt = true })
+      end
+      o._scanCommitted = false
+    end)
+    scan:attach(KK_UNTITLED_DIALOG, { slot = KK_DIALOG_SLOT, specificity = 0, naturalNav = true })
+    host.log.info("Komplete Kontrol standalone Scanning overlay ready.")
   end,
 }
