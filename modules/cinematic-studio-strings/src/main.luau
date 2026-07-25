@@ -24,21 +24,24 @@ return {
   activate = function()
     kontakt.library("Cinematic Studio Strings", img("images/CinematicStudioStrings/Product.png"), function(ov)
       ov:addStaticText("Cinematic Studio Strings")
-      -- ReaHotkey: four mic HotspotButtons (Spot 1/2, Main, Room). HotspotButton =
-      -- click the point + announce "activated" — behaviour-identical to ReaHotkey.
-      ov:addHotspotButton({ label = "Spot 1 Mic", at = { 27, 370 } })
-      ov:addHotspotButton({ label = "Spot 2 Mic", at = { 67, 370 } })
-      ov:addHotspotButton({ label = "Main Mic", at = { 107, 370 } })
-      ov:addHotspotButton({ label = "Room Mic", at = { 147, 370 } })
-      -- ReaHotkey: the Mix Position graphical toggle (state read by image-matching the
-      -- MixOn/MixOff templates over its region; click to toggle). Default match scales
-      -- (the templates are ReaHotkey's, not captured this session, so multi-scale helps).
-      ov:addGraphicalToggle({
-        label = "Mix Position",
-        region = { 180, 362, 212, 378 },
-        onImage = img("images/CinematicStudioStrings/MixOn.png"),
-        offImage = img("images/CinematicStudioStrings/MixOff.png"),
-      })
+      -- The five mic on/off toggles (Spot 1/2, Main, Room, Mix): each clicks its power (⏻)
+      -- icon to toggle the mic and reads on/off from a SINGLE pixel on that icon (ReaHotkey's
+      -- HotspotToggleButton — the CSS Brass overlay uses the same pixel-toggle). So a screen-
+      -- reader user hears every mic's state, not just Mix.
+      --
+      -- Coordinates are relative to the "CINEMATIC STUDIO STRINGS" LANDMARK's top-left (the
+      -- overlay is landmark-anchored — see O:landmark / originOf), so they hold regardless of
+      -- host, Kontakt browser state, window size or version: the wordmark and the mixer move
+      -- together. Measured against the live CSS 8.11 UI: the ⏻ icons sit at landmark x
+      -- {-138,-98,-58,-18,22} (a 40 px pitch), and the discriminating pixel is on the ring at
+      -- y = +366. Lit, the ⏻ is CSS's accent lilac (≈180,165,230); unlit it is dim grey
+      -- (≈78,79,85); nearest wins.
+      local ON, OFF = { 180, 165, 230 }, { 78, 79, 85 }
+      ov:addHotspotToggle({ label = "Spot 1 Mic",   at = { -138, 366 }, onColor = ON, offColor = OFF })
+      ov:addHotspotToggle({ label = "Spot 2 Mic",   at = { -98, 366 }, onColor = ON, offColor = OFF })
+      ov:addHotspotToggle({ label = "Main Mic",     at = { -58, 366 }, onColor = ON, offColor = OFF })
+      ov:addHotspotToggle({ label = "Room Mic",     at = { -18, 366 }, onColor = ON, offColor = OFF })
+      ov:addHotspotToggle({ label = "Mix Position", at = { 22, 366 }, onColor = ON, offColor = OFF })
     end)
   end,
 }

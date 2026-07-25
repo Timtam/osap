@@ -77,6 +77,21 @@ ov:addGraphicalToggle({
 })
 ```
 
+## O:addHotspotToggle(opts)
+
+Appends a toggle whose on/off state is read from a **single pixel** at its click point (ReaHotkey's `HotspotToggleButton`) — cheap (one screen touch), where a region scan would cost ~16 ms *per pixel*. The pixel is compared to an on/off reference colour and the **nearest** wins. Activating clicks the point (toggling it) then re-reads the state after ~150 ms. `opts: { label: string, at: {number, number}, onColor: {number, number, number}, offColor: {number, number, number}, hotkey: string?, rawOrigin: boolean? }` — `at` is `{x, y}` origin-relative; `onColor`/`offColor` are `{r, g, b}`.
+
+Returns `{ kind = "hotspottoggle", label, at, onColor, offColor, hotkey, rawOrigin }`. Spoken state is `"on"` / `"off"` (omitted when the pixel can't be read). Prefer this over `addGraphicalToggle` when the control has a distinct lit/unlit colour (an indicator LED, a lit ⏻ icon) — it needs no template images and is a fraction of the cost.
+
+```lua
+ov:addHotspotToggle({
+  label = "Spot 1 Mic",
+  at = { -138, 366 },
+  onColor = { 180, 165, 230 }, -- lit (accent)
+  offColor = { 78, 79, 85 },   -- unlit (dim grey)
+})
+```
+
 ## O:focusNext()
 
 Moves focus to the next control (wrapping) and speaks it, moving the mouse onto OCR controls if `hoverToRead` is set. No-op when there are no controls. Returns nothing.
@@ -133,6 +148,17 @@ satisfied only while `image` (an **absolute** path, via `host.path`) is found wi
 the active context's region. A derived / library overlay uses a landmark to take
 over from its base only when its product wordmark is on screen. Both return the
 overlay (chainable).
+
+**Coordinate anchoring (opt-in):** pass `landmark(image, { anchor = true })` and, while
+the landmark is on screen, the overlay's control coordinates resolve **relative to the
+landmark's top-left** instead of the plugin's client area (a `rawOrigin` control still
+uses the client). So an overlay whose landmark sits *in the same UI panel as its
+controls* (a library's wordmark above its mixer) stays correctly positioned regardless
+of host, window size, or plugin chrome/browser state — the landmark and the controls
+move together. Author such controls relative to the wordmark (coordinates may be
+negative if a control sits above/left of it). WITHOUT `anchor`, `landmark` is a pure
+gate and controls stay client-relative — the right choice when the image is used only
+to tell the overlay apart from a sibling on a shared slot (a dialog's header image).
 
 ```lua
 ov:landmark(host.path("images/MyLib/wordmark.png"))

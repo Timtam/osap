@@ -19,6 +19,10 @@ local daw = host.require("com.platform.daw-hosts")
 local kk = host.tryRequire("com.platform.komplete-kontrol")
 
 local SLOT = "com.platform.kontakt"
+-- A SEPARATE arbiter slot for the STANDALONE Kontakt window (its own top-level window,
+-- not a plugin embedded in a host). The standalone header and every library's standalone
+-- variant compete here, exactly as the embedded base + libraries compete on SLOT.
+local STANDALONE_SLOT = "com.platform.kontakt-standalone"
 local BUTTON, MENUITEM = 50000, 50011
 
 -- (The KK library-browser auto-close + its opt-out setting now live in the Komplete
@@ -41,6 +45,16 @@ local function anyKontakt(c)
     if v.identify(c) then return true end
   end
   return false
+end
+
+-- The version content offset of a Kontakt control (K7 = 0, K8 = +29): libraries are
+-- authored in the Kontakt 7 frame, and Kontakt 8 renders content 29 px lower, so EVERY
+-- host path adds this on top of its own chrome offset. Determined by UIA identity.
+local function versionOffsetOf(c)
+  for _, v in ipairs(VARIANTS) do
+    if v.identify(c) then return v.offset[1], v.offset[2] end
+  end
+  return 0, 0
 end
 
 -- ── Komplete Kontrol nesting ──────────────────────────────────────────────────
@@ -123,12 +137,17 @@ local function resolveOffset(c)
     if cached then return cached[1], cached[2] end
     local kc = findNestedKontakt(c)
     if kc and kc.client and c.client then
-      local off = { kc.client.x - c.client.x, kc.client.y - c.client.y }
+      -- KK chrome offset (nested Kontakt.client − KK.client) PLUS the nested Kontakt's
+      -- version offset — libraries are authored in the K7 frame, so K8 needs +29 here
+      -- exactly as in the bare/standalone paths (this branch used to omit it, so a
+      -- KK-nested library sat 29 px too high on Kontakt 8).
+      local vx, vy = versionOffsetOf(kc)
+      local off = { kc.client.x - c.client.x + vx, kc.client.y - c.client.y + vy }
       offsetCache[key] = off
       host.log.info(string.format(
         "Kontakt nested in Komplete Kontrol — dynamic content offset (%d, %d) "
-          .. "[Kontakt.client (%d,%d) − KK.client (%d,%d)]",
-        off[1], off[2], kc.client.x, kc.client.y, c.client.x, c.client.y
+          .. "[Kontakt.client (%d,%d) − KK.client (%d,%d) + version (%d,%d)]",
+        off[1], off[2], kc.client.x, kc.client.y, c.client.x, c.client.y, vx, vy
       ))
       return off[1], off[2]
     end
@@ -143,6 +162,20 @@ local function resolveOffset(c)
     end
   end
   return 0, 0 -- version not yet identified (UIA not ready): transient, NOT cached
+end
+
+-- Content offset for a STANDALONE Kontakt window (Kontakt N.exe on its own). Measured
+-- live: the Kontakt content Qt control's client coincides with the window client (no NI
+-- menu-bar chrome offset), so the only shift a library authored in the Kontakt 7 frame
+-- needs is the bare version offset (K7 = 0, K8 = +29) — the same as resolveOffset's bare
+-- branch. The version is read from the "^Kontakt N" title (which the standalone matcher
+-- guarantees).
+local function standaloneOffset(o)
+  local ver = string.match((o and o.title) or "", "^Kontakt (%d)")
+  for _, v in ipairs(VARIANTS) do
+    if ver and v.name == "Kontakt " .. ver then return v.offset[1], v.offset[2] end
+  end
+  return 0, 0
 end
 
 -- The plugin control to anchor on: prefer a KK container that is hosting Kontakt
@@ -343,6 +376,27 @@ local KONTAKT_STANDALONE = {
   windows = { class = { prefix = "NINormalWindow" } },
 }
 
+-- Builds a library overlay — the inherited Kontakt header plus the library's own controls,
+-- gated on `landmark` — and binds it via `cfg.attach(ov)`. Shared by the EMBEDDED variant
+-- (in a DAW / nested in KK: the KK chrome header, the dynamic host/version offset) and the
+-- STANDALONE variant (Kontakt's own window: bare header, plain version offset). `build(ov)`
+-- adds the library's controls the same way for both. Runs in the LIBRARY module's VM.
+local function buildLibraryOverlay(name, landmark, build, cfg)
+  local ov = O.new("Kontakt — " .. (name or "library"))
+  if cfg.kkHeader then addKKHeader(ov) end
+  addHeader(ov)
+  ov._originOffset = cfg.offset
+  ov:onActivate(onPluginActive)
+  if build then build(ov) end
+  -- Anchor coordinates to the landmark: a library's controls are authored relative to
+  -- its on-screen wordmark, so they stay correct across every host (DAW / KK / standalone)
+  -- and Kontakt browser state, without any content/version/chrome offset.
+  if landmark then ov:landmark(landmark, { anchor = true }) end
+  cfg.attach(ov)
+  ov:_startMenuWatch()
+  return ov
+end
+
 return {
   -- Standalone side effect, run only in Kontakt's own VM: the base overlay.
   activate = function()
@@ -378,7 +432,10 @@ return {
     -- Tab / Shift+Tab step through Kontakt's OWN focusable controls (its window doesn't
     -- move focus on Tab itself) — ReaHotkey's Standalone Tab pass-through.
     sa:enableUiaPassThrough()
-    sa:attach(KONTAKT_STANDALONE)
+    -- Join the standalone slot at the LOWEST specificity, so a library's standalone
+    -- variant (specificity 2, gated on its landmark) takes over when its library is
+    -- loaded, and this header is the resting default otherwise.
+    sa:attach(KONTAKT_STANDALONE, { slot = STANDALONE_SLOT, specificity = 0 })
     sa:_startMenuWatch()
     host.log.info("Kontakt standalone overlay ready.")
   end,
@@ -395,20 +452,32 @@ return {
   -- imageSearch runs in Kontakt's identity scope, so a relative path would resolve
   -- under Kontakt's root, not the library's.
   library = function(name, landmark, build)
-    local ov = O.new("Kontakt — " .. (name or "library"))
-    addKKHeader(ov)
-    addHeader(ov)
-    ov._originOffset = resolveOffset
-    ov:onActivate(onPluginActive)
-    if build then build(ov) end
-    -- Match = Kontakt focused (the embedded context) AND this library's landmark
-    -- visible (re-checked on the poll below, since a library loads/unloads inside
-    -- Kontakt with no window event).
-    if landmark then ov:landmark(landmark) end
-    -- Specificity 2: a library wins over both the Kontakt base (1) and the KK chrome
-    -- (0) on the shared slot whenever its landmark is present.
-    ov:attachEmbedded(spec(), { slot = SLOT, specificity = 2, pollMatch = 500 })
-    ov:_startMenuWatch()
+    -- EMBEDDED variant (in a DAW, or nested in Komplete Kontrol) — the ReaHotkey-faithful
+    -- case. Includes the KK chrome header (shown only while nested) and the dynamic host
+    -- offset. Match = Kontakt focused (embedded context) AND this library's landmark
+    -- visible (re-checked on the poll, since a library loads/unloads with no window
+    -- event). Specificity 2 wins over the Kontakt base (1) and the KK chrome (0).
+    local ov = buildLibraryOverlay(name, landmark, build, {
+      kkHeader = true,
+      offset = resolveOffset,
+      attach = function(o)
+        o:attachEmbedded(spec(), { slot = SLOT, specificity = 2, pollMatch = 500 })
+      end,
+    })
+
+    -- STANDALONE variant (Kontakt N.exe on its own) — BEYOND ReaHotkey, which shows only a
+    -- header there. The SAME library controls over the top-level Kontakt window: bare
+    -- header (never nested in KK), origin = the window client + the K7/K8 version offset.
+    -- Its own slot; specificity 2 wins over the standalone header (0) whenever this
+    -- library's landmark is on screen, else the header is the resting default.
+    buildLibraryOverlay(name, landmark, build, {
+      kkHeader = false,
+      offset = standaloneOffset,
+      attach = function(o)
+        o:attach(KONTAKT_STANDALONE, { slot = STANDALONE_SLOT, specificity = 2, pollMatch = 500 })
+      end,
+    })
+
     host.log.info("Kontakt library overlay ready: " .. (name or "library"))
     return ov
   end,

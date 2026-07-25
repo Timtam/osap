@@ -141,6 +141,22 @@ function Overlay:addGraphicalToggle(opts)
   })
 end
 
+-- A toggle whose on/off state is read from a SINGLE pixel at its click point (one screen
+-- touch — cheap, unlike a per-pixel region scan), compared to an on/off reference colour
+-- (nearest wins) — ReaHotkey's HotspotToggleButton. Activating clicks the point (toggling
+-- it) and re-reads the state. `at` is origin-relative; `onColor`/`offColor` are {r, g, b}.
+function Overlay:addHotspotToggle(opts)
+  return add(self, {
+    kind = "hotspottoggle",
+    label = opts.label,
+    at = opts.at,
+    onColor = opts.onColor,
+    offColor = opts.offColor,
+    hotkey = opts.hotkey,
+    rawOrigin = opts.rawOrigin,
+  })
+end
+
 -- An extra activation condition ANDed on top of the context match: `fn(origin)`
 -- (origin = the active context's coordinate window/control) returns whether this
 -- overlay should be active. A derived/library overlay uses it to gate on its own,
@@ -154,7 +170,14 @@ end
 -- region (a library's product wordmark inside the plugin). `image` must be an
 -- ABSOLUTE path (host.path) — the imageSearch runs in the active context's identity
 -- scope, so a relative path would resolve under the wrong module root.
-function Overlay:landmark(image)
+--
+-- `opts.anchor` (default false): also ANCHOR the overlay's control coordinates to the
+-- landmark's on-screen position (see originOf) — for a library whose landmark sits in
+-- the same UI panel as its controls, so they stay put across hosts/window states.
+-- WITHOUT it, :landmark is a pure gate and controls stay client-relative (e.g. a dialog
+-- using its header image only to tell itself apart from a sibling on a shared slot).
+function Overlay:landmark(image, opts)
+  self._anchorLandmark = opts ~= nil and opts.anchor == true
   -- The template match runs on a worker thread (host.screen.imageSearchAsync) so the
   -- detection poll never blocks the main thread on it. The gate returns the LAST
   -- known result and kicks off a refresh (at most one in flight); when the result
@@ -184,6 +207,10 @@ function Overlay:landmark(image)
         pending = false
         local was = matched
         lastHit = hit or nil
+        -- Expose the hit's screen rect so a landmark-anchored overlay can resolve its
+        -- control coordinates RELATIVE to the on-screen library UI (host / browser-state /
+        -- version independent — the wordmark and the controls move together). See originOf.
+        self._landmarkHit = hit or nil
         matched = hit ~= nil
         if matched ~= was then self:_recheck() end
       end)
@@ -237,7 +264,7 @@ end
 
 local TYPE_LABEL =
   { static = "", hotspot = "button", custom = "button", ocr = "button", ocredit = "edit",
-    gtoggle = "toggle button", tabcontrol = "tab control" }
+    gtoggle = "toggle button", hotspottoggle = "toggle button", tabcontrol = "tab control" }
 
 -- Origin (top-left) of the overlay's coordinate space in screen pixels: the
 -- client-area top-left of the active context's coordinate window — the plugin
@@ -260,8 +287,21 @@ local function originOf(self, control)
       -- frame. This lets one overlay mix two coordinate frames — content controls
       -- (offset applied) and host-chrome controls like KK's menu hotspot (raw) —
       -- which is exactly the KK→Kontakt nesting case (two frames).
+      if control and control.rawOrigin then
+        return o.client.x, o.client.y
+      end
+      -- A landmark-ANCHORED overlay (landmark(image, {anchor=true}) and its image is on
+      -- screen) resolves NON-raw control coordinates relative to the landmark's top-left,
+      -- so positions track the on-screen library UI regardless of host, Kontakt browser
+      -- state, window size or version — the wordmark and the controls move together.
+      -- This replaces the absolute content frame (which shifts per host) entirely.
+      -- Opt-in: an overlay that uses :landmark only as a GATE (e.g. a dialog telling
+      -- itself apart from a sibling on a shared slot) keeps client-relative coordinates.
+      if self._anchorLandmark and self._landmarkHit then
+        return self._landmarkHit.x, self._landmarkHit.y
+      end
       local dx, dy = 0, 0
-      if self._originOffset and not (control and control.rawOrigin) then
+      if self._originOffset then
         dx, dy = self._originOffset(o)
       end
       return o.client.x + dx, o.client.y + dy
@@ -368,6 +408,19 @@ local function gtoggleState(self, c)
   return nil
 end
 
+-- On/off state of a HotspotToggle: read the single pixel at its click point and return
+-- whichever reference colour it is closer to (Manhattan distance) — ReaHotkey's pixel
+-- toggle. Cheap (one screen touch). nil if unconfigured or the pixel can't be read.
+local function hotspotToggleState(self, c)
+  if not (c.at and c.onColor and c.offColor) then return nil end
+  local ox, oy = originOf(self, c)
+  local p = host.screen.pixel(ox + c.at[1], oy + c.at[2])
+  if not p then return nil end
+  local don = math.abs(p.r - c.onColor[1]) + math.abs(p.g - c.onColor[2]) + math.abs(p.b - c.onColor[3])
+  local doff = math.abs(p.r - c.offColor[1]) + math.abs(p.g - c.offColor[2]) + math.abs(p.b - c.offColor[3])
+  if don <= doff then return "on" else return "off" end
+end
+
 local function speakControl(self, index, moveMouse)
   local c = self.controls[index]
   if not c then return end
@@ -403,6 +456,10 @@ local function speakControl(self, index, moveMouse)
   end
   if c.kind == "gtoggle" then
     local st = gtoggleState(self, c)
+    if st then parts[#parts + 1] = st end
+  end
+  if c.kind == "hotspottoggle" then
+    local st = hotspotToggleState(self, c)
     if st then parts[#parts + 1] = st end
   end
   host.speech.output(table.concat(parts, ", "), { interrupt = true })
@@ -502,6 +559,11 @@ function Overlay:activate(index)
     host.input.click(ox + math.floor((c.region[1] + c.region[3]) / 2),
       oy + math.floor((c.region[2] + c.region[4]) / 2))
     -- Re-read the new state once the UI redraws.
+    if host.timer then host.timer.after(150, function() speakControl(self, i, false) end) end
+  elseif c.kind == "hotspottoggle" and c.at then
+    local ox, oy = originOf(self, c)
+    host.input.click(ox + c.at[1], oy + c.at[2])
+    -- Re-read the new state (announced with the label) once the UI redraws.
     if host.timer then host.timer.after(150, function() speakControl(self, i, false) end) end
   end
 end
