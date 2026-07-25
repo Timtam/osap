@@ -76,18 +76,24 @@ Have: `host.window.controls`, `host.window.focusChain`, `host.uia.find`,
 **`host.screen.imageSearch(template, {region, tolerance})`** (template match — the
 library-identity primitive, already implemented; honours the template's alpha as a
 mask), `host.path`/`host.resource` (absolute package paths), the overlay prelude
-(contexts/activeCtx/attachEmbedded/navigation/origin), `host.require(id)` +
-**`host.providers(contract)`** (export tables indexed by a `provides` contract —
-lets a container discover extension modules with no central list, live for
-hot-load).
+(contexts/activeCtx/attachEmbedded/navigation/origin), and **`host.require(id)`**
+— for a [`code_module`](module-package-format.md) dependency the dep's code is
+evaluated *inside the dependent's VM*, so its returned table crosses with
+**functions intact** (the mechanism the decentralised-library decision below rests
+on). *(An earlier soft-discovery primitive `host.providers(contract)` was designed
+here but never needed — the inheritance model subsumed it and it has since been
+removed.)*
 
-**Decentralised libraries (key decision):** per-module VM isolation means Lua
-functions can't cross modules, only data. So a **library is its own module** that
-**depends on the container** and its entry **returns a declarative descriptor**:
-`{ provides = "kontakt.library", libraries = [ { name, vendor, image (absolute,
-via host.path), controls = [ {kind, label, at|region, onImage, offImage} ] } ] }`.
-The container queries `host.providers("kontakt.library")` and interprets the data —
-no callbacks cross VMs. New library support = a small installable data module.
+**Decentralised libraries (key decision):** a **library is its own
+`code_module`** that **depends on the container** (`kontakt`) and, evaluated into
+the container's VM, calls the container's exported builder directly —
+`kontakt.library(name, image, function(ov) ov:addHotspotButton{…} end)` — with
+**closures intact**. (The original plan here was data-only descriptors queried via
+`host.providers`, because plain VM isolation can't pass functions; the
+inheritance model — [`code_module`](module-package-format.md) deps evaluated into
+the dependent VM — removed that limit, so libraries now ship real control-builder
+code, not just declarative tables.) New library support = a small installable
+`code_module`.
 
 New (to build):
 - Overlay prelude → **control tree with portal slots + recursive flattener**, the
@@ -98,17 +104,19 @@ New (to build):
 
 ## Module shapes
 
-- **Container provider** (e.g. `kontakt`): attaches to the plugin (control-class +
-  UIA identity), holds generic header controls + a per-container coordinate
-  offset, queries `host.providers("kontakt.library")` for descriptors, runs the
-  image-detection poll, and mounts the matched library's controls. A built-in
-  NoLibrary fallback (header only) is the resting default. May itself export a
-  container descriptor so KK can host it (Phase B).
-- **Library** (e.g. `cinematic-studio-strings`): `dependencies = ["…kontakt"]`,
-  entry **returns** `{ provides = "kontakt.library", libraries = [ {name, vendor,
-  image, controls} ] }` — pure data, image paths absolute via `host.path`. One
-  module may carry several products/patches. Installable on its own via the
-  manager (topic `osap-module`) — decentralised, no central list.
+- **Container** (e.g. `kontakt`, a `code_module`): attaches to the plugin
+  (control-class + UIA identity), holds generic header controls + a per-container
+  coordinate offset, and **exports a `library(name, image, build)` builder**. Each
+  library that depends on it calls that builder (evaluated into the container's VM)
+  to register itself; the container runs the image-detection poll and mounts the
+  matched library's controls. A built-in NoLibrary fallback (header only) is the
+  resting default. May itself be hosted by KK (Phase B).
+- **Library** (e.g. `cinematic-studio-strings`, a `code_module`):
+  `dependencies = ["…kontakt"]`, entry **calls**
+  `kontakt.library(name, image, function(ov) …control builders… end)` — real
+  closures, image paths absolute via `host.path`. One module may carry several
+  products/patches. Installable on its own via the manager (topic `osap-module`) —
+  decentralised, no central list.
 
 ## Concrete facts (from ReaHotkey, to port)
 
