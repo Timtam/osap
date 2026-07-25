@@ -26,6 +26,18 @@ local STANDALONE = {
   windows = { class = { prefix = "NINormalWindow" } },
 }
 
+-- KK standalone's Preferences dialog: a standard Win32 dialog frame (#32770) titled
+-- "Preferences", owned by Komplete Kontrol.exe. Its content is custom-drawn Qt with NO
+-- UIA at all (the whole tree is two nameless Panes), so — exactly like ReaHotkey — it is
+-- driven purely by client-relative PIXEL COORDINATES. Those below were measured on the
+-- current KK version (ReaHotkey's have already drifted) against a ~600x496 client, and
+-- may need re-calibration after a KK update. Verified reachable via PrintWindow capture.
+local PREFS = {
+  title = { exact = "Preferences" },
+  app = { exe = { contains = "Komplete Kontrol" } },
+  windows = { class = "#32770" },
+}
+
 -- Opt-out setting (default ON): auto-close KK's library browser when this KK overlay
 -- becomes active with the browser open. An open browser HIDES a loaded instrument (that
 -- is exactly why the KK overlay — not the Kontakt/library overlay — is the active one),
@@ -98,6 +110,28 @@ local function onKKActive(o)
   end
 end
 
+-- Builds an onActivate that clicks a SEQUENCE of client-relative points in the active
+-- window, with a settle delay between each — the way the tabbed, UIA-less Preferences
+-- dialog is driven: switch to the owning tab (and sub-tab), then click the control. So
+-- every action is self-contained: the user need not first navigate to the right tab.
+-- The origin (dialog client, in screen coords) is read once at activation.
+local function prefsAction(label, points)
+  return function(o)
+    local ctx = o.activeCtx and o.activeCtx.origin()
+    local c = ctx and ctx.client
+    if not c then return end
+    for i, p in ipairs(points) do
+      local sx, sy = c.x + p[1], c.y + p[2]
+      if i == 1 then
+        host.input.click(sx, sy)
+      else
+        host.timer.after(400 * (i - 1), function() host.input.click(sx, sy) end)
+      end
+    end
+    host.speech.output(label .. ", activated", { interrupt = true })
+  end
+end
+
 return {
   -- Standalone side effect (this module's own VM): the KK base overlay.
   activate = function()
@@ -155,5 +189,48 @@ return {
     sa:attach(STANDALONE, { naturalNav = true })
     sa:_startMenuWatch()
     host.log.info("Komplete Kontrol standalone overlay ready.")
+
+    -- STANDALONE Preferences dialog overlay (#32770 "Preferences"). Robust core: switch
+    -- the five tabs, close, and the actionable items ReaHotkey exposes (library / plug-in
+    -- rescans, add user directory). The tabs' content is not UIA-readable, so each action
+    -- auto-navigates to its own tab/sub-tab first (prefsAction). The Plug-ins/Library
+    -- checkboxes (pixel-state) are a follow-up. Coordinates are client-relative to the
+    -- ~600x496 dialog (measured on the current KK version — re-calibrate after updates).
+    local prefs = O.new("Komplete Kontrol Preferences")
+    -- One tab control for the five left-column tabs (ReaHotkey's TabControl): Left/Right
+    -- switch tabs, and only the CURRENT tab's controls are Tab-reachable. Each tab's `at`
+    -- is the client-relative point clicked to switch the underlying dialog.
+    local tc = prefs:addTabControl({ tabs = {
+      { label = "Audio", at = { 62, 78 } },
+      { label = "MIDI", at = { 62, 115 } },
+      { label = "General", at = { 62, 156 } },
+      { label = "Library", at = { 62, 196 } },
+      { label = "Plug-ins", at = { 62, 237 } },
+    } })
+    -- Audio / MIDI / General expose no controls of their own (only the global Close).
+    -- Library tab (4): rescans + add-directory. The user is already on the Library tab
+    -- (the tab control clicked it), so each action only needs its Factory/User sub-tab
+    -- (163,74 / 240,74 — not UIA-readable) then the control.
+    prefs:addCustomButton({
+      label = "Rescan factory library",
+      onActivate = prefsAction("Rescan factory library", { { 163, 74 }, { 548, 420 } }),
+    }).when = tc:onTab(4)
+    prefs:addCustomButton({
+      label = "Rescan user library",
+      onActivate = prefsAction("Rescan user library", { { 240, 74 }, { 548, 420 } }),
+    }).when = tc:onTab(4)
+    prefs:addCustomButton({
+      label = "Add user library directory",
+      onActivate = prefsAction("Add user library directory", { { 240, 74 }, { 163, 420 } }),
+    }).when = tc:onTab(4)
+    -- Plug-ins tab (5): rescan (on its Manager sub-tab, 163,74).
+    prefs:addCustomButton({
+      label = "Rescan plug-ins",
+      onActivate = prefsAction("Rescan plug-ins", { { 163, 74 }, { 548, 398 } }),
+    }).when = tc:onTab(5)
+    -- Close is available on every tab.
+    prefs:addHotspotButton({ label = "Close", at = { 548, 473 } })
+    prefs:attach(PREFS, { naturalNav = true })
+    host.log.info("Komplete Kontrol standalone Preferences overlay ready.")
   end,
 }

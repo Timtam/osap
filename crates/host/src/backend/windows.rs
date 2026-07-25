@@ -30,7 +30,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetGUIThreadInfo, GetMessageW, GetSystemMetrics, GetWindowRect,
     GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
     PostThreadMessageW, RegisterClassW, SetCursorPos, SetWindowsHookExW, TranslateMessage,
-    EVENT_OBJECT_FOCUS, EVENT_SYSTEM_FOREGROUND, GA_PARENT, GUITHREADINFO,
+    EVENT_OBJECT_FOCUS, EVENT_OBJECT_NAMECHANGE, EVENT_SYSTEM_FOREGROUND, GA_PARENT, GUITHREADINFO,
     HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, SM_CXSCREEN, SM_CYSCREEN,
     WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_NULL, WM_SYSKEYDOWN,
     WM_SYSKEYUP, WNDCLASSW,
@@ -46,6 +46,11 @@ thread_local! {
     /// focus change need not raise a foreground event (e.g. focusing into a
     /// plugin embedded in an already-foreground DAW host window).
     static FOCUS_DIRTY: std::cell::Cell<bool> = std::cell::Cell::new(false);
+    /// Deadlines for delayed re-checks: a window can become foreground before it is
+    /// matchable (empty title / not yet shown — window_info None, so active() is nil),
+    /// then settle with NO further event. After such a foreground event we queue a few
+    /// re-checks here so the window is picked up once it has a title and is visible.
+    static DELAYED_RECHECK: RefCell<Vec<std::time::Instant>> = RefCell::new(Vec::new());
 }
 
 /// HWND (as isize) of the lazily-created message-only window that owns global
@@ -471,6 +476,23 @@ impl Backend for WindowsBackend {
                 WINEVENT_OUTOFCONTEXT,
             );
         }
+        // And the foreground window's TITLE changing. Some windows (e.g. Komplete
+        // Kontrol's custom-drawn Preferences dialog) become foreground with an empty
+        // title, then set it a beat later with no focus event — so the foreground
+        // re-check runs before the window is matchable and it stays undetected until
+        // the next foreground change (Alt+Tab). A name-change on the foreground window
+        // re-checks once the title is finally there.
+        unsafe {
+            SetWinEventHook(
+                EVENT_OBJECT_NAMECHANGE,
+                EVENT_OBJECT_NAMECHANGE,
+                std::ptr::null_mut::<core::ffi::c_void>() as HMODULE,
+                Some(win_event_proc),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT,
+            );
+        }
         // Intentionally leak the hook handles: they live for the process lifetime.
         Ok(())
     }
@@ -531,9 +553,12 @@ impl Backend for WindowsBackend {
             events.on_hotkey(id);
         }
         let pending: Vec<isize> = FOREGROUND_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
+        let mut unmatched_fg = false;
         for hwnd in pending {
-            if let Some(win) = window_info(hwnd) {
-                events.on_window_activate(win);
+            match window_info(hwnd) {
+                Some(win) => events.on_window_activate(win),
+                // Foreground, but not matchable yet — remember to re-check shortly.
+                None => unmatched_fg = true,
             }
         }
         let pending_keys: Vec<(u32, u8)> = KEY_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
@@ -541,6 +566,33 @@ impl Backend for WindowsBackend {
             events.on_key(vk, mask);
         }
         if FOCUS_DIRTY.with(|f| f.replace(false)) {
+            events.on_focus_change();
+        }
+
+        // A window that became foreground before it was matchable (empty title / not yet
+        // shown) fires no further event once it settles — e.g. Komplete Kontrol's
+        // Preferences dialog on a re-open sets its title/visibility a beat after becoming
+        // foreground. Queue a few delayed re-checks so it is picked up then. Coalesced
+        // (only armed when nothing is pending) so window churn can't pile these up.
+        if unmatched_fg {
+            DELAYED_RECHECK.with(|d| {
+                let mut v = d.borrow_mut();
+                if v.is_empty() {
+                    let now = std::time::Instant::now();
+                    v.push(now + std::time::Duration::from_millis(200));
+                    v.push(now + std::time::Duration::from_millis(500));
+                    v.push(now + std::time::Duration::from_millis(1000));
+                }
+            });
+        }
+        let now = std::time::Instant::now();
+        let fire = DELAYED_RECHECK.with(|d| {
+            let mut v = d.borrow_mut();
+            let fire = v.iter().any(|&t| now >= t);
+            v.retain(|&t| now < t);
+            fire
+        });
+        if fire {
             events.on_focus_change();
         }
     }
@@ -656,6 +708,10 @@ unsafe extern "system" fn win_event_proc(
     if event == EVENT_SYSTEM_FOREGROUND && id_object == 0 && id_child == 0 && !hwnd.is_null() {
         let v = hwnd as isize;
         FOREGROUND_QUEUE.with(|q| q.borrow_mut().push(v));
+        // Also re-check via the focus path: window_info() drops a window with an empty
+        // title, so the queued activate can be lost for a window that isn't matchable
+        // yet — a fresh active() re-check via the focus dispatch doesn't depend on that.
+        FOCUS_DIRTY.with(|f| f.set(true));
         // Wake the event loop so it drains the queue even without a real message.
         let tid = HOOK_THREAD.load(Ordering::Relaxed);
         if tid != 0 {
@@ -668,6 +724,18 @@ unsafe extern "system" fn win_event_proc(
         let tid = HOOK_THREAD.load(Ordering::Relaxed);
         if tid != 0 {
             PostThreadMessageW(tid, WM_NULL, 0, 0);
+        }
+    } else if event == EVENT_OBJECT_NAMECHANGE && id_object == 0 && id_child == 0 {
+        // The foreground window's title just changed — re-check, so a window that
+        // became foreground before it had a (matchable) title is caught the moment it
+        // gets one. Filtered to OBJID_WINDOW + the current foreground window, so the
+        // (frequent) name changes of other windows / child objects cost only this test.
+        if !hwnd.is_null() && hwnd == GetForegroundWindow() {
+            FOCUS_DIRTY.with(|f| f.set(true));
+            let tid = HOOK_THREAD.load(Ordering::Relaxed);
+            if tid != 0 {
+                PostThreadMessageW(tid, WM_NULL, 0, 0);
+            }
         }
     }
 }

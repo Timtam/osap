@@ -73,6 +73,24 @@ function Overlay:addStaticText(label)
   return add(self, { kind = "static", label = label })
 end
 
+-- A tab control (ReaHotkey's TabControl): a single focus stop where Left / Right switch
+-- the current tab, and only the CURRENT tab's controls are Tab-reachable. `opts.tabs` is
+-- an ordered list of { label, at = {x, y} } — `at` is the client-relative point clicked
+-- to switch the underlying (UIA-less) dialog to that tab. Returns a handle whose
+-- `h:onTab(n)` is a `when` predicate; assign it to the child controls of tab n (added
+-- after this call) so they only show — and are only Tab-reachable — while tab n is
+-- current. Tab controls can nest: gate a nested control on `h1:onTab(a)` AND its own.
+function Overlay:addTabControl(opts)
+  local c = add(self, { kind = "tabcontrol", label = opts.label or "", tabs = opts.tabs or {}, _current = 1 })
+  self._hasTabControl = true
+  return {
+    control = c,
+    onTab = function(_, n)
+      return function() return c._current == n end
+    end,
+  }
+end
+
 function Overlay:addHotspotButton(opts)
   -- `rawOrigin` pins the control to the matched control's OWN client frame,
   -- skipping the per-overlay content offset — for chrome controls (e.g. Komplete
@@ -203,7 +221,8 @@ function Overlay:replace(label, build)
 end
 
 local TYPE_LABEL =
-  { static = "", hotspot = "button", custom = "button", ocr = "button", gtoggle = "toggle button" }
+  { static = "", hotspot = "button", custom = "button", ocr = "button", gtoggle = "toggle button",
+    tabcontrol = "tab control" }
 
 -- Origin (top-left) of the overlay's coordinate space in screen pixels: the
 -- client-area top-left of the active context's coordinate window — the plugin
@@ -234,6 +253,66 @@ local function originOf(self, control)
     end
   end
   return 0, 0
+end
+
+-- The overlay's (first) tab control and its index in `controls`, or nil if none.
+-- Defined here, after `originOf`, since the selectors below use it (a Luau local is
+-- only visible after its declaration — so tab helpers all live below originOf).
+local function findTabControl(self)
+  for i, c in ipairs(self.controls) do
+    if c.kind == "tabcontrol" then return i, c end
+  end
+  return nil
+end
+
+-- Spoken form of a tab, ReaHotkey-style: "<label> tab selected" — a tab's state is
+-- "selected" when it is the current one, which is the only tab we ever announce. An
+-- optional `extra` (e.g. "tab control") is inserted, and a bound hotkey's label is spoken
+-- last (ReaHotkey appends the HotkeyLabel), so the user hears how to jump to it.
+local function tabMessage(tab, extra)
+  local m = ((tab and tab.label) or "") .. " tab selected"
+  if extra and extra ~= "" then m = m .. ", " .. extra end
+  if tab and tab.hotkeyLabel and tab.hotkeyLabel ~= "" then m = m .. ", " .. tab.hotkeyLabel end
+  return m
+end
+
+-- Clicks tab control `c`'s CURRENT tab coordinate (so the underlying dialog follows) and
+-- announces it. Shared by every tab selector.
+local function selectTab(self, c)
+  local tab = c.tabs[c._current]
+  if tab and tab.at then
+    local ox, oy = originOf(self, c)
+    host.input.click(ox + tab.at[1], oy + tab.at[2])
+  end
+  host.speech.output(tabMessage(tab), { interrupt = true })
+end
+
+-- Left / Right on a focused tab control: switch its tab by `dir` (±1), wrapping. No-op
+-- unless the focused control IS a tab control (so arrows stay inert on other controls).
+function Overlay:switchTab(dir)
+  local c = self.controls[self.focus]
+  if not c or c.kind ~= "tabcontrol" or #c.tabs == 0 then return end
+  c._current = ((c._current - 1 + dir) % #c.tabs) + 1
+  selectTab(self, c)
+end
+
+-- Ctrl+Tab / Ctrl+Shift+Tab: switch the overlay's tab control from ANYWHERE (focus need
+-- not be on it) and move focus onto it — ReaHotkey's FocusNextPreviousTab.
+function Overlay:cycleTab(dir)
+  local i, c = findTabControl(self)
+  if not c or #c.tabs == 0 then return end
+  self.focus = i
+  c._current = ((c._current - 1 + dir) % #c.tabs) + 1
+  selectTab(self, c)
+end
+
+-- Ctrl+<n>: jump straight to tab n and move focus onto the tab control.
+function Overlay:gotoTab(n)
+  local i, c = findTabControl(self)
+  if not c or n < 1 or n > #c.tabs then return end
+  self.focus = i
+  c._current = n
+  selectTab(self, c)
 end
 
 local function ocrCenter(self, c)
@@ -274,6 +353,13 @@ end
 local function speakControl(self, index, moveMouse)
   local c = self.controls[index]
   if not c then return end
+  -- A tab control announces WHICH tab is current, then that it is a tab control (so the
+  -- user knows Left/Right — or Ctrl+Tab, Ctrl+number — switch it). Its current tab's
+  -- controls are the ones Tab then steps into (see isFocusable's `when` gating).
+  if c.kind == "tabcontrol" then
+    host.speech.output(tabMessage(c.tabs[c._current], "tab control"), { interrupt = true })
+    return
+  end
   local parts = { c.label or "" }
   local tl = TYPE_LABEL[c.kind]
   if tl ~= "" then parts[#parts + 1] = tl end
@@ -398,6 +484,18 @@ function Overlay:_registerHotkeys()
       local idx = i
       self.registered[#self.registered + 1] = host.hotkey.register(c.hotkey, function() self:activate(idx) end)
     end
+    -- A tab control's individual TABS may each carry a hotkey (ReaHotkey's Tab.SetHotkey):
+    -- pressing it brings that tab to the front from anywhere in the overlay (like
+    -- Ctrl+<n>), and its label is spoken in the tab's announcement (see tabMessage). KK
+    -- doesn't bind any, but other plugins (e.g. Dubler) do — so the mechanism is here.
+    if c.kind == "tabcontrol" then
+      for tn, tab in ipairs(c.tabs) do
+        if tab.hotkey then
+          local n = tn
+          self.registered[#self.registered + 1] = host.hotkey.register(tab.hotkey, function() self:gotoTab(n) end)
+        end
+      end
+    end
   end
   if self.naturalNav then
     -- Capture (+ suppress) the normal navigation keys, ReaHotkey-style — only
@@ -419,6 +517,22 @@ function Overlay:_registerHotkeys()
       cap("Tab", function() self:focusNext() end)
       cap("Shift+Tab", function() self:focusPrev() end)
       cap("Return", function() self:activate() end)
+      -- Tab controls (ReaHotkey): Left/Right switch the tab when the tab control itself
+      -- is focused (LeftRightHK); Ctrl+Tab / Ctrl+Shift+Tab switch it from anywhere in
+      -- the overlay (ControlTab/ControlShiftTabHK); Ctrl+<n> jumps straight to tab n (our
+      -- addition). Captured only when this overlay has a tab control, so these keys stay
+      -- free everywhere else.
+      if self._hasTabControl then
+        cap("Left", function() self:switchTab(-1) end)
+        cap("Right", function() self:switchTab(1) end)
+        cap("Ctrl+Tab", function() self:cycleTab(1) end)
+        cap("Ctrl+Shift+Tab", function() self:cycleTab(-1) end)
+        local _, tcCtrl = findTabControl(self)
+        local ntabs = tcCtrl and #tcCtrl.tabs or 0
+        for n = 1, math.min(ntabs, 9) do
+          cap("Ctrl+" .. n, function() self:gotoTab(n) end)
+        end
+      end
     end
   else
     self.registered[#self.registered + 1] = host.hotkey.register(NAV.next, function() self:focusNext() end)
