@@ -101,7 +101,16 @@ function Overlay:addHotspotButton(opts)
   -- `rawOrigin` pins the control to the matched control's OWN client frame,
   -- skipping the per-overlay content offset — for chrome controls (e.g. Komplete
   -- Kontrol's menu) that live in the host frame, not the nested plugin's content.
-  return add(self, { kind = "hotspot", label = opts.label, at = opts.at, hotkey = opts.hotkey, rawOrigin = opts.rawOrigin })
+  -- `fromRight` anchors `at`'s x to the control's RIGHT edge (see hotspotPoint) —
+  -- for UI that is laid out from the right, so it stays put as the plugin is resized.
+  return add(self, {
+    kind = "hotspot",
+    label = opts.label,
+    at = opts.at,
+    hotkey = opts.hotkey,
+    rawOrigin = opts.rawOrigin,
+    fromRight = opts.fromRight,
+  })
 end
 
 function Overlay:addCustomButton(opts)
@@ -154,6 +163,7 @@ function Overlay:addHotspotToggle(opts)
     offColor = opts.offColor,
     hotkey = opts.hotkey,
     rawOrigin = opts.rawOrigin,
+    fromRight = opts.fromRight,
   })
 end
 
@@ -408,13 +418,28 @@ local function gtoggleState(self, c)
   return nil
 end
 
+-- Absolute screen point of a control's `at` hotspot. Normally origin + at, but a
+-- `fromRight` control measures x from the coordinate window's RIGHT edge instead
+-- (ReaHotkey's `ControlX + ControlWidth − N`): plugin UI that is laid out from the
+-- right stays correctly targeted whatever the plugin's width is.
+local function hotspotPoint(self, c)
+  local ox, oy = originOf(self, c)
+  local x = c.at[1]
+  if c.fromRight then
+    local o = self.activeCtx and self.activeCtx.origin()
+    local w = (o and o.bounds and o.bounds.w) or 0
+    x = w - c.at[1]
+  end
+  return ox + x, oy + c.at[2]
+end
+
 -- On/off state of a HotspotToggle: read the single pixel at its click point and return
 -- whichever reference colour it is closer to (Manhattan distance) — ReaHotkey's pixel
 -- toggle. Cheap (one screen touch). nil if unconfigured or the pixel can't be read.
 local function hotspotToggleState(self, c)
   if not (c.at and c.onColor and c.offColor) then return nil end
-  local ox, oy = originOf(self, c)
-  local p = host.screen.pixel(ox + c.at[1], oy + c.at[2])
+  local px, py = hotspotPoint(self, c)
+  local p = host.screen.pixel(px, py)
   if not p then return nil end
   local don = math.abs(p.r - c.onColor[1]) + math.abs(p.g - c.onColor[2]) + math.abs(p.b - c.onColor[3])
   local doff = math.abs(p.r - c.offColor[1]) + math.abs(p.g - c.offColor[2]) + math.abs(p.b - c.offColor[3])
@@ -539,8 +564,8 @@ function Overlay:activate(index)
   if not c then return end
   if c.when and c.when(self) ~= true then return end -- a hidden control's hotkey no-ops
   if c.kind == "hotspot" and c.at then
-    local ox, oy = originOf(self, c)
-    host.input.click(ox + c.at[1], oy + c.at[2])
+    local px, py = hotspotPoint(self, c)
+    host.input.click(px, py)
     host.speech.output((c.label or "") .. ", activated", { interrupt = true })
   elseif c.kind == "custom" and c.onActivate then
     c.onActivate(self) -- the overlay, so a header control can reach the active context
@@ -561,8 +586,8 @@ function Overlay:activate(index)
     -- Re-read the new state once the UI redraws.
     if host.timer then host.timer.after(150, function() speakControl(self, i, false) end) end
   elseif c.kind == "hotspottoggle" and c.at then
-    local ox, oy = originOf(self, c)
-    host.input.click(ox + c.at[1], oy + c.at[2])
+    local px, py = hotspotPoint(self, c)
+    host.input.click(px, py)
     -- Re-read the new state (announced with the label) once the UI redraws.
     if host.timer then host.timer.after(150, function() speakControl(self, i, false) end) end
   end

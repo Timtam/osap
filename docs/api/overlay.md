@@ -31,12 +31,16 @@ ov:addStaticText("Mixer section")
 
 ## O:addHotspotButton(opts)
 
-Appends a button that, when activated, clicks a fixed origin-relative point. `opts: { label: string, at: {number, number}, hotkey: string? }` — `at` is `{x, y}` relative to the origin; `hotkey` is an optional global activation hotkey spec (e.g. `"Alt+P"`).
+Appends a button that, when activated, clicks a fixed origin-relative point. `opts: { label: string, at: {number, number}, hotkey: string?, rawOrigin: boolean?, fromRight: boolean? }` — `at` is `{x, y}` relative to the origin; `hotkey` is an optional global activation hotkey spec (e.g. `"Alt+P"`).
 
-Returns `{ kind = "hotspot", label, at, hotkey }`. On activate it clicks `(origin.x + at[1], origin.y + at[2])` and speaks `"label, activated"`.
+Returns `{ kind = "hotspot", label, at, hotkey, rawOrigin, fromRight }`. On activate it clicks `(origin.x + at[1], origin.y + at[2])` and speaks `"label, activated"`.
+
+`fromRight` measures `at[1]` from the coordinate window's **right edge** instead of its left — the click lands at `origin.x + width − at[1]` (ReaHotkey's `ControlX + ControlWidth − N`). Use it for plugin UI laid out from the right, so the target stays correct whatever the plugin's width is. Also accepted by [`addHotspotToggle`](#oaddhotspottoggleopts).
 
 ```lua
 ov:addHotspotButton({ label = "Play", at = { 120, 40 }, hotkey = "Alt+P" })
+-- 352 px in from the right edge, 87 px down — Kontakt's instrument arrows:
+ov:addHotspotButton({ label = "Previous instrument", at = { 352, 87 }, fromRight = true, rawOrigin = true })
 ```
 
 ## O:addCustomButton(opts)

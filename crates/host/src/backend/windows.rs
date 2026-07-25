@@ -213,9 +213,33 @@ impl Backend for WindowsBackend {
     fn uia_locate(&self, hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i32)> {
         super::uia::uia_locate(hwnd, name, control_type)
     }
+    fn uia_locate_via(
+        &self,
+        hwnd: isize,
+        via_name: &str,
+        via_type: i32,
+        name: &str,
+        control_type: i32,
+    ) -> Option<(i32, i32)> {
+        super::uia::uia_locate_via(hwnd, via_name, via_type, name, control_type)
+    }
+
+    fn uia_plugin_locate(
+        &self,
+        hwnd: isize,
+        container_name: &str,
+        name: &str,
+        control_type: i32,
+    ) -> Option<(i32, i32)> {
+        super::uia::uia_plugin_locate(hwnd, container_name, name, control_type)
+    }
 
     fn uia_dump(&self, hwnd: isize) -> Vec<(i32, String, String, i32)> {
         super::uia::uia_dump(hwnd)
+    }
+
+    fn uia_raw_dump(&self, hwnd: isize) -> Vec<(i32, String, String, i32)> {
+        super::uia::uia_raw_dump(hwnd)
     }
 
     fn uia_class_nav_point(

@@ -2169,6 +2169,48 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             }
         })?,
     )?;
+    // host.uia.locateVia(hwnd, viaName, viaType, name, controlType) -> { x, y } | nil.
+    // Like locate, but descends into a container element (viaName/viaType) first and
+    // searches within it — reaches a plugin's UI that hangs off an identity pane as a
+    // nested UIA fragment (a DAW-embedded Kontakt). Ports ReaHotkey's two-level find.
+    let sh = shared.clone();
+    uia.set(
+        "locateVia",
+        lua.create_function(
+            move |lua, (hwnd, via_name, via_type, name, ctype): (isize, String, i32, String, i32)| {
+                match sh.backend.uia_locate_via(hwnd, &via_name, via_type, &name, ctype) {
+                    Some((x, y)) => {
+                        let t = lua.create_table()?;
+                        t.set("x", x)?;
+                        t.set("y", y)?;
+                        Ok(Some(t))
+                    }
+                    None => Ok(None),
+                }
+            },
+        )?,
+    )?;
+    // host.uia.pluginLocate(hwnd, containerName, name, controlType) -> { x, y } | nil.
+    // ReaHotkey's GetPluginUIAElement + FindElement: find the element that IS the plugin
+    // (containerName, Window/Pane, QuickWindow class preferred) and search within it over
+    // the RAW tree — the only view that reaches a DAW-embedded plugin's hosted Qt UI.
+    let sh = shared.clone();
+    uia.set(
+        "pluginLocate",
+        lua.create_function(
+            move |lua, (hwnd, container, name, ctype): (isize, String, String, i32)| {
+                match sh.backend.uia_plugin_locate(hwnd, &container, &name, ctype) {
+                    Some((x, y)) => {
+                        let t = lua.create_table()?;
+                        t.set("x", x)?;
+                        t.set("y", y)?;
+                        Ok(Some(t))
+                    }
+                    None => Ok(None),
+                }
+            },
+        )?,
+    )?;
     // host.uia.dump(hwnd) -> { {depth, name, class, ctype}, … } — diagnostic UIA
     // tree walk (raw view) for discovering plugin identity properties.
     let sh = shared.clone();
@@ -2177,6 +2219,26 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         lua.create_function(move |lua, hwnd: isize| {
             let arr = lua.create_table()?;
             for (i, (depth, name, class, ctype)) in sh.backend.uia_dump(hwnd).into_iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("depth", depth)?;
+                t.set("name", name)?;
+                t.set("class", class)?;
+                t.set("ctype", ctype)?;
+                arr.set(i + 1, t)?;
+            }
+            Ok(arr)
+        })?,
+    )?;
+    // host.uia.rawDump(hwnd) — like dump, but over the RAW TreeWalker, which crosses
+    // into a hosted Qt fragment (a DAW-embedded plugin's real UI).
+    let sh = shared.clone();
+    uia.set(
+        "rawDump",
+        lua.create_function(move |lua, hwnd: isize| {
+            let arr = lua.create_table()?;
+            for (i, (depth, name, class, ctype)) in
+                sh.backend.uia_raw_dump(hwnd).into_iter().enumerate()
+            {
                 let t = lua.create_table()?;
                 t.set("depth", depth)?;
                 t.set("name", name)?;

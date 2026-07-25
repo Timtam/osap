@@ -51,6 +51,25 @@ if pt then
 end
 ```
 
+## host.uia.pluginLocate(hwnd, containerName, name, controlType)
+
+**Signature:** `host.uia.pluginLocate(hwnd: number, containerName: string, name: string, controlType: number) -> { x: number, y: number } | nil`
+
+Like `locate`, but for a plugin hosted inside another application. It first finds the element that **is** the plugin — Name `containerName` (e.g. `"Kontakt 8"`) with control type Window (50032) or Pane (50033), preferring the `ni::qt::QuickWindow` class (a Qt plugin's scene root, which carries the content) over the `…QWindowIcon` window host — and then searches for the target **within** it, using the **raw** tree walker. A port of ReaHotkey's `GetPluginUIAElement` + `MainElement.FindElement(...)`.
+
+The raw walker matters: the condition-based search (`find` / `locate`) stops at a hosted fragment's boundary, so a plugin's UI can look entirely absent to it. Note that some plugins expose no accessible content when embedded regardless — a DAW-embedded Kontakt 8 is a UIA **leaf** — in which case this returns `nil` and only coordinates remain.
+
+```luau
+local pt = host.uia.pluginLocate(hwnd, "Kontakt 8", "Kontakt File Menu", 50000)
+if pt then host.input.click(pt.x, pt.y) end
+```
+
+## host.uia.rawDump(hwnd)
+
+**Signature:** `host.uia.rawDump(hwnd: number) -> { { depth: number, name: string, class: string, ctype: number }, … }`
+
+Diagnostic counterpart to `host.uia.dump`, walking the **raw** tree instead of a condition-based search, so it crosses into hosted fragments the latter cannot see. Bounded by node budget and depth. Use it to find out whether a plugin exposes any accessible content at all before building on UIA.
+
 ## host.screen.pixel(x, y)
 
 **Signature:** `host.screen.pixel(x: number, y: number) -> { r: number, g: number, b: number, hex: string }`

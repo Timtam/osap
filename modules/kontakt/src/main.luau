@@ -191,9 +191,38 @@ local function pluginHwnd(ov)
   local ctrl = ov.activeCtx and ov.activeCtx.origin()
   return ctrl and ctrl.id
 end
-local function uiaClick(hwnd, name, ctype)
-  if not hwnd then return false end
-  local p = host.uia.locate(hwnd, name, ctype)
+-- The "Kontakt N" identity pane's name for `hwnd` (the QuickWindow, control type
+-- Window 50032 / Pane 50033), or nil. Used to scope a two-level UIA search into the
+-- plugin's real UI (see uiaClick).
+local WINDOW, PANE = 50032, 50033
+local function kontaktPaneName(hwnd)
+  for _, v in ipairs(VARIANTS) do
+    if host.uia.find(hwnd, v.name, WINDOW) or host.uia.find(hwnd, v.name, PANE) then
+      return v.name
+    end
+  end
+  return nil
+end
+-- Locate an element inside the FOCUSED Kontakt, exactly the way ReaHotkey does
+-- (GetPluginUIAElement + MainElement.FindElement): root at the foreground window, find
+-- the element that IS the plugin ("Kontakt N", Window/Pane — the ni::qt::QuickWindow
+-- scene root in preference to the content-empty QWindowIcon host), and search within it
+-- over the RAW tree. The raw walker is what makes a DAW-embedded Kontakt reachable at
+-- all: the condition-based search stops at the Qt fragment boundary, which is why an
+-- embedded Kontakt looked like it exposed no accessible content whatsoever.
+local function pluginLocate(name, ctype)
+  local fg = host.window.active()
+  if not (fg and fg.id) then return nil end
+  local via = kontaktPaneName(fg.id)
+  if via then return host.uia.pluginLocate(fg.id, via, name, ctype) end
+  for _, v in ipairs(VARIANTS) do
+    local p = host.uia.pluginLocate(fg.id, v.name, name, ctype)
+    if p then return p end
+  end
+  return nil
+end
+local function uiaClick(_, name, ctype)
+  local p = pluginLocate(name, ctype)
   if p then
     host.input.click(p.x, p.y)
     return true
@@ -311,26 +340,105 @@ end
 -- to `ov` with the functional builders — the same way any overlay is built. The
 -- onActivate closures take the ACTIVE overlay `o` (passed at activation), so they
 -- work unchanged in a derived/library overlay too.
-local function addHeader(ov)
-  ov:addCustomButton({
-    label = "Kontakt file menu",
-    hotkey = "Alt+F",
-    onActivate = function(o)
-      if uiaClick(pluginHwnd(o), "Kontakt File Menu", BUTTON) then
-        host.keys.menuOpen(true) -- snappier than waiting for the menu-watch poll
-      end
-    end,
-  }).when = bare
+-- The DAW-embedded Kontakt exposes NO accessible UIA content — not the header buttons,
+-- and the file menu it opens is neither a #32768 nor a UIA element, so NVDA can't read
+-- it and we can't navigate it by UIA. ReaHotkey's fallback (and now ours) drives the
+-- header + menu by COORDINATE, relative to the plugin control client: the KONTAKT menu
+-- button (ReaHotkey's 86,19), and the menu items at their fixed positions in the opened
+-- menu (measured against the live 8.11 menu). A menu item's action (e.g. "Load...") opens
+-- Kontakt's own native, ACCESSIBLE dialog — so the user never needs to read the Qt menu.
+local FILE_MENU_AT = { 86, 19 }
+-- Content-relative click points of the file-menu items we drive (the ReaHotkey set:
+-- Load / Save as / Reset multi). The menu opens at a fixed position from FILE_MENU_AT, so
+-- items sit at fixed offsets — measured against the live 8.11 menu ("Load..." is confirmed
+-- by the working Ctrl+L; the others are ~23 px apart, adjust if a click misses).
+local MENU_ITEM = {
+  ["Load..."] = { 100, 84 },
+  ["Save multi as..."] = { 100, 140 },
+  ["Reset multi"] = { 100, 195 },
+}
+
+-- Opens the Kontakt file menu: the UIA "Kontakt File Menu" button when it's reachable
+-- (a standalone / full-UIA Kontakt), else a coordinate click on the KONTAKT header. Returns
+-- the origin control + whether UIA was used (so a follow-up item click picks its method).
+local function openFileMenu(o)
+  local ctrl = o.activeCtx and o.activeCtx.origin()
+  if uiaClick(ctrl and ctrl.id, "Kontakt File Menu", BUTTON) then
+    host.keys.menuOpen(true)
+    return ctrl, true
+  elseif ctrl and ctrl.client then
+    host.input.click(ctrl.client.x + FILE_MENU_AT[1], ctrl.client.y + FILE_MENU_AT[2])
+    return ctrl, false
+  end
+  return nil
+end
+
+-- Opens the file menu and selects `item` after it appears — via UIA (standalone) or a
+-- coordinate click on the item's fixed menu position (DAW-embedded). Kontakt's own native,
+-- accessible dialog then opens, so the user never has to read the (inaccessible) Qt menu.
+local function invokeMenuItem(o, item)
+  local ctrl, uia = openFileMenu(o)
+  if not ctrl then return end
+  host.timer.after(250, function()
+    if uia then
+      uiaClick(ctrl.id, item, MENUITEM)
+    elseif ctrl.client and MENU_ITEM[item] then
+      local at = MENU_ITEM[item]
+      host.input.click(ctrl.client.x + at[1], ctrl.client.y + at[2])
+    end
+  end)
+end
+
+-- The instrument / multi / snapshot arrows, straight from ReaHotkey's Kontakt 8
+-- coordinate fallback (MoveToPluginInstrumentButton / MultiButton / SnapshotButton).
+-- All are `rawOrigin` — they sit in the PLUGIN CONTROL's own frame, so they must skip
+-- both the content offset and a library overlay's landmark anchoring (ReaHotkey measures
+-- them off ControlGetPos of the plugin control, whatever library is loaded). Those with
+-- `fromRight` are anchored to the control's right edge (ReaHotkey's ControlWidth − N).
+local HEADER_HOTSPOTS = {
+  { label = "Previous instrument", at = { 352, 87 }, fromRight = true, hotkey = "Ctrl+P" },
+  { label = "Next instrument", at = { 332, 87 }, fromRight = true, hotkey = "Ctrl+N" },
+  { label = "Previous multi", at = { 722, 53 }, hotkey = "Ctrl+Shift+P" },
+  { label = "Next multi", at = { 742, 53 }, hotkey = "Ctrl+Shift+N" },
+  { label = "Snapshot menu", at = { 588, 118 }, fromRight = true, hotkey = "Alt+M" },
+  { label = "Previous snapshot", at = { 405, 118 }, fromRight = true, hotkey = "Alt+P" },
+  { label = "Next snapshot", at = { 389, 118 }, fromRight = true, hotkey = "Alt+N" },
+}
+
+-- `embedded` adds the coordinate arrows, which ReaHotkey offers on the PLUGIN header
+-- only (its standalone header is just the file menu + Tab pass-through) — their
+-- positions are measured in the embedded plugin's frame and don't hold for the
+-- standalone window, which has its own menu-bar chrome.
+local function addHeader(ov, embedded)
+  -- ReaHotkey's Kontakt 8 plugin header. Its "Load" / "Save as" / "Reset multi" drive the
+  -- file menu; the arrows are direct coordinate hotspots. (Its UIA-first path is dead on a
+  -- DAW-embedded Kontakt — verified: the plugin element is a UIA LEAF with no content at
+  -- all, even when queried directly — so everything here takes ReaHotkey's fallback route.)
   ov:addCustomButton({
     label = "Load instrument",
     hotkey = "Ctrl+L",
-    onActivate = function(o)
-      local hwnd = pluginHwnd(o)
-      if uiaClick(hwnd, "Kontakt File Menu", BUTTON) then
-        host.timer.after(200, function() uiaClick(hwnd, "Load...", MENUITEM) end)
-      end
-    end,
+    onActivate = function(o) invokeMenuItem(o, "Load...") end,
   }).when = bare
+  ov:addCustomButton({
+    label = "Save multi as",
+    hotkey = "Ctrl+S",
+    onActivate = function(o) invokeMenuItem(o, "Save multi as...") end,
+  }).when = bare
+  ov:addCustomButton({
+    label = "Reset multi",
+    hotkey = "Ctrl+R",
+    onActivate = function(o) invokeMenuItem(o, "Reset multi") end,
+  }).when = bare
+  if not embedded then return end
+  for _, h in ipairs(HEADER_HOTSPOTS) do
+    ov:addHotspotButton({
+      label = h.label,
+      at = h.at,
+      fromRight = h.fromRight,
+      rawOrigin = true,
+      hotkey = h.hotkey,
+    }).when = bare
+  end
 end
 
 -- The embedded-attach spec shared by the base and every library overlay. A
@@ -366,6 +474,27 @@ local function spec()
   }
 end
 
+-- Kontakt's "Content Missing" dialog — shown when a library's samples aren't where
+-- Kontakt expects them, and a hard stop until you point it at the folder. ReaHotkey
+-- gives it its own overlay with the one control that matters, and so do we. Two shapes:
+--   • embedded — the dialog is an NIChildWindow CONTROL inside the host window (the
+--     enumeration only reports VISIBLE controls, so its presence IS the dialog being up);
+--   • standalone — a top-level #32770 titled "Content Missing".
+-- Both join their Kontakt slot at the highest specificity, so the dialog overlay takes
+-- over from the header/library overlay while it is up and hands back when it closes.
+local CONTENT_MISSING_CONTROL = "^NIChildWindow%x+$"
+local CONTENT_MISSING_WINDOW = {
+  title = { pattern = "^Content Missing" },
+  app = { exe = { contains = "Kontakt" } },
+  windows = { class = { prefix = "#32770" } },
+}
+local function contentMissingOverlay()
+  local ov = O.new("Content Missing")
+  -- ReaHotkey's hotspot, relative to the dialog's own top-left.
+  ov:addHotspotButton({ label = "Browse For Folder", at = { 218, 341 }, hotkey = "Alt+B" })
+  return ov
+end
+
 -- The Kontakt STANDALONE application window (Kontakt N.exe running on its own, not
 -- embedded in a DAW): a top-level NINormalWindow titled "Kontakt 7" / "Kontakt 8".
 -- Mirrors ReaHotkey's Standalone.Register criteria. Unlike a KK-nested Kontakt (a UIA
@@ -384,7 +513,7 @@ local KONTAKT_STANDALONE = {
 local function buildLibraryOverlay(name, landmark, build, cfg)
   local ov = O.new("Kontakt — " .. (name or "library"))
   if cfg.kkHeader then addKKHeader(ov) end
-  addHeader(ov)
+  addHeader(ov, cfg.embedded)
   ov._originOffset = cfg.offset
   ov:onActivate(onPluginActive)
   if build then build(ov) end
@@ -402,7 +531,7 @@ return {
   activate = function()
     local ov = O.new("Kontakt")
     addKKHeader(ov)
-    addHeader(ov)
+    addHeader(ov, true)
     -- On focus: dismiss the one-time What's New dialog + auto-close KK's browser.
     ov:onActivate(onPluginActive)
     -- Specificity 1: above the Komplete Kontrol chrome overlay (0, com.platform
@@ -438,6 +567,16 @@ return {
     sa:attach(KONTAKT_STANDALONE, { slot = STANDALONE_SLOT, specificity = 0 })
     sa:_startMenuWatch()
     host.log.info("Kontakt standalone overlay ready.")
+
+    -- The Content Missing dialog, embedded + standalone. Specificity 3 beats the header
+    -- (0/1) and any library (2) on the same slot, so while the dialog is up it IS the
+    -- overlay — and the arbiter hands back automatically once it closes.
+    local cmSpec = spec()
+    cmSpec.control = CONTENT_MISSING_CONTROL
+    cmSpec.identify = function() return kontaktPresent() end
+    contentMissingOverlay():attachEmbedded(cmSpec, { slot = SLOT, specificity = 3 })
+    contentMissingOverlay():attach(CONTENT_MISSING_WINDOW, { slot = STANDALONE_SLOT, specificity = 3 })
+    host.log.info("Kontakt Content Missing overlays ready.")
   end,
 
   -- Called from a sample-library module (this file runs in its VM): builds an
@@ -459,6 +598,7 @@ return {
     -- event). Specificity 2 wins over the Kontakt base (1) and the KK chrome (0).
     local ov = buildLibraryOverlay(name, landmark, build, {
       kkHeader = true,
+      embedded = true,
       offset = resolveOffset,
       attach = function(o)
         o:attachEmbedded(spec(), { slot = SLOT, specificity = 2, pollMatch = 500 })

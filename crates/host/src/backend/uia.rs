@@ -8,8 +8,9 @@ use std::cell::RefCell;
 use windows::core::{BSTR, VARIANT};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTreeWalker,
-    TreeScope_Descendants, TreeScope_Subtree, UIA_ControlTypePropertyId, UIA_NamePropertyId,
+    CUIAutomation, IUIAutomation, IUIAutomationCondition, IUIAutomationElement,
+    IUIAutomationTreeWalker, TreeScope_Descendants, TreeScope_Subtree, UIA_ControlTypePropertyId,
+    UIA_NamePropertyId,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
@@ -75,6 +76,62 @@ pub fn uia_locate(hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i3
         }
         Some(((r.left + r.right) / 2, (r.top + r.bottom) / 2))
     }
+}
+
+/// Like `uia_locate`, but first descends into a CONTAINER element (`via_name` /
+/// `via_type`, e.g. the "Kontakt 8" QuickWindow pane) reachable from `hwnd`, then
+/// searches for the target WITHIN that container. A DAW-embedded plugin exposes the
+/// container element but hosts its real UI as a nested UIA fragment that a search from
+/// the outer `hwnd` does NOT cross — searching from the container element itself does.
+/// Ports ReaHotkey's GetPluginUIAElement + `MainElement.FindElement(...)`. Returns the
+/// target's on-screen click centre, or None (container or target not found / off-screen).
+pub fn uia_locate_via(
+    hwnd: isize,
+    via_name: &str,
+    via_type: i32,
+    name: &str,
+    control_type: i32,
+) -> Option<(i32, i32)> {
+    AUTOMATION.with(|cell| unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let mut borrow = cell.borrow_mut();
+        if borrow.is_none() {
+            *borrow =
+                CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+                    .ok();
+        }
+        let automation = borrow.as_ref()?;
+        let root = automation.ElementFromHandle(HWND(hwnd as *mut _)).ok()?;
+
+        // Build a Name(+Type) condition; an empty name means "any of this type".
+        let make_cond = |nm: &str, ct: i32| -> Option<IUIAutomationCondition> {
+            let v_ct: VARIANT = ct.into();
+            let cond_ct = automation
+                .CreatePropertyCondition(UIA_ControlTypePropertyId, &v_ct)
+                .ok()?;
+            if nm.is_empty() {
+                Some(cond_ct)
+            } else {
+                let v_nm: VARIANT = BSTR::from(nm).into();
+                let cond_nm = automation
+                    .CreatePropertyCondition(UIA_NamePropertyId, &v_nm)
+                    .ok()?;
+                automation.CreateAndCondition(&cond_nm, &cond_ct).ok()
+            }
+        };
+
+        // Find the container (the plugin's identity pane), then search WITHIN it —
+        // this crosses the hosted-fragment boundary that a search from `root` does not.
+        let cond_via = make_cond(via_name, via_type)?;
+        let container = root.FindFirst(TreeScope_Subtree, &cond_via).ok()?;
+        let cond = make_cond(name, control_type)?;
+        let el = container.FindFirst(TreeScope_Subtree, &cond).ok()?;
+        let r = el.CurrentBoundingRectangle().ok()?;
+        if r.right <= r.left || r.bottom <= r.top {
+            return None;
+        }
+        Some(((r.left + r.right) / 2, (r.top + r.bottom) / 2))
+    })
 }
 
 /// Dev/diagnostic: walk `hwnd`'s UIA subtree in the RAW view and return the
@@ -177,6 +234,163 @@ pub fn uia_class_nav_point(
             return None;
         }
         Some(((r.left + r.right) / 2, (r.top + r.bottom) / 2))
+    })
+}
+
+/// A raw-view depth-first walk, bounded by node budget and depth, calling `visit` for
+/// every element. `visit` returning false stops the walk. The RAW walker is the only
+/// way into a Qt plugin's QML content: the condition-based FindAll/FindFirst stops at
+/// the QuickWindow fragment boundary, so a DAW-embedded Kontakt looks empty to it.
+unsafe fn raw_walk(
+    walker: &IUIAutomationTreeWalker,
+    el: &IUIAutomationElement,
+    depth: i32,
+    budget: &mut i32,
+    visit: &mut impl FnMut(&IUIAutomationElement, i32) -> bool,
+) -> bool {
+    if depth > 40 || *budget <= 0 {
+        return true;
+    }
+    *budget -= 1;
+    if !visit(el, depth) {
+        return false;
+    }
+    let mut child = match walker.GetFirstChildElement(el) {
+        Ok(c) => c,
+        Err(_) => return true,
+    };
+    loop {
+        if !raw_walk(walker, &child, depth + 1, budget, visit) {
+            return false;
+        }
+        if *budget <= 0 {
+            return true;
+        }
+        child = match walker.GetNextSiblingElement(&child) {
+            Ok(n) => n,
+            Err(_) => return true,
+        };
+    }
+}
+
+/// Dev/diagnostic counterpart to `uia_dump` that uses the RAW TreeWalker instead of a
+/// condition-based FindAll, so it crosses into a hosted Qt fragment (a DAW-embedded
+/// Kontakt's real UI, which FindAll cannot see). Returns (depth, Name, ClassName,
+/// ControlType); bounded by node budget and depth.
+pub fn uia_raw_dump(hwnd: isize) -> Vec<(i32, String, String, i32)> {
+    let mut out: Vec<(i32, String, String, i32)> = Vec::new();
+    AUTOMATION.with(|cell| unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let mut borrow = cell.borrow_mut();
+        if borrow.is_none() {
+            *borrow =
+                CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+                    .ok();
+        }
+        let automation = match borrow.as_ref() {
+            Some(a) => a,
+            None => return,
+        };
+        let root = match automation.ElementFromHandle(HWND(hwnd as *mut _)) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        let walker = match automation.RawViewWalker() {
+            Ok(w) => w,
+            Err(_) => return,
+        };
+        let mut budget = 4000;
+        raw_walk(&walker, &root, 0, &mut budget, &mut |el, depth| {
+            let name = el.CurrentName().map(|b| b.to_string()).unwrap_or_default();
+            let class = el.CurrentClassName().map(|b| b.to_string()).unwrap_or_default();
+            let ctype = el.CurrentControlType().map(|t| t.0).unwrap_or(0);
+            if !name.is_empty() || !class.is_empty() {
+                out.push((depth, name, class, ctype));
+            }
+            true
+        });
+    });
+    out
+}
+
+/// ReaHotkey's `GetPluginUIAElement` + `MainElement.FindElement(...)`, ported.
+///
+/// A DAW-embedded plugin hosts its real UI as a nested UIA fragment. ReaHotkey reaches
+/// it by finding the element that IS the plugin — Name == `container_name` (e.g.
+/// "Kontakt 8") with ControlType Window (50032) or Pane (50033) — preferring the
+/// `ni::qt::QuickWindow` class (the Qt scene root, which has the content) over the
+/// `…QWindowIcon` HWND host (a content-empty proxy), and then searching for the target
+/// WITHIN it. We do the same, but over the RAW tree walker: the condition-based search
+/// stops at the fragment boundary, which is exactly why an embedded Kontakt looked like
+/// it had no accessible content at all.
+///
+/// `name` empty means "any element of this ControlType" (e.g. an open Menu, 50009).
+/// Returns the target's on-screen click centre, or None.
+pub fn uia_plugin_locate(
+    hwnd: isize,
+    container_name: &str,
+    name: &str,
+    control_type: i32,
+) -> Option<(i32, i32)> {
+    AUTOMATION.with(|cell| unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let mut borrow = cell.borrow_mut();
+        if borrow.is_none() {
+            *borrow =
+                CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+                    .ok();
+        }
+        let automation = borrow.as_ref()?;
+        let root = automation.ElementFromHandle(HWND(hwnd as *mut _)).ok()?;
+        let walker = automation.RawViewWalker().ok()?;
+
+        // Every element that IS the plugin (ReaHotkey's CheckElement), in raw-tree order.
+        let mut containers: Vec<(bool, IUIAutomationElement)> = Vec::new();
+        let mut budget = 4000;
+        raw_walk(&walker, &root, 0, &mut budget, &mut |el, _| {
+            let t = el.CurrentControlType().map(|t| t.0).unwrap_or(0);
+            if t == 50032 || t == 50033 {
+                let n = el.CurrentName().map(|b| b.to_string()).unwrap_or_default();
+                if n == container_name {
+                    let class = el.CurrentClassName().map(|b| b.to_string()).unwrap_or_default();
+                    // ReaHotkey's Criteria order: ni::qt::QuickWindow before QWindowIcon.
+                    containers.push((class.contains("QuickWindow"), el.clone()));
+                }
+            }
+            true
+        });
+        if containers.is_empty() {
+            return None;
+        }
+        containers.sort_by_key(|(is_quick, _)| !*is_quick);
+
+        for (_, container) in &containers {
+            let mut hit: Option<(i32, i32)> = None;
+            let mut budget = 4000;
+            raw_walk(&walker, container, 0, &mut budget, &mut |el, _| {
+                let t = el.CurrentControlType().map(|t| t.0).unwrap_or(0);
+                if t != control_type {
+                    return true;
+                }
+                if !name.is_empty() {
+                    let n = el.CurrentName().map(|b| b.to_string()).unwrap_or_default();
+                    if n != name {
+                        return true;
+                    }
+                }
+                if let Ok(r) = el.CurrentBoundingRectangle() {
+                    if r.right > r.left && r.bottom > r.top {
+                        hit = Some(((r.left + r.right) / 2, (r.top + r.bottom) / 2));
+                        return false; // found — stop walking
+                    }
+                }
+                true
+            });
+            if hit.is_some() {
+                return hit;
+            }
+        }
+        None
     })
 }
 

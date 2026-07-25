@@ -99,10 +99,40 @@ pub trait Backend {
     /// found / it has no on-screen rect.
     fn uia_locate(&self, hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i32)>;
 
+    /// Like `uia_locate`, but first descends into a container element
+    /// (`via_name`/`via_type`) and searches for the target within it — crosses a
+    /// hosted-fragment boundary a search from `hwnd` does not (a DAW-embedded plugin
+    /// whose UI hangs off an identity pane). Click-centre, or None.
+    fn uia_locate_via(
+        &self,
+        hwnd: isize,
+        via_name: &str,
+        via_type: i32,
+        name: &str,
+        control_type: i32,
+    ) -> Option<(i32, i32)>;
+
+    /// ReaHotkey's `GetPluginUIAElement` + FindElement: locate the element that IS the
+    /// plugin (Name == `container_name`, ControlType Window/Pane, `ni::qt::QuickWindow`
+    /// class preferred over the `…QWindowIcon` host) and find the target within it, over
+    /// the RAW tree walker — the only view that crosses into a DAW-embedded plugin's
+    /// hosted Qt fragment. Empty `name` = any element of that type. Click-centre, or None.
+    fn uia_plugin_locate(
+        &self,
+        hwnd: isize,
+        container_name: &str,
+        name: &str,
+        control_type: i32,
+    ) -> Option<(i32, i32)>;
+
     /// Dev/diagnostic: the "interesting" elements of `hwnd`'s UIA subtree (raw
     /// view), as (depth, Name, ClassName, ControlType). For discovering plugin
     /// identity properties.
     fn uia_dump(&self, hwnd: isize) -> Vec<(i32, String, String, i32)>;
+
+    /// Like `uia_dump`, but over the RAW TreeWalker, which crosses into a hosted Qt
+    /// fragment that the condition-based dump cannot see.
+    fn uia_raw_dump(&self, hwnd: isize) -> Vec<(i32, String, String, i32)>;
 
     /// Click-point (screen centre) of the element reached from the first element
     /// whose ClassName contains `class_substr` + ControlType == `ctype` by walking

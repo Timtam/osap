@@ -77,7 +77,29 @@ impl Backend for StubBackend {
     fn uia_locate(&self, _hwnd: isize, _name: &str, _control_type: i32) -> Option<(i32, i32)> {
         None
     }
+    fn uia_locate_via(
+        &self,
+        _hwnd: isize,
+        _via_name: &str,
+        _via_type: i32,
+        _name: &str,
+        _control_type: i32,
+    ) -> Option<(i32, i32)> {
+        None
+    }
+    fn uia_plugin_locate(
+        &self,
+        _hwnd: isize,
+        _container_name: &str,
+        _name: &str,
+        _control_type: i32,
+    ) -> Option<(i32, i32)> {
+        None
+    }
     fn uia_dump(&self, _hwnd: isize) -> Vec<(i32, String, String, i32)> {
+        Vec::new()
+    }
+    fn uia_raw_dump(&self, _hwnd: isize) -> Vec<(i32, String, String, i32)> {
         Vec::new()
     }
     fn uia_class_nav_point(
