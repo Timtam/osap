@@ -85,8 +85,13 @@ struct Shared {
     enabled: RefCell<Vec<bool>>,
     /// Global hotkey id → its registration (owning module, VM, callback, spec).
     hotkeys: RefCell<HashMap<i32, HotkeyReg>>,
-    /// Captured keys: (vk, modifier-mask, module_idx, VM, callback).
-    keys: RefCell<Vec<(u32, u8, usize, Lua, RegistryKey)>>,
+    /// Captured keys: (vk, modifier-mask, module_idx, token, VM, callback). The
+    /// per-capture `token` lets `release` target the exact registration: two overlays
+    /// in the SAME module that both capture a key (e.g. Komplete Kontrol's chrome and
+    /// its Preferences dialog both capturing Tab) would otherwise collide on
+    /// (vk, mask, module_idx), so the first to deactivate would release the key the
+    /// second still needs. Keyed by token, one overlay's release can't drop another's.
+    keys: RefCell<Vec<(u32, u8, usize, i64, Lua, RegistryKey)>>,
     /// Unified portable store: per-module enabled-state + settings.
     store: RefCell<settings::Store>,
     /// module_idx → (setting key → schema), for validation + the GUI. Not persisted.
@@ -107,6 +112,8 @@ struct Shared {
     arbiter: RefCell<HashMap<String, ArbiterSlot>>,
     /// Monotonic id source for arbiter claim handles.
     next_arbiter: Cell<i64>,
+    /// Monotonic id source for captured-key registration tokens.
+    next_key_token: Cell<i64>,
     /// Recurring timers: (next deadline, interval, module_idx, VM, callback). Fired
     /// from the tick and re-armed even while the owning module is disabled, so a
     /// poll resumes on re-enable instead of dying (unlike a Lua self-rescheduling
@@ -1506,6 +1513,7 @@ impl Manager {
             exports: RefCell::new(HashMap::new()),
             arbiter: RefCell::new(HashMap::new()),
             next_arbiter: Cell::new(0),
+            next_key_token: Cell::new(0),
             recurring: RefCell::new(Vec::new()),
             errors: RefCell::new(Vec::new()),
             error_seen: RefCell::new(HashSet::new()),
@@ -1744,7 +1752,7 @@ impl HostEvents for Dispatcher<'_> {
             let keys = self.shared.keys.borrow();
             keys.iter()
                 .find(|(k, m, idx, ..)| *k == vk && *m == mods && self.enabled(*idx))
-                .and_then(|(_, _, idx, lua, key)| {
+                .and_then(|(_, _, idx, _tok, lua, key)| {
                     lua.registry_value::<Function>(key).ok().map(|f| (*idx, lua.clone(), f))
                 })
         };
@@ -1961,24 +1969,35 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             // window is focused), so a duplicate is usually legitimate, not a clash.
             // The dispatcher routes to the first match and refresh_captured filters
             // by enabled; conflict dialogs are for process-wide hotkeys only.
+            //
+            // Within a module we keep ONE entry per (vk, mask): the latest capturer
+            // wins (drop any prior same-module entry, then push). Each entry carries a
+            // unique token, returned to the caller so `release` can target THIS exact
+            // registration and not another overlay's re-capture of the same key.
             let key = lua.create_registry_value(cb)?;
+            let token = sh.next_key_token.get() + 1;
+            sh.next_key_token.set(token);
             sh.keys
                 .borrow_mut()
                 .retain(|(k, m, i, ..)| !(*k == vk && *m == mask && *i == idx));
-            sh.keys.borrow_mut().push((vk, mask, idx, lua.clone(), key));
+            sh.keys.borrow_mut().push((vk, mask, idx, token, lua.clone(), key));
             sh.refresh_captured();
             sh.backend.watch_keys().map_err(mlua::Error::external)?;
-            Ok(())
+            Ok(token)
         })?,
     )?;
     let sh = shared.clone();
     keys.set(
         "release",
-        lua.create_function(move |_, spec: String| {
-            if let Some((vk, mask)) = backend::key_spec(&spec) {
-                sh.keys
-                    .borrow_mut()
-                    .retain(|(k, m, i, ..)| !(*k == vk && *m == mask && *i == idx));
+        // Releases the exact registration returned by `capture` (its token). Keying on
+        // the token, not (vk, mask, module_idx), means one overlay deactivating cannot
+        // drop a key another overlay in the same module has since re-captured. An
+        // unknown/stale token (already superseded by a later capture) is a harmless
+        // no-op.
+        lua.create_function(move |_, token: i64| {
+            let before = sh.keys.borrow().len();
+            sh.keys.borrow_mut().retain(|(.., t, _, _)| *t != token);
+            if sh.keys.borrow().len() != before {
                 sh.refresh_captured();
             }
             Ok(())
@@ -1988,7 +2007,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     keys.set(
         "releaseAll",
         lua.create_function(move |_, ()| {
-            sh.keys.borrow_mut().retain(|(.., i, _, _)| *i != idx);
+            // Element .2 is module_idx in (vk, mask, module_idx, token, VM, callback).
+            sh.keys.borrow_mut().retain(|entry| entry.2 != idx);
             sh.refresh_captured();
             Ok(())
         })?,

@@ -10,7 +10,7 @@ Input/output reference for the speech, hotkey, low-level key-capture, timer, and
 Two namespaces parse `+`-joined spec strings; segments are trimmed and case-insensitive.
 
 - **`host.hotkey.register`** uses the OS hotkey parser (`parse_spec`, Windows `RegisterHotKey`). The last segment is the key, all earlier segments are modifiers. Registered with `MOD_NOREPEAT` (no auto-repeat).
-- **`host.keys.capture` / `host.keys.release`** use `backend::key_spec`, which yields `(vk, modifier-mask)`. A captured key fires **only when the pressed modifier state equals the mask exactly** — so `"Tab"` (mask 0) does not swallow `Alt+Tab`, and you must register `"Shift+Tab"` separately from `"Tab"`.
+- **`host.keys.capture`** uses `backend::key_spec`, which yields `(vk, modifier-mask)`. A captured key fires **only when the pressed modifier state equals the mask exactly** — so `"Tab"` (mask 0) does not swallow `Alt+Tab`, and you must register `"Shift+Tab"` separately from `"Tab"`. `host.keys.capture` returns a **token** that `host.keys.release` takes to undo that exact capture.
 
 **Modifiers** (any combination): `Ctrl`/`Control`, `Alt`/`Option`, `Shift`, `Win`/`Super`/`Cmd`/`Command`/`Meta`.
 
@@ -61,9 +61,9 @@ The `host.keys` namespace is a low-level, modifier-aware keyboard hook that **in
 
 ## host.keys.capture(spec, callback)
 
-**Signature:** `host.keys.capture(spec: string, callback: (mods: { shift: boolean, ctrl: boolean, alt: boolean, win: boolean }) -> ())` → `nil`
+**Signature:** `host.keys.capture(spec: string, callback: (mods: { shift: boolean, ctrl: boolean, alt: boolean, win: boolean }) -> ())` → `number` (a release token)
 
-Begins intercepting the [key spec](#key-spec-string-format): the keypress is swallowed (not passed to the underlying app) and `callback` is invoked with a `mods` table describing the modifier state at press time. Re-capturing the same `(vk, mask)` for this module replaces the previous callback. Installs the low-level keyboard hook on first use (idempotent). Raises an error for an unknown spec.
+Begins intercepting the [key spec](#key-spec-string-format): the keypress is swallowed (not passed to the underlying app) and `callback` is invoked with a `mods` table describing the modifier state at press time. Re-capturing the same `(vk, mask)` for this module replaces the previous callback (and mints a new token). Installs the low-level keyboard hook on first use (idempotent). Raises an error for an unknown spec. **Returns a token** to pass to [`host.keys.release`](#hostkeysreleasetoken); keep it if you'll release this specific capture (two overlays in one module can each capture the same key, so releasing by spec would be ambiguous).
 
 ```lua
 host.keys.capture("Tab", function(mods)
@@ -73,14 +73,16 @@ end)
 host.keys.capture("Shift+Tab", function() moveFocus(-1) end)
 ```
 
-## host.keys.release(spec)
+## host.keys.release(token)
 
-**Signature:** `host.keys.release(spec: string)` → `nil`
+**Signature:** `host.keys.release(token: number)` → `nil`
 
-Stops capturing exactly that `(vk, mask)` for this module and recomputes the global captured set so the key reaches apps normally again. A spec that doesn't parse is silently ignored.
+Undoes the exact capture identified by the `token` [`host.keys.capture`](#hostkeyscapturespec-callback) returned, recomputing the global captured set so the key reaches apps normally again (unless another capture still holds it). Keying on the token — not `(vk, mask, module)` — means one overlay releasing a key cannot drop another overlay in the same module that has since re-captured it. An unknown/stale token (already superseded by a later capture of the same key) is a harmless no-op.
 
 ```lua
-host.keys.release("Tab")
+local tok = host.keys.capture("Tab", onTab)
+-- later:
+host.keys.release(tok)
 ```
 
 ## host.keys.releaseAll()

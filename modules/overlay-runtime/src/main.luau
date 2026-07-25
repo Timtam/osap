@@ -528,9 +528,12 @@ function Overlay:_registerHotkeys()
     -- Capture (+ suppress) the normal navigation keys, ReaHotkey-style — only
     -- while the overlay is active (its window is focused). Modifier-exact, so
     -- Alt+Tab etc. pass through.
+    -- Track the token capture returns (not the spec): release must target THIS exact
+    -- registration, so another overlay in the same module re-capturing the same key
+    -- (e.g. KK chrome and its Preferences dialog both capturing Tab) isn't dropped when
+    -- this one deactivates. See host.keys.capture/release.
     local function cap(spec, fn)
-      host.keys.capture(spec, fn)
-      self.capturedKeys[#self.capturedKeys + 1] = spec
+      self.capturedKeys[#self.capturedKeys + 1] = host.keys.capture(spec, fn)
     end
     -- Tab moves *between* elements; arrow keys are left for value changes within
     -- a control (standard interaction scheme), so we don't capture them here.
@@ -573,8 +576,8 @@ function Overlay:_unregisterHotkeys()
     host.hotkey.unregister(id)
   end
   self.registered = {}
-  for _, spec in ipairs(self.capturedKeys or {}) do
-    host.keys.release(spec)
+  for _, token in ipairs(self.capturedKeys or {}) do
+    host.keys.release(token)
   end
   self.capturedKeys = {}
 end
