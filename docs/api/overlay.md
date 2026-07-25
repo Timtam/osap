@@ -108,9 +108,9 @@ ov:show()
 
 ## O:attach(matcher, opts)
 
-Binds the overlay as a **standalone** context: active while a window matching `matcher` is the foreground/active window, with coordinates relative to that window's client area. `matcher` is a window matcher passed to `host.window.test`; `opts: { naturalNav: boolean?, hoverToRead: boolean? }?`.
+Binds the overlay as a **standalone** context: active while a window matching `matcher` is the foreground/active window, with coordinates relative to that window's client area. `matcher` is a window matcher passed to `host.window.test`; `opts: { naturalNav: boolean?, hoverToRead: boolean?, resetFocusOnActivate: boolean? }?`.
 
-`naturalNav` (default `false`) captures and suppresses `Tab` / `Shift+Tab` / `Return` for native-style navigation while the overlay window is focused; otherwise navigation uses the fallback hotkeys `Ctrl+Alt+Right` / `Ctrl+Alt+Left` / `Ctrl+Alt+Return`. `hoverToRead` (default `false`) moves the mouse onto an OCR control on focus (some UIs only reveal values on hover). Registers the foreground/focus trigger once. Returns nothing.
+`naturalNav` (default `false`) captures and suppresses `Tab` / `Shift+Tab` / `Return` for native-style navigation while the overlay window is focused; otherwise navigation uses the fallback hotkeys `Ctrl+Alt+Right` / `Ctrl+Alt+Left` / `Ctrl+Alt+Return`. `hoverToRead` (default `false`) moves the mouse onto an OCR control on focus (some UIs only reveal values on hover). `resetFocusOnActivate` (default `false`) makes the overlay restart at its first control — and any tab control at its first tab — when a **genuinely new** dialog window opens, instead of resuming the last-focused control; set it for **transient dialogs** (which should open fresh after being closed), and leave it off for persistent plugin overlays (which should resume where the user was). The reset is gated on the origin window's identity (its HWND), so merely `Alt+Tab`-ing out of and back into the *same* still-open dialog resumes where the user was — only closing and reopening (a new window) resets. Registers the foreground/focus trigger once. Returns nothing.
 
 ```lua
 ov:attach({ title = "MySynth" }, { naturalNav = true })
@@ -122,7 +122,7 @@ Binds the overlay as an **embedded** context: active while keyboard focus is ins
 
 `spec: { hosts: {Matcher}?, host: Matcher?, control: string, identify: ((control) -> boolean)? }` — `hosts` is the list of acceptable DAW host-window matchers (falls back to `{ spec.host }`); `control` is a Luau pattern matched against candidate child/focus-chain control class names; `identify(control)` is an optional confirmation callback (UIA / OCR / image search), cached per control HWND, used because a host's plugin control class often matches any plugin (e.g. REAPER's `Plugin<ptr>`). Candidates come from `host.window.controls()` plus the `host.window.focusChain()`.
 
-`opts: { naturalNav?, hoverToRead?, slot: string?, specificity: number?, pollMatch: number? }` — `naturalNav`/`hoverToRead` as in `attach`. With `slot` the overlay joins the host **arbiter** for that slot at `specificity` (a base and the overlays inheriting it pass the same slot; the most-specific *matching* one is active — see `host.arbiter`); `pollMatch` (ms) additionally re-checks the match on a recurring timer, for matches that change with no window event (a library landmark appearing inside an already-focused plugin). Returns nothing.
+`opts: { naturalNav?, hoverToRead?, resetFocusOnActivate?, slot: string?, specificity: number?, pollMatch: number? }` — `naturalNav`/`hoverToRead`/`resetFocusOnActivate` as in `attach`. With `slot` the overlay joins the host **arbiter** for that slot at `specificity` (a base and the overlays inheriting it pass the same slot; the most-specific *matching* one is active — see `host.arbiter`); `pollMatch` (ms) additionally re-checks the match on a recurring timer, for matches that change with no window event (a library landmark appearing inside an already-focused plugin). Returns nothing.
 
 ```lua
 ov:attachEmbedded({

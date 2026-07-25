@@ -61,6 +61,15 @@ function O.new(label)
       _onActivate = false,
       -- Optional module hook fn(overlay) fired each time it stops being active.
       _onDeactivate = false,
+      -- When true (set via attach opts.resetFocusOnActivate), the overlay restarts at
+      -- its first control (and first tab) when a genuinely NEW dialog window opens,
+      -- instead of resuming the last-focused control — the right behaviour for a
+      -- transient dialog (which should open fresh after being closed), unlike a
+      -- persistent plugin overlay. The reset is gated on the origin window's identity
+      -- (see _activate) so merely Alt+Tab'ing out of and back into the SAME still-open
+      -- dialog resumes where the user was; _lastActiveId remembers that identity.
+      _resetFocus = false,
+      _lastActiveId = false,
     },
     Overlay
   )
@@ -598,9 +607,29 @@ end
 function Overlay:_activate()
   if self.active then return end
   self.active = true
+  -- A dialog overlay (attached with resetFocusOnActivate) starts FRESH — focus back on
+  -- the first control, any tab control back on its first tab — but ONLY when a
+  -- genuinely NEW dialog window opens, NOT when the SAME still-open dialog merely
+  -- regained the foreground (Alt+Tab out and back), which should resume where the user
+  -- was. We tell them apart by the origin window's HWND (`.id`): closing then reopening
+  -- a dialog yields a new window (new id) → reset; Alt+Tab keeps the same id → resume.
+  -- (A dialog that reused the very same HWND across close/reopen would resume too, but
+  -- real KK dialogs are destroyed and recreated, so their id changes.) Clearing focus
+  -- here lets the `if self.focus == 0` block below re-pick the first focusable.
+  if self._resetFocus then
+    local origin = self.activeCtx and self.activeCtx.origin()
+    local id = (origin and origin.id) or false
+    if id ~= self._lastActiveId then
+      self.focus = 0
+      for _, c in ipairs(self.controls) do
+        if c.kind == "tabcontrol" then c._current = 1 end
+      end
+    end
+    self._lastActiveId = id
+  end
   -- Remember the last-focused control across deactivate/reactivate, so re-entering
   -- the window (e.g. Alt+Tab out and back) resumes where you were — only pick the
-  -- first focusable control on the very first activation.
+  -- first focusable control on the very first activation (or after a reset above).
   if self.focus == 0 then
     for i = 1, #self.controls do
       if isFocusable(self, i) then
@@ -720,6 +749,7 @@ local function ensureTrigger(self, opts)
   if opts then
     self.naturalNav = opts.naturalNav == true
     self.hoverToRead = opts.hoverToRead == true
+    self._resetFocus = opts.resetFocusOnActivate == true
     self:_join(opts.slot, opts.specificity, opts.pollMatch)
   else
     self:_join(nil, nil, nil)
@@ -859,6 +889,7 @@ function Overlay:derive(name, build)
   child._originOffset = self._originOffset
   child.naturalNav = self.naturalNav
   child.hoverToRead = self.hoverToRead
+  child._resetFocus = self._resetFocus
   if build then build(child) end
   child:_join(self._slot or nil, (self._specificity or 0) + 1, 500)
   return child

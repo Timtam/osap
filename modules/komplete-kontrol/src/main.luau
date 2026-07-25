@@ -263,7 +263,7 @@ return {
     }).when = tc:onTab(5)
     -- Close is available on every tab.
     prefs:addHotspotButton({ label = "Close", at = { 548, 473 } })
-    prefs:attach(PREFS, { naturalNav = true })
+    prefs:attach(PREFS, { naturalNav = true, resetFocusOnActivate = true })
     host.log.info("Komplete Kontrol standalone Preferences overlay ready.")
 
     -- STANDALONE "Save preset" dialog overlay (#32770, empty title, ~360x160). Custom-
@@ -282,7 +282,7 @@ return {
     saveas:landmark(host.path("images/saveas-header.png"))
     -- Specificity 1 on the shared slot: with its "Save Preset" landmark present it beats
     -- the Scanning fallback (0) whenever this really is the Save-preset dialog.
-    saveas:attach(KK_UNTITLED_DIALOG, { slot = KK_DIALOG_SLOT, specificity = 1, naturalNav = true })
+    saveas:attach(KK_UNTITLED_DIALOG, { slot = KK_DIALOG_SLOT, specificity = 1, naturalNav = true, resetFocusOnActivate = true })
     host.log.info("Komplete Kontrol standalone Save preset overlay ready.")
 
     -- STANDALONE "Scanning in progress" dialog overlay: shown while KK rescans its
@@ -322,7 +322,7 @@ return {
       end
       o._scanCommitted = false
     end)
-    scan:attach(KK_UNTITLED_DIALOG, { slot = KK_DIALOG_SLOT, specificity = 0, naturalNav = true })
+    scan:attach(KK_UNTITLED_DIALOG, { slot = KK_DIALOG_SLOT, specificity = 0, naturalNav = true, resetFocusOnActivate = true })
     host.log.info("Komplete Kontrol standalone Scanning overlay ready.")
   end,
 }
