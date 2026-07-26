@@ -337,6 +337,52 @@ pub fn transitive_dependents(id: &str, graph: &[(String, Vec<String>)]) -> Vec<S
     out
 }
 
+/// The transitive dependents of `id`, ordered so that a module always comes AFTER
+/// every module it depends on that is also in the list — the order they must be
+/// rebuilt in when `id` changes.
+///
+/// A code module's source is copied into each dependent's VM when that dependent is
+/// built, so rebuilding them in the wrong order would hand a module its dependency's
+/// OLD code and then rebuild the dependency underneath it. `transitive_dependents`
+/// answers "who is affected" in discovery order, which is not that.
+///
+/// A dependency cycle cannot be ordered; the remainder is appended as-is rather than
+/// dropped, so a cycle degrades to "possibly stale" instead of "silently missing".
+pub fn reload_order(id: &str, graph: &[(String, Vec<String>)]) -> Vec<String> {
+    use std::collections::HashSet;
+    let affected = transitive_dependents(id, graph);
+    let in_list: HashSet<String> = affected.iter().cloned().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut done: HashSet<String> = HashSet::new();
+    let mut remaining = affected;
+    while !remaining.is_empty() {
+        let mut still: Vec<String> = Vec::new();
+        let mut progressed = false;
+        for m in remaining {
+            let ready = graph
+                .iter()
+                .find(|(mid, _)| *mid == m)
+                .map(|(_, deps)| {
+                    deps.iter().all(|d| !in_list.contains(d) || done.contains(d))
+                })
+                .unwrap_or(true);
+            if ready {
+                done.insert(m.clone());
+                out.push(m);
+                progressed = true;
+            } else {
+                still.push(m);
+            }
+        }
+        if !progressed {
+            out.extend(still); // cycle — no valid order exists
+            break;
+        }
+        remaining = still;
+    }
+    out
+}
+
 /// Installed dependency modules left **orphaned** — needed by nothing that
 /// survives — when every id in `removing` is uninstalled. Cascades: an orphan's
 /// own now-unneeded dependencies are orphaned too. Use to offer cleanup after a
@@ -406,6 +452,30 @@ mod graph_tests {
         assert_eq!(k, ["css"]);
         assert!(transitive_dependents("css", &graph).is_empty());
     }
+    #[test]
+    fn reload_order_puts_a_dependency_before_its_dependent() {
+        let graph = sample();
+        let order = reload_order("overlay", &graph);
+        // Everyone affected is there, and kontakt is rebuilt before css, which holds a
+        // copy of kontakt's code.
+        assert_eq!(order.len(), 3);
+        let pos = |id: &str| order.iter().position(|m| m == id).unwrap();
+        assert!(pos("kontakt") < pos("css"));
+        assert!(order.contains(&"sforzando".to_string()));
+        // A leaf has no dependents at all.
+        assert!(reload_order("css", &graph).is_empty());
+    }
+
+    #[test]
+    fn reload_order_survives_a_cycle() {
+        // a <-> b, both depending on the changed module: no valid order exists, but
+        // neither may be dropped from the list.
+        let graph = g(&[("a", &["x", "b"]), ("b", &["x", "a"]), ("x", &[])]);
+        let mut order = reload_order("x", &graph);
+        order.sort();
+        assert_eq!(order, ["a", "b"]);
+    }
+
     #[test]
     fn orphans_cascade_but_spare_still_needed() {
         let graph = sample();

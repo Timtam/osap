@@ -80,10 +80,11 @@ pub fn run_gui(
     on_set: impl FnMut(usize, String, settings::Value) + 'static,
     on_install: impl Fn(std::path::PathBuf) -> Result<(String, Vec<ModuleInfo>), String> + 'static,
     on_remove: impl Fn(usize) + 'static,
-    on_reload: impl Fn(usize) -> Result<(ModuleInfo, Vec<String>), String> + 'static,
+    on_reload: impl Fn(usize) -> Result<(ModuleInfo, crate::ReloadReport), String> + 'static,
     mut pump: impl FnMut() + 'static,
     mut drain_errors: impl FnMut() -> Vec<(String, String)> + 'static,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let on_reload = std::rc::Rc::new(on_reload);
     wxdragon::main(move |app| {
         // The window is a background manager: hiding/closing it must not quit the
         // app — only the tray "Quit" does.
@@ -247,6 +248,7 @@ pub fn run_gui(
         // hold its code keep the old copy until restarted.
         {
             let rows = rows.clone();
+        let reload_cb = on_reload.clone();
             reload_btn.on_click(move |_| {
                 let Some(sel) = list.get_selection() else {
                     return;
@@ -260,8 +262,8 @@ pub fn run_gui(
                 let Some(idx) = idx else {
                     return;
                 };
-                match on_reload(idx) {
-                    Ok((info, deps)) => {
+                match reload_cb(idx) {
+                    Ok((info, report)) => {
                         // The reload may have changed the schema, the declared
                         // dependencies (which the Uninstall guard reasons over — a
                         // stale set could drop a module a live one now needs), and the
@@ -278,15 +280,32 @@ pub fn run_gui(
                                 );
                             }
                         }
-                        let msg = if deps.is_empty() {
+                        // The cascade is the point: a module that depends on this one
+                        // carries a COPY of its code, so it was rebuilt too. Name them,
+                        // and name any that could not be rebuilt -- those are now
+                        // inactive, which the user has to know.
+                        let others = report.reloaded.len().saturating_sub(1);
+                        let mut msg = if others == 0 {
                             format!("Module \u{201c}{}\u{201d} reloaded.", info.name)
                         } else {
                             format!(
-                                "Module \u{201c}{}\u{201d} reloaded. Restart to apply the change in modules that depend on it: {}.",
+                                "Module \u{201c}{}\u{201d} reloaded, along with {} module(s) that depend on it: {}.",
                                 info.name,
-                                deps.join(", ")
+                                others,
+                                report.reloaded[1..].join(", ")
                             )
                         };
+                        if !report.failed.is_empty() {
+                            msg.push_str(&format!(
+                                "\n\nThese could not be rebuilt and are now inactive: {}. Fix each and press Reload on it.",
+                                report
+                                    .failed
+                                    .iter()
+                                    .map(|(id, e)| format!("{id} ({e})"))
+                                    .collect::<Vec<_>>()
+                                    .join("; ")
+                            ));
+                        }
                         modal_message(&frame, "Reloaded", &msg, false);
                     }
                     Err(e) => {
@@ -420,6 +439,8 @@ pub fn run_gui(
         // thread via a shared inbox drained on the timer tick (wxdragon has no
         // CallAfter). Threads only move owned data; controls stay on this thread.
         enum Job {
+            /// An update landed on disk: rebuild the running module + its dependents.
+            Updated(String),
             Browse(Vec<crate::registry::RemoteModule>),
             BrowseStatus(String),
             Updates(Vec<(String, String, String)>), // (module id, repo, "vX → vY")
@@ -628,22 +649,7 @@ pub fn run_gui(
                 std::thread::spawn(move || {
                     let job = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         match crate::registry::install(&repo) {
-                            Ok(m) => {
-                                // Modules that inherit this one hold a copy of its code
-                                // and reload it on the next start (the cascade is via
-                                // restart for now — no live hot-reload yet).
-                                let graph: Vec<(String, Vec<String>)> = crate::registry::installed()
-                                    .into_iter()
-                                    .map(|x| (x.id, x.dependencies))
-                                    .collect();
-                                let deps = crate::registry::transitive_dependents(&m.id, &graph);
-                                let extra = if deps.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!(" Dependents reload with it: {}.", deps.join(", "))
-                                };
-                                Job::Done(format!("Updated {}. Restart to apply.{extra}", m.id))
-                            }
+                            Ok(m) => Job::Updated(m.id),
                             Err(e) => Job::Done(format!("Update failed: {e}")),
                         }
                     }))
@@ -819,6 +825,71 @@ pub fn run_gui(
                                 ),
                             };
                             modal_message(&frame, "Installed", &msg, false);
+                        }
+                        Job::Updated(id) => {
+                            busy.set(false);
+                            update_btn.enable(true);
+                            // The files changed on disk; now rebuild what is RUNNING.
+                            // Every module that inherits this one holds a copy of its
+                            // code, so the reload cascades to them -- that is what used
+                            // to need a restart.
+                            let idx =
+                                rows.borrow().iter().find(|r| r.id == id).map(|r| r.module_idx);
+                            let msg = match idx {
+                                None => format!(
+                                    "Updated \u{201c}{id}\u{201d} on disk. It is not loaded in this \
+                                     session, so there is nothing to reload."
+                                ),
+                                Some(idx) => match on_reload(idx) {
+                                    Ok((info, report)) => {
+                                        {
+                                            let mut rb = rows.borrow_mut();
+                                            if let Some(r) =
+                                                rb.iter_mut().find(|r| r.module_idx == idx)
+                                            {
+                                                r.settings = info.settings.clone();
+                                                r.dependencies = info.dependencies.clone();
+                                                r.name = info.name.clone();
+                                                list.set_item_text(
+                                                    &r.item,
+                                                    &format!(
+                                                        "{}  v{}   ({})",
+                                                        info.name, info.version, info.id
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                        let others = report.reloaded.len().saturating_sub(1);
+                                        let mut m = if others == 0 {
+                                            format!(
+                                                "Updated \u{201c}{id}\u{201d} and reloaded it \u{2014} running now."
+                                            )
+                                        } else {
+                                            format!(
+                                                "Updated \u{201c}{id}\u{201d} and reloaded it, along with {} module(s) that depend on it: {}. All running now.",
+                                                others,
+                                                report.reloaded[1..].join(", ")
+                                            )
+                                        };
+                                        if !report.failed.is_empty() {
+                                            m.push_str(&format!(
+                                                "\n\nThese could not be rebuilt and are now inactive: {}.",
+                                                report
+                                                    .failed
+                                                    .iter()
+                                                    .map(|(i, e)| format!("{i} ({e})"))
+                                                    .collect::<Vec<_>>()
+                                                    .join("; ")
+                                            ));
+                                        }
+                                        m
+                                    }
+                                    Err(e) => format!(
+                                        "Updated \u{201c}{id}\u{201d} on disk, but reloading it failed:\n{e}\n\nIt is now inactive; restart the app to retry."
+                                    ),
+                                },
+                            };
+                            modal_message(&frame, "Updated", &msg, false);
                         }
                         Job::Done(msg) => {
                             busy.set(false);

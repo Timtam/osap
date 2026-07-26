@@ -1477,6 +1477,73 @@ fn reload_module(
     Ok(registry::transitive_dependents(&old_id, &graph))
 }
 
+/// What a cascading reload did: the module itself, then each dependent that had to be
+/// rebuilt with it, with the error for any that failed.
+pub struct ReloadReport {
+    /// Ids rebuilt successfully, in the order they were rebuilt.
+    pub reloaded: Vec<String>,
+    /// (id, error) for each dependent whose rebuild failed — it is now inactive.
+    pub failed: Vec<(String, String)>,
+}
+
+/// Reloads module `idx` AND every module that transitively depends on it, in
+/// dependency order.
+///
+/// The cascade is not a nicety: a code module's source is copied into each dependent's
+/// VM when that dependent is built, so rebuilding only the changed module leaves every
+/// dependent running the OLD copy. That is why updating one used to end in "restart to
+/// apply" — the running app had no way to reach the stale copies.
+///
+/// Order matters for the same reason: a dependent must be rebuilt AFTER the dependency
+/// whose code it will copy, or it copies the old code and the fix is invisible until the
+/// next restart, which is precisely the bug being fixed.
+///
+/// A dependent that fails to rebuild is left inactive and reported, rather than aborting
+/// the cascade: the remaining ones are independent of it, and stopping halfway would
+/// leave more of the system stale than continuing does.
+fn reload_module_tree(
+    shared: &Rc<Shared>,
+    modules: &Rc<RefCell<Vec<Module>>>,
+    idx: usize,
+) -> Result<ReloadReport> {
+    let dependents = reload_module(shared, modules, idx)?;
+    let root_id = modules.borrow()[idx].id.clone();
+    let mut report = ReloadReport { reloaded: vec![root_id.clone()], failed: Vec::new() };
+    if dependents.is_empty() {
+        return Ok(report);
+    }
+
+    let graph: Vec<(String, Vec<String>)> =
+        modules.borrow().iter().map(|m| (m.id.clone(), m.dependencies.clone())).collect();
+    for id in registry::reload_order(&root_id, &graph) {
+        let dep_idx = modules.borrow().iter().position(|m| m.id == id);
+        let Some(dep_idx) = dep_idx else { continue };
+        match reload_module(shared, modules, dep_idx) {
+            Ok(_) => report.reloaded.push(id),
+            Err(e) => {
+                logging::line(
+                    "manager",
+                    &format!("cascading reload of dependent '{id}' failed: {e:#}"),
+                );
+                report.failed.push((id, format!("{e:#}")));
+            }
+        }
+    }
+    logging::line(
+        "manager",
+        &format!(
+            "reloaded '{root_id}' and {} dependent(s){}",
+            report.reloaded.len() - 1,
+            if report.failed.is_empty() {
+                String::new()
+            } else {
+                format!(", {} failed", report.failed.len())
+            }
+        ),
+    );
+    Ok(report)
+}
+
 /// Builds the manager's display row for module `idx`: its settings (schema +
 /// stored/default values), enabled state, and declared dependencies. Used both
 /// for the startup snapshot and when a hot-loaded module is added to the list.
@@ -1681,15 +1748,17 @@ impl Manager {
                     move |idx| {
                         remove_shared.apply_enabled(idx, false);
                     },
-                    // Reload the selected module's VM in place from its source dir.
+                    // Reload the selected module's VM in place from its source dir --
+                    // and every module that depends on it, since each holds a COPY of its
+                    // code and would otherwise keep running the old one.
                     move |idx| {
-                        let deps = reload_module(&reload_shared, &reload_modules, idx)
+                        let report = reload_module_tree(&reload_shared, &reload_modules, idx)
                             .map_err(|e| format!("{e:#}"))?;
                         let info = {
                             let mods = reload_modules.borrow();
                             module_info(&reload_shared, &mods[idx], idx)
                         };
-                        Ok((info, deps))
+                        Ok((info, report))
                     },
                     move || {
                         let mods = modules.borrow();
