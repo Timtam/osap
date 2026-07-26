@@ -155,9 +155,29 @@ local function invokeMenuItem(cell, o, item)
       return
     end
     local base, at = cell.geometry.fileMenu, geo.MENU_ITEM[item]
-    if ctrl.client and base and at then
-      host.input.click(ctrl.client.x + base[1] + at[1], ctrl.client.y + base[2] + at[2])
+    if not (ctrl.client and base and at) then return end
+    local x = ctrl.client.x + base[1] + at[1]
+    local y = ctrl.client.y + base[2] + at[2]
+    -- READ THE ROW BEFORE CLICKING IT. These offsets are measured against one state of a
+    -- menu whose contents vary — an item present or absent above shifts every row below it
+    -- — and a one-row slip here is not harmless: the row under "Reset multi" is "Save as
+    -- default multi", which overwrites the user's default multi. The menu carries no
+    -- accessibility information, so OCR is the only way to know what is actually there.
+    -- ReaHotkey does the same check through UIA and says "menu item not found"; this is
+    -- that, where UIA cannot reach.
+    local seen = host.ocr.recognize({ region = { x - 8, y - 9, x + 190, y + 9 } })
+    local text = string.lower((seen and seen.text) or "")
+    local want = string.lower(string.gsub(item, "%.%.%.$", ""))
+    if string.find(text, want, 1, true) == nil then
+      host.log.info(string.format(
+        "Kontakt: menu row at (%d,%d) reads '%s', expected '%s' — not clicking",
+        x, y, tostring(seen and seen.text), item
+      ))
+      host.speech.output("Menu item not found", { interrupt = true })
+      host.input.send("Escape")
+      return
     end
+    host.input.click(x, y)
   end)
 end
 

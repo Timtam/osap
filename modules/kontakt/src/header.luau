@@ -39,19 +39,36 @@ local function addPluginHeader(ov, cell)
     hotkey = "Ctrl+R",
     onActivate = function(o) A.invokeMenuItem(cell, o, "Reset multi") end,
   })
-  -- The arrows sit in the PLUGIN CONTROL's own frame, so `rawOrigin`: they must skip both
-  -- the content offset and a library overlay's landmark anchoring, exactly as ReaHotkey
-  -- measures them off the plugin control whatever library is loaded. `fromRight` ones are
-  -- anchored to its right edge (ReaHotkey's ControlWidth − N).
-  for _, h in ipairs(geo.ARROWS) do
-    ov:addHotspotButton({
-      label = h.label,
-      at = h.at or cell.geometry[h.key],
-      fromRight = h.fromRight,
-      rawOrigin = true,
-      hotkey = h.hotkey,
-    })
-  end
+  -- Switching to the classic view, by Kontakt's OWN keyboard shortcut rather than through
+  -- its menu. The menu entry reads "Switch to Classic View   F10", and a shortcut the
+  -- application itself defines cannot drift the way a measured menu row can.
+  --
+  -- It is not a nicety: the instrument, multi and snapshot controls exist only in the
+  -- classic view, and the only other route to it is a menu that carries no accessibility
+  -- information at all. Without this a user who cannot see the screen can never get there.
+  -- (The header's "Play View" button turns the modern view ON; it does not toggle.)
+  ov:addCustomButton({
+    label = "Switch to classic view",
+    hotkey = "Alt+V",
+    onActivate = function() host.input.send("F10") end,
+  })
+  -- ReaHotkey's instrument / multi / snapshot arrows are NOT here, deliberately.
+  --
+  -- Measured against the live Kontakt 8.11 with the calibrator, its coordinates land on
+  -- nothing in either view: in the modern one they fall inside the loaded library's UI (one
+  -- sat on Cinematic Studio Strings' "Sustain" articulation, so pressing Ctrl+P changed the
+  -- sound instead of the instrument), and in the classic one they land on inert header
+  -- space -- the empty right half of the multi name field, the gap beside the camera icon,
+  -- and the "MIDI Ch:" / "Memory:" labels. Kontakt 8.11's classic header simply has no such
+  -- arrows; the snapshot row appears only for an instrument that HAS snapshots.
+  --
+  -- A control that fires something else is worse than a missing one, and ReaHotkey itself
+  -- only offers these in the classic view (CheckPluginClassicView), a gate we cannot
+  -- reproduce embedded because it needs the UIA tree that an embedded Kontakt does not
+  -- expose. To bring them back: load an instrument that has snapshots, switch to the
+  -- classic view (Alt+V), and take a calibration shot -- the positions can then be read off
+  -- the picture, and they will need a visibility condition so they never appear in the
+  -- modern view.
   for _, h in ipairs(geo.K7_CONTROLS) do
     -- Only those Kontakt 7 offers embedded, and only where the cell has the coordinate:
     -- Kontakt 8's geometry simply has no entry, so the loop skips it without a version
