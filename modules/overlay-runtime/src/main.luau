@@ -23,6 +23,16 @@ local O = {}
 local MATCH_TOLERANCE = 20
 local MATCH_SCALES = { 1.0, 0.9, 1.1, 0.8, 1.2, 1.25, 0.75, 1.5, 0.67, 2.0 }
 
+-- The specificity ladder overlays compete on within a slot, named. The numbers are the
+-- ones already in use, so a migrated overlay and an unmigrated one still rank correctly
+-- against each other; renaming is safe today, renumbering is not.
+--
+--   chrome  — a host's own frame (Komplete Kontrol's menu bar around a nested plugin)
+--   base    — the plugin's generic header, when nothing more specific applies
+--   content — what is loaded INSIDE the plugin right now (a sample library)
+--   dialog  — a modal that must own the keyboard while it is up
+O.layer = { chrome = 0, base = 1, content = 2, dialog = 3 }
+
 local Overlay = {}
 Overlay.__index = Overlay
 
@@ -976,6 +986,21 @@ function Overlay:_join(slot, specificity, pollMs)
       if pollMs then
         host.timer.every(pollMs, function() self:_recheck() end)
       end
+      -- Log the slot's roster as it grows. A slot is a plain string typed independently
+      -- in modules that never see each other, and a typo does not error — it quietly
+      -- creates a private slot where this overlay wins every time, or never competes.
+      -- A slot that stays at one participant while its sibling shows several is the only
+      -- visible symptom, so make it visible.
+      if host.arbiter.participants then
+        local names = {}
+        for _, p in ipairs(host.arbiter.participants(self._slot)) do
+          names[#names + 1] = string.format("%s(%d)", p.module, p.specificity)
+        end
+        host.log.info(string.format(
+          "arbiter slot '%s': %d participant(s) — %s",
+          self._slot, #names, table.concat(names, ", ")
+        ))
+      end
     elseif slot ~= self._slot then
       host.log.info(
         "overlay '"
@@ -1001,6 +1026,9 @@ end
 local function ensureTrigger(self, opts)
   if opts then
     self.hoverToRead = opts.hoverToRead == true
+    -- `menus = true`: hand the captured navigation keys to a plugin menu while one is
+    -- open (see watchMenus). Any overlay whose controls can open a plugin menu needs it.
+    if opts.menus then self:watchMenus() end
     self:_join(opts.slot, opts.specificity, opts.pollMatch)
   else
     self:_join(nil, nil, nil)
@@ -1181,20 +1209,53 @@ function Overlay:setControls(controls)
   end
 end
 
--- While active, watch (via UIA) for a MENU open inside
--- the plugin and tell the hook to let captured nav keys pass through to it — a
--- plugin's own (Qt) menu is not a Win32 #32768 menu, so the hook can't see it.
-function Overlay:_startMenuWatch()
+-- Watch for a MENU opening inside the plugin and tell the key hook to let the captured
+-- navigation keys pass through to it — a plugin's own (Qt) menu is not a Win32 #32768
+-- menu, so the hook cannot see it by itself. Without this, opening a plugin menu from an
+-- overlay control leaves the user unable to move in it: the overlay keeps swallowing Tab,
+-- Return and the arrows.
+--
+-- ONE watch per VM, not one per overlay. Every overlay needed this and it was a private
+-- method each module had to remember to call — sforzando and overlay-attach do not, and
+-- silently swallow keys as a result. Opt in with `menus = true` on attach.
+--
+-- `host.keys.menuOpen` is a process-wide flag, so it is only written while an opted-in
+-- overlay is actually active; otherwise this would clobber the state of whichever overlay
+-- is live elsewhere.
+local menuWatched = {}
+local menuTimer = false
+function Overlay:watchMenus()
+  for _, o in ipairs(menuWatched) do
+    if o == self then return self end
+  end
+  menuWatched[#menuWatched + 1] = self
+  if menuTimer then return self end
+  menuTimer = true
   -- Disable-safe recurring poll (survives a disable/enable cycle, unlike a Lua
   -- self-rescheduling host.timer.after).
   host.timer.every(150, function()
-    if self.active then
-      local ctrl = self:origin()
-      local open = ctrl ~= nil and ctrl.id ~= nil
-        and host.uia.find(ctrl.id, "", host.uia.type.Menu) == true
-      host.keys.menuOpen(open)
+    local anyActive, open = false, false
+    for _, o in ipairs(menuWatched) do
+      if o.active then
+        anyActive = true
+        local ctrl = o:origin()
+        if ctrl ~= nil and ctrl.id ~= nil
+          and host.uia.find(ctrl.id, "", host.uia.type.Menu) == true
+        then
+          open = true
+          break
+        end
+      end
     end
+    if anyActive then host.keys.menuOpen(open) end
   end)
+  return self
+end
+
+-- Deprecated name kept so existing modules keep loading; `menus = true` on attach is the
+-- supported way in.
+function Overlay:_startMenuWatch()
+  return self:watchMenus()
 end
 
 -- Calibration helper: capture the live on-screen pixels of the control labelled

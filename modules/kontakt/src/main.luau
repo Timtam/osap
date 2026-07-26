@@ -645,7 +645,6 @@ local function buildLibraryOverlay(name, landmark, build, cfg)
   -- and Kontakt browser state, without any content/version/chrome offset.
   if landmark then ov:landmark(landmark, { anchor = true }) end
   cfg.attach(ov)
-  ov:_startMenuWatch()
   return ov
 end
 
@@ -659,8 +658,7 @@ return {
     ov:onActivate(onPluginActive)
     -- Specificity 1: above the Komplete Kontrol chrome overlay (0, com.platform
     -- .komplete-kontrol) on the shared slot, below a library (2).
-    ov:attachEmbedded(spec(), { slot = SLOT, specificity = 1 })
-    ov:_startMenuWatch()
+    ov:attachEmbedded(spec(), { slot = SLOT, specificity = O.layer.base, menus = true })
     host.log.info("Kontakt base overlay ready.")
 
     -- STANDALONE overlay: Kontakt running as its OWN application (Kontakt N.exe), not
@@ -701,8 +699,7 @@ return {
     -- Join the standalone slot at the LOWEST specificity, so a library's standalone
     -- variant (specificity 2, gated on its landmark) takes over when its library is
     -- loaded, and this header is the resting default otherwise.
-    sa:attach(KONTAKT_STANDALONE, { slot = STANDALONE_SLOT, specificity = 0 })
-    sa:_startMenuWatch()
+    sa:attach(KONTAKT_STANDALONE, { slot = STANDALONE_SLOT, specificity = O.layer.chrome, menus = true })
     host.log.info("Kontakt standalone overlay ready.")
 
     -- The Content Missing dialog, embedded + standalone. Specificity 3 beats the header
@@ -711,8 +708,8 @@ return {
     local cmSpec = spec()
     cmSpec.control = CONTENT_MISSING_CONTROL
     cmSpec.identify = function() return kontaktPresent() end
-    contentMissingOverlay():attachEmbedded(cmSpec, { slot = SLOT, specificity = 3 })
-    contentMissingOverlay():attach(CONTENT_MISSING_WINDOW, { slot = STANDALONE_SLOT, specificity = 3 })
+    contentMissingOverlay():attachEmbedded(cmSpec, { slot = SLOT, specificity = O.layer.dialog })
+    contentMissingOverlay():attach(CONTENT_MISSING_WINDOW, { slot = STANDALONE_SLOT, specificity = O.layer.dialog })
     host.log.info("Kontakt Content Missing overlays ready.")
   end,
 
@@ -738,7 +735,7 @@ return {
       embedded = true,
       offset = resolveOffset,
       attach = function(o)
-        o:attachEmbedded(spec(), { slot = SLOT, specificity = 2, pollMatch = 500 })
+        o:attachEmbedded(spec(), { slot = SLOT, specificity = O.layer.content, pollMatch = 500, menus = true })
       end,
     })
 
@@ -751,7 +748,7 @@ return {
       kkHeader = false,
       offset = standaloneOffset,
       attach = function(o)
-        o:attach(KONTAKT_STANDALONE, { slot = STANDALONE_SLOT, specificity = 2, pollMatch = 500 })
+        o:attach(KONTAKT_STANDALONE, { slot = STANDALONE_SLOT, specificity = O.layer.content, pollMatch = 500, menus = true })
       end,
     })
 

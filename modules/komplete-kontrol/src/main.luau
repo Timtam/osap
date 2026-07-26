@@ -43,10 +43,18 @@ local PREFS = {
 -- "Scanning in progress" dialogs are untitled #32770s (only Preferences carries a title),
 -- so one window matcher fits both; they are told apart on a shared ARBITER slot by an
 -- image landmark + specificity — Save As has the "Save Preset" header and wins, Scanning
--- is the fallback for any other untitled KK dialog. The `not "Preferences"` guard keeps
--- both off the Preferences dialog (so the Save As image search never runs there).
+-- is the fallback for any other untitled KK dialog.
+--
+-- UNTITLED is the actual discriminator, and it must be tested: KK's own custom-drawn
+-- dialogs carry no window title, whereas every dialog Windows itself puts up on KK's
+-- behalf has one — the folder picker behind "Add user library directory" ("Browse For
+-- Folder" / "Ordner suchen"), file dialogs, message boxes. Matching those would be worse
+-- than useless: the overlay captures Tab/Shift+Tab/Return, so a user who cannot see the
+-- dialog is locked out of it while being told a scan is running. The old
+-- `not "Preferences"` guard excluded exactly one titled dialog by name and let the rest
+-- through.
 local KK_UNTITLED_DIALOG = {
-  title = { ["not"] = "Preferences" },
+  title = "",
   app = { exe = { contains = "Komplete Kontrol" } },
   windows = { class = "#32770" },
 }
@@ -130,7 +138,7 @@ end
 -- The origin (dialog client, in screen coords) is read once at activation.
 local function prefsAction(label, points)
   return function(o)
-    local ctx = o.activeCtx and o.activeCtx.origin()
+    local ctx = o:origin()
     local c = ctx and ctx.client
     if not c then return end
     for i, p in ipairs(points) do
@@ -193,8 +201,7 @@ return {
     -- Tab / Shift+Tab navigate the header (like the Kontakt overlay), Enter activates;
     -- Alt+M / Alt+S / Alt+L are also global. The menu-watch hands the captured nav keys
     -- to KK's own Qt menu (opened by Alt+M) while it is open.
-    ov:attachEmbedded(spec(), { slot = SLOT, specificity = 0 })
-    ov:_startMenuWatch()
+    ov:attachEmbedded(spec(), { slot = SLOT, specificity = O.layer.chrome, menus = true })
     host.log.info("Komplete Kontrol base overlay ready.")
 
     -- STANDALONE overlay: Komplete Kontrol running as its OWN application (not embedded
@@ -215,8 +222,7 @@ return {
     -- the embedded KK chrome (0) does in a DAW. (The Kontakt module adds this KK window as
     -- a host, so its nested overlays can match here.) When the browser hides the nested
     -- Kontakt, this overlay is the active one and its onKKActive still auto-closes it.
-    sa:attach(STANDALONE, { slot = SLOT, specificity = 0 })
-    sa:_startMenuWatch()
+    sa:attach(STANDALONE, { slot = SLOT, specificity = O.layer.chrome, menus = true })
     host.log.info("Komplete Kontrol standalone overlay ready.")
 
     -- STANDALONE Preferences dialog overlay (#32770 "Preferences"). Robust core: switch
@@ -282,7 +288,7 @@ return {
     saveas:landmark(host.path("images/saveas-header.png"))
     -- Specificity 1 on the shared slot: with its "Save Preset" landmark present it beats
     -- the Scanning fallback (0) whenever this really is the Save-preset dialog.
-    saveas:attach(KK_UNTITLED_DIALOG, { slot = KK_DIALOG_SLOT, specificity = 1 })
+    saveas:attach(KK_UNTITLED_DIALOG, { slot = KK_DIALOG_SLOT, specificity = O.layer.base })
     host.log.info("Komplete Kontrol standalone Save preset overlay ready.")
 
     -- STANDALONE "Scanning in progress" dialog overlay: shown while KK rescans its
@@ -322,7 +328,12 @@ return {
       end
       o._scanCommitted = false
     end)
-    scan:attach(KK_UNTITLED_DIALOG, { slot = KK_DIALOG_SLOT, specificity = 0 })
+    -- Polled: this overlay identifies its dialog by the ABSENCE of a title, and a window
+    -- can acquire one after it is created. Without a re-check it would keep a dialog it
+    -- no longer matches until the next foreground change — and holding this one means
+    -- swallowing the keys the user needs. The poll is a window-property test, not an
+    -- enumeration.
+    scan:attach(KK_UNTITLED_DIALOG, { slot = KK_DIALOG_SLOT, specificity = O.layer.chrome, pollMatch = 500 })
     host.log.info("Komplete Kontrol standalone Scanning overlay ready.")
   end,
 }
