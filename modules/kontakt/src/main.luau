@@ -230,8 +230,13 @@ local function uiaClick(_, name, ctype)
   return false
 end
 
--- The What's New dialog's close (✕) glyph, for the image-based nested dismiss.
-local WHATSNEW_CLOSE = host.path("images/whatsnew-close.png")
+-- The update dialog's close (✕) glyph, for the image-based dismiss. Two templates: the
+-- Kontakt 8 "What's New" screen, and Kontakt 7's "New version Kontakt 8 available"
+-- promo, whose ✕ is drawn differently (the K8 template misses it by a wide margin).
+local WHATSNEW_CLOSE = {
+  host.path("images/whatsnew-close.png"),
+  host.path("images/whatsnew-close-k7.png"),
+}
 -- Bound the image-based search: the dialog is one-time (shows when Kontakt loads a
 -- fresh update) and modal, so a handful of attempts per plugin instance covers the
 -- load window; after that we stop scanning so the worker isn't probed on every
@@ -240,46 +245,64 @@ local WHATSNEW_CLOSE = host.path("images/whatsnew-close.png")
 local whatsNewTries = {}
 local WHATSNEW_MAX_TRIES = 6
 
--- Dismiss Kontakt's one-time "What's New" update dialog. Two strategies:
---   • Bare Kontakt — ReaHotkey-style UIA: find the WhatsNewScreen pane on the Kontakt
---     control and click its close child (WalkTree(2)).
---   • Nested in KK — Kontakt exposes NO UIA tree (its "Kontakt N" control is a UIA leaf,
---     the same reason nested detection is image-based), so UIA finds nothing; fall back
---     to an IMAGE search for the close glyph within the nested Kontakt content area and
---     click it. Async + single-scale + low tolerance + one click (NOT a multi-scale
---     full-region scan, which would starve the worker); a miss = no dialog up (safe).
+-- Dismiss Kontakt's one-time update dialog ("What's New" in Kontakt 8, "New version
+-- Kontakt 8 available" in Kontakt 7). It matters beyond being a nuisance: it covers the
+-- loaded library's UI, so its wordmark can't be found and the library overlay never
+-- takes over. Two strategies:
+--   • UIA, ReaHotkey-style: find the WhatsNewScreen pane on the Kontakt control and
+--     click its close child (WalkTree(2)). Works where Kontakt is accessible at all —
+--     i.e. running standalone.
+--   • IMAGE search for the close glyph within the Kontakt content area, then one click.
+--     Async + single-scale + low tolerance (NOT a multi-scale full-region scan, which
+--     would starve the worker); a miss = no dialog up (safe). Each template is tried in
+--     turn, since the two versions draw the ✕ differently.
+-- The image path runs on ANY UIA miss, not just where UIA is unreachable: Kontakt 7's
+-- upsell dialog is not a WhatsNewScreen at all, so the UIA lookup misses it even on a
+-- Kontakt 7 embedded in a DAW, which — unlike Kontakt 8 — does expose a UIA tree. A UIA
+-- miss therefore never proves the absence of a dialog. Matching demands every pixel
+-- within tolerance, and both templates were checked to match exactly once (K7) and never
+-- (K8) across a full plugin screenshot, so this cannot stray onto Kontakt's own ✕
+-- controls; the per-instance try budget bounds the cost when no dialog is up.
 -- No-op when no dialog is up either way.
-local function closeWhatsNew(o)
+local function closeWhatsNew(_)
   local kc = findNestedKontakt()
   if not kc then return end
+  -- Announce it: a dialog vanishing on its own is otherwise silent, and the user has no
+  -- way to tell that something was in the way at all. QUEUED, never interrupting — the
+  -- overlay that takes over once the dialog is gone (the library's, now that its wordmark
+  -- is visible) announces itself right after, and that announcement must not be stomped.
+  local function announce()
+    host.speech.output("Update dialog closed", { interrupt = false })
+  end
   local p = host.uia.classNavPoint(kc.id, "WhatsNewScreen", 50033, 2, 0)
   if p then
     host.input.click(p.x, p.y)
-    host.log.info("Kontakt: dismissed What's New dialog (UIA)")
+    host.log.info("Kontakt: dismissed update dialog (UIA)")
+    announce()
     return
   end
-  -- Image fallback ONLY when nested in KK: there UIA can't reach Kontakt, so a UIA
-  -- miss is inconclusive and the dialog must be found by image. Bare Kontakt HAS a
-  -- UIA tree, so a UIA miss means there is genuinely no dialog — don't run a scan
-  -- (avoids needless worker probes and any image false-click) on the bare path.
-  local matched = o and o.activeCtx and o.activeCtx.origin()
-  if matched and isKK(matched) and kc.bounds then
-    local tries = whatsNewTries[kc.id] or 0
-    if tries >= WHATSNEW_MAX_TRIES then return end
-    whatsNewTries[kc.id] = tries + 1
-    local b = kc.bounds
-    host.screen.imageSearchAsync(
-      WHATSNEW_CLOSE,
-      { region = { b.x, b.y, b.x + b.w, b.y + b.h }, tolerance = 8 },
-      function(hit)
-        if hit then
-          host.input.click(hit.x + math.floor(hit.w / 2), hit.y + math.floor(hit.h / 2))
-          host.log.info("Kontakt: dismissed What's New dialog (image)")
-          whatsNewTries[kc.id] = WHATSNEW_MAX_TRIES -- done; stop scanning for this instance
-        end
+  if not kc.bounds then return end
+  local tries = whatsNewTries[kc.id] or 0
+  if tries >= WHATSNEW_MAX_TRIES then return end
+  whatsNewTries[kc.id] = tries + 1
+  local b = kc.bounds
+  local region = { b.x, b.y, b.x + b.w, b.y + b.h }
+  local search
+  search = function(n)
+    local image = WHATSNEW_CLOSE[n]
+    if not image then return end
+    host.screen.imageSearchAsync(image, { region = region, tolerance = 8 }, function(hit)
+      if not hit then
+        search(n + 1) -- this version's glyph didn't match; try the next template
+        return
       end
-    )
+      host.input.click(hit.x + math.floor(hit.w / 2), hit.y + math.floor(hit.h / 2))
+      host.log.info("Kontakt: dismissed update dialog (image)")
+      announce()
+      whatsNewTries[kc.id] = WHATSNEW_MAX_TRIES -- done; stop scanning for this instance
+    end)
   end
+  search(1)
 end
 
 -- Fired whenever the Kontakt base/library overlay becomes focused: dismiss the one-time
@@ -347,30 +370,100 @@ end
 -- button (ReaHotkey's 86,19), and the menu items at their fixed positions in the opened
 -- menu (measured against the live 8.11 menu). A menu item's action (e.g. "Load...") opens
 -- Kontakt's own native, ACCESSIBLE dialog — so the user never needs to read the Qt menu.
-local FILE_MENU_AT = { 86, 19 }
--- Content-relative click points of the file-menu items we drive (the ReaHotkey set:
--- Load / Save as / Reset multi). The menu opens at a fixed position from FILE_MENU_AT, so
--- items sit at fixed offsets — measured against the live 8.11 menu ("Load..." is confirmed
--- by the working Ctrl+L; the others are ~23 px apart, adjust if a click misses).
+-- Which Kontakt is focused right now, by name ("Kontakt 7" / "Kontakt 8"), or nil.
+-- ReaHotkey keeps two entirely separate overlays with their own hard-coded numbers;
+-- here ONE header serves both and resolves the version live, so a library overlay
+-- inherits it unchanged whichever Kontakt it is loaded into. Cached per control id
+-- (a Kontakt's version never changes under a fixed handle).
+local variantCache = {}
+local function variantOf(o)
+  local ctrl = o and o.activeCtx and o.activeCtx.origin()
+  if not ctrl then return nil end
+  local cached = variantCache[ctrl.id]
+  if cached ~= nil then return cached or nil end
+  -- Standalone: the window title carries the version. Embedded: identify by UIA, on the
+  -- Kontakt itself — or, when anchored on a KK container, on the Kontakt nested in it.
+  local name = string.match(tostring(ctrl.title or ""), "^(Kontakt %d)")
+  if not name then
+    local kc = ctrl
+    if isKK(ctrl) then kc = findNestedKontakt(ctrl) or ctrl end
+    for _, v in ipairs(VARIANTS) do
+      if v.identify(kc) then
+        name = v.name
+        break
+      end
+    end
+  end
+  if name then variantCache[ctrl.id] = name end
+  return name
+end
+
+-- ReaHotkey's per-version header geometry (its Kontakt7/Kontakt8 coordinate fallbacks),
+-- relative to the plugin control's own top-left. Kontakt 7 and 8 differ in where the
+-- chrome sits, so every coordinate the header clicks is looked up by focused version.
+local GEOMETRY = {
+  ["Kontakt 7"] = {
+    fileMenu = { 175, 19 }, -- the "FILE" button
+    library = { 231, 19 },
+    viewMenu = { 288, 19 },
+    shop = { 440, 19 }, -- with the library browser open ReaHotkey uses 815 — needs UIA
+    prevMulti = { 704, 53 },
+    nextMulti = { 722, 53 },
+  },
+  ["Kontakt 8"] = {
+    fileMenu = { 86, 19 }, -- the KONTAKT wordmark
+    prevMulti = { 722, 53 },
+    nextMulti = { 742, 53 },
+  },
+}
+-- Kontakt 8 is the fallback when the version isn't resolved yet (it is the tested one).
+local function geom(o, key)
+  local g = GEOMETRY[variantOf(o) or "Kontakt 8"]
+  return g and g[key]
+end
+
+-- File-menu item click points, relative to the FILE-MENU BUTTON — the menu drops from
+-- that button, so one set of offsets holds for both versions even though the button
+-- itself sits ~90 px apart in Kontakt 7 and 8. Measured on the live 8.11 menu (all three
+-- confirmed working); the item order is the same in Kontakt 7.
 local MENU_ITEM = {
-  ["Load..."] = { 100, 84 },
-  ["Save multi as..."] = { 100, 140 },
-  ["Reset multi"] = { 100, 195 },
+  ["Load..."] = { 14, 65 },
+  ["Save multi as..."] = { 14, 121 },
+  ["Reset multi"] = { 14, 176 },
 }
 
--- Opens the Kontakt file menu: the UIA "Kontakt File Menu" button when it's reachable
--- (a standalone / full-UIA Kontakt), else a coordinate click on the KONTAKT header. Returns
--- the origin control + whether UIA was used (so a follow-up item click picks its method).
+-- Opens the Kontakt file menu: the UIA file-menu button when it's reachable (a
+-- standalone / full-UIA Kontakt), else a coordinate click on the header. Returns the
+-- origin control + whether UIA was used (so a follow-up item click picks its method).
+-- The UIA button's name is version-specific: "FILE" in Kontakt 7, "Kontakt File Menu"
+-- in Kontakt 8.
+local UIA_FILE_MENU = { ["Kontakt 7"] = "FILE", ["Kontakt 8"] = "Kontakt File Menu" }
 local function openFileMenu(o)
   local ctrl = o.activeCtx and o.activeCtx.origin()
-  if uiaClick(ctrl and ctrl.id, "Kontakt File Menu", BUTTON) then
+  local uiaName = UIA_FILE_MENU[variantOf(o) or "Kontakt 8"]
+  if uiaClick(ctrl and ctrl.id, uiaName, BUTTON) then
     host.keys.menuOpen(true)
     return ctrl, true
-  elseif ctrl and ctrl.client then
-    host.input.click(ctrl.client.x + FILE_MENU_AT[1], ctrl.client.y + FILE_MENU_AT[2])
+  end
+  local at = geom(o, "fileMenu")
+  if ctrl and ctrl.client and at then
+    host.input.click(ctrl.client.x + at[1], ctrl.client.y + at[2])
     return ctrl, false
   end
   return nil
+end
+
+-- A header control that acts through UIA where that works (a standalone Kontakt is
+-- fully accessible) and falls back to ReaHotkey's coordinate for that version.
+local function headerAction(uiaName, key)
+  return function(o)
+    local ctrl = o.activeCtx and o.activeCtx.origin()
+    if uiaClick(ctrl and ctrl.id, uiaName, BUTTON) then return end
+    local at = geom(o, key)
+    if ctrl and ctrl.client and at then
+      host.input.click(ctrl.client.x + at[1], ctrl.client.y + at[2])
+    end
+  end
 end
 
 -- Opens the file menu and selects `item` after it appears — via UIA (standalone) or a
@@ -382,9 +475,11 @@ local function invokeMenuItem(o, item)
   host.timer.after(250, function()
     if uia then
       uiaClick(ctrl.id, item, MENUITEM)
-    elseif ctrl.client and MENU_ITEM[item] then
-      local at = MENU_ITEM[item]
-      host.input.click(ctrl.client.x + at[1], ctrl.client.y + at[2])
+      return
+    end
+    local base, at = geom(o, "fileMenu"), MENU_ITEM[item]
+    if ctrl.client and base and at then
+      host.input.click(ctrl.client.x + base[1] + at[1], ctrl.client.y + base[2] + at[2])
     end
   end)
 end
@@ -395,14 +490,31 @@ end
 -- both the content offset and a library overlay's landmark anchoring (ReaHotkey measures
 -- them off ControlGetPos of the plugin control, whatever library is loaded). Those with
 -- `fromRight` are anchored to the control's right edge (ReaHotkey's ControlWidth − N).
+-- The multi arrows are the one pair whose position differs between the versions, so
+-- they take their coordinates from GEOMETRY per focused Kontakt; the rest are identical
+-- in ReaHotkey's Kontakt 7 and Kontakt 8 overlays.
 local HEADER_HOTSPOTS = {
   { label = "Previous instrument", at = { 352, 87 }, fromRight = true, hotkey = "Ctrl+P" },
   { label = "Next instrument", at = { 332, 87 }, fromRight = true, hotkey = "Ctrl+N" },
-  { label = "Previous multi", at = { 722, 53 }, hotkey = "Ctrl+Shift+P" },
-  { label = "Next multi", at = { 742, 53 }, hotkey = "Ctrl+Shift+N" },
+  { label = "Previous multi", at = function(o) return geom(o, "prevMulti") end, hotkey = "Ctrl+Shift+P" },
+  { label = "Next multi", at = function(o) return geom(o, "nextMulti") end, hotkey = "Ctrl+Shift+N" },
   { label = "Snapshot menu", at = { 588, 118 }, fromRight = true, hotkey = "Alt+M" },
   { label = "Previous snapshot", at = { 405, 118 }, fromRight = true, hotkey = "Alt+P" },
   { label = "Next snapshot", at = { 389, 118 }, fromRight = true, hotkey = "Alt+N" },
+}
+
+-- Kontakt 7 offers single-click header controls that Kontakt 8's header does not have
+-- (its chrome moved them into menus). Shown only when a Kontakt 7 is the focused one.
+--
+-- Only the library toggle, whose position ReaHotkey never shifts. Its SHOP button is
+-- deliberately NOT here: that one sits at a DIFFERENT x depending on whether the library
+-- browser is open (440 closed, 815 open), and ReaHotkey tells the two apart through the
+-- plugin's UIA tree — which an embedded Kontakt does not have. Clicking the closed-state
+-- coordinate with the browser open (its default) lands in the browser's own chrome, so
+-- the button would be a stray click rather than a shop link. It stays on the standalone
+-- header, where UIA resolves the real button regardless of browser state.
+local K7_HOTSPOTS = {
+  { label = "Library on/off", key = "library", hotkey = "Alt+L" },
 }
 
 -- `embedded` adds the coordinate arrows, which ReaHotkey offers on the PLUGIN header
@@ -438,6 +550,14 @@ local function addHeader(ov, embedded)
       rawOrigin = true,
       hotkey = h.hotkey,
     }).when = bare
+  end
+  for _, h in ipairs(K7_HOTSPOTS) do
+    ov:addHotspotButton({
+      label = h.label,
+      at = function(o) return geom(o, h.key) end,
+      rawOrigin = true,
+      hotkey = h.hotkey,
+    }).when = function(o) return bare(o) and variantOf(o) == "Kontakt 7" end
   end
 end
 
@@ -552,12 +672,24 @@ return {
     sa:addCustomButton({
       label = "Kontakt file menu",
       hotkey = "Alt+F",
-      onActivate = function(o)
-        if uiaClick(pluginHwnd(o), "Kontakt File Menu", BUTTON) then
-          host.keys.menuOpen(true) -- snappier than waiting for the menu-watch poll
-        end
-      end,
+      -- Version-aware: the UIA button is "FILE" in Kontakt 7, "Kontakt File Menu" in
+      -- Kontakt 8. Unlike embedded, a standalone Kontakt's menu IS accessible, so the
+      -- menu watch hands Tab/arrows straight to it — this button is useful here.
+      onActivate = function(o) openFileMenu(o) end,
     })
+    -- Kontakt 7's standalone header carries three more buttons that Kontakt 8's does
+    -- not (ReaHotkey lists them for K7 only); shown only when a Kontakt 7 is focused.
+    for _, h in ipairs({
+      { label = "Library on/off", uia = "LIBRARY", key = "library", hotkey = "Alt+L" },
+      { label = "View menu", uia = "VIEW", key = "viewMenu", hotkey = "Alt+V" },
+      { label = "Shop", uia = "SHOP", key = "shop", hotkey = "Alt+S" },
+    }) do
+      sa:addCustomButton({
+        label = h.label,
+        hotkey = h.hotkey,
+        onActivate = headerAction(h.uia, h.key),
+      }).when = function(o) return variantOf(o) == "Kontakt 7" end
+    end
     -- Tab / Shift+Tab step through Kontakt's OWN focusable controls (its window doesn't
     -- move focus on Tab itself) — ReaHotkey's Standalone Tab pass-through.
     sa:enableUiaPassThrough()

@@ -33,6 +33,7 @@ function O.new(label)
       controls = {},
       focus = 0,
       registered = {},
+      controlHotkeys = {},
       capturedKeys = {},
       active = false,
       hoverToRead = false,
@@ -352,6 +353,8 @@ local function selectTab(self, c)
   -- Focus is now on the tab control (a non-editable stop): make sure Space is captured
   -- again if we arrived here from an editable field via Ctrl+Tab / Ctrl+<n>.
   self:_syncSpaceCapture()
+  -- The new tab exposes a different set of controls, so the hotkeys they claim change.
+  if self.active then self:_syncControlHotkeys() end
   host.speech.output(tabMessage(tab), { interrupt = true })
 end
 
@@ -423,14 +426,21 @@ end
 -- (ReaHotkey's `ControlX + ControlWidth − N`): plugin UI that is laid out from the
 -- right stays correctly targeted whatever the plugin's width is.
 local function hotspotPoint(self, c)
+  -- `at` may be a FUNCTION of the active overlay, for a control whose position depends
+  -- on what is focused right now — e.g. one Kontakt header serving both Kontakt 7 and
+  -- Kontakt 8, whose chrome sits at different coordinates. Returning nil (version not
+  -- yet known) yields no point, and the caller skips the click rather than guessing.
+  local at = c.at
+  if type(at) == "function" then at = at(self) end
+  if type(at) ~= "table" then return nil end
   local ox, oy = originOf(self, c)
-  local x = c.at[1]
+  local x = at[1]
   if c.fromRight then
     local o = self.activeCtx and self.activeCtx.origin()
     local w = (o and o.bounds and o.bounds.w) or 0
-    x = w - c.at[1]
+    x = w - at[1]
   end
-  return ox + x, oy + c.at[2]
+  return ox + x, oy + at[2]
 end
 
 -- On/off state of a HotspotToggle: read the single pixel at its click point and return
@@ -439,6 +449,7 @@ end
 local function hotspotToggleState(self, c)
   if not (c.at and c.onColor and c.offColor) then return nil end
   local px, py = hotspotPoint(self, c)
+  if not px then return nil end
   local p = host.screen.pixel(px, py)
   if not p then return nil end
   local don = math.abs(p.r - c.onColor[1]) + math.abs(p.g - c.onColor[2]) + math.abs(p.b - c.onColor[3])
@@ -565,6 +576,7 @@ function Overlay:activate(index)
   if c.when and c.when(self) ~= true then return end -- a hidden control's hotkey no-ops
   if c.kind == "hotspot" and c.at then
     local px, py = hotspotPoint(self, c)
+    if not px then return end
     host.input.click(px, py)
     host.speech.output((c.label or "") .. ", activated", { interrupt = true })
   elseif c.kind == "custom" and c.onActivate then
@@ -587,21 +599,75 @@ function Overlay:activate(index)
     if host.timer then host.timer.after(150, function() speakControl(self, i, false) end) end
   elseif c.kind == "hotspottoggle" and c.at then
     local px, py = hotspotPoint(self, c)
+    if not px then return end
     host.input.click(px, py)
     -- Re-read the new state (announced with the label) once the UI redraws.
     if host.timer then host.timer.after(150, function() speakControl(self, i, false) end) end
   end
 end
 
+-- The first of `candidates` (control indices) that is currently visible, or nil when
+-- none is — i.e. which control a shared hotkey belongs to right now.
+function Overlay:_visibleClaimant(candidates)
+  for _, i in ipairs(candidates) do
+    local c = self.controls[i]
+    if c and (c.when == nil or c.when(self) == true) then return i end
+  end
+  return nil
+end
+
+-- (Re-)registers the per-control global hotkeys. Kept separate from the key CAPTURES,
+-- which must NOT be dropped and retaken on a re-sync: their release is token-scoped and
+-- shared with sibling overlays in the same module.
+--
+-- One key combination can only be registered ONCE — the OS rejects a second claim on it
+-- — and an overlay legitimately carries mutually exclusive control sets that reuse keys:
+-- a Kontakt nested in Komplete Kontrol offers KK's menu on Alt+M, a bare one offers
+-- Kontakt's snapshot menu on the same key, each gated by `when`. So all claimants of a
+-- spec are collected, and:
+--   • the OS combination is taken only while at least one of them is visible, so a
+--     control gated to a plugin variant doesn't swallow a key on a plugin where it can
+--     never appear (nor kill a visible sibling's identical hotkey by declaration order);
+--   • WHICH claimant a press activates is decided at PRESS time, not here — the overlay
+--     stays active when focus moves to another matching plugin window, so a winner
+--     frozen at registration would go stale (Alt+M would keep firing Komplete Kontrol's
+--     menu after focus moved to a bare Kontakt).
+-- Re-run whenever the visible set can have changed: a tab switch (see selectTab) and a
+-- change of coordinate origin (see _recheck).
+function Overlay:_syncControlHotkeys()
+  for _, id in ipairs(self.controlHotkeys or {}) do
+    host.hotkey.unregister(id)
+  end
+  self.controlHotkeys = {}
+  local o = self.activeCtx and self.activeCtx.origin()
+  self._hotkeyOriginId = (o and o.id) or false
+  local claim, specs = {}, {}
+  for i, c in ipairs(self.controls) do
+    if c.hotkey then
+      local held = claim[c.hotkey]
+      if held then
+        held[#held + 1] = i
+      else
+        claim[c.hotkey] = { i }
+        specs[#specs + 1] = c.hotkey
+      end
+    end
+  end
+  for _, spec in ipairs(specs) do
+    local candidates = claim[spec]
+    if self:_visibleClaimant(candidates) then
+      self.controlHotkeys[#self.controlHotkeys + 1] = host.hotkey.register(spec, function()
+        self:activate(self:_visibleClaimant(candidates) or candidates[1])
+      end)
+    end
+  end
+end
+
 function Overlay:_registerHotkeys()
   self.registered = self.registered or {}
   self.capturedKeys = self.capturedKeys or {}
-  -- Per-control hotkeys (e.g. Alt+P) are always global hotkeys.
-  for i, c in ipairs(self.controls) do
-    if c.hotkey then
-      local idx = i
-      self.registered[#self.registered + 1] = host.hotkey.register(c.hotkey, function() self:activate(idx) end)
-    end
+  self:_syncControlHotkeys()
+  for _, c in ipairs(self.controls) do
     -- A tab control's individual TABS may each carry a hotkey (ReaHotkey's Tab.SetHotkey):
     -- pressing it brings that tab to the front from anywhere in the overlay (like
     -- Ctrl+<n>), and its label is spoken in the tab's announcement (see tabMessage). KK
@@ -666,6 +732,11 @@ function Overlay:_unregisterHotkeys()
     host.hotkey.unregister(id)
   end
   self.registered = {}
+  for _, id in ipairs(self.controlHotkeys or {}) do
+    host.hotkey.unregister(id)
+  end
+  self.controlHotkeys = {}
+  self._hotkeyOriginId = nil
   for _, token in ipairs(self.capturedKeys or {}) do
     host.keys.release(token)
   end
@@ -795,6 +866,16 @@ function Overlay:_recheck()
     self:_activate()
   else
     self:_deactivate()
+  end
+  -- An already-active overlay STAYS active when focus moves to another window it also
+  -- matches (the arbiter re-reports the match without re-activating), and the visible
+  -- control set can differ there — e.g. a Kontakt 7's header controls versus a Kontakt
+  -- 8's. Re-sync the per-control hotkeys when that coordinate origin changes.
+  if self.active and matched then
+    local o = self.activeCtx and self.activeCtx.origin()
+    if ((o and o.id) or false) ~= self._hotkeyOriginId then
+      self:_syncControlHotkeys()
+    end
   end
 end
 
@@ -1101,7 +1182,7 @@ function Overlay:captureAll(dir)
   for _, c in ipairs(self.controls) do
     if c.label and c.label ~= "" and not c.rawOrigin then
       local cx, cy
-      if c.at then
+      if type(c.at) == "table" then
         cx, cy = c.at[1], c.at[2]
       elseif c.region then
         cx = math.floor((c.region[1] + c.region[3]) / 2)

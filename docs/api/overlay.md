@@ -37,6 +37,8 @@ Returns `{ kind = "hotspot", label, at, hotkey, rawOrigin, fromRight }`. On acti
 
 `fromRight` measures `at[1]` from the coordinate window's **right edge** instead of its left — the click lands at `origin.x + width − at[1]` (ReaHotkey's `ControlX + ControlWidth − N`). Use it for plugin UI laid out from the right, so the target stays correct whatever the plugin's width is. Also accepted by [`addHotspotToggle`](#oaddhotspottoggleopts).
 
+`at` may also be a **function** `(overlay) -> {x, y} | nil`, for a control whose position depends on what is focused right now — one overlay serving several versions of a plugin whose chrome moved between them. Returning `nil` (the version isn't known yet) skips the click rather than guessing. Also accepted by `addHotspotToggle`.
+
 ```lua
 ov:addHotspotButton({ label = "Play", at = { 120, 40 }, hotkey = "Alt+P" })
 -- 352 px in from the right edge, 87 px down — Kontakt's instrument arrows:
