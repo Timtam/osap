@@ -331,49 +331,6 @@ function Overlay:landmark(image, opts)
   end)
 end
 
--- A named placeholder in the control tree: a base overlay reserves a slot, and a
--- derived/library overlay fills it (via :fill) so its controls land at THIS
--- position instead of appended at the end. An unfilled slot is skipped in nav.
-function Overlay:addSlot(name)
-  return add(self, { kind = "slot", name = name })
-end
-
--- Fills the named slot with the controls `build` adds: the placeholder is replaced
--- in place by them, so a base's `header + slot + footer` becomes `header + the
--- child's controls + footer`. No-op if no such slot (e.g. already filled).
-function Overlay:fill(name, build)
-  local idx
-  for i, c in ipairs(self.controls) do
-    if c.kind == "slot" and c.name == name then
-      idx = i
-      break
-    end
-  end
-  if not idx then return self end
-  local tmp = O.new()
-  if build then build(tmp) end
-  table.remove(self.controls, idx)
-  for j, c in ipairs(tmp.controls) do
-    table.insert(self.controls, idx + j - 1, c)
-  end
-  return self
-end
-
--- Overrides an inherited control: replaces the first control labelled `label` with
--- the (first) control `build` adds, leaving the rest of the tree intact.
-function Overlay:replace(label, build)
-  if label == nil then return self end -- never match a label-less control on nil == nil
-  for i, c in ipairs(self.controls) do
-    if c.kind ~= "slot" and c.label == label then
-      local tmp = O.new()
-      if build then build(tmp) end
-      if tmp.controls[1] then self.controls[i] = tmp.controls[1] end
-      return self
-    end
-  end
-  return self
-end
-
 local TYPE_LABEL =
   { static = "", hotspot = "button", custom = "button", ocr = "button", ocredit = "edit",
     gtoggle = "toggle button", hotspottoggle = "toggle button", tabcontrol = "tab control" }
@@ -627,7 +584,7 @@ local function isFocusable(self, index)
   -- control with a `when` predicate is skipped while it returns non-true (e.g. KK
   -- chrome controls, shown only while Kontakt is nested inside Komplete Kontrol).
   local c = self.controls[index]
-  if c == nil or c.kind == "slot" then return false end
+  if c == nil then return false end
   if not isVisible(self, c) then return false end
   return true
 end
@@ -1340,47 +1297,6 @@ function Overlay:attachEmbedded(spec, opts)
   end
   self.contexts[#self.contexts + 1] = { match = matched, origin = origin }
   ensureTrigger(self, opts)
-end
-
--- Derives a child overlay from this one: it inherits this overlay's controls (a
--- fresh list — `build(child)` then appends the child's own), its coordinate frame +
--- interaction flags, and its activation context, and competes on the SAME arbiter
--- slot one specificity higher (so the child wins over its parent when active). The
--- child sets its own, more-specific gate in `build` (e.g. child:landmark(image)).
--- This is how a sub-library composes onto a library — each level is itself a full
--- overlay, assembled by the arbiter (React-portal style). The parent must already
--- be attached (so its context + slot exist to inherit).
-function Overlay:derive(name, build)
-  local child = O.new(name or self.label)
-  for _, c in ipairs(self.controls) do
-    child.controls[#child.controls + 1] = c
-  end
-  for _, ctx in ipairs(self.contexts) do
-    child.contexts[#child.contexts + 1] = ctx
-  end
-  child._originOffset = self._originOffset
-  child.hoverToRead = self.hoverToRead
-  if build then build(child) end
-  child:_join(self._slot or nil, (self._specificity or 0) + 1, 500)
-  return child
-end
-
--- Replaces the control set at runtime (e.g. a Kontakt base overlay vs a library's
--- header + controls), re-registering hotkeys and resetting focus to the first
--- focusable control.
-function Overlay:setControls(controls)
-  if self.active then self:_unregisterHotkeys() end
-  self.controls = controls
-  self.focus = 0
-  if self.active then
-    -- Pick the first focusable BEFORE re-registering, so _registerHotkeys' Space sync
-    -- sees the real focused control — an editable field (ocredit) that ends up first
-    -- must not have Space captured over it. Same order as _activate.
-    for i = 1, #self.controls do
-      if isFocusable(self, i) then self.focus = i break end
-    end
-    self:_registerHotkeys()
-  end
 end
 
 -- Watch for a MENU opening inside the plugin and tell the key hook to let the captured
