@@ -19,7 +19,8 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, RegisterHotKey, SendInput, UnregisterHotKey, INPUT, INPUT_KEYBOARD, INPUT_MOUSE,
+    GetAsyncKeyState, RegisterHotKey, SendInput, UnregisterHotKey, INPUT, INPUT_KEYBOARD,
+    INPUT_MOUSE,
     KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
     MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, VK_CONTROL, VK_MENU, VK_SHIFT,
@@ -788,7 +789,13 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
         let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
         let is_up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
         if is_down || is_up {
-            let down = |k: u16| (GetKeyState(k as i32) as u16 & 0x8000) != 0;
+            // GetAsyncKeyState, NOT GetKeyState: a low-level hook runs on the thread
+            // that installed it, and GetKeyState reports that THREAD's view of the
+            // keyboard — updated only by the messages it retrieves. Our thread never
+            // receives the keystrokes (they belong to the focused application), so the
+            // modifiers read as up and every combination collapsed to mask 0. Unmodified
+            // keys like Tab worked, which is why this stayed hidden.
+            let down = |k: u16| (GetAsyncKeyState(k as i32) as u16 & 0x8000) != 0;
             let mut mask: u8 = 0;
             if down(VK_SHIFT) {
                 mask |= 1;

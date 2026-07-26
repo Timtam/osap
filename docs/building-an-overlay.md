@@ -79,15 +79,23 @@ Other control kinds, all origin-relative:
 - `addGraphicalToggle{ region, onImage, offImage }` — reads on/off by matching two template images. For a control with no single distinguishing pixel.
 - `addCustomButton{ onActivate = fn }` — you do the work yourself.
 
-### Finding the coordinates
+### Finding the coordinates — the calibrator
 
-Do not derive them from another tool's numbers, and do not trust a value because *something* about it looks right. Capture the real thing:
+Do not derive coordinates from another tool's numbers, and do not trust a value because *something* about it looks right. A cautionary tale from this repo: a set of toggles was calibrated by sampling colours, the colours matched, and the positions were taken to be right — they were 16 px off, on the caption row *under* the buttons. Three of five sampled near-black there and reported "off" forever, and the overlay had shipped like that.
 
-```lua
-ov:captureRegion({ 0, 0, 640, 430 }, host.path("shot.png"))
-```
+Start the app with `AUTOMATION_PLATFORM_CALIBRATE=1` and three keys arm on whichever overlay is active:
 
-Then measure in the image. A cautionary tale from this repo: a set of toggles was calibrated by sampling colours, the colours matched, and the positions were taken to be right — they were 16 px off, on the caption row *under* the buttons. Three of five sampled near-black there and reported "off" forever. Measure positions from an image; confirm colours at the position you measured.
+| Key | What it does |
+| --- | --- |
+| `Ctrl+Alt+Shift+S` | Screenshot of the coordinate window with a **crosshair** where each control will actually click, plus a log line per control: resolved screen point, the pixel read there, and whether it is `rawOrigin`. |
+| `Ctrl+Alt+Shift+T` | Crops a template around the **focused** control and writes it into `calibration/`. |
+| `Ctrl+Alt+Shift+V` | Counts **every** match of the focused control's template in the region. |
+
+The screenshot is the one that matters: "is my control on its button?" becomes a glance instead of arithmetic. The crosshairs are magenta, a colour these dark plugin interfaces do not use, and are numbered by ticks so they match the log lines.
+
+`Ctrl+Alt+Shift+V` answers the question you must ask before clicking a template match blindly: **exactly one** is what you want. Two means it will eventually click the wrong one; none means the control silently never fires. A close-glyph template in this repo was checked that way before shipping, and sat 20 px from the plugin's own close button.
+
+Output goes to `modules/overlay-runtime/calibration/`, named after the overlay — the runtime resolves its own paths against its own module, which is the same rule that lets an inherited overlay find its own images. The log line prints the absolute path.
 
 ---
 
@@ -237,6 +245,8 @@ If your overlay is the *only* participant in a slot that should have several, yo
 ```
 
 No line at all means the gate is never even evaluated — the *context* does not match, so look at your binding. A `lost` line means the image search failed: the picture on screen is not the picture you captured (a different version, a different scale, or something covering it).
+
+**The calibrator** (above): the screenshot shows where every control actually lands, which answers "is it even pointing at the thing?" before you look anywhere else.
 
 **The declaration report**, logged when you bind, naming the control:
 

@@ -1,3 +1,6 @@
 /target
 **/*.rs.bk
 Cargo.lock.bak
+
+# Calibration output (AUTOMATION_PLATFORM_CALIBRATE=1): local measuring aids.
+modules/*/calibration/

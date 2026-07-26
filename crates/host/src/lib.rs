@@ -403,6 +403,18 @@ impl Shared {
             .collect();
         set.sort_unstable();
         set.dedup();
+        if std::env::var("AUTOMATION_PLATFORM_CALIBRATE").as_deref() == Ok("1") {
+            logging::line(
+                "keys",
+                &format!(
+                    "captured set: {}",
+                    set.iter()
+                        .map(|(vk, m)| format!("vk 0x{vk:02X}/m{m}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+            );
+        }
         self.backend.set_captured_keys(&set);
     }
 
@@ -1859,6 +1871,9 @@ impl HostEvents for Dispatcher<'_> {
 
     fn on_key(&mut self, vk: u32, mods: u8) {
         self.shared.bump_epoch();
+        if std::env::var("AUTOMATION_PLATFORM_CALIBRATE").as_deref() == Ok("1") {
+            logging::line("keys", &format!("dispatch vk 0x{vk:02X}/m{mods}"));
+        }
         let found = {
             let keys = self.shared.keys.borrow();
             keys.iter()
@@ -2613,6 +2628,107 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             },
         )?,
     )?;
+    // host.screen.saveMarked(path, opts) — like save, but draws a crosshair (and an index
+    // tick) at each point in `opts.marks` = { {x, y}, … } in SCREEN coordinates.
+    //
+    // This is the calibration question in one picture: "is my control on its button?"
+    // Reading a control's coordinates out of a log and finding that spot in a screenshot
+    // by hand is the step that hides errors — a set of toggles in this repo sat 16 px off,
+    // on the caption row under the buttons, for as long as it existed, because the colours
+    // sampled there happened to look plausible. A crosshair drawn where the click will
+    // actually land makes that a glance instead of an arithmetic exercise.
+    let sh = shared.clone();
+    screen.set(
+        "saveMarked",
+        lua.create_function(move |lua, (path, opts): (String, Table)| {
+            let full = sh.root(idx).join(&path);
+            let (sw, sh_) = sh.backend.screen_size();
+            let (rx, ry, rw, rh) = read_region(Some(&opts), sw, sh_);
+            let Some(cap) = sh.backend.capture(rx, ry, rw, rh) else { return Ok(false) };
+            let Some(mut img) = image::RgbaImage::from_raw(cap.w, cap.h, cap.rgba) else {
+                return Ok(false);
+            };
+            let marks: Table = opts.get("marks").unwrap_or(lua.create_table()?);
+            for (n, m) in marks.sequence_values::<Table>().enumerate() {
+                let Ok(m) = m else { continue };
+                let (mx, my): (i32, i32) = (m.get("x").unwrap_or(0), m.get("y").unwrap_or(0));
+                // Region-relative, and only what is actually inside the shot.
+                let (cx, cy) = (mx - rx, my - ry);
+                if cx < 0 || cy < 0 || cx >= cap.w as i32 || cy >= cap.h as i32 {
+                    continue;
+                }
+                // Magenta: not a colour these dark plugin UIs use, so it cannot be mistaken
+                // for part of the interface.
+                let ink = image::Rgba([255u8, 0, 255, 255]);
+                for d in -9i32..=9 {
+                    for (px, py) in [(cx + d, cy), (cx, cy + d)] {
+                        if px >= 0 && py >= 0 && px < cap.w as i32 && py < cap.h as i32 {
+                            img.put_pixel(px as u32, py as u32, ink);
+                        }
+                    }
+                }
+                // n+1 ticks below the crosshair, so marks stay tellable apart without text.
+                for t in 0..=(n as i32) {
+                    let (px, py) = (cx - (n as i32) + 2 * t, cy + 12);
+                    if px >= 0 && py >= 0 && px < cap.w as i32 && py < cap.h as i32 {
+                        img.put_pixel(px as u32, py as u32, ink);
+                    }
+                }
+            }
+            // Create the folder: image::save does not, and "the system cannot find the
+            // path" is a poor answer to "put a screenshot here".
+            if let Some(dir) = full.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            img.save(&full).map_err(|e| {
+                mlua::Error::external(format!("screen.saveMarked '{}': {e}", full.display()))
+            })?;
+            Ok(true)
+        })?,
+    )?;
+    // host.screen.imageSearchAll(image, opts?) -> { {x,y,w,h}, … } — EVERY match of the
+    // template in the region, not just the first.
+    //
+    // For deciding whether a template is safe to click blindly. A close-glyph template
+    // that matches twice will eventually click the wrong one, and a template that matches
+    // nowhere is a control that silently never fires; "matched exactly once, here" is the
+    // answer you want before shipping either.
+    let sh = shared.clone();
+    screen.set(
+        "imageSearchAll",
+        lua.create_function(move |lua, (template, opts): (String, Option<Table>)| {
+            let tmpl = sh.load_template(&sh.root(idx).join(&template))?;
+            let (sw, sh_) = sh.backend.screen_size();
+            let (rx, ry, rw, rh) = read_region(opts.as_ref(), sw, sh_);
+            let tol: u8 = opts.as_ref().and_then(|o| o.get::<u8>("tolerance").ok()).unwrap_or(0);
+            let out = lua.create_table()?;
+            let Some(cap) = sh.backend.capture(rx, ry, rw, rh) else { return Ok(out) };
+            let mut n = 0;
+            // Non-overlapping: after a hit, resume past its right edge on that row, so one
+            // match is reported once rather than once per pixel of slop.
+            let (tw, th) = (tmpl.w, tmpl.h);
+            let mut y = 0;
+            while y + th <= cap.h {
+                let mut x = 0;
+                while x + tw <= cap.w {
+                    if matches_at(&cap, x, y, tw, th, &tmpl.rgba, tol) {
+                        let t = lua.create_table()?;
+                        t.set("x", rx + x as i32)?;
+                        t.set("y", ry + y as i32)?;
+                        t.set("w", tw)?;
+                        t.set("h", th)?;
+                        n += 1;
+                        out.set(n, t)?;
+                        x += tw;
+                    } else {
+                        x += 1;
+                    }
+                }
+                y += 1;
+            }
+            Ok(out)
+        })?,
+    )?;
     // host.screen.save(path, opts?) — capture a screen region (opts.region, else the
     // full screen) and write it to `path` (relative to the calling module's root; an
     // absolute path is used as-is) as a PNG. Returns true on success. A calibration
@@ -2627,6 +2743,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             match sh.backend.capture(rx, ry, rw, rh) {
                 Some(cap) => match image::RgbaImage::from_raw(cap.w, cap.h, cap.rgba) {
                     Some(img) => {
+                        if let Some(dir) = full.parent() {
+                            let _ = std::fs::create_dir_all(dir);
+                        }
                         img.save(&full).map_err(|e| {
                             mlua::Error::external(format!("screen.save '{}': {e}", full.display()))
                         })?;
@@ -2972,6 +3091,15 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     host.set("arbiter", arbiter)?;
 
     install_include(lua, shared, idx, &host)?;
+
+    // host.calibrating — true when the app was started with AUTOMATION_PLATFORM_CALIBRATE=1.
+    // The overlay runtime arms its calibration keys only then, so a normal user never has
+    // those combinations taken away, and a module author gets them by starting the app
+    // once with the variable set. Same shape as AUTOMATION_PLATFORM_OCR_DEBUG.
+    host.set(
+        "calibrating",
+        std::env::var("AUTOMATION_PLATFORM_CALIBRATE").as_deref() == Ok("1"),
+    )?;
 
     Ok(host)
 }

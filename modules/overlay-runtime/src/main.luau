@@ -37,6 +37,9 @@ local MATCH_SCALES = { 1.0, 0.9, 1.1, 0.8, 1.2, 1.25, 0.75, 1.5, 0.67, 2.0 }
 -- introduced (verified: no bare specificity numbers remain outside the runtime).
 O.layer = { chrome = 10, base = 20, content = 30, dialog = 40 }
 
+-- One line per VM when the calibration keys arm (see the Calibration section).
+local calibrationAnnounced = false
+
 local Overlay = {}
 Overlay.__index = Overlay
 
@@ -819,6 +822,23 @@ function Overlay:_registerHotkeys()
   local function cap(spec, fn)
     self.capturedKeys[#self.capturedKeys + 1] = host.keys.capture(spec, fn)
   end
+  -- Calibration keys, only in a calibrating run (see the section above). Captured, so
+  -- they act on the overlay that is active — the one that knows its own coordinates.
+  if host.calibrating then
+    -- Say so once per VM: whether the flag took is otherwise invisible, and "I pressed
+    -- the key and nothing happened" has two very different causes.
+    if not calibrationAnnounced then
+      calibrationAnnounced = true
+      host.log.info(
+        "[calibrate] armed — Ctrl+Alt+Shift+S shot, +T template, +V verify (active overlay)"
+      )
+    end
+    -- NOT the Ctrl+Alt+F-keys: graphics drivers commonly claim those system-wide, and a
+    -- key another process holds never reaches our hook at all.
+    cap("Ctrl+Alt+Shift+S", function() self:calibrationShot() end)
+    cap("Ctrl+Alt+Shift+T", function() self:calibrationCrop() end)
+    cap("Ctrl+Alt+Shift+V", function() self:calibrationVerify() end)
+  end
   -- Tab moves *between* elements; arrow keys are left for value changes within a
   -- control (standard interaction scheme), so we don't capture them here.
   if self._passThrough then
@@ -1457,6 +1477,129 @@ end
 -- supported way in.
 function Overlay:_startMenuWatch()
   return self:watchMenus()
+end
+
+-- ── Calibration ──────────────────────────────────────────────────────────────
+-- Armed only when the app runs with AUTOMATION_PLATFORM_CALIBRATE=1, and captured (not
+-- registered as global hotkeys) so the keys belong to whichever overlay is ACTIVE — which
+-- is also the only overlay that can answer where its controls land, since the coordinate
+-- frame (origin, frame offset, rawOrigin, landmark anchoring) is its own. A separate tool
+-- would have to reimplement that resolution, and would then be measuring something other
+-- than what the overlay clicks.
+--
+--   Ctrl+Alt+Shift+S  a screenshot of the coordinate window with a CROSSHAIR on every
+--                     control where it will actually click, plus the pixel read there
+--   Ctrl+Alt+Shift+T  crop a template around the focused control, straight into the module
+--   Ctrl+Alt+Shift+V  count every match of the focused control's template in the region
+--
+-- Written into `calibration/` under the module's own directory.
+
+-- The point a control resolves to right now, or nil for one that has no point (a
+-- region-based control reports its centre instead).
+local function calibrationPoint(self, c)
+  if c.at then return hotspotPoint(self, c) end
+  if c.region then
+    local ox, oy = originOf(self, c)
+    return ox + math.floor((c.region[1] + c.region[3]) / 2),
+      oy + math.floor((c.region[2] + c.region[4]) / 2)
+  end
+  return nil
+end
+
+-- A label as a file name: overlays are named after plugins and libraries, which contain
+-- spaces and dashes.
+local function safeName(label)
+  return (string.gsub(tostring(label or "overlay"), "[^%w]+", "-"))
+end
+
+function Overlay:calibrationShot()
+  local o = self:origin()
+  if not (o and o.client and o.bounds) then
+    host.log.info("[calibrate] no active origin")
+    return false
+  end
+  local marks, lines = {}, {}
+  for i, c in ipairs(self.controls) do
+    local x, y = calibrationPoint(self, c)
+    if x then
+      marks[#marks + 1] = { x = x, y = y }
+      local px = host.screen.pixel(x, y)
+      lines[#lines + 1] = string.format(
+        "  %2d %-24s screen (%d,%d)  pixel %s%s",
+        #marks, tostring(c.label), x, y,
+        px and string.format("%d,%d,%d", px.r, px.g, px.b) or "?",
+        c.rawOrigin and "  [rawOrigin]" or ""
+      )
+    else
+      lines[#lines + 1] = string.format("  -- %-24s no position", tostring(c.label))
+    end
+  end
+  -- Written under the OVERLAY RUNTIME's own directory, not the module whose overlay this
+  -- is: host.path resolves against the module that DEFINES the running code, which here is
+  -- the runtime. That rule is what makes an inherited overlay find its own images, so it
+  -- stays -- calibration output just gets one known home instead of a per-module one. The
+  -- log line prints the absolute path, and the file is named after the overlay.
+  local path = host.path("calibration/" .. safeName(self.label) .. ".png")
+  local ok = host.screen.saveMarked(path, {
+    region = { o.client.x, o.client.y, o.client.x + o.bounds.w, o.client.y + o.bounds.h },
+    marks = marks,
+  })
+  host.log.info(string.format(
+    "[calibrate] %s — origin (%d,%d) %dx%d%s -> %s (%s)",
+    tostring(self.label), o.client.x, o.client.y, o.bounds.w, o.bounds.h,
+    self._landmarkHit
+      and string.format("  landmark at (%d,%d)", self._landmarkHit.x, self._landmarkHit.y)
+      or "",
+    path, tostring(ok)
+  ))
+  for _, l in ipairs(lines) do host.log.info("[calibrate]" .. l) end
+  return ok == true
+end
+
+-- Crops `size` pixels around the FOCUSED control and writes it as a template. The size a
+-- template wants is the thing that distinguishes it plus a little of its surroundings —
+-- too tight matches everywhere, too loose breaks when anything near it changes.
+function Overlay:calibrationCrop(size)
+  local c = self.controls[self.focus]
+  if not c then return false end
+  local x, y = calibrationPoint(self, c)
+  if not x then
+    host.log.info("[calibrate] focused control has no position to crop around")
+    return false
+  end
+  local half = math.floor((size or 28) / 2)
+  local name = string.gsub(tostring(c.label or "control"), "[^%w]", "-")
+  local path = host.path("calibration/" .. name .. ".png")
+  local ok = host.screen.save(path, { region = { x - half, y - half, x + half, y + half } })
+  host.log.info(string.format(
+    "[calibrate] cropped %s around (%d,%d) -> %s (%s)", tostring(c.label), x, y, path, tostring(ok)
+  ))
+  return ok == true
+end
+
+-- Counts every match of the focused control's template across the coordinate window.
+-- Exactly one is what you want before clicking it blindly; two means it will eventually
+-- click the wrong one, and none means the control silently never fires.
+function Overlay:calibrationVerify()
+  local c = self.controls[self.focus]
+  local o = self:origin()
+  if not (c and o and o.client and o.bounds) then return false end
+  local image = c.onImage or c.offImage
+  if not image then
+    local name = string.gsub(tostring(c.label or "control"), "[^%w]", "-")
+    image = host.path("calibration/" .. name .. ".png")
+  end
+  local hits = host.screen.imageSearchAll(image, {
+    region = { o.client.x, o.client.y, o.client.x + o.bounds.w, o.client.y + o.bounds.h },
+    tolerance = 8,
+  })
+  host.log.info(string.format(
+    "[calibrate] %s: %d match(es) for %s", tostring(c.label), #hits, tostring(image)
+  ))
+  for i, h in ipairs(hits) do
+    host.log.info(string.format("[calibrate]   %d at (%d,%d) %dx%d", i, h.x, h.y, h.w, h.h))
+  end
+  return #hits
 end
 
 -- Calibration helper: capture the live on-screen pixels of the control labelled
