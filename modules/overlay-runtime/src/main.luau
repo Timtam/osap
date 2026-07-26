@@ -88,6 +88,20 @@ function O.new(label)
   )
 end
 
+-- Declaring something AFTER the overlay is bound is always a mistake, and a subtle one:
+-- `_join` ends with a synchronous `_recheck`, so a gate or landmark set afterwards misses
+-- that first evaluation and the overlay can activate ungated for one pass. Nothing in the
+-- code enforced the order, and every call site happened to get it right — which is exactly
+-- the kind of rule that holds until someone new writes the next module.
+local function assertUnbound(self, what)
+  if self._bound then
+    error(string.format(
+      "overlay '%s': %s must be called BEFORE binding it — the binding is what starts it",
+      tostring(self.label), what
+    ), 3)
+  end
+end
+
 -- ANDs an enclosing group's predicate (see Overlay:group) onto a control's own `when`.
 -- Both must hold, and both must return exactly `true` — see isVisible.
 local function andWhen(outer, own)
@@ -97,6 +111,7 @@ local function andWhen(outer, own)
 end
 
 local function add(self, control)
+  assertUnbound(self, "adding a control")
   control.when = andWhen(self._groupWhen, control.when)
   self.controls[#self.controls + 1] = control
   return control
@@ -139,6 +154,7 @@ end
 -- Shifts this overlay's whole coordinate frame: `fn(origin) -> dx, dy`, resolved per
 -- active control (a host version's content shift, a nested plugin's inner origin).
 function Overlay:frame(fn)
+  assertUnbound(self, "frame")
   self._originOffset = fn
   return self
 end
@@ -266,6 +282,7 @@ end
 -- overlay should be active. A derived/library overlay uses it to gate on its own,
 -- more-specific landmark while sharing the base's window context.
 function Overlay:gate(fn)
+  assertUnbound(self, "gate")
   self._gate = fn
   return self
 end
@@ -281,6 +298,8 @@ end
 -- WITHOUT it, :landmark is a pure gate and controls stay client-relative (e.g. a dialog
 -- using its header image only to tell itself apart from a sibling on a shared slot).
 function Overlay:landmark(image, opts)
+  assertUnbound(self, "landmark")
+  self._landmarkImage = image
   self._anchorLandmark = opts ~= nil and opts.anchor == true
   -- The template match runs on a worker thread (host.screen.imageSearchAsync) so the
   -- detection poll never blocks the main thread on it. The gate returns the LAST
@@ -636,6 +655,7 @@ end
 -- natively (toggle a check box, open a combo). The overlay's own actions stay on their
 -- global hotkeys. Ported from ReaHotkey's AddCustomPassThrough("Standalone", …).
 function Overlay:enableUiaPassThrough()
+  assertUnbound(self, "enableUiaPassThrough")
   self._passThrough = function(o, dir)
     local ctrl = o:origin()
     local hwnd = ctrl and ctrl.id
@@ -881,6 +901,7 @@ end
 -- A module hook fired (with the overlay) each time it becomes the ACTIVE overlay —
 -- runs after the activation context is set, so origin()/pluginHwnd are available.
 function Overlay:onActivate(fn)
+  assertUnbound(self, "onActivate")
   self._onActivate = fn
   return self
 end
@@ -889,6 +910,7 @@ end
 -- the counterpart to onActivate. Used e.g. by the Komplete Kontrol scanning dialog to
 -- announce "scanning stopped" (and let its progress loop wind down) when it closes.
 function Overlay:onDeactivate(fn)
+  assertUnbound(self, "onDeactivate")
   self._onDeactivate = fn
   return self
 end
@@ -988,6 +1010,87 @@ function Overlay:_recheck()
   end
 end
 
+-- ── Declaration checks ───────────────────────────────────────────────────────
+-- Everything about this system fails SILENTLY. A control with no coordinates simply
+-- never clicks anything; a relative image path resolves under the wrong module and the
+-- landmark never matches, so the overlay never appears; a specificity passed without a
+-- slot is quietly ignored. None of it errors, and the person who would notice cannot see
+-- the screen. So whatever can be decided when an overlay is DECLARED is decided then, and
+-- said out loud with the control's name in it.
+--
+-- Reported, not raised: a finding here may be deliberate (a label-less spacer), and a
+-- module that mostly works should keep working. Order violations below are different.
+-- Spelled out with sub() rather than a pattern: a character class containing a backslash
+-- is exactly the kind of escaping that silently degrades into something that matches
+-- nothing, and a path check that always says "no" would report every correct module.
+local function isAbsolutePath(p)
+  if type(p) ~= "string" then return false end
+  local drive, sep = string.match(p, "^%a:"), string.sub(p, 3, 3)
+  if drive and (sep == "/" or sep == "\\") then return true end -- C:\… or C:/…
+  if string.sub(p, 1, 2) == "\\\\" then return true end -- \\server\share
+  return string.sub(p, 1, 1) == "/" -- POSIX
+end
+
+local NEEDS_REGION = { ocr = true, ocredit = true, gtoggle = true }
+
+local function report(self, opts)
+  local found = {}
+  local function bad(fmt, ...)
+    found[#found + 1] = string.format(fmt, ...)
+  end
+
+  for i, c in ipairs(self.controls) do
+    local who = string.format("control %d (%s '%s')", i, tostring(c.kind), tostring(c.label or ""))
+    if c.label == nil or c.label == "" then
+      if c.kind ~= "tabcontrol" then bad("%s has no label — it will be announced as nothing", who) end
+    end
+    if c.kind == "hotspot" and c.at == nil and c.points == nil then
+      bad("%s has neither `at` nor `points` — activating it does nothing", who)
+    end
+    if NEEDS_REGION[c.kind] and c.region == nil then
+      bad("%s has no `region` — there is nothing for it to read", who)
+    end
+    if c.kind == "hotspottoggle" then
+      if c.at == nil then bad("%s has no `at`", who) end
+      if c.onColor == nil or c.offColor == nil then
+        bad("%s needs both `onColor` and `offColor` to tell its state apart", who)
+      end
+    end
+    if c.kind == "gtoggle" and c.onImage == nil and c.offImage == nil then
+      bad("%s has neither `onImage` nor `offImage`", who)
+    end
+    for _, field in ipairs({ "onImage", "offImage" }) do
+      if c[field] ~= nil and not isAbsolutePath(c[field]) then
+        bad("%s: `%s` is not an absolute path — use host.path(); a relative one resolves "
+          .. "under whichever module is RUNNING, which for an inherited overlay is not yours",
+          who, field)
+      end
+    end
+    if c.when ~= nil and type(c.when) ~= "function" then
+      bad("%s: `when` must be a function, got %s", who, type(c.when))
+    end
+    if c.hotkey ~= nil and type(c.hotkey) ~= "string" then
+      bad("%s: `hotkey` must be a string like \"Alt+P\", got %s", who, type(c.hotkey))
+    end
+  end
+
+  if self._landmarkImage ~= nil and not isAbsolutePath(self._landmarkImage) then
+    bad("landmark image is not an absolute path — use host.path()")
+  end
+  if #self.controls == 0 and not self._passThrough then
+    bad("no controls and no pass-through — this overlay has nothing to offer")
+  end
+  if opts and opts.specificity ~= nil and not opts.slot then
+    bad("`specificity` was given without a `slot`, so it is ignored — overlays only rank "
+      .. "against each other within a slot")
+  end
+
+  for _, msg in ipairs(found) do
+    host.log.info(string.format("[overlay] %s: %s", tostring(self.label), msg))
+  end
+  return #found
+end
+
 -- Registers the single foreground/focus trigger (once) that drives _recheck
 -- across all of the overlay's contexts. With `opts.slot` the overlay joins the
 -- host arbiter for that slot at `opts.specificity` (a base overlay and the
@@ -1001,6 +1104,10 @@ end
 -- would silently fold into the first slot's claim), so log it rather than rebind.
 -- Shared by attach* (via ensureTrigger) and derive.
 function Overlay:_join(slot, specificity, pollMs)
+  report(self, { slot = slot, specificity = specificity })
+  -- From here on the overlay is LIVE: _join ends with a synchronous _recheck, so anything
+  -- that changes what the overlay is must already be in place. See the guard below.
+  self._bound = true
   if slot then
     if not self._slot then
       self._slot = slot
