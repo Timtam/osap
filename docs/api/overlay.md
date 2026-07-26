@@ -3,9 +3,13 @@ title: "host.overlay (O) — self-voicing overlay control layer"
 sidebar_position: 6
 ---
 
-The overlay API is exposed as `host.overlay` (aliased `O` throughout). `O.new` returns an `Overlay` object whose methods are called with `:`. Controls are added to a virtual tree, navigated by keyboard, and spoken as `"label, type[, value]"`. All control coordinates are **origin-relative**: the origin is the client-area top-left (in screen pixels) of the active context's coordinate window — the plugin window when standalone, or the embedded plugin's child control when hosted in a DAW — re-resolved per call so it tracks window moves; `(0, 0)` when unattached.
+The overlay API is a **code module**, not a host namespace: declare `com.platform.overlay` as a dependency and pull it in with `host.require` (aliased `O` throughout). `O.new` returns an `Overlay` object whose methods are called with `:`. Controls are added to a virtual tree, navigated by keyboard, and spoken as `"label, type[, value]"`. All control coordinates are **origin-relative**: the origin is the client-area top-left (in screen pixels) of the active context's coordinate window — the plugin window when standalone, or the embedded plugin's child control when hosted in a DAW — re-resolved per call so it tracks window moves; `(0, 0)` when unattached.
 
-Source: `C:/scripts/operating-system-automation-platform/crates/host/src/overlay_prelude.luau`.
+```lua
+local O = host.require("com.platform.overlay")
+```
+
+Source: `modules/overlay-runtime/src/main.luau`.
 
 Control **kinds**: `static`, `hotspot`, `custom`, `ocr`, `gtoggle`. The spoken type label is `""` (static), `"button"` (hotspot/custom/ocr), `"toggle button"` (gtoggle). **Every kind is a focus stop** — `static` text is Tab-reachable and read aloud, it just has no activation (Enter does nothing on it).
 
@@ -44,6 +48,46 @@ ov:addHotspotButton({ label = "Play", at = { 120, 40 }, hotkey = "Alt+P" })
 -- 352 px in from the right edge, 87 px down — Kontakt's instrument arrows:
 ov:addHotspotButton({ label = "Previous instrument", at = { 352, 87 }, fromRight = true, rawOrigin = true })
 ```
+
+## O:group(pred, build)
+
+**Signature:** `O:group(pred: (overlay) -> boolean, build: (overlay) -> ()) -> Overlay`
+
+Adds everything `build` adds under a shared condition: `pred` is ANDed onto each control's own `when`, and groups nest. Prefer it over repeating the same `when` on every control of a set — forgetting one is silent.
+
+```luau
+ov:group(bare, function(ov)
+    ov:addCustomButton({ label = "Load instrument", hotkey = "Ctrl+L", onActivate = load })
+    ov:group(isVersion("Kontakt 7"), function(ov)
+        ov:addHotspotButton({ label = "Library on/off", at = { 231, 19 }, hotkey = "Alt+L" })
+    end)
+end)
+```
+
+A `when` predicate must return exactly `true`; anything else counts as hidden. A hidden control is not Tab-reachable, its hotkey does nothing, and it does not claim a key combination that a visible sibling wants.
+
+## O:origin() / O:hwnd()
+
+**Signature:** `O:origin() -> Control | Window | nil` · `O:hwnd() -> number | nil`
+
+The active context's coordinate window — the plugin control when embedded, the window when standalone — and its handle. `nil` while the overlay is not active. This is the module's handle on the thing it overlays; use it instead of reaching into `activeCtx`.
+
+```luau
+onActivate = function(o)
+    local p = host.uia.locate(o:hwnd(), "", host.uia.type.Edit)
+    if p then host.input.click(p.x, p.y) end
+end,
+```
+
+## O:frame(fn)
+
+**Signature:** `O:frame(fn: (origin) -> (number, number)) -> Overlay`
+
+Shifts the overlay's whole coordinate frame: `fn` returns `dx, dy`, resolved per active control — a host version's content shift, or a nested plugin's inner origin. Controls marked `rawOrigin` opt out.
+
+## O.state
+
+A free-form table on every overlay for the owning module's own state, so it does not have to squat in the runtime's reserved `_`-prefixed fields.
 
 ## O:addCustomButton(opts)
 

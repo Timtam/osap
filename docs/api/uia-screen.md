@@ -51,6 +51,32 @@ if pt then
 end
 ```
 
+## host.uia.type
+
+**Signature:** `host.uia.type: { [string]: number }`
+
+The UIA ControlType ids by name — `host.uia.type.Button` (50000), `.Edit`, `.Menu`, `.MenuItem`, `.Tab`, `.Window` (50032), `.Pane` (50033), and the rest. Pass these instead of writing the integers at call sites.
+
+```luau
+local U = host.uia.type
+if host.uia.find(hwnd, "Kontakt 8", U.Pane) then … end
+```
+
+## host.uia.findAny(hwnd, names, types)
+
+**Signature:** `host.uia.findAny(hwnd: number, names: {string}, types: {number}) -> number | nil`
+
+Answers "is any of these names present as any of these control types?" — the shape a plugin-identity check takes, since a plugin may expose its name as a Window on one host and a Pane on another. Returns the **1-based index of the matching name**, so a caller learns *which* one matched (e.g. the plugin's version) rather than asking once per candidate. `nil` if none match; an empty name matches any element of the given types.
+
+One tree traversal per name, with the types folded into the condition — where a loop of `find` calls costs one full subtree walk per name×type pair. This runs on every detection pass, per candidate control, so the difference is not academic.
+
+```luau
+local U = host.uia.type
+local VERSIONS = { "Kontakt 8", "Kontakt 7" }
+local i = host.uia.findAny(ctrl.id, VERSIONS, { U.Window, U.Pane })
+if i then host.log("this is " .. VERSIONS[i]) end
+```
+
 ## host.uia.pluginLocate(hwnd, containerName, name, controlType)
 
 **Signature:** `host.uia.pluginLocate(hwnd: number, containerName: string, name: string, controlType: number) -> { x: number, y: number } | nil`
@@ -117,6 +143,22 @@ local hit = host.screen.imageSearch("assets/icon.png", {
     region = { x1 = 0, y1 = 0, x2 = 400, y2 = 300 },
     tolerance = 16,
 })
+```
+
+## host.screen.imageSearchAsync(template, opts?, cb)
+
+**Signature:** `host.screen.imageSearchAsync(template: string | {string}, opts: { region: Region?, tolerance: number?, scales: {number}? }?, cb: (hit: { x: number, y: number, w: number, h: number, n: number } | nil) -> ()) -> nil`
+
+Like `imageSearch`, but the region capture **and** the match both run on a worker thread; `cb` fires on a later tick. Use this for anything on a detection poll — a screen capture costs about a compositor frame, and doing it inline stalls the event loop that also carries speech and key handling.
+
+Pass a **list of templates** to try several renderings of the same thing (a dialog's close glyph as two plugin versions draw it): they are matched in order against the **same captured frame**, first hit wins, and `hit.n` reports which one matched (1-based). Chaining separate searches instead pays a fresh capture per template.
+
+```luau
+host.screen.imageSearchAsync({ "images/close-v8.png", "images/close-v7.png" },
+    { region = { b.x, b.y, b.x + b.w, b.y + b.h }, tolerance = 8 },
+    function(hit)
+        if hit then host.input.click(hit.x + hit.w // 2, hit.y + hit.h // 2) end
+    end)
 ```
 
 ## Region form

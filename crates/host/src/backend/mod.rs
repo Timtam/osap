@@ -95,6 +95,11 @@ pub trait Backend {
     /// Name + ControlType — for confirming a plugin's identity.
     fn uia_find(&self, hwnd: isize, name: &str, control_type: i32) -> bool;
 
+    /// "Is any of these names present as any of these control types?" — one traversal
+    /// per name instead of one per name×type pair. Returns the 1-based index of the
+    /// matching name (so the caller learns which), or None.
+    fn uia_find_any(&self, hwnd: isize, names: &[String], types: &[i32]) -> Option<usize>;
+
     /// Screen-pixel centre of that UIA element (to click it), or None if not
     /// found / it has no on-screen rect.
     fn uia_locate(&self, hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i32)>;

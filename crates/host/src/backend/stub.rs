@@ -74,6 +74,9 @@ impl Backend for StubBackend {
     fn uia_find(&self, _hwnd: isize, _name: &str, _control_type: i32) -> bool {
         false
     }
+    fn uia_find_any(&self, _hwnd: isize, _names: &[String], _types: &[i32]) -> Option<usize> {
+        None
+    }
     fn uia_locate(&self, _hwnd: isize, _name: &str, _control_type: i32) -> Option<(i32, i32)> {
         None
     }

@@ -65,6 +65,65 @@ pub fn uia_find(hwnd: isize, name: &str, control_type: i32) -> bool {
     find_element(hwnd, name, control_type).is_some()
 }
 
+/// "Is any of these names present as any of these control types?" — the shape almost
+/// every plugin-identity check takes ("Kontakt 8" as Window OR Pane). Answers it with a
+/// SINGLE tree traversal built from one OR-condition, instead of one full subtree walk
+/// per name×type pair; the walk dominates the cost, and identity is re-checked on every
+/// detection pass. Returns the 1-based index of the matching NAME (so the caller learns
+/// WHICH one matched, e.g. the plugin's version), or None.
+///
+/// An empty name matches any element of the given types.
+pub fn uia_find_any(hwnd: isize, names: &[String], types: &[i32]) -> Option<usize> {
+    if names.is_empty() || types.is_empty() {
+        return None;
+    }
+    AUTOMATION.with(|cell| unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let mut borrow = cell.borrow_mut();
+        if borrow.is_none() {
+            *borrow =
+                CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+                    .ok();
+        }
+        let automation = borrow.as_ref()?;
+        let element = automation.ElementFromHandle(HWND(hwnd as *mut _)).ok()?;
+
+        // OR over the control types, ANDed with the name when one is given. One
+        // traversal per NAME (a name is what we must tell apart in the result); the
+        // types — the part that multiplied the walks — collapse into the condition.
+        // Folded pairwise rather than via CreateOrConditionFromArray, which wants a
+        // SAFEARRAY; the type list is a handful of entries, so the shape is irrelevant.
+        let mut cond_type: Option<IUIAutomationCondition> = None;
+        for t in types {
+            let v: VARIANT = (*t).into();
+            let c = automation.CreatePropertyCondition(UIA_ControlTypePropertyId, &v).ok()?;
+            cond_type = Some(match cond_type {
+                None => c,
+                Some(prev) => automation.CreateOrCondition(&prev, &c).ok()?,
+            });
+        }
+        let cond_type = cond_type?;
+
+        for (i, name) in names.iter().enumerate() {
+            let cond = if name.is_empty() {
+                cond_type.clone()
+            } else {
+                let v: VARIANT = BSTR::from(name.as_str()).into();
+                let cond_name =
+                    automation.CreatePropertyCondition(UIA_NamePropertyId, &v).ok()?;
+                match automation.CreateAndCondition(&cond_name, &cond_type) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                }
+            };
+            if element.FindFirst(TreeScope_Subtree, &cond).is_ok() {
+                return Some(i + 1);
+            }
+        }
+        None
+    })
+}
+
 /// The screen-pixel centre of that element's bounding rectangle (to click it), or
 /// None if not found / it has no on-screen rect.
 pub fn uia_locate(hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i32)> {

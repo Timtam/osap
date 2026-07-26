@@ -147,6 +147,27 @@ end)
 
 ---
 
+## host.epoch()
+
+**Signature:** `host.epoch() -> number`
+
+A counter that changes whenever the world may have: an OS event dispatched into a module (hotkey, key, window activation, focus change), a timer firing, an async image result arriving, or the module itself driving input (click, move, drag, scroll, key send, typing).
+
+Memoize an expensive observation against it, so repeats within one dispatch are free while a genuinely new situation is always re-observed:
+
+```luau
+local cachedEpoch, cached = -1, nil
+local function expensiveThing()
+    local e = host.epoch()
+    if e ~= cachedEpoch then
+        cached, cachedEpoch = reallyWorkItOut(), e
+    end
+    return cached
+end
+```
+
+Deliberately **not** time-based, and it does not advance on an idle tick. A stale answer here means acting on the wrong screen position, and "it was fresh 50 ms ago" is not a safety property.
+
 ## host.log.info(msg)
 
 **Signature:** `host.log.info(msg: string)` → `nil`

@@ -13,7 +13,8 @@ local O = host.require("com.platform.overlay")
 local daw = host.require("com.platform.daw-hosts")
 
 local SLOT = "com.platform.kontakt" -- shared with kontakt so the arbiter composes
-local EDIT = 50004 -- UIA control type: Edit (KK's browser search field)
+local U = host.uia.type
+local EDIT = U.Edit -- KK's browser search field
 
 -- The Komplete Kontrol STANDALONE application window (KK running on its own, not
 -- embedded in a DAW): a top-level NINormalWindow titled "Komplete Kontrol", exe
@@ -72,7 +73,7 @@ local CLOSE_KK_BROWSER = "closeKKBrowser"
 -- A Komplete Kontrol Qt control (same Qt class as Kontakt; the UIA name is what
 -- distinguishes it). Non-relational, so the identity cache is safe here.
 local function isKK(c)
-  return host.uia.find(c.id, "Komplete Kontrol", 50032) or host.uia.find(c.id, "Komplete Kontrol", 50033)
+  return host.uia.findAny(c.id, { "Komplete Kontrol" }, { U.Window, U.Pane }) ~= nil
 end
 
 local function spec()
@@ -85,24 +86,19 @@ local function spec()
   }
 end
 
--- The focused KK plugin window handle, from the overlay's active context.
-local function pluginHwnd(ov)
-  local ctrl = ov.activeCtx and ov.activeCtx.origin()
-  return ctrl and ctrl.id
-end
 
 -- The toggle that closes KK's library browser — the previous-sibling of the browser
 -- pane (FileTypeSelector / TagCloudAccordionWithBrands) — or nil when NO browser is
 -- open. Doubles as the "is the browser open?" probe (nil ⇒ closed).
 local function browserToggle(hwnd)
   if not hwnd then return nil end
-  return host.uia.classNavPoint(hwnd, "FileTypeSelector", 50018, 0, -1)
-    or host.uia.classNavPoint(hwnd, "TagCloudAccordionWithBrands", 50033, 0, -1)
+  return host.uia.classNavPoint(hwnd, "FileTypeSelector", U.Tab, 0, -1)
+    or host.uia.classNavPoint(hwnd, "TagCloudAccordionWithBrands", U.Pane, 0, -1)
 end
 
 -- `when` predicate for the manual close control + the auto-close: is a browser open?
 local function browserOpen(o)
-  return browserToggle(pluginHwnd(o)) ~= nil
+  return browserToggle(o:hwnd()) ~= nil
 end
 
 -- Fired when the KK overlay becomes the active overlay: if the browser is open (hiding a
@@ -110,7 +106,7 @@ end
 -- higher-specificity Kontakt/library overlay can detect it and take over.
 local function onKKActive(o)
   local enabled = host.settings.get(CLOSE_KK_BROWSER)
-  local p = enabled and browserToggle(pluginHwnd(o)) or nil
+  local p = enabled and browserToggle(o:hwnd()) or nil
   host.log.info(string.format(
     "KK overlay active: auto-close=%s browserToggle=%s",
     tostring(enabled), p and (p.x .. "," .. p.y) or "nil (no browser open)"
@@ -174,7 +170,7 @@ return {
       label = "Search library browser",
       hotkey = "Alt+S",
       onActivate = function(o)
-        local hwnd = pluginHwnd(o)
+        local hwnd = o:hwnd()
         if not hwnd then return end
         local p = host.uia.locate(hwnd, "", EDIT)
         if p then host.input.click(p.x, p.y) end
@@ -183,15 +179,15 @@ return {
     -- Manual close, shown ONLY while a browser is actually open (no point offering it
     -- otherwise). The auto-close above covers most cases; this is the fallback when the
     -- setting is off, or to close a browser you opened yourself.
-    local closeBtn = ov:addCustomButton({
+    ov:addCustomButton({
       label = "Close library browser",
       hotkey = "Alt+L",
+      when = browserOpen,
       onActivate = function(o)
-        local p = browserToggle(pluginHwnd(o))
+        local p = browserToggle(o:hwnd())
         if p then host.input.click(p.x, p.y) end
       end,
     })
-    closeBtn.when = browserOpen
     -- Auto-close on activate (opt-out): reveals an instrument the browser is hiding.
     ov:onActivate(onKKActive)
     -- Tab / Shift+Tab navigate the header (like the Kontakt overlay), Enter activates;
@@ -244,23 +240,27 @@ return {
     -- Library tab (4): rescans + add-directory. The user is already on the Library tab
     -- (the tab control clicked it), so each action only needs its Factory/User sub-tab
     -- (163,74 / 240,74 — not UIA-readable) then the control.
-    prefs:addCustomButton({
-      label = "Rescan factory library",
-      onActivate = prefsAction("Rescan factory library", { { 163, 74 }, { 548, 420 } }),
-    }).when = tc:onTab(4)
-    prefs:addCustomButton({
-      label = "Rescan user library",
-      onActivate = prefsAction("Rescan user library", { { 240, 74 }, { 548, 420 } }),
-    }).when = tc:onTab(4)
-    prefs:addCustomButton({
-      label = "Add user library directory",
-      onActivate = prefsAction("Add user library directory", { { 240, 74 }, { 163, 420 } }),
-    }).when = tc:onTab(4)
+    prefs:group(tc:onTab(4), function(prefs)
+      prefs:addCustomButton({
+        label = "Rescan factory library",
+        onActivate = prefsAction("Rescan factory library", { { 163, 74 }, { 548, 420 } }),
+      })
+      prefs:addCustomButton({
+        label = "Rescan user library",
+        onActivate = prefsAction("Rescan user library", { { 240, 74 }, { 548, 420 } }),
+      })
+      prefs:addCustomButton({
+        label = "Add user library directory",
+        onActivate = prefsAction("Add user library directory", { { 240, 74 }, { 163, 420 } }),
+      })
+    end)
     -- Plug-ins tab (5): rescan (on its Manager sub-tab, 163,74).
-    prefs:addCustomButton({
-      label = "Rescan plug-ins",
-      onActivate = prefsAction("Rescan plug-ins", { { 163, 74 }, { 548, 398 } }),
-    }).when = tc:onTab(5)
+    prefs:group(tc:onTab(5), function(prefs)
+      prefs:addCustomButton({
+        label = "Rescan plug-ins",
+        onActivate = prefsAction("Rescan plug-ins", { { 163, 74 }, { 548, 398 } }),
+      })
+    end)
     -- Close is available on every tab.
     prefs:addHotspotButton({ label = "Close", at = { 548, 473 } })
     prefs:attach(PREFS)

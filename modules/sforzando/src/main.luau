@@ -39,9 +39,9 @@ ov:attachEmbedded({
   -- ReaHotkey uses UIA (a Pane named "PlogueXMLGUI"); this OCR landmark is the
   -- UIA-free check (UIA-based identity to be added alongside).
   identify = function(ctrl)
-    -- UIA (as ReaHotkey): sforzando's GUI is a Pane (50033 = UIA_PaneControlTypeId)
+    -- UIA (as ReaHotkey): sforzando's GUI is a Pane
     -- named "PlogueXMLGUI".
-    if host.uia and host.uia.find(ctrl.id, "PlogueXMLGUI", 50033) then
+    if host.uia and host.uia.find(ctrl.id, "PlogueXMLGUI", host.uia.type.Pane) then
       return true
     end
     -- Fallback: read the "sforzando" wordmark in the header.

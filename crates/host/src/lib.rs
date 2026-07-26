@@ -110,6 +110,13 @@ struct Shared {
     /// (higher specificity) suppresses its base when it matches. See
     /// docs/nested-overlays-design.md.
     arbiter: RefCell<HashMap<String, ArbiterSlot>>,
+    /// Monotonic "the world may have changed" counter. Bumped whenever an OS event is
+    /// dispatched into a module, a timer fires, or a module drives input — i.e. at every
+    /// point where what is on screen, focused or enumerable can differ from a moment ago.
+    /// A module memoizes an expensive observation (which plugin control is focused, say)
+    /// against it, so repeats within one dispatch are free while a genuinely new
+    /// situation is always re-observed. See `host.epoch()`.
+    epoch: Cell<u64>,
     /// Monotonic id source for arbiter claim handles.
     next_arbiter: Cell<i64>,
     /// Monotonic id source for captured-key registration tokens.
@@ -163,20 +170,26 @@ struct Decoded {
 }
 
 /// A queued async template match. The worker CAPTURES `region` itself (off the main
-/// thread) then matches `tmpl` against it; `region` = (x, y, w, h) in screen coords,
+/// thread) then matches `tmpls` against it; `region` = (x, y, w, h) in screen coords,
 /// whose (x, y) is added back into the reported hit.
+///
+/// `tmpls` holds ONE OR MORE templates tried in order against the SAME captured frame,
+/// first hit wins — several renderings of the same thing (a dialog's close glyph as two
+/// plugin versions draw it). Chaining single-template searches instead would pay a fresh
+/// region capture (~1 compositor frame) per template.
 struct ImageTask {
     id: u64,
     region: (i32, i32, i32, i32),
-    tmpl: Arc<Decoded>,
+    tmpls: Vec<Arc<Decoded>>,
     tol: u8,
     scales: Vec<f32>,
 }
 
-/// The worker's answer: the hit rect in screen coords, or None.
+/// The worker's answer: the hit rect in screen coords plus the 1-based index of the
+/// template that matched, or None.
 struct ImageResult {
     id: u64,
-    hit: Option<(i32, i32, u32, u32)>,
+    hit: Option<(i32, i32, u32, u32, usize)>,
 }
 
 /// The image-search worker: CAPTURES each task's region and runs the CPU-heavy
@@ -229,8 +242,11 @@ fn spawn_image_worker(
                 };
                 let (rx, ry, _, _) = t.region;
                 let hit = frames[idx].1.as_ref().and_then(|cap| {
-                    find_template_scaled(cap, t.tmpl.w, t.tmpl.h, &t.tmpl.rgba, t.tol, &t.scales)
-                        .map(|(ox, oy, mw, mh)| (rx + ox as i32, ry + oy as i32, mw, mh))
+                    // Templates in order against this one frame; first hit wins.
+                    t.tmpls.iter().enumerate().find_map(|(n, tm)| {
+                        find_template_scaled(cap, tm.w, tm.h, &tm.rgba, t.tol, &t.scales)
+                            .map(|(ox, oy, mw, mh)| (rx + ox as i32, ry + oy as i32, mw, mh, n + 1))
+                    })
                 });
                 if results.send(ImageResult { id: t.id, hit }).is_err() {
                     return; // main thread gone
@@ -244,6 +260,11 @@ impl Shared {
     fn root(&self, idx: usize) -> PathBuf {
         self.roots.borrow()[idx].clone()
     }
+    /// Marks the world as possibly changed (see the `epoch` field).
+    fn bump_epoch(&self) {
+        self.epoch.set(self.epoch.get().wrapping_add(1));
+    }
+
     fn alloc_id(&self) -> i32 {
         let id = self.next_id.get() + 1;
         self.next_id.set(id);
@@ -780,6 +801,12 @@ impl Shared {
                 }
             }
         }
+        // Only once something actually fires — this runs on EVERY loop tick, and an idle
+        // tick has changed nothing. Bumping there would make the epoch a tick counter and
+        // defeat the memoization it exists for.
+        if !due.is_empty() {
+            self.bump_epoch();
+        }
         for (idx, lua, cb) in due {
             if self.enabled.borrow().get(idx).copied().unwrap_or(false) {
                 if let Ok(f) = lua.registry_value::<Function>(&cb) {
@@ -821,15 +848,22 @@ impl Shared {
         while let Ok(res) = self.image_results.try_recv() {
             let entry = self.pending_image.borrow_mut().remove(&res.id);
             if let Some((lua, cb, idx)) = entry {
+                // A result arriving is a fresh observation of the screen, and its callback
+                // may re-check an overlay — bump per delivery, not per (mostly empty) poll.
+                self.bump_epoch();
                 if self.enabled.borrow().get(idx).copied().unwrap_or(false) {
                     if let Ok(f) = lua.registry_value::<Function>(&cb) {
+                        // The hit table carries `n`, the 1-based index of the template
+                        // that matched — meaningful for a multi-template search, and
+                        // always 1 for a single-template one.
                         let arg = match res.hit {
-                            Some((x, y, w, h)) => match lua.create_table() {
+                            Some((x, y, w, h, n)) => match lua.create_table() {
                                 Ok(t) => {
                                     let _ = t.set("x", x);
                                     let _ = t.set("y", y);
                                     let _ = t.set("w", w);
                                     let _ = t.set("h", h);
+                                    let _ = t.set("n", n);
                                     mlua::Value::Table(t)
                                 }
                                 Err(_) => mlua::Value::Nil,
@@ -1512,6 +1546,7 @@ impl Manager {
             timers: RefCell::new(Vec::new()),
             exports: RefCell::new(HashMap::new()),
             arbiter: RefCell::new(HashMap::new()),
+            epoch: Cell::new(0),
             next_arbiter: Cell::new(0),
             next_key_token: Cell::new(0),
             recurring: RefCell::new(Vec::new()),
@@ -1727,6 +1762,7 @@ impl Dispatcher<'_> {
 
 impl HostEvents for Dispatcher<'_> {
     fn on_hotkey(&mut self, id: i32) {
+        self.shared.bump_epoch();
         let found = {
             let map = self.shared.hotkeys.borrow();
             map.get(&id).and_then(|reg| {
@@ -1748,6 +1784,7 @@ impl HostEvents for Dispatcher<'_> {
     }
 
     fn on_key(&mut self, vk: u32, mods: u8) {
+        self.shared.bump_epoch();
         let found = {
             let keys = self.shared.keys.borrow();
             keys.iter()
@@ -1775,6 +1812,7 @@ impl HostEvents for Dispatcher<'_> {
     }
 
     fn on_window_activate(&mut self, win: WinInfo) {
+        self.shared.bump_epoch();
         for (idx, m) in self.modules.iter().enumerate() {
             if !self.enabled(idx) {
                 continue;
@@ -1795,6 +1833,7 @@ impl HostEvents for Dispatcher<'_> {
     }
 
     fn on_focus_change(&mut self) {
+        self.shared.bump_epoch();
         for (idx, m) in self.modules.iter().enumerate() {
             if !self.enabled(idx) {
                 continue;
@@ -2152,6 +2191,66 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             Ok(sh.backend.uia_find(hwnd, &name, ctype))
         })?,
     )?;
+    // host.uia.type — the UIA ControlType ids, by name. Modules were declaring these as
+    // local constants (and writing bare integers where they hadn't), which reads as a
+    // magic number at every call site: `host.uia.find(id, "Kontakt 8", 50033)`.
+    let types = lua.create_table()?;
+    for (name, id) in [
+        ("Button", 50000),
+        ("Calendar", 50001),
+        ("CheckBox", 50002),
+        ("ComboBox", 50003),
+        ("Edit", 50004),
+        ("Hyperlink", 50005),
+        ("Image", 50006),
+        ("ListItem", 50007),
+        ("List", 50008),
+        ("Menu", 50009),
+        ("MenuBar", 50010),
+        ("MenuItem", 50011),
+        ("ProgressBar", 50012),
+        ("RadioButton", 50013),
+        ("ScrollBar", 50014),
+        ("Slider", 50015),
+        ("Spinner", 50016),
+        ("StatusBar", 50017),
+        ("Tab", 50018),
+        ("TabItem", 50019),
+        ("Text", 50020),
+        ("ToolBar", 50021),
+        ("ToolTip", 50022),
+        ("Tree", 50023),
+        ("TreeItem", 50024),
+        ("Custom", 50025),
+        ("Group", 50026),
+        ("Thumb", 50027),
+        ("DataGrid", 50028),
+        ("DataItem", 50029),
+        ("Document", 50030),
+        ("SplitButton", 50031),
+        ("Window", 50032),
+        ("Pane", 50033),
+        ("Header", 50034),
+        ("HeaderItem", 50035),
+        ("Table", 50036),
+        ("TitleBar", 50037),
+        ("Separator", 50038),
+    ] {
+        types.set(name, id)?;
+    }
+    uia.set("type", types)?;
+    // host.uia.findAny(hwnd, names, types) -> index | nil — "is any of these names
+    // present as any of these control types?", the shape a plugin-identity check takes
+    // ("Kontakt 8" as Window OR Pane). One tree traversal per NAME rather than one per
+    // name×type pair, and it returns WHICH name matched (1-based), so a caller can read
+    // the plugin's version straight out of the answer instead of asking once per version.
+    let sh = shared.clone();
+    uia.set(
+        "findAny",
+        lua.create_function(move |_, (hwnd, names, types): (isize, Vec<String>, Vec<i32>)| {
+            Ok(sh.backend.uia_find_any(hwnd, &names, &types))
+        })?,
+    )?;
     // host.uia.locate(hwnd, name, controlType) -> { x, y } (screen centre of the
     // matching element, to click it) or nil. For driving plugin UI via UIA.
     let sh = shared.clone();
@@ -2383,17 +2482,38 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             Ok((mlua::Value::Nil, mlua::Value::Nil))
         })?,
     )?;
-    // host.screen.imageSearchAsync(image, opts, cb) — offloads BOTH the region capture
-    // (the ~1-frame DWM-compositor cost) and the template match to a worker thread,
-    // calling cb({x,y,w,h}) | cb(nil) on a later tick, so a detection poll (e.g. the
-    // 500 ms landmark poll) never blocks the event loop on either. Only the template
-    // decode happens here, and it is cached.
+    // host.screen.imageSearchAsync(image | {image, …}, opts, cb) — offloads BOTH the
+    // region capture (the ~1-frame DWM-compositor cost) and the template match to a
+    // worker thread, calling cb({x,y,w,h,n}) | cb(nil) on a later tick, so a detection
+    // poll (e.g. the 500 ms landmark poll) never blocks the event loop on either. Only
+    // the template decode happens here, and it is cached.
+    //
+    // Given a LIST of images, they are tried in order against the SAME captured frame and
+    // the first hit wins, with `n` reporting which one matched — for a thing with several
+    // renderings (a dialog's close glyph as two plugin versions draw it). Chaining
+    // separate searches instead costs a fresh capture per template.
     let sh = shared.clone();
     screen.set(
         "imageSearchAsync",
         lua.create_function(
-            move |lua, (template, opts, cb): (String, Option<Table>, Function)| {
-                let tmpl = sh.load_template(&sh.root(idx).join(&template))?;
+            move |lua, (template, opts, cb): (mlua::Value, Option<Table>, Function)| {
+                let mut tmpls = Vec::new();
+                match &template {
+                    mlua::Value::Table(list) => {
+                        for p in list.clone().sequence_values::<String>() {
+                            tmpls.push(sh.load_template(&sh.root(idx).join(&p?))?);
+                        }
+                    }
+                    _ => {
+                        let p: String = lua.from_value(template.clone())?;
+                        tmpls.push(sh.load_template(&sh.root(idx).join(&p))?);
+                    }
+                }
+                if tmpls.is_empty() {
+                    return Err(mlua::Error::external(
+                        "imageSearchAsync: no template given".to_string(),
+                    ));
+                }
                 let (sw, sh_) = sh.backend.screen_size();
                 let (rx, ry, rw, rh) = read_region(opts.as_ref(), sw, sh_);
                 let tol: u8 = opts.as_ref().and_then(|o| o.get::<u8>("tolerance").ok()).unwrap_or(0);
@@ -2407,7 +2527,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 sh.pending_image.borrow_mut().insert(id, (lua.clone(), key, idx));
                 if sh
                     .image_tasks
-                    .send(ImageTask { id, region: (rx, ry, rw, rh), tmpl, tol, scales })
+                    .send(ImageTask { id, region: (rx, ry, rw, rh), tmpls, tol, scales })
                     .is_err()
                 {
                     // Worker thread gone (should never happen — it's panic-proof): drop
@@ -2477,6 +2597,15 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     )?;
     host.set("ocr", ocr)?;
 
+    // host.epoch() -> number — a counter that changes whenever the world may have: an
+    // OS event dispatched into a module, a timer firing, or the module itself driving
+    // input. Memoize an expensive observation against it (`if cachedEpoch == host.epoch()
+    // then return cached end`) and repeats within one dispatch cost nothing, while a new
+    // situation is always re-observed. Deliberately NOT time-based: a stale coordinate
+    // clicks the wrong thing, and "it was fresh 50 ms ago" is not a safety property.
+    let sh = shared.clone();
+    host.set("epoch", lua.create_function(move |_, ()| Ok(sh.epoch.get()))?)?;
+
     // host.input: cursorPos / move / click / drag / scroll / send / text
     let input = lua.create_table()?;
     let sh = shared.clone();
@@ -2494,6 +2623,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     input.set(
         "move",
         lua.create_function(move |_, (x, y): (i32, i32)| {
+            sh.bump_epoch();
             sh.backend.mouse_move(x, y);
             Ok(())
         })?,
@@ -2502,6 +2632,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     input.set(
         "click",
         lua.create_function(move |_, (x, y, opts): (i32, i32, Option<Table>)| {
+            sh.bump_epoch();
             sh.backend.mouse_click(x, y, button_from(opts.as_ref()));
             Ok(())
         })?,
@@ -2510,6 +2641,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     input.set(
         "drag",
         lua.create_function(move |_, (x1, y1, x2, y2, opts): (i32, i32, i32, i32, Option<Table>)| {
+            sh.bump_epoch();
             sh.backend.mouse_drag(x1, y1, x2, y2, button_from(opts.as_ref()));
             Ok(())
         })?,
@@ -2518,6 +2650,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     input.set(
         "scroll",
         lua.create_function(move |_, (x, y, amount): (i32, i32, i32)| {
+            sh.bump_epoch();
             sh.backend.mouse_scroll(x, y, amount);
             Ok(())
         })?,
@@ -2526,6 +2659,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     input.set(
         "send",
         lua.create_function(move |_, combo: String| {
+            sh.bump_epoch();
             sh.backend.key_send(&combo).map_err(mlua::Error::external)
         })?,
     )?;
@@ -2533,6 +2667,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     input.set(
         "text",
         lua.create_function(move |_, text: String| {
+            sh.bump_epoch();
             sh.backend.type_text(&text);
             Ok(())
         })?,
@@ -2729,6 +2864,36 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     arbiter.set(
         "winner",
         lua.create_function(move |_, slot: String| Ok(sh.arbiter_winner(&slot)))?,
+    )?;
+    // host.arbiter.participants(slot) -> { {module, specificity, matching, active}, … }
+    // A DIAGNOSTIC, and the only way to catch the failure this design is most prone to:
+    // slots are plain strings typed independently in modules that never see each other,
+    // so a typo doesn't error — it silently creates a private slot where the overlay wins
+    // every time (or never competes). Nothing else can notice that, because a slot with
+    // one participant is perfectly legal. Every failure mode here is silent to a user who
+    // cannot see the screen, so it has to be inspectable.
+    let sh = shared.clone();
+    arbiter.set(
+        "participants",
+        lua.create_function(move |lua, slot: String| {
+            let arr = lua.create_table()?;
+            let map = sh.arbiter.borrow();
+            if let Some(s) = map.get(&slot) {
+                let names = sh.ids.borrow();
+                for (i, c) in s.claims.iter().enumerate() {
+                    let t = lua.create_table()?;
+                    t.set(
+                        "module",
+                        names.get(c.module_idx).cloned().unwrap_or_else(|| "?".to_string()),
+                    )?;
+                    t.set("specificity", c.specificity)?;
+                    t.set("matching", c.matching)?;
+                    t.set("active", s.active == Some(c.handle))?;
+                    arr.set(i + 1, t)?;
+                }
+            }
+            Ok(arr)
+        })?,
     )?;
     host.set("arbiter", arbiter)?;
 

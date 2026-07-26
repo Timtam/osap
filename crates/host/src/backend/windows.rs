@@ -210,6 +210,10 @@ impl Backend for WindowsBackend {
         super::uia::uia_find(hwnd, name, control_type)
     }
 
+    fn uia_find_any(&self, hwnd: isize, names: &[String], types: &[i32]) -> Option<usize> {
+        super::uia::uia_find_any(hwnd, names, types)
+    }
+
     fn uia_locate(&self, hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i32)> {
         super::uia::uia_locate(hwnd, name, control_type)
     }

@@ -66,18 +66,74 @@ function O.new(label)
       -- focused control like Return, but is released while an editable field is focused
       -- so the user can type spaces into it — see _syncSpaceCapture.
       _spaceToken = false,
+      -- Free-form per-overlay scratch space for the module that owns it, so module
+      -- state does not have to squat in the runtime's reserved `_`-prefixed fields.
+      state = {},
     },
     Overlay
   )
 end
 
+-- ANDs an enclosing group's predicate (see Overlay:group) onto a control's own `when`.
+-- Both must hold, and both must return exactly `true` — see isVisible.
+local function andWhen(outer, own)
+  if not outer then return own end
+  if not own then return outer end
+  return function(o) return outer(o) == true and own(o) == true end
+end
+
 local function add(self, control)
+  control.when = andWhen(self._groupWhen, control.when)
   self.controls[#self.controls + 1] = control
   return control
 end
 
-function Overlay:addStaticText(label)
-  return add(self, { kind = "static", label = label })
+-- Is this control shown right now? A `when` predicate must return exactly `true`;
+-- anything else — including a truthy non-boolean such as a `string.find` result — counts
+-- as hidden. Every reader of `when` goes through here, because they must agree: one
+-- place decides Tab-reachability (isFocusable), whether a hotkey press does anything
+-- (activate), and which control owns a shared hotkey (_visibleClaimant). Disagreeing
+-- would make a control silently unreachable while its key still fired something else.
+local function isVisible(self, c)
+  return c ~= nil and (c.when == nil or c.when(self) == true)
+end
+
+-- Adds everything `build` adds under a shared condition: `pred` is ANDed onto each
+-- control's own `when`, and groups nest. Replaces poking `.when` onto every returned
+-- control by hand — which is easy to forget on one control of a set, and reads as
+-- unrelated statements rather than "these belong together".
+function Overlay:group(pred, build)
+  local outer = self._groupWhen
+  self._groupWhen = andWhen(outer, pred)
+  build(self)
+  self._groupWhen = outer
+  return self
+end
+
+-- The active context's coordinate window — the plugin control when embedded, the window
+-- when standalone — or nil when the overlay isn't active. `:hwnd()` is its handle. This
+-- is the module's handle on the thing it overlays, and every module was re-deriving it.
+function Overlay:origin()
+  return self.activeCtx and self.activeCtx.origin() or nil
+end
+
+function Overlay:hwnd()
+  local o = self:origin()
+  return o and o.id or nil
+end
+
+-- Shifts this overlay's whole coordinate frame: `fn(origin) -> dx, dy`, resolved per
+-- active control (a host version's content shift, a nested plugin's inner origin).
+function Overlay:frame(fn)
+  self._originOffset = fn
+  return self
+end
+
+function Overlay:addStaticText(labelOrOpts)
+  if type(labelOrOpts) == "table" then
+    return add(self, { kind = "static", label = labelOrOpts.label, when = labelOrOpts.when })
+  end
+  return add(self, { kind = "static", label = labelOrOpts })
 end
 
 -- A tab control (ReaHotkey's TabControl): a single focus stop where Left / Right switch
@@ -88,7 +144,10 @@ end
 -- after this call) so they only show — and are only Tab-reachable — while tab n is
 -- current. Tab controls can nest: gate a nested control on `h1:onTab(a)` AND its own.
 function Overlay:addTabControl(opts)
-  local c = add(self, { kind = "tabcontrol", label = opts.label or "", tabs = opts.tabs or {}, _current = 1 })
+  local c = add(self, {
+    kind = "tabcontrol", label = opts.label or "", tabs = opts.tabs or {},
+    _current = 1, when = opts.when,
+  })
   self._hasTabControl = true
   return {
     control = c,
@@ -111,18 +170,25 @@ function Overlay:addHotspotButton(opts)
     hotkey = opts.hotkey,
     rawOrigin = opts.rawOrigin,
     fromRight = opts.fromRight,
+    when = opts.when,
   })
 end
 
 function Overlay:addCustomButton(opts)
-  return add(self, { kind = "custom", label = opts.label, onActivate = opts.onActivate, hotkey = opts.hotkey })
+  return add(self, {
+    kind = "custom", label = opts.label, onActivate = opts.onActivate,
+    hotkey = opts.hotkey, when = opts.when,
+  })
 end
 
 function Overlay:addOCRButton(opts)
   -- `readOnly` makes the control a pure announcer: focusing/activating re-reads the
   -- region via OCR but does NOT click it. For value/label readouts sitting over a
   -- drag knob or near a destructive control, where a click would change state.
-  return add(self, { kind = "ocr", label = opts.label, region = opts.region, hotkey = opts.hotkey, readOnly = opts.readOnly })
+  return add(self, {
+    kind = "ocr", label = opts.label, region = opts.region, hotkey = opts.hotkey,
+    readOnly = opts.readOnly, when = opts.when,
+  })
 end
 
 -- An OCR-read EDIT field (ReaHotkey's OCREdit — a distinct control type from OCRButton,
@@ -131,7 +197,10 @@ end
 -- to change it (e.g. rename a preset) then Tab on to a Save button. Announced as an
 -- "edit", so a screen-reader user hears it is an editable field, not a button.
 function Overlay:addOCREdit(opts)
-  return add(self, { kind = "ocredit", label = opts.label, region = opts.region, hotkey = opts.hotkey })
+  return add(self, {
+    kind = "ocredit", label = opts.label, region = opts.region,
+    hotkey = opts.hotkey, when = opts.when,
+  })
 end
 
 -- A toggle whose on/off state is read by image-matching its region against an
@@ -148,6 +217,7 @@ function Overlay:addGraphicalToggle(opts)
     -- Optional per-control overrides of the module-wide match robustness defaults.
     tolerance = opts.tolerance,
     scales = opts.scales,
+    when = opts.when,
   })
 end
 
@@ -165,6 +235,7 @@ function Overlay:addHotspotToggle(opts)
     hotkey = opts.hotkey,
     rawOrigin = opts.rawOrigin,
     fromRight = opts.fromRight,
+    when = opts.when,
   })
 end
 
@@ -284,7 +355,7 @@ local TYPE_LABEL =
 -- unattached. All control coordinates (OCR regions, hotspots) are relative to it.
 local function originOf(self, control)
   if self.activeCtx then
-    local o = self.activeCtx.origin()
+    local o = self:origin()
     if o and o.client then
       -- An optional per-overlay offset shifts the whole coordinate frame: a
       -- container library overlay uses it for the host version's content shift
@@ -436,7 +507,7 @@ local function hotspotPoint(self, c)
   local ox, oy = originOf(self, c)
   local x = at[1]
   if c.fromRight then
-    local o = self.activeCtx and self.activeCtx.origin()
+    local o = self:origin()
     local w = (o and o.bounds and o.bounds.w) or 0
     x = w - at[1]
   end
@@ -509,7 +580,7 @@ local function isFocusable(self, index)
   -- chrome controls, shown only while Kontakt is nested inside Komplete Kontrol).
   local c = self.controls[index]
   if c == nil or c.kind == "slot" then return false end
-  if c.when and c.when(self) ~= true then return false end
+  if not isVisible(self, c) then return false end
   return true
 end
 
@@ -557,7 +628,7 @@ end
 -- global hotkeys. Ported from ReaHotkey's AddCustomPassThrough("Standalone", …).
 function Overlay:enableUiaPassThrough()
   self._passThrough = function(o, dir)
-    local ctrl = o.activeCtx and o.activeCtx.origin()
+    local ctrl = o:origin()
     local hwnd = ctrl and ctrl.id
     if not hwnd then return end
     -- Move the plugin's OWN keyboard focus to the next/previous control. We deliberately
@@ -573,7 +644,7 @@ function Overlay:activate(index)
   local i = index or self.focus
   local c = self.controls[i]
   if not c then return end
-  if c.when and c.when(self) ~= true then return end -- a hidden control's hotkey no-ops
+  if not isVisible(self, c) then return end -- a hidden control's hotkey no-ops
   if c.kind == "hotspot" and c.at then
     local px, py = hotspotPoint(self, c)
     if not px then return end
@@ -611,7 +682,7 @@ end
 function Overlay:_visibleClaimant(candidates)
   for _, i in ipairs(candidates) do
     local c = self.controls[i]
-    if c and (c.when == nil or c.when(self) == true) then return i end
+    if isVisible(self, c) then return i end
   end
   return nil
 end
@@ -639,7 +710,7 @@ function Overlay:_syncControlHotkeys()
     host.hotkey.unregister(id)
   end
   self.controlHotkeys = {}
-  local o = self.activeCtx and self.activeCtx.origin()
+  local o = self:origin()
   self._hotkeyOriginId = (o and o.id) or false
   local claim, specs = {}, {}
   for i, c in ipairs(self.controls) do
@@ -795,7 +866,7 @@ function Overlay:_activate()
   -- window reusing the very same HWND across close/reopen would resume too, but these
   -- plugin/dialog windows are destroyed and recreated, so their id changes.) Clearing
   -- focus here lets the `if self.focus == 0` block below re-pick the first focusable.
-  local origin = self.activeCtx and self.activeCtx.origin()
+  local origin = self:origin()
   local id = (origin and origin.id) or false
   if id ~= self._lastActiveId then
     self.focus = 0
@@ -857,7 +928,7 @@ function Overlay:_recheck()
   -- An extra gate (e.g. a library landmark) further narrows the match, evaluated
   -- against the matched context's coordinate origin.
   if matched and self._gate then
-    matched = self._gate(self.activeCtx.origin()) == true
+    matched = self._gate(self:origin()) == true
     if not matched then self.activeCtx = false end
   end
   if self._slot then
@@ -872,7 +943,7 @@ function Overlay:_recheck()
   -- control set can differ there — e.g. a Kontakt 7's header controls versus a Kontakt
   -- 8's. Re-sync the per-control hotkeys when that coordinate origin changes.
   if self.active and matched then
-    local o = self.activeCtx and self.activeCtx.origin()
+    local o = self:origin()
     if ((o and o.id) or false) ~= self._hotkeyOriginId then
       self:_syncControlHotkeys()
     end
@@ -1037,16 +1108,35 @@ function Overlay:attachEmbedded(spec, opts)
   -- NOT cached like identify, so a condition that changes while the same control
   -- stays focused (a library loading/unloading inside an embedded plugin) is
   -- re-evaluated each time. origin still resolves to the control either way.
+  -- Resolving the origin is the most expensive thing this runtime does repeatedly: a
+  -- window enumeration, a focus-chain walk, and — for a relational spec like Kontakt's,
+  -- which cannot cache its identity per HWND — a UIA query per candidate control, which
+  -- itself enumerates again. And it is asked for constantly: once per control coordinate,
+  -- again for a right-anchored hotspot, on every hotkey re-sync, on activation, and every
+  -- 150 ms from the menu watch. All of those want the SAME answer.
+  --
+  -- So memoize it against host.epoch(), which changes whenever an OS event reaches a
+  -- module, a timer fires, or the module drives input — every point at which the answer
+  -- could differ. Within one such pass the origin is resolved once; a new pass always
+  -- re-resolves. Not a time-based cache: a stale origin means clicking the wrong place.
+  local cachedEpoch, cachedOrigin = -1, nil
+  local function origin(opts)
+    local e = host.epoch and host.epoch() or -1
+    if not (opts and opts.fresh) and e == cachedEpoch then return cachedOrigin end
+    cachedOrigin = pluginControl()
+    cachedEpoch = e
+    return cachedOrigin
+  end
+  -- The match asks the same question ("is the plugin focused?") and so shares the memo:
+  -- a recheck plus the activation and coordinate work that follows it resolve once
+  -- between them, where each used to enumerate the window afresh.
   local function matched()
-    local c = pluginControl()
+    local c = origin()
     if not c then return false end
     if spec.present and not spec.present(c) then return false end
     return true
   end
-  self.contexts[#self.contexts + 1] = {
-    match = matched,
-    origin = function() return pluginControl() end,
-  }
+  self.contexts[#self.contexts + 1] = { match = matched, origin = origin }
   ensureTrigger(self, opts)
 end
 
@@ -1091,7 +1181,7 @@ function Overlay:setControls(controls)
   end
 end
 
--- While active, watch (via UIA, control type 50009 = Menu) for a menu open inside
+-- While active, watch (via UIA) for a MENU open inside
 -- the plugin and tell the hook to let captured nav keys pass through to it — a
 -- plugin's own (Qt) menu is not a Win32 #32768 menu, so the hook can't see it.
 function Overlay:_startMenuWatch()
@@ -1099,8 +1189,9 @@ function Overlay:_startMenuWatch()
   -- self-rescheduling host.timer.after).
   host.timer.every(150, function()
     if self.active then
-      local ctrl = self.activeCtx and self.activeCtx.origin()
-      local open = ctrl ~= nil and ctrl.id ~= nil and host.uia.find(ctrl.id, "", 50009) == true
+      local ctrl = self:origin()
+      local open = ctrl ~= nil and ctrl.id ~= nil
+        and host.uia.find(ctrl.id, "", host.uia.type.Menu) == true
       host.keys.menuOpen(open)
     end
   end)
@@ -1155,7 +1246,7 @@ function Overlay:captureFull(path)
     host.log.info("captureFull: overlay not active")
     return false
   end
-  local o = self.activeCtx and self.activeCtx.origin()
+  local o = self:origin()
   if not o or not o.client or not o.bounds then return false end
   local r = { o.client.x, o.client.y, o.client.x + o.bounds.w, o.client.y + o.bounds.h }
   local ok = host.screen.save ~= nil and host.screen.save(path, { region = r })

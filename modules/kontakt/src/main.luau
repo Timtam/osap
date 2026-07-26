@@ -23,37 +23,41 @@ local SLOT = "com.platform.kontakt"
 -- not a plugin embedded in a host). The standalone header and every library's standalone
 -- variant compete here, exactly as the embedded base + libraries compete on SLOT.
 local STANDALONE_SLOT = "com.platform.kontakt-standalone"
-local BUTTON, MENUITEM = 50000, 50011
+local U = host.uia.type
+local BUTTON, MENUITEM = U.Button, U.MenuItem
+-- A plugin identifies itself through a UIA element named after it, which NI exposes as a
+-- Window on some hosts and a Pane on others — so every identity question here asks about
+-- both types at once.
+local IDENTITY_TYPES = { U.Window, U.Pane }
 
 -- (The KK library-browser auto-close + its opt-out setting now live in the Komplete
 -- Kontrol module: an open browser hides the nested Kontakt, so the KK overlay — not
 -- this one — is the overlay active then, and is where the close belongs.)
 
--- A Kontakt version's identity (UIA name + Window/Pane control type) + the content
--- offset its libraries need.
-local function isKontakt(version)
-  return function(c)
-    return host.uia.find(c.id, version, 50032) or host.uia.find(c.id, version, 50033)
-  end
-end
+-- The Kontakt versions, in the order host.uia.findAny reports them. `offset` is the
+-- content shift a library needs: libraries are authored in the Kontakt 7 frame and
+-- Kontakt 8 renders content 29 px lower, so EVERY host path adds this on top of its own
+-- chrome offset.
 local VARIANTS = {
-  { name = "Kontakt 8", offset = { 0, 29 }, identify = isKontakt("Kontakt 8") },
-  { name = "Kontakt 7", offset = { 0, 0 }, identify = isKontakt("Kontakt 7") },
+  { name = "Kontakt 8", offset = { 0, 29 } },
+  { name = "Kontakt 7", offset = { 0, 0 } },
 }
-local function anyKontakt(c)
-  for _, v in ipairs(VARIANTS) do
-    if v.identify(c) then return true end
-  end
-  return false
-end
+local VARIANT_NAMES = {}
+for i, v in ipairs(VARIANTS) do VARIANT_NAMES[i] = v.name end
 
--- The version content offset of a Kontakt control (K7 = 0, K8 = +29): libraries are
--- authored in the Kontakt 7 frame, and Kontakt 8 renders content 29 px lower, so EVERY
--- host path adds this on top of its own chrome offset. Determined by UIA identity.
+-- WHICH Kontakt a control is, as an index into VARIANTS, or nil for "not a Kontakt".
+-- One question, one answer: a single UIA pass over both names and both types, so asking
+-- "is this a Kontakt?" and "which one?" costs the same as the old "is this a Kontakt 8?"
+-- alone did — and this runs on every detection pass, per candidate control.
+local function variantIndex(c)
+  return c and c.id and host.uia.findAny(c.id, VARIANT_NAMES, IDENTITY_TYPES) or nil
+end
+local function anyKontakt(c)
+  return variantIndex(c) ~= nil
+end
 local function versionOffsetOf(c)
-  for _, v in ipairs(VARIANTS) do
-    if v.identify(c) then return v.offset[1], v.offset[2] end
-  end
+  local i = variantIndex(c)
+  if i then return VARIANTS[i].offset[1], VARIANTS[i].offset[2] end
   return 0, 0
 end
 
@@ -64,8 +68,9 @@ end
 -- on KK's control and crosses KK's chrome with a fixed content offset — we do the
 -- same, so the SAME library layout (authored in the bare-Kontakt frame) lands
 -- correctly without the library knowing anything about KK.
+local KK_NAME = { "Komplete Kontrol" }
 local function isKK(c)
-  return host.uia.find(c.id, "Komplete Kontrol", 50032) or host.uia.find(c.id, "Komplete Kontrol", 50033)
+  return c ~= nil and c.id ~= nil and host.uia.findAny(c.id, KK_NAME, IDENTITY_TYPES) ~= nil
 end
 -- KK chrome offset, from KK's control top-left to where Kontakt's content begins.
 -- This is computed DYNAMICALLY at runtime (= nested Kontakt.client − KK.client, the
@@ -155,11 +160,10 @@ local function resolveOffset(c)
   end
   local cached = offsetCache[c.id]
   if cached then return cached[1], cached[2] end
-  for _, v in ipairs(VARIANTS) do
-    if v.identify(c) then
-      offsetCache[c.id] = v.offset
-      return v.offset[1], v.offset[2]
-    end
+  local i = variantIndex(c)
+  if i then
+    offsetCache[c.id] = VARIANTS[i].offset
+    return VARIANTS[i].offset[1], VARIANTS[i].offset[2]
   end
   return 0, 0 -- version not yet identified (UIA not ready): transient, NOT cached
 end
@@ -171,9 +175,9 @@ end
 -- branch. The version is read from the "^Kontakt N" title (which the standalone matcher
 -- guarantees).
 local function standaloneOffset(o)
-  local ver = string.match((o and o.title) or "", "^Kontakt (%d)")
+  local name = string.match((o and o.title) or "", "^(Kontakt %d)")
   for _, v in ipairs(VARIANTS) do
-    if ver and v.name == "Kontakt " .. ver then return v.offset[1], v.offset[2] end
+    if v.name == name then return v.offset[1], v.offset[2] end
   end
   return 0, 0
 end
@@ -186,22 +190,11 @@ local function identifyHost(c)
   return false
 end
 
--- The focused Kontakt plugin window handle, from an overlay's active context.
-local function pluginHwnd(ov)
-  local ctrl = ov.activeCtx and ov.activeCtx.origin()
-  return ctrl and ctrl.id
-end
--- The "Kontakt N" identity pane's name for `hwnd` (the QuickWindow, control type
--- Window 50032 / Pane 50033), or nil. Used to scope a two-level UIA search into the
--- plugin's real UI (see uiaClick).
-local WINDOW, PANE = 50032, 50033
+-- The "Kontakt N" identity element's name under `hwnd`, or nil. Used to scope a
+-- two-level UIA search into the plugin's real UI (see pluginLocate).
 local function kontaktPaneName(hwnd)
-  for _, v in ipairs(VARIANTS) do
-    if host.uia.find(hwnd, v.name, WINDOW) or host.uia.find(hwnd, v.name, PANE) then
-      return v.name
-    end
-  end
-  return nil
+  local i = hwnd and host.uia.findAny(hwnd, VARIANT_NAMES, IDENTITY_TYPES)
+  return i and VARIANTS[i].name or nil
 end
 -- Locate an element inside the FOCUSED Kontakt, exactly the way ReaHotkey does
 -- (GetPluginUIAElement + MainElement.FindElement): root at the foreground window, find
@@ -213,6 +206,13 @@ end
 local function pluginLocate(name, ctype)
   local fg = host.window.active()
   if not (fg and fg.id) then return nil end
+  -- Once the identity lookup names the plugin, that IS the container — a miss then means
+  -- the element has no reachable content (the embedded case, where the plugin is a UIA
+  -- leaf), not that we asked about the wrong version. Retrying the other version's name
+  -- would walk the whole DAW window again for nothing, on the main thread, before every
+  -- coordinate fallback click. The loop is only for the case it was written for: no
+  -- identity resolved, because the condition-based lookup stopped at a Qt fragment
+  -- boundary that the raw-walking pluginLocate can still cross.
   local via = kontaktPaneName(fg.id)
   if via then return host.uia.pluginLocate(fg.id, via, name, ctype) end
   for _, v in ipairs(VARIANTS) do
@@ -274,7 +274,7 @@ local function closeWhatsNew(_)
   local function announce()
     host.speech.output("Update dialog closed", { interrupt = false })
   end
-  local p = host.uia.classNavPoint(kc.id, "WhatsNewScreen", 50033, 2, 0)
+  local p = host.uia.classNavPoint(kc.id, "WhatsNewScreen", U.Pane, 2, 0)
   if p then
     host.input.click(p.x, p.y)
     host.log.info("Kontakt: dismissed update dialog (UIA)")
@@ -286,23 +286,19 @@ local function closeWhatsNew(_)
   if tries >= WHATSNEW_MAX_TRIES then return end
   whatsNewTries[kc.id] = tries + 1
   local b = kc.bounds
-  local region = { b.x, b.y, b.x + b.w, b.y + b.h }
-  local search
-  search = function(n)
-    local image = WHATSNEW_CLOSE[n]
-    if not image then return end
-    host.screen.imageSearchAsync(image, { region = region, tolerance = 8 }, function(hit)
-      if not hit then
-        search(n + 1) -- this version's glyph didn't match; try the next template
-        return
-      end
+  -- Both glyphs against ONE captured frame (the search takes a template list), rather
+  -- than a chain of searches that would each pay a fresh region capture.
+  host.screen.imageSearchAsync(
+    WHATSNEW_CLOSE,
+    { region = { b.x, b.y, b.x + b.w, b.y + b.h }, tolerance = 8 },
+    function(hit)
+      if not hit then return end
       host.input.click(hit.x + math.floor(hit.w / 2), hit.y + math.floor(hit.h / 2))
-      host.log.info("Kontakt: dismissed update dialog (image)")
+      host.log.info("Kontakt: dismissed update dialog (image, template " .. hit.n .. ")")
       announce()
       whatsNewTries[kc.id] = WHATSNEW_MAX_TRIES -- done; stop scanning for this instance
-    end)
-  end
-  search(1)
+    end
+  )
 end
 
 -- Fired whenever the Kontakt base/library overlay becomes focused: dismiss the one-time
@@ -337,26 +333,28 @@ local function bare(o)
   return not nested(o)
 end
 local function addKKHeader(ov)
-  ov:addStaticText("Komplete Kontrol").when = nested
-  -- KK's menu is a fixed hotspot in KK's chrome at (297,17) relative to KK's RAW
-  -- client. It lives in KK's frame, NOT Kontakt's content frame, so `rawOrigin` makes
-  -- the overlay skip the content offset for it (the two-frame case): content controls
-  -- get the KK→content offset, this chrome control stays in KK's raw client.
-  ov:addHotspotButton({
-    label = "Komplete Kontrol menu",
-    at = { 297, 17 },
-    rawOrigin = true,
-    hotkey = "Alt+M",
-  }).when = nested
-  ov:addCustomButton({
-    label = "Search library browser",
-    hotkey = "Alt+S",
-    onActivate = function(o)
-      local h = pluginHwnd(o)
-      local p = h and host.uia.locate(h, "", EDIT)
-      if p then host.input.click(p.x, p.y) end
-    end,
-  }).when = nested
+  ov:group(nested, function(ov)
+    ov:addStaticText("Komplete Kontrol")
+    -- KK's menu is a fixed hotspot in KK's chrome at (297,17) relative to KK's RAW
+    -- client. It lives in KK's frame, NOT Kontakt's content frame, so `rawOrigin` makes
+    -- the overlay skip the content offset for it (the two-frame case): content controls
+    -- get the KK→content offset, this chrome control stays in KK's raw client.
+    ov:addHotspotButton({
+      label = "Komplete Kontrol menu",
+      at = { 297, 17 },
+      rawOrigin = true,
+      hotkey = "Alt+M",
+    })
+    ov:addCustomButton({
+      label = "Search library browser",
+      hotkey = "Alt+S",
+      onActivate = function(o)
+        local h = o:hwnd()
+        local p = h and host.uia.locate(h, "", EDIT)
+        if p then host.input.click(p.x, p.y) end
+      end,
+    })
+  end)
 end
 
 -- Adds the generic, library-independent header (UIA-driven, robust across versions)
@@ -387,12 +385,8 @@ local function variantOf(o)
   if not name then
     local kc = ctrl
     if isKK(ctrl) then kc = findNestedKontakt(ctrl) or ctrl end
-    for _, v in ipairs(VARIANTS) do
-      if v.identify(kc) then
-        name = v.name
-        break
-      end
-    end
+    local i = variantIndex(kc)
+    name = i and VARIANTS[i].name or nil
   end
   if name then variantCache[ctrl.id] = name end
   return name
@@ -416,6 +410,11 @@ local GEOMETRY = {
     nextMulti = { 742, 53 },
   },
 }
+-- A ready-made `when` predicate: shown only on this Kontakt version.
+local function isVersion(name)
+  return function(o) return variantOf(o) == name end
+end
+
 -- Kontakt 8 is the fallback when the version isn't resolved yet (it is the tested one).
 local function geom(o, key)
   local g = GEOMETRY[variantOf(o) or "Kontakt 8"]
@@ -526,39 +525,43 @@ local function addHeader(ov, embedded)
   -- file menu; the arrows are direct coordinate hotspots. (Its UIA-first path is dead on a
   -- DAW-embedded Kontakt — verified: the plugin element is a UIA LEAF with no content at
   -- all, even when queried directly — so everything here takes ReaHotkey's fallback route.)
-  ov:addCustomButton({
-    label = "Load instrument",
-    hotkey = "Ctrl+L",
-    onActivate = function(o) invokeMenuItem(o, "Load...") end,
-  }).when = bare
-  ov:addCustomButton({
-    label = "Save multi as",
-    hotkey = "Ctrl+S",
-    onActivate = function(o) invokeMenuItem(o, "Save multi as...") end,
-  }).when = bare
-  ov:addCustomButton({
-    label = "Reset multi",
-    hotkey = "Ctrl+R",
-    onActivate = function(o) invokeMenuItem(o, "Reset multi") end,
-  }).when = bare
-  if not embedded then return end
-  for _, h in ipairs(HEADER_HOTSPOTS) do
-    ov:addHotspotButton({
-      label = h.label,
-      at = h.at,
-      fromRight = h.fromRight,
-      rawOrigin = true,
-      hotkey = h.hotkey,
-    }).when = bare
-  end
-  for _, h in ipairs(K7_HOTSPOTS) do
-    ov:addHotspotButton({
-      label = h.label,
-      at = function(o) return geom(o, h.key) end,
-      rawOrigin = true,
-      hotkey = h.hotkey,
-    }).when = function(o) return bare(o) and variantOf(o) == "Kontakt 7" end
-  end
+  ov:group(bare, function(ov)
+    ov:addCustomButton({
+      label = "Load instrument",
+      hotkey = "Ctrl+L",
+      onActivate = function(o) invokeMenuItem(o, "Load...") end,
+    })
+    ov:addCustomButton({
+      label = "Save multi as",
+      hotkey = "Ctrl+S",
+      onActivate = function(o) invokeMenuItem(o, "Save multi as...") end,
+    })
+    ov:addCustomButton({
+      label = "Reset multi",
+      hotkey = "Ctrl+R",
+      onActivate = function(o) invokeMenuItem(o, "Reset multi") end,
+    })
+    if not embedded then return end
+    for _, h in ipairs(HEADER_HOTSPOTS) do
+      ov:addHotspotButton({
+        label = h.label,
+        at = h.at,
+        fromRight = h.fromRight,
+        rawOrigin = true,
+        hotkey = h.hotkey,
+      })
+    end
+    ov:group(isVersion("Kontakt 7"), function(ov)
+      for _, h in ipairs(K7_HOTSPOTS) do
+        ov:addHotspotButton({
+          label = h.label,
+          at = function(o) return geom(o, h.key) end,
+          rawOrigin = true,
+          hotkey = h.hotkey,
+        })
+      end
+    end)
+  end)
 end
 
 -- The embedded-attach spec shared by the base and every library overlay. A
@@ -679,17 +682,19 @@ return {
     })
     -- Kontakt 7's standalone header carries three more buttons that Kontakt 8's does
     -- not (ReaHotkey lists them for K7 only); shown only when a Kontakt 7 is focused.
-    for _, h in ipairs({
-      { label = "Library on/off", uia = "LIBRARY", key = "library", hotkey = "Alt+L" },
-      { label = "View menu", uia = "VIEW", key = "viewMenu", hotkey = "Alt+V" },
-      { label = "Shop", uia = "SHOP", key = "shop", hotkey = "Alt+S" },
-    }) do
-      sa:addCustomButton({
-        label = h.label,
-        hotkey = h.hotkey,
-        onActivate = headerAction(h.uia, h.key),
-      }).when = function(o) return variantOf(o) == "Kontakt 7" end
-    end
+    sa:group(isVersion("Kontakt 7"), function(ov)
+      for _, h in ipairs({
+        { label = "Library on/off", uia = "LIBRARY", key = "library", hotkey = "Alt+L" },
+        { label = "View menu", uia = "VIEW", key = "viewMenu", hotkey = "Alt+V" },
+        { label = "Shop", uia = "SHOP", key = "shop", hotkey = "Alt+S" },
+      }) do
+        ov:addCustomButton({
+          label = h.label,
+          hotkey = h.hotkey,
+          onActivate = headerAction(h.uia, h.key),
+        })
+      end
+    end)
     -- Tab / Shift+Tab step through Kontakt's OWN focusable controls (its window doesn't
     -- move focus on Tab itself) — ReaHotkey's Standalone Tab pass-through.
     sa:enableUiaPassThrough()
