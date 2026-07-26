@@ -1065,6 +1065,11 @@ fn build_dep_host(
     let mt = lua.create_table()?;
     mt.set("__index", host_owner)?;
     host.set_metatable(Some(mt))?;
+    // Installed explicitly, NOT inherited through the metatable: an included file must be
+    // resolved against — and handed the host of — the module that includes it. Falling
+    // through to the owner would resolve a code module's own files under the DEPENDENT's
+    // root, and hand them the dependent's host.
+    install_include(lua, shared, dep_idx, &host)?;
     Ok(host)
 }
 
@@ -2897,7 +2902,99 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     )?;
     host.set("arbiter", arbiter)?;
 
+    install_include(lua, shared, idx, &host)?;
+
     Ok(host)
+}
+
+/// `host.include(rel)` — load another FILE OF THIS MODULE and return whatever it returns.
+///
+/// A module was one file, which is why long modules exist: there was no way to put shared
+/// helpers, a table of coordinates, or one overlay per file. This is that way. It is not
+/// overlay-specific — an included file returns any value, typically a table of functions.
+///
+/// Semantics that matter:
+///   * The file sees the SAME `host` as the file that included it, passed in rather than
+///     taken from the globals. So for a code module — whose source is evaluated inside each
+///     dependent's VM — an included file resolves paths, settings and resources against the
+///     DEFINING module, exactly as its includer does. `install_include` is therefore
+///     re-run for a dependency host with that host's own table.
+///   * Executed ONCE per VM; later includes of the same file return the same value (a
+///     module split into files must not re-run side effects per include). Cached per VM,
+///     because a code module legitimately runs once per dependent VM.
+///   * `..` and absolute paths are REJECTED. `host.path` / `host.resource.read` join
+///     without normalizing, which lets a path escape the module directory; that is a
+///     nuisance for reading a file and a different thing entirely for executing one.
+///   * An include cycle is an error naming the file, not a stack overflow.
+fn install_include(lua: &Lua, shared: &Rc<Shared>, idx: usize, host: &Table) -> Result<()> {
+    let sh = shared.clone();
+    // The host table the included file will receive. Held in the registry for the VM's
+    // lifetime, which is exactly how long the host table itself lives.
+    let host_ref = std::rc::Rc::new(lua.create_registry_value(host.clone())?);
+    host.set(
+        "include",
+        lua.create_function(move |lua, rel: String| {
+            let root = sh.root(idx);
+            let root_abs = std::path::absolute(&root).unwrap_or(root.clone());
+            let joined = root.join(&rel);
+            let abs = std::path::absolute(&joined).unwrap_or(joined);
+            if !abs.starts_with(&root_abs) {
+                return Err(mlua::Error::external(format!(
+                    "include '{rel}' resolves outside the module directory"
+                )));
+            }
+            let key = abs.to_string_lossy().to_string();
+
+            let cache: Table = match lua.named_registry_value::<Table>("__include_cache") {
+                Ok(t) => t,
+                Err(_) => {
+                    let t = lua.create_table()?;
+                    lua.set_named_registry_value("__include_cache", &t)?;
+                    t
+                }
+            };
+            // Cached as a one-element table so a file returning nil is still "done".
+            if let Ok(box_) = cache.get::<Table>(key.as_str()) {
+                return box_.get::<mlua::Value>(1);
+            }
+            let loading: Table = match lua.named_registry_value::<Table>("__include_loading") {
+                Ok(t) => t,
+                Err(_) => {
+                    let t = lua.create_table()?;
+                    lua.set_named_registry_value("__include_loading", &t)?;
+                    t
+                }
+            };
+            if loading.get::<bool>(key.as_str()).unwrap_or(false) {
+                return Err(mlua::Error::external(format!(
+                    "include cycle: '{rel}' is already being loaded"
+                )));
+            }
+            loading.set(key.as_str(), true)?;
+
+            let result = (|| -> mlua::Result<mlua::Value> {
+                let src = std::fs::read_to_string(&abs).map_err(|e| {
+                    mlua::Error::external(format!("include '{rel}': {e}"))
+                })?;
+                // The wrapper opens on the SAME line as the file's first line, so reported
+                // line numbers match the file.
+                let chunk = lua
+                    .load(format!("return function(host) {src}\nend"))
+                    .set_name(&key)
+                    .into_function()?;
+                let f: Function = chunk.call(())?;
+                let host_tbl: Table = lua.registry_value(&host_ref)?;
+                f.call::<mlua::Value>(host_tbl)
+            })();
+            loading.set(key.as_str(), mlua::Value::Nil)?;
+            let value = result?;
+            let box_ = lua.create_table()?;
+            box_.set(1, value.clone())?;
+            cache.set(key.as_str(), box_)?;
+            Ok(value)
+        })?,
+    )?;
+    Ok(())
 }
 
 /// Converts a Luau value into a stored setting value (scalars only).

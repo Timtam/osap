@@ -1,5 +1,5 @@
 ---
-title: "host.overlay (O) — self-voicing overlay control layer"
+title: "com.platform.overlay (O) — self-voicing overlay control layer"
 sidebar_position: 6
 ---
 
@@ -41,6 +41,8 @@ Returns `{ kind = "hotspot", label, at, hotkey, rawOrigin, fromRight }`. On acti
 
 `fromRight` measures `at[1]` from the coordinate window's **right edge** instead of its left — the click lands at `origin.x + width − at[1]` (ReaHotkey's `ControlX + ControlWidth − N`). Use it for plugin UI laid out from the right, so the target stays correct whatever the plugin's width is. Also accepted by [`addHotspotToggle`](#oaddhotspottoggleopts).
 
+`points` replaces `at` with a **click sequence** — `points = {{x1,y1},{x2,y2},…}`, with `settle` ms between each (default 400) — for UI where reaching a control means getting there first: switch to its tab, then its sub-tab, then click it. Each step re-resolves the origin and goes through the overlay's own coordinate resolution, so a frame offset, `rawOrigin` or landmark anchoring applies exactly as for a single point. Making that one control keeps every action self-contained, so a user who cannot see a tab structure never has to navigate it.
+
 `at` may also be a **function** `(overlay) -> {x, y} | nil`, for a control whose position depends on what is focused right now — one overlay serving several versions of a plugin whose chrome moved between them. Returning `nil` (the version isn't known yet) skips the click rather than guessing. Also accepted by `addHotspotToggle`.
 
 ```lua
@@ -65,6 +67,51 @@ end)
 ```
 
 A `when` predicate must return exactly `true`; anything else counts as hidden. A hidden control is not Tab-reachable, its hotkey does nothing, and it does not claim a key combination that a visible sibling wants.
+
+## Bindings — O.window / O.embedded / :with / O.hosts / O:bind
+
+**Signatures:**
+`O.window(matcher, opts?) -> Binding` · `O.embedded(spec, opts?) -> Binding` · `Binding:with(over) -> Binding` · `O.hosts(...) -> {matcher}` · `O:bind(binding, opts?) -> Overlay`
+
+A **binding** is an inert value saying *where* an overlay lives: which window or embedded control, on which `slot`, at which `specificity`, with `pollMatch` / `menus`. Declare it once and reuse it, instead of writing a factory function that rebuilds an attach spec per attachment — the reason such factories appear is that a caller mutates the table and the next caller needs a clean copy.
+
+`:with(over)` returns a **copy** with `over` merged into the target (`control`, `identify`, `title`, …); `over.opts` merges into the options. `O.hosts(...)` concatenates host lists and skips `nil`, so an optional host (a plugin that may not be installed) can be listed inline. `O:bind(binding, opts)` attaches, with `opts` overriding the binding's own options.
+
+```luau
+local HOSTED = O.embedded({
+    hosts = O.hosts(daw.all, kk and kk.standaloneWindow),
+    control = "Qt%d+.-QWindowIcon",
+    identify = identifyHost,
+    cacheIdentity = false,
+}, { slot = SLOT, menus = true })
+
+base:bind(HOSTED, { specificity = O.layer.base })
+dialog:bind(HOSTED:with({ control = "^NIChildWindow%x+$", identify = present,
+                          opts = { menus = false } }), { specificity = O.layer.dialog })
+```
+
+One overlay object takes **one** binding: an object is pinned to a single slot and its match poll belongs to that join. Two places to live means two overlay objects sharing a build function.
+
+## O.layer
+
+The specificity ladder within a slot, named: `chrome` (a host's own frame), `base` (the plugin's generic header), `content` (what is loaded inside it right now), `dialog` (a modal that must own the keyboard). Pass `specificity = O.layer.content` rather than a bare number.
+
+## O.memoByOrigin(fn, opts?)
+
+**Signature:** `O.memoByOrigin(fn: (origin, ...) -> value, opts: { key: ((origin) -> any)? }?) -> (origin, ...) -> value`
+
+Memoizes a per-window property that does not change while that window exists — which plugin version it is, whether it is a host container, where its content begins.
+
+One rule: a **non-nil** result is cached; **`nil` means "cannot tell yet" and is not cached**. Identity is usually resolved through UIA, which is not ready the instant a plugin window appears, and pinning that first answer is how an overlay ends up permanently convinced it is driving a different plugin version. `false` is a real answer and *is* cached.
+
+`opts.key(origin)` extends the cache key past the window handle — for a property that survives a window *move* but not a *resize*.
+
+```luau
+local variantOf = O.memoByOrigin(function(ctrl)
+    local i = host.uia.findAny(ctrl.id, VERSIONS, { U.Window, U.Pane })
+    return i and VERSIONS[i] or nil   -- nil: UIA not ready, ask again next time
+end)
+```
 
 ## O:origin() / O:hwnd()
 

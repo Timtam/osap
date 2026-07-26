@@ -29,6 +29,11 @@ local BUTTON, MENUITEM = U.Button, U.MenuItem
 -- Window on some hosts and a Pane on others — so every identity question here asks about
 -- both types at once.
 local IDENTITY_TYPES = { U.Window, U.Pane }
+-- NI Qt plugin control class — plain ("Qt652QWindowIcon{GUID}1", e.g. Kontakt) OR
+-- NI-versioned ("Qt671NI_6_7_1_R3QWindowIcon{GUID}", e.g. Komplete Kontrol); the ".-"
+-- spans the optional NI_<version> segment. A loose match: the UIA NAME is what tells
+-- these plugins apart (see identifyHost).
+local QT_PLUGIN = "Qt%d+.-QWindowIcon"
 
 -- (The KK library-browser auto-close + its opt-out setting now live in the Komplete
 -- Kontrol module: an open browser hides the nested Kontakt, so the KK overlay — not
@@ -84,7 +89,7 @@ local KK_OFFSET = { 198, 222 }
 -- only counts as a host when it actually contains a Kontakt.
 local function hasControl(test)
   for _, c in ipairs(host.window.controls()) do
-    if string.match(c.class, "Qt%d+.-QWindowIcon") and test(c) then return true end
+    if string.match(c.class, QT_PLUGIN) and test(c) then return true end
   end
   return false
 end
@@ -111,7 +116,7 @@ end
 local function findNestedKontakt(container)
   local candidates = {}
   for _, c in ipairs(host.window.controls()) do
-    if string.match(c.class, "Qt%d+.-QWindowIcon") and anyKontakt(c) and not isKK(c) then
+    if string.match(c.class, QT_PLUGIN) and anyKontakt(c) and not isKK(c) then
       candidates[#candidates + 1] = c
     end
   end
@@ -314,17 +319,13 @@ end
 -- This is ReaHotkey's "KK header on top of the plugin overlay" composition, realized
 -- as conditional controls in one nav list (KK → Kontakt → library). They act on the
 -- matched control (the KK container when nested).
-local EDIT = 50004 -- UIA Edit control type: KK's library-browser search field
-local nestedCache = {}
+local EDIT = U.Edit -- KK's library-browser search field
+-- Is the overlay anchored on a KK container (rather than a bare Kontakt)? Memoized per
+-- window: the answer is a property of the control, and it is asked on every `when`
+-- evaluation, i.e. on every focus move.
+local isNested = O.memoByOrigin(isKK)
 local function nested(o)
-  local ctrl = o.activeCtx and o.activeCtx.origin()
-  if not ctrl then return false end
-  local v = nestedCache[ctrl.id]
-  if v == nil then
-    v = isKK(ctrl)
-    nestedCache[ctrl.id] = v
-  end
-  return v == true
+  return isNested(o:origin()) == true
 end
 -- The inverse: shown only on a BARE Kontakt (no KK wrapping it). Kontakt's file menu /
 -- load is the bare way to load instruments; under KK you use KK's browser instead, so
@@ -373,43 +374,28 @@ end
 -- here ONE header serves both and resolves the version live, so a library overlay
 -- inherits it unchanged whichever Kontakt it is loaded into. Cached per control id
 -- (a Kontakt's version never changes under a fixed handle).
-local variantCache = {}
-local function variantOf(o)
-  local ctrl = o and o.activeCtx and o.activeCtx.origin()
-  if not ctrl then return nil end
-  local cached = variantCache[ctrl.id]
-  if cached ~= nil then return cached or nil end
+-- Memoized per window, and nil (UIA not ready yet) is deliberately NOT cached — pinning
+-- that would leave the overlay permanently wrong about which Kontakt it is driving.
+local variantOfOrigin = O.memoByOrigin(function(ctrl)
   -- Standalone: the window title carries the version. Embedded: identify by UIA, on the
   -- Kontakt itself — or, when anchored on a KK container, on the Kontakt nested in it.
   local name = string.match(tostring(ctrl.title or ""), "^(Kontakt %d)")
-  if not name then
-    local kc = ctrl
-    if isKK(ctrl) then kc = findNestedKontakt(ctrl) or ctrl end
-    local i = variantIndex(kc)
-    name = i and VARIANTS[i].name or nil
-  end
-  if name then variantCache[ctrl.id] = name end
-  return name
+  if name then return name end
+  local kc = ctrl
+  if isKK(ctrl) then kc = findNestedKontakt(ctrl) or ctrl end
+  local i = variantIndex(kc)
+  return i and VARIANTS[i].name or nil
+end)
+local function variantOf(o)
+  local ctrl = o and o:origin()
+  return ctrl and variantOfOrigin(ctrl) or nil
 end
 
--- ReaHotkey's per-version header geometry (its Kontakt7/Kontakt8 coordinate fallbacks),
--- relative to the plugin control's own top-left. Kontakt 7 and 8 differ in where the
--- chrome sits, so every coordinate the header clicks is looked up by focused version.
-local GEOMETRY = {
-  ["Kontakt 7"] = {
-    fileMenu = { 175, 19 }, -- the "FILE" button
-    library = { 231, 19 },
-    viewMenu = { 288, 19 },
-    shop = { 440, 19 }, -- with the library browser open ReaHotkey uses 815 — needs UIA
-    prevMulti = { 704, 53 },
-    nextMulti = { 722, 53 },
-  },
-  ["Kontakt 8"] = {
-    fileMenu = { 86, 19 }, -- the KONTAKT wordmark
-    prevMulti = { 722, 53 },
-    nextMulti = { 742, 53 },
-  },
-}
+-- Header geometry lives in its own file: pure per-version coordinate tables, which is
+-- reference data rather than logic and was the bulk of this module's length.
+local geo = host.include("src/geometry.luau")
+local GEOMETRY, MENU_ITEM, UIA_FILE_MENU = geo.GEOMETRY, geo.MENU_ITEM, geo.UIA_FILE_MENU
+
 -- A ready-made `when` predicate: shown only on this Kontakt version.
 local function isVersion(name)
   return function(o) return variantOf(o) == name end
@@ -421,24 +407,12 @@ local function geom(o, key)
   return g and g[key]
 end
 
--- File-menu item click points, relative to the FILE-MENU BUTTON — the menu drops from
--- that button, so one set of offsets holds for both versions even though the button
--- itself sits ~90 px apart in Kontakt 7 and 8. Measured on the live 8.11 menu (all three
--- confirmed working); the item order is the same in Kontakt 7.
-local MENU_ITEM = {
-  ["Load..."] = { 14, 65 },
-  ["Save multi as..."] = { 14, 121 },
-  ["Reset multi"] = { 14, 176 },
-}
-
 -- Opens the Kontakt file menu: the UIA file-menu button when it's reachable (a
 -- standalone / full-UIA Kontakt), else a coordinate click on the header. Returns the
 -- origin control + whether UIA was used (so a follow-up item click picks its method).
--- The UIA button's name is version-specific: "FILE" in Kontakt 7, "Kontakt File Menu"
--- in Kontakt 8.
-local UIA_FILE_MENU = { ["Kontakt 7"] = "FILE", ["Kontakt 8"] = "Kontakt File Menu" }
+-- The UIA button's name is version-specific (see geometry.luau).
 local function openFileMenu(o)
-  local ctrl = o.activeCtx and o.activeCtx.origin()
+  local ctrl = o:origin()
   local uiaName = UIA_FILE_MENU[variantOf(o) or "Kontakt 8"]
   if uiaClick(ctrl and ctrl.id, uiaName, BUTTON) then
     host.keys.menuOpen(true)
@@ -456,7 +430,7 @@ end
 -- fully accessible) and falls back to ReaHotkey's coordinate for that version.
 local function headerAction(uiaName, key)
   return function(o)
-    local ctrl = o.activeCtx and o.activeCtx.origin()
+    local ctrl = o:origin()
     if uiaClick(ctrl and ctrl.id, uiaName, BUTTON) then return end
     local at = geom(o, key)
     if ctrl and ctrl.client and at then
@@ -489,37 +463,6 @@ end
 -- both the content offset and a library overlay's landmark anchoring (ReaHotkey measures
 -- them off ControlGetPos of the plugin control, whatever library is loaded). Those with
 -- `fromRight` are anchored to the control's right edge (ReaHotkey's ControlWidth − N).
--- The multi arrows are the one pair whose position differs between the versions, so
--- they take their coordinates from GEOMETRY per focused Kontakt; the rest are identical
--- in ReaHotkey's Kontakt 7 and Kontakt 8 overlays.
-local HEADER_HOTSPOTS = {
-  { label = "Previous instrument", at = { 352, 87 }, fromRight = true, hotkey = "Ctrl+P" },
-  { label = "Next instrument", at = { 332, 87 }, fromRight = true, hotkey = "Ctrl+N" },
-  { label = "Previous multi", at = function(o) return geom(o, "prevMulti") end, hotkey = "Ctrl+Shift+P" },
-  { label = "Next multi", at = function(o) return geom(o, "nextMulti") end, hotkey = "Ctrl+Shift+N" },
-  { label = "Snapshot menu", at = { 588, 118 }, fromRight = true, hotkey = "Alt+M" },
-  { label = "Previous snapshot", at = { 405, 118 }, fromRight = true, hotkey = "Alt+P" },
-  { label = "Next snapshot", at = { 389, 118 }, fromRight = true, hotkey = "Alt+N" },
-}
-
--- Kontakt 7 offers single-click header controls that Kontakt 8's header does not have
--- (its chrome moved them into menus). Shown only when a Kontakt 7 is the focused one.
---
--- Only the library toggle, whose position ReaHotkey never shifts. Its SHOP button is
--- deliberately NOT here: that one sits at a DIFFERENT x depending on whether the library
--- browser is open (440 closed, 815 open), and ReaHotkey tells the two apart through the
--- plugin's UIA tree — which an embedded Kontakt does not have. Clicking the closed-state
--- coordinate with the browser open (its default) lands in the browser's own chrome, so
--- the button would be a stray click rather than a shop link. It stays on the standalone
--- header, where UIA resolves the real button regardless of browser state.
-local K7_HOTSPOTS = {
-  { label = "Library on/off", key = "library", hotkey = "Alt+L" },
-}
-
--- `embedded` adds the coordinate arrows, which ReaHotkey offers on the PLUGIN header
--- only (its standalone header is just the file menu + Tab pass-through) — their
--- positions are measured in the embedded plugin's frame and don't hold for the
--- standalone window, which has its own menu-bar chrome.
 local function addHeader(ov, embedded)
   -- ReaHotkey's Kontakt 8 plugin header. Its "Load" / "Save as" / "Reset multi" drive the
   -- file menu; the arrows are direct coordinate hotspots. (Its UIA-first path is dead on a
@@ -542,31 +485,36 @@ local function addHeader(ov, embedded)
       onActivate = function(o) invokeMenuItem(o, "Reset multi") end,
     })
     if not embedded then return end
-    for _, h in ipairs(HEADER_HOTSPOTS) do
+    for _, h in ipairs(geo.ARROWS) do
       ov:addHotspotButton({
         label = h.label,
-        at = h.at,
+        -- A fixed pair, or looked up per focused version when the two differ.
+        at = h.at or function(o) return geom(o, h.key) end,
         fromRight = h.fromRight,
         rawOrigin = true,
         hotkey = h.hotkey,
       })
     end
     ov:group(isVersion("Kontakt 7"), function(ov)
-      for _, h in ipairs(K7_HOTSPOTS) do
-        ov:addHotspotButton({
-          label = h.label,
-          at = function(o) return geom(o, h.key) end,
-          rawOrigin = true,
-          hotkey = h.hotkey,
-        })
+      for _, h in ipairs(geo.K7_CONTROLS) do
+        if h.embedded then
+          ov:addHotspotButton({
+            label = h.label,
+            at = function(o) return geom(o, h.key) end,
+            rawOrigin = true,
+            hotkey = h.hotkey,
+          })
+        end
       end
     end)
   end)
 end
 
--- The embedded-attach spec shared by the base and every library overlay. A
--- library's landmark is now an overlay-level gate (ov:landmark), not part of the
--- spec, so this is identical for the base and every library.
+-- ── Where a Kontakt can be ───────────────────────────────────────────────────
+-- Two BINDINGS, declared once as values. `HOSTED` is a Kontakt embedded in a host window;
+-- `STANDALONE` is Kontakt running as its own application. Every overlay here — the base
+-- header, each library variant, the Content Missing dialog — binds to one of these, or to
+-- a `:with{…}` variant of one, instead of rebuilding an attach spec per attachment.
 --
 -- Hosts = the DAWs (from daw-hosts) PLUS, when Komplete Kontrol is installed, KK's own
 -- standalone window (imported via the optional `kk` dependency): KK running on its own
@@ -575,27 +523,17 @@ end
 -- inside it, the plain-Qt nested Kontakt — so the same relational identity + dynamic
 -- KK→content offset apply). We reuse KK's OWN window matcher (kk.standaloneWindow) rather
 -- than treating KK as a DAW or duplicating its identity; if KK isn't installed, `kk` is
--- nil and this host is simply omitted. In a DAW the KK lives inside a non-KK host, so
+-- nil and O.hosts simply omits it. In a DAW the KK lives inside a non-KK host, so
 -- daw.all still handles the DAW-embedded case (with its chrome gate) unchanged.
-local function spec()
-  local hosts = {}
-  for _, h in ipairs(daw.all) do hosts[#hosts + 1] = h end
-  if kk and kk.standaloneWindow then hosts[#hosts + 1] = kk.standaloneWindow end
-  return {
-    hosts = hosts,
-    -- NI Qt plugin control class — plain ("Qt652QWindowIcon{GUID}1", e.g. Kontakt)
-    -- OR NI-versioned ("Qt671NI_6_7_1_R3QWindowIcon{GUID}", e.g. Komplete Kontrol);
-    -- the ".-" spans the optional NI_<version> segment. Loose match; the UIA name
-    -- (identifyHost) disambiguates Kontakt — and a KK that hosts it — from other NI
-    -- Qt plugins, and anchors a KK-nested Kontakt on the KK container.
-    control = "Qt%d+.-QWindowIcon",
-    identify = identifyHost,
-    -- identifyHost is RELATIONAL (a bare Kontakt defers to a wrapping KK, a KK only
-    -- counts when it hosts Kontakt), so it must NOT be cached per HWND — KK's
-    -- container HWND is stable while a Kontakt is loaded into it.
-    cacheIdentity = false,
-  }
-end
+local HOSTED = O.embedded({
+  hosts = O.hosts(daw.all, kk and kk.standaloneWindow),
+  control = QT_PLUGIN,
+  identify = identifyHost,
+  -- identifyHost is RELATIONAL (a bare Kontakt defers to a wrapping KK, a KK only
+  -- counts when it hosts Kontakt), so it must NOT be cached per HWND — KK's
+  -- container HWND is stable while a Kontakt is loaded into it.
+  cacheIdentity = false,
+}, { slot = SLOT, menus = true })
 
 -- Kontakt's "Content Missing" dialog — shown when a library's samples aren't where
 -- Kontakt expects them, and a hard stop until you point it at the folder. ReaHotkey
@@ -627,6 +565,7 @@ local KONTAKT_STANDALONE = {
   app = { exe = { contains = "Kontakt" } },
   windows = { class = { prefix = "NINormalWindow" } },
 }
+local STANDALONE = O.window(KONTAKT_STANDALONE, { slot = STANDALONE_SLOT, menus = true })
 
 -- Builds a library overlay — the inherited Kontakt header plus the library's own controls,
 -- gated on `landmark` — and binds it via `cfg.attach(ov)`. Shared by the EMBEDDED variant
@@ -658,7 +597,7 @@ return {
     ov:onActivate(onPluginActive)
     -- Specificity 1: above the Komplete Kontrol chrome overlay (0, com.platform
     -- .komplete-kontrol) on the shared slot, below a library (2).
-    ov:attachEmbedded(spec(), { slot = SLOT, specificity = O.layer.base, menus = true })
+    ov:bind(HOSTED, { specificity = O.layer.base })
     host.log.info("Kontakt base overlay ready.")
 
     -- STANDALONE overlay: Kontakt running as its OWN application (Kontakt N.exe), not
@@ -681,11 +620,7 @@ return {
     -- Kontakt 7's standalone header carries three more buttons that Kontakt 8's does
     -- not (ReaHotkey lists them for K7 only); shown only when a Kontakt 7 is focused.
     sa:group(isVersion("Kontakt 7"), function(ov)
-      for _, h in ipairs({
-        { label = "Library on/off", uia = "LIBRARY", key = "library", hotkey = "Alt+L" },
-        { label = "View menu", uia = "VIEW", key = "viewMenu", hotkey = "Alt+V" },
-        { label = "Shop", uia = "SHOP", key = "shop", hotkey = "Alt+S" },
-      }) do
+      for _, h in ipairs(geo.K7_CONTROLS) do
         ov:addCustomButton({
           label = h.label,
           hotkey = h.hotkey,
@@ -699,17 +634,24 @@ return {
     -- Join the standalone slot at the LOWEST specificity, so a library's standalone
     -- variant (specificity 2, gated on its landmark) takes over when its library is
     -- loaded, and this header is the resting default otherwise.
-    sa:attach(KONTAKT_STANDALONE, { slot = STANDALONE_SLOT, specificity = O.layer.chrome, menus = true })
+    sa:bind(STANDALONE, { specificity = O.layer.chrome })
     host.log.info("Kontakt standalone overlay ready.")
 
     -- The Content Missing dialog, embedded + standalone. Specificity 3 beats the header
     -- (0/1) and any library (2) on the same slot, so while the dialog is up it IS the
     -- overlay — and the arbiter hands back automatically once it closes.
-    local cmSpec = spec()
-    cmSpec.control = CONTENT_MISSING_CONTROL
-    cmSpec.identify = function() return kontaktPresent() end
-    contentMissingOverlay():attachEmbedded(cmSpec, { slot = SLOT, specificity = O.layer.dialog })
-    contentMissingOverlay():attach(CONTENT_MISSING_WINDOW, { slot = STANDALONE_SLOT, specificity = O.layer.dialog })
+    contentMissingOverlay():bind(
+      HOSTED:with({
+        control = CONTENT_MISSING_CONTROL,
+        identify = function() return kontaktPresent() end,
+        opts = { menus = false }, -- nothing here opens a plugin menu
+      }),
+      { specificity = O.layer.dialog }
+    )
+    contentMissingOverlay():bind(
+      O.window(CONTENT_MISSING_WINDOW, { slot = STANDALONE_SLOT }),
+      { specificity = O.layer.dialog }
+    )
     host.log.info("Kontakt Content Missing overlays ready.")
   end,
 
@@ -735,7 +677,7 @@ return {
       embedded = true,
       offset = resolveOffset,
       attach = function(o)
-        o:attachEmbedded(spec(), { slot = SLOT, specificity = O.layer.content, pollMatch = 500, menus = true })
+        o:bind(HOSTED, { specificity = O.layer.content, pollMatch = 500 })
       end,
     })
 
@@ -748,7 +690,7 @@ return {
       kkHeader = false,
       offset = standaloneOffset,
       attach = function(o)
-        o:attach(KONTAKT_STANDALONE, { slot = STANDALONE_SLOT, specificity = O.layer.content, pollMatch = 500, menus = true })
+        o:bind(STANDALONE, { specificity = O.layer.content, pollMatch = 500 })
       end,
     })
 

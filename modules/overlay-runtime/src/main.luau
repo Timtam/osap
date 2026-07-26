@@ -173,10 +173,16 @@ function Overlay:addHotspotButton(opts)
   -- Kontrol's menu) that live in the host frame, not the nested plugin's content.
   -- `fromRight` anchors `at`'s x to the control's RIGHT edge (see hotspotPoint) —
   -- for UI that is laid out from the right, so it stays put as the plugin is resized.
+  -- `points` (instead of `at`) clicks a SEQUENCE, with `settle` ms between each — for UI
+  -- where reaching a control means getting there first: switch to its tab, then its
+  -- sub-tab, then click it. Making that one control keeps every action self-contained, so
+  -- the user never has to navigate a tab structure they cannot see.
   return add(self, {
     kind = "hotspot",
     label = opts.label,
     at = opts.at,
+    points = opts.points,
+    settle = opts.settle,
     hotkey = opts.hotkey,
     rawOrigin = opts.rawOrigin,
     fromRight = opts.fromRight,
@@ -655,7 +661,36 @@ function Overlay:activate(index)
   local c = self.controls[i]
   if not c then return end
   if not isVisible(self, c) then return end -- a hidden control's hotkey no-ops
-  if c.kind == "hotspot" and c.at then
+  if c.kind == "hotspot" and c.points then
+    -- Acknowledge at PRESS time, like every other control. Speaking after the last click
+    -- instead would land hundreds of milliseconds late — indistinguishable from a key that
+    -- did not register — and, with interrupt, would cut off the announcement of whatever
+    -- that final click opened. The last click is the one that usually opens a dialog, so
+    -- its announcement is the one the user actually needs.
+    host.speech.output((c.label or "") .. ", activated", { interrupt = true })
+    -- Each step re-resolves the origin (an earlier click may have moved what we aim at)
+    -- and goes through the overlay's own coordinate resolution, so a frame offset,
+    -- `rawOrigin` or landmark anchoring applies exactly as for a single-point hotspot.
+    --
+    -- But a continuation runs LATER, and by then the overlay may have lost its window:
+    -- originOf answers (0, 0) with no active context, which would fire the remaining
+    -- clicks at raw screen coordinates on whatever window is now in front. So each step
+    -- re-checks that the overlay is still active on the SAME window it started on, and
+    -- abandons the sequence otherwise — a half-finished sequence is recoverable, a click
+    -- into an unknown window is not.
+    local settle = c.settle or 400
+    local pinned = self:hwnd()
+    local function step(k)
+      local p = c.points[k]
+      if not p then return end
+      if not self.active or self:hwnd() ~= pinned then return end
+      local ox, oy = originOf(self, c)
+      host.input.click(ox + p[1], oy + p[2])
+      -- No trailing delay after the last click: there is nothing left to settle for.
+      if c.points[k + 1] then host.timer.after(settle, function() step(k + 1) end) end
+    end
+    step(1)
+  elseif c.kind == "hotspot" and c.at then
     local px, py = hotspotPoint(self, c)
     if not px then return end
     host.input.click(px, py)
@@ -1033,6 +1068,113 @@ local function ensureTrigger(self, opts)
   else
     self:_join(nil, nil, nil)
   end
+end
+
+-- Memoizes `fn(origin, …) -> value` per origin window, for a property of a window that
+-- does not change while that window exists: which plugin version it is, whether it is a
+-- host container, where its content begins.
+--
+-- One rule, because the modules doing this by hand each invented their own and each got a
+-- different corner wrong: a NON-NIL result is cached, and `nil` means "could not tell
+-- yet" and is NOT cached. Identity here is resolved through UIA, which is not ready the
+-- instant a plugin window appears — pinning that first answer is how an overlay ends up
+-- permanently convinced a Kontakt 8 is a Kontakt 7. `false` is a real answer and is
+-- cached; only `nil` is transient.
+--
+-- `opts.key(origin)` extends the cache key beyond the window handle, for a property that
+-- survives a window MOVE but not a RESIZE (a host that repositions its embedded plugin).
+function O.memoByOrigin(fn, opts)
+  local cache = {}
+  local keyOf = opts and opts.key
+  return function(origin, ...)
+    if not (origin and origin.id) then return fn(origin, ...) end
+    local k = origin.id
+    if keyOf then k = tostring(k) .. "|" .. tostring(keyOf(origin)) end
+    local hit = cache[k]
+    if hit ~= nil then return hit end
+    local v = fn(origin, ...)
+    if v ~= nil then cache[k] = v end
+    return v
+  end
+end
+
+-- ── Bindings ─────────────────────────────────────────────────────────────────
+-- A BINDING is an inert value saying WHERE an overlay lives: which window or embedded
+-- control it attaches to, on which slot, at which layer. Being a value rather than a
+-- call, it can be named once and reused — `:with{…}` derives a variant without touching
+-- the original. Modules were writing a `spec()` FUNCTION for exactly this, because a
+-- caller mutated the table it returned and the next caller needed a clean copy.
+--
+-- One overlay object takes ONE binding: `_join` pins an object to a single slot, and its
+-- match poll is registered with that join. Two places to live means two overlay objects
+-- (share a build function), not two bindings.
+local Binding = {}
+Binding.__index = Binding
+
+local function binding(kind, target, opts)
+  return setmetatable({ _bind = kind, target = target, opts = opts or {} }, Binding)
+end
+
+-- A top-level window (see host.window matchers).
+function O.window(matcher, opts)
+  return binding("window", matcher, opts)
+end
+
+-- A plugin control embedded in a host window (see attachEmbedded's spec).
+function O.embedded(spec, opts)
+  return binding("embedded", spec, opts)
+end
+
+-- A copy with `over` merged into the target (control, identify, title, …); `over.opts`
+-- merges into the options (slot, specificity, pollMatch, menus).
+function Binding:with(over)
+  local target = {}
+  for k, v in pairs(self.target) do target[k] = v end
+  local opts = {}
+  for k, v in pairs(self.opts) do opts[k] = v end
+  for k, v in pairs(over or {}) do
+    if k == "opts" then
+      for ok, ov in pairs(v) do opts[ok] = ov end
+    else
+      target[k] = v
+    end
+  end
+  return binding(self._bind, target, opts)
+end
+
+-- Concatenates host lists, skipping nils — so an OPTIONAL host (a plugin that may not be
+-- installed) can be listed inline instead of appended by a loop.
+function O.hosts(...)
+  local out = {}
+  -- Counted explicitly: `ipairs` would stop at the FIRST nil, so an absent host in any
+  -- position but the last would silently swallow every host after it.
+  for i = 1, select("#", ...) do
+    local list = select(i, ...)
+    if type(list) == "table" then
+      if list.title or list.app or list.windows then
+        out[#out + 1] = list -- a single matcher, not a list of them
+      else
+        for _, h in ipairs(list) do out[#out + 1] = h end
+      end
+    end
+  end
+  return out
+end
+
+-- Attaches the overlay according to `b`, with `opts` overriding the binding's own.
+function Overlay:bind(b, opts)
+  local merged = b.opts
+  if opts then
+    merged = {}
+    for k, v in pairs(b.opts) do merged[k] = v end
+    for k, v in pairs(opts) do merged[k] = v end
+  end
+  if b._bind == "embedded" then
+    self:attachEmbedded(b.target, merged)
+  else
+    self:attach(b.target, merged)
+  end
+  return self
 end
 
 -- Context-bound (standalone): active while a window matching `matcher` is

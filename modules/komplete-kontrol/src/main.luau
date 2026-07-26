@@ -84,15 +84,15 @@ local function isKK(c)
   return host.uia.findAny(c.id, { "Komplete Kontrol" }, { U.Window, U.Pane }) ~= nil
 end
 
-local function spec()
-  return {
-    hosts = daw.all,
-    -- KK's control is the NI-versioned Qt class (e.g. "Qt671NI_6_7_1_R3QWindowIcon
-    -- {GUID}"); ".-" spans the NI_<version> segment that sits before QWindowIcon.
-    control = "Qt%d+.-QWindowIcon",
-    identify = isKK,
-  }
-end
+-- Where KK can be: embedded in a DAW, or its own application window. Values, not
+-- factory calls — nothing mutates them, so one declaration serves every attachment.
+local HOSTED = O.embedded({
+  hosts = daw.all,
+  -- KK's control is the NI-versioned Qt class (e.g. "Qt671NI_6_7_1_R3QWindowIcon
+  -- {GUID}"); ".-" spans the NI_<version> segment that sits before QWindowIcon.
+  control = "Qt%d+.-QWindowIcon",
+  identify = isKK,
+}, { slot = SLOT, menus = true })
 
 
 -- The toggle that closes KK's library browser — the previous-sibling of the browser
@@ -131,27 +131,6 @@ local function onKKActive(o)
   end
 end
 
--- Builds an onActivate that clicks a SEQUENCE of client-relative points in the active
--- window, with a settle delay between each — the way the tabbed, UIA-less Preferences
--- dialog is driven: switch to the owning tab (and sub-tab), then click the control. So
--- every action is self-contained: the user need not first navigate to the right tab.
--- The origin (dialog client, in screen coords) is read once at activation.
-local function prefsAction(label, points)
-  return function(o)
-    local ctx = o:origin()
-    local c = ctx and ctx.client
-    if not c then return end
-    for i, p in ipairs(points) do
-      local sx, sy = c.x + p[1], c.y + p[2]
-      if i == 1 then
-        host.input.click(sx, sy)
-      else
-        host.timer.after(400 * (i - 1), function() host.input.click(sx, sy) end)
-      end
-    end
-    host.speech.output(label .. ", activated", { interrupt = true })
-  end
-end
 
 return {
   -- The KK standalone window matcher, EXPORTED so a dependent (Kontakt, which optionally
@@ -201,7 +180,7 @@ return {
     -- Tab / Shift+Tab navigate the header (like the Kontakt overlay), Enter activates;
     -- Alt+M / Alt+S / Alt+L are also global. The menu-watch hands the captured nav keys
     -- to KK's own Qt menu (opened by Alt+M) while it is open.
-    ov:attachEmbedded(spec(), { slot = SLOT, specificity = O.layer.chrome, menus = true })
+    ov:bind(HOSTED, { specificity = O.layer.chrome })
     host.log.info("Komplete Kontrol base overlay ready.")
 
     -- STANDALONE overlay: Komplete Kontrol running as its OWN application (not embedded
@@ -228,7 +207,7 @@ return {
     -- STANDALONE Preferences dialog overlay (#32770 "Preferences"). Robust core: switch
     -- the five tabs, close, and the actionable items ReaHotkey exposes (library / plug-in
     -- rescans, add user directory). The tabs' content is not UIA-readable, so each action
-    -- auto-navigates to its own tab/sub-tab first (prefsAction). The Plug-ins/Library
+    -- auto-navigates to its own tab/sub-tab first (a `points` click sequence). The Plug-ins/Library
     -- checkboxes (pixel-state) are a follow-up. Coordinates are client-relative to the
     -- ~600x496 dialog (measured on the current KK version — re-calibrate after updates).
     local prefs = O.new("Komplete Kontrol Preferences")
@@ -247,25 +226,13 @@ return {
     -- (the tab control clicked it), so each action only needs its Factory/User sub-tab
     -- (163,74 / 240,74 — not UIA-readable) then the control.
     prefs:group(tc:onTab(4), function(prefs)
-      prefs:addCustomButton({
-        label = "Rescan factory library",
-        onActivate = prefsAction("Rescan factory library", { { 163, 74 }, { 548, 420 } }),
-      })
-      prefs:addCustomButton({
-        label = "Rescan user library",
-        onActivate = prefsAction("Rescan user library", { { 240, 74 }, { 548, 420 } }),
-      })
-      prefs:addCustomButton({
-        label = "Add user library directory",
-        onActivate = prefsAction("Add user library directory", { { 240, 74 }, { 163, 420 } }),
-      })
+      prefs:addHotspotButton({ label = "Rescan factory library", points = { { 163, 74 }, { 548, 420 } } })
+      prefs:addHotspotButton({ label = "Rescan user library", points = { { 240, 74 }, { 548, 420 } } })
+      prefs:addHotspotButton({ label = "Add user library directory", points = { { 240, 74 }, { 163, 420 } } })
     end)
     -- Plug-ins tab (5): rescan (on its Manager sub-tab, 163,74).
     prefs:group(tc:onTab(5), function(prefs)
-      prefs:addCustomButton({
-        label = "Rescan plug-ins",
-        onActivate = prefsAction("Rescan plug-ins", { { 163, 74 }, { 548, 398 } }),
-      })
+      prefs:addHotspotButton({ label = "Rescan plug-ins", points = { { 163, 74 }, { 548, 398 } } })
     end)
     -- Close is available on every tab.
     prefs:addHotspotButton({ label = "Close", at = { 548, 473 } })
