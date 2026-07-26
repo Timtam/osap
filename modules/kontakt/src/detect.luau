@@ -1,8 +1,11 @@
 -- Kontakt DETECTION: which window is a Kontakt, which version, whether a Komplete
 -- Kontrol is wrapping it, and where its content begins. No overlays and no controls
 -- here — just the questions every Kontakt overlay has to ask about a window.
+--
+-- Note what is NOT here any more: a "which version am I on?" lookup. Each overlay is
+-- declared for ONE cell of the matrix (version × where it runs), so it knows its version
+-- at declaration time and never asks at runtime. See cells.luau.
 
-local O = host.require("com.platform.overlay")
 local U = host.uia.type
 
 -- A plugin identifies itself through a UIA element named after it, which NI exposes as a
@@ -12,12 +15,12 @@ local IDENTITY_TYPES = { U.Window, U.Pane }
 -- NI Qt plugin control class — plain ("Qt652QWindowIcon{GUID}1", e.g. Kontakt) OR
 -- NI-versioned ("Qt671NI_6_7_1_R3QWindowIcon{GUID}", e.g. Komplete Kontrol); the ".-"
 -- spans the optional NI_<version> segment. A loose match: the UIA NAME is what tells
--- these plugins apart (see identifyHost).
+-- these plugins apart.
 local QT_PLUGIN = "Qt%d+.-QWindowIcon"
 
--- (The KK library-browser auto-close + its opt-out setting now live in the Komplete
--- Kontrol module: an open browser hides the nested Kontakt, so the KK overlay — not
--- this one — is the overlay active then, and is where the close belongs.)
+-- (The KK library-browser auto-close + its opt-out setting live in the Komplete Kontrol
+-- module: an open browser hides the nested Kontakt, so the KK overlay — not this one — is
+-- the overlay active then, and is where the close belongs.)
 
 -- The Kontakt versions, in the order host.uia.findAny reports them. `offset` is the
 -- content shift a library needs: libraries are authored in the Kontakt 7 frame and
@@ -40,11 +43,6 @@ end
 local function anyKontakt(c)
   return variantIndex(c) ~= nil
 end
-local function versionOffsetOf(c)
-  local i = variantIndex(c)
-  if i then return VARIANTS[i].offset[1], VARIANTS[i].offset[2] end
-  return 0, 0
-end
 
 -- ── Komplete Kontrol nesting ──────────────────────────────────────────────────
 -- KK can itself host a Kontakt instance (DAW → KK → Kontakt → library). KK and
@@ -58,11 +56,11 @@ local function isKK(c)
   return c ~= nil and c.id ~= nil and host.uia.findAny(c.id, KK_NAME, IDENTITY_TYPES) ~= nil
 end
 -- KK chrome offset, from KK's control top-left to where Kontakt's content begins.
--- This is computed DYNAMICALLY at runtime (= nested Kontakt.client − KK.client, the
--- exact inner content origin) by resolveOffset; the constant is only a transient
--- fallback for the brief window before the nested Kontakt control is enumerable
--- (e.g. while KK's library browser is still open and hides it). Live value ≈ 198,222
--- (KK 6.7.1 + Kontakt 8.11); the old hardcoded 190,111 landed ~111 px too high.
+-- Computed DYNAMICALLY at runtime (= nested Kontakt.client − KK.client, the exact inner
+-- content origin) by kkContentFrame; this constant is only a transient fallback for the
+-- brief window before the nested Kontakt control is enumerable (e.g. while KK's library
+-- browser is still open and hides it). Live value ≈ 198,222 (KK 6.7.1 + Kontakt 8.11);
+-- the old hardcoded 190,111 landed ~111 px too high.
 local KK_OFFSET = { 198, 222 }
 -- Does the active host window contain a control passing `test` (a KK or a Kontakt
 -- container)? The two compete: a bare Kontakt defers to a wrapping KK, and a KK
@@ -110,30 +108,46 @@ local function findNestedKontakt(container)
   return nil -- ambiguous: don't guess (caller falls back, uncached)
 end
 
--- Resolve a control's content offset: when anchored on a KK container, the KK→content
--- offset = the nested Kontakt control's client − KK's client, computed LIVE (the old
--- hardcoded constant was wrong and unstable); otherwise the bare Kontakt version
--- offset (K7 = 0, K8 = +29). Both branches cache only once the offset is positively
--- resolved, so a transient miss (KK browser still hiding Kontakt; UIA not ready right
--- after activation) returns a fallback WITHOUT pinning it. The KK cache key includes
--- the container's size: the offset is invariant under window MOVES (both client
--- origins shift together, so it stays valid and cached) but KK can reposition the
--- embedded plugin on a RESIZE/reflow, which changes the size and so re-derives.
-local offsetCache = {}
-local function resolveOffset(c)
-  if isKK(c) then
+-- Is this control the container a HOST puts the plugin in, rather than something in its
+-- own right? Komplete Kontrol hosts its plugin inside an `NIChildWindow` — the same window
+-- class Kontakt's "Content Missing" dialog uses — so that class alone cannot tell the
+-- dialog from an ordinary KK session. Observed live: KK's plugin container and the nested
+-- Kontakt control have IDENTICAL bounds (both (448,350) 633×418), because one is simply
+-- the frame around the other. A real dialog is a separate window and does not coincide
+-- with the plugin like that. (A DAW does not hit this at all: REAPER's container is a
+-- `reaperPluginHostWrapProc`, so no NIChildWindow exists there in normal use.)
+local function isPluginHostContainer(c)
+  local kc = findNestedKontakt()
+  local a, b = c and c.bounds, kc and kc.bounds
+  return a ~= nil
+    and b ~= nil
+    and a.x == b.x
+    and a.y == b.y
+    and a.w == b.w
+    and a.h == b.h
+end
+
+-- The coordinate frame for a library nested in Komplete Kontrol: KK's control top-left to
+-- where Kontakt's content begins = the nested Kontakt control's client − KK's client,
+-- computed LIVE (the old hardcoded constant was wrong and unstable), PLUS the version's
+-- own content shift, which the CELL supplies — libraries are authored in the K7 frame, so
+-- K8 needs +29 here exactly as in the bare and standalone paths.
+--
+-- Cached only once positively resolved, so a transient miss (KK browser still hiding
+-- Kontakt; UIA not ready right after activation) returns the fallback WITHOUT pinning it.
+-- The key includes the container's SIZE: the offset is invariant under window moves (both
+-- client origins shift together, so it stays valid and cached) but KK can reposition the
+-- embedded plugin on a resize/reflow, which changes the size and so re-derives.
+local function kkContentFrame(vx, vy)
+  local cache = {}
+  return function(c)
     local key = c.id .. "|" .. (c.bounds and (c.bounds.w .. "x" .. c.bounds.h) or "?")
-    local cached = offsetCache[key]
+    local cached = cache[key]
     if cached then return cached[1], cached[2] end
     local kc = findNestedKontakt(c)
     if kc and kc.client and c.client then
-      -- KK chrome offset (nested Kontakt.client − KK.client) PLUS the nested Kontakt's
-      -- version offset — libraries are authored in the K7 frame, so K8 needs +29 here
-      -- exactly as in the bare/standalone paths (this branch used to omit it, so a
-      -- KK-nested library sat 29 px too high on Kontakt 8).
-      local vx, vy = versionOffsetOf(kc)
       local off = { kc.client.x - c.client.x + vx, kc.client.y - c.client.y + vy }
-      offsetCache[key] = off
+      cache[key] = off
       host.log.info(string.format(
         "Kontakt nested in Komplete Kontrol — dynamic content offset (%d, %d) "
           .. "[Kontakt.client (%d,%d) − KK.client (%d,%d) + version (%d,%d)]",
@@ -143,62 +157,21 @@ local function resolveOffset(c)
     end
     return KK_OFFSET[1], KK_OFFSET[2] -- not resolvable yet: transient, NOT cached
   end
-  local cached = offsetCache[c.id]
-  if cached then return cached[1], cached[2] end
-  local i = variantIndex(c)
-  if i then
-    offsetCache[c.id] = VARIANTS[i].offset
-    return VARIANTS[i].offset[1], VARIANTS[i].offset[2]
-  end
-  return 0, 0 -- version not yet identified (UIA not ready): transient, NOT cached
 end
 
--- Content offset for a STANDALONE Kontakt window (Kontakt N.exe on its own). Measured
--- live: the Kontakt content Qt control's client coincides with the window client (no NI
--- menu-bar chrome offset), so the only shift a library authored in the Kontakt 7 frame
--- needs is the bare version offset (K7 = 0, K8 = +29) — the same as resolveOffset's bare
--- branch. The version is read from the "^Kontakt N" title (which the standalone matcher
--- guarantees).
-local function standaloneOffset(o)
-  local name = string.match((o and o.title) or "", "^(Kontakt %d)")
-  for _, v in ipairs(VARIANTS) do
-    if v.name == name then return v.offset[1], v.offset[2] end
-  end
-  return 0, 0
-end
-
--- The plugin control to anchor on: prefer a KK container that is hosting Kontakt
--- (so the KK offset places the library), else a bare Kontakt with no KK wrapping it.
-local function identifyHost(c)
-  if isKK(c) then return kontaktPresent() end
-  if anyKontakt(c) then return not kkPresent() end
-  return false
+-- A constant frame — the version's own content shift, which is the whole story for a bare
+-- Kontakt in a DAW and for a standalone one (measured live: the standalone window's client
+-- coincides with the Kontakt content control's, with no NI menu-bar chrome offset).
+local function constantFrame(vx, vy)
+  return function() return vx, vy end
 end
 
 -- The "Kontakt N" identity element's name under `hwnd`, or nil. Used to scope a
--- two-level UIA search into the plugin's real UI (see pluginLocate).
+-- two-level UIA search into the plugin's real UI (see actions.luau's pluginLocate).
 local function kontaktPaneName(hwnd)
   local i = hwnd and host.uia.findAny(hwnd, VARIANT_NAMES, IDENTITY_TYPES)
   return i and VARIANTS[i].name or nil
 end
-
--- Which Kontakt the overlay is currently on, by name, or nil. Memoized per window, and
--- nil (UIA not ready yet) is deliberately NOT cached — pinning that would leave the
--- overlay permanently wrong about which Kontakt it is driving.
-local variantOfOrigin = O.memoByOrigin(function(ctrl)
-  -- Standalone: the window title carries the version. Embedded: identify by UIA, on the
-  -- Kontakt itself — or, when anchored on a KK container, on the Kontakt nested in it.
-  local name = string.match(tostring(ctrl.title or ""), "^(Kontakt %d)")
-  if name then return name end
-  local kc = ctrl
-  if isKK(ctrl) then kc = findNestedKontakt(ctrl) or ctrl end
-  local i = variantIndex(kc)
-  return i and VARIANTS[i].name or nil
-end)
-
--- Is the overlay anchored on a KK container rather than a bare Kontakt? Also memoized:
--- it is asked on every `when` evaluation, i.e. on every focus move.
-local isNested = O.memoByOrigin(isKK)
 
 return {
   VARIANTS = VARIANTS,
@@ -211,10 +184,8 @@ return {
   kkPresent = kkPresent,
   kontaktPresent = kontaktPresent,
   findNestedKontakt = findNestedKontakt,
-  identifyHost = identifyHost,
-  resolveOffset = resolveOffset,
-  standaloneOffset = standaloneOffset,
+  isPluginHostContainer = isPluginHostContainer,
+  kkContentFrame = kkContentFrame,
+  constantFrame = constantFrame,
   kontaktPaneName = kontaktPaneName,
-  variantOfOrigin = variantOfOrigin,
-  isNested = isNested,
 }

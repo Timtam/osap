@@ -1,8 +1,10 @@
 -- What a Kontakt HEADER CONTROL actually does: reach into the plugin by UIA where that
--- works, fall back to the coordinate ReaHotkey uses for that version, drive the file menu,
--- and dismiss the one-time update dialog. Takes the version of the focused Kontakt as an
--- argument wherever the answer differs, so nothing here has to know how versions are
--- resolved.
+-- works, fall back to the coordinate ReaHotkey uses, drive the file menu, and dismiss the
+-- one-time update dialog.
+--
+-- Everything version-dependent arrives as a CELL — the overlay's own declaration, which
+-- already knows its version and carries that version's geometry (see cells.luau). Nothing
+-- here resolves a version at runtime.
 
 local U = host.uia.type
 local BUTTON, MENUITEM = U.Button, U.MenuItem
@@ -123,9 +125,61 @@ local function onPluginActive(o)
   closeWhatsNew(o)
 end
 
+-- Opens the file menu: the UIA file-menu button when it is reachable (a standalone /
+-- full-UIA Kontakt), else a coordinate click on the header. Returns the origin control
+-- plus whether UIA was used, so a follow-up item click picks the same method.
+local function openFileMenu(cell, o)
+  local ctrl = o:origin()
+  if uiaClick(nil, cell.uiaFileMenu, BUTTON) then
+    host.keys.menuOpen(true)
+    return ctrl, true
+  end
+  local at = cell.geometry.fileMenu
+  if ctrl and ctrl.client and at then
+    host.input.click(ctrl.client.x + at[1], ctrl.client.y + at[2])
+    return ctrl, false
+  end
+  return nil
+end
+
+-- Opens the file menu and selects `item` once it appears — by UIA (standalone) or by a
+-- coordinate click on the item's fixed position within the opened menu (DAW-embedded).
+-- The item's action opens Kontakt's own native, ACCESSIBLE dialog, so the user never has
+-- to read the Qt menu, which carries no accessibility information at all.
+local function invokeMenuItem(cell, o, item)
+  local ctrl, uia = openFileMenu(cell, o)
+  if not ctrl then return end
+  host.timer.after(250, function()
+    if uia then
+      uiaClick(nil, item, MENUITEM)
+      return
+    end
+    local base, at = cell.geometry.fileMenu, geo.MENU_ITEM[item]
+    if ctrl.client and base and at then
+      host.input.click(ctrl.client.x + base[1] + at[1], ctrl.client.y + base[2] + at[2])
+    end
+  end)
+end
+
+-- A header control that acts through UIA where that works (a standalone Kontakt is fully
+-- accessible) and falls back to this cell's coordinate for that control.
+local function headerAction(cell, uiaName, key)
+  return function(o)
+    local ctrl = o:origin()
+    if uiaClick(nil, uiaName, BUTTON) then return end
+    local at = cell.geometry[key]
+    if ctrl and ctrl.client and at then
+      host.input.click(ctrl.client.x + at[1], ctrl.client.y + at[2])
+    end
+  end
+end
+
 return {
   pluginLocate = pluginLocate,
   uiaClick = uiaClick,
   closeWhatsNew = closeWhatsNew,
   onPluginActive = onPluginActive,
+  openFileMenu = openFileMenu,
+  invokeMenuItem = invokeMenuItem,
+  headerAction = headerAction,
 }

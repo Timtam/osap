@@ -180,6 +180,7 @@ function Overlay:addHotspotButton(opts)
   return add(self, {
     kind = "hotspot",
     label = opts.label,
+    ocrLabel = opts.ocrLabel,
     at = opts.at,
     points = opts.points,
     settle = opts.settle,
@@ -245,6 +246,7 @@ function Overlay:addHotspotToggle(opts)
   return add(self, {
     kind = "hotspottoggle",
     label = opts.label,
+    ocrLabel = opts.ocrLabel,
     at = opts.at,
     onColor = opts.onColor,
     offColor = opts.offColor,
@@ -310,7 +312,19 @@ function Overlay:landmark(image, opts)
         -- version independent — the wordmark and the controls move together). See originOf.
         self._landmarkHit = hit or nil
         matched = hit ~= nil
-        if matched ~= was then self:_recheck() end
+        if matched ~= was then
+          -- Logged on the TRANSITION only, never per poll. "My library overlay does not
+          -- appear" is the failure a module author hits first, and the landmark search is
+          -- the step that decides it — but it runs asynchronously on a worker, so nothing
+          -- about it is otherwise observable. Quiet in the steady state, and it records
+          -- both the region searched and the hit that anchors every coordinate.
+          host.log.info(("[landmark] %s: %s  (region %d,%d–%d,%d)"):format(
+            tostring(self.label),
+            hit and ("found at " .. hit.x .. "," .. hit.y .. " " .. hit.w .. "x" .. hit.h) or "lost",
+            region[1], region[2], region[3], region[4]
+          ))
+          self:_recheck()
+        end
       end)
     end
     return matched
@@ -554,7 +568,25 @@ local function speakControl(self, index, moveMouse)
     host.speech.output(tabMessage(c.tabs[c._current], "tab control"), { interrupt = true })
     return
   end
-  local parts = { c.label or "" }
+  -- `ocrLabel`: read the control's NAME off the screen instead of announcing a fixed one,
+  -- for a control whose meaning the plugin itself changes. A sample library can put a mixer
+  -- strip in one place whose five channels are mic positions for one patch and orchestral
+  -- sections for another — same buttons, same pixels, different names. A fixed label is
+  -- then confidently wrong, which is worse than slow: it tells a user who cannot see the
+  -- screen that they toggled something they did not. Falls back to the static label when
+  -- OCR reads nothing, so a failed read never leaves a control nameless.
+  local label = c.label or ""
+  if c.ocrLabel then
+    local ox, oy = originOf(self, c)
+    local r = host.ocr.recognize({
+      region = {
+        ox + c.ocrLabel[1], oy + c.ocrLabel[2],
+        ox + c.ocrLabel[3], oy + c.ocrLabel[4],
+      },
+    })
+    if r and r.text and r.text ~= "" then label = r.text end
+  end
+  local parts = { label }
   local tl = TYPE_LABEL[c.kind]
   if tl ~= "" then parts[#parts + 1] = tl end
   if (c.kind == "ocr" or c.kind == "ocredit") and c.region then

@@ -136,6 +136,24 @@ Shifts the overlay's whole coordinate frame: `fn` returns `dx, dy`, resolved per
 
 A free-form table on every overlay for the owning module's own state, so it does not have to squat in the runtime's reserved `_`-prefixed fields.
 
+## ocrLabel — reading a control's name off the screen
+
+Any hotspot or hotspot-toggle may carry `ocrLabel = {x1, y1, x2, y2}` (origin-relative): the control's spoken **name** is then read by OCR from that region instead of announced from the static `label`, which becomes the fallback for when OCR reads nothing.
+
+Use it where the plugin itself changes what a control means. A sample library can put one mixer strip in a fixed place whose five channels are microphone positions for one patch and orchestral sections for another — same buttons, same pixels, different names. A fixed label is then confidently wrong, which is worse than being slow: it tells a user who cannot see the screen that they toggled something they did not.
+
+Costs one OCR read per focus, so put it on controls whose name genuinely varies, not on every control.
+
+```luau
+ov:addHotspotToggle({
+    label = "Spot 1 Mic",              -- fallback if OCR reads nothing
+    at = { -130, 350 },                -- the power icon
+    ocrLabel = { -154, 358, -106, 376 }, -- the caption printed under it
+    onColor = { 180, 165, 230 },
+    offColor = { 77, 79, 85 },
+})
+```
+
 ## O:addCustomButton(opts)
 
 Appends a button that runs a Luau callback on activation. `opts: { label: string, onActivate: (overlay) -> (), hotkey: string? }` — `onActivate` receives the overlay itself (so a header control can reach the active context).
