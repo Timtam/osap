@@ -30,7 +30,10 @@ local daw = host.require("com.platform.daw-hosts")
 -- Activate while the sforzando window is focused (standalone) or while it is
 -- embedded in a DAW host window; deactivate on leaving. Navigation is Tab /
 -- Shift+Tab / Enter (and Space) captured + suppressed, so it feels like ReaHotkey.
-ov:attach(sforzando)
+-- `menus = true`: while the plugin has a menu open, hand the captured navigation keys to
+-- it instead of steering the overlay. Any overlay over a plugin that can open a menu needs
+-- this; without it Tab and Enter are swallowed and the menu cannot be used at all.
+ov:attach(sforzando, { menus = true })
 ov:attachEmbedded({
   hosts = daw.all,
   control = "^Plugin%x+$",
@@ -49,4 +52,4 @@ ov:attachEmbedded({
     local r = host.ocr.recognize({ region = { ox + 605, oy + 33, ox + 762, oy + 70 } })
     return string.find(string.lower(r.text or ""), "sforzando", 1, true) ~= nil
   end,
-})
+}, { menus = true })

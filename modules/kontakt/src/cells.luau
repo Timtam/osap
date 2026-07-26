@@ -95,17 +95,22 @@ for vIdx, v in ipairs(D.VARIANTS) do
     frame = D.constantFrame(ox, oy),
   }, { __index = common })
 
-  CELLS[#CELLS + 1] = setmetatable({
-    key = v.name .. " in Komplete Kontrol",
-    where = "in-kk",
-    binding = O.embedded({
-      hosts = HOSTS,
-      control = D.QT_PLUGIN,
-      identify = kkHostingVersion(vIdx),
-      cacheIdentity = false,
-    }, { slot = SLOT, menus = true }),
-    frame = D.kkContentFrame(ox, oy),
-  }, { __index = common })
+  -- Only when Komplete Kontrol is actually loaded: without it a Kontakt cannot BE inside
+  -- one, and the cell would be a claim that can never match — plus its controls are KK's
+  -- own exported part, which does not exist then.
+  if kk then
+    CELLS[#CELLS + 1] = setmetatable({
+      key = v.name .. " in Komplete Kontrol",
+      where = "in-kk",
+      binding = O.embedded({
+        hosts = HOSTS,
+        control = D.QT_PLUGIN,
+        identify = kkHostingVersion(vIdx),
+        cacheIdentity = false,
+      }, { slot = SLOT, menus = true }),
+      frame = D.kkContentFrame(ox, oy),
+    }, { __index = common })
+  end
 
   CELLS[#CELLS + 1] = setmetatable({
     key = v.name .. " standalone",

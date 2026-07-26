@@ -23,15 +23,19 @@ local O = {}
 local MATCH_TOLERANCE = 20
 local MATCH_SCALES = { 1.0, 0.9, 1.1, 0.8, 1.2, 1.25, 0.75, 1.5, 0.67, 2.0 }
 
--- The specificity ladder overlays compete on within a slot, named. The numbers are the
--- ones already in use, so a migrated overlay and an unmigrated one still rank correctly
--- against each other; renaming is safe today, renumbering is not.
+-- The specificity ladder overlays compete on within a slot, named:
 --
 --   chrome  — a host's own frame (Komplete Kontrol's menu bar around a nested plugin)
 --   base    — the plugin's generic header, when nothing more specific applies
 --   content — what is loaded INSIDE the plugin right now (a sample library)
 --   dialog  — a modal that must own the keyboard while it is up
-O.layer = { chrome = 0, base = 1, content = 2, dialog = 3 }
+--
+-- Spaced by ten so a case nobody has met yet can slot BETWEEN two of these without
+-- renumbering the ladder — which would be a silent break: an overlay on a new number
+-- competing against one that still passes an old literal simply loses, with no error.
+-- That is also why every module had to be on O.layer before this spacing could be
+-- introduced (verified: no bare specificity numbers remain outside the runtime).
+O.layer = { chrome = 10, base = 20, content = 30, dialog = 40 }
 
 local Overlay = {}
 Overlay.__index = Overlay

@@ -132,11 +132,60 @@ local function onKKActive(o)
 end
 
 
+-- KK's chrome controls, as a reusable PART. Exported (this is a code module, so its
+-- functions cross into a dependent's VM) because the Kontakt module needs exactly these
+-- on the overlay it declares for "a Kontakt nested inside a Komplete Kontrol": there you
+-- still want KK's menu and its browser, to load a different instrument. It used to define
+-- its own copy of them — semantically the same controls, separately maintained.
+--
+-- `rawOrigin` on the menu hotspot matters for that reuse: in KK's own overlay there is no
+-- frame offset so it changes nothing, but the Kontakt-in-KK overlay shifts its frame to
+-- the nested plugin's content, and this control lives in KK's chrome, outside it. One
+-- definition, correct in both.
+local function addChrome(ov)
+  ov:addStaticText("Komplete Kontrol")
+  -- KK's hamburger menu — a fixed hotspot in KK's chrome (ReaHotkey: 297,17),
+  -- origin-relative to the KK control.
+  ov:addHotspotButton({
+    label = "Komplete Kontrol menu",
+    at = { 297, 17 },
+    rawOrigin = true,
+    hotkey = "Alt+M",
+  })
+  -- Focus KK's library-browser search field (the first UIA Edit) so you can type an
+  -- instrument/library name; KK filters and you pick it with KK's own keys.
+  ov:addCustomButton({
+    label = "Search library browser",
+    hotkey = "Alt+S",
+    onActivate = function(o)
+      local hwnd = o:hwnd()
+      if not hwnd then return end
+      local p = host.uia.locate(hwnd, "", EDIT)
+      if p then host.input.click(p.x, p.y) end
+    end,
+  })
+  -- Manual close, shown ONLY while a browser is actually open (no point offering it
+  -- otherwise). The auto-close covers most cases; this is the fallback when the setting is
+  -- off, or to close a browser you opened yourself.
+  ov:addCustomButton({
+    label = "Close library browser",
+    hotkey = "Alt+L",
+    when = browserOpen,
+    onActivate = function(o)
+      local p = browserToggle(o:hwnd())
+      if p then host.input.click(p.x, p.y) end
+    end,
+  })
+end
+
 return {
   -- The KK standalone window matcher, EXPORTED so a dependent (Kontakt, which optionally
   -- requires this module) can reuse it as a host — recognising a Kontakt nested inside a
   -- standalone KK — without duplicating KK's window identity or depending on daw-hosts.
   standaloneWindow = STANDALONE,
+
+  -- KK's chrome controls as a part, for the overlay that covers a plugin nested inside KK.
+  chrome = addChrome,
 
   -- Standalone side effect (this module's own VM only — activate never runs when this
   -- module is imported as a code dependency into another VM): the KK base overlay + the
@@ -147,34 +196,7 @@ return {
       label = "Automatically close Komplete Kontrol's library browser",
     })
     local ov = O.new("Komplete Kontrol")
-    ov:addStaticText("Komplete Kontrol")
-    -- KK's hamburger menu — a fixed hotspot in KK's chrome (ReaHotkey: 297,17),
-    -- origin-relative to the KK control.
-    ov:addHotspotButton({ label = "Komplete Kontrol menu", at = { 297, 17 }, hotkey = "Alt+M" })
-    -- Focus KK's library-browser search field (the first UIA Edit) so you can type an
-    -- instrument/library name; KK filters and you pick it with KK's own keys.
-    ov:addCustomButton({
-      label = "Search library browser",
-      hotkey = "Alt+S",
-      onActivate = function(o)
-        local hwnd = o:hwnd()
-        if not hwnd then return end
-        local p = host.uia.locate(hwnd, "", EDIT)
-        if p then host.input.click(p.x, p.y) end
-      end,
-    })
-    -- Manual close, shown ONLY while a browser is actually open (no point offering it
-    -- otherwise). The auto-close above covers most cases; this is the fallback when the
-    -- setting is off, or to close a browser you opened yourself.
-    ov:addCustomButton({
-      label = "Close library browser",
-      hotkey = "Alt+L",
-      when = browserOpen,
-      onActivate = function(o)
-        local p = browserToggle(o:hwnd())
-        if p then host.input.click(p.x, p.y) end
-      end,
-    })
+    addChrome(ov)
     -- Auto-close on activate (opt-out): reveals an instrument the browser is hiding.
     ov:onActivate(onKKActive)
     -- Tab / Shift+Tab navigate the header (like the Kontakt overlay), Enter activates;

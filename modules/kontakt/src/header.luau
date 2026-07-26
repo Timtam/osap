@@ -9,32 +9,11 @@ local A = host.include("src/actions.luau")
 local geo = host.include("src/geometry.luau")
 local U = host.uia.type
 
--- Komplete Kontrol's chrome, for the cell where a Kontakt runs INSIDE a KK. It stays
--- reachable while a library is loaded, so you can still open KK's menu and its browser to
--- load a DIFFERENT (including non-Kontakt) instrument. ReaHotkey's "KK header on top of
--- the plugin overlay", here as the control set of the in-kk cell.
-local function addKKChrome(ov)
-  ov:addStaticText("Komplete Kontrol")
-  -- KK's menu is a fixed hotspot in KK's chrome at (297,17) relative to KK's RAW client.
-  -- It lives in KK's frame, NOT Kontakt's content frame, so `rawOrigin` makes the overlay
-  -- skip the content offset for it — the two-frame case: content controls get the
-  -- KK→content offset, this chrome control stays in KK's raw client.
-  ov:addHotspotButton({
-    label = "Komplete Kontrol menu",
-    at = { 297, 17 },
-    rawOrigin = true,
-    hotkey = "Alt+M",
-  })
-  ov:addCustomButton({
-    label = "Search library browser",
-    hotkey = "Alt+S",
-    onActivate = function(o)
-      local h = o:hwnd()
-      local p = h and host.uia.locate(h, "", U.Edit)
-      if p then host.input.click(p.x, p.y) end
-    end,
-  })
-end
+-- Komplete Kontrol's chrome comes from the Komplete Kontrol MODULE, not from a copy here:
+-- it owns those controls, and it is a code module, so its exported part crosses into this
+-- VM. The in-kk cell is only declared when KK is loaded (see cells.luau), so `kk.chrome`
+-- is always there when this runs.
+local kk = host.tryRequire("com.platform.komplete-kontrol")
 
 -- The Kontakt header for a bare plugin in a DAW. ReaHotkey's set: the file-menu actions,
 -- the instrument / multi / snapshot arrows, and — on Kontakt 7 — the single-click chrome
@@ -122,7 +101,7 @@ end
 -- `isLibrary` marks the overlay as one a sample library is building on top of.
 local function add(ov, cell, isLibrary)
   if cell.where == "in-kk" then
-    addKKChrome(ov)
+    kk.chrome(ov)
   elseif cell.where == "standalone" then
     addStandaloneHeader(ov, cell, isLibrary)
   else
@@ -130,4 +109,4 @@ local function add(ov, cell, isLibrary)
   end
 end
 
-return { add = add, addKKChrome = addKKChrome }
+return { add = add }
