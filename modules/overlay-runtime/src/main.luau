@@ -361,6 +361,7 @@ function Overlay:landmark(image, opts)
     end
     if not pending then
       pending = true
+      local sticky = lastHit ~= nil
       local region
       if lastHit then
         region = { lastHit.x - 6, lastHit.y - 6, lastHit.x + lastHit.w + 6, lastHit.y + lastHit.h + 6 }
@@ -374,6 +375,21 @@ function Overlay:landmark(image, opts)
       -- small regions (gtoggle); the wordmark is captured at this setup, so 1.0 fits.
       host.screen.imageSearchAsync(image, { region = region, tolerance = MATCH_TOLERANCE }, function(hit)
         pending = false
+        -- A miss in the STICKY box is not the same as "gone". The box is the last hit ±6 px,
+        -- so anything that repaints the landmark — a hover highlight, a value redraw, the
+        -- panel scrolling a pixel — misses there while the library is plainly still loaded.
+        -- Treating that as lost tore the overlay down and rebuilt it on the next pass, which
+        -- is what "sometimes there is no overlay, sometimes there is" turned out to be:
+        -- Cerberus flapping found → lost → found. So a sticky miss only DROPS THE ANCHOR and
+        -- lets the next pass search the whole plugin; only a full-region miss means lost.
+        -- Costs one extra poll before a genuinely closed library deactivates.
+        if hit == nil and sticky then
+          lastHit = nil
+          host.log.info(("[landmark] %s: not where it was, widening the search"):format(
+            tostring(self.label)
+          ))
+          return
+        end
         local was = matched
         lastHit = hit or nil
         -- Expose the hit's screen rect so a landmark-anchored overlay can resolve its
