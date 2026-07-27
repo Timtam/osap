@@ -846,7 +846,7 @@ end
 -- SCAN is the `when` predicates over every control (a screen pixel or a UIA search, per
 -- control, per step), ANNOUNCE is reading the focused control's state (an image search for
 -- a graphic toggle, OCR for an `ocrLabel`, a pixel for a hotspot toggle).
-local function focusStep(self, advance)
+local function focusStep(self, advance, dir)
   local n = #self.controls
   if n == 0 then return end
   local t0 = host.now and host.now() or 0
@@ -868,21 +868,27 @@ local function focusStep(self, advance)
   local t1 = host.now and host.now() or 0
   if t1 - t0 >= 20 then
     local c = self.controls[self.focus]
+    -- Direction and the input-epoch are in the line because both are hypotheses somebody
+    -- has already voiced and neither can be checked without them: whether Shift+Tab is
+    -- genuinely slower than Tab (it walks the same ring the other way, but the controls it
+    -- has to SKIP differ), and what keeps invalidating the cached view probe when nothing
+    -- has been clicked. A guess about either is cheap to state and expensive to act on.
     host.log.info(string.format(
-      "[focus] %d ms to reach '%s' (scan %d over %d control(s), announce %d)",
-      t1 - t0, tostring(c and c.label or "?"), tScan - t0, n, t1 - tScan
+      "[focus] %s %d ms to reach '%s' (scan %d over %d control(s), announce %d, gen %d)",
+      dir, t1 - t0, tostring(c and c.label or "?"), tScan - t0, n, t1 - tScan,
+      host.inputEpoch and host.inputEpoch() or -1
     ))
   end
 end
 
 function Overlay:focusNext()
   if self:_stepPassThrough(1) then return end
-  focusStep(self, function(i, n) return (i % n) + 1 end)
+  focusStep(self, function(i, n) return (i % n) + 1 end, "Tab      ")
 end
 
 function Overlay:focusPrev()
   if self:_stepPassThrough(-1) then return end
-  focusStep(self, function(i, n) return ((i - 2) % n) + 1 end)
+  focusStep(self, function(i, n) return ((i - 2) % n) + 1 end, "Shift+Tab")
 end
 
 -- ReaHotkey's AddCustomPassThrough, as what it actually is there: a CONTROL in the
