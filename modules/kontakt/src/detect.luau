@@ -221,7 +221,15 @@ local VIEW_PROBE_FROM_RIGHT, VIEW_PROBE_Y = 262, 24
 local viewKey, viewCache = nil, false
 local function isClassicView(origin)
   if not (origin and origin.client and origin.bounds) then return false end
-  local key = tostring(origin.id) .. "@" .. tostring(host.epoch and host.epoch() or 0)
+  -- Keyed on `inputEpoch`, NOT `epoch`. Which view Kontakt is in can only change when
+  -- something acts — our F10, or a click in its menu — and both go through host.input,
+  -- which turns that counter over. `epoch` also turns over on every timer tick and every
+  -- key the USER presses, and this probe gates which header controls exist, so it is
+  -- consulted on every focus move: against `epoch` that meant one fresh screen read per
+  -- Tab, measured at 21-38 ms of a ~70 ms step, to re-answer a question whose answer
+  -- pressing Tab cannot have changed.
+  local gen = host.inputEpoch and host.inputEpoch() or (host.epoch and host.epoch() or 0)
+  local key = tostring(origin.id) .. "@" .. tostring(gen)
   if viewKey == key then return viewCache end
   -- Against the CONTENT's right edge, not the window frame's: standalone, the frame is
   -- 16 px wider than the plugin, which is enough to read a neighbouring icon instead.

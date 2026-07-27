@@ -118,6 +118,8 @@ struct Shared {
     /// against it, so repeats within one dispatch are free while a genuinely new
     /// situation is always re-observed. See `host.epoch()`.
     epoch: Cell<u64>,
+    /// See bump_input_epoch: turns over only when something ACTED on the screen.
+    input_epoch: Cell<u64>,
     /// Monotonic id source for arbiter claim handles.
     next_arbiter: Cell<i64>,
     /// Monotonic id source for captured-key registration tokens.
@@ -355,6 +357,22 @@ impl Shared {
     /// Marks the world as possibly changed (see the `epoch` field).
     fn bump_epoch(&self) {
         self.epoch.set(self.epoch.get().wrapping_add(1));
+    }
+
+    /// Marks the SCREEN as possibly changed — something was driven (a click, a keystroke
+    /// we sent, a drag) or a window came forward. Distinct from `epoch`, which also turns
+    /// over on a timer tick and on the user's own keys.
+    ///
+    /// The difference is worth a counter because reading the screen costs a fixed
+    /// compositor frame, ~17-25 ms, and a lot of what gets read is a property that only
+    /// something ACTING can change. Kontakt's classic-vs-play view is the case that
+    /// prompted this: it gates which header controls exist, so it is consulted on every
+    /// focus move, and against `epoch` that meant a fresh pixel read on every Tab —
+    /// measured at 21-38 ms of the ~70 ms step. Pressing Tab cannot change which view
+    /// Kontakt is in. Sending F10 can, and that goes through host.input, which bumps this.
+    fn bump_input_epoch(&self) {
+        self.input_epoch.set(self.input_epoch.get().wrapping_add(1));
+        self.bump_epoch();
     }
 
     fn alloc_id(&self) -> i32 {
@@ -1764,6 +1782,7 @@ impl Manager {
             exports: RefCell::new(HashMap::new()),
             arbiter: RefCell::new(HashMap::new()),
             epoch: Cell::new(0),
+            input_epoch: Cell::new(0),
             next_arbiter: Cell::new(0),
             next_key_token: Cell::new(0),
             recurring: RefCell::new(Vec::new()),
@@ -2034,7 +2053,9 @@ impl HostEvents for Dispatcher<'_> {
     }
 
     fn on_window_activate(&mut self, win: WinInfo) {
-        self.shared.bump_epoch();
+        // A different window in front is a different screen — this counts as the screen
+        // having changed, not merely the world (see bump_input_epoch).
+        self.shared.bump_input_epoch();
         for (idx, m) in self.modules.iter().enumerate() {
             if !self.enabled(idx) {
                 continue;
@@ -2303,6 +2324,18 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     host.set(
         "now",
         lua.create_function(move |_, ()| Ok(started.elapsed().as_millis() as i64))?,
+    )?;
+
+    // host.inputEpoch() — a counter that turns over only when something ACTED on the
+    // screen: input we drove, or a window coming forward. host.epoch() also turns over on
+    // timer ticks and on the user's own keystrokes, which is right for "re-resolve where
+    // the plugin is" and far too eager for "what does this pixel say". A screen read costs
+    // a fixed compositor frame, so a property that only an action can change should be
+    // cached against this instead. See bump_input_epoch.
+    let sh_ie = shared.clone();
+    host.set(
+        "inputEpoch",
+        lua.create_function(move |_, ()| Ok(sh_ie.input_epoch.get() as i64))?,
     )?;
 
     // host.timer: one-shot delayed callbacks, fired from the event-loop tick.
@@ -2960,7 +2993,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     input.set(
         "move",
         lua.create_function(move |_, (x, y): (i32, i32)| {
-            sh.bump_epoch();
+            sh.bump_input_epoch();
             sh.backend.mouse_move(x, y);
             Ok(())
         })?,
@@ -2969,7 +3002,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     input.set(
         "click",
         lua.create_function(move |_, (x, y, opts): (i32, i32, Option<Table>)| {
-            sh.bump_epoch();
+            sh.bump_input_epoch();
             sh.backend.mouse_click(x, y, button_from(opts.as_ref()));
             Ok(())
         })?,
@@ -2978,7 +3011,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     input.set(
         "drag",
         lua.create_function(move |_, (x1, y1, x2, y2, opts): (i32, i32, i32, i32, Option<Table>)| {
-            sh.bump_epoch();
+            sh.bump_input_epoch();
             sh.backend.mouse_drag(x1, y1, x2, y2, button_from(opts.as_ref()));
             Ok(())
         })?,
@@ -2987,7 +3020,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     input.set(
         "scroll",
         lua.create_function(move |_, (x, y, amount): (i32, i32, i32)| {
-            sh.bump_epoch();
+            sh.bump_input_epoch();
             sh.backend.mouse_scroll(x, y, amount);
             Ok(())
         })?,
@@ -2996,7 +3029,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     input.set(
         "send",
         lua.create_function(move |_, combo: String| {
-            sh.bump_epoch();
+            sh.bump_input_epoch();
             sh.backend.key_send(&combo).map_err(mlua::Error::external)
         })?,
     )?;
@@ -3004,7 +3037,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     input.set(
         "text",
         lua.create_function(move |_, text: String| {
-            sh.bump_epoch();
+            sh.bump_input_epoch();
             sh.backend.type_text(&text);
             Ok(())
         })?,
