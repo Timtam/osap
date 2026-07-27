@@ -1647,6 +1647,11 @@ function O.hosts(...)
   return out
 end
 
+-- One resolved origin per (spec, epoch), shared by every overlay bound to that spec.
+-- See the note in attachEmbedded for why this is not per overlay. Weak keys: an entry
+-- lives exactly as long as the spec it answers for.
+local originMemo = setmetatable({}, { __mode = "k" })
+
 -- Attaches the overlay according to `b`, with `opts` overriding the binding's own.
 function Overlay:bind(b, opts)
   local merged = b.opts
@@ -1775,13 +1780,33 @@ function Overlay:attachEmbedded(spec, opts)
   -- module, a timer fires, or the module drives input — every point at which the answer
   -- could differ. Within one such pass the origin is resolved once; a new pass always
   -- re-resolves. Not a time-based cache: a stale origin means clicking the wrong place.
-  local cachedEpoch, cachedOrigin = -1, nil
+  -- Memoized per EPOCH and per SPEC — shared by every overlay bound to the same spec,
+  -- not one cache each.
+  --
+  -- Resolving an origin is the most expensive thing this runtime does: a window
+  -- enumeration plus, for a relational spec like Kontakt's, a UIA subtree search per
+  -- candidate control (measured: ~11 ms). A per-overlay cache means every overlay pays it
+  -- separately, and they all ask the IDENTICAL question — a cell's `binding` is one table
+  -- reused by that cell's base overlay and by every library overlay inheriting it, so
+  -- sixty-six overlays across eleven products were re-deriving the same six answers.
+  -- Measured: 681 ms of main thread per 500 ms poll, with the plugin merely focused. That
+  -- is over its own interval, so the loop never caught up — and speech, hotkeys and the
+  -- arbiter all queue behind it.
+  --
+  -- Keyed on the spec TABLE, so overlays that share a binding share the answer while
+  -- overlays with their own binding stay independent. Weak keys, so a spec that goes away
+  -- takes its entry with it.
   local function origin(opts)
     local e = host.epoch and host.epoch() or -1
-    if not (opts and opts.fresh) and e == cachedEpoch then return cachedOrigin end
-    cachedOrigin = pluginControl()
-    cachedEpoch = e
-    return cachedOrigin
+    local memo = originMemo[spec]
+    if not memo then
+      memo = { epoch = -1, value = nil }
+      originMemo[spec] = memo
+    end
+    if not (opts and opts.fresh) and e == memo.epoch then return memo.value end
+    memo.value = pluginControl()
+    memo.epoch = e
+    return memo.value
   end
   -- The match asks the same question ("is the plugin focused?") and so shares the memo:
   -- a recheck plus the activation and coordinate work that follows it resolve once
