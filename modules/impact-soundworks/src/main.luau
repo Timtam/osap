@@ -49,7 +49,16 @@ return {
         -- ReaHotkey's OCRButton: reads the preset name aloud on focus, and clicking it
         -- opens the preset browser. The name is the only thing in this UI that says which
         -- of the two hundred presets is loaded, and nothing else exposes it.
-        ov:addOCRButton({ label = "Preset", region = p.preset, hotkey = "Alt+P" })
+        --
+        -- NO hotkey, and that is deliberate. This control had Alt+P — invented here, since
+        -- ReaHotkey binds no key on either Juggernaut OCRButton — and Alt+P already belongs
+        -- to "Previous snapshot" on the Kontakt header this overlay INHERITS. A spec claimed
+        -- twice resolves to the first VISIBLE claimant, and the header is declared first, so
+        -- the key stepped a snapshot (changing the loaded sound) instead of reading the
+        -- preset. Whether it did that or the intended thing depended on which Kontakt view
+        -- was showing — a thing the user cannot see. Tab reaches this control, exactly as in
+        -- ReaHotkey; a shortcut here would have to be one the inherited header never claims.
+        ov:addOCRButton({ label = "Preset", region = p.preset })
       end)
     end
   end,

@@ -176,6 +176,149 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
         want the list, and arrow-key stepping now exists (the slider owns Left/Right), so
         that is the natural place to build on when either is ported.
 
+## AutoHotkey translation audit (2026-07-27)
+
+A 14-agent audit of every ported literal against its ReaHotkey original, across five lenses
+(class names, colours, coordinate origins, image/OCR semantics, keys and timing). 22
+candidates, 8 adversarially verified, 3 confirmed. The rule it produced, worth keeping:
+**a literal copied from AutoHotkey is a claim about AHK's semantics, not a value — port the
+meaning, then re-derive the number.** Each defect was the same shape: a token valid in AHK's
+frame of reference became invalid in ours, and the runtime answered with silence or a
+plausible wrong action rather than an error.
+
+- [x] **Komplete Kontrol's standalone menu bar was entirely unreachable** ✓ (2026-07-27) —
+      its five hotspots are authored at client-relative `y = -10`, which is legitimate: a
+      window's client origin sits BELOW its caption and native menu bar, so addressing that
+      bar means a negative y. `pointInOrigin` began the legal rectangle AT the client origin,
+      so all five were refused before clicking, saying "File menu is not where it should be"
+      — a message that reads like version drift and points nowhere near the cause. Worse,
+      the overlay's `RegisterHotKey` claims outrank the application, so Alt+F/E/V/C/H were
+      swallowed too: the last route to that menu bar without us. Now tested against the
+      window's FRAME, which also fixes an existing mismatch (client ORIGIN paired with frame
+      SIZE, overshooting the right and bottom edges by a border width on any window that has
+      one). The case the guard was written for still holds: Kontakt 7's arrow at x=704
+      against a 649 px window is outside the frame too.
+- [ ] **Verify KK standalone's `-10` itself against a real window** — the guard was the bug,
+      but the literal is still unconfirmed: Komplete Kontrol's application is not installed
+      here, so nobody has checked that its menu bar is genuinely non-client rather than a Qt
+      widget inside the client area. If it is a widget, the guard fix stands and the module's
+      y needs re-measuring rather than copying. Re-measure x = 16/52/83/138/194 at the same
+      time.
+- [x] **Impact Soundworks' invented Alt+P** ✓ (2026-07-27) — ReaHotkey binds NO key on
+      either Juggernaut OCRButton; ours added Alt+P, which the inherited Kontakt header
+      already owns for "Previous snapshot". A doubly-claimed spec resolves to the first
+      VISIBLE claimant and the header is declared first, so the key stepped a snapshot —
+      changing the loaded sound — instead of reading the preset, in 4 of 6 cells. Removed.
+- [ ] **`menuOpen` frees only the navigation keys; ReaHotkey drops ALL of the overlay's** —
+      its `SetHotkeyMode(…, 0)` turns off the per-control hotkeys AND the common nav keys
+      while a plug-in menu is up. Our flag reaches only the captured-key branch of the
+      low-level hook, so `RegisterHotKey`-owned combos (Alt+P, Alt+M, Alt+N, Ctrl+L, Ctrl+S)
+      still fire into an open Qt menu and re-run the overlay's own action against a UI that
+      already has one up. Milder than it sounds — `invokeMenuItem` escapes with "Menu item
+      not found", and the camera/arrow probes sit above the row a menu drops onto, so a
+      re-fire dismisses the popup rather than clicking a row — but the user hears an
+      acknowledgement for a keystroke the menu never got. Fix: make the flag mean what
+      HotkeyMode 0 means (drop the per-control registrations on open, or return early in
+      `Overlay:activate`), and set it EAGERLY at press time for every `opensMenu` control —
+      the 150 ms poll is too slow, and only `openFileMenu`'s UIA path does that today.
+- [ ] **Enforce the shared-hotkey invariant at declaration time** — the runtime already
+      states it in prose (two controls may share a spec only when their `when` predicates are
+      mutually exclusive) and the Impact Soundworks defect is exactly a violation of it. A
+      check in the declaration report would have caught it at load with a log line instead of
+      by audit. More generally: a guard that can REFUSE an author's value should fail loudly
+      when the overlay is declared, not quietly when the key is pressed — a blind user cannot
+      tell "refused" from "not implemented".
+- [ ] **14 of the 22 candidates were never verified** (budget cap), so they are not cleared,
+      only unexamined. Full run under `subagents/workflows/wf_b83b2311-d3a/journal.jsonl`.
+
+## ReaHotkey port — plug-in headers (u-he)
+
+The first ports that are not sample libraries inside Kontakt. A u-he synth is an ordinary
+VST with a window class of its own, which makes it the simplest case the runtime has: the
+class IS the identity, so there is no landmark, no `identify`, and nothing to disambiguate.
+
+- [x] **u-he — Diva, Hive 2, Repro-1, Zebra2, ZebraHZ from one table** (`modules/u-he`,
+      `com.platform.u-he`). ReaHotkey's four files (`Diva.ahk`, `Hive2.ahk`, `Repro.ahk`,
+      `ZebraLegacy.ahk`) are token for token the same file apart from a class, a name and
+      six coordinates, so only the measurements live per synth. All five load clean.
+      Coordinates are ReaHotkey's, still to be verified against calibration shots.
+- [x] **Runtime: a hotspot toggle REFUSES to report an unrecognised pixel** — it used to
+      answer "whichever reference is nearer", which always has an answer, including for a
+      pixel resembling neither state. These probes are single pixels and Diva's lands on the
+      antialiased edge of a glyph stroke, so a rescale or a font change would have it read
+      background and announce a confident, wrong state — the worst thing this system can do
+      to someone who cannot check it. The threshold is self-calibrating (half the distance
+      between the two references: 109 apart on Diva, 334 on Cinematic Studio, so no fixed
+      tolerance could serve both) and a refusal is logged. `onColor`/`offColor` now also take
+      a LIST, as ReaHotkey's OnColors/OffColors always could.
+- [x] **Runtime: calibration shots survive a restart, and record who has the keyboard** —
+      the shot counter lived only in memory, so a restart between two shots overwrote the
+      first (it ate the first Diva shot). It now counts what is on disk, via a new
+      `host.resource.exists` (`read` cannot answer this for a PNG — it decodes as UTF-8 and
+      fails either way). The context dump also prints the focus chain with the overlay's
+      origin marked: every control here is driven by synthetic mouse clicks, so an overlay
+      can be wholly correct while the plug-in never receives a key, and nothing said so.
+- [ ] **Calibration shots land in `modules/overlay-runtime/calibration/`**, not under the
+      module that declared the overlay — `host.path`/`host.screen.save` resolve against the
+      module whose code is RUNNING, which for the shared calibrator is always the runtime.
+      Harmless but wrong, and with nine modules everything piles into one directory. The doc
+      comment above the calibration section claims otherwise.
+- [x] **Runtime: a state `hint` on a toggle** — ReaHotkey's `ExecuteOnActivationPostSpeech`,
+      which all three u-he browser toggles use for one sentence: switching the preset
+      browser on is half the information, because nothing on screen says the arrow keys now
+      pick presets. Keyed BY STATE (`hint = { on = "…" }`) and spoken on ACTIVATION only —
+      a hint repeated on every Tab pass is noise that says nothing new. Works on both toggle
+      kinds; the declaration check rejects it anywhere else, and rejects a mistyped key,
+      because a hint that is never spoken fails silently.
+- [x] **Diva measured and verified** ✓ (2026-07-27) — 1200x670, Diva 1.4.5. All five
+      positions land where ReaHotkey says, and BOTH toggle colours read back exactly (unlit
+      126,128,134 = 0x7E8086, lit 170,168,159 = 0xAAA89F), which also settles that AHK v2's
+      PixelGetColor is plain RGB. One number corrected: ReaHotkey's preset region ends at
+      y 44 and cuts the descenders off the name — fine for Tesseract, not for an OCR that
+      crops to the glyphs and upscales first. Widened to y 20–48, inside the pill's own dark
+      interior (y 16–54).
+- [x] **The preset menu is a NATIVE context menu** ✓ (2026-07-27, live on Diva and Repro-1),
+      which makes the OCR preset control the accessible path to every preset — a screen
+      reader reads a real Windows menu without help. `menus = true` is therefore load-bearing
+      here, not precautionary.
+- [x] **ReaHotkey's "use the arrow keys to select a preset" is not true here** ✓ — with the
+      PRESETS page open the arrows select nothing (and they are not ours: the runtime
+      captures Left/Right only for a focused slider). Our hint names the preset menu instead.
+      Repeating an instruction that silently fails is worse than saying nothing to someone
+      who cannot see that it failed.
+- [x] **All five synths validated live** ✓ (2026-07-27) — Diva, Repro-1, Hive 2, Zebra2 and
+      ZebraHZ each detect, announce and operate. ReaHotkey's coordinates transfer unchanged
+      for all of them, which is worth recording: the four files really were one file.
+- [ ] **Only Diva has been measured against a calibration shot.** The other four are
+      validated by USE, which is strong evidence for anything audible (the preset name reads
+      back, prev/next change the sound, the toggle reports a state) and none at all for a
+      control whose miss is silent — a Save that lands one button over does not announce
+      itself. Worth one shot each when convenient.
+- [ ] **Every u-he coordinate assumes the DEFAULT window size.** These plug-ins have a
+      70–200 % zoom, and at any other setting the whole header scales. No landmark fixes
+      that: anchoring moves a coordinate frame, it does not scale one. Nothing detects the
+      condition today, so it would present as an overlay whose controls all miss.
+- [ ] **Repro-5** — ReaHotkey registers only Repro-1's class but then image-checks which of
+      the two is on screen before offering the browser toggle, which only makes sense if
+      the class does not always discriminate them. Unsettleable here: Repro-5 is not
+      installed, so its class, layout and toggle colours are all unmeasured. If one ever
+      turns up under Repro-1's class, that toggle needs a Repro-1 landmark gate first.
+- [ ] **u-he inside Komplete Kontrol** — these are NKS-ready and ReaHotkey supports them
+      there. Unlike a nested Kontakt (a UIA leaf needing a content frame), a u-he plug-in
+      keeps its own HWND, so `EnumChildWindows` would find it under a KK window and its own
+      client rect is already the right origin — the work is the ARBITER: it has to join KK's
+      shared slot above KK's chrome, and a ranking mistake there is only visible against a
+      real window.
+- [ ] **Two plug-ins of one family in one FX chain** are children of the same host window,
+      so both overlays match it. The shared slot means the arbiter picks one rather than
+      leaving two overlays fighting over Tab, but which one is arbitrary. The same ambiguity
+      exists across modules (a Kontakt and a Diva in one chain) and is inherent in matching
+      on the host window rather than on which plug-in has keyboard focus.
+- [ ] **Raum** (free, installed) and **GTune** (free, installed as VST2) are the small
+      remaining ReaHotkey plug-in overlays. GTune is the one that settles whether we carry a
+      SELF-UPDATING read-out (it polls at 2.5 Hz); every future level/meter display wants
+      that answer.
+
 ## ReaHotkey port — Kontakt (open threads)
 
 The Kontakt overlays cover {Kontakt 7, Kontakt 8} × {bare in a DAW, nested in Komplete
