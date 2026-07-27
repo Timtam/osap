@@ -3103,6 +3103,16 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             std::fs::read_to_string(&path).map_err(mlua::Error::external)
         })?,
     )?;
+    // host.resource.exists(rel) -> bool. `read` cannot answer this for anything binary
+    // (it decodes as UTF-8 and fails on a PNG whether or not the file is there), and the
+    // calibrator needs it to number a shot without overwriting an earlier one from a
+    // PREVIOUS RUN — an in-memory counter resets on restart, which is the normal case
+    // while a module is being written.
+    let sh = shared.clone();
+    resource.set(
+        "exists",
+        lua.create_function(move |_, rel: String| Ok(sh.root(idx).join(&rel).exists()))?,
+    )?;
     host.set("resource", resource)?;
 
     // host.settings: define/get/set/onChange — persisted in the unified store.

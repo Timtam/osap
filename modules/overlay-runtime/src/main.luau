@@ -269,6 +269,7 @@ function Overlay:addGraphicalToggle(opts)
     onImage = opts.onImage,
     offImage = opts.offImage,
     hotkey = opts.hotkey,
+    hint = opts.hint,
     -- Optional per-control overrides of the module-wide match robustness defaults.
     tolerance = opts.tolerance,
     scales = opts.scales,
@@ -306,8 +307,10 @@ end
 
 -- A toggle whose on/off state is read from a SINGLE pixel at its click point (one screen
 -- touch — cheap, unlike a per-pixel region scan), compared to an on/off reference colour
--- (nearest wins) — ReaHotkey's HotspotToggleButton. Activating clicks the point (toggling
--- it) and re-reads the state. `at` is origin-relative; `onColor`/`offColor` are {r, g, b}.
+-- (nearest wins, but only if it is near ENOUGH — see hotspotToggleState) — ReaHotkey's
+-- HotspotToggleButton. Activating clicks the point (toggling it) and re-reads the state.
+-- `at` is origin-relative; `onColor`/`offColor` are {r, g, b}, or a LIST of such tables when
+-- one state can legitimately look several ways.
 function Overlay:addHotspotToggle(opts)
   return add(self, {
     kind = "hotspottoggle",
@@ -317,6 +320,7 @@ function Overlay:addHotspotToggle(opts)
     onColor = opts.onColor,
     offColor = opts.offColor,
     hotkey = opts.hotkey,
+    hint = opts.hint,
     rawOrigin = opts.rawOrigin,
     fromRight = opts.fromRight,
     when = opts.when,
@@ -560,25 +564,49 @@ end
 -- plugin's right edge into REAPER.
 --
 -- This is the one coordinate error that pressing the key again cannot undo, so it refuses
--- and says so rather than clicking. The refusal names the control: one that is present and
--- silently inert is the harder thing to make sense of without seeing the screen.
+-- and says so rather than clicking.
+--
+-- The legal area is the window's OWN PIXELS — its frame, not its client area.
+--
+-- This started as the client rectangle, and got two things wrong at once. It paired the
+-- client ORIGIN with the frame SIZE, which for an embedded plug-in control is the same
+-- rectangle (borderless, so the two agree) and for a standalone window overshoots the right
+-- and bottom edges by a border width. And, worse, it made a NEGATIVE client-relative
+-- coordinate impossible — when that is a legitimate, deliberate way to author a control.
+--
+-- A window's client origin sits BELOW its caption and native menu bar. So a hotspot that
+-- addresses that menu bar is authored at a negative y, which is exactly what ReaHotkey does
+-- for Komplete Kontrol's standalone menu bar (Includes/Overlays/KompleteKontrol.ahk:32-36,
+-- File/Edit/View/Controller/Help at y = -10) and what our port copied. Every one of those
+-- five was refused before it could click: the controls existed, Tab announced them, and
+-- pressing one said "File menu is not where it should be" — a message that reads like
+-- version drift and pointed nowhere near the real cause. Since the overlay's hotkeys are
+-- RegisterHotKey claims, which outrank the application, it also swallowed Alt+F/E/V/C/H:
+-- the very access keys that were the last route to that menu bar without us.
+--
+-- Testing the frame keeps the case this guard was written for. Kontakt 7's multi arrow
+-- resolved 704 px from the left of a 649 px window; the frame is still 649 px wide, so it
+-- is still refused. That is the error worth refusing — the one where pressing the key again
+-- cannot undo what the first press did to whatever window lay beyond the edge.
 local function pointInOrigin(self, x, y)
   local o = self:origin()
-  if not (o and o.client and o.bounds) then return false end
-  return x >= o.client.x
-    and x < o.client.x + o.bounds.w
-    and y >= o.client.y
-    and y < o.client.y + o.bounds.h
+  if not (o and o.bounds) then return false end
+  return x >= o.bounds.x
+    and x < o.bounds.x + o.bounds.w
+    and y >= o.bounds.y
+    and y < o.bounds.y + o.bounds.h
 end
 
+-- The refusal names the control: one that is present and silently inert is the harder thing
+-- to make sense of without seeing the screen.
 local function refuseOutside(self, c, x, y)
   if pointInOrigin(self, x, y) then return false end
   local o = self:origin()
+  local b = o and o.bounds
   host.log.info(string.format(
-    "%s: '%s' resolves to (%d,%d), outside its origin (%d,%d) %dx%d — not clicking",
+    "%s: '%s' resolves to (%d,%d), outside its origin's window (%d,%d) %dx%d — not clicking",
     tostring(self.label), tostring(c.label), x, y,
-    o and o.client and o.client.x or 0, o and o.client and o.client.y or 0,
-    o and o.bounds and o.bounds.w or 0, o and o.bounds and o.bounds.h or 0
+    b and b.x or 0, b and b.y or 0, b and b.w or 0, b and b.h or 0
   ))
   host.speech.output((c.label or "Control") .. " is not where it should be", { interrupt = true })
   return true
@@ -735,14 +763,76 @@ end
 -- On/off state of a HotspotToggle: read the single pixel at its click point and return
 -- whichever reference colour it is closer to (Manhattan distance) — ReaHotkey's pixel
 -- toggle. Cheap (one screen touch). nil if unconfigured or the pixel can't be read.
+local function colorDist(p, ref)
+  return math.abs(p.r - ref[1]) + math.abs(p.g - ref[2]) + math.abs(p.b - ref[3])
+end
+
+-- A reference may be ONE colour or a LIST of them — ReaHotkey's OnColors/OffColors are
+-- arrays, because a control can legitimately look several ways in one state (a lit button
+-- under two different skins, a glyph the renderer antialiases differently at two sizes).
+local function asColors(v)
+  if type(v[1]) == "number" then return { v } end
+  return v
+end
+
+local function nearestRef(p, refs)
+  local best
+  for _, ref in ipairs(asColors(refs)) do
+    local d = colorDist(p, ref)
+    if best == nil or d < best then best = d end
+  end
+  return best
+end
+
+-- How far apart the two states actually LOOK, which is the only scale on which "near
+-- enough" means anything: Diva's lit and unlit tab labels are 109 apart, a Cinematic Studio
+-- mic icon's are 334. A fixed tolerance would be far too loose for one and too tight for
+-- the other. Constant per control, so it is computed once.
+local function refSeparation(c)
+  if c._sep then return c._sep end
+  local best
+  for _, on in ipairs(asColors(c.onColor)) do
+    for _, off in ipairs(asColors(c.offColor)) do
+      local d = colorDist({ r = on[1], g = on[2], b = on[3] }, off)
+      if best == nil or d < best then best = d end
+    end
+  end
+  c._sep = best or 0
+  return c._sep
+end
+
+-- A floor, for a control whose two states genuinely look almost alike: half of "almost
+-- nothing" is a threshold nothing could ever pass, which would silence a working control.
+local TOGGLE_MIN_MARGIN = 30
+
 local function hotspotToggleState(self, c)
   if not (c.at and c.onColor and c.offColor) then return nil end
   local px, py = hotspotPoint(self, c)
   if not px then return nil end
   local p = host.screen.pixel(px, py)
   if not p then return nil end
-  local don = math.abs(p.r - c.onColor[1]) + math.abs(p.g - c.onColor[2]) + math.abs(p.b - c.onColor[3])
-  local doff = math.abs(p.r - c.offColor[1]) + math.abs(p.g - c.offColor[2]) + math.abs(p.b - c.offColor[3])
+  local don, doff = nearestRef(p, c.onColor), nearestRef(p, c.offColor)
+  -- REFUSE rather than guess. "Whichever is nearer" always has an answer, including for a
+  -- pixel that resembles neither state — and these probes are single pixels, sometimes
+  -- landing on the antialiased edge of a glyph stroke (Diva's preset-browser tab is exactly
+  -- that: one pixel wide, its neighbours nothing like it). Let the window drift, the plug-in
+  -- rescale or a version change the font, and the probe reads background — from which
+  -- "nearer" cheerfully derives a state, and announces it with the same confidence as a
+  -- correct one. Announcing the OPPOSITE of the truth is the worst thing this system can do
+  -- to someone who cannot check it against the screen; saying nothing is merely unhelpful.
+  --
+  -- So the reading must be close to one of the references on the scale of how far apart
+  -- they are. Logged when refused, because a toggle that has quietly stopped reporting is
+  -- otherwise indistinguishable from one that has no state.
+  local limit = math.max(TOGGLE_MIN_MARGIN, math.floor(refSeparation(c) / 2))
+  local near = math.min(don, doff)
+  if near > limit then
+    host.log.info(string.format(
+      "[overlay] %s: '%s' at (%d,%d) reads (%d,%d,%d) — %d from the nearer reference, "
+      .. "limit %d; refusing to report a state",
+      tostring(self.label), tostring(c.label or ""), px, py, p.r, p.g, p.b, near, limit))
+    return nil
+  end
   if don <= doff then return "on" else return "off" end
 end
 
@@ -779,7 +869,22 @@ local function valueOf(self, c, done)
   end)
 end
 
-local function speakControl(self, index, moveMouse)
+-- What a toggle should ADD to its announcement once it is in a given state — ReaHotkey's
+-- ExecuteOnActivationPostSpeech, which every u-he synth uses for the same sentence: turning
+-- the preset browser on is only half the information, because nothing on screen and nothing
+-- in the control's name says the arrow keys now pick presets. A sighted user sees a list
+-- appear and infers it; this is the sentence that replaces seeing it.
+--
+-- Spoken on ACTIVATION only, not on focus (`withHint`), and that restraint is the point: a
+-- hint repeated on every Tab pass through a header is noise a screen-reader user has to sit
+-- through, and it says nothing new — they were told when they turned it on. Keyed BY STATE,
+-- so it is tied to the thing that just became true rather than to the control.
+local function hintFor(c, state)
+  if not (c.hint and state) then return nil end
+  return c.hint[state]
+end
+
+local function speakControl(self, index, moveMouse, withHint)
   local c = self.controls[index]
   if not c then return end
   -- A tab control announces WHICH tab is current, then that it is a tab control (so the
@@ -842,7 +947,11 @@ local function speakControl(self, index, moveMouse)
   end
   if c.kind == "hotspottoggle" then
     local st = hotspotToggleState(self, c)
-    if st then parts[#parts + 1] = st end
+    if st then
+      parts[#parts + 1] = st
+      local h = withHint and hintFor(c, st) or nil
+      if h then parts[#parts + 1] = h end
+    end
   end
   -- The IMAGE-read values — a graphic toggle's state, a slider's position — are announced
   -- in TWO utterances rather than one, and the name goes out first.
@@ -867,7 +976,10 @@ local function speakControl(self, index, moveMouse)
     local pinned = self:hwnd()
     valueOf(self, c, function(value)
       if value and self.active and self.focus == at and self:hwnd() == pinned then
-        host.speech.output(value, { interrupt = false })
+        -- A graphic toggle's value IS its state ("on"/"off"), so the hint attaches here,
+        -- to the same late utterance. A slider's is a percentage and matches no hint key.
+        local h = withHint and hintFor(c, value) or nil
+        host.speech.output(h and (value .. ", " .. h) or value, { interrupt = false })
       end
     end)
   end
@@ -1050,14 +1162,15 @@ function Overlay:activate(index)
     local ox, oy = originOf(self, c)
     host.input.click(ox + math.floor((c.region[1] + c.region[3]) / 2),
       oy + math.floor((c.region[2] + c.region[4]) / 2))
-    -- Re-read the new state once the UI redraws.
-    if host.timer then host.timer.after(150, function() speakControl(self, i, false) end) end
+    -- Re-read the new state once the UI redraws. `withHint`: this is the transition, the
+    -- one moment a state hint is worth hearing (see hintFor).
+    if host.timer then host.timer.after(150, function() speakControl(self, i, false, true) end) end
   elseif c.kind == "hotspottoggle" and c.at then
     local px, py = hotspotPoint(self, c)
     if not px then return end
     host.input.click(px, py)
     -- Re-read the new state (announced with the label) once the UI redraws.
-    if host.timer then host.timer.after(150, function() speakControl(self, i, false) end) end
+    if host.timer then host.timer.after(150, function() speakControl(self, i, false, true) end) end
   end
 end
 
@@ -1436,6 +1549,19 @@ local function report(self, opts)
       if c.at == nil then bad("%s has no `at`", who) end
       if c.onColor == nil or c.offColor == nil then
         bad("%s needs both `onColor` and `offColor` to tell its state apart", who)
+      else
+        -- A malformed colour reads as nil channels and every distance becomes an error or a
+        -- nonsense number — checked here because the control would otherwise just stop
+        -- reporting a state, which now looks exactly like a correctly-refused reading.
+        for _, field in ipairs({ "onColor", "offColor" }) do
+          for _, col in ipairs(asColors(c[field])) do
+            if type(col) ~= "table" or #col ~= 3
+              or type(col[1]) ~= "number" or type(col[2]) ~= "number" or type(col[3]) ~= "number"
+            then
+              bad("%s: `%s` must be {r, g, b} (or a list of them)", who, field)
+            end
+          end
+        end
       end
     end
     if c.kind == "gtoggle" and c.onImage == nil and c.offImage == nil then
@@ -1467,6 +1593,26 @@ local function report(self, opts)
           bad("%s: `%s` is not an absolute path — use host.path(); a relative one resolves "
             .. "under whichever module is RUNNING, which for an inherited overlay is not yours",
             who, field)
+        end
+      end
+    end
+    -- A hint is spoken by exactly two control kinds, and only for a state they can be in.
+    -- Both mistakes are silent otherwise: on any other control it is simply never read, and
+    -- a mistyped key ("enabled" for "on") is a sentence the user never hears and no error
+    -- ever mentions.
+    if c.hint ~= nil then
+      if type(c.hint) ~= "table" then
+        bad("%s: `hint` must be a table keyed by state, e.g. { on = \"…\" }, got %s",
+          who, type(c.hint))
+      elseif c.kind ~= "hotspottoggle" and c.kind ~= "gtoggle" then
+        bad("%s: only a toggle has the on/off state a `hint` is keyed by, so this one is "
+          .. "never spoken", who)
+      else
+        for k in pairs(c.hint) do
+          if k ~= "on" and k ~= "off" then
+            bad("%s: `hint` key '%s' is not a state this control reports — use `on` / `off`",
+              who, tostring(k))
+          end
         end
       end
     end
@@ -1980,12 +2126,28 @@ end
 -- replaced the evidence for all the others. It cost an hour once: two products' shots
 -- collapsed into one file and the wrong one got measured. The log prints the exact path it
 -- wrote, so nothing has to be guessed from a directory listing.
+local function shotName(base, k)
+  return base .. (k > 1 and ("-" .. k) or "")
+end
+
 local shotsTaken = {}
 local function shotPath(label)
   local base = safeName(label)
-  local n = (shotsTaken[base] or 0) + 1
+  local n = shotsTaken[base]
+  -- Seeded from what is already on disk, not merely counted per run. A counter that lives
+  -- only in memory resets on restart, and restarting between two shots of the same overlay
+  -- is not the exception while a module is being written — it is the loop. That is exactly
+  -- how the first Diva shot got overwritten by the second: the very mistake this numbering
+  -- was added to prevent, defeated by the workflow it was meant to serve.
+  if n == nil then
+    n = 0
+    while host.resource.exists("calibration/" .. shotName(base, n + 1) .. ".png") do
+      n = n + 1
+    end
+  end
+  n = n + 1
   shotsTaken[base] = n
-  return base .. (n > 1 and ("-" .. n) or "")
+  return shotName(base, n)
 end
 
 -- WHICH control the overlay took as its origin, and what else was on offer.
@@ -2020,6 +2182,31 @@ local function calibrationContext(origin)
       tostring(c.class), c.id,
       b and b.x or 0, b and b.y or 0, b and b.w or 0, b and b.h or 0
     )
+  end
+  -- WHO HAS THE KEYBOARD, which the roster above cannot tell you.
+  --
+  -- Every control here is driven by a synthetic mouse click, so an overlay can be entirely
+  -- correct — right origin, right coordinates, right pixels — while the plug-in never
+  -- receives a single keystroke. That distinction is invisible until the moment the
+  -- plug-in's OWN keys are what matter: u-he's preset browser is stepped with the arrow
+  -- keys, which this runtime deliberately does not capture, and whether they arrive depends
+  -- entirely on whether the plug-in window (rather than the host's dialog) holds the focus.
+  -- Printed innermost-first, as GetGUIThreadInfo reports it, with the overlay's own origin
+  -- marked — so "the plug-in is not on the focus chain at all" is readable at a glance.
+  local chain = host.window.focusChain()
+  if #chain == 0 then
+    lines[#lines + 1] = "  keyboard focus: none reported"
+  else
+    local parts, onChain = {}, false
+    for _, c in ipairs(chain) do
+      local mine = origin ~= nil and c.id == origin.id
+      if mine then onChain = true end
+      parts[#parts + 1] = string.format("%s[%s] id=%d", mine and "->" or "", tostring(c.class), c.id)
+    end
+    lines[#lines + 1] = "  keyboard focus (innermost first): " .. table.concat(parts, "  <  ")
+    lines[#lines + 1] = "    the overlay's origin is " ..
+      (onChain and "ON the focus chain — keys the overlay does not capture reach the plug-in"
+        or "NOT on the focus chain — keys go to the host, not to the plug-in")
   end
   return lines
 end
