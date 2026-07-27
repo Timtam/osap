@@ -35,16 +35,44 @@ local function img(rel) return host.path(rel) end
 -- `region` is the button's own box relative to the wordmark's top-left, which is also what
 -- bounds the search: ReaHotkey's ClassicMixOff2 template matches a second time up in
 -- Kontakt's own top bar, so an unscoped search would read the state off the wrong pixels.
-local function chorusMix(name, x0, x1)
+-- One segment of a product's mixer selector. `y0`/`y1` are the row, shared by every segment
+-- of that product; `x0`/`x1` are this segment's own box. The label suffix and the three
+-- template paths follow from the segment's name, which is ReaHotkey's own naming.
+local function mix(product, name, x0, x1, y0, y1)
+  local base = "images/" .. product .. "/" .. name .. "Mix"
   return {
     label = name .. " Mix",
-    region = { x0, 163, x1, 186 },
-    on = { "images/Chorus/" .. name .. "MixOn.png" },
-    off = { "images/Chorus/" .. name .. "MixOff1.png", "images/Chorus/" .. name .. "MixOff2.png" },
+    region = { x0, y0, x1, y1 },
+    on = { base .. "On.png" },
+    off = { base .. "Off1.png", base .. "Off2.png" },
   }
 end
 
 local PRODUCTS = {
+  {
+    name = "Areia",
+    landmark = "images/Areia/Product.png",
+    -- MEASURED off a calibration shot of "Areia - 03 6 Celli - Performance Legato" in
+    -- Kontakt 8 with the browser open. Wordmark at (972,55); the mixer row is y 224–247 and
+    -- the two segments span x 410–489 and 491–574; the mic-blend track runs x 410–574 at
+    -- y 166–180 with the thumb centred on (492,172).
+    verified = true,
+    -- The Close/Mid/Far mic blend. `from`/`to` are the thumb CENTRE at each end of its
+    -- travel — the track's ends inset by the thumb's radius — which is what makes the
+    -- reading a percentage of the blend rather than of the bar. Checked against the shot:
+    -- the thumb sat on "Mid" and the arithmetic returns exactly 50.
+    slider = {
+      label = "Close/Mid/Far",
+      region = { -570, 105, -390, 133 },
+      thumb = "images/Areia/Thumb.png",
+      from = -554,
+      to = -406,
+    },
+    mixes = {
+      mix("Areia", "Classic", -562, -483, 169, 192),
+      mix("Areia", "Modern", -481, -398, 169, 192),
+    },
+  },
   {
     name = "Chorus",
     landmark = "images/Chorus/Product.png",
@@ -56,9 +84,9 @@ local PRODUCTS = {
     -- Read back live at the same time: CLC off, MDN off, Scott Smith on.
     verified = true,
     mixes = {
-      chorusMix("Classic", -535, -494), -- "CLC"
-      chorusMix("Modern", -493, -452), -- "MDN"
-      chorusMix("ScottSmith", -451, -370), -- "Scott Smith"
+      mix("Chorus", "Classic", -535, -494, 163, 186), -- "CLC"
+      mix("Chorus", "Modern", -493, -452, 163, 186), -- "MDN"
+      mix("Chorus", "ScottSmith", -451, -370, 163, 186), -- "Scott Smith"
     },
   },
 }
@@ -66,6 +94,16 @@ local PRODUCTS = {
 local function build(product)
   return function(ov)
     ov:addStaticText(product.name)
+    if product.slider then
+      local sl = product.slider
+      ov:addSlider({
+        label = sl.label,
+        region = sl.region,
+        thumbImage = img(sl.thumb),
+        from = sl.from,
+        to = sl.to,
+      })
+    end
     for _, m in ipairs(product.mixes) do
       local on, off = {}, {}
       for i, p in ipairs(m.on) do on[i] = img(p) end

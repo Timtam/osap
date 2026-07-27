@@ -120,7 +120,10 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
 - [x] **Audio Imperia — module started, Chorus measured and verified** (`modules/audio-imperia`,
       `com.platform.audio-imperia`). Its wordmark templates still match the current UI
       exactly, unlike its coordinates. ✓ (2026-07-27)
-- [ ] **Audio Imperia — the remaining ten.** Richer than "the same two toggles": the products
+- [x] **Areia measured and verified** — wordmark (972,55); mixer row +169..+192 with two
+      segments at -562..-483 and -481..-398; mic-blend track -570..-390 at +105..+133 with
+      the thumb's travel from -554 to -406. ✓ (2026-07-27)
+- [ ] **Audio Imperia — the remaining nine.** Richer than "the same two toggles": the products
       carry Classic / Modern / EZ / Scott Smith MIXER variants, each with its own on/off
       templates. Chorus (3 segments) and Dolce (2) need nothing new; **Glade** is 2 hotspot
       buttons and is the one product where ReaHotkey hardcodes genuinely different
@@ -136,7 +139,9 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
       drag a percent, look again, extend a pixel at a time until the reading moves — but
       BOUNDED, and every continuation re-checks the window, because an unbounded drag loop
       inside someone's plugin is not a thing to ship. ✓ (2026-07-27)
-      **Not yet exercised by any product** — Areia is the first, and it needs one shot.
+      First used by Areia's Close/Mid/Far mic blend; **live check of the drag loop still
+      owed** — the reading and the announcement are verified against a shot, the dragging
+      is not.
 - [ ] **A "choose overlay" override (ReaHotkey's Alt+C).** ReaHotkey lets a plugin register
       SEVERAL overlays and the user pick by hand from a Vendor → Product → Patch menu
       (`Overlay.Functions.ahk:272-380`), with `AutoChangeOverlay` as the automatic path. Our
