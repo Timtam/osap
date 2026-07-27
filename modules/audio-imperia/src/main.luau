@@ -61,10 +61,20 @@ local PRODUCTS = {
     -- travel — the track's ends inset by the thumb's radius — which is what makes the
     -- reading a percentage of the blend rather than of the bar. Checked against the shot:
     -- the thumb sat on "Mid" and the arithmetic returns exactly 50.
+    -- TWO thumb templates, which is what ReaHotkey's EZMixerOff/EZMixerOn pair is for and
+    -- the reason a single one failed live: once the slider has been touched, the knob is
+    -- drawn slightly differently — measured, up to 27 per channel — and our matcher wants
+    -- every pixel within tolerance. No single tolerance fixes that: 27 is needed to accept
+    -- the second state, and at 30 the template already matches twice inside the track,
+    -- at 35 seven hundred times. So: one template per state.
+    --
+    -- `ThumbHeld.png` was cropped from a calibration shot whose crosshair lay across the
+    -- knob, so the 32 pixels it covered are stored TRANSPARENT — the matcher treats those
+    -- as wildcards, which is the honest encoding for "we could not see this pixel".
     slider = {
       label = "Close/Mid/Far",
       region = { -570, 105, -390, 133 },
-      thumb = "images/Areia/Thumb.png",
+      thumb = { "images/Areia/Thumb.png", "images/Areia/ThumbHeld.png" },
       from = -554,
       to = -406,
     },
@@ -99,7 +109,11 @@ local function build(product)
       ov:addSlider({
         label = sl.label,
         region = sl.region,
-        thumbImage = img(sl.thumb),
+        thumbImage = (function()
+          local out = {}
+          for i, t in ipairs(sl.thumb) do out[i] = img(t) end
+          return out
+        end)(),
         from = sl.from,
         to = sl.to,
       })

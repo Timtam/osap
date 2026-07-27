@@ -1902,10 +1902,17 @@ function Overlay:calibrationShot()
   -- of whatever was behind it, so a picture meant to settle where a coordinate lands
   -- disagreed with the coordinate by 16 px.
   local ow, oh = O.contentSize(o)
+  local region = { o.client.x, o.client.y, o.client.x + ow, o.client.y + oh }
   local path = host.path("calibration/" .. safeName(self.label) .. ".png")
-  local ok = host.screen.saveMarked(path, {
-    region = { o.client.x, o.client.y, o.client.x + ow, o.client.y + oh },
-    marks = marks,
+  local ok = host.screen.saveMarked(path, { region = region, marks = marks })
+  -- The SAME frame without the crosshairs. They are drawn over the very thing a control
+  -- points at, which is fine for a hotspot and destroys the evidence for an image-matched
+  -- one: measuring why a slider's thumb had stopped matching meant reading its knob through
+  -- 32 pixels of magenta. Cheap — one more capture of a region already known — and it is
+  -- also the frame a template gets cropped from.
+  host.screen.saveMarked(host.path("calibration/" .. safeName(self.label) .. "-clean.png"), {
+    region = region,
+    marks = {},
   })
   host.log.info(string.format(
     "[calibrate] %s — origin (%d,%d) %dx%d%s -> %s (%s)",
