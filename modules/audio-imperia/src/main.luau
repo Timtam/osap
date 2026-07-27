@@ -57,6 +57,13 @@ local PRODUCTS = {
     -- the two segments span x 410–489 and 491–574; the mic-blend track runs x 410–574 at
     -- y 166–180 with the thumb centred on (492,172).
     verified = true,
+    -- Offered UNCONDITIONALLY, including while a mix preset is lit. The two are related in
+    -- one direction only — moving the blend clears both mix buttons, selecting a preset
+    -- leaves the blend knob where it was — so its reading is arguably stale then. We show it
+    -- anyway, because Audio Imperia does: the overlay's job is to make what is on screen
+    -- reachable, not to decide what it means. Gating it on the presets would also make a
+    -- control appear and disappear under someone navigating by Tab, which is worse.
+    --
     -- The Close/Mid/Far mic blend. `from`/`to` are the thumb CENTRE at each end of its
     -- travel — the track's ends inset by the thumb's radius — which is what makes the
     -- reading a percentage of the blend rather than of the bar. Checked against the shot:

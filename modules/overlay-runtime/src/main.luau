@@ -1811,6 +1811,20 @@ local function safeName(label)
   return (string.gsub(tostring(label or "overlay"), "[^%w]+", "-"))
 end
 
+-- Shots of the SAME overlay no longer overwrite each other: the second gets "-2", the
+-- third "-3". Measuring a library that has no module yet is done from the plain Kontakt
+-- header, so every product in a row lands under the same label — and the last one silently
+-- replaced the evidence for all the others. It cost an hour once: two products' shots
+-- collapsed into one file and the wrong one got measured. The log prints the exact path it
+-- wrote, so nothing has to be guessed from a directory listing.
+local shotsTaken = {}
+local function shotPath(label)
+  local base = safeName(label)
+  local n = (shotsTaken[base] or 0) + 1
+  shotsTaken[base] = n
+  return base .. (n > 1 and ("-" .. n) or "")
+end
+
 -- WHICH control the overlay took as its origin, and what else was on offer.
 --
 -- An overlay whose readings are all wrong is nearly always a correct overlay on a WRONG
@@ -1912,14 +1926,15 @@ function Overlay:calibrationShot()
   -- disagreed with the coordinate by 16 px.
   local ow, oh = O.contentSize(o)
   local region = { o.client.x, o.client.y, o.client.x + ow, o.client.y + oh }
-  local path = host.path("calibration/" .. safeName(self.label) .. ".png")
+  local stem = shotPath(self.label)
+  local path = host.path("calibration/" .. stem .. ".png")
   local ok = host.screen.saveMarked(path, { region = region, marks = marks })
   -- The SAME frame without the crosshairs. They are drawn over the very thing a control
   -- points at, which is fine for a hotspot and destroys the evidence for an image-matched
   -- one: measuring why a slider's thumb had stopped matching meant reading its knob through
   -- 32 pixels of magenta. Cheap — one more capture of a region already known — and it is
   -- also the frame a template gets cropped from.
-  host.screen.saveMarked(host.path("calibration/" .. safeName(self.label) .. "-clean.png"), {
+  host.screen.saveMarked(host.path("calibration/" .. stem .. "-clean.png"), {
     region = region,
     marks = {},
   })
