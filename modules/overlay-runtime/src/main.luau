@@ -1512,6 +1512,67 @@ local function safeName(label)
   return (string.gsub(tostring(label or "overlay"), "[^%w]+", "-"))
 end
 
+-- WHICH control the overlay took as its origin, and what else was on offer.
+--
+-- An overlay whose readings are all wrong is nearly always a correct overlay on a WRONG
+-- ORIGIN, and that is invisible in the list below: every coordinate is then computed
+-- faithfully against the wrong rectangle, so the numbers look reasonable and the picture
+-- shows a plausible window. Live, a Kontakt 7 header attached itself to Kontakt's own
+-- "Content Missing" dialog — same Qt window class, same "Kontakt 7" in its UIA subtree,
+-- 600x440 instead of the plugin's 649x657 — and nothing in the report said so.
+--
+-- attachEmbedded takes the FIRST enumerated control that matches the class pattern and
+-- passes identify, with no tie-break, so the roster is exactly the decision it made: the
+-- window it enumerated, every control that was a candidate, and which one won.
+local function calibrationContext(origin)
+  local lines = {}
+  local a = host.window.active()
+  if a and a.bounds then
+    lines[#lines + 1] = string.format(
+      "  window  \"%s\"  class %s  exe %s  bounds (%d,%d) %dx%d",
+      tostring(a.title), tostring(a.class), tostring(a.app and a.app.exe or "?"),
+      a.bounds.x, a.bounds.y, a.bounds.w, a.bounds.h
+    )
+  end
+  local controls = host.window.controls()
+  lines[#lines + 1] = string.format("  controls (%d, in enumeration order):", #controls)
+  for _, c in ipairs(controls) do
+    local b = c.bounds
+    lines[#lines + 1] = string.format(
+      "   %s %-52s id=%d  (%d,%d) %dx%d",
+      (origin and c.id == origin.id) and "->" or "  ",
+      tostring(c.class), c.id,
+      b and b.x or 0, b and b.y or 0, b and b.w or 0, b and b.h or 0
+    )
+  end
+  return lines
+end
+
+-- The named elements in the origin's own accessibility tree, over the RAW walker (the one
+-- that crosses into a hosted plugin's Qt fragment). This is how you find out what a window
+-- IS when its class and size cannot tell it apart from another — and what to key a
+-- discriminator on. Bounded: a plugin's tree runs to hundreds of nodes, and this is a
+-- manual action, not something worth flooding the log for.
+local UIA_DUMP_MAX = 60
+local function calibrationUia(origin)
+  local lines, n = {}, 0
+  for _, e in ipairs(host.uia.rawDump(origin.id) or {}) do
+    if e.name ~= nil and e.name ~= "" then
+      n += 1
+      if n > UIA_DUMP_MAX then
+        lines[#lines + 1] = "    … (more, truncated)"
+        break
+      end
+      lines[#lines + 1] = string.format(
+        "    %s%s  [%s]", string.rep("  ", e.depth or 0), tostring(e.name), tostring(e.ctype)
+      )
+    end
+  end
+  if n == 0 then lines[#lines + 1] = "    (no named elements — this window exposes no UIA)" end
+  table.insert(lines, 1, "  origin accessibility tree (named elements, raw walker):")
+  return lines
+end
+
 function Overlay:calibrationShot()
   local o = self:origin()
   if not (o and o.client and o.bounds) then
@@ -1559,6 +1620,8 @@ function Overlay:calibrationShot()
       or "",
     path, tostring(ok)
   ))
+  for _, l in ipairs(calibrationContext(o)) do host.log.info("[calibrate]" .. l) end
+  for _, l in ipairs(calibrationUia(o)) do host.log.info("[calibrate]" .. l) end
   for _, l in ipairs(lines) do host.log.info("[calibrate]" .. l) end
   return ok == true
 end

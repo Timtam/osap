@@ -79,7 +79,17 @@ return {
         -- NIChildWindow too, so matching on the class made this dialog overlay win
         -- permanently inside KK and hide every other control. Reject the container that
         -- IS the plugin host; see detect.isPluginHostContainer.
+        --
+        -- But ask FIRST whether the dialog is simply the window we are in. Under REAPER it
+        -- is its own top-level window holding this NIChildWindow, and the Qt window inside
+        -- the frame sits at the frame's exact rect — which is precisely the signature
+        -- isPluginHostContainer reads as "a plugin host". Live, that made this overlay
+        -- turn down the Content Missing dialog, leaving the Kontakt header active over it
+        -- with every coordinate measured against the dialog. A blind user then has no
+        -- "Browse for folder" at all and a header full of controls that do the wrong
+        -- thing. When the foreground window IS the dialog, there is nothing to weigh up.
         identify = function(c)
+          if D.inOwnDialog() then return true end
           return D.kontaktPresent() and not D.isPluginHostContainer(c)
         end,
         cacheIdentity = false,
@@ -108,7 +118,10 @@ return {
     local made = {}
     for _, cell in ipairs(C.all) do
       made[#made + 1] = overlayFor(cell, {
-        name = "Kontakt — " .. (name or "library"),
+        -- Named after the CELL, not just the library: six overlays share this name
+        -- otherwise, which makes the arbiter roster unreadable and makes two calibration
+        -- shots (one per Kontakt version) overwrite each other.
+        name = cell.key .. " — " .. (name or "library"),
         layer = O.layer.content,
         -- A library loads and unloads with no window event, so its landmark gate is
         -- re-checked on a poll rather than only on focus changes.

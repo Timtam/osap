@@ -6,9 +6,7 @@
 -- which Kontakt it is on, because the cell already is one.
 
 local A = host.include("src/actions.luau")
-local D = host.include("src/detect.luau")
 local geo = host.include("src/geometry.luau")
-local U = host.uia.type
 
 -- Komplete Kontrol's chrome comes from the Komplete Kontrol MODULE, not from a copy here:
 -- it owns those controls, and it is a code module, so its exported part crosses into this
@@ -42,37 +40,36 @@ local function addPluginHeader(ov, cell)
   })
   -- The view toggle, by Kontakt's OWN keyboard shortcut (F10) rather than through its
   -- menu: the menu entry reads "Switch to Classic View   F10", and a shortcut the
-  -- application defines cannot drift the way a measured menu row can.
+  -- application defines cannot drift the way a measured menu row can. Kontakt 8 only —
+  -- Kontakt 7 has no view modes, and the button did nothing there.
   --
-  -- It is not a nicety. The instrument, multi and snapshot controls exist only in the
-  -- classic view, and the only other route there is a menu that carries no accessibility
-  -- information at all — so without this a user who cannot see the screen never gets there.
-  -- (The header's "Play View" button turns the modern view ON; it does not toggle.)
+  -- Two controls, one key: F10 toggles, so the label has to say which way it will go.
+  -- Whichever is currently visible owns Alt+V — the runtime resolves a shared hotkey to its
+  -- visible claimant at press time, which is exactly this case.
   --
-  -- TWO controls, one key: F10 toggles, so the label has to say which way it will go.
-  -- Whichever one is currently visible owns Alt+V — the runtime resolves a shared hotkey to
-  -- its visible claimant at press time, which is exactly this case.
-  local function inClassic(o) return D.isClassicView(o:origin()) == true end
-  local function inModern(o) return D.isClassicView(o:origin()) ~= true end
-  ov:addCustomButton({
-    label = "Switch to classic view",
-    hotkey = "Alt+V",
-    when = inModern,
-    onActivate = function() host.input.send("F10") end,
-  })
-  ov:addCustomButton({
-    label = "Switch to play view",
-    hotkey = "Alt+V",
-    when = inClassic,
-    onActivate = function() host.input.send("F10") end,
-  })
+  -- (Kontakt 8's own "Play View" header button turns the modern view ON; it never toggles,
+  -- which is why there was no way back to the classic one without this.)
+  if cell.hasViews then
+    ov:addCustomButton({
+      label = "Switch to classic view",
+      hotkey = "Alt+V",
+      when = cell.inModern,
+      onActivate = function() host.input.send("F10") end,
+    })
+    ov:addCustomButton({
+      label = "Switch to play view",
+      hotkey = "Alt+V",
+      when = cell.inClassic,
+      onActivate = function() host.input.send("F10") end,
+    })
+  end
   -- The classic view's own arrows, offered only while that view is up. Their coordinates
   -- are right — verified against a calibration shot of the classic header — but in the
   -- modern view the same points fall inside the loaded library's UI, where one of them sat
   -- on Cinematic Studio Strings' "Sustain": pressing Ctrl+P changed the articulation
   -- instead of the instrument. ReaHotkey gates these the same way, through a UIA check we
   -- cannot make embedded; the view probe (a pixel in Kontakt's own chrome) stands in.
-  ov:group(inClassic, function(ov)
+  ov:group(cell.inClassic, function(ov)
     for _, h in ipairs(geo.ARROWS) do
       ov:addHotspotButton({
         label = h.label,

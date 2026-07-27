@@ -40,10 +40,15 @@ local HOSTS = O.hosts(daw.all, kk and kk.standaloneWindow)
 
 -- A bare Kontakt of this version, with no Komplete Kontrol wrapping it. The `not isKK`
 -- matters: a KK container reports the nested "Kontakt N" name in its own subtree, so an
--- identity check alone would match KK too.
+-- identity check alone would match KK too. And `not inOwnDialog`: one of Kontakt's own
+-- dialogs is a plugin host by our REAPER criteria, and the Qt window that draws it passes
+-- both the class test and the identity test — see detect.inOwnDialog for what that cost.
 local function bareOfVersion(vIdx)
   return function(c)
-    return not D.isKK(c) and D.variantIndex(c) == vIdx and not D.kkPresent()
+    return not D.isKK(c)
+      and not D.inOwnDialog()
+      and D.variantIndex(c) == vIdx
+      and not D.kkPresent()
   end
 end
 
@@ -52,7 +57,7 @@ end
 -- through the dynamic frame below.
 local function kkHostingVersion(vIdx)
   return function(c)
-    if not D.isKK(c) then return false end
+    if not D.isKK(c) or D.inOwnDialog() then return false end
     local kc = D.findNestedKontakt(c)
     return kc ~= nil and D.variantIndex(kc) == vIdx
   end
@@ -79,7 +84,24 @@ local CELLS = {}
 for vIdx, v in ipairs(D.VARIANTS) do
   local G = geo.GEOMETRY[v.name]
   local ox, oy = v.offset[1], v.offset[2]
-  local common = { version = v.name, geometry = G, uiaFileMenu = geo.UIA_FILE_MENU[v.name] }
+  -- Kontakt 8 has two views and keeps the instrument / multi / snapshot controls in the
+  -- CLASSIC one, so those are gated on a live probe. Kontakt 7 has no such modes at all —
+  -- its header IS that layout, always — so probing there asks a question with no answer,
+  -- and did: the probe reads a pixel of Kontakt 8's top bar, Kontakt 7's is a quite
+  -- different one, it came back "not classic", and every one of those controls went
+  -- silently missing. Which version this is was settled when the window opened, so this
+  -- belongs to the CELL, and only the K8 cells carry a predicate at all.
+  local hasViews = v.name == "Kontakt 8"
+  local common = {
+    version = v.name,
+    geometry = G,
+    uiaFileMenu = geo.UIA_FILE_MENU[v.name],
+    hasViews = hasViews,
+    inClassic = hasViews and function(o) return D.isClassicView(o:origin()) == true end
+      or function() return true end,
+    inModern = hasViews and function(o) return D.isClassicView(o:origin()) ~= true end
+      or function() return false end,
+  }
 
   CELLS[#CELLS + 1] = setmetatable({
     key = v.name .. " in a DAW",

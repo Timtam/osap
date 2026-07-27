@@ -108,14 +108,48 @@ local function findNestedKontakt(container)
   return nil -- ambiguous: don't guess (caller falls back, uncached)
 end
 
+-- ── Kontakt's own dialogs ────────────────────────────────────────────────────
+-- When Kontakt runs natively in REAPER, its dialogs are TOP-LEVEL windows of the HOST
+-- process. Measured live with the calibrator: "Content Missing" is a `#32770` owned by
+-- reaper.exe, containing an NIChildWindow frame and, at the identical rect, the Qt window
+-- that draws it — whose own accessible element is named "Kontakt 7", type Window.
+--
+-- Every gate we have waves that through. Our REAPER host matcher takes any `#32770` of
+-- that process as a plugin host (REAPER's FX window is one), so the dialog counts as a
+-- host window; its Qt child matches the plugin's window class, because Kontakt draws both
+-- with the same Qt build; and `variantIndex` finds "Kontakt 7" without descending a single
+-- level, because the dialog IS Kontakt. attachEmbedded takes the first candidate that
+-- passes, so the header overlay attached to the dialog and measured its whole geometry
+-- against a 600x440 rectangle: the instrument arrows landed in the empty file list, and
+-- the snapshot probe read dialog background and reported "Snapshots not available".
+--
+-- So it is asked at the WINDOW level, by title, which is where the answer actually lives —
+-- and which is what ReaHotkey does for this same case (Kontakt7.ahk:163 gates its dialog
+-- handler on `WinGetTitle("A") = "content Missing"`). Cheap: no UIA, no screen.
+local DIALOG_TITLES = { "^Content Missing" }
+local function inOwnDialog()
+  local a = host.window.active()
+  if not (a and a.title) then return false end
+  for _, p in ipairs(DIALOG_TITLES) do
+    if string.match(a.title, p) then return true end
+  end
+  return false
+end
+
 -- Is this control the container a HOST puts the plugin in, rather than something in its
 -- own right? Komplete Kontrol hosts its plugin inside an `NIChildWindow` — the same window
 -- class Kontakt's "Content Missing" dialog uses — so that class alone cannot tell the
 -- dialog from an ordinary KK session. Observed live: KK's plugin container and the nested
 -- Kontakt control have IDENTICAL bounds (both (448,350) 633×418), because one is simply
--- the frame around the other. A real dialog is a separate window and does not coincide
--- with the plugin like that. (A DAW does not hit this at all: REAPER's container is a
--- `reaperPluginHostWrapProc`, so no NIChildWindow exists there in normal use.)
+-- the frame around the other.
+--
+-- That test has a blind spot, found the hard way: Kontakt's own dialog frame ALSO holds a
+-- Qt window at exactly its own rect (both (660,307) 600×440 live), so the dialog looks
+-- like a plugin container and the Content Missing overlay REJECTED the very dialog it
+-- exists for — which is how the header overlay came to be the one active over it. Callers
+-- must therefore settle `inOwnDialog` FIRST; this answers only the question it can.
+-- (A DAW does not hit this at all: REAPER's container is a `reaperPluginHostWrapProc`,
+-- so no NIChildWindow exists there in normal use.)
 local function isPluginHostContainer(c)
   local kc = findNestedKontakt()
   local a, b = c and c.bounds, kc and kc.bounds
@@ -220,4 +254,5 @@ return {
   constantFrame = constantFrame,
   kontaktPaneName = kontaktPaneName,
   isClassicView = isClassicView,
+  inOwnDialog = inOwnDialog,
 }
