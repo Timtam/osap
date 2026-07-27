@@ -9,8 +9,6 @@
 local GEOMETRY = {
   ["Kontakt 7"] = {
     fileMenu = { 175, 19 }, -- the "FILE" button
-    prevMulti = { 704, 53 },
-    nextMulti = { 722, 53 },
     library = { 231, 19 },
     viewMenu = { 288, 19 },
     -- ReaHotkey uses 815 with the library browser open and 440 with it closed, telling
@@ -20,38 +18,86 @@ local GEOMETRY = {
   },
   ["Kontakt 8"] = {
     fileMenu = { 86, 19 }, -- the KONTAKT wordmark
-    prevMulti = { 722, 53 },
-    nextMulti = { 742, 53 },
   },
 }
 
--- The instrument and multi arrows of the CLASSIC view's header (ReaHotkey's
--- MoveToPluginInstrumentButton / MultiButton). Verified against a calibration shot of the
--- live 8.11 classic header: the instrument pair sits at (658, 89) and (677, 89) and the
--- multi pair at (725, 54) and (744, 54) — ReaHotkey's numbers, to within a pixel or two.
+-- ── The instrument header ────────────────────────────────────────────────────
+-- The two versions lay this out DIFFERENTLY, which cost a long detour: ReaHotkey keeps a
+-- separate copy of these numbers per version, we shared one set, and Kontakt 8's numbers
+-- were the ones that survived. Measured against a calibration shot of each:
 --
--- They exist ONLY in the classic view. In the modern one the same coordinates fall inside
--- whatever library is loaded (one landed on Cinematic Studio Strings' "Sustain"), so they
--- are gated on the view rather than offered unconditionally — see header.luau.
+--   Kontakt 8, classic view — three stacked rows
+--     y 53   Multi Rack: the multi name and its arrows, at a fixed offset from the LEFT
+--     y 87   instrument name, its arrows, the camera, the info button
+--     y 118  the snapshot bar, once the camera has revealed it
 --
--- The snapshot trio needed one more step to verify: its bar is not in the header until the
--- camera button reveals it. With the bar up, ReaHotkey's numbers are right again — the name
--- field and its dropdown begin where -588 lands, and the arrows measured at (607, 117) and
--- (625, 117) against its -405 / -389 at y+118.
-local ARROWS = {
-  { label = "Previous instrument", at = { 352, 87 }, fromRight = true, hotkey = "Ctrl+P" },
-  { label = "Next instrument", at = { 332, 87 }, fromRight = true, hotkey = "Ctrl+N" },
-  { label = "Previous multi", key = "prevMulti", hotkey = "Ctrl+Shift+P" },
-  { label = "Next multi", key = "nextMulti", hotkey = "Ctrl+Shift+N" },
-}
-
--- The snapshot bar's own controls. The bar is not in the header until Kontakt's camera
--- button reveals it, so each of these reveals it first and then clicks — see
--- actions.snapshotAction, which also knows where that camera is.
-local SNAPSHOTS = {
-  { label = "Snapshot menu", at = { 588, 118 }, fromRight = true, hotkey = "Alt+M" },
-  { label = "Previous snapshot", at = { 405, 118 }, fromRight = true, hotkey = "Alt+P" },
-  { label = "Next snapshot", at = { 389, 118 }, fromRight = true, hotkey = "Alt+N" },
+--   Kontakt 7, rack view — two rows, and no multi row at all
+--     y 19   the top bar: FILE LIBRARY VIEW [multi ▲▼] … SHOP
+--     y 61   instrument name, its arrows, the camera, the info button
+--
+-- So Kontakt 8's y 87 lands two rows low in Kontakt 7 (on "Max: 128" / "Memory"), and its
+-- multi coordinate — 704 px from the LEFT — falls outside a Kontakt 7 window that is only
+-- 649 px wide. Both were live: the arrows changed nothing and the camera probe read the
+-- wrong row, which is what "Snapshots not available" was really reporting.
+--
+-- `arrows` and `snapshots` are the control rows; `camera` is the button that reveals the
+-- snapshot bar (actions.snapshotAction presses it and re-checks). A missing entry means
+-- "not measured for this version" and the controls are simply not offered — see header.
+-- `camera.litAbove` is the brightness at which that button counts as LIT, i.e. the bar is
+-- already open. It has to be per-version too: Kontakt 8 draws the camera dark on dark
+-- chrome and white when active (measured 18–85 against 255, so 150 sits comfortably
+-- between), while Kontakt 7 draws it as a light-grey BUTTON — 169 closed, 255 open. Kontakt
+-- 8's threshold read Kontakt 7's resting state as "already open", which would have skipped
+-- the reveal and clicked the snapshot targets against the row that occupies that space
+-- while the bar is closed: "Voices" and "Max".
+local HEADER = {
+  ["Kontakt 8"] = {
+    camera = { fromRight = 305, y = 87, litAbove = 150 },
+    arrows = {
+      { label = "Previous instrument", fromRight = 352, y = 87, hotkey = "Ctrl+P" },
+      { label = "Next instrument", fromRight = 332, y = 87, hotkey = "Ctrl+N" },
+      { label = "Previous multi", at = { 722, 53 }, hotkey = "Ctrl+Shift+P" },
+      { label = "Next multi", at = { 742, 53 }, hotkey = "Ctrl+Shift+N" },
+    },
+    -- The bar is not in the header until the camera reveals it. With it up, ReaHotkey's
+    -- numbers are right: the name field and its dropdown begin where 588 lands, and the
+    -- arrows measured at (607, 117) and (625, 117) against 405 / 389 at y 118.
+    snapshots = {
+      { label = "Snapshot menu", fromRight = 588, y = 118, hotkey = "Alt+M" },
+      { label = "Previous snapshot", fromRight = 405, y = 118, hotkey = "Alt+P" },
+      { label = "Next snapshot", fromRight = 389, y = 118, hotkey = "Alt+N" },
+    },
+  },
+  ["Kontakt 7"] = {
+    -- Measured from calibration shots 649 px wide: the arrow glyphs centre on x 312 and
+    -- 331, the camera on x 359, all on row y 58–64; with the bar open, its dropdown
+    -- triangle is at x 70 and its arrows at x 260 and 279, on row y 85–91.
+    camera = { fromRight = 290, y = 61, litAbove = 212 },
+    arrows = {
+      { label = "Previous instrument", fromRight = 337, y = 61, hotkey = "Ctrl+P" },
+      { label = "Next instrument", fromRight = 318, y = 61, hotkey = "Ctrl+N" },
+      -- No multi pair. ReaHotkey's (704, 53) points past the right edge of this window,
+      -- and what it was measured against is not in the shot — the multi selector here is
+      -- the ▲▼ in the TOP bar (around x 324, y 14 and 25), which is a different control in
+      -- a different place. Switching multi unloads what is loaded, so this stays absent
+      -- until it is measured rather than inferred: a control that fires something else is
+      -- worse than one that is missing.
+    },
+    -- Everything here is measured from the RIGHT even though the dropdown sits at the far
+    -- left of the row, because opening Kontakt's library browser widens the window to the
+    -- LEFT: the rack keeps its size and its distance from the right edge, so every
+    -- right-anchored number survives that and every absolute one does not. (It is what
+    -- moves ReaHotkey's SHOP coordinate from 440 to 815.) The dropdown lands at 579 here
+    -- against Kontakt 8's 588 — the two layouts differ by row, not by column.
+    snapshots = {
+      { label = "Snapshot menu", fromRight = 579, y = 88, hotkey = "Alt+M" },
+      { label = "Previous snapshot", fromRight = 389, y = 88, hotkey = "Alt+P" },
+      { label = "Next snapshot", fromRight = 370, y = 88, hotkey = "Alt+N" },
+      -- Deliberately NOT offered, and the reason these were measured rather than derived:
+      -- the same row carries save (fromRight 344) and delete (321). A guess extrapolated
+      -- from Kontakt 8 put "Next snapshot" at 374 — 30 px from overwriting a snapshot.
+    },
+  },
 }
 
 -- Single-click header controls Kontakt 7 has and Kontakt 8 does not (its chrome moved them
@@ -67,8 +113,7 @@ local UIA_FILE_MENU = { ["Kontakt 7"] = "FILE", ["Kontakt 8"] = "Kontakt File Me
 
 return {
   GEOMETRY = GEOMETRY,
-  ARROWS = ARROWS,
-  SNAPSHOTS = SNAPSHOTS,
+  HEADER = HEADER,
   K7_CONTROLS = K7_CONTROLS,
   UIA_FILE_MENU = UIA_FILE_MENU,
 }

@@ -84,22 +84,28 @@ local CELLS = {}
 for vIdx, v in ipairs(D.VARIANTS) do
   local G = geo.GEOMETRY[v.name]
   local ox, oy = v.offset[1], v.offset[2]
-  -- Kontakt 8 has two views and keeps the instrument / multi / snapshot controls in the
-  -- CLASSIC one, so those are gated on a live probe. Kontakt 7 has no such modes at all —
-  -- its header IS that layout, always — so probing there asks a question with no answer,
-  -- and did: the probe reads a pixel of Kontakt 8's top bar, Kontakt 7's is a quite
-  -- different one, it came back "not classic", and every one of those controls went
-  -- silently missing. Which version this is was settled when the window opened, so this
-  -- belongs to the CELL, and only the K8 cells carry a predicate at all.
-  local hasViews = v.name == "Kontakt 8"
+  -- BOTH versions keep the instrument / multi / snapshot controls in one view only, and
+  -- each answers "which view am I in?" differently — so the question belongs to the cell,
+  -- which knows its version from the moment the window opened.
+  --
+  --   Kontakt 8  modern ↔ classic, read from a pixel of its own top bar. It also offers a
+  --              toggle (F10), which is the only way back from the modern view without
+  --              reading a menu that carries no accessibility information.
+  --   Kontakt 7  single ↔ rack, read from UIA (detect.isRackView). No toggle: F10 is a
+  --              Kontakt 8 command, and offering it here pressed a key that does nothing.
+  --
+  -- Sharing Kontakt 8's pixel probe across both is what hid every one of Kontakt 7's
+  -- header controls: it measures a bar Kontakt 7 does not have.
+  local isK8 = v.name == "Kontakt 8"
   local common = {
     version = v.name,
     geometry = G,
+    header = geo.HEADER[v.name],
     uiaFileMenu = geo.UIA_FILE_MENU[v.name],
-    hasViews = hasViews,
-    inClassic = hasViews and function(o) return D.isClassicView(o:origin()) == true end
-      or function() return true end,
-    inModern = hasViews and function(o) return D.isClassicView(o:origin()) ~= true end
+    hasViewToggle = isK8,
+    inClassic = isK8 and function(o) return D.isClassicView(o:origin()) == true end
+      or function() return D.isRackView() end,
+    inModern = isK8 and function(o) return D.isClassicView(o:origin()) ~= true end
       or function() return false end,
   }
 

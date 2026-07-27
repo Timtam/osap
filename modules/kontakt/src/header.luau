@@ -49,7 +49,7 @@ local function addPluginHeader(ov, cell)
   --
   -- (Kontakt 8's own "Play View" header button turns the modern view ON; it never toggles,
   -- which is why there was no way back to the classic one without this.)
-  if cell.hasViews then
+  if cell.hasViewToggle then
     ov:addCustomButton({
       label = "Switch to classic view",
       hotkey = "Alt+V",
@@ -70,23 +70,27 @@ local function addPluginHeader(ov, cell)
   -- instead of the instrument. ReaHotkey gates these the same way, through a UIA check we
   -- cannot make embedded; the view probe (a pixel in Kontakt's own chrome) stands in.
   ov:group(cell.inClassic, function(ov)
-    for _, h in ipairs(geo.ARROWS) do
+    for _, h in ipairs(cell.header.arrows) do
       ov:addHotspotButton({
         label = h.label,
-        at = h.at or cell.geometry[h.key],
-        fromRight = h.fromRight,
+        at = h.at or { h.fromRight, h.y },
+        fromRight = h.fromRight ~= nil,
         rawOrigin = true,
         hotkey = h.hotkey,
       })
     end
     -- The snapshot controls reveal the bar themselves when they need to (see
-    -- actions.snapshotAction), so they are offered whenever the classic view is up rather
-    -- than appearing and disappearing with it.
-    for _, h in ipairs(geo.SNAPSHOTS) do
+    -- actions.snapshotAction), so they are offered whenever the view is up rather than
+    -- appearing and disappearing with it.
+    --
+    -- A version whose bar has not been measured simply does not offer them: that row
+    -- carries a save and a delete icon, so an approximate coordinate there does not miss
+    -- harmlessly, it overwrites or deletes one of the user's snapshots.
+    for _, h in ipairs(cell.header.snapshots or {}) do
       ov:addCustomButton({
         label = h.label,
         hotkey = h.hotkey,
-        onActivate = A.snapshotAction(h.at[1], h.at[2]),
+        onActivate = A.snapshotAction(cell, h.fromRight, h.y),
       })
     end
   end)

@@ -527,6 +527,38 @@ local function hotspotPoint(self, c)
   return ox + x, oy + at[2]
 end
 
+-- A hotspot's point has to land inside the origin it was measured against. Outside it,
+-- there are only other windows' pixels — the DAW's own chrome, another plugin, the
+-- desktop — and a click there does something arbitrary in an application the user was not
+-- aiming at and cannot see. Live: Kontakt 7's multi arrows carried Kontakt 8's
+-- coordinates, 704 px from the left of a window 649 px wide, so both fired past the
+-- plugin's right edge into REAPER.
+--
+-- This is the one coordinate error that pressing the key again cannot undo, so it refuses
+-- and says so rather than clicking. The refusal names the control: one that is present and
+-- silently inert is the harder thing to make sense of without seeing the screen.
+local function pointInOrigin(self, x, y)
+  local o = self:origin()
+  if not (o and o.client and o.bounds) then return false end
+  return x >= o.client.x
+    and x < o.client.x + o.bounds.w
+    and y >= o.client.y
+    and y < o.client.y + o.bounds.h
+end
+
+local function refuseOutside(self, c, x, y)
+  if pointInOrigin(self, x, y) then return false end
+  local o = self:origin()
+  host.log.info(string.format(
+    "%s: '%s' resolves to (%d,%d), outside its origin (%d,%d) %dx%d — not clicking",
+    tostring(self.label), tostring(c.label), x, y,
+    o and o.client and o.client.x or 0, o and o.client and o.client.y or 0,
+    o and o.bounds and o.bounds.w or 0, o and o.bounds and o.bounds.h or 0
+  ))
+  host.speech.output((c.label or "Control") .. " is not where it should be", { interrupt = true })
+  return true
+end
+
 -- On/off state of a HotspotToggle: read the single pixel at its click point and return
 -- whichever reference colour it is closer to (Manhattan distance) — ReaHotkey's pixel
 -- toggle. Cheap (one screen touch). nil if unconfigured or the pixel can't be read.
@@ -701,6 +733,7 @@ function Overlay:activate(index)
       if not p then return end
       if not self.active or self:hwnd() ~= pinned then return end
       local ox, oy = originOf(self, c)
+      if refuseOutside(self, c, ox + p[1], oy + p[2]) then return end
       host.input.click(ox + p[1], oy + p[2])
       -- No trailing delay after the last click: there is nothing left to settle for.
       if c.points[k + 1] then host.timer.after(settle, function() step(k + 1) end) end
@@ -709,6 +742,7 @@ function Overlay:activate(index)
   elseif c.kind == "hotspot" and c.at then
     local px, py = hotspotPoint(self, c)
     if not px then return end
+    if refuseOutside(self, c, px, py) then return end
     host.input.click(px, py)
     host.speech.output((c.label or "") .. ", activated", { interrupt = true })
   elseif c.kind == "custom" and c.onActivate then

@@ -235,33 +235,39 @@ end
 -- camera, and it is taken again after pressing: if the bar still is not there, nothing is
 -- clicked and the user is told, instead of a click landing on the "Output / Voices" row
 -- that occupies the same place when the bar is hidden.
-local CAMERA_FROM_RIGHT, CAMERA_Y = 305, 87
-
-local function snapshotBarUp(ctrl)
-  local p = host.screen.pixel(
-    ctrl.client.x + ctrl.bounds.w - CAMERA_FROM_RIGHT,
-    ctrl.client.y + CAMERA_Y
-  )
-  return p ~= nil and (p.r + p.g + p.b) / 3 > 150
+-- WHERE that camera is differs per version — the whole instrument header sits at a
+-- different height in Kontakt 7 than in Kontakt 8 — so it comes from the cell. Reading
+-- Kontakt 8's row on a Kontakt 7 found ordinary dark chrome, concluded the bar had not
+-- appeared, and told the user "Snapshots not available" on an instrument that has them.
+local function cameraPoint(cell, ctrl)
+  local cam = cell.header and cell.header.camera
+  if not cam then return nil end
+  return ctrl.client.x + ctrl.bounds.w - cam.fromRight, ctrl.client.y + cam.y
 end
 
-local function snapshotAction(fromRight, y)
+local function snapshotBarUp(cell, ctrl)
+  local x, y = cameraPoint(cell, ctrl)
+  if not x then return false end
+  local p = host.screen.pixel(x, y)
+  return p ~= nil and (p.r + p.g + p.b) / 3 > cell.header.camera.litAbove
+end
+
+local function snapshotAction(cell, fromRight, y)
   return function(o)
     local ctrl = o:origin()
     if not (ctrl and ctrl.client and ctrl.bounds) then return end
     local function clickTarget()
       host.input.click(ctrl.client.x + ctrl.bounds.w - fromRight, ctrl.client.y + y)
     end
-    if snapshotBarUp(ctrl) then
+    if snapshotBarUp(cell, ctrl) then
       clickTarget()
       return
     end
-    host.input.click(
-      ctrl.client.x + ctrl.bounds.w - CAMERA_FROM_RIGHT,
-      ctrl.client.y + CAMERA_Y
-    )
+    local cx, cy = cameraPoint(cell, ctrl)
+    if not cx then return end
+    host.input.click(cx, cy)
     host.timer.after(250, function()
-      if snapshotBarUp(ctrl) then
+      if snapshotBarUp(cell, ctrl) then
         clickTarget()
       else
         host.log.info("Kontakt: snapshot bar did not appear — not clicking")

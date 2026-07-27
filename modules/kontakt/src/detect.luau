@@ -238,6 +238,29 @@ local function kontaktPaneName(hwnd)
   return i and VARIANTS[i].name or nil
 end
 
+-- Kontakt 7's equivalent question — is the RACK on screen, rather than a single
+-- instrument? Its arrows, multi and snapshot controls exist only in the rack, exactly as
+-- Kontakt 8's do only in the classic view, and ReaHotkey gates them the same way
+-- (Kontakt7.ahk:76-100, `If This.GetPluginView() = "rack"`).
+--
+-- Unlike Kontakt 8 this needs no pixel: Kontakt 7 exposes its menu bar as real UIA
+-- buttons — a dump of a live embedded instance lists FILE, LIBRARY, VIEW, SHOP — and
+-- ReaHotkey reads the view off exactly that (GetView: find the SHOP button, take its
+-- PREVIOUS sibling, "VIEW" means rack). We ask the shorter form of the same question,
+-- because the raw walker can search by name but not step siblings by name.
+--
+-- Fails OPEN, and that is deliberate: a wrong "no" here HIDES the controls, which is the
+-- failure the user actually hit — all seven silently gone. So "the plugin's UIA is not
+-- answering at all" (no Kontakt pane resolves) counts as rack, and only a plugin that
+-- answers but has no VIEW button counts as single-instrument view.
+local function isRackView()
+  local fg = host.window.active()
+  if not (fg and fg.id) then return true end
+  local via = kontaktPaneName(fg.id)
+  if not via then return true end -- cannot tell: keep the controls
+  return host.uia.pluginLocate(fg.id, via, "VIEW", U.Button) ~= nil
+end
+
 return {
   VARIANTS = VARIANTS,
   VARIANT_NAMES = VARIANT_NAMES,
@@ -254,5 +277,6 @@ return {
   constantFrame = constantFrame,
   kontaktPaneName = kontaktPaneName,
   isClassicView = isClassicView,
+  isRackView = isRackView,
   inOwnDialog = inOwnDialog,
 }
