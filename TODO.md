@@ -106,10 +106,15 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
   and the wordmark is then located in that shot with ReaHotkey's own `Product.png` template,
   which gives every offset without a guess and without shipping a control that clicks
   somewhere unverified.
-- [ ] **Impact Soundworks / Juggernaut** — needs no new mechanism: two landmark variants for
-      one product (BASS and DRUMS & FX, `Bass.png` / `DrumsAndFX.png`), one OCR read-out
-      each. The right first vendor now, and the one that proves the row format on a shape
-      other than a mixer.
+- [x] **Impact Soundworks / Juggernaut** ✓ (2026-07-27) — two OVERLAYS, not two variants of
+      one: a bass synth with a step sequencer and an eight-channel drum mixer, sharing a
+      name. ReaHotkey identifies them by the loaded patch's name as KONTAKT prints it, which
+      detects fine and anchors nothing; the library's own artwork says the same thing inside
+      its own panel, so the upper word of the wordmark ("BASS" / "DRUMS/FX") is the landmark,
+      each verified to find nothing in the other patch's shot. The preset field's OCR region
+      stops short of its up/down arrows on purpose — an OCRButton CLICKS what it reads, and a
+      click on an arrow would step the preset instead of opening the browser.
+      **Impact Soundworks complete.**
 - [ ] **Soundiron (3)** — one image toggle ("Reverb") per product, but each is preceded by
       `ClickFXRack` (`Soundiron.ahk:63-83`): if the FX-rack tab's pixel is still the closed
       colour, click it and wait 250 ms. So the control needs a `prepare` hook that runs
