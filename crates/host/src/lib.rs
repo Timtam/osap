@@ -699,6 +699,17 @@ impl Shared {
         self.arbiter.borrow().get(slot).and_then(|s| s.active)
     }
 
+    /// The SPECIFICITY of the slot's active claim, if any. An overlay uses this to find
+    /// out whether something at least as specific as itself already owns the slot — which,
+    /// where only one claimant can be right at a time (one sample library loaded in one
+    /// plugin), makes its own detection work provably pointless until that changes.
+    fn arbiter_winner_specificity(&self, slot: &str) -> Option<i64> {
+        let map = self.arbiter.borrow();
+        let s = map.get(slot)?;
+        let active = s.active?;
+        s.claims.iter().find(|c| c.handle == active).map(|c| c.specificity)
+    }
+
     /// Elects the winner of `slot` — the matching claim of highest specificity
     /// owned by an enabled module — and, if it changed, deactivates the previous
     /// winner then activates the new one.
@@ -3098,6 +3109,15 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     arbiter.set(
         "winner",
         lua.create_function(move |_, slot: String| Ok(sh.arbiter_winner(&slot)))?,
+    )?;
+    // host.arbiter.winnerSpecificity(slot) -> number | nil — the rank of whoever currently
+    // owns the slot. Lets a claimant skip work it cannot use: with twelve sample-library
+    // overlays competing for one plugin, and only one library ever loaded, eleven of their
+    // twelve landmark searches are known-pointless the moment any of them wins.
+    let sh = shared.clone();
+    arbiter.set(
+        "winnerSpecificity",
+        lua.create_function(move |_, slot: String| Ok(sh.arbiter_winner_specificity(&slot)))?,
     )?;
     // host.arbiter.participants(slot) -> { {module, specificity, matching, active}, … }
     // A DIAGNOSTIC, and the only way to catch the failure this design is most prone to:

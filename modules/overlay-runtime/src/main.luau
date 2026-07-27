@@ -359,6 +359,22 @@ function Overlay:landmark(image, opts)
       lastHit, matched = nil, false
       return false
     end
+    -- Don't hunt for a landmark that cannot be relevant. Only one sample library is loaded
+    -- in a plugin at a time, so once a claimant of at least this overlay's rank owns the
+    -- slot, this search cannot change anything until that one lets go — and it WILL let go,
+    -- because the winner keeps checking its own landmark. Measured before adding this: a
+    -- single full-region match ran to 12 s, and twelve libraries polled every 500 ms, so
+    -- eleven of every twelve searches were work nobody could use.
+    --
+    -- Rank matters: a LESS specific winner (Kontakt's own header while no library is
+    -- recognised) must not silence a library overlay, or it could never take over.
+    if self._slot and self._claim and host.arbiter.winnerSpecificity then
+      local owner = host.arbiter.winner(self._slot)
+      local rank = host.arbiter.winnerSpecificity(self._slot)
+      if owner and owner ~= self._claim and rank and rank >= (self._specificity or 0) then
+        return matched
+      end
+    end
     if not pending then
       pending = true
       local sticky = lastHit ~= nil
