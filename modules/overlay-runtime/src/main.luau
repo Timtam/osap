@@ -1788,6 +1788,15 @@ end
 -- region-based control reports its centre instead).
 local function calibrationPoint(self, c)
   if c.at then return hotspotPoint(self, c) end
+  -- A SLIDER's region is the whole track it searches, so its centre is a point the control
+  -- has nothing to do with — it marked bare track and read the background colour, which
+  -- reads in the log exactly like a mis-measured control. Mark the thumb where it actually
+  -- is; fall through to the region centre only when it cannot be found, which is itself
+  -- the useful thing to see.
+  if c.kind == "slider" then
+    local thumb = sliderThumb(self, c)
+    if thumb then return thumb.cx, thumb.cy end
+  end
   if c.region then
     local ox, oy = originOf(self, c)
     return ox + math.floor((c.region[1] + c.region[3]) / 2),
