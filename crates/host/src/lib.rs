@@ -996,10 +996,13 @@ fn collect_one_code_dep(
     if !seen.insert(dep_id.to_string()) {
         return Ok(()); // already visited
     }
-    let dir = match find_sibling_module(parent, dep_id) {
+    let dir = match find_module_dir(parent, dep_id) {
         Some(d) => d,
         None if optional => return Ok(()), // absent optional dependency — skip
-        None => anyhow::bail!("dependency '{dep_id}' not found in {}", parent.display()),
+        None => anyhow::bail!(
+            "dependency '{dep_id}' not found beside {} or in a sibling modules/ dir",
+            parent.display()
+        ),
     };
     let lm = LoadedModule::load(&dir)?;
     if !lm.manifest.code_module {
@@ -1274,9 +1277,9 @@ fn load_module(
         for spec in module.manifest.dependencies.clone() {
             let dep = module_manifest::dep_id(&spec);
             if !modules.borrow().iter().any(|m| m.id == dep) {
-                let dep_dir = find_sibling_module(&parent, dep).ok_or_else(|| {
+                let dep_dir = find_module_dir(&parent, dep).ok_or_else(|| {
                     anyhow::anyhow!(
-                        "module '{id}' depends on '{dep}', not found in {}",
+                        "module '{id}' depends on '{dep}', not found beside {}                          or in a sibling modules/ dir",
                         parent.display()
                     )
                 })?;
@@ -1301,7 +1304,7 @@ fn load_module(
         for spec in module.manifest.optional_dependencies.clone() {
             let dep = module_manifest::dep_id(&spec);
             if !modules.borrow().iter().any(|m| m.id == dep) {
-                if let Some(dep_dir) = find_sibling_module(&parent, dep) {
+                if let Some(dep_dir) = find_module_dir(&parent, dep) {
                     load_module(shared, modules, disabled_ids, loading, &dep_dir)?;
                 }
             }
@@ -3390,20 +3393,38 @@ fn find_template_scaled(
 
 /// Converts a native window snapshot into the Lua table modules see:
 /// `{ id, title, class, app = { name, exe, pid }, bounds = { x, y, w, h } }`.
-/// Finds a sibling module directory (under `parent`) whose manifest id matches —
-/// for auto-discovering declared dependencies.
-fn find_sibling_module(parent: &Path, id: &str) -> Option<PathBuf> {
-    for entry in std::fs::read_dir(parent).ok()?.flatten() {
-        let p = entry.path();
-        if p.is_dir() {
-            if let Ok(m) = LoadedModule::load_dir(&p) {
-                if m.manifest.id == id {
-                    return Some(p);
+/// Finds the module directory whose manifest id matches — for auto-discovering
+/// declared dependencies. Looks BESIDE the module first, then in a `modules`
+/// directory next to that.
+///
+/// The first is the installed layout, where everything sits side by side in the
+/// portable `modules/` dir. The second is for a source tree that separates its
+/// modules from its examples: `examples/overlay-attach` depends on the overlay
+/// runtime, which lives in `modules/` and is therefore not its sibling. Without
+/// the fallback, splitting the two would break exactly the examples that show
+/// how a dependency is used.
+fn find_module_dir(parent: &Path, id: &str) -> Option<PathBuf> {
+    fn scan(dir: &Path, id: &str) -> Option<PathBuf> {
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                if let Ok(m) = LoadedModule::load_dir(&p) {
+                    if m.manifest.id == id {
+                        return Some(p);
+                    }
                 }
             }
         }
+        None
     }
-    None
+    if let Some(found) = scan(parent, id) {
+        return Some(found);
+    }
+    let beside = parent.parent()?.join("modules");
+    if beside == parent {
+        return None; // already scanned
+    }
+    scan(&beside, id)
 }
 
 fn control_to_table(lua: &Lua, c: &ControlInfo) -> mlua::Result<Table> {

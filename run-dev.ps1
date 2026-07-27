@@ -1,0 +1,53 @@
+# Runs the platform with every REAL module — everything under modules/, which is the whole
+# point of keeping the API demos in examples/ and the dev tools in tools/. Loading them by
+# hand meant whichever module was not on the current command line went untested; sforzando
+# sat unloaded through an entire refactor that way.
+#
+#   .\run-dev.ps1                 build if needed, then run every module in modules/
+#   .\run-dev.ps1 -Calibrate      the same, with the calibration keys armed
+#   .\run-dev.ps1 -Build          force a rebuild first
+#   .\run-dev.ps1 -Only kontakt,cinematic-studio-strings
+#                                 just those, by directory name
+#   .\run-dev.ps1 -Examples       run the examples/ set instead
+[CmdletBinding()]
+param(
+  [switch]$Calibrate,
+  [switch]$Build,
+  [switch]$Examples,
+  [string[]]$Only
+)
+
+$ErrorActionPreference = "Stop"
+$root = $PSScriptRoot
+$exe = Join-Path $root "target\debug\automation-platform.exe"
+
+if ($Build -or -not (Test-Path $exe)) {
+  # wxDragon needs these; setting them here rather than expecting a configured shell.
+  if (-not $env:LIBCLANG_PATH) {
+    $llvm = "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\Llvm\x64\bin"
+    if (Test-Path $llvm) { $env:LIBCLANG_PATH = $llvm }
+  }
+  Push-Location $root
+  try { cargo build } finally { Pop-Location }
+  if ($LASTEXITCODE -ne 0) { throw "build failed" }
+}
+
+$srcDir = Join-Path $root ($Examples ? "examples" : "modules")
+$dirs = Get-ChildItem $srcDir -Directory |
+  Where-Object { Test-Path (Join-Path $_.FullName "module.toml") } |
+  Where-Object { -not $Only -or $Only -contains $_.Name } |
+  ForEach-Object { $_.FullName }
+
+if (-not $dirs) { throw "no modules found in $srcDir$(if ($Only) { " matching: $($Only -join ', ')" })" }
+
+# A module the app is already running would hold the log file and its own hotkeys.
+Get-Process -Name automation-platform -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Milliseconds 500
+
+if ($Calibrate) { $env:AUTOMATION_PLATFORM_CALIBRATE = "1" }
+else { Remove-Item Env:\AUTOMATION_PLATFORM_CALIBRATE -ErrorAction SilentlyContinue }
+
+Write-Host "Starting with $($dirs.Count) module(s) from $srcDir$(if ($Calibrate) { ' (calibrating)' }):"
+$dirs | ForEach-Object { Write-Host "  $(Split-Path $_ -Leaf)" }
+
+Start-Process -FilePath $exe -ArgumentList $dirs -WorkingDirectory $root

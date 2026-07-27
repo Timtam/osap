@@ -1,5 +1,5 @@
 //! Entry point. Without a subcommand, loads one or more module directories
-//! (default `modules/hello`) and runs them under the manager. The management
+//! (default `examples/hello`) and runs them under the manager. The management
 //! subcommands discover/install/update modules from GitHub (registry).
 
 use std::io::Write;
@@ -22,12 +22,14 @@ fn main() -> Result<()> {
             let dirs = if args.is_empty() {
                 // No args: run every installed module (portable modules dir next
                 // to the exe). Fall back to the dev example if nothing's installed.
+                // (The repo keeps its own modules/ for real ones, examples/ for the
+                // demos and tools/ for dev tools — see run-dev.ps1.)
                 let installed: Vec<String> = registry::installed()
                     .into_iter()
                     .map(|m| m.dir.to_string_lossy().into_owned())
                     .collect();
                 if installed.is_empty() {
-                    vec!["modules/hello".to_string()]
+                    vec!["examples/hello".to_string()]
                 } else {
                     installed
                 }
