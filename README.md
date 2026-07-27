@@ -37,7 +37,7 @@ A module can be loaded either as an unpacked directory (dev) or as a **`.zip` pa
   - `overlay-runtime` (`com.platform.overlay`) — the overlay framework itself, a **code module**: its code is evaluated inside each dependent's VM, so dependents get its functions and not just its data.
   - `daw-hosts` — a **library module**: shared DAW host-window matchers, imported via `host.require`. Modules declare `dependencies` in `module.toml` and those are auto-loaded first.
   - `kontakt`, `komplete-kontrol` — the ReaHotkey plugin overlays: one overlay per cell of {Kontakt 7, Kontakt 8} × {bare in a DAW, nested in Komplete Kontrol, standalone}.
-  - `cinematic-studio-strings` — a sample-library overlay built on `kontakt` by inheritance.
+  - `cinematic-studio-series` — a sample-library overlay built on `kontakt` by inheritance.
   - `sforzando` — the first real ReaHotkey port: a self-voicing OCR overlay over the standalone sforzando window.
 - `examples/` — the API demos, one per capability: `hello` (speak once), `hotkey`, `window`, `window-trigger`, `screen`, `ocr`, `input`, `sound`, `keys`, `settings`, `overlay-attach` (a context-bound overlay over Notepad). Kept out of `modules/` so that running everything in `modules/` means running the real thing.
 - `tools/inspect` — OCR window-inspector dev tool: **Ctrl+Alt+I** logs every recognized word with client-relative coordinates. Largely superseded for overlay work by the built-in calibrator (`AUTOMATION_PLATFORM_CALIBRATE=1`).

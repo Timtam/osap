@@ -140,7 +140,7 @@ The **module is almost nothing but content** — coordinates, regions, labels, h
 
 **(b) Then: ONE overlay end-to-end on Win AND macOS — simplest first:**
 1. **FabFilter** — *one* HotspotButton, no OCR/Custom/UIA. Validates the complete coordinate-compensation pipeline (AXFrame→click). The "Hello World" of the platform.
-2. **GTune** — OCR vertical slice: 2 OCR regions + Custom + 400-ms auto-report timer. Validates `host.ocr` (Vision) + `host.timer` + periodic capture (4 Hz → performance stress test).
+2. **GTune** — OCR vertical slice: a 400-ms auto-report timer over **one** region (`GTune.ahk:7`, `:40`), i.e. **2.5 captures + OCR per second**, not the 4 Hz stated in earlier drafts of this document. Validates `host.ocr` (Vision) + `host.timer` + periodic capture.
 3. **ZebraLegacy** — simplest u-he overlay: only Hotspot + 1 OCR, no Custom/Toggle/pixel color. Demonstrates "multiple plugins/one file."
 4. **Serum2** — the "rounded" MVP: Hotspot + Custom + OCR + host-specific detection (§5).
 
@@ -153,7 +153,8 @@ Once FabFilter + GTune run on both platforms, the platform is **proven**.
 - **Raum** (UIA detection, Qt6) — AX detection; Qt a11y behaves differently on macOS.
 - **Zampler** — largest Hotspot/OCR tree, fragile state logic (mouse wheel, click-then-OCR-reread, 3-tab state).
 - **Komplete Kontrol / Kontakt 7+8** — UIA+Hotspot+OCR+Graphical mixed, high content volume.
-- **Dubler 2 family** — very involved, deliberately deferred (NOT blocked): image-search/hardcoded-coordinate heavy, **absolute** screen coordinates, plus advanced audio routing via ASIO/BASSASIO (per the client also available for macOS — so not a hard blocker, but advanced) and `MSXML2` XML (trivially replaceable). High content effort → to the end.
+- **Dubler 2 family** — very involved, deliberately deferred (NOT blocked): image-search/hardcoded-coordinate heavy, plus advanced audio routing via ASIO/BASSASIO (per the client also available for macOS — so not a hard blocker, but advanced) and `MSXML2` XML (trivially replaceable). High content effort → to the end.
+  - **Correction:** an earlier version of this line said Dubler used **absolute** screen coordinates. It does not — `ReaHotkey.ahk:8-9` sets `CoordMode "Mouse", "Client"` and `CoordMode "Pixel", "Client"` globally, so every click, pixel read and image search in ReaHotkey is CLIENT-RELATIVE to the foreground window. That is the model `Overlay:attach` already provides, and this part of the port is therefore easier than assumed. What Dubler really needs is elsewhere: it **edits the application's own config files and restarts it** (profiles, `dublersettings.json`, `audiosettings.xml`), it drives BASSASIO through FFI including a real-time audio callback, and it builds native menus with checked/disabled items. It also cannot be verified without the Dubler microphone. Its **MIDI Capture VST** half (`Dubler2.ahk:460-542`) is the exception: ~80 lines needing only UIA identity, an image gate and a drag, all of which exist.
 
 ## 7. Biggest Risks / Open Questions
 
@@ -162,7 +163,7 @@ Once FabFilter + GTune run on both platforms, the platform is **proven**.
 3. **Screen reader output strategy.** Decided (AVSpeechSynthesizer), tradeoff accepted (own voice, no braille). **Open:** Is that enough for blind musicians accustomed to VoiceOver? Otherwise retrofit the announcement path (with interruption risk).
 4. **OCR/image vs. native AX.** Where a plugin delivers real AX values, AX is more robust/faster/lower-permission than OCR (no Retina problem). **Recommendation:** the MVP stays OCR/Hotspot, but `host.a11y` as the *next* capability right after the vertical slice — **not at the end**.
 5. **Permissions onboarding is operationally critical.** Three TCC gates + CGEventTap silent disable (P0-2) + Sequoia weekly re-prompt (P0-9). **To solve before the first overlay:** health watchdog (`tapIsEnabled`/`tapEnable`, 5 s), permission persistence across updates (stable team/bundle ID), guided one-time onboarding flow.
-6. **Performance budget capture+OCR** (study 10.2). GTune's 4-Hz auto-report = 4 captures + OCR/s *per active overlay*; under SCK more expensive than Windows `PixelGetColor`. **Open:** a hard budget (max. capture frequency, ROI size).
+6. **Performance budget capture+OCR** (study 10.2). GTune's auto-report is **2.5 Hz over one region** = 2.5 captures + OCR/s *per active overlay*; under SCK more expensive than Windows `PixelGetColor`. **Open:** a hard budget (max. capture frequency, ROI size). Measured on Windows since: every GDI screen touch costs a fixed ~16.7 ms (a compositor frame) regardless of size, so a *pixel* poll is as expensive as a small capture — see `docs/screen-frame-sharing-design.md`. That is what makes Dubler's 10-Hz, 12-pixel polling loops unportable as written.
 
 ## Bottom Line
 

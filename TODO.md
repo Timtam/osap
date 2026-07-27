@@ -71,6 +71,39 @@ Foundation: [docs/reahotkey-port-analysis.md](docs/reahotkey-port-analysis.md).
 - [ ] Concretize the **capture+OCR performance budget** (max capture frequency, ROI size) — GTune polls at 4 Hz; more expensive under ScreenCaptureKit than Windows `PixelGetColor`. Part of study §10.2.
 - [ ] **MVP vertical-slice order:** runtime framework → FabFilter (1 hotspot) → GTune (OCR+timer) → u-he bundle (Diva/Hive2/Repro/Zebra, possibly 1 generic "u-he header" module) → later Engine2/Raum/Zampler/KompleteKontrol. **Dubler 2 family = very involved** (image-/coordinate-heavy; advanced audio routing via ASIO/BASSASIO — per the client also available for Mac), deliberately deferred.
 
+## ReaHotkey port — sample libraries (in progress)
+
+ReaHotkey keeps 19 unported product overlays in `Includes/Overlays/KontaktKompleteKontrol/`
+— `AudioImperia.ahk` (11 products), `Soundiron.ahk` (3), `ImpactSoundworks.ahk` (2),
+`Audiobro.ahk` (1), `CinematicStudioSeries.ahk` (2) and `NoLibraryProduct.ahk` (a "None"
+fallback). Each file is `#IncludeAgain`d three times, once per host, with a per-host offset
+table; **all of those tables vanish for us** because our library overlays are
+landmark-anchored, and `kontakt.library()` already produces the six cells of the Kontakt
+matrix. This is the cheapest remaining content on the backlog: a product is a data row.
+
+- [x] **Cinematic Studio Series restructured to a product table** — the module (renamed from
+      `cinematic-studio-strings`, id `com.platform.cinematic-studio-series`) now declares
+      products as rows and builds their controls from one function. Strings unchanged and
+      still measured; **Brass added, coordinates DERIVED** from ReaHotkey's by way of the
+      measured Strings offsets (it logs that it is unverified). ✓ (2026-07-27)
+- [ ] **Verify Brass** with one calibration shot, then mark the row `verified`.
+- [ ] **Audiobro (LA Scoring Strings 3)** — 1 hotspot + 1 OCR read-out; the smallest
+      possible second vendor, and the one that proves the row format on a different shape.
+- [ ] **Impact Soundworks (2)** and **Soundiron (3)**.
+- [ ] **Audio Imperia (11)** — eight of the eleven are the SAME two image toggles at the
+      same coordinates with a different image path, i.e. pure data. The other three need a
+      new control kind first (see below).
+- [ ] **Image slider control** (`GraphicalHorizontalSlider`, `AccessibilityOverlay.ahk:2622`):
+      ReaHotkey drives it as a closed loop — image-search the thumb, drag one percent,
+      re-search to read the new position, repeat until it moves. Needed by three Audio
+      Imperia products, and it is the first control of ours that would own the arrow keys.
+- [ ] **A "choose overlay" override (ReaHotkey's Alt+C).** ReaHotkey lets a plugin register
+      SEVERAL overlays and the user pick by hand from a Vendor → Product → Patch menu
+      (`Overlay.Functions.ahk:272-380`), with `AutoChangeOverlay` as the automatic path. Our
+      arbiter only decides automatically. Once several libraries can match one window, the
+      manual override is the safety net for a landmark misdetection — and we have already
+      hit one of those in production (an open KK browser hiding the Kontakt control).
+
 ## ReaHotkey port — Kontakt (open threads)
 
 The Kontakt overlays cover {Kontakt 7, Kontakt 8} × {bare in a DAW, nested in Komplete
