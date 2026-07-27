@@ -128,10 +128,15 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
       Close/Mid/Far image slider; **Cerberus** is the hardest, not the easiest — a list box
       ("Normal" / "Epic Mix") that SWAPS the control set (`AudioImperia.ahk:26-30`), so it
       needs both the list control and overlay swapping. One calibration shot per product.
-- [ ] **Image slider control** (`GraphicalHorizontalSlider`, `AccessibilityOverlay.ahk:2622`):
-      ReaHotkey drives it as a closed loop — image-search the thumb, drag one percent,
-      re-search to read the new position, repeat until it moves. Needed by three Audio
-      Imperia products, and it is the first control of ours that would own the arrow keys.
+- [x] **Image slider control built** (`Overlay:addSlider`, ReaHotkey's
+      `GraphicalHorizontalSlider`): the thumb is found by image search inside `region` and
+      its centre against `from`/`to` gives a percentage; Left/Right adjust it, captured only
+      while a slider has focus (and refused, loudly, on an overlay that also has a tab
+      control, which claims those keys statically). Adjusting is ReaHotkey's closed loop —
+      drag a percent, look again, extend a pixel at a time until the reading moves — but
+      BOUNDED, and every continuation re-checks the window, because an unbounded drag loop
+      inside someone's plugin is not a thing to ship. ✓ (2026-07-27)
+      **Not yet exercised by any product** — Areia is the first, and it needs one shot.
 - [ ] **A "choose overlay" override (ReaHotkey's Alt+C).** ReaHotkey lets a plugin register
       SEVERAL overlays and the user pick by hand from a Vendor → Product → Patch menu
       (`Overlay.Functions.ahk:272-380`), with `AutoChangeOverlay` as the automatic path. Our

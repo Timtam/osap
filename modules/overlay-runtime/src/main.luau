@@ -276,6 +276,34 @@ function Overlay:addGraphicalToggle(opts)
   })
 end
 
+-- A GRAPHICAL SLIDER — ReaHotkey's GraphicalHorizontalSlider, the control Audio Imperia's
+-- libraries use for a Close/Mid/Far mic blend. There is nothing to read its value from: the
+-- position IS where the thumb is drawn, so the thumb is found by image search inside
+-- `region`, and its centre against `from` (0 %) and `to` (100 %) gives a percentage.
+--
+-- `thumbImage` may be a list, like a toggle's images — the thumb is commonly drawn one way
+-- at rest and another while it is being dragged.
+--
+-- Adjusting it is a CLOSED LOOP rather than a calculation, because a plugin's slider does
+-- not necessarily move a pixel when you drag it a pixel: drag by one percent, look again,
+-- and if the reading has not changed, extend by one more pixel and repeat — ReaHotkey does
+-- exactly this (AccessibilityOverlay.ahk:2560-2600). Bounded here, which ReaHotkey's is
+-- not: a loop that cannot converge would otherwise drag forever inside the user's plugin.
+function Overlay:addSlider(opts)
+  return add(self, {
+    kind = "slider",
+    label = opts.label,
+    region = opts.region,
+    thumbImage = opts.thumbImage,
+    from = opts.from,
+    to = opts.to,
+    hotkey = opts.hotkey,
+    tolerance = opts.tolerance,
+    scales = opts.scales,
+    when = opts.when,
+  })
+end
+
 -- A toggle whose on/off state is read from a SINGLE pixel at its click point (one screen
 -- touch — cheap, unlike a per-pixel region scan), compared to an on/off reference colour
 -- (nearest wins) — ReaHotkey's HotspotToggleButton. Activating clicks the point (toggling
@@ -375,7 +403,7 @@ end
 local TYPE_LABEL =
   { static = "", hotspot = "button", custom = "button", ocr = "button", ocredit = "edit",
     gtoggle = "toggle button", hotspottoggle = "toggle button", tabcontrol = "tab control",
-    passthrough = "" }
+    slider = "slider", passthrough = "" }
 
 -- Origin (top-left) of the overlay's coordinate space in screen pixels: the
 -- client-area top-left of the active context's coordinate window — the plugin
@@ -492,6 +520,38 @@ local function ocrCenter(self, c)
     oy + math.floor((c.region[2] + c.region[4]) / 2)
 end
 
+-- A hotspot's point has to land inside the origin it was measured against. Outside it,
+-- there are only other windows' pixels — the DAW's own chrome, another plugin, the
+-- desktop — and a click there does something arbitrary in an application the user was not
+-- aiming at and cannot see. Live: Kontakt 7's multi arrows carried Kontakt 8's
+-- coordinates, 704 px from the left of a window 649 px wide, so both fired past the
+-- plugin's right edge into REAPER.
+--
+-- This is the one coordinate error that pressing the key again cannot undo, so it refuses
+-- and says so rather than clicking. The refusal names the control: one that is present and
+-- silently inert is the harder thing to make sense of without seeing the screen.
+local function pointInOrigin(self, x, y)
+  local o = self:origin()
+  if not (o and o.client and o.bounds) then return false end
+  return x >= o.client.x
+    and x < o.client.x + o.bounds.w
+    and y >= o.client.y
+    and y < o.client.y + o.bounds.h
+end
+
+local function refuseOutside(self, c, x, y)
+  if pointInOrigin(self, x, y) then return false end
+  local o = self:origin()
+  host.log.info(string.format(
+    "%s: '%s' resolves to (%d,%d), outside its origin (%d,%d) %dx%d — not clicking",
+    tostring(self.label), tostring(c.label), x, y,
+    o and o.client and o.client.x or 0, o and o.client and o.client.y or 0,
+    o and o.bounds and o.bounds.w or 0, o and o.bounds and o.bounds.h or 0
+  ))
+  host.speech.output((c.label or "Control") .. " is not where it should be", { interrupt = true })
+  return true
+end
+
 -- A state may be drawn MORE THAN ONE WAY, so `onImage`/`offImage` take either one path or
 -- a list of them. ReaHotkey carries two "off" variants for each button of Audio Imperia's
 -- segmented mixers, and a toggle that only knows one of them reports no state at all in the
@@ -541,6 +601,81 @@ local function gtoggleState(self, c)
   return nil
 end
 
+-- Where the slider's thumb is right now, in screen coordinates, or nil when it cannot be
+-- found (the panel is not showing, or the plugin draws it differently than the template).
+local function sliderThumb(self, c)
+  if not (c.region and c.thumbImage) then return nil end
+  local ox, oy = originOf(self, c)
+  local _, hit = host.screen.imageSearchMulti(asList(c.thumbImage), {
+    region = { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] },
+    tolerance = c.tolerance or MATCH_TOLERANCE,
+    scales = c.scales or MATCH_SCALES,
+  })
+  if not hit then return nil end
+  return {
+    cx = hit.x + math.floor(hit.w / 2),
+    cy = hit.y + math.floor(hit.h / 2),
+  }
+end
+
+-- The thumb's position as a percentage of the track, clamped. nil when the track is
+-- degenerate (from == to) — better to say nothing than to announce a number from a
+-- division that means nothing.
+local function sliderPercent(self, c, thumb)
+  local ox = originOf(self, c)
+  local from, to = ox + c.from, ox + c.to
+  if to <= from then return nil end
+  local p = math.floor(((thumb.cx - from) / (to - from)) * 100 + 0.5)
+  return math.max(0, math.min(100, p))
+end
+
+-- One arrow-key step. Drags by a percent of the track, then RE-READS: if the plugin did not
+-- actually move, the target is extended a pixel at a time until it does, the track end is
+-- reached, or the attempt budget runs out. Everything after the first drag runs on a timer,
+-- so this never blocks the loop, and every continuation re-checks that the overlay is still
+-- on the same window — a drag into whatever window arrived meanwhile is not recoverable.
+local SLIDER_SETTLE, SLIDER_MAX_NUDGES = 25, 24
+local function sliderStep(self, c, dir)
+  local thumb = sliderThumb(self, c)
+  if not thumb then
+    host.speech.output((c.label or "") .. ", not found", { interrupt = true })
+    return
+  end
+  local ox = originOf(self, c)
+  local step = math.max(1, math.ceil((c.to - c.from) / 100))
+  local startPct = sliderPercent(self, c, thumb)
+  local pinned = self:hwnd()
+  local target = thumb.cx + dir * step
+  local nudges = 0
+  local function attempt()
+    if not self.active or self:hwnd() ~= pinned then return end
+    local t = sliderThumb(self, c)
+    if not t then return end
+    if refuseOutside(self, c, target, t.cy) then return end
+    host.input.drag(t.cx, t.cy, target, t.cy)
+    host.timer.after(SLIDER_SETTLE, function()
+      if not self.active or self:hwnd() ~= pinned then return end
+      local after = sliderThumb(self, c)
+      local pct = after and sliderPercent(self, c, after)
+      local ended = pct == nil
+        or (pct == 0 and dir < 0)
+        or (pct == 100 and dir > 0)
+        or pct ~= startPct
+      if not ended and nudges < SLIDER_MAX_NUDGES then
+        nudges += 1
+        target += dir
+        attempt()
+        return
+      end
+      host.speech.output(
+        pct and (tostring(pct) .. " percent") or ((c.label or "") .. ", not found"),
+        { interrupt = true }
+      )
+    end)
+  end
+  attempt()
+end
+
 -- Absolute screen point of a control's `at` hotspot. Normally origin + at, but a
 -- `fromRight` control measures x from the coordinate window's RIGHT edge instead
 -- (ReaHotkey's `ControlX + ControlWidth − N`): plugin UI that is laid out from the
@@ -563,38 +698,6 @@ local function hotspotPoint(self, c)
     x = O.contentSize(self:origin()) - at[1]
   end
   return ox + x, oy + at[2]
-end
-
--- A hotspot's point has to land inside the origin it was measured against. Outside it,
--- there are only other windows' pixels — the DAW's own chrome, another plugin, the
--- desktop — and a click there does something arbitrary in an application the user was not
--- aiming at and cannot see. Live: Kontakt 7's multi arrows carried Kontakt 8's
--- coordinates, 704 px from the left of a window 649 px wide, so both fired past the
--- plugin's right edge into REAPER.
---
--- This is the one coordinate error that pressing the key again cannot undo, so it refuses
--- and says so rather than clicking. The refusal names the control: one that is present and
--- silently inert is the harder thing to make sense of without seeing the screen.
-local function pointInOrigin(self, x, y)
-  local o = self:origin()
-  if not (o and o.client and o.bounds) then return false end
-  return x >= o.client.x
-    and x < o.client.x + o.bounds.w
-    and y >= o.client.y
-    and y < o.client.y + o.bounds.h
-end
-
-local function refuseOutside(self, c, x, y)
-  if pointInOrigin(self, x, y) then return false end
-  local o = self:origin()
-  host.log.info(string.format(
-    "%s: '%s' resolves to (%d,%d), outside its origin (%d,%d) %dx%d — not clicking",
-    tostring(self.label), tostring(c.label), x, y,
-    o and o.client and o.client.x or 0, o and o.client and o.client.y or 0,
-    o and o.bounds and o.bounds.w or 0, o and o.bounds and o.bounds.h or 0
-  ))
-  host.speech.output((c.label or "Control") .. " is not where it should be", { interrupt = true })
-  return true
 end
 
 -- On/off state of a HotspotToggle: read the single pixel at its click point and return
@@ -679,6 +782,14 @@ local function speakControl(self, index, moveMouse)
   if c.kind == "hotspottoggle" then
     local st = hotspotToggleState(self, c)
     if st then parts[#parts + 1] = st end
+  end
+  -- A slider's value IS its thumb position, so it is read on focus like a toggle's state.
+  -- "not found" rather than a number when the thumb cannot be located: a percentage
+  -- invented from a failed search is worse than an admission, because it sounds right.
+  if c.kind == "slider" then
+    local thumb = sliderThumb(self, c)
+    local pct = thumb and sliderPercent(self, c, thumb)
+    parts[#parts + 1] = pct and (tostring(pct) .. " percent") or "not found"
   end
   host.speech.output(table.concat(parts, ", "), { interrupt = true })
 end
@@ -1013,6 +1124,10 @@ function Overlay:_unregisterHotkeys()
     host.keys.release(self._returnToken)
     self._returnToken = false
   end
+  if self._arrowTokens then
+    for _, t in ipairs(self._arrowTokens) do host.keys.release(t) end
+    self._arrowTokens = false
+  end
 end
 
 -- Keeps the two keys that ACTIVATE a control — Space and Return — in sync with what is
@@ -1043,6 +1158,27 @@ function Overlay:_syncNativeKeys()
     host.keys.release(self._returnToken)
     self._returnToken = false
   end
+  -- Left/Right belong to a focused SLIDER, and only then. Arrows are otherwise left alone
+  -- on purpose (the standard scheme keeps them for value changes inside whatever control
+  -- has focus), which is exactly what this is — the overlay's slider IS that control.
+  -- Skipped when the overlay also has a tab control, which claims Left/Right statically;
+  -- the declaration report says so out loud rather than leaving a slider silently inert.
+  local wantArrows = c ~= nil and c.kind == "slider" and not self._hasTabControl
+  if wantArrows and not self._arrowTokens then
+    self._arrowTokens = {
+      host.keys.capture("Left", function() self:adjust(-1) end),
+      host.keys.capture("Right", function() self:adjust(1) end),
+    }
+  elseif not wantArrows and self._arrowTokens then
+    for _, t in ipairs(self._arrowTokens) do host.keys.release(t) end
+    self._arrowTokens = false
+  end
+end
+
+-- One step of the focused control's value, from Left/Right. Only a slider has one today.
+function Overlay:adjust(dir)
+  local c = self.controls[self.focus]
+  if c and c.kind == "slider" and isVisible(self, c) then sliderStep(self, c, dir) end
 end
 
 -- Deprecated name; the capture covers Return as well now.
@@ -1210,6 +1346,25 @@ local function report(self, opts)
     end
     if c.kind == "gtoggle" and c.onImage == nil and c.offImage == nil then
       bad("%s has neither `onImage` nor `offImage`", who)
+    end
+    if c.kind == "slider" then
+      if c.region == nil then bad("%s has no `region` to look for its thumb in", who) end
+      if c.thumbImage == nil then bad("%s has no `thumbImage`", who) end
+      if c.from == nil or c.to == nil then
+        bad("%s needs `from` and `to` — the x that reads 0 %% and the x that reads 100 %%", who)
+      elseif c.to <= c.from then
+        bad("%s: `to` (%s) is not right of `from` (%s), so its value cannot be computed",
+          who, tostring(c.to), tostring(c.from))
+      end
+      for _, path in ipairs(asList(c.thumbImage)) do
+        if not isAbsolutePath(path) then
+          bad("%s: `thumbImage` is not an absolute path — use host.path()", who)
+        end
+      end
+      if self._hasTabControl then
+        bad("%s is a slider on an overlay that also has a tab control, which claims "
+          .. "Left/Right — the slider's arrows will not work here", who)
+      end
     end
     for _, field in ipairs({ "onImage", "offImage" }) do
       -- Either may be a LIST of variants (see asList), so every entry is checked.
