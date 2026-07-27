@@ -117,10 +117,17 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
       the rack is closed is not "off", it is meaningless. Deliberately NOT designed yet: the
       hook has to be asynchronous (we cannot sleep), and its contract should be written
       against the real UI rather than against a guess about it.
-- [ ] **Audio Imperia (11)** — mostly data, and richer than "the same two toggles": the
-      products carry Classic / Modern / EZ / Scott Smith MIXER variants, each with its own
-      on/off templates (Areia, Jaeger and Talos have EZMixer; Chorus adds ScottSmith). Three
-      need the image slider first (see below).
+- [x] **Audio Imperia — module started, Chorus measured and verified** (`modules/audio-imperia`,
+      `com.platform.audio-imperia`). Its wordmark templates still match the current UI
+      exactly, unlike its coordinates. ✓ (2026-07-27)
+- [ ] **Audio Imperia — the remaining ten.** Richer than "the same two toggles": the products
+      carry Classic / Modern / EZ / Scott Smith MIXER variants, each with its own on/off
+      templates. Chorus (3 segments) and Dolce (2) need nothing new; **Glade** is 2 hotspot
+      buttons and is the one product where ReaHotkey hardcodes genuinely different
+      coordinates per host rather than an offset; **Areia, Jaeger, Talos** each add the
+      Close/Mid/Far image slider; **Cerberus** is the hardest, not the easiest — a list box
+      ("Normal" / "Epic Mix") that SWAPS the control set (`AudioImperia.ahk:26-30`), so it
+      needs both the list control and overlay swapping. One calibration shot per product.
 - [ ] **Image slider control** (`GraphicalHorizontalSlider`, `AccessibilityOverlay.ahk:2622`):
       ReaHotkey drives it as a closed loop — image-search the thumb, drag one percent,
       re-search to read the new position, repeat until it moves. Needed by three Audio

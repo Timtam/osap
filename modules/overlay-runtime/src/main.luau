@@ -492,6 +492,22 @@ local function ocrCenter(self, c)
     oy + math.floor((c.region[2] + c.region[4]) / 2)
 end
 
+-- A state may be drawn MORE THAN ONE WAY, so `onImage`/`offImage` take either one path or
+-- a list of them. ReaHotkey carries two "off" variants for each button of Audio Imperia's
+-- segmented mixers, and a toggle that only knows one of them reports no state at all in the
+-- other — which for a screen-reader user is a control that has simply gone quiet.
+local function asList(v)
+  if v == nil then return {} end
+  if type(v) == "table" then return v end
+  return { v }
+end
+local function addTemplates(templates, labels, images, label)
+  for _, path in ipairs(asList(images)) do
+    templates[#templates + 1] = path
+    labels[#labels + 1] = label
+  end
+end
+
 -- Reads a graphical toggle's state by image-matching its region against the
 -- on/off templates. Returns "on" / "off" / nil (unknown).
 local function gtoggleState(self, c)
@@ -509,15 +525,19 @@ local function gtoggleState(self, c)
   -- nil). The hit's 1-based index maps back to the on/off label.
   if host.screen.imageSearchMulti then
     local templates, labels = {}, {}
-    if c.onImage then templates[#templates + 1] = c.onImage; labels[#labels + 1] = "on" end
-    if c.offImage then templates[#templates + 1] = c.offImage; labels[#labels + 1] = "off" end
+    addTemplates(templates, labels, c.onImage, "on")
+    addTemplates(templates, labels, c.offImage, "off")
     if #templates == 0 then return nil end
     local idx = host.screen.imageSearchMulti(templates, opts)
     return idx and labels[idx] or nil
   end
-  -- Fallback for a host without imageSearchMulti: two separate captures.
-  if c.onImage and host.screen.imageSearch(c.onImage, opts) then return "on" end
-  if c.offImage and host.screen.imageSearch(c.offImage, opts) then return "off" end
+  -- Fallback for a host without imageSearchMulti: one capture per template.
+  for _, t in ipairs(asList(c.onImage)) do
+    if host.screen.imageSearch(t, opts) then return "on" end
+  end
+  for _, t in ipairs(asList(c.offImage)) do
+    if host.screen.imageSearch(t, opts) then return "off" end
+  end
   return nil
 end
 
@@ -1192,10 +1212,13 @@ local function report(self, opts)
       bad("%s has neither `onImage` nor `offImage`", who)
     end
     for _, field in ipairs({ "onImage", "offImage" }) do
-      if c[field] ~= nil and not isAbsolutePath(c[field]) then
-        bad("%s: `%s` is not an absolute path — use host.path(); a relative one resolves "
-          .. "under whichever module is RUNNING, which for an inherited overlay is not yours",
-          who, field)
+      -- Either may be a LIST of variants (see asList), so every entry is checked.
+      for _, path in ipairs(asList(c[field])) do
+        if not isAbsolutePath(path) then
+          bad("%s: `%s` is not an absolute path — use host.path(); a relative one resolves "
+            .. "under whichever module is RUNNING, which for an inherited overlay is not yours",
+            who, field)
+        end
       end
     end
     if c.when ~= nil and type(c.when) ~= "function" then
