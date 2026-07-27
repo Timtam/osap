@@ -123,7 +123,25 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
 - [x] **Areia measured and verified** — wordmark (972,55); mixer row +169..+192 with two
       segments at -562..-483 and -481..-398; mic-blend track -570..-390 at +105..+133 with
       the thumb's travel from -554 to -406. ✓ (2026-07-27)
-- [ ] **Audio Imperia — the remaining nine.** Richer than "the same two toggles": the products
+- [x] **Audio Imperia — Areia, Chorus, Solo, Talos, Jaeger** (5 of 11). The panel turns out
+      to be SHARED: measured across five shots, the mixer row is always y 224–247 with
+      segments starting at x 410 and 491, and the mic blend's track is always x 410–574 at
+      y 166–180 — every product's mix label matched at exactly (420,232) or (501,232). Only
+      the wordmark moves, so the module states the panel once in plugin coordinates and each
+      product contributes just the wordmark position it was measured at. The slider knob is
+      one shared asset too: Areia's template pair matches Jaeger's and Talos's exactly.
+      ✓ (2026-07-27)
+- [ ] **Audio Imperia — the remaining four.**
+  - [ ] **Dolce** — same panel (its labels sit at the standard x), but ReaHotkey's mix
+        templates no longer match at any tolerance, the same ageing that killed Jaeger's
+        wordmark. Needs its four templates cropped from OUR shots, which takes two: one per
+        selected segment, since a shot only shows each button in one state.
+  - [ ] **Glade** and **Nucleus** — a different, wider UI (1353 px) with Perform / Layers /
+        Effects / Settings tabs, which is why ReaHotkey drives them with hotspot buttons at
+        per-host coordinates instead of image toggles. Both shot and waiting.
+  - [ ] **Cerberus** — the hardest, not the easiest: a list box ("Normal" / "Epic Mix") that
+        SWAPS the control set beneath it (`AudioImperia.ahk:127-150`), so it needs both a
+        list control and a way to replace an overlay's controls at runtime. Richer than "the same two toggles": the products
       carry Classic / Modern / EZ / Scott Smith MIXER variants, each with its own on/off
       templates. Chorus (3 segments) and Dolce (2) need nothing new; **Glade** is 2 hotspot
       buttons and is the one product where ReaHotkey hardcodes genuinely different

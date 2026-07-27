@@ -23,113 +23,117 @@
 local kontakt = host.require("com.platform.kontakt")
 local function img(rel) return host.path(rel) end
 
--- ── The products ─────────────────────────────────────────────────────────────
--- `mixes` is the segmented selector. Each entry is read by IMAGE rather than by pixel, as
--- ReaHotkey does it: the difference between selected and not is a 1–2 px border and the
--- colour of the label text (measured: orange 255,121,0 against grey 115,115,115), and a
--- single-pixel probe on a line that thin is one repaint away from being wrong.
+-- ── The panel, once ──────────────────────────────────────────────────────────
+-- Audio Imperia's libraries share ONE panel, at the same place in the plugin. Measured
+-- across five calibration shots (Areia, Chorus, Solo, Talos, Jaeger): the mixer selector
+-- always occupies y 224–247, its segments start at x 410 and 491, and where a library has
+-- the Close/Mid/Far mic blend its track runs x 410–574 at y 166–180. Every product's mix
+-- label matched its template at exactly (420,232) or (501,232).
 --
--- Each state may be drawn more than one way, hence the lists — ReaHotkey ships two "off"
--- variants per button, and a toggle that knows only one of them goes silent in the other.
---
--- `region` is the button's own box relative to the wordmark's top-left, which is also what
--- bounds the search: ReaHotkey's ClassicMixOff2 template matches a second time up in
--- Kontakt's own top bar, so an unscoped search would read the state off the wrong pixels.
--- One segment of a product's mixer selector. `y0`/`y1` are the row, shared by every segment
--- of that product; `x0`/`x1` are this segment's own box. The label suffix and the three
--- template paths follow from the segment's name, which is ReaHotkey's own naming.
-local function mix(product, name, x0, x1, y0, y1)
+-- What DOES move is the wordmark — Chorus prints it at (943,61), Areia at (972,55) — and
+-- since our coordinates are anchored to it, that is the one number each product has to
+-- contribute. So the panel is written down once, in plugin coordinates, and each product
+-- carries only the wordmark position it was measured at; the offsets our controls actually
+-- use are the difference. That keeps six hand-subtracted numbers per product from being six
+-- chances to typo, and it states the real structure: one panel, many wordmarks.
+local PANEL = {
+  mixRow = { 224, 247 },
+  segments = { { 410, 489 }, { 491, 574 } }, -- a two-segment selector
+  blend = {
+    region = { 402, 160, 582, 188 }, -- where the thumb is searched, the full travel
+    from = 418, -- thumb centre at 0 %: the track's left end inset by its radius
+    to = 566, --   …and at 100 %
+  },
+}
+
+-- The knob is the SAME across products — Areia's pair of templates matches Jaeger's and
+-- Talos's at the identical position — so it is one asset, not one per library. Two of them
+-- because the knob is drawn differently under the pointer; see the note in the slider.
+local THUMB = { "images/Areia/Thumb.png", "images/Areia/ThumbHeld.png" }
+
+-- One segment of a product's mixer selector, in PLUGIN coordinates; `rel` converts.
+local function mix(product, name, seg)
   local base = "images/" .. product .. "/" .. name .. "Mix"
   return {
     label = name .. " Mix",
-    region = { x0, y0, x1, y1 },
+    box = { seg[1], PANEL.mixRow[1], seg[2], PANEL.mixRow[2] },
     on = { base .. "On.png" },
     off = { base .. "Off1.png", base .. "Off2.png" },
   }
 end
 
-local PRODUCTS = {
-  {
-    name = "Areia",
-    landmark = "images/Areia/Product.png",
-    -- MEASURED off a calibration shot of "Areia - 03 6 Celli - Performance Legato" in
-    -- Kontakt 8 with the browser open. Wordmark at (972,55); the mixer row is y 224–247 and
-    -- the two segments span x 410–489 and 491–574; the mic-blend track runs x 410–574 at
-    -- y 166–180 with the thumb centred on (492,172).
+-- A product with the standard two-segment panel: Classic Mix, Modern Mix, and optionally
+-- the mic blend. `at` is where its wordmark was measured.
+local function standard(name, at, opts)
+  return {
+    name = name,
+    landmark = "images/" .. name .. "/Product.png",
+    wordmark = at,
     verified = true,
-    -- Offered UNCONDITIONALLY, including while a mix preset is lit. The two are related in
-    -- one direction only — moving the blend clears both mix buttons, selecting a preset
-    -- leaves the blend knob where it was — so its reading is arguably stale then. We show it
-    -- anyway, because Audio Imperia does: the overlay's job is to make what is on screen
-    -- reachable, not to decide what it means. Gating it on the presets would also make a
-    -- control appear and disappear under someone navigating by Tab, which is worse.
-    --
-    -- The Close/Mid/Far mic blend. `from`/`to` are the thumb CENTRE at each end of its
-    -- travel — the track's ends inset by the thumb's radius — which is what makes the
-    -- reading a percentage of the blend rather than of the bar. Checked against the shot:
-    -- the thumb sat on "Mid" and the arithmetic returns exactly 50.
-    -- TWO thumb templates, which is what ReaHotkey's EZMixerOff/EZMixerOn pair is for and
-    -- the reason a single one failed live: once the slider has been touched, the knob is
-    -- drawn slightly differently — measured, up to 27 per channel — and our matcher wants
-    -- every pixel within tolerance. No single tolerance fixes that: 27 is needed to accept
-    -- the second state, and at 30 the template already matches twice inside the track,
-    -- at 35 seven hundred times. So: one template per state.
-    --
-    -- `ThumbHeld.png` was cropped from a calibration shot whose crosshair lay across the
-    -- knob, so the 32 pixels it covered are stored TRANSPARENT — the matcher treats those
-    -- as wildcards, which is the honest encoding for "we could not see this pixel".
-    slider = {
-      label = "Close/Mid/Far",
-      region = { -570, 105, -390, 133 },
-      thumb = { "images/Areia/Thumb.png", "images/Areia/ThumbHeld.png" },
-      from = -554,
-      to = -406,
-    },
+    blend = (opts and opts.blend) == true,
     mixes = {
-      mix("Areia", "Classic", -562, -483, 169, 192),
-      mix("Areia", "Modern", -481, -398, 169, 192),
+      mix(name, "Classic", PANEL.segments[1]),
+      mix(name, "Modern", PANEL.segments[2]),
     },
-  },
+  }
+end
+
+local PRODUCTS = {
+  -- Areia carries the three-segment note only because it was the first measured; its own
+  -- selector is the standard two. Wordmark from a shot of "03 6 Celli - Performance Legato".
+  standard("Areia", { 972, 55 }, { blend = true }),
+  -- "03 Chorus - Women - Energetic Syllables". Chorus is the exception: THREE segments
+  -- (CLC / MDN / Scott Smith), so its boxes are its own rather than PANEL's pair.
   {
     name = "Chorus",
     landmark = "images/Chorus/Product.png",
-    -- MEASURED off a calibration shot of "03 Chorus - Women - Energetic Syllables" in
-    -- Kontakt 8, with the library browser open (which is the case that would break a
-    -- plugin-relative coordinate and leaves an anchored one untouched). The wordmark sat at
-    -- (943,61) in that frame; the selector row runs y 224–247 there, i.e. wordmark +163 to
-    -- +186, and the three segments span x 408–449, 450–491 and 492–573 → the numbers below.
-    -- Read back live at the same time: CLC off, MDN off, Scott Smith on.
+    wordmark = { 943, 61 },
     verified = true,
     mixes = {
-      mix("Chorus", "Classic", -535, -494, 163, 186), -- "CLC"
-      mix("Chorus", "Modern", -493, -452, 163, 186), -- "MDN"
-      mix("Chorus", "ScottSmith", -451, -370, 163, 186), -- "Scott Smith"
+      mix("Chorus", "Classic", { 408, 449 }), -- "CLC"
+      mix("Chorus", "Modern", { 450, 491 }), -- "MDN"
+      mix("Chorus", "ScottSmith", { 492, 573 }), -- "Scott Smith"
     },
   },
+  standard("Solo", { 959, 61 }),
+  standard("Talos", { 960, 62 }, { blend = true }),
+  -- Jaeger's wordmark is OUR crop, not ReaHotkey's: its Product.png no longer matches the
+  -- current UI at any tolerance we would dare use, while its mix templates still do. The
+  -- library was re-skinned and ReaHotkey's landmark went with it.
+  standard("Jaeger", { 966, 64 }, { blend = true }),
 }
+
+-- Plugin coordinates → wordmark-relative, which is what the overlay's controls use.
+local function rel(product, box)
+  local wx, wy = product.wordmark[1], product.wordmark[2]
+  return { box[1] - wx, box[2] - wy, box[3] - wx, box[4] - wy }
+end
 
 local function build(product)
   return function(ov)
     ov:addStaticText(product.name)
-    if product.slider then
-      local sl = product.slider
+    if product.blend then
+      local b = PANEL.blend
+      local thumb = {}
+      for i, t in ipairs(THUMB) do thumb[i] = img(t) end
       ov:addSlider({
-        label = sl.label,
-        region = sl.region,
-        thumbImage = (function()
-          local out = {}
-          for i, t in ipairs(sl.thumb) do out[i] = img(t) end
-          return out
-        end)(),
-        from = sl.from,
-        to = sl.to,
+        label = "Close/Mid/Far",
+        region = rel(product, b.region),
+        thumbImage = thumb,
+        from = b.from - product.wordmark[1],
+        to = b.to - product.wordmark[1],
       })
     end
     for _, m in ipairs(product.mixes) do
       local on, off = {}, {}
-      for i, p in ipairs(m.on) do on[i] = img(p) end
-      for i, p in ipairs(m.off) do off[i] = img(p) end
-      ov:addGraphicalToggle({ label = m.label, region = m.region, onImage = on, offImage = off })
+      for i, t in ipairs(m.on) do on[i] = img(t) end
+      for i, t in ipairs(m.off) do off[i] = img(t) end
+      ov:addGraphicalToggle({
+        label = m.label,
+        region = rel(product, m.box),
+        onImage = on,
+        offImage = off,
+      })
     end
   end
 end
