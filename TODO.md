@@ -131,26 +131,23 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
       product contributes just the wordmark position it was measured at. The slider knob is
       one shared asset too: Areia's template pair matches Jaeger's and Talos's exactly.
       ✓ (2026-07-27)
-- [ ] **Audio Imperia — the remaining three.**
+- [ ] **Audio Imperia — one left.**
   - [x] **Dolce** ✓ (2026-07-27) — and the way it got in is the point. Its own templates are
         stale, and cropping fresh ones would have meant asking a blind user to click the very
         buttons this overlay exists to make clickable. The two-segment products' labels turn
         out to be rendered identically (ReaHotkey ships four BYTE-IDENTICAL copies), so a
         sibling's templates serve, the six files are now shared, and no second shot was
         needed. **Look for that before asking for a state change** — see the memory note.
-  - [ ] **Glade** and **Nucleus** — BLOCKED on the right patch, and on a landmark. Both were
-        shot with their "Designer" patch (`00 Glade Designer`, `00 Nucleus Designer`), whose
-        UI is the newer wide one (1353 px, Perform / Layers / Effects / Settings, Macro 1 and
-        2) and has no mix selector at all. ReaHotkey targets other patches: Glade's metadata
-        names "Studio (Pyramid Instruments)" and "Standard (Pyramid Instruments)".
-        Their landmarks need rethinking too. Glade's `Studio.png` / `Standard.png` are the
-        text "Glade Studio" / "Glade" in KONTAKT's font — the same unusable kind as
-        Soundiron's: it detects a library but sits in Kontakt's chrome, so it cannot anchor
-        anything. Nucleus's `Product.png` is its wordmark WITH the artwork behind it, and the
-        Designer patch has different artwork, so it matches at no tolerance up to 80; a fresh
-        crop is only a landmark if that background is constant for the patch that has the
-        controls. Needs: one shot per library with a patch that actually shows Classic /
-        Modern Mix.
+  - [x] **Glade** and **Nucleus** ✓ (2026-07-27) — they use Audio Imperia's OTHER layout (a
+        1353 px window with Basic/Advanced tabs) and their mix selector is two large labelled
+        boxes rather than a segmented strip. Measured from shots of the patches that actually
+        have it ("02 Pyramid Instruments / 02 Low Strings", "Nucleus - 01 10 Violas"); the
+        Designer patches carry no mixer at all. Both landmarks are OUR crops of the wordmark
+        glyphs — ReaHotkey's include the artwork behind them and stop matching when the patch
+        changes it. Glade's blend track (455–591, thumb centre 523) reads exactly 50 %.
+        ReaHotkey announces no state for these two; we do, from a single shot, because both
+        boxes contain the word "Mix" and only its brightness differs — one template pair
+        serves both buttons.
   - [ ] **Cerberus** — the hardest, not the easiest: a list box ("Normal" / "Epic Mix") that
         SWAPS the control set beneath it (`AudioImperia.ahk:127-150`), so it needs both a
         list control and a way to replace an overlay's controls at runtime. Richer than "the same two toggles": the products

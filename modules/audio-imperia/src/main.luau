@@ -89,6 +89,29 @@ local function standard(name, at, opts)
   }
 end
 
+
+-- ── The wide panel ───────────────────────────────────────────────────────────
+-- Glade and Nucleus use Audio Imperia's OTHER layout — a wider window (1353 px against
+-- 1177) with Basic/Advanced tabs — and their mix selector is two large labelled boxes
+-- rather than a segmented strip. ReaHotkey drives these two with plain hotspot buttons and
+-- announces no state at all; we can do better from the same single shot, because both
+-- boxes contain the word "Mix" and the ONLY difference between selected and not is how
+-- brightly it is drawn. So one pair of templates — "Mix" dim and "Mix" lit — serves both
+-- buttons, and since each search is scoped to its own box, where the word sits inside the
+-- label does not matter.
+--
+-- That is what made these measurable from one picture. Cropping a per-button on AND off
+-- would have meant asking the user to click the buttons this overlay exists to make
+-- clickable, which for a blind user is circular.
+local function wideMix(product, label, box)
+  return {
+    label = label,
+    box = box,
+    on = { "images/" .. product .. "/MixOn.png" },
+    off = { "images/" .. product .. "/MixOff.png" },
+  }
+end
+
 local PRODUCTS = {
   -- Areia carries the three-segment note only because it was the first measured; its own
   -- selector is the standard two. Wordmark from a shot of "03 6 Celli - Performance Legato".
@@ -115,6 +138,41 @@ local PRODUCTS = {
   -- current UI at any tolerance we would dare use, while its mix templates still do. The
   -- library was re-skinned and ReaHotkey's landmark went with it.
   standard("Jaeger", { 966, 64 }, { blend = true }),
+
+  -- Measured from a shot of "Nucleus - 01 10 Violas - Sustained". Its wordmark sits over
+  -- library artwork, so the landmark is OUR crop of the glyphs (150x13 at 781,70) —
+  -- ReaHotkey's includes the backdrop and matches nothing once the patch changes it.
+  -- Two stacked boxes, no mic blend.
+  {
+    name = "Nucleus",
+    landmark = "images/Nucleus/Product.png",
+    wordmark = { 781, 70 },
+    verified = true,
+    mixes = {
+      wideMix("Nucleus", "Classic Mix", { 455, 178, 589, 201 }),
+      wideMix("Nucleus", "Modern Mix", { 455, 212, 589, 235 }),
+    },
+  },
+
+  -- Measured from "02 Pyramid Instruments / 02 Low Strings" — the patch family ReaHotkey
+  -- targets; Glade's "Designer" patch has no mixer at all. Side-by-side boxes plus the mic
+  -- blend, whose track (455–591) and thumb (centre 523) check out: exactly 50 %, i.e. "Mid".
+  {
+    name = "Glade",
+    landmark = "images/Glade/Product.png",
+    wordmark = { 771, 60 },
+    verified = true,
+    wideBlend = {
+      region = { -326, 108, -171, 136 },
+      thumb = { "images/Glade/Thumb.png" },
+      from = -307,
+      to = -189,
+    },
+    mixes = {
+      wideMix("Glade", "Classic Mix", { 430, 226, 527, 250 }),
+      wideMix("Glade", "Modern Mix", { 522, 226, 630, 250 }),
+    },
+  },
 }
 
 -- Plugin coordinates → wordmark-relative, which is what the overlay's controls use.
@@ -126,6 +184,18 @@ end
 local function build(product)
   return function(ov)
     ov:addStaticText(product.name)
+    if product.wideBlend then
+      local b = product.wideBlend
+      local thumb = {}
+      for i, t in ipairs(b.thumb) do thumb[i] = img(t) end
+      ov:addSlider({
+        label = "Close/Mid/Far",
+        region = b.region,
+        thumbImage = thumb,
+        from = b.from,
+        to = b.to,
+      })
+    end
     if product.blend then
       local b = PANEL.blend
       local thumb = {}
