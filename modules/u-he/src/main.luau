@@ -153,7 +153,7 @@ local function build(ov, s)
   -- directories). Ctrl+U and Ctrl+S below are ReaHotkey's own bindings, kept so a
   -- ReaHotkey user's fingers still work — but note that while this overlay is active it
   -- OWNS them, so Ctrl+S saves a u-he preset rather than the DAW project.
-  ov:addHotspotButton({ label = "u-he logo menu", at = s.logo, hotkey = "Ctrl+U" })
+  ov:addHotspotButton({ label = "u-he logo menu", at = s.logo, hotkey = "Ctrl+U", opensMenu = true })
   if s.browser then
     ov:addHotspotToggle({
       label = "Preset browser toggle",
@@ -173,7 +173,7 @@ local function build(ov, s)
   -- live on Diva and Repro-1. Native is the whole point: a screen reader announces it
   -- without help from us, so this one control is the accessible path to every preset, and
   -- the reason the browser toggle's hint points here.
-  ov:addOCRButton({ label = "Preset menu", region = s.preset, hotkey = "Alt+M" })
+  ov:addOCRButton({ label = "Preset menu", region = s.preset, hotkey = "Alt+M", opensMenu = true })
   ov:addHotspotButton({ label = "Next preset", at = s.next, hotkey = "Alt+N" })
   ov:addHotspotButton({ label = "Save preset", at = s.save, hotkey = "Ctrl+S" })
 end

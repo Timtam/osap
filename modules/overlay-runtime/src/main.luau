@@ -215,6 +215,11 @@ function Overlay:addHotspotButton(opts)
   -- where reaching a control means getting there first: switch to its tab, then its
   -- sub-tab, then click it. Making that one control keeps every action self-contained, so
   -- the user never has to navigate a tab structure they cannot see.
+  -- `opensMenu`: activating this control puts a MENU on screen. Declared, because the
+  -- overlay cannot tell — and the moment a menu is up the overlay must stop owning keys, so
+  -- that Alt+P and the rest reach the menu instead of re-firing the control (see
+  -- Overlay:_menuOpening). The menu watch would notice within 150 ms anyway; this closes
+  -- that window at the only moment it is open.
   return add(self, {
     kind = "hotspot",
     label = opts.label,
@@ -223,6 +228,7 @@ function Overlay:addHotspotButton(opts)
     points = opts.points,
     settle = opts.settle,
     hotkey = opts.hotkey,
+    opensMenu = opts.opensMenu,
     rawOrigin = opts.rawOrigin,
     fromRight = opts.fromRight,
     when = opts.when,
@@ -232,7 +238,7 @@ end
 function Overlay:addCustomButton(opts)
   return add(self, {
     kind = "custom", label = opts.label, onActivate = opts.onActivate,
-    hotkey = opts.hotkey, when = opts.when,
+    hotkey = opts.hotkey, opensMenu = opts.opensMenu, when = opts.when,
   })
 end
 
@@ -242,7 +248,7 @@ function Overlay:addOCRButton(opts)
   -- drag knob or near a destructive control, where a click would change state.
   return add(self, {
     kind = "ocr", label = opts.label, region = opts.region, hotkey = opts.hotkey,
-    readOnly = opts.readOnly, when = opts.when,
+    readOnly = opts.readOnly, opensMenu = opts.opensMenu, when = opts.when,
   })
 end
 
@@ -1110,6 +1116,9 @@ function Overlay:activate(index)
   local c = self.controls[i]
   if not c then return end
   if not isVisible(self, c) then return end -- a hidden control's hotkey no-ops
+  -- Before the click, not after: the menu can be up by the time the click returns, and from
+  -- that instant the keys belong to it.
+  if c.opensMenu then self:_menuOpening() end
   if c.kind == "hotspot" and c.points then
     -- Acknowledge at PRESS time, like every other control. Speaking after the last click
     -- instead would land hundreds of milliseconds late — indistinguishable from a key that
@@ -1203,6 +1212,10 @@ end
 -- Re-run whenever the visible set can have changed: a tab switch (see selectTab) and a
 -- change of coordinate origin (see _recheck).
 function Overlay:_syncControlHotkeys()
+  -- While a plug-in menu is open this overlay owns no keys at all (see
+  -- _suspendControlHotkeys), and a re-sync from any other cause must not quietly take them
+  -- back — a tab switch or an origin change while a menu is up would otherwise undo it.
+  if self._hotkeysSuspended then return end
   for _, id in ipairs(self.controlHotkeys or {}) do
     host.hotkey.unregister(id)
   end
@@ -1231,9 +1244,59 @@ function Overlay:_syncControlHotkeys()
   end
 end
 
+-- ReaHotkey's HotkeyMode 0: while a plug-in menu is open, this overlay owns NO keys.
+--
+-- The captured navigation keys were already handled — Tab, Return and Space fall through to
+-- an open menu (see host.keys.menuOpen). The per-control hotkeys were not, and they are the
+-- ones that matter, because they are RegisterHotKey claims and those OUTRANK the
+-- application: with Kontakt's file or snapshot menu up, Alt+P and Alt+M never reached the
+-- menu at all. The overlay ate them and re-ran its own action against a UI that already had
+-- a menu open, acknowledging a keystroke the menu never received.
+--
+-- Dropping the registration rather than merely ignoring the press is the point. Ignoring
+-- would still swallow the key — the OS hands it to us and we would discard it, which is
+-- indistinguishable from a broken tool. Unregistered, the key reaches the menu, which is
+-- where the user was aiming and what ReaHotkey does.
+--
+-- Idempotent: the watch polls at 150 ms and calls this on every tick.
+function Overlay:_suspendControlHotkeys(suspend)
+  if suspend == (self._hotkeysSuspended == true) then return end
+  self._hotkeysSuspended = suspend
+  if suspend then
+    for _, id in ipairs(self.controlHotkeys or {}) do
+      host.hotkey.unregister(id)
+    end
+    self.controlHotkeys = {}
+  elseif self.active then
+    self:_syncControlHotkeys()
+  end
+end
+
+-- Called the moment a control that OPENS a menu is activated, because the watch's 150 ms
+-- poll is too slow to be the only answer: ReaHotkey does the same eagerly (Kontakt8.ahk:97
+-- checks for the menu immediately after clicking the snapshot dropdown) rather than waiting
+-- for its own timer.
+function Overlay:_menuOpening()
+  if not self.active then return end
+  host.keys.menuOpen(true)
+  self:_suspendControlHotkeys(true)
+  -- The watch is what LOWERS the flag again, by seeing that no menu is there. An overlay
+  -- that isn't watched has nothing to lower it — and a stranded suspension is an overlay
+  -- whose every hotkey has silently stopped working, with nothing to tell the user why. So
+  -- an unwatched overlay gets a one-shot restore: the eager suspension is worth having for
+  -- the moment a menu takes to appear, not for the rest of the session.
+  if not self._menuWatch then
+    host.timer.after(600, function()
+      host.keys.menuOpen(false)
+      self:_suspendControlHotkeys(false)
+    end)
+  end
+end
+
 function Overlay:_registerHotkeys()
   self.registered = self.registered or {}
   self.capturedKeys = self.capturedKeys or {}
+  self._hotkeysSuspended = false
   self:_syncControlHotkeys()
   for _, c in ipairs(self.controls) do
     -- A tab control's individual TABS may each carry a hotkey (ReaHotkey's Tab.SetHotkey):
@@ -1319,6 +1382,10 @@ function Overlay:_unregisterHotkeys()
   end
   self.controlHotkeys = {}
   self._hotkeyOriginId = nil
+  -- Cleared with the registrations: a suspension is a statement about keys this overlay
+  -- currently holds, and it holds none now. Left set, the next activation would find itself
+  -- suspended for a menu that closed long ago.
+  self._hotkeysSuspended = false
   for _, token in ipairs(self.capturedKeys or {}) do
     host.keys.release(token)
   end
@@ -1621,6 +1688,51 @@ local function report(self, opts)
     end
     if c.hotkey ~= nil and type(c.hotkey) ~= "string" then
       bad("%s: `hotkey` must be a string like \"Alt+P\", got %s", who, type(c.hotkey))
+    end
+  end
+
+  -- A hotkey spec claimed by TWO controls, where at least one of them is always visible.
+  --
+  -- Sharing a spec is legitimate and the runtime is built for it — a Kontakt nested in
+  -- Komplete Kontrol offers KK's menu on Alt+M, a bare one offers Kontakt's snapshot menu on
+  -- the same key — but only under the condition _syncControlHotkeys states in prose: the
+  -- claimants must never be visible at once, because a press goes to the FIRST visible one
+  -- and declaration order decides the rest. A claimant with no `when` is visible always, so
+  -- it necessarily overlaps every other claimant, and the invariant is broken.
+  --
+  -- This is the check that would have caught Impact Soundworks' Preset taking Alt+P, which
+  -- the inherited Kontakt header already owned for "Previous snapshot": the header won, and
+  -- the key stepped a snapshot — changing the loaded sound — instead of reading a preset. It
+  -- took a fourteen-agent audit to find, and a blind user could not have told the difference
+  -- from hearing it, because both controls announce themselves correctly. Two `when`-gated
+  -- claimants are NOT reported: whether two predicates are mutually exclusive cannot be
+  -- decided here, and guessing would report every legitimate case.
+  local claim, order = {}, {}
+  for i, c in ipairs(self.controls) do
+    if type(c.hotkey) == "string" then
+      if claim[c.hotkey] then
+        table.insert(claim[c.hotkey], i)
+      else
+        claim[c.hotkey] = { i }
+        order[#order + 1] = c.hotkey
+      end
+    end
+  end
+  for _, spec in ipairs(order) do
+    local idxs = claim[spec]
+    if #idxs > 1 then
+      local names, ungated = {}, false
+      for _, i in ipairs(idxs) do
+        local c = self.controls[i]
+        names[#names + 1] = string.format("%d '%s'", i, tostring(c.label or ""))
+        if c.when == nil then ungated = true end
+      end
+      if ungated then
+        bad("hotkey %s is claimed by controls %s, and at least one of them is visible at "
+          .. "all times — a press activates whichever comes FIRST, so the later one may "
+          .. "never fire. Gate them on mutually exclusive `when`s, or give one another key",
+          spec, table.concat(names, " and "))
+      end
     end
   end
 
@@ -2049,6 +2161,7 @@ function Overlay:watchMenus()
     if o == self then return self end
   end
   menuWatched[#menuWatched + 1] = self
+  self._menuWatch = true
   if menuTimer then return self end
   menuTimer = true
   -- Disable-safe recurring poll (survives a disable/enable cycle, unlike a Lua
@@ -2067,7 +2180,16 @@ function Overlay:watchMenus()
         end
       end
     end
-    if anyActive then host.keys.menuOpen(open) end
+    if anyActive then
+      host.keys.menuOpen(open)
+      -- And the other half of what "a menu is open" has to mean: an active overlay owns no
+      -- per-control hotkeys while one is up, so they reach the menu instead of re-firing
+      -- the control. This loop is also what LOWERS an eager suspension (_menuOpening) when
+      -- the menu never appeared.
+      for _, o in ipairs(menuWatched) do
+        if o.active then o:_suspendControlHotkeys(open) end
+      end
+    end
   end)
   return self
 end

@@ -86,6 +86,10 @@ local function addRackControls(ov, cell)
       ov:addCustomButton({
         label = h.label,
         hotkey = h.hotkey,
+        -- The snapshot menu LEAVES a menu open for the user to walk. Declaring it hands the
+        -- overlay's own hotkeys to that menu from the press onwards, instead of letting
+        -- Alt+M re-press the camera behind it.
+        opensMenu = h.opensMenu,
         onActivate = function(o)
           -- Acknowledge at PRESS time, as a hotspot control does. These act through a
           -- reveal-then-click sequence that can take half a second, and one that worked
@@ -140,6 +144,9 @@ local function addStandaloneHeader(ov, cell, isLibrary)
   ov:addCustomButton({
     label = "Kontakt file menu",
     hotkey = "Alt+F",
+    -- Unlike the three actions above, which drive the menu themselves and close it again,
+    -- this one hands it to the user — so the overlay stops owning keys while it is up.
+    opensMenu = true,
     onActivate = function(o) A.openFileMenu(cell, o) end,
   })
   for _, h in ipairs(geo.K7_CONTROLS) do

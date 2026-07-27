@@ -209,25 +209,33 @@ plausible wrong action rather than an error.
       already owns for "Previous snapshot". A doubly-claimed spec resolves to the first
       VISIBLE claimant and the header is declared first, so the key stepped a snapshot —
       changing the loaded sound — instead of reading the preset, in 4 of 6 cells. Removed.
-- [ ] **`menuOpen` frees only the navigation keys; ReaHotkey drops ALL of the overlay's** —
-      its `SetHotkeyMode(…, 0)` turns off the per-control hotkeys AND the common nav keys
-      while a plug-in menu is up. Our flag reaches only the captured-key branch of the
-      low-level hook, so `RegisterHotKey`-owned combos (Alt+P, Alt+M, Alt+N, Ctrl+L, Ctrl+S)
-      still fire into an open Qt menu and re-run the overlay's own action against a UI that
-      already has one up. Milder than it sounds — `invokeMenuItem` escapes with "Menu item
-      not found", and the camera/arrow probes sit above the row a menu drops onto, so a
-      re-fire dismisses the popup rather than clicking a row — but the user hears an
-      acknowledgement for a keystroke the menu never got. Fix: make the flag mean what
-      HotkeyMode 0 means (drop the per-control registrations on open, or return early in
-      `Overlay:activate`), and set it EAGERLY at press time for every `opensMenu` control —
-      the 150 ms poll is too slow, and only `openFileMenu`'s UIA path does that today.
-- [ ] **Enforce the shared-hotkey invariant at declaration time** — the runtime already
-      states it in prose (two controls may share a spec only when their `when` predicates are
-      mutually exclusive) and the Impact Soundworks defect is exactly a violation of it. A
-      check in the declaration report would have caught it at load with a log line instead of
-      by audit. More generally: a guard that can REFUSE an author's value should fail loudly
-      when the overlay is declared, not quietly when the key is pressed — a blind user cannot
-      tell "refused" from "not implemented".
+- [x] **An open plug-in menu now takes ALL of the overlay's keys, not just the navigation
+      ones** ✓ (2026-07-27) — ReaHotkey's `SetHotkeyMode(…, 0)` means "this overlay owns no
+      keys at all"; ours meant "let the nav keys through". The per-control hotkeys are
+      `RegisterHotKey` claims, and those OUTRANK the application, so with Kontakt's file or
+      snapshot menu up, Alt+P and Alt+M never reached the menu — the overlay ate them and
+      re-ran its own action, acknowledging a keystroke the menu never received.
+      Their REGISTRATION is dropped, not merely their effect: ignoring the press would still
+      swallow the key, which is indistinguishable from a broken tool. Unregistered, it
+      reaches the menu. Set eagerly at press time via a declared `opensMenu`, since the
+      150 ms poll is too slow to be the only answer (ReaHotkey does the same at
+      Kontakt8.ahk:97); the poll is what lowers it again, and an overlay that is not
+      menu-watched gets a one-shot restore so a suspension can never strand.
+      Declared on the controls that hand a menu to the USER — Kontakt's snapshot and file
+      menus, KK's hamburger and its five standalone menu-bar buttons, u-he's logo and preset
+      menus — but NOT on the three that drive a menu themselves and close it again.
+- [x] **The shared-hotkey invariant is enforced when an overlay is DECLARED** ✓
+      (2026-07-27) — two controls may share a spec only when their `when` predicates are
+      mutually exclusive; a claimant with no `when` is visible always and therefore always
+      overlaps. Verified against the defect it was written for by reintroducing Alt+P: it
+      names both controls and fires on exactly the four cells where both exist, staying
+      silent on the two in-KK cells where the Kontakt header is not present — which is
+      independently the split the audit derived. Two `when`-gated claimants are deliberately
+      NOT reported: whether two predicates are exclusive cannot be decided here, and guessing
+      would flag every legitimate case (KK's Alt+M against Kontakt's, Alt+V's two view
+      toggles). The general form of this is worth keeping in mind: a guard that can refuse an
+      author's value should fail loudly at declaration, not quietly at press time — a blind
+      user cannot tell "refused" from "not implemented".
 - [ ] **14 of the 22 candidates were never verified** (budget cap), so they are not cleared,
       only unexamined. Full run under `subagents/workflows/wf_b83b2311-d3a/journal.jsonl`.
 

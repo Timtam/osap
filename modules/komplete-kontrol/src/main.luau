@@ -151,6 +151,7 @@ local function addChrome(ov)
     at = { 297, 17 },
     rawOrigin = true,
     hotkey = "Alt+M",
+    opensMenu = true,
   })
   -- Focus KK's library-browser search field (the first UIA Edit) so you can type an
   -- instrument/library name; KK filters and you pick it with KK's own keys.
@@ -212,11 +213,14 @@ return {
     -- above the client, so the hotspots use Y = -10. Auto-closes the library browser on
     -- activate like the embedded overlay (the opt-out setting is shared).
     local sa = O.new("Komplete Kontrol")
-    sa:addHotspotButton({ label = "File menu", at = { 16, -10 }, hotkey = "Alt+F" })
-    sa:addHotspotButton({ label = "Edit menu", at = { 52, -10 }, hotkey = "Alt+E" })
-    sa:addHotspotButton({ label = "View menu", at = { 83, -10 }, hotkey = "Alt+V" })
-    sa:addHotspotButton({ label = "Controller menu", at = { 138, -10 }, hotkey = "Alt+C" })
-    sa:addHotspotButton({ label = "Help menu", at = { 194, -10 }, hotkey = "Alt+H" })
+    -- Every one of these opens a menu the user then walks, so each hands the overlay's
+    -- hotkeys over while it is up — including Alt+F/E/V/C/H themselves, which are the menu
+    -- bar's own access keys and which our RegisterHotKey claims would otherwise outrank.
+    sa:addHotspotButton({ label = "File menu", at = { 16, -10 }, hotkey = "Alt+F", opensMenu = true })
+    sa:addHotspotButton({ label = "Edit menu", at = { 52, -10 }, hotkey = "Alt+E", opensMenu = true })
+    sa:addHotspotButton({ label = "View menu", at = { 83, -10 }, hotkey = "Alt+V", opensMenu = true })
+    sa:addHotspotButton({ label = "Controller menu", at = { 138, -10 }, hotkey = "Alt+C", opensMenu = true })
+    sa:addHotspotButton({ label = "Help menu", at = { 194, -10 }, hotkey = "Alt+H", opensMenu = true })
     sa:onActivate(onKKActive)
     -- Join the shared Kontakt arbiter slot at the LOWEST specificity, so a Kontakt (1) or
     -- library (2) loaded inside this standalone KK takes over the same slot — exactly like
