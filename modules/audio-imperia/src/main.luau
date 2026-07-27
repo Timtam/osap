@@ -51,6 +51,17 @@ local PANEL = {
 -- because the knob is drawn differently under the pointer; see the note in the slider.
 local THUMB = { "images/Areia/Thumb.png", "images/Areia/ThumbHeld.png" }
 
+-- The two-segment products' labels are rendered IDENTICALLY — ReaHotkey ships four
+-- byte-identical copies of these six files, one per library, and they match each other's
+-- shots at exactly (420,232) and (501,232). So there is one shared set, and a library that
+-- draws its own (Chorus, whose narrow segments read "CLC" and "MDN") names its own folder.
+--
+-- This is also what let Dolce in without a second calibration shot. Its OWN templates no
+-- longer match anything — ReaHotkey's are from an older skin — and reading both states off
+-- the screen would have meant asking the user to click the very buttons this overlay exists
+-- to make clickable. Reusing a sibling's templates removes the question.
+local SHARED_MIX = "Mix"
+
 -- One segment of a product's mixer selector, in PLUGIN coordinates; `rel` converts.
 local function mix(product, name, seg)
   local base = "images/" .. product .. "/" .. name .. "Mix"
@@ -72,8 +83,8 @@ local function standard(name, at, opts)
     verified = true,
     blend = (opts and opts.blend) == true,
     mixes = {
-      mix(name, "Classic", PANEL.segments[1]),
-      mix(name, "Modern", PANEL.segments[2]),
+      mix(SHARED_MIX, "Classic", PANEL.segments[1]),
+      mix(SHARED_MIX, "Modern", PANEL.segments[2]),
     },
   }
 end
@@ -96,6 +107,9 @@ local PRODUCTS = {
     },
   },
   standard("Solo", { 959, 61 }),
+  -- Dolce's panel is the standard one and its labels match the shared templates; only
+  -- ReaHotkey's Dolce-specific images are stale. Wordmark from a shot of the loaded library.
+  standard("Dolce", { 948, 65 }),
   standard("Talos", { 960, 62 }, { blend = true }),
   -- Jaeger's wordmark is OUR crop, not ReaHotkey's: its Product.png no longer matches the
   -- current UI at any tolerance we would dare use, while its mix templates still do. The

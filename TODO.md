@@ -131,11 +131,13 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
       product contributes just the wordmark position it was measured at. The slider knob is
       one shared asset too: Areia's template pair matches Jaeger's and Talos's exactly.
       ✓ (2026-07-27)
-- [ ] **Audio Imperia — the remaining four.**
-  - [ ] **Dolce** — same panel (its labels sit at the standard x), but ReaHotkey's mix
-        templates no longer match at any tolerance, the same ageing that killed Jaeger's
-        wordmark. Needs its four templates cropped from OUR shots, which takes two: one per
-        selected segment, since a shot only shows each button in one state.
+- [ ] **Audio Imperia — the remaining three.**
+  - [x] **Dolce** ✓ (2026-07-27) — and the way it got in is the point. Its own templates are
+        stale, and cropping fresh ones would have meant asking a blind user to click the very
+        buttons this overlay exists to make clickable. The two-segment products' labels turn
+        out to be rendered identically (ReaHotkey ships four BYTE-IDENTICAL copies), so a
+        sibling's templates serve, the six files are now shared, and no second shot was
+        needed. **Look for that before asking for a state change** — see the memory note.
   - [ ] **Glade** and **Nucleus** — a different, wider UI (1353 px) with Perform / Layers /
         Effects / Settings tabs, which is why ReaHotkey drives them with hotspot buttons at
         per-host coordinates instead of image toggles. Both shot and waiting.
