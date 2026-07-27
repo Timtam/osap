@@ -746,6 +746,39 @@ local function hotspotToggleState(self, c)
   if don <= doff then return "on" else return "off" end
 end
 
+-- The value of an image-read control, delivered to `done` when the worker answers.
+--
+-- Same measurement as the synchronous versions above and the same verdict, only off the
+-- main thread: one capture of the control's own region, every template matched against
+-- that single frame. `done(nil)` when there is nothing to say — a toggle whose templates
+-- both miss has no state to report, and inventing one is worse than silence.
+local function valueOf(self, c, done)
+  local ox, oy = originOf(self, c)
+  local opts = {
+    region = { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] },
+    tolerance = c.tolerance or MATCH_TOLERANCE,
+    scales = c.scales or MATCH_SCALES,
+  }
+  if c.kind == "gtoggle" then
+    local templates, labels = {}, {}
+    addTemplates(templates, labels, c.onImage, "on")
+    addTemplates(templates, labels, c.offImage, "off")
+    if #templates == 0 then return done(nil) end
+    host.screen.imageSearchAsync(templates, opts, function(hit)
+      done(hit and labels[hit.n] or nil)
+    end)
+    return
+  end
+  -- A slider: its value IS where the thumb is drawn. "not found" rather than a number
+  -- when it cannot be located — a percentage invented from a failed search is worse than
+  -- an admission, because it sounds right.
+  host.screen.imageSearchAsync(asList(c.thumbImage), opts, function(hit)
+    if not hit then return done("not found") end
+    local pct = sliderPercent(self, c, { cx = hit.x + math.floor(hit.w / 2) })
+    done(pct and (tostring(pct) .. " percent") or "not found")
+  end)
+end
+
 local function speakControl(self, index, moveMouse)
   local c = self.controls[index]
   if not c then return end
@@ -807,23 +840,37 @@ local function speakControl(self, index, moveMouse)
         oy + math.floor((c.region[2] + c.region[4]) / 2))
     end
   end
-  if c.kind == "gtoggle" then
-    local st = gtoggleState(self, c)
-    if st then parts[#parts + 1] = st end
-  end
   if c.kind == "hotspottoggle" then
     local st = hotspotToggleState(self, c)
     if st then parts[#parts + 1] = st end
   end
-  -- A slider's value IS its thumb position, so it is read on focus like a toggle's state.
-  -- "not found" rather than a number when the thumb cannot be located: a percentage
-  -- invented from a failed search is worse than an admission, because it sounds right.
-  if c.kind == "slider" then
-    local thumb = sliderThumb(self, c)
-    local pct = thumb and sliderPercent(self, c, thumb)
-    parts[#parts + 1] = pct and (tostring(pct) .. " percent") or "not found"
-  end
+  -- The IMAGE-read values — a graphic toggle's state, a slider's position — are announced
+  -- in TWO utterances rather than one, and the name goes out first.
+  --
+  -- Reading them means a screen capture, which costs a fixed compositor frame: measured at
+  -- 20-42 ms per focus step, and that whole time the user hears nothing at all. Nothing is
+  -- gained by their waiting for it — the name is known immediately, and the value is what
+  -- takes the time. So the name is spoken at once and the value appended when it arrives,
+  -- queued rather than interrupting, which reads as one phrase when it lands quickly.
+  --
+  -- This is the shape a screen reader already has, and it is why the read is worth doing
+  -- ASYNCHRONOUSLY: the capture and the match move to the worker, off the thread that
+  -- speech and hotkeys share, so the step costs what the speech costs.
+  --
+  -- Guarded on the focus not having moved on: two fast Tabs must not have the first
+  -- control's state read out while the second one is focused, which would be a plain lie
+  -- about what is in front of the user.
+  local needsValue = c.kind == "gtoggle" or c.kind == "slider"
   host.speech.output(table.concat(parts, ", "), { interrupt = true })
+  if needsValue then
+    local at = self.focus
+    local pinned = self:hwnd()
+    valueOf(self, c, function(value)
+      if value and self.active and self.focus == at and self:hwnd() == pinned then
+        host.speech.output(value, { interrupt = false })
+      end
+    end)
+  end
 end
 
 local function isFocusable(self, index)
