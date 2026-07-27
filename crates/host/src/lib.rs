@@ -7,7 +7,7 @@
 
 mod backend;
 mod gui;
-mod logging;
+pub mod logging;
 pub mod registry;
 mod settings;
 

@@ -213,14 +213,50 @@ return {
     -- above the client, so the hotspots use Y = -10. Auto-closes the library browser on
     -- activate like the embedded overlay (the opt-out setting is shared).
     local sa = O.new("Komplete Kontrol")
-    -- Every one of these opens a menu the user then walks, so each hands the overlay's
-    -- hotkeys over while it is up — including Alt+F/E/V/C/H themselves, which are the menu
-    -- bar's own access keys and which our RegisterHotKey claims would otherwise outrank.
-    sa:addHotspotButton({ label = "File menu", at = { 16, -10 }, hotkey = "Alt+F", opensMenu = true })
-    sa:addHotspotButton({ label = "Edit menu", at = { 52, -10 }, hotkey = "Alt+E", opensMenu = true })
-    sa:addHotspotButton({ label = "View menu", at = { 83, -10 }, hotkey = "Alt+V", opensMenu = true })
-    sa:addHotspotButton({ label = "Controller menu", at = { 138, -10 }, hotkey = "Alt+C", opensMenu = true })
-    sa:addHotspotButton({ label = "Help menu", at = { 194, -10 }, hotkey = "Alt+H", opensMenu = true })
+    -- The menu bar, by NAME rather than by coordinate.
+    --
+    -- ReaHotkey addresses these as pixels at client-relative y = -10 (the bar sits in the
+    -- window's non-client band, above the client origin), and a calibration shot confirms
+    -- the arithmetic exactly: client top 297, window top 246, so -10 lands at 287, inside
+    -- the frame and on the bar. But the same shot showed something better in the window's
+    -- accessibility tree — a real menu bar with all five items named:
+    --
+    --     Anwendungsmenü  [MenuBar]
+    --       File  Edit  View  Controller  Help   [MenuItem]
+    --
+    -- Named, so UIA can locate each one and give us the point to click. That is worth more
+    -- than a correct offset: a coordinate is right for one window size, one DPI and one
+    -- version of KK, and when it drifts it clicks something else in silence. A name either
+    -- resolves or it does not. It also survives the German Windows this was measured on
+    -- without needing translation — NI's own items stay English inside a localised frame.
+    --
+    -- `opensMenu` on each: they open a menu the user then walks, so the overlay gives up its
+    -- hotkeys while it is up — including Alt+F/E/V/C/H themselves, which are the bar's own
+    -- access keys and which our RegisterHotKey claims would otherwise outrank.
+    for _, item in ipairs({
+      { label = "File menu", name = "File", hotkey = "Alt+F" },
+      { label = "Edit menu", name = "Edit", hotkey = "Alt+E" },
+      { label = "View menu", name = "View", hotkey = "Alt+V" },
+      { label = "Controller menu", name = "Controller", hotkey = "Alt+C" },
+      { label = "Help menu", name = "Help", hotkey = "Alt+H" },
+    }) do
+      sa:addCustomButton({
+        label = item.label,
+        hotkey = item.hotkey,
+        opensMenu = true,
+        onActivate = function(o)
+          local hwnd = o:hwnd()
+          local p = hwnd and host.uia.locate(hwnd, item.name, U.MenuItem)
+          if p then
+            host.input.click(p.x, p.y)
+          else
+            -- Said rather than left silent: a menu that cannot be found is the one case
+            -- where doing nothing is indistinguishable from a key that never registered.
+            host.speech.output(item.label .. " not found", { interrupt = true })
+          end
+        end,
+      })
+    end
     sa:onActivate(onKKActive)
     -- Join the shared Kontakt arbiter slot at the LOWEST specificity, so a Kontakt (1) or
     -- library (2) loaded inside this standalone KK takes over the same slot — exactly like

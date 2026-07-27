@@ -2398,6 +2398,20 @@ function Overlay:calibrationShot()
   -- disagreed with the coordinate by 16 px.
   local ow, oh = O.contentSize(o)
   local region = { o.client.x, o.client.y, o.client.x + ow, o.client.y + oh }
+  -- …but GROWN to cover any control that resolves outside it, because that is precisely the
+  -- control whose picture you need. Komplete Kontrol's standalone menu bar sits 10 px above
+  -- the client top, in the window's non-client band, so the shot meant to prove where those
+  -- five points land cut every one of them off — and produced a picture with no crosshairs
+  -- at all, which reads as "nothing was marked" rather than "the marks are off-frame".
+  -- Clamped to the window's own rectangle, so a genuinely stray coordinate still cannot pull
+  -- another application's pixels into the evidence.
+  local pad = 12
+  for _, m in ipairs(marks) do
+    region[1] = math.max(o.bounds.x, math.min(region[1], m.x - pad))
+    region[2] = math.max(o.bounds.y, math.min(region[2], m.y - pad))
+    region[3] = math.min(o.bounds.x + o.bounds.w, math.max(region[3], m.x + pad))
+    region[4] = math.min(o.bounds.y + o.bounds.h, math.max(region[4], m.y + pad))
+  end
   local stem = shotPath(self.label)
   local path = host.path("calibration/" .. stem .. ".png")
   local ok = host.screen.saveMarked(path, { region = region, marks = marks })
@@ -2410,9 +2424,13 @@ function Overlay:calibrationShot()
     region = region,
     marks = {},
   })
+  -- The captured region, not the window size: the two differ (content vs frame, and the
+  -- growth above), and printing the one that is NOT in the picture is how half an hour goes
+  -- into wondering why a coordinate inside "1044x633" was off the edge of the image.
   host.log.info(string.format(
-    "[calibrate] %s — origin (%d,%d) %dx%d%s -> %s (%s)",
-    tostring(self.label), o.client.x, o.client.y, o.bounds.w, o.bounds.h,
+    "[calibrate] %s — origin (%d,%d) captured (%d,%d)-(%d,%d) %dx%d%s -> %s (%s)",
+    tostring(self.label), o.client.x, o.client.y,
+    region[1], region[2], region[3], region[4], region[3] - region[1], region[4] - region[2],
     self._landmarkHit
       and string.format("  landmark at (%d,%d)", self._landmarkHit.x, self._landmarkHit.y)
       or "",

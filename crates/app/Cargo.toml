@@ -11,3 +11,9 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0.102"
 host = { path = "../host" }
+
+# Only to re-attach the parent terminal when the management subcommands are run from one —
+# the windows subsystem otherwise leaves the process with no console at all. Same version
+# the host crate already pulls in, so this adds nothing to the build.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Console"] }
