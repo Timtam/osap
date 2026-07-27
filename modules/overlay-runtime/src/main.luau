@@ -1455,8 +1455,22 @@ local function joinPoll(self, ms)
     -- Disable-safe recurring poll, like the menu watch: it survives a disable/enable cycle
     -- where a self-rescheduling host.timer.after would not.
     host.timer.every(ms, function()
+      -- Timed, because this tick runs on the MAIN thread and everything else waits behind
+      -- it: speech, hotkeys, the arbiter. Each overlay's context check re-resolves the
+      -- plugin control, and Kontakt's cells cannot cache their identity (it is relational),
+      -- so this is a UIA subtree search per overlay per tick. With one library module
+      -- declaring eleven products across six cells that is sixty-six of them, and if the
+      -- tick spreads over more than a few ms the landmark searches it starts no longer
+      -- arrive together — which is exactly what "batch of 1" was telling us.
+      local t0 = host.now and host.now() or 0
       for _, o in ipairs(group) do
         o:_recheck()
+      end
+      local dt = (host.now and host.now() or 0) - t0
+      if dt >= 25 then
+        host.log.info(string.format(
+          "[poll] %d ms rechecking %d overlay(s) on the %d ms poll", dt, #group, ms
+        ))
       end
     end)
   end

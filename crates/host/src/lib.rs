@@ -2294,6 +2294,17 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     )?;
     host.set("keys", keys)?;
 
+    // host.now() -> milliseconds since the app started. A CLOCK, not a date: the only
+    // thing modules need it for is measuring their own hot paths, and "how long did that
+    // take" is exactly what nobody could answer about the overlay runtime — every
+    // performance question so far had to be answered from Rust or from log timestamps a
+    // second apart. Monotonic, so it cannot go backwards mid-measurement.
+    let started = Instant::now();
+    host.set(
+        "now",
+        lua.create_function(move |_, ()| Ok(started.elapsed().as_millis() as i64))?,
+    )?;
+
     // host.timer: one-shot delayed callbacks, fired from the event-loop tick.
     let timer = lua.create_table()?;
     let sh = shared.clone();
