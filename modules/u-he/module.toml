@@ -1,0 +1,10 @@
+id = "com.platform.u-he"
+name = "u-he synthesizers"
+version = "0.1.0"
+engine_api = ">=0.1, <0.2"
+entry = "src/main.luau"
+license = "MIT"
+dependencies = ["com.platform.overlay", "com.platform.daw-hosts"]
+
+[capabilities]
+require = ["window", "screen", "ocr", "input", "speech", "hotkey", "keys", "timer", "log"]
