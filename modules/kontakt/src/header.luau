@@ -6,6 +6,7 @@
 -- which Kontakt it is on, because the cell already is one.
 
 local A = host.include("src/actions.luau")
+local D = host.include("src/detect.luau")
 local geo = host.include("src/geometry.luau")
 local U = host.uia.type
 
@@ -39,36 +40,59 @@ local function addPluginHeader(ov, cell)
     hotkey = "Ctrl+R",
     onActivate = function(o) A.invokeMenuItem(cell, o, "Reset multi") end,
   })
-  -- Switching to the classic view, by Kontakt's OWN keyboard shortcut rather than through
-  -- its menu. The menu entry reads "Switch to Classic View   F10", and a shortcut the
-  -- application itself defines cannot drift the way a measured menu row can.
+  -- The view toggle, by Kontakt's OWN keyboard shortcut (F10) rather than through its
+  -- menu: the menu entry reads "Switch to Classic View   F10", and a shortcut the
+  -- application defines cannot drift the way a measured menu row can.
   --
-  -- It is not a nicety: the instrument, multi and snapshot controls exist only in the
-  -- classic view, and the only other route to it is a menu that carries no accessibility
-  -- information at all. Without this a user who cannot see the screen can never get there.
+  -- It is not a nicety. The instrument, multi and snapshot controls exist only in the
+  -- classic view, and the only other route there is a menu that carries no accessibility
+  -- information at all — so without this a user who cannot see the screen never gets there.
   -- (The header's "Play View" button turns the modern view ON; it does not toggle.)
+  --
+  -- TWO controls, one key: F10 toggles, so the label has to say which way it will go.
+  -- Whichever one is currently visible owns Alt+V — the runtime resolves a shared hotkey to
+  -- its visible claimant at press time, which is exactly this case.
+  local function inClassic(o) return D.isClassicView(o:origin()) == true end
+  local function inModern(o) return D.isClassicView(o:origin()) ~= true end
   ov:addCustomButton({
     label = "Switch to classic view",
     hotkey = "Alt+V",
+    when = inModern,
     onActivate = function() host.input.send("F10") end,
   })
-  -- ReaHotkey's instrument / multi / snapshot arrows are NOT here, deliberately.
-  --
-  -- Measured against the live Kontakt 8.11 with the calibrator, its coordinates land on
-  -- nothing in either view: in the modern one they fall inside the loaded library's UI (one
-  -- sat on Cinematic Studio Strings' "Sustain" articulation, so pressing Ctrl+P changed the
-  -- sound instead of the instrument), and in the classic one they land on inert header
-  -- space -- the empty right half of the multi name field, the gap beside the camera icon,
-  -- and the "MIDI Ch:" / "Memory:" labels. Kontakt 8.11's classic header simply has no such
-  -- arrows; the snapshot row appears only for an instrument that HAS snapshots.
-  --
-  -- A control that fires something else is worse than a missing one, and ReaHotkey itself
-  -- only offers these in the classic view (CheckPluginClassicView), a gate we cannot
-  -- reproduce embedded because it needs the UIA tree that an embedded Kontakt does not
-  -- expose. To bring them back: load an instrument that has snapshots, switch to the
-  -- classic view (Alt+V), and take a calibration shot -- the positions can then be read off
-  -- the picture, and they will need a visibility condition so they never appear in the
-  -- modern view.
+  ov:addCustomButton({
+    label = "Switch to play view",
+    hotkey = "Alt+V",
+    when = inClassic,
+    onActivate = function() host.input.send("F10") end,
+  })
+  -- The classic view's own arrows, offered only while that view is up. Their coordinates
+  -- are right — verified against a calibration shot of the classic header — but in the
+  -- modern view the same points fall inside the loaded library's UI, where one of them sat
+  -- on Cinematic Studio Strings' "Sustain": pressing Ctrl+P changed the articulation
+  -- instead of the instrument. ReaHotkey gates these the same way, through a UIA check we
+  -- cannot make embedded; the view probe (a pixel in Kontakt's own chrome) stands in.
+  ov:group(inClassic, function(ov)
+    for _, h in ipairs(geo.ARROWS) do
+      ov:addHotspotButton({
+        label = h.label,
+        at = h.at or cell.geometry[h.key],
+        fromRight = h.fromRight,
+        rawOrigin = true,
+        hotkey = h.hotkey,
+      })
+    end
+    -- The snapshot controls reveal the bar themselves when they need to (see
+    -- actions.snapshotAction), so they are offered whenever the classic view is up rather
+    -- than appearing and disappearing with it.
+    for _, h in ipairs(geo.SNAPSHOTS) do
+      ov:addCustomButton({
+        label = h.label,
+        hotkey = h.hotkey,
+        onActivate = A.snapshotAction(h.at[1], h.at[2]),
+      })
+    end
+  end)
   for _, h in ipairs(geo.K7_CONTROLS) do
     -- Only those Kontakt 7 offers embedded, and only where the cell has the coordinate:
     -- Kontakt 8's geometry simply has no entry, so the loop skips it without a version

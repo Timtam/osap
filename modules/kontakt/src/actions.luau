@@ -146,6 +146,46 @@ end
 -- coordinate click on the item's fixed position within the opened menu (DAW-embedded).
 -- The item's action opens Kontakt's own native, ACCESSIBLE dialog, so the user never has
 -- to read the Qt menu, which carries no accessibility information at all.
+-- Groups OCR words into menu ROWS (words within a few pixels of each other vertically),
+-- returning { text = "save multi as...", y = <centre>, x = <left edge> } per row, in
+-- reading order. OCR gives words with positions; a menu is rows, so this is the join.
+local function ocrRows(words)
+  local rows = {}
+  for _, w in ipairs(words or {}) do
+    local mid = w.y + math.floor(w.h / 2)
+    local row
+    for _, r in ipairs(rows) do
+      if math.abs(r.y - mid) <= 7 then row = r break end
+    end
+    if not row then
+      row = { y = mid, x = w.x, parts = {} }
+      rows[#rows + 1] = row
+    end
+    row.x = math.min(row.x, w.x)
+    row.parts[#row.parts + 1] = { x = w.x, text = w.text }
+  end
+  for _, r in ipairs(rows) do
+    table.sort(r.parts, function(p, q) return p.x < q.x end)
+    local t = {}
+    for _, part in ipairs(r.parts) do t[#t + 1] = part.text end
+    r.text = string.lower(table.concat(t, " "))
+  end
+  return rows
+end
+
+-- Opens the file menu and selects `item` by READING the menu and clicking the row whose
+-- text matches — not by clicking a measured offset.
+--
+-- The offsets came first and were wrong twice: the menu's contents vary (one entry more or
+-- less above shifts every row below it), and a one-row slip put "Reset multi" onto "Save as
+-- default multi", which overwrites the user's default multi. A number measured against one
+-- state of a menu is a number that will be wrong again. Reading the menu costs one OCR per
+-- press — a user action, not a loop — and cannot drift.
+--
+-- If no row matches, nothing is clicked: the menu is closed and the failure is announced,
+-- which is what ReaHotkey does through UIA ("menu item not found") where it can see the
+-- menu at all. An embedded Kontakt's menu carries no accessibility information whatsoever,
+-- so OCR is the only way to know what is actually on screen.
 local function invokeMenuItem(cell, o, item)
   local ctrl, uia = openFileMenu(cell, o)
   if not ctrl then return end
@@ -154,31 +194,81 @@ local function invokeMenuItem(cell, o, item)
       uiaClick(nil, item, MENUITEM)
       return
     end
-    local base, at = cell.geometry.fileMenu, geo.MENU_ITEM[item]
-    if not (ctrl.client and base and at) then return end
-    local x = ctrl.client.x + base[1] + at[1]
-    local y = ctrl.client.y + base[2] + at[2]
-    -- READ THE ROW BEFORE CLICKING IT. These offsets are measured against one state of a
-    -- menu whose contents vary — an item present or absent above shifts every row below it
-    -- — and a one-row slip here is not harmless: the row under "Reset multi" is "Save as
-    -- default multi", which overwrites the user's default multi. The menu carries no
-    -- accessibility information, so OCR is the only way to know what is actually there.
-    -- ReaHotkey does the same check through UIA and says "menu item not found"; this is
-    -- that, where UIA cannot reach.
-    local seen = host.ocr.recognize({ region = { x - 8, y - 9, x + 190, y + 9 } })
-    local text = string.lower((seen and seen.text) or "")
+    local base = cell.geometry.fileMenu
+    if not (ctrl.client and base) then return end
+    local bx, by = ctrl.client.x + base[1], ctrl.client.y + base[2]
+    -- Generously around where the menu drops from its button; the exact bounds do not
+    -- matter, only that the menu is inside them.
+    local seen = host.ocr.recognize({ region = { bx - 80, by + 14, bx + 170, by + 460 } })
     local want = string.lower(string.gsub(item, "%.%.%.$", ""))
-    if string.find(text, want, 1, true) == nil then
+    local hit
+    for _, r in ipairs(ocrRows(seen and seen.words)) do
+      -- The row must CONTAIN the wanted text and not be a longer, different entry:
+      -- "save multi as" must not match "save as default multi". Anchoring at the start
+      -- and allowing only a trailing shortcut column does that.
+      if string.sub(r.text, 1, #want) == want then
+        hit = r
+        break
+      end
+    end
+    if not hit then
       host.log.info(string.format(
-        "Kontakt: menu row at (%d,%d) reads '%s', expected '%s' — not clicking",
-        x, y, tostring(seen and seen.text), item
+        "Kontakt: no menu row starting with '%s' — read: %s",
+        item, string.gsub(tostring(seen and seen.text or ""), "%s+", " ")
       ))
       host.speech.output("Menu item not found", { interrupt = true })
       host.input.send("Escape")
       return
     end
-    host.input.click(x, y)
+    host.input.click(hit.x + 10, hit.y)
   end)
+end
+
+-- Kontakt's snapshot bar is a second row in the instrument header that the camera button
+-- reveals, and the snapshot controls have no target until it is up. Rather than offering
+-- them only while it happens to be showing — which makes them come and go under the user —
+-- each one REVEALS the bar and then clicks its target, the same shape as the file-menu
+-- actions: open the thing, then choose from it.
+--
+-- Whether the bar is already up is read from the camera icon itself, which lights up while
+-- it is (measured white against dark chrome). That read only decides whether to press the
+-- camera, and it is taken again after pressing: if the bar still is not there, nothing is
+-- clicked and the user is told, instead of a click landing on the "Output / Voices" row
+-- that occupies the same place when the bar is hidden.
+local CAMERA_FROM_RIGHT, CAMERA_Y = 305, 87
+
+local function snapshotBarUp(ctrl)
+  local p = host.screen.pixel(
+    ctrl.client.x + ctrl.bounds.w - CAMERA_FROM_RIGHT,
+    ctrl.client.y + CAMERA_Y
+  )
+  return p ~= nil and (p.r + p.g + p.b) / 3 > 150
+end
+
+local function snapshotAction(fromRight, y)
+  return function(o)
+    local ctrl = o:origin()
+    if not (ctrl and ctrl.client and ctrl.bounds) then return end
+    local function clickTarget()
+      host.input.click(ctrl.client.x + ctrl.bounds.w - fromRight, ctrl.client.y + y)
+    end
+    if snapshotBarUp(ctrl) then
+      clickTarget()
+      return
+    end
+    host.input.click(
+      ctrl.client.x + ctrl.bounds.w - CAMERA_FROM_RIGHT,
+      ctrl.client.y + CAMERA_Y
+    )
+    host.timer.after(250, function()
+      if snapshotBarUp(ctrl) then
+        clickTarget()
+      else
+        host.log.info("Kontakt: snapshot bar did not appear — not clicking")
+        host.speech.output("Snapshots not available", { interrupt = true })
+      end
+    end)
+  end
 end
 
 -- A header control that acts through UIA where that works (a standalone Kontakt is fully
@@ -202,4 +292,5 @@ return {
   openFileMenu = openFileMenu,
   invokeMenuItem = invokeMenuItem,
   headerAction = headerAction,
+  snapshotAction = snapshotAction,
 }

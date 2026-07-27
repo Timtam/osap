@@ -1519,7 +1519,14 @@ function Overlay:calibrationShot()
     return false
   end
   local marks, lines = {}, {}
-  for i, c in ipairs(self.controls) do
+  for _, c in ipairs(self.controls) do
+    -- A control that is currently HIDDEN gets no crosshair: drawing one would say the user
+    -- can reach something they cannot, which is the opposite of what this picture is for.
+    -- It is still listed, marked, so its absence is visible rather than mysterious.
+    if not isVisible(self, c) then
+      lines[#lines + 1] = string.format("  -- %-24s hidden (its `when` is false)", tostring(c.label))
+      continue
+    end
     local x, y = calibrationPoint(self, c)
     if x then
       marks[#marks + 1] = { x = x, y = y }

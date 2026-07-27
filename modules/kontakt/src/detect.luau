@@ -166,6 +166,37 @@ local function constantFrame(vx, vy)
   return function() return vx, vy end
 end
 
+-- Which VIEW Kontakt is in — the modern one, or the classic rack.
+--
+-- Nothing accessible can be asked, so it is read from a single pixel in Kontakt's OWN top
+-- bar: an icon that is present there only in the classic view. Measured across two
+-- calibration shots of the same window, (24,24,24) modern against (99,99,99) classic. Its
+-- being Kontakt chrome rather than the loaded library's UI is the point — the library
+-- changes with every instrument, this does not. It belongs to the right-hand cluster
+-- (Update, CPU, …), so it is measured from the right edge.
+--
+-- Memoized per dispatch pass: this backs `when` predicates, which run on every focus move,
+-- and one screen pixel costs a compositor frame (~17 ms) — a handful of controls asking
+-- separately would add a tenth of a second to every keypress.
+--
+-- A single pixel is a weak signal, so it is used only for what is safe to get wrong: which
+-- LABEL a view-toggle carries, and whether a control that needs the classic view is
+-- offered. Never to decide where to click.
+local VIEW_PROBE_FROM_RIGHT, VIEW_PROBE_Y = 262, 24
+local viewKey, viewCache = nil, false
+local function isClassicView(origin)
+  if not (origin and origin.client and origin.bounds) then return false end
+  local key = tostring(origin.id) .. "@" .. tostring(host.epoch and host.epoch() or 0)
+  if viewKey == key then return viewCache end
+  local p = host.screen.pixel(
+    origin.client.x + origin.bounds.w - VIEW_PROBE_FROM_RIGHT,
+    origin.client.y + VIEW_PROBE_Y
+  )
+  viewKey = key
+  viewCache = p ~= nil and (p.r + p.g + p.b) / 3 > 60
+  return viewCache
+end
+
 -- The "Kontakt N" identity element's name under `hwnd`, or nil. Used to scope a
 -- two-level UIA search into the plugin's real UI (see actions.luau's pluginLocate).
 local function kontaktPaneName(hwnd)
@@ -188,4 +219,5 @@ return {
   kkContentFrame = kkContentFrame,
   constantFrame = constantFrame,
   kontaktPaneName = kontaktPaneName,
+  isClassicView = isClassicView,
 }

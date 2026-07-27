@@ -9,6 +9,8 @@
 local GEOMETRY = {
   ["Kontakt 7"] = {
     fileMenu = { 175, 19 }, -- the "FILE" button
+    prevMulti = { 704, 53 },
+    nextMulti = { 722, 53 },
     library = { 231, 19 },
     viewMenu = { 288, 19 },
     -- ReaHotkey uses 815 with the library browser open and 440 with it closed, telling
@@ -18,23 +20,38 @@ local GEOMETRY = {
   },
   ["Kontakt 8"] = {
     fileMenu = { 86, 19 }, -- the KONTAKT wordmark
+    prevMulti = { 722, 53 },
+    nextMulti = { 742, 53 },
   },
 }
 
--- File-menu item click points, relative to the FILE-MENU BUTTON: the menu drops from that
--- button, so one set of offsets holds for both versions even though the button itself sits
--- ~90 px apart in Kontakt 7 and 8.
+-- The instrument and multi arrows of the CLASSIC view's header (ReaHotkey's
+-- MoveToPluginInstrumentButton / MultiButton). Verified against a calibration shot of the
+-- live 8.11 classic header: the instrument pair sits at (658, 89) and (677, 89) and the
+-- multi pair at (725, 54) and (744, 54) — ReaHotkey's numbers, to within a pixel or two.
 --
--- MEASURED off a photograph of the open menu, row by row. The earlier values were one row
--- out for two of the three, which was invisible for a long time because the menu's CONTENT
--- varies: with "New Leap preset" absent everything shifts up by one row and the old numbers
--- were right again. That is also why every one of these is verified by OCR before the click
--- lands (see actions.luau) — a one-row slip on "Reset multi" hits "Save as default multi",
--- which overwrites the user's default multi.
-local MENU_ITEM = {
-  ["Load..."] = { 14, 63 },
-  ["Save multi as..."] = { 14, 143 },
-  ["Reset multi"] = { 14, 199 },
+-- They exist ONLY in the classic view. In the modern one the same coordinates fall inside
+-- whatever library is loaded (one landed on Cinematic Studio Strings' "Sustain"), so they
+-- are gated on the view rather than offered unconditionally — see header.luau.
+--
+-- The snapshot trio needed one more step to verify: its bar is not in the header until the
+-- camera button reveals it. With the bar up, ReaHotkey's numbers are right again — the name
+-- field and its dropdown begin where -588 lands, and the arrows measured at (607, 117) and
+-- (625, 117) against its -405 / -389 at y+118.
+local ARROWS = {
+  { label = "Previous instrument", at = { 352, 87 }, fromRight = true, hotkey = "Ctrl+P" },
+  { label = "Next instrument", at = { 332, 87 }, fromRight = true, hotkey = "Ctrl+N" },
+  { label = "Previous multi", key = "prevMulti", hotkey = "Ctrl+Shift+P" },
+  { label = "Next multi", key = "nextMulti", hotkey = "Ctrl+Shift+N" },
+}
+
+-- The snapshot bar's own controls. The bar is not in the header until Kontakt's camera
+-- button reveals it, so each of these reveals it first and then clicks — see
+-- actions.snapshotAction, which also knows where that camera is.
+local SNAPSHOTS = {
+  { label = "Snapshot menu", at = { 588, 118 }, fromRight = true, hotkey = "Alt+M" },
+  { label = "Previous snapshot", at = { 405, 118 }, fromRight = true, hotkey = "Alt+P" },
+  { label = "Next snapshot", at = { 389, 118 }, fromRight = true, hotkey = "Alt+N" },
 }
 
 -- Single-click header controls Kontakt 7 has and Kontakt 8 does not (its chrome moved them
@@ -50,7 +67,8 @@ local UIA_FILE_MENU = { ["Kontakt 7"] = "FILE", ["Kontakt 8"] = "Kontakt File Me
 
 return {
   GEOMETRY = GEOMETRY,
-  MENU_ITEM = MENU_ITEM,
+  ARROWS = ARROWS,
+  SNAPSHOTS = SNAPSHOTS,
   K7_CONTROLS = K7_CONTROLS,
   UIA_FILE_MENU = UIA_FILE_MENU,
 }
