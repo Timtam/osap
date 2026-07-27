@@ -148,33 +148,22 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
         ReaHotkey announces no state for these two; we do, from a single shot, because both
         boxes contain the word "Mix" and only its brightness differs — one template pair
         serves both buttons.
-  - [ ] **Cerberus** — the hardest, not the easiest: a list box ("Normal" / "Epic Mix") that
-        SWAPS the control set beneath it (`AudioImperia.ahk:127-150`), so it needs both a
-        list control and a way to replace an overlay's controls at runtime. Richer than "the same two toggles": the products
-      carry Classic / Modern / EZ / Scott Smith MIXER variants, each with its own on/off
-      templates. Chorus (3 segments) and Dolce (2) need nothing new; **Glade** is 2 hotspot
-      buttons and is the one product where ReaHotkey hardcodes genuinely different
-      coordinates per host rather than an offset; **Areia, Jaeger, Talos** each add the
-      Close/Mid/Far image slider; **Cerberus** is the hardest, not the easiest — a list box
-      ("Normal" / "Epic Mix") that SWAPS the control set (`AudioImperia.ahk:26-30`), so it
-      needs both the list control and overlay swapping. One calibration shot per product.
-- [x] **Image slider control built** (`Overlay:addSlider`, ReaHotkey's
-      `GraphicalHorizontalSlider`): the thumb is found by image search inside `region` and
-      its centre against `from`/`to` gives a percentage; Left/Right adjust it, captured only
-      while a slider has focus (and refused, loudly, on an overlay that also has a tab
-      control, which claims those keys statically). Adjusting is ReaHotkey's closed loop —
-      drag a percent, look again, extend a pixel at a time until the reading moves — but
-      BOUNDED, and every continuation re-checks the window, because an unbounded drag loop
-      inside someone's plugin is not a thing to ship. ✓ (2026-07-27)
-      First used by Areia's Close/Mid/Far mic blend; **live check of the drag loop still
-      owed** — the reading and the announcement are verified against a shot, the dragging
-      is not.
-- [ ] **A "choose overlay" override (ReaHotkey's Alt+C).** ReaHotkey lets a plugin register
-      SEVERAL overlays and the user pick by hand from a Vendor → Product → Patch menu
-      (`Overlay.Functions.ahk:272-380`), with `AutoChangeOverlay` as the automatic path. Our
-      arbiter only decides automatically. Once several libraries can match one window, the
-      manual override is the safety net for a landmark misdetection — and we have already
-      hit one of those in production (an open KK browser hiding the Kontakt control).
+  - [x] **Cerberus — Epic Mixes variant** ✓ (2026-07-27), and WITHOUT the list control and
+        control-swapping the backlog said it needed. Cerberus's panel depends on the loaded
+        patch — an "Epic Mixes" one has three mic faders (C / F / R), an ordinary one two
+        (C / M) — and ReaHotkey handles that by ASKING: a list box where the user declares
+        which patch they loaded, which then replaces the control set. We do not have to ask.
+        The letter row IS the difference, so it is the landmark: an Epic Mixes patch matches
+        it and gets those three controls, anything else matches nothing and is offered
+        nothing, rather than three buttons aimed at the wrong faders. It anchors them too, so
+        their offsets are measured from themselves. Verified: the template matches exactly
+        once in the whole plugin.
+  - [ ] **Cerberus — ordinary variant** (two faders, C / M). Needs one shot with a
+        non-"Epic Mixes" patch loaded, then the same treatment.
+  - [ ] **A list control and runtime control-swapping are no longer needed for Audio
+        Imperia** — but Zampler's four `OCRListBox`es and Dubler's `PopulatedListBox` still
+        want the list, and arrow-key stepping now exists (the slider owns Left/Right), so
+        that is the natural place to build on when either is ported.
 
 ## ReaHotkey port — Kontakt (open threads)
 

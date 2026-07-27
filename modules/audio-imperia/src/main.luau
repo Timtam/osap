@@ -154,6 +154,30 @@ local PRODUCTS = {
     },
   },
 
+  -- Cerberus's panel depends on WHICH PATCH is loaded: an "Epic Mixes" one has three mic
+  -- faders (C / F / R), an ordinary one has two (C / M). ReaHotkey solves that by asking —
+  -- a list box where the user declares which they loaded, which then swaps the control set
+  -- underneath (`AudioImperia.ahk:127-150`). We do not have to ask, and should not: the
+  -- letter row IS the difference, so it is the landmark. An Epic Mixes patch matches this
+  -- template and gets these three controls; anything else does not match and is offered
+  -- nothing, rather than three buttons aimed at the wrong faders.
+  --
+  -- Anchoring to the row the controls live in also makes their offsets trivially stable —
+  -- they are measured from themselves. Verified: the template matches exactly once in the
+  -- whole plugin. Measured from "Cerberus - 02 Ens Drums - Epic Mixes - Stacked".
+  {
+    name = "Cerberus Epic Mix",
+    landmark = "images/Cerberus/EpicMix.png",
+    wordmark = { 452, 232 }, -- the landmark's own top-left; see `rel`
+    verified = true,
+    mixes = {},
+    hotspots = {
+      { label = "Close mic", at = { 11, 9 } },
+      { label = "Far mic", at = { 39, 9 } },
+      { label = "Room mic", at = { 68, 9 } },
+    },
+  },
+
   -- Measured from "02 Pyramid Instruments / 02 Low Strings" — the patch family ReaHotkey
   -- targets; Glade's "Designer" patch has no mixer at all. Side-by-side boxes plus the mic
   -- blend, whose track (455–591) and thumb (centre 523) check out: exactly 50 %, i.e. "Mid".
@@ -207,6 +231,11 @@ local function build(product)
         from = b.from - product.wordmark[1],
         to = b.to - product.wordmark[1],
       })
+    end
+    for _, h in ipairs(product.hotspots or {}) do
+      -- Plain buttons: ReaHotkey reads no state for these either, and the faders they sit
+      -- under have no on/off — they are mic levels, not switches.
+      ov:addHotspotButton({ label = h.label, at = h.at })
     end
     for _, m in ipairs(product.mixes) do
       local on, off = {}, {}
