@@ -838,42 +838,51 @@ local function isFocusable(self, index)
   return true
 end
 
-function Overlay:focusNext()
-  if self:_stepPassThrough(1) then return end
+-- A Tab step, timed in its two halves.
+--
+-- This is THE interaction path: everything the user does is a focus move followed by an
+-- announcement, and any millisecond here is one they wait with nothing to hear. The two
+-- halves cost for different reasons and want different fixes, so they are measured apart —
+-- SCAN is the `when` predicates over every control (a screen pixel or a UIA search, per
+-- control, per step), ANNOUNCE is reading the focused control's state (an image search for
+-- a graphic toggle, OCR for an `ocrLabel`, a pixel for a hotspot toggle).
+local function focusStep(self, advance)
   local n = #self.controls
   if n == 0 then return end
+  local t0 = host.now and host.now() or 0
   local found = false
   for _ = 1, n do
-    self.focus = (self.focus % n) + 1
+    self.focus = advance(self.focus, n)
     if isFocusable(self, self.focus) then
       found = true
       break
     end
   end
+  local tScan = host.now and host.now() or 0
   -- Nothing focusable (e.g. a control set that is only unfilled slots): don't
   -- announce a phantom empty stop with interrupt.
   if found then
     self:_syncNativeKeys()
     speakControl(self, self.focus, true)
   end
+  local t1 = host.now and host.now() or 0
+  if t1 - t0 >= 20 then
+    local c = self.controls[self.focus]
+    host.log.info(string.format(
+      "[focus] %d ms to reach '%s' (scan %d over %d control(s), announce %d)",
+      t1 - t0, tostring(c and c.label or "?"), tScan - t0, n, t1 - tScan
+    ))
+  end
+end
+
+function Overlay:focusNext()
+  if self:_stepPassThrough(1) then return end
+  focusStep(self, function(i, n) return (i % n) + 1 end)
 end
 
 function Overlay:focusPrev()
   if self:_stepPassThrough(-1) then return end
-  local n = #self.controls
-  if n == 0 then return end
-  local found = false
-  for _ = 1, n do
-    self.focus = ((self.focus - 2) % n) + 1
-    if isFocusable(self, self.focus) then
-      found = true
-      break
-    end
-  end
-  if found then
-    self:_syncNativeKeys()
-    speakControl(self, self.focus, true)
-  end
+  focusStep(self, function(i, n) return ((i - 2) % n) + 1 end)
 end
 
 -- ReaHotkey's AddCustomPassThrough, as what it actually is there: a CONTROL in the
