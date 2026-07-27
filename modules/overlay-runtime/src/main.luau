@@ -1433,6 +1433,36 @@ local function report(self, opts)
   return #found
 end
 
+-- ONE poll timer per interval per VM, not one per overlay.
+--
+-- Each library overlay used to start its own `host.timer.every(500, …)`, and since they
+-- start at different moments their ticks are spread across the interval. That is invisible
+-- until you look at what a tick COSTS: every landmark search then arrives alone, so the
+-- host's fan-out batching — one screen capture serving all the searches of a tick — never
+-- has anything to fan out over, and neither does the thread pool. Measured with twelve
+-- libraries: twelve batches of one, each paying its own ~25 ms capture for a ~5 ms match.
+-- Twelve captures where the whole design says one.
+--
+-- Sharing the timer makes the ticks coincide, which is what makes the batching real. It
+-- also matches how the menu watch is already done here: one watch per VM, not one per
+-- overlay that has to remember to ask for it.
+local pollGroups = {}
+local function joinPoll(self, ms)
+  local group = pollGroups[ms]
+  if not group then
+    group = {}
+    pollGroups[ms] = group
+    -- Disable-safe recurring poll, like the menu watch: it survives a disable/enable cycle
+    -- where a self-rescheduling host.timer.after would not.
+    host.timer.every(ms, function()
+      for _, o in ipairs(group) do
+        o:_recheck()
+      end
+    end)
+  end
+  group[#group + 1] = self
+end
+
 -- Registers the single foreground/focus trigger (once) that drives _recheck
 -- across all of the overlay's contexts. With `opts.slot` the overlay joins the
 -- host arbiter for that slot at `opts.specificity` (a base overlay and the
@@ -1461,7 +1491,7 @@ function Overlay:_join(slot, specificity, pollMs)
         function() self:_deactivate() end
       )
       if pollMs then
-        host.timer.every(pollMs, function() self:_recheck() end)
+        joinPoll(self, pollMs)
       end
       -- Log the slot's roster as it grows. A slot is a plain string typed independently
       -- in modules that never see each other, and a typo does not error — it quietly
