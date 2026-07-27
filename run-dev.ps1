@@ -32,7 +32,11 @@ if ($Build -or -not (Test-Path $exe)) {
   if ($LASTEXITCODE -ne 0) { throw "build failed" }
 }
 
-$srcDir = Join-Path $root ($Examples ? "examples" : "modules")
+# Spelled out rather than a ternary: `? :` is PowerShell 7+ only, and this script has to
+# run under whichever powershell.exe someone happens to have (5.1 is still the default).
+$srcName = "modules"
+if ($Examples) { $srcName = "examples" }
+$srcDir = Join-Path $root $srcName
 $dirs = Get-ChildItem $srcDir -Directory |
   Where-Object { Test-Path (Join-Path $_.FullName "module.toml") } |
   Where-Object { -not $Only -or $Only -contains $_.Name } |

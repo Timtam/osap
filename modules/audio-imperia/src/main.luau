@@ -178,6 +178,27 @@ local PRODUCTS = {
     },
   },
 
+  -- The other Cerberus patch family, told apart the same way: this one has SIX mic faders
+  -- (TD BC MS D W F) and then a separate C | M pair, so the six grey labels are the
+  -- landmark. Verified both ways — it matches once here and nowhere in the Epic Mixes shot,
+  -- which is what keeps the two variants from claiming each other's window. Measured from
+  -- "Cerberus - 02 Ens Drums - Stacked".
+  --
+  -- Only C and M are offered, as in ReaHotkey. The six drum mics beside them are reachable
+  -- by the same means and would be a fair addition, but that is a decision about scope, not
+  -- a measurement, so it is not smuggled in here.
+  {
+    name = "Cerberus",
+    landmark = "images/Cerberus/Standard.png",
+    wordmark = { 424, 232 },
+    verified = true,
+    mixes = {},
+    hotspots = {
+      { label = "Close mic", at = { 139, 9 } },
+      { label = "Mix", at = { 152, 9 } },
+    },
+  },
+
   -- Measured from "02 Pyramid Instruments / 02 Low Strings" — the patch family ReaHotkey
   -- targets; Glade's "Designer" patch has no mixer at all. Side-by-side boxes plus the mic
   -- blend, whose track (455–591) and thumb (centre 523) check out: exactly 50 %, i.e. "Mid".

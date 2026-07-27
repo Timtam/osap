@@ -131,7 +131,7 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
       product contributes just the wordmark position it was measured at. The slider knob is
       one shared asset too: Areia's template pair matches Jaeger's and Talos's exactly.
       ✓ (2026-07-27)
-- [ ] **Audio Imperia — one left.**
+- [x] **Audio Imperia — complete** (2026-07-27).
   - [x] **Dolce** ✓ (2026-07-27) — and the way it got in is the point. Its own templates are
         stale, and cropping fresh ones would have meant asking a blind user to click the very
         buttons this overlay exists to make clickable. The two-segment products' labels turn
@@ -158,8 +158,14 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
         nothing, rather than three buttons aimed at the wrong faders. It anchors them too, so
         their offsets are measured from themselves. Verified: the template matches exactly
         once in the whole plugin.
-  - [ ] **Cerberus — ordinary variant** (two faders, C / M). Needs one shot with a
-        non-"Epic Mixes" patch loaded, then the same treatment.
+  - [x] **Cerberus — ordinary variant** ✓ (2026-07-27). Six mic faders (TD BC MS D W F) plus
+        a separate C | M pair; the six grey labels are the landmark, verified to match once
+        here and NOT at all in the Epic Mixes shot, which is what stops the two variants
+        claiming each other's window. Only C and M are offered, as in ReaHotkey — the six
+        drum mics beside them would be a fair addition but that is a scope decision, not a
+        measurement.
+  - **Audio Imperia is complete**: all eleven product overlays across two panel layouts and
+    two Cerberus patch families.
   - [ ] **A list control and runtime control-swapping are no longer needed for Audio
         Imperia** — but Zampler's four `OCRListBox`es and Dubler's `PopulatedListBox` still
         want the list, and arrow-key stepping now exists (the slider owns Left/Right), so
