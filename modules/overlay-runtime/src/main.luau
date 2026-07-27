@@ -1477,9 +1477,33 @@ function Overlay:onDeactivate(fn)
   return self
 end
 
+-- How long the announcement waits after activation, so it does not land on top of the
+-- screen reader's own window-title announcement and get clobbered. Named because it is a
+-- FIXED part of every activation the user experiences, and any measurement that does not
+-- separate it out is measuring a deliberate pause and calling it slowness.
+local ANNOUNCE_DELAY = 350
+
 function Overlay:_activate()
   if self.active then return end
   self.active = true
+  -- The other half of the interaction path, timed like the Tab step already is.
+  --
+  -- A Tab step is a focus move inside an overlay that is already up; this is everything
+  -- BEFORE that — the window changed, and the question is how long until anything speaks.
+  -- The two halves cost for different reasons: a focus step pays for reading one control's
+  -- state, whereas activation pays for DECIDING WHICH OVERLAY, which today means every
+  -- landmark search on the slot resolving before the arbiter can settle. Nothing measured
+  -- that, so "the KK overlay takes longer than the Kontakt one" had no number attached.
+  --
+  -- `gate` is from the moment a CONTEXT matched (the window/control was found) to now: the
+  -- landmark searches, the arbiter, and any polling ticks in between. It is the part that
+  -- grows with the number of overlays, which is why it is reported on its own.
+  if host.now and self._ctxSince then
+    host.log.info(string.format(
+      "[activate] '%s' gate %d ms (%d recheck(s)), then %d ms before it speaks",
+      tostring(self.label), host.now() - self._ctxSince, self._ctxChecks or 0, ANNOUNCE_DELAY
+    ))
+  end
   -- The overlay starts FRESH — focus back on the first control, any tab control back on
   -- its first tab — when it becomes active on a genuinely NEW window, but resumes where
   -- the user was when the SAME still-open window merely regained the foreground (Alt+Tab
@@ -1516,7 +1540,22 @@ function Overlay:_activate()
   -- Announce the focused control shortly after the window gains focus, once the
   -- screen reader's window-title announcement has passed (so it isn't clobbered).
   if host.timer and self.focus > 0 then
-    host.timer.after(350, function()
+    -- How LATE the announcement actually is, which is a different question from how long it
+    -- was asked to wait. Timer callbacks, speech and hotkeys share one thread with the
+    -- landmark poll, and the poll currently asks for more time than a tick contains — so a
+    -- delay of 350 ms can be served at 800 without a single thing being "slow". Reported
+    -- only when it overruns, because a punctual timer is not news.
+    local asked = host.now and host.now() or nil
+    host.timer.after(ANNOUNCE_DELAY, function()
+      if asked then
+        local late = host.now() - asked - ANNOUNCE_DELAY
+        if late > 20 then
+          host.log.info(string.format(
+            "[activate] '%s' spoke %d ms late — the timer thread was busy",
+            tostring(self.label), late
+          ))
+        end
+      end
       if self.active then speakControl(self, self.focus, false) end
     end)
   end
@@ -1547,6 +1586,19 @@ function Overlay:_recheck()
     end
   end
   if not matched then self.activeCtx = false end
+  -- Stamped BEFORE the gate, because the two answer different questions: a context match
+  -- means "this window is mine", the gate means "and what is loaded in it is mine too". The
+  -- gap between them is the landmark search plus however many polling ticks it took, and
+  -- that gap is what grows as overlays are added — see the report in _activate.
+  if matched then
+    if not self._ctxSince then
+      self._ctxSince = host.now and host.now() or 0
+      self._ctxChecks = 0
+    end
+    self._ctxChecks = (self._ctxChecks or 0) + 1
+  else
+    self._ctxSince = nil
+  end
   -- An extra gate (e.g. a library landmark) further narrows the match, evaluated
   -- against the matched context's coordinate origin.
   if matched and self._gate then

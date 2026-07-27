@@ -117,6 +117,13 @@ struct Shared {
     /// A module memoizes an expensive observation (which plugin control is focused, say)
     /// against it, so repeats within one dispatch are free while a genuinely new
     /// situation is always re-observed. See `host.epoch()`.
+    /// Answers the OS gave us during the CURRENT epoch (see `Observations`).
+    observations: RefCell<Observations>,
+    /// Per-pump-iteration accounting for the OS-event phase: (activate dispatches,
+    /// ms in activate, ms in focus-change, ms in key dispatch). Reset each iteration and
+    /// reported when one overruns — "os events 446 ms" names no cause on its own, and this
+    /// phase is three different fan-outs with very different multiplicities.
+    ev_counts: Cell<(u32, u128, u128, u128)>,
     epoch: Cell<u64>,
     /// See bump_input_epoch: turns over only when something ACTED on the screen.
     input_epoch: Cell<u64>,
@@ -350,10 +357,89 @@ fn spawn_image_worker(
     });
 }
 
+/// Names a single OS observation that blocked the pump thread for a long time.
+///
+/// These are CROSS-PROCESS calls: a UIA traversal runs inside the target application, so its
+/// cost is that application's to decide, and a DAW that is mid-redraw because its window just
+/// came to the front can take hundreds of milliseconds to answer. That is invisible from
+/// here — the call simply returns late — and it lands on the one thread that also owns the
+/// keyboard hook.
+fn slow_observation(what: &str, detail: &str, started: Instant) {
+    let ms = started.elapsed().as_millis();
+    if ms >= 50 {
+        logging::line(
+            "observe",
+            &format!("{what}({detail}) blocked the pump for {ms} ms"),
+        );
+    }
+}
+
+/// What the OS told us during one epoch, so it is asked ONCE.
+///
+/// An epoch means "the world may have changed"; within one, the same question necessarily
+/// has the same answer, so asking it twice is pure duplication. And it is duplicated hard:
+/// each Kontakt cell's `identify` asks whether a control is a Komplete Kontrol, whether it
+/// is a Kontakt, and which version — and there are six cells, and the runtime is a CODE
+/// module, so all of that exists separately inside every dependent module's VM. Nine
+/// modules, one shared epoch, the same handful of distinct questions, ~100 times over.
+///
+/// The layer above this already memoizes (`originMemo`, per spec and epoch), but it caches
+/// the COMPOSITE verdict — the duplication is one level down, where `host.uia.findAny` and
+/// `host.window.controls` go straight to the backend on every single call. UIA traversal is
+/// the expensive part of a poll tick, and it is being paid for answers we already have.
+///
+/// NEGATIVE answers are cached too, deliberately, and that is where nearly all the saving
+/// is: in a poll, almost every identity check is expected to fail. "Not found" is a real
+/// answer within an epoch, not an "ask me later" — the epoch turning over IS ask-me-later,
+/// and it turns over on every image batch and every focus change.
+#[derive(Default)]
+struct Observations {
+    epoch: u64,
+    /// (hwnd, names, control types) → 1-based index of the matching name, or None.
+    uia_any: HashMap<(isize, Vec<String>, Vec<i32>), Option<usize>>,
+    /// (hwnd, name, control type) → present?
+    uia_find: HashMap<(isize, String, i32), bool>,
+    /// hwnd → its child controls. Rc so handing it out does not copy the vector.
+    controls: HashMap<isize, Rc<Vec<backend::ControlInfo>>>,
+    served: u32,
+    asked: u32,
+}
+
 impl Shared {
     fn root(&self, idx: usize) -> PathBuf {
         self.roots.borrow()[idx].clone()
     }
+
+    /// The observation cache, emptied whenever the epoch has turned over.
+    ///
+    /// Reports the epoch it is discarding when that epoch did enough work to be worth
+    /// knowing about — the ratio is the whole claim of this cache, and a claim about
+    /// performance that nobody can check is just an assertion.
+    fn observations(&self) -> std::cell::RefMut<'_, Observations> {
+        let now = self.epoch.get();
+        let mut obs = self.observations.borrow_mut();
+        if obs.epoch != now {
+            if obs.asked >= 20 {
+                logging::line(
+                    "observe",
+                    &format!(
+                        "epoch served {} of {} OS question(s) from cache ({} actually asked)",
+                        obs.served,
+                        obs.asked,
+                        obs.asked - obs.served
+                    ),
+                );
+            }
+            obs.epoch = now;
+            obs.uia_any.clear();
+            obs.uia_find.clear();
+            obs.controls.clear();
+            obs.served = 0;
+            obs.asked = 0;
+        }
+        obs
+    }
+
     /// Marks the world as possibly changed (see the `epoch` field).
     fn bump_epoch(&self) {
         self.epoch.set(self.epoch.get().wrapping_add(1));
@@ -981,6 +1067,18 @@ impl Shared {
     /// the loop tick): each fires its stored callback with the hit table `{x,y,w,h}`
     /// or nil, then drops the one-shot registry value.
     fn fire_image_results(&self) {
+        // ONE epoch for the whole drain, not one per result.
+        //
+        // The bump used to sit next to each callback, which reads correctly on its own — a
+        // result IS a fresh observation — and is wrong for a batch. Every search in a batch
+        // was answered from ONE captured frame, so the batch is one observation, not eighty-
+        // four; and the epoch is what every memo is keyed on. Turning it over per result
+        // meant that during the delivery of an 84-result batch, the shared per-(spec, epoch)
+        // origin memo was invalidated eighty-four times — cold on exactly the tick that had
+        // the most callers to share it with, each re-resolving what the one before it had
+        // just worked out. Bumped once, before the first callback runs, so they all see the
+        // same new world. Fewer invalidations AND a truer statement about what changed.
+        let mut bumped = false;
         while let Ok(res) = self.image_results.try_recv() {
             // A search nobody can see taking long is a bug nobody can diagnose. The
             // landmark poll is entirely invisible from Luau — it runs on a worker and only
@@ -1009,8 +1107,12 @@ impl Shared {
             let entry = self.pending_image.borrow_mut().remove(&res.id);
             if let Some((lua, cb, idx)) = entry {
                 // A result arriving is a fresh observation of the screen, and its callback
-                // may re-check an overlay — bump per delivery, not per (mostly empty) poll.
-                self.bump_epoch();
+                // may re-check an overlay — so the epoch turns once here, rather than on
+                // every (mostly empty) poll tick. See the note above for why once per DRAIN.
+                if !bumped {
+                    self.bump_epoch();
+                    bumped = true;
+                }
                 if self.enabled.borrow().get(idx).copied().unwrap_or(false) {
                     if let Ok(f) = lua.registry_value::<Function>(&cb) {
                         // The hit table carries `n`, the 1-based index of the template
@@ -1781,6 +1883,8 @@ impl Manager {
             timers: RefCell::new(Vec::new()),
             exports: RefCell::new(HashMap::new()),
             arbiter: RefCell::new(HashMap::new()),
+            observations: RefCell::new(Observations::default()),
+            ev_counts: Cell::new((0, 0, 0, 0)),
             epoch: Cell::new(0),
             input_epoch: Cell::new(0),
             next_arbiter: Cell::new(0),
@@ -1925,14 +2029,53 @@ impl Manager {
                         Ok((info, report))
                     },
                     move || {
+                        // How long ONE pump iteration takes, reported when it runs long.
+                        //
+                        // This is not a general performance counter — it watches a specific
+                        // hazard. The low-level keyboard hook (WH_KEYBOARD_LL) is installed
+                        // on THIS thread (backend/windows.rs, watch_keys), and Windows calls
+                        // a low-level hook back on its owning thread. A thread busy inside a
+                        // poll callback cannot answer, and past LowLevelHooksTimeout (300 ms
+                        // by default) Windows stops waiting and delivers the keystroke
+                        // WITHOUT us — so a Tab the overlay believed it had captured lands
+                        // in the plugin instead, intermittently, with nothing logged.
+                        //
+                        // For a user who navigates entirely by Tab and cannot see where the
+                        // focus went, that is not a performance problem, it is a correctness
+                        // one. Measured landmark polls have already been seen at 400 ms.
+                        let pump_started = std::time::Instant::now();
                         let mods = modules.borrow();
                         let mut dispatcher = Dispatcher {
                             shared: &shared,
                             modules: &mods[..],
                         };
+                        // Broken down by phase, because "one iteration took 729 ms" names a
+                        // symptom and no cause — and the cause moved once already: the poll
+                        // was the whole story until the observation cache took it out, after
+                        // which the overruns lined up with window switches instead.
+                        shared.ev_counts.set((0, 0, 0, 0));
                         backend.pump_pending(&mut dispatcher);
+                        let events_ms = pump_started.elapsed().as_millis();
+                        let (act_n, act_ms, focus_ms, _) = shared.ev_counts.get();
+                        let t = std::time::Instant::now();
                         shared.fire_due_timers();
+                        let timers_ms = t.elapsed().as_millis();
+                        let t = std::time::Instant::now();
                         shared.fire_image_results();
+                        let images_ms = t.elapsed().as_millis();
+                        let pump_ms = pump_started.elapsed().as_millis();
+                        if pump_ms >= 250 {
+                            logging::line(
+                                "pump",
+                                &format!(
+                                    "one iteration took {pump_ms} ms (os events {events_ms} \
+                                     = {act_n}x window-activate {act_ms} + focus-change \
+                                     {focus_ms}, timers {timers_ms}, image results \
+                                     {images_ms}) — past ~300 ms Windows stops waiting for \
+                                     our keyboard hook and delivers the key without us"
+                                ),
+                            );
+                        }
                         // A module asked for a re-check (host.window.recheck) after
                         // changing plugin UI itself — dispatch it like an OS focus event.
                         if shared.recheck_requested.replace(false) {
@@ -2053,6 +2196,7 @@ impl HostEvents for Dispatcher<'_> {
     }
 
     fn on_window_activate(&mut self, win: WinInfo) {
+        let started = Instant::now();
         // A different window in front is a different screen — this counts as the screen
         // having changed, not merely the world (see bump_input_epoch).
         self.shared.bump_input_epoch();
@@ -2073,9 +2217,14 @@ impl HostEvents for Dispatcher<'_> {
                 self.shared.report_callback_error(idx, "window trigger", &e);
             }
         }
+        let mut c = self.shared.ev_counts.get();
+        c.0 += 1;
+        c.1 += started.elapsed().as_millis();
+        self.shared.ev_counts.set(c);
     }
 
     fn on_focus_change(&mut self) {
+        let started = Instant::now();
         self.shared.bump_epoch();
         for (idx, m) in self.modules.iter().enumerate() {
             if !self.enabled(idx) {
@@ -2090,6 +2239,9 @@ impl HostEvents for Dispatcher<'_> {
                 self.shared.report_callback_error(idx, "focus change", &e);
             }
         }
+        let mut c = self.shared.ev_counts.get();
+        c.2 += started.elapsed().as_millis();
+        self.shared.ev_counts.set(c);
     }
 }
 
@@ -2411,9 +2563,29 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                     None => return Ok(lua.create_table()?),
                 },
             };
+            // Enumerating a window's children is the other question asked once per overlay
+            // per tick and answered identically every time — it is the same window.
+            let controls = {
+                let mut obs = sh.observations();
+                obs.asked += 1;
+                match obs.controls.get(&hwnd).cloned() {
+                    Some(c) => {
+                        obs.served += 1;
+                        c
+                    }
+                    None => {
+                        drop(obs);
+                        let t = Instant::now();
+                        let c = Rc::new(sh.backend.window_controls(hwnd));
+                        slow_observation("window.controls", "", t);
+                        sh.observations().controls.insert(hwnd, c.clone());
+                        c
+                    }
+                }
+            };
             let t = lua.create_table()?;
-            for c in sh.backend.window_controls(hwnd) {
-                t.push(control_to_table(lua, &c)?)?;
+            for c in controls.iter() {
+                t.push(control_to_table(lua, c)?)?;
             }
             Ok(t)
         })?,
@@ -2454,7 +2626,19 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     uia.set(
         "find",
         lua.create_function(move |_, (hwnd, name, ctype): (isize, String, i32)| {
-            Ok(sh.backend.uia_find(hwnd, &name, ctype))
+            let key = (hwnd, name, ctype);
+            let mut obs = sh.observations();
+            obs.asked += 1;
+            if let Some(cached) = obs.uia_find.get(&key).copied() {
+                obs.served += 1;
+                return Ok(cached);
+            }
+            drop(obs);
+            let t = Instant::now();
+            let answer = sh.backend.uia_find(key.0, &key.1, key.2);
+            slow_observation("uia.find", &key.1, t);
+            sh.observations().uia_find.insert(key, answer);
+            Ok(answer)
         })?,
     )?;
     // host.uia.type — the UIA ControlType ids, by name. Modules were declaring these as
@@ -2514,7 +2698,21 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     uia.set(
         "findAny",
         lua.create_function(move |_, (hwnd, names, types): (isize, Vec<String>, Vec<i32>)| {
-            Ok(sh.backend.uia_find_any(hwnd, &names, &types))
+            let key = (hwnd, names, types);
+            let mut obs = sh.observations();
+            obs.asked += 1;
+            if let Some(cached) = obs.uia_any.get(&key).copied() {
+                obs.served += 1;
+                return Ok(cached);
+            }
+            // Dropped before the traversal: it can re-enter Lua, and holding the RefMut
+            // across that would panic on the next observation from inside a callback.
+            drop(obs);
+            let t = Instant::now();
+            let answer = sh.backend.uia_find_any(key.0, &key.1, &key.2);
+            slow_observation("uia.findAny", &key.1.join("/"), t);
+            sh.observations().uia_any.insert(key, answer);
+            Ok(answer)
         })?,
     )?;
     // host.uia.locate(hwnd, name, controlType) -> { x, y } (screen centre of the

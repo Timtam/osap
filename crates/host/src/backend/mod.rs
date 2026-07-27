@@ -41,6 +41,7 @@ pub struct WinInfo {
 
 /// A child control (window) inside a top-level window: its class and geometry,
 /// for detecting plugins embedded in a host (DAW) window.
+#[derive(Clone)]
 pub struct ControlInfo {
     pub hwnd: isize,
     pub class: String,
