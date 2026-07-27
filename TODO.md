@@ -92,12 +92,35 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
       sibling's numbers give the SHAPE, never the offsets); and ReaHotkey's separate image
       toggle for Brass's mix position points at empty background in this UI, while Mix's own
       ⏻ sits on the mixer row and reads like the other three. ✓ (2026-07-27)
-- [ ] **Audiobro (LA Scoring Strings 3)** — 1 hotspot + 1 OCR read-out; the smallest
-      possible second vendor, and the one that proves the row format on a different shape.
-- [ ] **Impact Soundworks (2)** and **Soundiron (3)**.
-- [ ] **Audio Imperia (11)** — eight of the eleven are the SAME two image toggles at the
-      same coordinates with a different image path, i.e. pure data. The other three need a
-      new control kind first (see below).
+- **What is actually installed here** (checked against the NI registry, which is what
+  settles the order — an overlay nobody can put on screen cannot be verified, and every
+  failure in this tool is silent): Audio Imperia complete (Areia, Cerberus, Chorus, Dolce,
+  Glade Studio, Jaeger, Nucleus, Solo, Talos), Soundiron (Voices Of Gaia, Mimi Page Light
+  and Shadow, the three Voice Of Wind titles), Impact Soundworks Juggernaut, Cinematic
+  Studio Brass + Strings. **Audiobro LA Scoring Strings 3 is NOT installed** — so the
+  "smallest second vendor" is out.
+- **How a product gets its numbers.** ReaHotkey's are plugin-relative and have drifted;
+  ours are wordmark-relative. Deriving one product's offsets from a sibling's was tried on
+  Brass and was 25 px out. The workflow instead: ONE calibration shot of Kontakt with the
+  library loaded — Kontakt's own header is enough, the library overlay need not exist yet —
+  and the wordmark is then located in that shot with ReaHotkey's own `Product.png` template,
+  which gives every offset without a guess and without shipping a control that clicks
+  somewhere unverified.
+- [ ] **Impact Soundworks / Juggernaut** — needs no new mechanism: two landmark variants for
+      one product (BASS and DRUMS & FX, `Bass.png` / `DrumsAndFX.png`), one OCR read-out
+      each. The right first vendor now, and the one that proves the row format on a shape
+      other than a mixer.
+- [ ] **Soundiron (3)** — one image toggle ("Reverb") per product, but each is preceded by
+      `ClickFXRack` (`Soundiron.ahk:63-83`): if the FX-rack tab's pixel is still the closed
+      colour, click it and wait 250 ms. So the control needs a `prepare` hook that runs
+      before the state is READ as well as before it is activated — a state read taken while
+      the rack is closed is not "off", it is meaningless. Deliberately NOT designed yet: the
+      hook has to be asynchronous (we cannot sleep), and its contract should be written
+      against the real UI rather than against a guess about it.
+- [ ] **Audio Imperia (11)** — mostly data, and richer than "the same two toggles": the
+      products carry Classic / Modern / EZ / Scott Smith MIXER variants, each with its own
+      on/off templates (Areia, Jaeger and Talos have EZMixer; Chorus adds ScottSmith). Three
+      need the image slider first (see below).
 - [ ] **Image slider control** (`GraphicalHorizontalSlider`, `AccessibilityOverlay.ahk:2622`):
       ReaHotkey drives it as a closed loop — image-search the thumb, drag one percent,
       re-search to read the new position, repeat until it moves. Needed by three Audio
