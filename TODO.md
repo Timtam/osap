@@ -84,9 +84,14 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
 - [x] **Cinematic Studio Series restructured to a product table** — the module (renamed from
       `cinematic-studio-strings`, id `com.platform.cinematic-studio-series`) now declares
       products as rows and builds their controls from one function. Strings unchanged and
-      still measured; **Brass added, coordinates DERIVED** from ReaHotkey's by way of the
-      measured Strings offsets (it logs that it is unverified). ✓ (2026-07-27)
-- [ ] **Verify Brass** with one calibration shot, then mark the row `verified`.
+      still measured. ✓ (2026-07-27)
+- [x] **Cinematic Studio Brass measured and verified** — four channels (Close/Main/Room/Mix)
+      at wordmark x {-144,-94,-44,+6}, y +334, lit (234,167,164) against unlit (92,88,85).
+      Two findings worth keeping: the derived x was 25 px out although the derived y was
+      exact (the two products centre their mixer differently under the same wordmark — so a
+      sibling's numbers give the SHAPE, never the offsets); and ReaHotkey's separate image
+      toggle for Brass's mix position points at empty background in this UI, while Mix's own
+      ⏻ sits on the mixer row and reads like the other three. ✓ (2026-07-27)
 - [ ] **Audiobro (LA Scoring Strings 3)** — 1 hotspot + 1 OCR read-out; the smallest
       possible second vendor, and the one that proves the row format on a different shape.
 - [ ] **Impact Soundworks (2)** and **Soundiron (3)**.

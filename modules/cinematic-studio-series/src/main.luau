@@ -57,33 +57,32 @@ local PRODUCTS = {
   {
     name = "Cinematic Studio Brass",
     landmark = "images/CinematicStudioBrass/Product.png",
-    -- NOT measured — DERIVED, and the derivation is written down so it can be checked
-    -- instead of trusted. ReaHotkey puts Brass's mics at plugin-frame (46, 465), (96, 465)
-    -- and (146, 465), and its mix switch at (186,476)-(206,488), in the Kontakt 7 frame.
-    -- Its Strings mics are at (35, 481)… in that same frame, and we measured those at
-    -- wordmark-relative (-130, 350) — so in ReaHotkey's frame this wordmark sits at about
-    -- (165, 131), and subtracting that gives the numbers below.
+    -- MEASURED off a calibration shot of "CSB Solo Horn" in Kontakt 8: the four ⏻ icons sit
+    -- at wordmark x {-144,-94,-44,+6} — a 50 px pitch — and y +334.
     --
-    -- The one assumption is that Brass's wordmark sits at the same offset from its mixer as
-    -- Strings' does. Plausible (same vendor, same UI family) and unverified — which is
-    -- exactly the difference that has repeatedly been between a working control and a
-    -- silent one. One calibration shot with Brass loaded settles it; until then a wrong
-    -- click here toggles a mic channel, which is audible and reversible.
-    verified = false,
+    -- The derived values this replaces were 25 px too far right, and the derivation is worth
+    -- recording because of WHY it failed. It assumed Brass's wordmark sits where Strings'
+    -- does relative to its mixer: ReaHotkey puts Brass's mics at plugin-frame (46,465)… and
+    -- Strings' at (35,481)…, we had measured Strings' at wordmark-relative (-130,350), so
+    -- subtracting the implied wordmark position (165,131) gave (-119,334). The y came out
+    -- exactly right and the x did not — the two products simply centre their mixer
+    -- differently under the same wordmark. Same shape, different numbers, which is the whole
+    -- reason each product gets measured rather than computed from its sibling.
+    verified = true,
     mixer = {
-      at = { -119, 334 },
+      at = { -144, 334 },
       pitch = 50,
-      on = { 246, 175, 172 }, -- ReaHotkey's 0xF6AFAC — Brass's accent, lit
-      off = { 115, 113, 112 }, -- 0x737170, unlit
-      channels = { "Close Mic", "Main Mic", "Room Mic" },
-    },
-    -- Brass's mix position is NOT on the mixer row (wordmark y +345 against the mics' +334)
-    -- and is not a power icon, so it is read by IMAGE as ReaHotkey does it, not by pixel.
-    mix = {
-      label = "Mix Position",
-      region = { 21, 345, 41, 357 },
-      onImage = "images/CinematicStudioBrass/MixOn.png",
-      offImage = "images/CinematicStudioBrass/MixOff.png",
+      -- Read live at the icons: unlit (92,88,85) on Close/Main/Room, lit (234,167,164) on
+      -- Mix. ReaHotkey's references (0xF6AFAC / 0x737170) are close enough that its exact
+      -- match would still have worked here, but these are the ones actually on screen.
+      on = { 234, 167, 164 }, -- Brass's accent salmon, lit
+      off = { 92, 88, 85 }, -- dim grey, unlit
+      -- FOUR channels, and Mix is one of them. ReaHotkey gives Brass three pixel toggles
+      -- plus a separate IMAGE toggle for the mix position at plugin-frame
+      -- (186,476)-(206,488); in this UI that region is empty background (29,13,5), while
+      -- Mix's own ⏻ sits on the mixer row with the other three and reads exactly like them.
+      -- Its coordinates have drifted the same way its Strings ones had.
+      channels = { "Close Mic", "Main Mic", "Room Mic", "Mix Position" },
     },
   },
 }
