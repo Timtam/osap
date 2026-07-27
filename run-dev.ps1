@@ -13,13 +13,20 @@
 param(
   [switch]$Calibrate,
   [switch]$Build,
+  [switch]$Release,
   [switch]$Examples,
   [string[]]$Only
 )
 
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
-$exe = Join-Path $root "target\debug\automation-platform.exe"
+# Debug is the default, because that is what a build-and-try loop wants. But the image
+# matcher is a tight pixel loop, and unoptimised it measured TWELVE SECONDS for a single
+# full-region template match — so any judgement about performance has to be made on
+# -Release, and a slow overlay is worth re-checking there before believing it.
+$profileDir = "debug"
+if ($Release) { $profileDir = "release" }
+$exe = Join-Path $root "target\$profileDir\automation-platform.exe"
 
 if ($Build -or -not (Test-Path $exe)) {
   # wxDragon needs these; setting them here rather than expecting a configured shell.
@@ -28,7 +35,9 @@ if ($Build -or -not (Test-Path $exe)) {
     if (Test-Path $llvm) { $env:LIBCLANG_PATH = $llvm }
   }
   Push-Location $root
-  try { cargo build } finally { Pop-Location }
+  try {
+    if ($Release) { cargo build --release } else { cargo build }
+  } finally { Pop-Location }
   if ($LASTEXITCODE -ne 0) { throw "build failed" }
 }
 
@@ -51,7 +60,7 @@ Start-Sleep -Milliseconds 500
 if ($Calibrate) { $env:AUTOMATION_PLATFORM_CALIBRATE = "1" }
 else { Remove-Item Env:\AUTOMATION_PLATFORM_CALIBRATE -ErrorAction SilentlyContinue }
 
-Write-Host "Starting with $($dirs.Count) module(s) from $srcDir$(if ($Calibrate) { ' (calibrating)' }):"
+Write-Host "Starting the $profileDir build with $($dirs.Count) module(s) from $srcDir$(if ($Calibrate) { ' (calibrating)' }):"
 $dirs | ForEach-Object { Write-Host "  $(Split-Path $_ -Leaf)" }
 
 Start-Process -FilePath $exe -ArgumentList $dirs -WorkingDirectory $root
