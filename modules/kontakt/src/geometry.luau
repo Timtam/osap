@@ -43,16 +43,23 @@ local GEOMETRY = {
 -- `arrows` and `snapshots` are the control rows; `camera` is the button that reveals the
 -- snapshot bar (actions.snapshotAction presses it and re-checks). A missing entry means
 -- "not measured for this version" and the controls are simply not offered — see header.
--- `camera.litAbove` is the brightness at which that button counts as LIT, i.e. the bar is
--- already open. It has to be per-version too: Kontakt 8 draws the camera dark on dark
--- chrome and white when active (measured 18–85 against 255, so 150 sits comfortably
--- between), while Kontakt 7 draws it as a light-grey BUTTON — 169 closed, 255 open. Kontakt
--- 8's threshold read Kontakt 7's resting state as "already open", which would have skipped
--- the reveal and clicked the snapshot targets against the row that occupies that space
--- while the bar is closed: "Voices" and "Max".
+-- CAMERA_LIT is the brightness above which that button counts as LIT — the bar is already
+-- open, so pressing it again would CLOSE it. Measured in both states on both versions, and
+-- they agree: the glyph reads 169 (Kontakt 7) / 170 (Kontakt 8) at rest and 255 when the
+-- bar is open, so the midpoint separates them with 42 to spare either way.
+--
+-- It was 150, from a reading of the dark PANEL AROUND the glyph rather than the glyph, and
+-- both versions therefore reported "already open" whenever the bar was shut: the reveal
+-- was skipped and the snapshot targets were clicked against whatever occupies that row
+-- with the bar closed — the instrument's own UI. It only ever appeared to work because the
+-- bar happened to be open during testing, which is the failure mode this whole file exists
+-- to avoid: a number inferred from a neighbouring measurement rather than taken from the
+-- thing itself.
+local CAMERA_LIT = 212
+
 local HEADER = {
   ["Kontakt 8"] = {
-    camera = { fromRight = 305, y = 87, litAbove = 150 },
+    camera = { fromRight = 305, y = 87, litAbove = CAMERA_LIT },
     arrows = {
       { label = "Previous instrument", fromRight = 352, y = 87, hotkey = "Ctrl+P" },
       { label = "Next instrument", fromRight = 332, y = 87, hotkey = "Ctrl+N" },
@@ -63,7 +70,7 @@ local HEADER = {
     -- numbers are right: the name field and its dropdown begin where 588 lands, and the
     -- arrows measured at (607, 117) and (625, 117) against 405 / 389 at y 118.
     snapshots = {
-      { label = "Snapshot menu", fromRight = 588, y = 118, hotkey = "Alt+M" },
+      { label = "Snapshot menu", fromRight = 588, y = 118, hotkey = "Alt+M", opensMenu = true },
       { label = "Previous snapshot", fromRight = 405, y = 118, hotkey = "Alt+P" },
       { label = "Next snapshot", fromRight = 389, y = 118, hotkey = "Alt+N" },
     },
@@ -72,7 +79,7 @@ local HEADER = {
     -- Measured from calibration shots 649 px wide: the arrow glyphs centre on x 312 and
     -- 331, the camera on x 359, all on row y 58–64; with the bar open, its dropdown
     -- triangle is at x 70 and its arrows at x 260 and 279, on row y 85–91.
-    camera = { fromRight = 290, y = 61, litAbove = 212 },
+    camera = { fromRight = 290, y = 61, litAbove = CAMERA_LIT },
     arrows = {
       { label = "Previous instrument", fromRight = 337, y = 61, hotkey = "Ctrl+P" },
       { label = "Next instrument", fromRight = 318, y = 61, hotkey = "Ctrl+N" },
@@ -90,7 +97,7 @@ local HEADER = {
     -- moves ReaHotkey's SHOP coordinate from 440 to 815.) The dropdown lands at 579 here
     -- against Kontakt 8's 588 — the two layouts differ by row, not by column.
     snapshots = {
-      { label = "Snapshot menu", fromRight = 579, y = 88, hotkey = "Alt+M" },
+      { label = "Snapshot menu", fromRight = 579, y = 88, hotkey = "Alt+M", opensMenu = true },
       { label = "Previous snapshot", fromRight = 389, y = 88, hotkey = "Alt+P" },
       { label = "Next snapshot", fromRight = 370, y = 88, hotkey = "Alt+N" },
       -- Deliberately NOT offered, and the reason these were measured rather than derived:

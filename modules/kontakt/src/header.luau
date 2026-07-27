@@ -22,26 +22,24 @@ local kk = host.tryRequire("com.platform.komplete-kontrol")
 -- whatsoever: its UIA element is a leaf even when queried directly, so ReaHotkey's
 -- UIA-first path is dead there and only its fallback remains. (Kontakt 7 does expose a
 -- tree — Qt 6.5.3 against Kontakt 8's 6.6.1 — and the actions still try UIA first.)
-local function addPluginHeader(ov, cell)
-  ov:addCustomButton({
-    label = "Load instrument",
-    hotkey = "Ctrl+L",
-    onActivate = function(o) A.invokeMenuItem(cell, o, "Load...") end,
-  })
-  ov:addCustomButton({
-    label = "Save multi as",
-    hotkey = "Ctrl+S",
-    onActivate = function(o) A.invokeMenuItem(cell, o, "Save multi as...") end,
-  })
-  ov:addCustomButton({
-    label = "Reset multi",
-    hotkey = "Ctrl+R",
-    onActivate = function(o) A.invokeMenuItem(cell, o, "Reset multi") end,
-  })
+-- The instrument rack's own controls — the view toggle, the instrument and multi arrows,
+-- the snapshot bar — which exist only while the rack view is up, and which the plugin
+-- exposes no accessible element for in ANY host: a raw walk of a standalone Kontakt 8
+-- lists its Header and Status bar buttons and nothing of the rack. So they are coordinates
+-- everywhere, and the same coordinates everywhere, because the rack is laid out the same
+-- whether the plugin is embedded in a DAW or running on its own.
+--
+-- ReaHotkey offers these only on its PLUGIN header and gives the standalone one just the
+-- file menu plus a Tab pass-through of Kontakt's native focus ring. We can't inherit that
+-- split: a LIBRARY overlay has to keep Tab for its own controls (see addStandaloneHeader),
+-- so on a standalone Kontakt with a library loaded that pass-through is off, and without
+-- these the whole rack is unreachable — which is exactly what the user found.
+local function addRackControls(ov, cell)
   -- The view toggle, by Kontakt's OWN keyboard shortcut (F10) rather than through its
   -- menu: the menu entry reads "Switch to Classic View   F10", and a shortcut the
   -- application defines cannot drift the way a measured menu row can. Kontakt 8 only —
-  -- Kontakt 7 has no view modes, and the button did nothing there.
+  -- Kontakt 7 switches rack/single through its VIEW menu and has no such command, and the
+  -- button did nothing there.
   --
   -- Two controls, one key: F10 toggles, so the label has to say which way it will go.
   -- Whichever is currently visible owns Alt+V — the runtime resolves a shared hotkey to its
@@ -63,12 +61,10 @@ local function addPluginHeader(ov, cell)
       onActivate = function() host.input.send("F10") end,
     })
   end
-  -- The classic view's own arrows, offered only while that view is up. Their coordinates
-  -- are right — verified against a calibration shot of the classic header — but in the
-  -- modern view the same points fall inside the loaded library's UI, where one of them sat
-  -- on Cinematic Studio Strings' "Sustain": pressing Ctrl+P changed the articulation
-  -- instead of the instrument. ReaHotkey gates these the same way, through a UIA check we
-  -- cannot make embedded; the view probe (a pixel in Kontakt's own chrome) stands in.
+  -- Offered only while that view is up. The coordinates are right for it, but in the other
+  -- view the same points fall inside whatever library is loaded — one of them sat on
+  -- Cinematic Studio Strings' "Sustain", so Ctrl+P changed the articulation instead of the
+  -- instrument. ReaHotkey gates them the same way (`If This.GetPluginView() = "rack"`).
   ov:group(cell.inClassic, function(ov)
     for _, h in ipairs(cell.header.arrows) do
       ov:addHotspotButton({
@@ -90,10 +86,35 @@ local function addPluginHeader(ov, cell)
       ov:addCustomButton({
         label = h.label,
         hotkey = h.hotkey,
-        onActivate = A.snapshotAction(cell, h.fromRight, h.y),
+        onActivate = function(o)
+          -- Acknowledge at PRESS time, as a hotspot control does. These act through a
+          -- reveal-then-click sequence that can take half a second, and one that worked
+          -- used to be completely silent.
+          host.speech.output(h.label .. ", activated", { interrupt = true })
+          A.snapshotAction(cell, h.fromRight, h.y, h.opensMenu)(o)
+        end,
       })
     end
   end)
+end
+
+local function addPluginHeader(ov, cell)
+  ov:addCustomButton({
+    label = "Load instrument",
+    hotkey = "Ctrl+L",
+    onActivate = function(o) A.invokeMenuItem(cell, o, "Load...") end,
+  })
+  ov:addCustomButton({
+    label = "Save multi as",
+    hotkey = "Ctrl+S",
+    onActivate = function(o) A.invokeMenuItem(cell, o, "Save multi as...") end,
+  })
+  ov:addCustomButton({
+    label = "Reset multi",
+    hotkey = "Ctrl+R",
+    onActivate = function(o) A.invokeMenuItem(cell, o, "Reset multi") end,
+  })
+  addRackControls(ov, cell)
   for _, h in ipairs(geo.K7_CONTROLS) do
     -- Only those Kontakt 7 offers embedded, and only where the cell has the coordinate:
     -- Kontakt 8's geometry simply has no entry, so the loop skips it without a version
@@ -130,13 +151,16 @@ local function addStandaloneHeader(ov, cell, isLibrary)
       })
     end
   end
-  -- Tab / Shift+Tab step through Kontakt's OWN focusable controls (its window does not
-  -- move focus on Tab by itself) — ReaHotkey's standalone Tab pass-through. It REPLACES
-  -- the overlay's own Tab navigation, so it belongs only to the plain header, whose job is
-  -- precisely to hand you on to the plugin. On a LIBRARY overlay it would take Tab away
-  -- from the very controls that overlay exists to offer: they would be present and
-  -- unreachable, which reads as the library overlay not being there at all.
-  if not isLibrary then ov:enableUiaPassThrough() end
+  addRackControls(ov, cell)
+  -- A last stop that hands Tab on to Kontakt's OWN focusable controls: its window does not
+  -- move focus on Tab by itself, so without this its native UI is unreachable. ReaHotkey's
+  -- standalone Tab pass-through, and like ReaHotkey's it is a CONTROL — Tab reaches it
+  -- after ours, walks the plugin's ring, and comes back out.
+  --
+  -- Not on a LIBRARY overlay. There the plugin's own controls are the ones the library
+  -- overlay exists to replace with named, reachable ones, and the sample library's UI is
+  -- drawn in a Qt scene that exposes no focusable elements anyway.
+  if not isLibrary then ov:addPassThrough({ label = "Kontakt controls" }) end
 end
 
 -- Everything a cell's overlay carries before a library adds its own controls.

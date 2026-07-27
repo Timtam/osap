@@ -27,7 +27,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumChildWindows,
-    EnumWindows, FindWindowW, GetAncestor, GetClassNameW, GetCursorPos, GetForegroundWindow,
+    EnumWindows, FindWindowW, GetAncestor, GetClassNameW, GetClientRect, GetCursorPos,
+    GetForegroundWindow,
     GetGUIThreadInfo, GetMessageW, GetSystemMetrics, GetWindowRect,
     GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
     PostThreadMessageW, RegisterClassW, SetCursorPos, SetWindowsHookExW, TranslateMessage,
@@ -653,6 +654,8 @@ fn control_info(hwnd_val: isize) -> Option<ControlInfo> {
         GetWindowRect(hwnd, &mut rect);
         let mut client = POINT { x: 0, y: 0 };
         ClientToScreen(hwnd, &mut client);
+        let mut crect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        GetClientRect(hwnd, &mut crect);
         Some(ControlInfo {
             hwnd: hwnd_val,
             class,
@@ -662,6 +665,8 @@ fn control_info(hwnd_val: isize) -> Option<ControlInfo> {
             h: rect.bottom - rect.top,
             client_x: client.x,
             client_y: client.y,
+            client_w: crect.right - crect.left,
+            client_h: crect.bottom - crect.top,
         })
     }
 }
@@ -875,6 +880,8 @@ fn window_info(hwnd_val: isize, require_title: bool) -> Option<WinInfo> {
         // to the client area, like AutoHotkey's default Client coord mode).
         let mut client = POINT { x: 0, y: 0 };
         ClientToScreen(hwnd, &mut client);
+        let mut crect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        GetClientRect(hwnd, &mut crect);
 
         Some(WinInfo {
             hwnd: hwnd_val,
@@ -888,6 +895,8 @@ fn window_info(hwnd_val: isize, require_title: bool) -> Option<WinInfo> {
             h: rect.bottom - rect.top,
             client_x: client.x,
             client_y: client.y,
+            client_w: crect.right - crect.left,
+            client_h: crect.bottom - crect.top,
         })
     }
 }

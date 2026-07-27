@@ -30,6 +30,13 @@ pub struct WinInfo {
     /// not the window frame.
     pub client_x: i32,
     pub client_y: i32,
+    /// Size of the CLIENT area. Distinct from w/h, which are the window frame:
+    /// a top-level window's frame is wider than its content by its borders, and
+    /// coordinates measured from the right edge of the content (a plugin header
+    /// laid out from the right) land outside it if they use w. Live: a Kontakt 8
+    /// standalone window is 1026 wide around 1010 of plugin.
+    pub client_w: i32,
+    pub client_h: i32,
 }
 
 /// A child control (window) inside a top-level window: its class and geometry,
@@ -45,6 +52,10 @@ pub struct ControlInfo {
     /// coordinate origin when the plugin is embedded in a host window.
     pub client_x: i32,
     pub client_y: i32,
+    /// Size of the control's CLIENT area — see WinInfo::client_w. Equal to w/h
+    /// for the borderless Qt windows plugins use, but not in general.
+    pub client_w: i32,
+    pub client_h: i32,
 }
 
 /// A captured screen region (RGBA, row-major, top-down).

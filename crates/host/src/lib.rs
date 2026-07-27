@@ -3419,6 +3419,8 @@ fn control_to_table(lua: &Lua, c: &ControlInfo) -> mlua::Result<Table> {
     let cl = lua.create_table()?;
     cl.set("x", c.client_x)?;
     cl.set("y", c.client_y)?;
+    cl.set("w", c.client_w)?;
+    cl.set("h", c.client_h)?;
     t.set("client", cl)?;
     Ok(t)
 }
@@ -3451,6 +3453,8 @@ fn win_to_table(lua: &Lua, w: &WinInfo) -> mlua::Result<Table> {
     let cl = lua.create_table()?;
     cl.set("x", w.client_x)?;
     cl.set("y", w.client_y)?;
+    cl.set("w", w.client_w)?;
+    cl.set("h", w.client_h)?;
     t.set("client", cl)?;
 
     Ok(t)

@@ -37,6 +37,21 @@ local MATCH_SCALES = { 1.0, 0.9, 1.1, 0.8, 1.2, 1.25, 0.75, 1.5, 0.67, 2.0 }
 -- introduced (verified: no bare specificity numbers remain outside the runtime).
 O.layer = { chrome = 10, base = 20, content = 30, dialog = 40 }
 
+-- The width and height of an origin's CONTENT, which is what coordinates are measured
+-- against — `client` for a window that has a frame, falling back to the window rect for
+-- anything that does not report one. An embedded plugin's control is borderless, so the
+-- two agree there and this changes nothing; a standalone plugin's window is not, and a
+-- Kontakt 8 one is 1026 wide around 1010 px of plugin. Anything anchored to the right edge
+-- (Kontakt's whole header cluster) or probing near it (its view probe) has to use this,
+-- or it sits a border-width off in exactly the case that is hardest to notice.
+function O.contentSize(o)
+  if not o then return 0, 0 end
+  local c, b = o.client, o.bounds
+  local w = (c and c.w and c.w > 0 and c.w) or (b and b.w) or 0
+  local h = (c and c.h and c.h > 0 and c.h) or (b and b.h) or 0
+  return w, h
+end
+
 -- One line per VM when the calibration keys arm (see the Calibration section).
 local calibrationAnnounced = false
 
@@ -359,7 +374,8 @@ end
 
 local TYPE_LABEL =
   { static = "", hotspot = "button", custom = "button", ocr = "button", ocredit = "edit",
-    gtoggle = "toggle button", hotspottoggle = "toggle button", tabcontrol = "tab control" }
+    gtoggle = "toggle button", hotspottoggle = "toggle button", tabcontrol = "tab control",
+    passthrough = "" }
 
 -- Origin (top-left) of the overlay's coordinate space in screen pixels: the
 -- client-area top-left of the active context's coordinate window — the plugin
@@ -436,7 +452,7 @@ local function selectTab(self, c)
   end
   -- Focus is now on the tab control (a non-editable stop): make sure Space is captured
   -- again if we arrived here from an editable field via Ctrl+Tab / Ctrl+<n>.
-  self:_syncSpaceCapture()
+  self:_syncNativeKeys()
   -- The new tab exposes a different set of controls, so the hotkeys they claim change.
   if self.active then self:_syncControlHotkeys() end
   host.speech.output(tabMessage(tab), { interrupt = true })
@@ -520,9 +536,11 @@ local function hotspotPoint(self, c)
   local ox, oy = originOf(self, c)
   local x = at[1]
   if c.fromRight then
-    local o = self:origin()
-    local w = (o and o.bounds and o.bounds.w) or 0
-    x = w - at[1]
+    -- Measured from the right edge of the CONTENT, not of the window frame. They are the
+    -- same thing for an embedded plugin (its control is borderless) and not for a
+    -- standalone one: a Kontakt 8 window is 1026 wide around 1010 of plugin, so every
+    -- right-anchored control would sit 16 px too far right there.
+    x = O.contentSize(self:origin()) - at[1]
   end
   return ox + x, oy + at[2]
 end
@@ -581,6 +599,16 @@ local function speakControl(self, index, moveMouse)
   -- controls are the ones Tab then steps into (see isFocusable's `when` gating).
   if c.kind == "tabcontrol" then
     host.speech.output(tabMessage(c.tabs[c._current], "tab control"), { interrupt = true })
+    return
+  end
+  -- A pass-through announces that Tab goes INTO the plugin from here, because nothing else
+  -- would tell the user that: what follows is the plugin's own focus ring, announced by
+  -- the screen reader rather than by us, and it is not obvious that Tab will come back out
+  -- again at the end. Landing on it also restarts the ring, so entering it, leaving by
+  -- hotkey and coming back walks the whole thing again rather than resuming mid-way.
+  if c.kind == "passthrough" then
+    c._entry = nil
+    host.speech.output((c.label or "") .. ", Tab to step through them", { interrupt = true })
     return
   end
   -- `ocrLabel`: read the control's NAME off the screen instead of announcing a fixed one,
@@ -648,6 +676,7 @@ local function isFocusable(self, index)
 end
 
 function Overlay:focusNext()
+  if self:_stepPassThrough(1) then return end
   local n = #self.controls
   if n == 0 then return end
   local found = false
@@ -661,12 +690,13 @@ function Overlay:focusNext()
   -- Nothing focusable (e.g. a control set that is only unfilled slots): don't
   -- announce a phantom empty stop with interrupt.
   if found then
-    self:_syncSpaceCapture()
+    self:_syncNativeKeys()
     speakControl(self, self.focus, true)
   end
 end
 
 function Overlay:focusPrev()
+  if self:_stepPassThrough(-1) then return end
   local n = #self.controls
   if n == 0 then return end
   local found = false
@@ -678,30 +708,64 @@ function Overlay:focusPrev()
     end
   end
   if found then
-    self:_syncSpaceCapture()
+    self:_syncNativeKeys()
     speakControl(self, self.focus, true)
   end
 end
 
--- Enable a standalone UIA Tab pass-through: Tab / Shift+Tab move keyboard focus through
--- the attached window's OWN controls (via host.uia.focusStep) and announce each — for a
--- plugin whose window doesn't move focus on Tab itself (Kontakt standalone). Return /
--- Space / arrows are deliberately NOT captured, so the focused control handles them
--- natively (toggle a check box, open a combo). The overlay's own actions stay on their
--- global hotkeys. Ported from ReaHotkey's AddCustomPassThrough("Standalone", …).
-function Overlay:enableUiaPassThrough()
+-- ReaHotkey's AddCustomPassThrough, as what it actually is there: a CONTROL in the
+-- overlay's own Tab ring, not a mode that replaces it.
+--
+-- We had it as a mode, and it was fine while the overlay it sat on carried exactly one
+-- other control. The moment the standalone header gained the rack controls, they were
+-- present and unreachable — Tab went straight into the plugin and never came back to
+-- them — which for someone who cannot see the screen is the same as their not existing.
+-- A control you cannot find is a control you do not have.
+--
+-- As a control: Tab reaches it like any other and announces it; Tab again enters the
+-- plugin's OWN focus ring and walks it (host.uia.focusStep, which raises a real UIA focus
+-- event, so the screen reader announces each element and we deliberately do not); and
+-- when that ring returns to where it was entered, Tab carries on through the rest of the
+-- overlay's controls. For a plugin window that does not move focus on Tab by itself
+-- (Kontakt standalone), this is the only way into its native controls.
+function Overlay:addPassThrough(opts)
+  return add(self, {
+    kind = "passthrough",
+    label = (opts and opts.label) or "Plugin controls",
+    when = opts and opts.when,
+  })
+end
+
+-- Kept for the old spelling; it now adds the control rather than switching on a mode.
+function Overlay:enableUiaPassThrough(opts)
   assertUnbound(self, "enableUiaPassThrough")
-  self._passThrough = function(o, dir)
-    local ctrl = o:origin()
-    local hwnd = ctrl and ctrl.id
-    if not hwnd then return end
-    -- Move the plugin's OWN keyboard focus to the next/previous control. We deliberately
-    -- do NOT announce it: SetFocus raises a real UIA focus event, so the screen reader
-    -- (NVDA) already reads the control — speaking it here too would double-announce.
-    -- (Our other controls are VIRTUAL, not real focus, so those we still announce.)
-    host.uia.focusStep(hwnd, dir)
-  end
+  self:addPassThrough(opts)
   return self
+end
+
+-- One Tab inside the focused pass-through control. True when it consumed the key (focus
+-- moved within the plugin), false to let Tab carry on through the overlay's controls.
+--
+-- focusStep WRAPS at the ends, so "we are done" is not something it reports; what it does
+-- report is a 1-based index, and coming back to the index we entered at means the ring has
+-- been walked once. Entering at whatever the plugin happens to have focused (rather than
+-- at element 1) is what makes that the full ring rather than the tail of it.
+function Overlay:_stepPassThrough(dir)
+  local c = self.controls[self.focus]
+  if not (c and c.kind == "passthrough" and isVisible(self, c)) then return false end
+  local ctrl = self:origin()
+  if not (ctrl and ctrl.id) then return false end
+  local r = host.uia.focusStep(ctrl.id, dir)
+  if not r then return false end -- nothing focusable in there: just move on
+  if c._entry == nil then
+    c._entry = r.index
+    return true
+  end
+  if r.index == c._entry then
+    c._entry = nil -- walked the ring; hand Tab back to the overlay
+    return false
+  end
+  return true
 end
 
 function Overlay:activate(index)
@@ -875,16 +939,12 @@ function Overlay:_registerHotkeys()
   end
   -- Tab moves *between* elements; arrow keys are left for value changes within a
   -- control (standard interaction scheme), so we don't capture them here.
-  if self._passThrough then
-    -- Standalone pass-through: Tab / Shift+Tab drive the plugin's native UIA focus.
-    -- Return / Space / arrows are LEFT uncaptured so the focused control handles them
-    -- natively; the overlay's own actions are reached via their global hotkeys.
-    cap("Tab", function() self._passThrough(self, 1) end)
-    cap("Shift+Tab", function() self._passThrough(self, -1) end)
-  else
+  do
     cap("Tab", function() self:focusNext() end)
     cap("Shift+Tab", function() self:focusPrev() end)
-    cap("Return", function() self:activate() end)
+    -- Return is captured per FOCUS, not statically: while the pass-through control has
+    -- the focus, the plugin's own control is what should receive it (open a combo, toggle
+    -- a check box). Same reasoning as Space below. See _syncNativeKeys.
     -- Tab controls (ReaHotkey): Left/Right switch the tab when the tab control itself
     -- is focused (LeftRightHK); Ctrl+Tab / Ctrl+Shift+Tab switch it from anywhere in
     -- the overlay (ControlTab/ControlShiftTabHK); Ctrl+<n> jumps straight to tab n (our
@@ -901,12 +961,13 @@ function Overlay:_registerHotkeys()
         cap("Ctrl+" .. n, function() self:gotoTab(n) end)
       end
     end
-    -- Space activates the focused control like Return (standard Windows button
-    -- behaviour). It is captured/released as focus moves — NOT via the static `cap`
-    -- set above — so that while an editable field (ocredit) is focused the Space
-    -- reaches the field and the user can type a literal space (e.g. a preset name
-    -- with spaces). Set the initial state for the control focused right now.
-    self:_syncSpaceCapture()
+    -- Space and Return activate the focused control (standard Windows button
+    -- behaviour). They are captured/released as focus moves — NOT via the static `cap`
+    -- set above — so that while an editable field (ocredit) is focused Space reaches the
+    -- field and the user can type a literal space (e.g. a preset name with spaces), and
+    -- while a pass-through control is focused BOTH reach the plugin's real control. Set
+    -- the initial state for the control focused right now.
+    self:_syncNativeKeys()
   end
 end
 
@@ -928,28 +989,45 @@ function Overlay:_unregisterHotkeys()
     host.keys.release(self._spaceToken)
     self._spaceToken = false
   end
+  if self._returnToken then
+    host.keys.release(self._returnToken)
+    self._returnToken = false
+  end
 end
 
--- Keeps the Space-activates-the-focused-control capture in sync with the focused
--- control's kind: captured for a normal (button-like) control, released while an
--- editable field (ocredit) is focused so Space reaches it as typed text. Idempotent;
--- called on every focus move (and at registration). No-op unless the overlay is active
--- and not a pass-through overlay (pass-through overlays never capture Space — the real
--- plugin control handles it).
-function Overlay:_syncSpaceCapture()
-  if not self.active or self._passThrough then
-    return
-  end
+-- Keeps the two keys that ACTIVATE a control — Space and Return — in sync with what is
+-- focused, because for two kinds of control they belong to something else:
+--
+--   ocredit       an editable field: Space must reach it, or the user cannot type a space
+--                 in a preset name. Return still activates.
+--   passthrough   the plugin's OWN control has the real keyboard focus, so both belong to
+--                 it — Space toggles its check box, Return opens its combo. Capturing
+--                 either here would swallow the interaction the pass-through exists for.
+--
+-- Idempotent; called on every focus move and at registration. No-op unless active.
+function Overlay:_syncNativeKeys()
+  if not self.active then return end
   local c = self.controls[self.focus]
-  local editable = c ~= nil and c.kind == "ocredit"
-  if editable then
-    if self._spaceToken then
-      host.keys.release(self._spaceToken)
-      self._spaceToken = false
-    end
-  elseif not self._spaceToken then
+  local passthrough = c ~= nil and c.kind == "passthrough"
+  local wantSpace = not passthrough and not (c ~= nil and c.kind == "ocredit")
+  local wantReturn = not passthrough
+  if wantSpace and not self._spaceToken then
     self._spaceToken = host.keys.capture("Space", function() self:activate() end)
+  elseif not wantSpace and self._spaceToken then
+    host.keys.release(self._spaceToken)
+    self._spaceToken = false
   end
+  if wantReturn and not self._returnToken then
+    self._returnToken = host.keys.capture("Return", function() self:activate() end)
+  elseif not wantReturn and self._returnToken then
+    host.keys.release(self._returnToken)
+    self._returnToken = false
+  end
+end
+
+-- Deprecated name; the capture covers Return as well now.
+function Overlay:_syncSpaceCapture()
+  return self:_syncNativeKeys()
 end
 
 -- A module hook fired (with the overlay) each time it becomes the ACTIVE overlay —
@@ -1131,7 +1209,7 @@ local function report(self, opts)
   if self._landmarkImage ~= nil and not isAbsolutePath(self._landmarkImage) then
     bad("landmark image is not an absolute path — use host.path()")
   end
-  if #self.controls == 0 and not self._passThrough then
+  if #self.controls == 0 then
     bad("no controls and no pass-through — this overlay has nothing to offer")
   end
   if opts and opts.specificity ~= nil and not opts.slot then
@@ -1641,9 +1719,14 @@ function Overlay:calibrationShot()
   -- the runtime. That rule is what makes an inherited overlay find its own images, so it
   -- stays -- calibration output just gets one known home instead of a per-module one. The
   -- log line prints the absolute path, and the file is named after the overlay.
+  -- The CONTENT rectangle, which is the one the controls are measured against — using the
+  -- window rect instead made a standalone shot overshoot by its border and include a strip
+  -- of whatever was behind it, so a picture meant to settle where a coordinate lands
+  -- disagreed with the coordinate by 16 px.
+  local ow, oh = O.contentSize(o)
   local path = host.path("calibration/" .. safeName(self.label) .. ".png")
   local ok = host.screen.saveMarked(path, {
-    region = { o.client.x, o.client.y, o.client.x + o.bounds.w, o.client.y + o.bounds.h },
+    region = { o.client.x, o.client.y, o.client.x + ow, o.client.y + oh },
     marks = marks,
   })
   host.log.info(string.format(

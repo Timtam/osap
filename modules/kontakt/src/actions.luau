@@ -6,6 +6,7 @@
 -- already knows its version and carries that version's geometry (see cells.luau). Nothing
 -- here resolves a version at runtime.
 
+local O = host.require("com.platform.overlay")
 local U = host.uia.type
 local BUTTON, MENUITEM = U.Button, U.MenuItem
 local D = host.include("src/detect.luau")
@@ -242,7 +243,7 @@ end
 local function cameraPoint(cell, ctrl)
   local cam = cell.header and cell.header.camera
   if not cam then return nil end
-  return ctrl.client.x + ctrl.bounds.w - cam.fromRight, ctrl.client.y + cam.y
+  return ctrl.client.x + O.contentSize(ctrl) - cam.fromRight, ctrl.client.y + cam.y
 end
 
 local function snapshotBarUp(cell, ctrl)
@@ -252,12 +253,43 @@ local function snapshotBarUp(cell, ctrl)
   return p ~= nil and (p.r + p.g + p.b) / 3 > cell.header.camera.litAbove
 end
 
-local function snapshotAction(cell, fromRight, y)
+-- Kontakt's snapshot dropdown opens a menu of the instrument's snapshots — and does
+-- nothing whatsoever on an instrument that ships none, which Cinematic Studio Strings is.
+-- To someone who cannot see the screen a control that silently does nothing and a key that
+-- never registered are the same event, so the dropdown reads back afterwards whether a
+-- menu actually appeared.
+--
+-- Only where the plugin answers UIA at all. host.uia.find returns a bare boolean, so on a
+-- DAW-embedded Kontakt 8 — which exposes no accessible content whatsoever — "no menu" and
+-- "cannot see" are the same `false`, and this would announce a missing menu every single
+-- time. There the press acknowledgement is all we can honestly give.
+--
+-- And it reports what it OBSERVED, not what it concluded: a menu that failed to open for
+-- some other reason is still worth saying out loud, and "this instrument has no snapshots"
+-- would be a claim this test cannot actually support.
+local MENU_SETTLE = 350
+local function verifyMenuOpened(o)
+  local fg = host.window.active()
+  if not (fg and fg.id and kontaktPaneName(fg.id)) then return end
+  local ctrl = o:origin()
+  if not (ctrl and ctrl.id) then return end
+  if host.uia.find(ctrl.id, "", U.Menu) then return end
+  host.log.info("Kontakt: no menu present after the snapshot dropdown was clicked")
+  host.speech.output("Snapshot menu did not open", { interrupt = true })
+end
+
+-- `opensMenu` marks the control whose click is supposed to drop a menu, so it can be
+-- checked afterwards; the arrows act on the instrument directly and have nothing to look
+-- for. Every one of them acknowledges the press first, the way a hotspot control does:
+-- until now a snapshot control that worked said nothing at all, and only a failing one
+-- spoke, which is the wrong way round.
+local function snapshotAction(cell, fromRight, y, opensMenu)
   return function(o)
     local ctrl = o:origin()
     if not (ctrl and ctrl.client and ctrl.bounds) then return end
     local function clickTarget()
-      host.input.click(ctrl.client.x + ctrl.bounds.w - fromRight, ctrl.client.y + y)
+      host.input.click(ctrl.client.x + O.contentSize(ctrl) - fromRight, ctrl.client.y + y)
+      if opensMenu then host.timer.after(MENU_SETTLE, function() verifyMenuOpened(o) end) end
     end
     if snapshotBarUp(cell, ctrl) then
       clickTarget()

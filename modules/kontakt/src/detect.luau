@@ -6,6 +6,7 @@
 -- declared for ONE cell of the matrix (version × where it runs), so it knows its version
 -- at declaration time and never asks at runtime. See cells.luau.
 
+local O = host.require("com.platform.overlay")
 local U = host.uia.type
 
 -- A plugin identifies itself through a UIA element named after it, which NI exposes as a
@@ -222,8 +223,10 @@ local function isClassicView(origin)
   if not (origin and origin.client and origin.bounds) then return false end
   local key = tostring(origin.id) .. "@" .. tostring(host.epoch and host.epoch() or 0)
   if viewKey == key then return viewCache end
+  -- Against the CONTENT's right edge, not the window frame's: standalone, the frame is
+  -- 16 px wider than the plugin, which is enough to read a neighbouring icon instead.
   local p = host.screen.pixel(
-    origin.client.x + origin.bounds.w - VIEW_PROBE_FROM_RIGHT,
+    origin.client.x + O.contentSize(origin) - VIEW_PROBE_FROM_RIGHT,
     origin.client.y + VIEW_PROBE_Y
   )
   viewKey = key
