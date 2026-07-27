@@ -7,6 +7,9 @@ license = "GPL-3.0-or-later"
 [dependencies]
 anyhow = "1.0.102"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
+# Template matching is embarrassingly parallel — every candidate position is independent —
+# and a batch is one task per installed sample library. See spawn_image_worker.
+rayon = "1"
 mlua = { version = "0.11.6", features = ["luau", "error-send", "serialize"] }
 module-manifest = { path = "../module-manifest" }
 rodio = "0.20"

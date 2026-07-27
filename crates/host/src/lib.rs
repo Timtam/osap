@@ -15,6 +15,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use rayon::prelude::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -241,6 +242,9 @@ struct ImageResult {
     match_ms: u32,
     /// Tasks sharing this batch — the fan-out that the capture was shared across.
     batch: u32,
+    /// Set on exactly one result per batch, so the timing is logged once rather than
+    /// once per task (they all carry the same batch figures).
+    first_of_batch: bool,
 }
 
 /// The image-search worker: CAPTURES each task's region and runs the CPU-heavy
@@ -281,8 +285,14 @@ fn spawn_image_worker(
             // Capture each DISTINCT region once; match every task's template against its
             // region's shared frame. The batch is small (one task per active library), so
             // a linear region lookup is fine.
+            //
+            // The captures stay SERIAL on purpose: each is a compositor-synchronised screen
+            // read, so running them together would contend rather than overlap, and the
+            // whole point of the batch is that there is only one per region anyway. The
+            // MATCHING is what gets spread across cores — see below.
             let mut frames: Vec<((i32, i32, i32, i32), Option<CapturedImage>, u32)> = Vec::new();
             let batch_len = batch.len() as u32;
+            let mut plan: Vec<(&ImageTask, usize)> = Vec::with_capacity(batch.len());
             for t in &batch {
                 let idx = match frames.iter().position(|(r, _, _)| *r == t.region) {
                     Some(i) => i,
@@ -295,21 +305,40 @@ fn spawn_image_worker(
                         frames.len() - 1
                     }
                 };
-                let (rx, ry, _, _) = t.region;
-                let t1 = Instant::now();
-                let hit = frames[idx].1.as_ref().and_then(|cap| {
-                    // Templates in order against this one frame; first hit wins.
-                    t.tmpls.iter().enumerate().find_map(|(n, tm)| {
-                        find_template_scaled(cap, tm.w, tm.h, &tm.rgba, t.tol, &t.scales, &tm.probes)
+                plan.push((t, idx));
+            }
+            // MATCH IN PARALLEL. Every candidate position is independent of every other, so
+            // this is the shape a thread pool is actually for; the tasks in a batch are
+            // independent too. Sequentially, twelve installed libraries cost twelve full
+            // scans back to back before any of them can answer — each one comfortably under
+            // the logging threshold and therefore invisible, while together they were the
+            // several seconds before the right overlay appeared.
+            let t1 = Instant::now();
+            let hits: Vec<Option<(i32, i32, u32, u32, usize)>> = plan
+                .par_iter()
+                .map(|(t, idx)| {
+                    let (rx, ry, _, _) = t.region;
+                    frames[*idx].1.as_ref().and_then(|cap| {
+                        // Templates in order against this one frame; first hit wins.
+                        t.tmpls.iter().enumerate().find_map(|(n, tm)| {
+                            find_template_scaled(
+                                cap, tm.w, tm.h, &tm.rgba, t.tol, &t.scales, &tm.probes,
+                            )
                             .map(|(ox, oy, mw, mh)| (rx + ox as i32, ry + oy as i32, mw, mh, n + 1))
+                        })
                     })
-                });
+                })
+                .collect();
+            let match_ms = t1.elapsed().as_millis() as u32;
+            let capture_ms: u32 = frames.iter().map(|f| f.2).sum();
+            for (i, ((t, _), hit)) in plan.iter().zip(hits).enumerate() {
                 let res = ImageResult {
                     id: t.id,
                     hit,
-                    capture_ms: frames[idx].2,
-                    match_ms: t1.elapsed().as_millis() as u32,
+                    capture_ms,
+                    match_ms,
                     batch: batch_len,
+                    first_of_batch: i == 0,
                 };
                 if results.send(res).is_err() {
                     return; // main thread gone
@@ -940,11 +969,18 @@ impl Shared {
             // its verdict is observable — so a slow one gets a line naming both halves,
             // capture and match, and how many tasks shared the capture. Only when it is
             // actually slow: the steady state stays silent.
-            if res.capture_ms + res.match_ms >= 40 {
+            // Reported per BATCH, not per search, and that distinction was itself a
+            // measurement bug: with twelve libraries each search sat at ~39 ms — just under
+            // a 40 ms per-search threshold, so the log fell completely silent while the
+            // twelve of them together still cost ~470 ms before any overlay could answer.
+            // The batch is the unit somebody actually waits for. Deduped on the first
+            // result of each batch so one line is logged, not twelve.
+            if res.first_of_batch && res.capture_ms + res.match_ms >= 25 {
                 logging::line(
                     "image",
                     &format!(
-                        "search took {} ms (capture {}, match {}), {} task(s) in the batch",
+                        "batch of {} search(es) took {} ms (capture {}, match {} across {} thread-pool tasks)",
+                        res.batch,
                         res.capture_ms + res.match_ms,
                         res.capture_ms,
                         res.match_ms,
