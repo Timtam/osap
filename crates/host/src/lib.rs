@@ -190,6 +190,15 @@ struct ImageTask {
 struct ImageResult {
     id: u64,
     hit: Option<(i32, i32, u32, u32, usize)>,
+    /// How long this search actually took, split into the shared capture and this
+    /// task's own matching. Reported so a slow search is a NUMBER in the log rather
+    /// than an inference from the gap between two events — the landmark poll is
+    /// invisible otherwise, and "my overlay takes 16 seconds to appear" has to be
+    /// diagnosable without rebuilding the host.
+    capture_ms: u32,
+    match_ms: u32,
+    /// Tasks sharing this batch — the fan-out that the capture was shared across.
+    batch: u32,
 }
 
 /// The image-search worker: CAPTURES each task's region and runs the CPU-heavy
@@ -230,17 +239,22 @@ fn spawn_image_worker(
             // Capture each DISTINCT region once; match every task's template against its
             // region's shared frame. The batch is small (one task per active library), so
             // a linear region lookup is fine.
-            let mut frames: Vec<((i32, i32, i32, i32), Option<CapturedImage>)> = Vec::new();
+            let mut frames: Vec<((i32, i32, i32, i32), Option<CapturedImage>, u32)> = Vec::new();
+            let batch_len = batch.len() as u32;
             for t in &batch {
-                let idx = match frames.iter().position(|(r, _)| *r == t.region) {
+                let idx = match frames.iter().position(|(r, _, _)| *r == t.region) {
                     Some(i) => i,
                     None => {
                         let (rx, ry, rw, rh) = t.region;
-                        frames.push((t.region, capture(rx, ry, rw, rh)));
+                        let t0 = Instant::now();
+                        let cap = capture(rx, ry, rw, rh);
+                        let ms = t0.elapsed().as_millis() as u32;
+                        frames.push((t.region, cap, ms));
                         frames.len() - 1
                     }
                 };
                 let (rx, ry, _, _) = t.region;
+                let t1 = Instant::now();
                 let hit = frames[idx].1.as_ref().and_then(|cap| {
                     // Templates in order against this one frame; first hit wins.
                     t.tmpls.iter().enumerate().find_map(|(n, tm)| {
@@ -248,7 +262,14 @@ fn spawn_image_worker(
                             .map(|(ox, oy, mw, mh)| (rx + ox as i32, ry + oy as i32, mw, mh, n + 1))
                     })
                 });
-                if results.send(ImageResult { id: t.id, hit }).is_err() {
+                let res = ImageResult {
+                    id: t.id,
+                    hit,
+                    capture_ms: frames[idx].2,
+                    match_ms: t1.elapsed().as_millis() as u32,
+                    batch: batch_len,
+                };
+                if results.send(res).is_err() {
                     return; // main thread gone
                 }
             }
@@ -858,6 +879,23 @@ impl Shared {
     /// or nil, then drops the one-shot registry value.
     fn fire_image_results(&self) {
         while let Ok(res) = self.image_results.try_recv() {
+            // A search nobody can see taking long is a bug nobody can diagnose. The
+            // landmark poll is entirely invisible from Luau — it runs on a worker and only
+            // its verdict is observable — so a slow one gets a line naming both halves,
+            // capture and match, and how many tasks shared the capture. Only when it is
+            // actually slow: the steady state stays silent.
+            if res.capture_ms + res.match_ms >= 40 {
+                logging::line(
+                    "image",
+                    &format!(
+                        "search took {} ms (capture {}, match {}), {} task(s) in the batch",
+                        res.capture_ms + res.match_ms,
+                        res.capture_ms,
+                        res.match_ms,
+                        res.batch
+                    ),
+                );
+            }
             let entry = self.pending_image.borrow_mut().remove(&res.id);
             if let Some((lua, cb, idx)) = entry {
                 // A result arriving is a fresh observation of the screen, and its callback
