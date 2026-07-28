@@ -249,6 +249,7 @@ end
 -- LABEL a view-toggle carries, and whether a control that needs the classic view is
 -- offered. Never to decide where to click.
 local VIEW_PROBE_FROM_RIGHT, VIEW_PROBE_Y = 262, 24
+
 local viewKey, viewCache = nil, false
 local function isClassicView(origin)
   if not (origin and origin.client and origin.bounds) then return false end
@@ -262,13 +263,25 @@ local function isClassicView(origin)
   local gen = host.inputEpoch and host.inputEpoch() or (host.epoch and host.epoch() or 0)
   local key = tostring(origin.id) .. "@" .. tostring(gen)
   if viewKey == key then return viewCache end
+  viewKey = key
+
+  -- MEASURED, and better than its own comment used to claim: the probe point reads
+  -- brightness 24 in the play view and 99 in the classic one, with the threshold at 60 sitting
+  -- squarely between them. That is not a weak signal, and it does not flap — the alternation
+  -- once blamed on it was the VIEW genuinely toggling twice, from a change that fired two
+  -- mechanisms at once. Recorded so nobody reopens this: a UIA replacement was tried and is
+  -- WORSE. "Status bar" and "Navigator" do appear in one view each in the calibrator's dump,
+  -- but that walks the RAW tree, whereas `findAny` is a condition-based search and finds
+  -- "Status bar" in BOTH — so the named probe answered "classic" always and left the user
+  -- unable to leave the classic view. Verifying with one traversal and deciding with another
+  -- is the mistake; the numbers above are from the thing that actually runs.
+  --
   -- Against the CONTENT's right edge, not the window frame's: standalone, the frame is
   -- 16 px wider than the plugin, which is enough to read a neighbouring icon instead.
   local p = host.screen.pixel(
     origin.client.x + O.contentSize(origin) - VIEW_PROBE_FROM_RIGHT,
     origin.client.y + VIEW_PROBE_Y
   )
-  viewKey = key
   viewCache = p ~= nil and (p.r + p.g + p.b) / 3 > 60
   return viewCache
 end
