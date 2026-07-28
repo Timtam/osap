@@ -54,6 +54,45 @@ local function editImages()
   return editImagesCache
 end
 
+-- Kontakt's own STATUS BAR toggles, by name.
+--
+-- All three are keyboard shortcuts Kontakt documents (F1, F9, F3) and all three are lost in a
+-- DAW: they reach REAPER, not the plug-in. Which makes them unreachable rather than merely
+-- inconvenient — there is no other way to fold Kontakt's side pane away from a keyboard.
+--
+-- Named, so they are clicked by name rather than measured: the calibrator's raw UIA walk lists
+-- them under "Status bar", and the names it printed are used VERBATIM below because the
+-- comparison is exact, description and full stop included.
+--
+-- The side pane is the one that prompted this, and for a reason worth recording: with it open
+-- the instrument area starts ~355 px in, and ReaHotkey's Soundiron coordinates (x 155, 162,
+-- 164) only make sense with it CLOSED. Every calibration shot so far has had it open, so those
+-- libraries have never been seen in the layout their published coordinates were written for.
+local STATUS_TOGGLES = {
+  { label = "Side pane", hotkey = "Alt+1",
+    name = "Side Pane (F1): Toggles the visibility of the side pane." },
+  { label = "Info pane", hotkey = "Alt+2",
+    name = "Info Pane (F9): Toggles the visibility of the information hint." },
+  { label = "Keyboard panel", hotkey = "Alt+3",
+    name = "Keyboard (F3): Toggles the visibility of the Keyboard panel, which shows the virtual keyboard." },
+}
+
+local function addStatusToggles(ov)
+  for _, t in ipairs(STATUS_TOGGLES) do
+    ov:addCustomButton({
+      label = t.label,
+      hotkey = t.hotkey,
+      onActivate = function()
+        -- Says so when the name does not resolve, rather than going quiet: these live in
+        -- Kontakt's own chrome, which a DAW-embedded instance does not always expose.
+        if not A.uiaClick(nil, t.name, host.uia.type.Button) then
+          host.speech.output(t.label .. " not found", { interrupt = true })
+        end
+      end,
+    })
+  end
+end
+
 local function addRackControls(ov, cell)
   -- The view toggle, by Kontakt's OWN keyboard shortcut (F10) rather than through its
   -- menu: the menu entry reads "Switch to Classic View   F10", and a shortcut the
@@ -207,6 +246,7 @@ local function addPluginHeader(ov, cell)
     onActivate = function(o) A.invokeMenuItem(cell, o, "Reset multi") end,
   })
   addRackControls(ov, cell)
+  addStatusToggles(ov)
   for _, h in ipairs(geo.K7_CONTROLS) do
     -- Only those Kontakt 7 offers embedded, and only where the cell has the coordinate:
     -- Kontakt 8's geometry simply has no entry, so the loop skips it without a version
