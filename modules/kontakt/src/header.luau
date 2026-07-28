@@ -71,6 +71,67 @@ local function addRackControls(ov, cell)
       onActivate = function() host.input.send("F10") end,
     })
   end
+  -- KONTAKT'S OWN INSTRUMENT EDITOR, and the way back out of it. One control, both templates.
+  --
+  -- This is what ReaHotkey's Soundiron reverb toggles actually need: their template is a 9x19
+  -- red bypass switch, a Kontakt FX-rack insert bypass, and the route to that rack is the
+  -- wrench in the instrument's own header. Not the library's — Voices Of Gaia builds a
+  -- "Performance | FX Rack" strip into its GUI and the older Soundiron libraries do not, which
+  -- is why hunting for a tab row found one for Gaia and nothing for Adey or Mimi Page.
+  --
+  -- FOUND, not placed, and it has to be: the wrench belongs to an instrument row, so it moves
+  -- with the browser's width, the rack's scroll and how many instruments are loaded. Kontakt
+  -- exposes no accessible element for it (a raw walk of the classic view lists the Header and
+  -- the Status bar and nothing of the rack), so an image is the only handle — which is exactly
+  -- the control type ReaHotkey has for this and we had not ported.
+  --
+  -- MASKED TO THE BORDER, after four attempts at collecting appearances failed.
+  --
+  -- The wrench toggles, so Edit Mode draws it differently (blue glyph) — that was expected.
+  -- What was not: it is drawn at least TWO ways within the classic view alone, and not subtly.
+  -- Measured at the same pixels across two shots of the same library in the same view:
+  -- background 248-250 against 226-237, glyph 24-48 against 81-95. The glyph is 60 apart,
+  -- three times the match tolerance, so a template cut from one can never match the other.
+  -- That is what "not found" kept reporting — correctly — after the coordinate frame and the
+  -- scale had both already been fixed. Adding the second appearance did not help either: the
+  -- next capture showed a third, so collecting them is a game with no end.
+  --
+  -- What IS invariant is the button's BORDER: identical pixel for pixel across every variant
+  -- seen. Alpha 0 is a wildcard in this matcher, so the templates keep a 3-px opaque ring and
+  -- wildcard everything inside it. One template per toggle state instead of one per appearance.
+  --
+  -- Verified rather than assumed, because a border-only template is generic enough to be a
+  -- real false-positive risk: at scale 1, the classic frame matches at exactly one position in
+  -- BOTH classic variants and nowhere in Edit Mode or the play view; the active frame matches
+  -- exactly once in Edit Mode and nowhere else. Neither matches anything in the play view, so
+  -- the control honestly reports "not found" there.
+  --
+  -- UNGATED, deliberately, though the view probe reads Edit Mode as "classic" and a gate would
+  -- work. This is the way OUT of a mode a user cannot leave with the mouse, and an escape that
+  -- can be hidden by a mis-read probe is not an escape. It costs one Tab stop in the play view,
+  -- where neither template matches and it honestly says so.
+  ov:addGraphicalButton({
+    label = "Instrument edit view",
+    -- `rawOrigin` like every other rack control: the rack is Kontakt's chrome, not the
+    -- library's content, so it must not carry the cell's content offset. Without it the region
+    -- shifted down by that offset and clipped the template's top rows — a correct image
+    -- reported as "not found", which is the message this control type exists to make
+    -- trustworthy and therefore the one most likely to be believed.
+    rawOrigin = true,
+    region = { 0, 40, 1010, 260 },
+    image = {
+      host.path("images/instrument-edit-frame.png"),
+      host.path("images/instrument-edit-active-frame.png"),
+    },
+    -- ONE SCALE, and not a micro-optimisation. The module-wide default searches ten scales
+    -- from 0.67 to 2.0, right for a library's ARTWORK at whatever zoom the plug-in is set to
+    -- and wrong for a fixed-size button in the host's chrome: measured, this template has ZERO
+    -- strict matches in Edit Mode at scale 1, and the multi-scale search still reported a hit
+    -- at a size the button is never drawn at. So it said "not found" when read and clicked
+    -- something else when pressed — the worst possible pair. One scale makes "not found" mean it.
+    scales = { 1.0 },
+    hotkey = "Alt+E",
+  })
   -- Offered only while that view is up. The coordinates are right for it, but in the other
   -- view the same points fall inside whatever library is loaded — one of them sat on
   -- Cinematic Studio Strings' "Sustain", so Ctrl+P changed the articulation instead of the

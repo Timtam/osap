@@ -282,7 +282,20 @@ local function isClassicView(origin)
     origin.client.x + O.contentSize(origin) - VIEW_PROBE_FROM_RIGHT,
     origin.client.y + VIEW_PROBE_Y
   )
+  local was = viewCache
   viewCache = p ~= nil and (p.r + p.g + p.b) / 3 > 60
+  -- Only on a CHANGE of answer, so this cannot log per focus move — but with the reading in
+  -- it, because "the detection is wrong" and "the detection is right about a state I did not
+  -- expect it to see" are different problems and the number tells them apart.
+  if viewCache ~= was then
+    host.log.info(string.format(
+      "[view] %s (probe at %d,%d reads %s)",
+      viewCache and "classic" or "play",
+      origin.client.x + O.contentSize(origin) - VIEW_PROBE_FROM_RIGHT,
+      origin.client.y + VIEW_PROBE_Y,
+      p and string.format("%d,%d,%d", p.r, p.g, p.b) or "nothing"
+    ))
+  end
   return viewCache
 end
 

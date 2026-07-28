@@ -297,6 +297,41 @@ function Overlay:addGraphicalToggle(opts)
   })
 end
 
+-- A button that is FOUND rather than placed — ReaHotkey's GraphicalButton. The template is
+-- searched for inside `region`, and activating clicks the centre of WHERE IT WAS FOUND, not
+-- the centre of the region.
+--
+-- That distinction is the entire control. Kontakt's "Performance | FX Rack" tab row is the
+-- case that needed it: it belongs to an INSTRUMENT and sits at the foot of that instrument's
+-- own GUI, so with two instruments loaded there are two of them, at heights that depend on
+-- how tall each GUI is and where the rack is scrolled. There is no coordinate to write down —
+-- which is also why ReaHotkey's fixed probe for it corresponded to nothing in our window. It
+-- was never drift; it was a number that could not exist.
+--
+-- Reports "not found" when the template is absent, as ReaHotkey does (States 0 = "not found").
+-- A button that cannot be located must say so rather than click the middle of its region: that
+-- region is chosen wide enough to contain the thing WHEREVER it has moved to, so its centre is
+-- the one point almost guaranteed to be something else.
+function Overlay:addGraphicalButton(opts)
+  return add(self, {
+    kind = "gbutton",
+    label = opts.label,
+    region = opts.region,
+    image = opts.image,
+    hotkey = opts.hotkey,
+    opensMenu = opts.opensMenu,
+    -- `rawOrigin`, as on a hotspot: pins the region to the matched control's OWN frame,
+    -- skipping the per-overlay content offset. For anything living in the plug-in's chrome
+    -- rather than inside the library's content — Kontakt's instrument rack, for instance,
+    -- where the cell's +29 px offset silently clipped the top of the searched-for image and
+    -- turned a correct template into "not found".
+    rawOrigin = opts.rawOrigin,
+    tolerance = opts.tolerance,
+    scales = opts.scales,
+    when = opts.when,
+  })
+end
+
 -- A GRAPHICAL SLIDER — ReaHotkey's GraphicalHorizontalSlider, the control Audio Imperia's
 -- libraries use for a Close/Mid/Far mic blend. There is nothing to read its value from: the
 -- position IS where the thumb is drawn, so the thumb is found by image search inside
@@ -477,6 +512,7 @@ end
 local TYPE_LABEL =
   { static = "", hotspot = "button", custom = "button", ocr = "button", ocredit = "edit",
     gtoggle = "toggle button", hotspottoggle = "toggle button", tabcontrol = "tab control",
+    gbutton = "button",
     slider = "slider", passthrough = "" }
 
 -- Origin (top-left) of the overlay's coordinate space in screen pixels: the
@@ -716,6 +752,19 @@ local function sliderThumb(self, c)
   }
 end
 
+-- Where a graphical button's template currently is, as a click point, or nil.
+local function graphicalButtonPoint(self, c)
+  if not (c.region and c.image) then return nil end
+  local ox, oy = originOf(self, c)
+  local _, hit = host.screen.imageSearchMulti(asList(c.image), {
+    region = { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] },
+    tolerance = c.tolerance or MATCH_TOLERANCE,
+    scales = c.scales or MATCH_SCALES,
+  })
+  if not hit then return nil end
+  return hit.x + math.floor(hit.w / 2), hit.y + math.floor(hit.h / 2)
+end
+
 -- The thumb's position as a percentage of the track, clamped. nil when the track is
 -- degenerate (from == to) — better to say nothing than to announce a number from a
 -- division that means nothing.
@@ -932,6 +981,47 @@ local function valueOfNow(self, c, done)
     end)
     return
   end
+  -- A graphical button says only whether it is THERE. Present is the unremarkable case and
+  -- gets no extra word (ReaHotkey's States maps found to ""); absent has to be said, because
+  -- the alternative is a button that announces itself normally and then does nothing.
+  if c.kind == "gbutton" then
+    host.screen.imageSearchAsync(asList(c.image), opts, function(hit)
+      if not hit then
+        -- "not found" is the whole value of this control type, so when it says that, it has to
+        -- say enough to check it. A region in the wrong coordinate frame, a scale the thing is
+        -- never drawn at, a template cut from another state — all three produce the identical
+        -- two words, and all three have now happened here.
+        host.log.info(string.format(
+          "[gbutton] '%s' not found: searched (%d,%d)-(%d,%d) for %d template(s) at %d scale(s)",
+          tostring(c.label), opts.region[1], opts.region[2], opts.region[3], opts.region[4],
+          #asList(c.image), #(c.scales or MATCH_SCALES)
+        ))
+        -- And SAVE WHAT WAS ACTUALLY LOOKED AT, once, while calibrating.
+        --
+        -- Everything else about a failed search can be checked from the log line above, and on
+        -- this control all of it checked out while the answer stayed "not found" through four
+        -- corrections. What could never be checked is the one thing that matters most: whether
+        -- the pixels the search saw are the pixels the template was cut from. A template is
+        -- always cropped from a CALIBRATION shot, and until now nothing compared that shot with
+        -- what the live capture returns — so a difference between the two would look exactly
+        -- like a wrong template, a wrong region and a wrong scale all at once.
+        --
+        -- Written only in a calibrating run, and only once per control, so a polling overlay
+        -- cannot fill the disk with the same disappointment.
+        if host.calibrating and not c._savedMiss then
+          c._savedMiss = true
+          -- Sanitised inline: safeName is declared with the calibration helpers far below this
+          -- point, and a local is not visible above its own declaration.
+          local stem = (string.gsub(tostring(c.label or "control"), "[^%w]+", "-"))
+          local path = "calibration/miss-" .. stem .. ".png"
+          host.screen.save(path, { region = opts.region })
+          host.log.info("[gbutton] wrote what the search actually saw to " .. path)
+        end
+      end
+      done(hit and nil or "not found")
+    end)
+    return
+  end
   -- A slider: its value IS where the thumb is drawn. "not found" rather than a number
   -- when it cannot be located — a percentage invented from a failed search is worse than
   -- an admission, because it sounds right.
@@ -1057,7 +1147,7 @@ local function speakControl(self, index, moveMouse, withHint)
   -- Guarded on the focus not having moved on: two fast Tabs must not have the first
   -- control's state read out while the second one is focused, which would be a plain lie
   -- about what is in front of the user.
-  local needsValue = c.kind == "gtoggle" or c.kind == "slider"
+  local needsValue = c.kind == "gtoggle" or c.kind == "slider" or c.kind == "gbutton"
   host.speech.output(table.concat(parts, ", "), { interrupt = true })
   if needsValue then
     local at = self.focus
@@ -1259,6 +1349,30 @@ function Overlay:activate(index)
       -- Re-read the new state once the UI redraws. `withHint`: this is the transition, the
       -- one moment a state hint is worth hearing (see hintFor).
       if host.timer then host.timer.after(150, function() speakControl(self, i, false, true) end) end
+    end)
+  elseif c.kind == "gbutton" and c.region and c.image then
+    -- Located, then clicked, and never clicked unlocated. The search is asynchronous, so this
+    -- is a continuation: it re-checks that the overlay is still active on the SAME window,
+    -- exactly as the hotspot `points` sequence and the panel reveal do, because a click
+    -- arriving after the world moved is the one mistake pressing the key again cannot undo.
+    local ox, oy = originOf(self, c)
+    local pinned = self:hwnd()
+    host.speech.output((c.label or "") .. ", activated", { interrupt = true })
+    host.screen.imageSearchAsync(asList(c.image), {
+      region = { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] },
+      tolerance = c.tolerance or MATCH_TOLERANCE,
+      scales = c.scales or MATCH_SCALES,
+    }, function(hit)
+      if not (self.active and self:hwnd() == pinned) then return end
+      if not hit then
+        -- Said, not silent: the acknowledgement above already went out, so leaving it here
+        -- would report an action that did not happen.
+        host.speech.output((c.label or "Control") .. " not found", { interrupt = true })
+        return
+      end
+      local cx, cy = hit.x + math.floor(hit.w / 2), hit.y + math.floor(hit.h / 2)
+      if refuseOutside(self, c, cx, cy) then return end
+      host.input.click(cx, cy)
     end)
   elseif c.kind == "hotspottoggle" and c.at then
     local px, py = hotspotPoint(self, c)
@@ -1819,7 +1933,7 @@ local function isAbsolutePath(p)
   return string.sub(p, 1, 1) == "/" -- POSIX
 end
 
-local NEEDS_REGION = { ocr = true, ocredit = true, gtoggle = true }
+local NEEDS_REGION = { ocr = true, ocredit = true, gtoggle = true, gbutton = true }
 
 local function report(self, opts)
   local found = {}
@@ -1854,6 +1968,15 @@ local function report(self, opts)
               bad("%s: `%s` must be {r, g, b} (or a list of them)", who, field)
             end
           end
+        end
+      end
+    end
+    if c.kind == "gbutton" then
+      if c.region == nil then bad("%s has no `region` to look for its image in", who) end
+      if c.image == nil then bad("%s has no `image` to look for", who) end
+      for _, path in ipairs(asList(c.image)) do
+        if not isAbsolutePath(path) then
+          bad("%s: `image` is not an absolute path — use host.path()", who)
         end
       end
     end
@@ -2521,6 +2644,14 @@ local function calibrationPoint(self, c)
   if c.kind == "slider" then
     local thumb = sliderThumb(self, c)
     if thumb then return thumb.cx, thumb.cy end
+  end
+  -- Same reasoning as the slider: a graphical button's region is the area it is HUNTED in, so
+  -- the region centre is a point the control has nothing to do with. Mark where the template
+  -- actually matched, and fall through to the centre only when it cannot be found — which is
+  -- itself the useful thing to see in the picture.
+  if c.kind == "gbutton" then
+    local bx, by = graphicalButtonPoint(self, c)
+    if bx then return bx, by end
   end
   if c.region then
     local ox, oy = originOf(self, c)
