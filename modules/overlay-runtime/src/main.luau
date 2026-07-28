@@ -1467,9 +1467,11 @@ function Overlay:activate(index)
         -- bigger but never smaller again is worse than one that refuses to grow. A caller that
         -- knows its own limits can compute the step from the handle's actual position, and
         -- return nothing to decline — with a reason, so declining is not silence.
-        local dx, dy, why = c.dragBy[1], c.dragBy[2], nil
+        local dx, dy, why
         if type(c.dragBy) == "function" then
           dx, dy, why = c.dragBy(self, hit)
+        else
+          dx, dy = c.dragBy[1], c.dragBy[2]
         end
         if not dx or (dx == 0 and dy == 0) then
           host.speech.output(why or ((c.label or "Control") .. " cannot go further"),
@@ -2087,6 +2089,15 @@ local function report(self, opts)
       for _, path in ipairs(asList(c.image)) do
         if not isAbsolutePath(path) then
           bad("%s: `image` is not an absolute path — use host.path()", who)
+        end
+      end
+      -- `dragBy` is read on a worker callback, long after this control was declared, so a
+      -- wrong type there surfaces as a Lua error inside an imageSearchAsync continuation with
+      -- nothing in it naming the control. Caught here instead, where the message can.
+      if c.dragBy ~= nil then
+        local k = type(c.dragBy)
+        if k ~= "function" and not (k == "table" and #c.dragBy == 2) then
+          bad("%s: `dragBy` must be {dx, dy} or a function(overlay, hit)", who)
         end
       end
     end
