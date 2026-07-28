@@ -447,11 +447,17 @@ struct Observations {
     /// observation whose whole purpose can be to change between two reads — but counted,
     /// because each is a compositor frame and they were invisible.
     pixels: u32,
-    pixel_ms: u128,
+    pixel_us: u128,
     /// Total time spent INSIDE these bindings this epoch, cache hits included. The
     /// backend call is only half of what one costs: every hit still rebuilds the answer
     /// as fresh Lua tables, once per calling overlay, in each of nine VMs.
-    binding_ms: u128,
+    ///
+    /// In MICROseconds, and that is the whole point. Accumulated in whole milliseconds this
+    /// read 0 for an epoch of 1858 calls — because each individual conversion rounds down to
+    /// zero, and eighteen hundred zeroes are still zero. The reading was not evidence that
+    /// the conversions are free; it was a unit too coarse to see them, and it retired a
+    /// correct hypothesis. Sub-millisecond costs need a sub-millisecond clock.
+    binding_us: u128,
 }
 
 impl Shared {
@@ -473,13 +479,13 @@ impl Shared {
                 logging::line(
                     "observe",
                     &format!(
-                        "epoch served {} of {} OS question(s) from cache ({} actually asked),                          {} ms inside the bindings, plus {} screen pixel read(s) costing {} ms",
+                        "epoch served {} of {} OS question(s) from cache ({} actually asked),                          {:.1} ms inside the bindings, plus {} screen pixel read(s) costing                          {:.1} ms",
                         obs.served,
                         obs.asked,
                         obs.asked - obs.served,
-                        obs.binding_ms,
+                        obs.binding_us as f64 / 1000.0,
                         obs.pixels,
-                        obs.pixel_ms
+                        obs.pixel_us as f64 / 1000.0
                     ),
                 );
             }
@@ -493,9 +499,9 @@ impl Shared {
             obs.focus_chain = None;
             obs.served = 0;
             obs.asked = 0;
-            obs.binding_ms = 0;
+            obs.binding_us = 0;
             obs.pixels = 0;
-            obs.pixel_ms = 0;
+            obs.pixel_us = 0;
         }
         obs
     }
@@ -2677,7 +2683,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             for c in controls.iter() {
                 t.push(control_to_table(lua, c)?)?;
             }
-            sh.observations().binding_ms += conv.elapsed().as_millis();
+            sh.observations().binding_us += conv.elapsed().as_micros();
             Ok(t)
         })?,
     )?;
@@ -2710,7 +2716,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             for c in chain.iter() {
                 t.push(control_to_table(lua, c)?)?;
             }
-            sh.observations().binding_ms += conv.elapsed().as_millis();
+            sh.observations().binding_us += conv.elapsed().as_micros();
             Ok(t)
         })?,
     )?;
@@ -2985,7 +2991,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             {
                 let mut obs = sh.observations();
                 obs.pixels += 1;
-                obs.pixel_ms += t0.elapsed().as_millis();
+                obs.pixel_us += t0.elapsed().as_micros();
             }
             let t = lua.create_table()?;
             t.set("r", r)?;

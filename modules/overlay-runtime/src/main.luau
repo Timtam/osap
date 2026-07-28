@@ -359,6 +359,30 @@ end
 -- the same UI panel as its controls, so they stay put across hosts/window states.
 -- WITHOUT it, :landmark is a pure gate and controls stay client-relative (e.g. a dialog
 -- using its header image only to tell itself apart from a sibling on a shared slot).
+-- Can this overlay's answer still matter, or does a claimant of at least its own rank
+-- already own the slot?
+--
+-- Only one thing is loaded in a plugin at a time, so once something of equal or greater
+-- specificity has won, nothing this overlay could discover changes the outcome — and it will
+-- get another chance, because the winner keeps re-checking ITSELF and gives the slot up when
+-- it stops matching. Rank matters in the other direction: a LESS specific winner (Kontakt's
+-- own header, while no library is recognised) must never silence a library overlay, or it
+-- could never take over. And the current winner must never skip its own check, or it would
+-- hold the slot forever.
+--
+-- This test lived inside :landmark, guarding only the image search. Measured, that was the
+-- cheap half: with every OS answer served from a per-epoch cache, a context match still cost
+-- 15-96 ms, because it is ~19 crossings of the Lua/Rust boundary and there is no single
+-- expensive call in it to fix. So the test belongs here, around the whole recheck — not a
+-- faster answer, but no question at all.
+function Overlay:_outranked()
+  if not (self._slot and self._claim and host.arbiter.winnerSpecificity) then return false end
+  local owner = host.arbiter.winner(self._slot)
+  if not owner or owner == self._claim then return false end
+  local rank = host.arbiter.winnerSpecificity(self._slot)
+  return rank ~= nil and rank >= (self._specificity or 0)
+end
+
 function Overlay:landmark(image, opts)
   assertUnbound(self, "landmark")
   self._landmarkImage = image
@@ -384,13 +408,7 @@ function Overlay:landmark(image, opts)
     --
     -- Rank matters: a LESS specific winner (Kontakt's own header while no library is
     -- recognised) must not silence a library overlay, or it could never take over.
-    if self._slot and self._claim and host.arbiter.winnerSpecificity then
-      local owner = host.arbiter.winner(self._slot)
-      local rank = host.arbiter.winnerSpecificity(self._slot)
-      if owner and owner ~= self._claim and rank and rank >= (self._specificity or 0) then
-        return matched
-      end
-    end
+    if self:_outranked() then return matched end
     if not pending then
       pending = true
       local sticky = lastHit ~= nil
@@ -1598,6 +1616,11 @@ end
 local RECHECK_SLOW_MS = 15
 
 function Overlay:_recheck()
+  -- Nothing to learn: something at least as specific already holds the slot (see
+  -- _outranked). The arbiter keeps whatever this overlay last reported, which is at most one
+  -- poll interval old and is corrected the moment the winner lets go — the same contract the
+  -- landmark gate has always had when it returns its last known result.
+  if self:_outranked() then return end
   local t0 = host.now and host.now() or nil
   local matched = false
   for _, ctx in ipairs(self.contexts) do
