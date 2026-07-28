@@ -66,14 +66,49 @@ local KK_OFFSET = { 198, 222 }
 -- Does the active host window contain a control passing `test` (a KK or a Kontakt
 -- container)? The two compete: a bare Kontakt defers to a wrapping KK, and a KK
 -- only counts as a host when it actually contains a Kontakt.
-local function hasControl(test)
+-- THE SCENE: what is in the active window right now, worked out ONCE per epoch.
+--
+-- Six cells ask overlapping questions about the same window on every recheck — is there a
+-- Komplete Kontrol, is there a Kontakt, which version, is this one nested in that one — and
+-- each used to walk the control list and re-interrogate every candidate itself. Measured,
+-- one cell's context match cost 15-96 ms with every underlying OS answer already served
+-- from a host-side cache: not one expensive call to find, but thousands of cheap ones. So
+-- the count is what has to come down, and the way down is to derive the whole picture once
+-- and let all six read it.
+--
+-- Per EPOCH rather than per window, because these verdicts are relational: "this Kontakt is
+-- bare" is only true until a Komplete Kontrol wraps it, and a per-window cache would pin the
+-- answer from before that happened. That is the same reason these cells declare
+-- `cacheIdentity = false`, and this is how to honour it without paying for it every time.
+local scene = O.memoByEpoch(function()
+  local kk, kontakt, byId = {}, {}, {}
   for _, c in ipairs(host.window.controls()) do
-    if string.match(c.class, QT_PLUGIN) and test(c) then return true end
+    if string.match(c.class, QT_PLUGIN) then
+      -- Both questions asked once per candidate, here and nowhere else.
+      local asKK = isKK(c)
+      local variant = variantIndex(c)
+      byId[c.id] = { control = c, isKK = asKK, variant = variant }
+      if asKK then
+        kk[#kk + 1] = c
+      elseif variant then
+        kontakt[#kontakt + 1] = c
+      end
+    end
+  end
+  return { kk = kk, kontakt = kontakt, byId = byId }
+end)
+
+local function kkPresent() return #scene().kk > 0 end
+-- "Any control that reports a Kontakt name", which INCLUDES a Komplete Kontrol — a KK
+-- exposes its nested Kontakt's name in its own subtree, and the old hasControl(anyKontakt)
+-- counted that. Read off the recorded variant rather than the two lists, because a KK with
+-- nothing loaded in it is in `kk` and is NOT a Kontakt.
+local function kontaktPresent()
+  for _, e in pairs(scene().byId) do
+    if e.variant ~= nil then return true end
   end
   return false
 end
-local function kkPresent() return hasControl(isKK) end
-local function kontaktPresent() return hasControl(anyKontakt) end
 
 -- True if `inner`'s centre lies within `outer` (both are {x,y,w,h} screen rects).
 local function centreInside(outer, inner)
@@ -93,12 +128,8 @@ end
 -- the caller uses a transient fallback instead of caching a wrong pairing. Without a
 -- container (the bare / standalone case) the first such control.
 local function findNestedKontakt(container)
-  local candidates = {}
-  for _, c in ipairs(host.window.controls()) do
-    if string.match(c.class, QT_PLUGIN) and anyKontakt(c) and not isKK(c) then
-      candidates[#candidates + 1] = c
-    end
-  end
+  -- The real Kontakt controls are exactly the scene's non-KK Kontakts; no second walk.
+  local candidates = scene().kontakt
   if not container then return candidates[1] end
   local within = {}
   for _, c in ipairs(candidates) do

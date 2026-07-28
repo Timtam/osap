@@ -176,6 +176,63 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
         want the list, and arrow-key stepping now exists (the slider owns Left/Right), so
         that is the natural place to build on when either is ported.
 
+## Detection cost and the keyboard-hook hazard (2026-07-27/28)
+
+Started as "the KK overlay takes longer to appear than the Kontakt one" and turned into the
+one open CORRECTNESS bug: the low-level keyboard hook is installed on the pump thread, and
+past `LowLevelHooksTimeout` (~300 ms) Windows stops waiting for it and delivers the keystroke
+WITHOUT us — a Tab the overlay believed it had captured lands in the plugin instead,
+intermittently, with nothing logged. For someone who navigates entirely by Tab and cannot see
+where the focus went, that is not a performance problem.
+
+Measured across the whole arc:
+
+| | before | after |
+|---|---|---|
+| announcement late | 21×, up to 1303 ms | none |
+| poll tick | ~600 ms of work per 500 ms | under its 25 ms reporting threshold |
+| menu watch, expensive walks | ~20 | 1 |
+| OS questions per epoch | every one | 1 |
+| questions per epoch (peak) | 5077 | 1771 |
+| dispatch | 315–520 ms | 45–176 ms |
+| pump overruns | 24 | 11 |
+
+- [x] **Ask the OS once per epoch** ✓ — an epoch means "the world may have changed", so
+      within one the same question has the same answer by definition. `uia.find`/`findAny`,
+      `window.controls`, `window.active` (which OPENS THE PROCESS to read its image name) and
+      the locate family are memoized in the host. Negative answers cached too: in a poll
+      almost every identity check is expected to fail, which is where the saving is. The
+      locate family is keyed on `input_epoch` as well, because those points get CLICKED and a
+      click must never aim at a coordinate worked out before the last thing that acted.
+- [x] **The menu watch asked the expensive question first** ✓ — `uia.find(hwnd, "", Menu)`
+      walks a plug-in's entire accessibility tree, 50–194 ms, every 150 ms, permanently. Now
+      the cheap native-popup check first, the walk only while a self-drawn menu is plausible
+      (a control declared `opensMenu` fired), plus a backstop every eighth tick.
+- [x] **Don't ask a question whose answer cannot matter** ✓ — the arbiter test that guarded
+      the image search now guards the whole recheck.
+- [x] **One scene per epoch instead of six cells re-deriving it** ✓ (verified live: an empty
+      KK, then Areia loaded, detected and switched — the transition a wrongly-cached
+      RELATIONAL verdict would have broken). Needs the new `O.memoByEpoch`, the counterpart
+      to `memoByOrigin`: per-window caching is wrong for a verdict that depends on what else
+      is in the window.
+- [ ] **The hazard is halved, not gone.** A pump iteration still exceeds ~300 ms on a window
+      switch. What is left is neither the OS calls (1 question per epoch reaches the system),
+      nor Lua table conversion (0.0 ms at microsecond resolution across 5077 calls), nor
+      pixels (zero), nor the arbiter — it is the COUNT of Lua/Rust crossings inside
+      `pluginControl`. The next lever is fewer crossings there, not cheaper ones.
+- [ ] **The runtime is a code module, so per-VM state multiplies.** The scene is computed
+      once per VM per epoch, not once globally — three Kontakt-using modules, three
+      computations. That is the price of the inheritance model, and it caps every
+      module-level memo the same way. A host-side scene would not have it.
+- [ ] **Instrumentation to keep.** The pump reports its phases and event multiplicity, each
+      epoch its hit ratio and pixel count, each dispatch its size, each recheck its two
+      halves. It exists because SEVEN reasoned guesses about this were wrong in a row
+      (arbiter, timer resolution, uncoalesced events, template cache, table conversion,
+      pixels, pluginLocate) and only measuring inside the loop ended it. One near-miss worth
+      remembering: accumulating per-call time with `as_millis()` rounded every sub-millisecond
+      cost to zero, and eighteen hundred zeroes summed to zero — a unit too coarse looks
+      exactly like evidence of absence.
+
 ## AutoHotkey translation audit (2026-07-27)
 
 A 14-agent audit of every ported literal against its ReaHotkey original, across five lenses

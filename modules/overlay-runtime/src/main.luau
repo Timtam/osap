@@ -2011,6 +2011,34 @@ function O.memoByOrigin(fn, opts)
   end
 end
 
+-- Memoizes `fn(…) -> value` for the CURRENT EPOCH only.
+--
+-- The sibling above caches per window, for a property fixed for that window's lifetime.
+-- This is for the other kind: a question whose answer holds only until the world moves,
+-- typically because it is RELATIONAL — "is this Kontakt wrapped by a Komplete Kontrol?"
+-- depends on what else is in the window, so a per-window cache would pin the answer from
+-- before the Komplete Kontrol loaded. Those questions are exactly the ones declared
+-- `cacheIdentity = false`, and exactly the ones that then get asked over and over.
+--
+-- An epoch means "the world may have changed", so within one, asking twice is duplication
+-- by definition. Same rule as the other memo: `nil` means "could not tell yet" and is not
+-- cached, `false` is a real answer and is.
+--
+-- Only the CURRENT epoch is held — one slot, not a growing table — so nothing accumulates
+-- and a stale answer cannot be read after the world has moved.
+function O.memoByEpoch(fn)
+  local epoch, value = nil, nil
+  return function(...)
+    local now = host.epoch and host.epoch() or 0
+    if epoch == now and value ~= nil then return value end
+    local v = fn(...)
+    if v ~= nil then
+      epoch, value = now, v
+    end
+    return v
+  end
+end
+
 -- ── Bindings ─────────────────────────────────────────────────────────────────
 -- A BINDING is an inert value saying WHERE an overlay lives: which window or embedded
 -- control it attaches to, on which slot, at which layer. Being a value rather than a
