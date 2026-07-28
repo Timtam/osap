@@ -128,12 +128,28 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
       The reverb needs no image templates at all: lit (215,21,20) against unlit (113,52,46) is
       159 apart and the whole 7x7 area separates, so one pixel is safer AND cheaper than a
       region capture with two templates.
-- [ ] **Soundiron — Mimi Page Light & Shadow and the Voices of Wind family** are installed but
-      unmeasured, and deliberately not declared: an overlay pointing at unverified coordinates
-      announces things it did not do. ReaHotkey's numbers (Mimi Page's toggle at y 462..502
-      with its rack probe at y 652; Voices of Wind at y 663) suggest a TALLER window where the
-      rack coexists with the header — which would be the case `reveal` was built for, and the
-      first chance to find out whether it is right about anything.
+- [x] **Soundiron — Mimi Page Light & Shadow** ✓ (2026-07-28), and ReaHotkey's control for it
+      could NOT be ported: there is no FX page in this version at all. The instrument panel
+      ends at y 570 with the keyboard directly below, there is no tab row, and no scrollbar
+      (the right edge is a uniform 0x1a top to bottom), so ReaHotkey's rack probe at y 652
+      would land in the keyboard. A third layout, not the second — `reveal` is still unused.
+      Instead of shipping a control that clicks into a keyboard, the overlay offers the one
+      piece of state otherwise unreachable: the articulation field ("AH (LIGHT)"), which alone
+      says which vowel and dynamic layer is loaded. Beyond ReaHotkey and deliberately so — a
+      substitution for a control that cannot be ported, not an expansion of scope.
+- [x] **A `readOnly` OCR control no longer announces itself as a "button"** ✓ — it suppressed
+      the click but kept the word, which promises an affordance that is not there: you hear
+      "button", press it, nothing happens, and the only honest reading of that is a broken
+      tool. Announced like a static text now, with no control type. The third variant of one
+      mistake in a day, after a hint pointing at a path that did not work and a toggle claiming
+      a state it could not read — **a control must not claim anything about itself it cannot
+      honour.** (Also worth keeping: `ocrLabel` was the wrong tool here. It reads a control's
+      NAME off the screen and REPLACES the fixed one, for controls whose meaning the plugin
+      changes — Cinematic Studio's mic switches. Here the name is fixed and the value moves.)
+- [ ] **Soundiron — the Voices of Wind family** is installed (Adey / Audrey / Kimba as separate
+      NI libraries, where ReaHotkey has one "Voices of Wind Collection" overlay) but unmeasured
+      and deliberately not declared. Its ReaHotkey rack probe sits at y 663, which the Mimi
+      Page finding makes suspect for the same reason.
 - [x] **Runtime: `reveal` on a graphical toggle** ✓ — the point whose colour says a panel is
       shut and which also opens it, plus a settle delay. Asynchronous (we cannot sleep through
       ReaHotkey's 250 ms), so the continuation re-checks that the overlay is still active on

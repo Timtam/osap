@@ -252,6 +252,8 @@ function Overlay:addOCRButton(opts)
   -- `readOnly` makes the control a pure announcer: focusing/activating re-reads the
   -- region via OCR but does NOT click it. For value/label readouts sitting over a
   -- drag knob or near a destructive control, where a click would change state.
+  -- It is also announced without the word "button" (see speakControl) — a control that
+  -- cannot be pressed must not describe itself as one.
   return add(self, {
     kind = "ocr", label = opts.label, region = opts.region, hotkey = opts.hotkey,
     readOnly = opts.readOnly, opensMenu = opts.opensMenu, when = opts.when,
@@ -1001,7 +1003,15 @@ local function speakControl(self, index, moveMouse, withHint)
     if r and r.text and r.text ~= "" then label = r.text end
   end
   local parts = { label }
+  -- A `readOnly` OCR control is NOT a button, and must not say it is.
+  --
+  -- `readOnly` already suppresses the click, so the control does nothing when activated — but
+  -- the announcement still ended in "button", which is a promise of an affordance that is not
+  -- there. A screen-reader user hears "button", presses it, and nothing happens; the only
+  -- honest reading of that is that the tool is broken. Announced like a static text instead
+  -- (no type word at all), because that is what it is: a value you can read and not press.
   local tl = TYPE_LABEL[c.kind]
+  if c.kind == "ocr" and c.readOnly then tl = "" end
   if tl ~= "" then parts[#parts + 1] = tl end
   if (c.kind == "ocr" or c.kind == "ocredit") and c.region then
     local ox, oy = originOf(self, c)

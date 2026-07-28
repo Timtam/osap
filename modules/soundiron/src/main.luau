@@ -25,11 +25,9 @@
 -- reverb anyway — and in exchange no control is ever offered against a coordinate resolved
 -- from something that is not on screen.
 --
--- `reveal` stays in the runtime: it is right for a panel that expands WITHOUT replacing the
--- anchor, and ReaHotkey's numbers for the other two products (Mimi Page's toggle at y
--- 462..502 with its rack probe at y 652; Voices of Wind at y 663) suggest exactly that shape
--- — a taller window where the rack coexists with the header. Unverifiable until they are
--- photographed, so nothing is declared for them yet.
+-- `reveal` stays in the runtime, so far unused: it is right for a panel that expands WITHOUT
+-- replacing the anchor, and ReaHotkey's remaining numbers hinted at that shape. A shot of
+-- Mimi Page settled it — see below, it is a third shape again.
 --
 -- ── Why none of ReaHotkey's coordinates could be carried over ─────────────────
 -- Its numbers are plugin-absolute with a per-host offset table, and the shot shows why that
@@ -41,6 +39,29 @@ local kontakt = host.require("com.platform.kontakt")
 local function img(rel) return host.path(rel) end
 
 -- Measured on Voices Of Gaia (Kontakt 8 in REAPER, browser open, 1010x679 of content).
+-- ── Mimi Page Light & Shadow: ReaHotkey's control does not exist here ────────
+-- ReaHotkey gives this product the same Reverb toggle, with an FX-rack probe at y 652. The
+-- calibration shot says there is nothing of the sort: the instrument panel ends at y 570 with
+-- the keyboard directly below, there is no "Performance | FX Rack" tab row at all, and no
+-- scrollbar (the right edge is a uniform 0x1a top to bottom). So there is no FX page to open,
+-- nothing to reveal, and no reverb to toggle — ReaHotkey's numbers describe a layout this
+-- version of the library does not have, the same way its Kontakt coordinates had drifted.
+--
+-- Rather than ship a control that clicks into a keyboard, this overlay offers the one piece of
+-- state in that GUI a blind user cannot get at any other way: the articulation field, which
+-- reads "AH (LIGHT)" and is the only thing saying which vowel and dynamic layer is loaded.
+-- That is BEYOND ReaHotkey, and deliberately so — it is a substitution for a control that
+-- cannot be ported, not an expansion of scope. `readOnly`, because activating it would open
+-- the dropdown, and a dropdown a screen reader cannot read is a worse place to be than the
+-- page you started on — and a `readOnly` control is announced with no control type at all,
+-- rather than as a "button" it would be unable to honour.
+local MIMI = {
+  name = "Mimi Page Light & Shadow",
+  -- "LIGHT & SHADOW", the distinctive line of the artwork wordmark; verified to match once.
+  landmark = "images/MimiPage/Wordmark.png",
+  articulation = { -115, 114, 165, 152 },
+}
+
 local GAIA = {
   name = "Voices Of Gaia",
 
@@ -120,6 +141,16 @@ return {
       })
     end)
 
-    host.log.info("Soundiron: Voices Of Gaia ready (performance + FX rack pages).")
+    kontakt.library(MIMI.name, img(MIMI.landmark), function(ov)
+      ov:addStaticText(MIMI.name)
+      ov:addOCRButton({
+        label = "Articulation",
+        region = MIMI.articulation,
+        readOnly = true,
+        hotkey = "Alt+B",
+      })
+    end)
+
+    host.log.info("Soundiron: Voices Of Gaia (2 pages) + Mimi Page Light & Shadow ready.")
   end,
 }
