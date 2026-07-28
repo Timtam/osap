@@ -185,7 +185,17 @@ end
 
 function Overlay:addStaticText(labelOrOpts)
   if type(labelOrOpts) == "table" then
-    return add(self, { kind = "static", label = labelOrOpts.label, when = labelOrOpts.when })
+    return add(self, {
+      kind = "static",
+      label = labelOrOpts.label,
+      -- `text = function(overlay) -> string`: a read-out rather than a caption. Appended to
+      -- the label each time the control is announced, so a value the user wants to CHECK — the
+      -- plug-in's current size, say — can be read by arriving at it, with nothing pressed and
+      -- nothing changed. The alternative is a button, and a button that only reports is a
+      -- promise of an action it does not perform.
+      text = labelOrOpts.text,
+      when = labelOrOpts.when,
+    })
   end
   return add(self, { kind = "static", label = labelOrOpts })
 end
@@ -329,6 +339,9 @@ function Overlay:addGraphicalButton(opts)
     -- May also be `function(overlay, hit) -> dx, dy, why`, for a handle with a limit only the
     -- caller knows. Returning no offset declines the drag and speaks `why`.
     dragBy = opts.dragBy,
+    -- `unavailable = function(overlay) -> string|nil`: what to announce INSTEAD of searching,
+    -- when the caller knows the control cannot act right now. See valueOfNow.
+    unavailable = opts.unavailable,
     -- `rawOrigin`, as on a hotspot: pins the region to the matched control's OWN frame,
     -- skipping the per-overlay content offset. For anything living in the plug-in's chrome
     -- rather than inside the library's content — Kontakt's instrument rack, for instance,
@@ -1048,6 +1061,16 @@ local function valueOfNow(self, c, done)
   -- gets no extra word (ReaHotkey's States maps found to ""); absent has to be said, because
   -- the alternative is a button that announces itself normally and then does nothing.
   if c.kind == "gbutton" then
+    -- A caller may answer for the control before the search runs. For a button that is
+    -- present and findable but cannot presently DO anything — Kontakt's "make it taller" once
+    -- the plug-in is as big as it can safely get — where "not found" would be false and
+    -- silence would be worse: a blind user tabbing past a button hears a button, and a button
+    -- that announces itself normally and then declines is the failure this control type was
+    -- introduced to stop. Returning nil falls through to the search as usual.
+    if c.unavailable then
+      local why = c.unavailable(self)
+      if why then return done(why) end
+    end
     opts.region = searchRect(self, c)
     host.screen.imageSearchAsync(asList(c.image), opts, function(hit)
       if not hit then
@@ -1163,6 +1186,10 @@ local function speakControl(self, index, moveMouse, withHint)
     if r and r.text and r.text ~= "" then label = r.text end
   end
   local parts = { label }
+  if c.kind == "static" and c.text then
+    local ok, v = pcall(c.text, self)
+    if ok and v ~= nil and v ~= "" then parts[#parts + 1] = tostring(v) end
+  end
   -- A `readOnly` OCR control is NOT a button, and must not say it is.
   --
   -- `readOnly` already suppresses the click, so the control does nothing when activated — but

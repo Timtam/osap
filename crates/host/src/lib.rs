@@ -3039,19 +3039,6 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     )?;
     let sh = shared.clone();
     screen.set(
-        "workArea",
-        lua.create_function(move |lua, ()| {
-            let (x, y, w, h) = sh.backend.work_area();
-            let t = lua.create_table()?;
-            t.set("x", x)?;
-            t.set("y", y)?;
-            t.set("w", w)?;
-            t.set("h", h)?;
-            Ok(t)
-        })?,
-    )?;
-    let sh = shared.clone();
-    screen.set(
         "imageSearch",
         lua.create_function(move |lua, (template, opts): (String, Option<Table>)| {
             let tmpl = sh.load_template(&sh.root(idx).join(&template))?;

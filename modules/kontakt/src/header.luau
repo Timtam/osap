@@ -5,6 +5,7 @@
 -- Every coordinate here is a plain number from the cell's own geometry table. Nothing asks
 -- which Kontakt it is on, because the cell already is one.
 
+local O = host.require("com.platform.overlay")
 local A = host.include("src/actions.luau")
 local geo = host.include("src/geometry.luau")
 
@@ -105,37 +106,89 @@ end
 -- MOVES it, so a fixed coordinate would be right exactly once.
 local RESIZE_STEP = 220
 
+-- Say what the resize actually did, and warn if it cost the grip.
+--
+-- Both halves were missing and both were reported as the same symptom: "no feedback". A
+-- graphical button only speaks when its template is NOT found, so a resize that worked said
+-- nothing at all — and for someone who cannot see the window, a successful action and a
+-- no-op are then the same event. Silence after a deliberate press is the one outcome that
+-- cannot be interpreted.
+--
+-- The grip warning is a report and not a remedy: Kontakt hides its grip once it is as big as
+-- the screen allows, and resizes through nothing else, so a plug-in that reaches that size is
+-- stuck big until the instrument is reloaded. The clamp above should make this unreachable —
+-- this is what would notice if that rule were wrong on a display it was never measured on.
+local function afterResize(ov, before)
+  local o = ov:origin()
+  if not (o and o.client) then return end
+  local w, h = O.contentSize(o)
+  if w == 0 or h == 0 then return end
+  host.screen.imageSearchAsync({ host.path("images/resize-grip.png") }, {
+    region = { o.client.x, o.client.y, o.client.x + w, o.client.y + h },
+    tolerance = 20,
+    scales = { 1.0 },
+  }, function(hit)
+    if not hit then
+      host.log.info(string.format(
+        "[resize] the grip is gone at %dx%d — Kontakt is at its maximum and cannot be made "
+        .. "smaller again without reloading the instrument", w, h))
+      host.speech.output(
+        "Warning: the resize grip is gone. Kontakt is at its largest and cannot be made "
+        .. "smaller again — reload the instrument to reset its size.", { interrupt = true })
+      return
+    end
+    host.log.info(string.format("[resize] height %d -> %d px", before, h))
+    if h == before then
+      host.speech.output("Plugin height unchanged", { interrupt = true })
+    else
+      host.speech.output(string.format("Plugin height %d pixels", h), { interrupt = true })
+    end
+  end)
+end
+
+-- How much taller the plug-in may still be made before Kontakt reaches the size at which it
+-- stops drawing its grip. nil when there is nothing to measure against.
+--
+-- Against the SCREEN, not the work area: the taskbar has no bearing on how big Kontakt will
+-- make itself, and an auto-hiding one reports the full height anyway. Screen-relative with a
+-- floor, so it adapts to a display this was never measured on.
+local MIN_STEP = 40
+
+local function growRoom(ov)
+  local origin = ov:origin()
+  local sz = host.screen.size and host.screen.size()
+  if not (origin and origin.client and sz and sz.h > 0) then return nil end
+  local _, h = O.contentSize(origin)
+  if h == 0 then return nil end
+  return (sz.h - math.max(120, math.floor(sz.h * 0.1))) - (origin.client.y + h)
+end
+
 -- CLASSIC VIEW ONLY, which is a measurement and not a guess about what Kontakt "probably"
 -- does. Across 27 calibration shots the grip appears in exactly 8, and all 8 are classic view;
 -- 13 play-view shots at the SAME 679 px of content have none. Play view is not resizable, so
 -- offering a resize there is a button that can only ever report "not found".
 --
--- GROWING IS CLAMPED, and this is the more important half.
---
--- Pressing "taller" twice took the plug-in from 679 to 965 px, and at 965 the grip was gone —
--- so was the way back. What was measured, from window rectangles rather than pixels: the
--- plug-in's view ended at y 1069, the host's own window content at ~1024, and the taskbar began
--- at ~1030. The grip sits 21 px in from the plug-in's bottom-right corner, so it had passed
--- under BOTH. Not hidden by Kontakt, not a hover effect — simply somewhere no mouse can go.
---
--- Three ways out were measured and all three failed: resizing the host's FX window shrank the
--- host and left the plug-in at 965 (the host does not pass a size down), `SetWindowPos` on the
--- plug-in's own window was ignored and snapped back, and a drag aimed at where the grip should
--- have been went to the taskbar instead. Kontakt resizes through this grip and nothing else.
---
--- So the fix is not a better way to reach a grip that has left the screen — it is never letting
--- it leave. The step is clamped so the grip stays inside the WORK AREA, which is the screen
--- minus the shell's own furniture, and is exactly the region a mouse can reach. When there is
--- no room left the control says so instead of growing into a corner it cannot come back from.
-local GRIP_MARGIN = 8
-
--- The play-view half is a measurement too: across 27 calibration shots the grip appears in 8,
--- all of them classic view, while 13 play-view shots at the same 679 px have none. Play view is
--- not resizable, so offering a resize there is a button that can only ever report "not found".
 local function addResizeControls(ov, cell)
+  -- The size itself, readable by arriving at it. Asked for directly, and the reason is the
+  -- one this whole thread has been about: the two controls below CHANGE the size and say so,
+  -- but until now there was no way to ask what it is — only to alter it and listen. A value
+  -- you can only learn by changing it is not a value you can check.
+  ov:addStaticText({
+    label = "Plugin size",
+    when = cell.inClassic,
+    text = function(o)
+      local origin = o:origin()
+      if not origin then return nil end
+      local w, h = O.contentSize(origin)
+      if w == 0 or h == 0 then return nil end
+      local room = growRoom(o)
+      return string.format("width %d, height %d pixels%s", w, h,
+        (room ~= nil and room < MIN_STEP) and ", at maximum height" or "")
+    end,
+  })
   for _, r in ipairs({
-    { label = "Make plugin taller", dy = RESIZE_STEP, hotkey = "Alt+9" },
-    { label = "Make plugin shorter", dy = -RESIZE_STEP, hotkey = "Alt+8" },
+    { label = "Increase plugin height", dy = RESIZE_STEP, hotkey = "Alt+9" },
+    { label = "Decrease plugin height", dy = -RESIZE_STEP, hotkey = "Alt+8" },
   }) do
     ov:addGraphicalButton({
       label = r.label,
@@ -146,18 +199,57 @@ local function addResizeControls(ov, cell)
       -- that had looked generous (664x679 became 664x965). The origin grows with the window.
       image = host.path("images/resize-grip.png"),
       scales = { 1.0 },
-      -- Computed from where the grip actually IS, which is the only position that can be
-      -- clamped honestly — the window's own rectangle does not say where the handle sits, and
-      -- growing moves the top edge as well as the bottom, so predicting it from the window
-      -- would be guesswork twice over.
-      dragBy = function(_, hit)
-        if r.dy < 0 then return 0, r.dy end   -- shrinking always has room
-        local wa = host.screen.workArea and host.screen.workArea()
-        if not wa then return 0, r.dy end     -- no shell to ask: behave as before
-        local room = (wa.y + wa.h) - (hit.y + hit.h) - GRIP_MARGIN
-        if room <= 0 then
-          return nil, nil, "Plugin is already as tall as the screen allows"
+      -- STOP SHORT OF THE SCREEN, because the last possible step is the one that cannot be
+      -- undone.
+      --
+      -- Kontakt stops DRAWING the grip once it is as big as the screen allows. Not clipped, not
+      -- covered — absent: two captures of the plug-in's own bottom-right corner, at 1010x679 and
+      -- at 1209x987, show the dotted triangle in the first and bare status bar in the second.
+      -- And the grip is the only way Kontakt resizes: the host passes no size down, SetWindowPos
+      -- on its window is ignored, and a drag aimed where the grip should be does nothing. So the
+      -- step that reaches the maximum strands the plug-in big until the instrument is reloaded.
+      --
+      -- Two measurements say what that maximum is, and it is the SCREEN rather than anything of
+      -- Kontakt's own: 1010x965 sitting at y 104 ends at 1069, and 1209x987 at y 58 ends at
+      -- 1045, on a 1080 px screen — 11 and 35 px short of the bottom. It grows until it nearly
+      -- touches, and hides the grip there.
+      --
+      -- So the rule is to keep a wide berth from the bottom of the SCREEN (not the work area:
+      -- the taskbar is irrelevant to how big Kontakt will make itself, and an auto-hiding one
+      -- reports the full height anyway). Screen-relative, with a floor, so it adapts to a
+      -- display this was never measured on. The step is CLAMPED rather than refused while there
+      -- is any room at all, because a partial grow is what the user actually wants — one press
+      -- was already enough to bring the FX rack tab row into view, and the second press was
+      -- pure damage.
+      -- Announced as unavailable rather than merely declining when pressed. A button that
+      -- reads as an ordinary button and then does nothing is exactly what this control type
+      -- exists to prevent, and it is worse for someone who cannot see that nothing moved.
+      unavailable = r.dy > 0 and function(o)
+        local room = growRoom(o)
+        if room ~= nil and room < MIN_STEP then
+          return "at maximum height, unavailable"
         end
+        return nil
+      end or nil,
+      dragBy = function(o)
+        local origin0 = o:origin()
+        local _, before = O.contentSize(origin0)
+        host.timer.after(900, function() afterResize(o, before) end)
+        if r.dy < 0 then return 0, r.dy end          -- shrinking cannot strand anything
+        local room = growRoom(o)
+        if room == nil then return 0, r.dy end       -- nothing to measure against
+        -- A MINIMUM STEP, because a step too small to see is worse than a refusal. With only
+        -- the raw clamp, a plug-in 2 px from the limit was dragged by 2 px: nothing moved,
+        -- nothing was refused, and so nothing was said. Pressing a button and getting silence
+        -- is the one outcome a blind user cannot interpret at all.
+        if room < MIN_STEP then
+          return nil, nil,
+            "Plugin is already at the greatest height it can have without losing the "
+            .. "resize handle"
+        end
+        -- The check stays even though the clamp should make it unreachable. It is the only
+        -- thing that would notice this rule being wrong on someone else's display, and it
+        -- costs one image search per press.
         return 0, math.min(r.dy, room)
       end,
       hotkey = r.hotkey,
