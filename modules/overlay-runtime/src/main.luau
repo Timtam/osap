@@ -446,6 +446,21 @@ function Overlay:landmark(image, opts)
   -- while the steady state stays cheap. Sticky: once found, only a tiny region around
   -- the last hit is re-searched; a miss there falls back to the full region.
   local lastHit, matched, pending = nil, false, false
+  -- Near-miss diagnosis, armed once per plug-in window and re-armed whenever a landmark that
+  -- WAS matching stops.
+  --
+  -- A landmark that no longer matches fails silently and always has: no overlay, no
+  -- announcement, no line saying which gate was tried or how close it came. For a user who
+  -- cannot see the screen that is indistinguishable from "this library is not supported", and
+  -- it is what happened — a second patch of one library moved 29 pixels of 17480 outside
+  -- tolerance and the only symptom available to anyone was nothing at all.
+  --
+  -- What makes this loggable without drowning the log is that a MISS IS NORMAL. Twelve library
+  -- overlays search every poll and eleven of them are supposed to fail. The signal is not the
+  -- miss, it is HOW CLOSE it came: a different library is nowhere near, while a template that
+  -- has gone stale is a few units of tolerance away. So a full-region miss re-runs the same
+  -- search once at three times the tolerance, and says something only if THAT hits.
+  local probedOrigin = nil
   return self:gate(function(origin)
     if not image or not origin or not origin.client or not origin.bounds then
       lastHit, matched = nil, false
@@ -493,6 +508,24 @@ function Overlay:landmark(image, opts)
           return
         end
         local was = matched
+        -- Ask "how close?" on a full-region miss, at most once per window, and once more
+        -- whenever a landmark that had been matching stops — which is the shape a patch change
+        -- takes. Re-arming on that transition matters as much as the first probe: the failure
+        -- this exists for happened by loading a second patch into a window already open.
+        if hit == nil and (probedOrigin ~= origin.id or was) then
+          probedOrigin = origin.id
+          host.screen.imageSearchAsync(image, {
+            region = region,
+            tolerance = MATCH_TOLERANCE * 3,
+          }, function(near)
+            if not near then return end   -- genuinely a different library: say nothing
+            host.log.info(("[landmark] %s: NEAR MISS — no match at tolerance %d, but found at "
+              .. "%d,%d with tolerance %d. The template is probably stale rather than the "
+              .. "library absent; compare it against a fresh capture."):format(
+              tostring(self.label), MATCH_TOLERANCE, near.x, near.y, MATCH_TOLERANCE * 3
+            ))
+          end)
+        end
         lastHit = hit or nil
         -- Expose the hit's screen rect so a landmark-anchored overlay can resolve its
         -- control coordinates RELATIVE to the on-screen library UI (host / browser-state /

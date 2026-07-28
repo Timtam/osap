@@ -313,12 +313,19 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
       Voice Of Wind Adey is a separate case and possibly a worse one: 0% dark, because it is
       33000 px of pure watercolour with no lettering to mask down to. If its backdrop shifts
       there is nothing to fall back on, and the fix would have to be something else entirely.
-- [ ] **A landmark that stops matching fails SILENTLY.** No overlay, no announcement, no log
-      line saying which gate was tried and how close it came — the user reported it, nothing
-      here noticed. That is the worst shape a failure can have for someone who cannot see the
-      screen: indistinguishable from "this library is not supported". Wanted: when an overlay's
-      landmark misses while its plug-in IS on screen, log the best match score and where, so
-      the next one of these is a lookup instead of an investigation.
+- [x] **A landmark that stops matching fails SILENTLY — now diagnosed.** No overlay, no
+      announcement, no line saying which gate was tried or how close it came; the user reported
+      it and nothing here noticed. What makes it loggable without drowning the log is that a
+      MISS IS NORMAL — twelve library overlays search every poll and eleven are supposed to
+      fail — so the signal is not the miss but how close it came. A full-region miss now
+      re-runs the same search once at three times the tolerance, and says something only if
+      THAT hits, at most once per window and once more whenever a landmark that had been
+      matching stops (which is the shape a patch change takes).
+
+      Validated against the actual failure: the template that shipped broken, checked against
+      the shot that reported it, misses at tolerance 20 and 25 and matches at 30, 40 and 60. So
+      the probe would have written exactly the missing line. Zero near-miss lines across a full
+      session of normal use.
 
 ## Decided against (so it is not reopened as an oversight)
 
