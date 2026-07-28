@@ -216,6 +216,15 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
         want the list, and arrow-key stepping now exists (the slider owns Left/Right), so
         that is the natural place to build on when either is ported.
 
+## Decided against (so it is not reopened as an oversight)
+
+- **Generating landmark templates on the user's machine instead of shipping crops.** Raised
+  because the modules declare MIT over cropped vendor artwork. DECLINED by the maintainer,
+  2026-07-28, with reasons: the crops serve an accessibility purpose, per-install generation is
+  effort out of proportion to the risk, and ReaHotkey has shipped the same kind of crops for
+  years without a complaint. If one ever comes, the module goes offline or a way round is
+  found. Recorded here so a later pass does not re-raise it as something nobody noticed.
+
 ## Detection cost and the keyboard-hook hazard (2026-07-27/28)
 
 Started as "the KK overlay takes longer to appear than the Kontakt one" and turned into the
