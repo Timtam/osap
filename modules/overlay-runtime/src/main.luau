@@ -320,6 +320,15 @@ function Overlay:addGraphicalButton(opts)
     image = opts.image,
     hotkey = opts.hotkey,
     opensMenu = opts.opensMenu,
+    -- `dragBy = {dx, dy}`: DRAG from where the template was found instead of clicking it.
+    -- For a handle rather than a button — a window's resize grip, a splitter, a fader — where
+    -- the gesture is the whole point. Being found rather than placed matters doubly here: a
+    -- resize grip MOVES as a result of being dragged, so a fixed coordinate would work exactly
+    -- once and then aim at empty space.
+    --
+    -- May also be `function(overlay, hit) -> dx, dy, why`, for a handle with a limit only the
+    -- caller knows. Returning no offset declines the drag and speaks `why`.
+    dragBy = opts.dragBy,
     -- `rawOrigin`, as on a hotspot: pins the region to the matched control's OWN frame,
     -- skipping the per-overlay content offset. For anything living in the plug-in's chrome
     -- rather than inside the library's content — Kontakt's instrument rack, for instance,
@@ -752,12 +761,30 @@ local function sliderThumb(self, c)
   }
 end
 
+-- The rectangle a graphical button hunts in, in SCREEN coordinates.
+--
+-- `region` is optional, and omitting it means THE WHOLE ORIGIN — which is the right default
+-- far more often than a written-out rectangle. A found control is used precisely when its
+-- position is not fixed, and a static region then has to guess how far the thing can wander:
+-- Kontakt's resize grip escaped its region on the second press, because dragging it made the
+-- window taller and moved the grip past the lower bound that had looked generous. The origin
+-- grows with the window, so it cannot go stale that way.
+local function searchRect(self, c)
+  local ox, oy = originOf(self, c)
+  if c.region then
+    return { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] }
+  end
+  local o = self:origin()
+  if not o then return { ox, oy, ox, oy } end
+  local w, h = O.contentSize(o)
+  return { ox, oy, ox + w, oy + h }
+end
+
 -- Where a graphical button's template currently is, as a click point, or nil.
 local function graphicalButtonPoint(self, c)
-  if not (c.region and c.image) then return nil end
-  local ox, oy = originOf(self, c)
+  if not c.image then return nil end
   local _, hit = host.screen.imageSearchMulti(asList(c.image), {
-    region = { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] },
+    region = searchRect(self, c),
     tolerance = c.tolerance or MATCH_TOLERANCE,
     scales = c.scales or MATCH_SCALES,
   })
@@ -926,6 +953,7 @@ end
 -- How far the probe may drift and still count as "closed".
 local REVEAL_TOLERANCE = 30
 
+
 -- Opens the panel this control lives in, if it is shut, and then continues.
 --
 -- ReaHotkey binds its ClickFXRack to a Soundiron toggle TWICE — before focus and before
@@ -967,7 +995,9 @@ end
 local function valueOfNow(self, c, done)
   local ox, oy = originOf(self, c)
   local opts = {
-    region = { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] },
+    region = c.region
+      and { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] }
+      or searchRect(self, c),
     tolerance = c.tolerance or MATCH_TOLERANCE,
     scales = c.scales or MATCH_SCALES,
   }
@@ -985,6 +1015,7 @@ local function valueOfNow(self, c, done)
   -- gets no extra word (ReaHotkey's States maps found to ""); absent has to be said, because
   -- the alternative is a button that announces itself normally and then does nothing.
   if c.kind == "gbutton" then
+    opts.region = searchRect(self, c)
     host.screen.imageSearchAsync(asList(c.image), opts, function(hit)
       if not hit then
         -- "not found" is the whole value of this control type, so when it says that, it has to
@@ -1366,17 +1397,16 @@ function Overlay:activate(index)
       -- one moment a state hint is worth hearing (see hintFor).
       if host.timer then host.timer.after(150, function() speakControl(self, i, false, true) end) end
     end)
-  elseif c.kind == "gbutton" and c.region and c.image then
+  elseif c.kind == "gbutton" and c.image then
     host.log.info(string.format("[gbutton] '%s' activated", tostring(c.label)))
     -- Located, then clicked, and never clicked unlocated. The search is asynchronous, so this
     -- is a continuation: it re-checks that the overlay is still active on the SAME window,
     -- exactly as the hotspot `points` sequence and the panel reveal do, because a click
     -- arriving after the world moved is the one mistake pressing the key again cannot undo.
-    local ox, oy = originOf(self, c)
     local pinned = self:hwnd()
     host.speech.output((c.label or "") .. ", activated", { interrupt = true })
     host.screen.imageSearchAsync(asList(c.image), {
-      region = { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] },
+      region = searchRect(self, c),
       tolerance = c.tolerance or MATCH_TOLERANCE,
       scales = c.scales or MATCH_SCALES,
     }, function(hit)
@@ -1397,7 +1427,29 @@ function Overlay:activate(index)
       end
       local cx, cy = hit.x + math.floor(hit.w / 2), hit.y + math.floor(hit.h / 2)
       if refuseOutside(self, c, cx, cy) then return end
-      host.input.click(cx, cy)
+      if c.dragBy then
+        -- `dragBy` may be a FUNCTION of where the handle was just found, not only a fixed
+        -- offset. Kontakt's resize grip is why: dragging it down until the plug-in's corner
+        -- passes under the taskbar leaves the grip unreachable, and a window that can be made
+        -- bigger but never smaller again is worse than one that refuses to grow. A caller that
+        -- knows its own limits can compute the step from the handle's actual position, and
+        -- return nothing to decline — with a reason, so declining is not silence.
+        local dx, dy, why = c.dragBy[1], c.dragBy[2], nil
+        if type(c.dragBy) == "function" then
+          dx, dy, why = c.dragBy(self, hit)
+        end
+        if not dx or (dx == 0 and dy == 0) then
+          host.speech.output(why or ((c.label or "Control") .. " cannot go further"),
+            { interrupt = true })
+          return
+        end
+        -- The DESTINATION is not checked against the origin: a drag that resizes a window is
+        -- meant to end outside the window it started in, which is exactly what that guard
+        -- forbids. The starting point is checked, and that is the one that must be right.
+        host.input.drag(cx, cy, cx + dx, cy + dy)
+      else
+        host.input.click(cx, cy)
+      end
     end)
   elseif c.kind == "hotspottoggle" and c.at then
     local px, py = hotspotPoint(self, c)
@@ -1958,7 +2010,7 @@ local function isAbsolutePath(p)
   return string.sub(p, 1, 1) == "/" -- POSIX
 end
 
-local NEEDS_REGION = { ocr = true, ocredit = true, gtoggle = true, gbutton = true }
+local NEEDS_REGION = { ocr = true, ocredit = true, gtoggle = true }
 
 local function report(self, opts)
   local found = {}
@@ -1997,7 +2049,7 @@ local function report(self, opts)
       end
     end
     if c.kind == "gbutton" then
-      if c.region == nil then bad("%s has no `region` to look for its image in", who) end
+      -- `region` is optional here: without one the search covers the whole origin.
       if c.image == nil then bad("%s has no `image` to look for", who) end
       for _, path in ipairs(asList(c.image)) do
         if not isAbsolutePath(path) then

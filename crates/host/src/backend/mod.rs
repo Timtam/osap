@@ -173,6 +173,22 @@ pub trait Backend {
 
     /// Size of the primary display in pixels.
     fn screen_size(&self) -> (i32, i32);
+
+    /// The screen area a window can occupy WITHOUT disappearing behind the shell's own
+    /// furniture — the taskbar, chiefly. Returned as (x, y, w, h) because the reserved strip
+    /// need not be at the bottom.
+    ///
+    /// Distinct from `screen_size` for a reason that cost a session: Kontakt's resize grip sits
+    /// 21 px in from the bottom-right of its own view, and growing the window until that corner
+    /// passed under the taskbar left it unreachable — the plug-in could be made bigger and then
+    /// never smaller again. Full screen height is the wrong bound for anything a user has to be
+    /// able to reach with a mouse.
+    ///
+    /// Backends without a shell to ask fall back to the full screen.
+    fn work_area(&self) -> (i32, i32, i32, i32) {
+        let (w, h) = self.screen_size();
+        (0, 0, w, h)
+    }
     /// Color (r, g, b) of the pixel at screen coordinates.
     fn pixel(&self, x: i32, y: i32) -> (u8, u8, u8);
     /// Captures a screen region into an RGBA image.

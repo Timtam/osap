@@ -33,9 +33,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetGUIThreadInfo, GetMessageW, GetSystemMetrics, GetWindowRect,
     GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
     GUI_INMENUMODE, GUI_POPUPMENUMODE, GUI_SYSTEMMENUMODE,
-    PostThreadMessageW, RegisterClassW, SetCursorPos, SetWindowsHookExW, TranslateMessage,
+    PostThreadMessageW, RegisterClassW, SetCursorPos, SetWindowsHookExW,
+    SystemParametersInfoW, TranslateMessage,
     EVENT_OBJECT_FOCUS, EVENT_OBJECT_NAMECHANGE, EVENT_SYSTEM_FOREGROUND, GA_PARENT, GUITHREADINFO,
-    HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, SM_CXSCREEN, SM_CYSCREEN,
+    HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, SM_CXSCREEN, SM_CYSCREEN, SPI_GETWORKAREA,
     WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_NULL, WM_SYSKEYDOWN,
     WM_SYSKEYUP, WNDCLASSW,
 };
@@ -267,6 +268,23 @@ impl Backend for WindowsBackend {
 
     fn screen_size(&self) -> (i32, i32) {
         unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
+    }
+
+    fn work_area(&self) -> (i32, i32, i32, i32) {
+        let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        let ok = unsafe {
+            SystemParametersInfoW(
+                SPI_GETWORKAREA,
+                0,
+                &mut r as *mut RECT as *mut core::ffi::c_void,
+                0,
+            )
+        };
+        if ok == 0 {
+            let (w, h) = self.screen_size();
+            return (0, 0, w, h);
+        }
+        (r.left, r.top, r.right - r.left, r.bottom - r.top)
     }
 
     fn pixel(&self, x: i32, y: i32) -> (u8, u8, u8) {

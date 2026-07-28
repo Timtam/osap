@@ -93,6 +93,78 @@ local function addStatusToggles(ov)
   end
 end
 
+-- Kontakt's own RESIZE GRIP, dragged rather than clicked.
+--
+-- Kontakt's window is bigger than what a DAW shows of it, and there is no keyboard way to
+-- change that: the grip is a mouse-only handle in the bottom-right corner. It matters beyond
+-- comfort — ReaHotkey's Soundiron probes sit at y 652/663 plus a version offset, below our
+-- 679 px of content in every configuration reachable so far, so a taller window is the one
+-- untested place their reverb could be.
+--
+-- FOUND by template, because a resize grip is the clearest case for it: dragging the thing
+-- MOVES it, so a fixed coordinate would be right exactly once.
+local RESIZE_STEP = 220
+
+-- CLASSIC VIEW ONLY, which is a measurement and not a guess about what Kontakt "probably"
+-- does. Across 27 calibration shots the grip appears in exactly 8, and all 8 are classic view;
+-- 13 play-view shots at the SAME 679 px of content have none. Play view is not resizable, so
+-- offering a resize there is a button that can only ever report "not found".
+--
+-- GROWING IS CLAMPED, and this is the more important half.
+--
+-- Pressing "taller" twice took the plug-in from 679 to 965 px, and at 965 the grip was gone —
+-- so was the way back. What was measured, from window rectangles rather than pixels: the
+-- plug-in's view ended at y 1069, the host's own window content at ~1024, and the taskbar began
+-- at ~1030. The grip sits 21 px in from the plug-in's bottom-right corner, so it had passed
+-- under BOTH. Not hidden by Kontakt, not a hover effect — simply somewhere no mouse can go.
+--
+-- Three ways out were measured and all three failed: resizing the host's FX window shrank the
+-- host and left the plug-in at 965 (the host does not pass a size down), `SetWindowPos` on the
+-- plug-in's own window was ignored and snapped back, and a drag aimed at where the grip should
+-- have been went to the taskbar instead. Kontakt resizes through this grip and nothing else.
+--
+-- So the fix is not a better way to reach a grip that has left the screen — it is never letting
+-- it leave. The step is clamped so the grip stays inside the WORK AREA, which is the screen
+-- minus the shell's own furniture, and is exactly the region a mouse can reach. When there is
+-- no room left the control says so instead of growing into a corner it cannot come back from.
+local GRIP_MARGIN = 8
+
+-- The play-view half is a measurement too: across 27 calibration shots the grip appears in 8,
+-- all of them classic view, while 13 play-view shots at the same 679 px have none. Play view is
+-- not resizable, so offering a resize there is a button that can only ever report "not found".
+local function addResizeControls(ov, cell)
+  for _, r in ipairs({
+    { label = "Make plugin taller", dy = RESIZE_STEP, hotkey = "Alt+9" },
+    { label = "Make plugin shorter", dy = -RESIZE_STEP, hotkey = "Alt+8" },
+  }) do
+    ov:addGraphicalButton({
+      label = r.label,
+      when = cell.inClassic,
+      rawOrigin = true,
+      -- No region: the whole plug-in. A written-out rectangle went stale on the second press
+      -- — dragging the grip made the window taller and carried the grip past a lower bound
+      -- that had looked generous (664x679 became 664x965). The origin grows with the window.
+      image = host.path("images/resize-grip.png"),
+      scales = { 1.0 },
+      -- Computed from where the grip actually IS, which is the only position that can be
+      -- clamped honestly — the window's own rectangle does not say where the handle sits, and
+      -- growing moves the top edge as well as the bottom, so predicting it from the window
+      -- would be guesswork twice over.
+      dragBy = function(_, hit)
+        if r.dy < 0 then return 0, r.dy end   -- shrinking always has room
+        local wa = host.screen.workArea and host.screen.workArea()
+        if not wa then return 0, r.dy end     -- no shell to ask: behave as before
+        local room = (wa.y + wa.h) - (hit.y + hit.h) - GRIP_MARGIN
+        if room <= 0 then
+          return nil, nil, "Plugin is already as tall as the screen allows"
+        end
+        return 0, math.min(r.dy, room)
+      end,
+      hotkey = r.hotkey,
+    })
+  end
+end
+
 local function addRackControls(ov, cell)
   -- The view toggle, by Kontakt's OWN keyboard shortcut (F10) rather than through its
   -- menu: the menu entry reads "Switch to Classic View   F10", and a shortcut the
@@ -247,6 +319,7 @@ local function addPluginHeader(ov, cell)
   })
   addRackControls(ov, cell)
   addStatusToggles(ov)
+  addResizeControls(ov, cell)
   for _, h in ipairs(geo.K7_CONTROLS) do
     -- Only those Kontakt 7 offers embedded, and only where the cell has the coordinate:
     -- Kontakt 8's geometry simply has no entry, so the loop skips it without a version
