@@ -62,6 +62,35 @@ local MIMI = {
   articulation = { -115, 114, 165, 152 },
 }
 
+-- ── Voice Of Wind Adey: no FX page either, and an OCR target in CURSIVE ─────
+-- Same finding as Mimi Page — the panel ends at y 570 with the keyboard below and there is no
+-- tab row, so ReaHotkey's rack probe at y 663 has nothing to probe. Its Reverb toggle is again
+-- unportable, and again the substitute is the articulation, here "Legato - Ah": the vowel
+-- within the loaded patch, which nothing else states (Kontakt's own rack names the PATCH,
+-- "Adey Legato", which is different information).
+--
+-- And it did not survive the listening test. That text is set in a HANDWRITTEN SCRIPT, both
+-- our engines are trained on print (WinRT and the embedded PaddleOCR), and what came back was
+-- unusable. So the control is GONE rather than shipped with a caveat: a confident wrong read
+-- tells a user who cannot check it that a different vowel is loaded than the one they are
+-- hearing, and no amount of documentation reaches someone in the middle of playing.
+--
+-- The overlay stays, because detection is worth having on its own — it announces the library
+-- and its landmark is verified — and because whatever replaces the read belongs on this
+-- control when it exists. Two candidates, in order of how likely they are to actually work:
+-- template-matching the FINITE set of articulation strings (this text is rendered from a fixed
+-- font every time, so a picture of each vowel would be exact where OCR is hopeless), or an OCR
+-- engine that handles handwriting, addressed only where a module asks for it.
+--
+-- ReaHotkey has a single "Voices of Wind Collection" overlay, but this landmark is 200x165 of
+-- watercolour artwork specific to Adey and will not match Audrey or Kimba — so it is declared
+-- per product, like Audio Imperia's eleven, and the other two await their own shots.
+local ADEY = {
+  name = "Voice Of Wind Adey",
+  landmark = "images/VoiceOfWindAdey/Wordmark.png",
+  articulation = { -192, 267, 32, 305 },
+}
+
 local GAIA = {
   name = "Voices Of Gaia",
 
@@ -151,6 +180,15 @@ return {
       })
     end)
 
-    host.log.info("Soundiron: Voices Of Gaia (2 pages) + Mimi Page Light & Shadow ready.")
+    kontakt.library(ADEY.name, img(ADEY.landmark), function(ov)
+      ov:addStaticText(ADEY.name)
+      -- The articulation read-out lived here and was removed; see the note above. Its measured
+      -- region is kept, because it is the region whichever mechanism replaces OCR will need:
+      -- ADEY.articulation = { -192, 267, 32, 305 }, landmark-relative.
+    end)
+
+    host.log.info(
+      "Soundiron: Voices Of Gaia (2 pages) + Mimi Page Light & Shadow + Voice Of Wind Adey ready."
+    )
   end,
 }

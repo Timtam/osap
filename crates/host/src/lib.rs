@@ -2210,6 +2210,22 @@ impl Dispatcher<'_> {
 impl HostEvents for Dispatcher<'_> {
     fn on_hotkey(&mut self, id: i32) {
         self.shared.bump_epoch();
+        // Logged on ARRIVAL, before anything is looked up. Registration and delivery are
+        // different things: `RegisterHotKey` can succeed while the keystroke still never
+        // reaches us, because a low-level hook ahead of ours in the chain — a screen reader
+        // installs one — can consume it first, and nothing in the chain reports that. With
+        // this line, "the overlay holds Alt+V but the DAW acted on it" splits cleanly into
+        // "we never got it" and "we got it and did the wrong thing".
+        {
+            let spec = self
+                .shared
+                .hotkeys
+                .borrow()
+                .get(&id)
+                .map(|r| r.spec.clone())
+                .unwrap_or_else(|| format!("id {id}"));
+            logging::line("keys", &format!("hotkey {spec} arrived"));
+        }
         let found = {
             let map = self.shared.hotkeys.borrow();
             map.get(&id).and_then(|reg| {
@@ -2535,6 +2551,15 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // window-class lookup for a native popup, no accessibility traversal. The menu watch
     // asks this before paying for the expensive question — measured at 50-194 ms per call,
     // every 150 ms, which is more than its own interval.
+    // host.keys.modifiersDown() -> bool. For a hotkey callback that synthesises input: it
+    // runs while its own combination is still held, so anything it sends carries those
+    // modifiers with it. ReaHotkey's HotkeyWait solves this by waiting for release
+    // (AccessibilityOverlay.ahk:1073-1075, `KeyWait` per key of the combination).
+    let sh = shared.clone();
+    keys.set(
+        "modifiersDown",
+        lua.create_function(move |_, ()| Ok(sh.backend.modifiers_down()))?,
+    )?;
     let sh = shared.clone();
     keys.set(
         "nativeMenuOpen",

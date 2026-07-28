@@ -1279,6 +1279,33 @@ function Overlay:_visibleClaimant(candidates)
   return nil
 end
 
+-- Runs `fn` once the modifier keys are up, or after a short grace period regardless.
+--
+-- A hotkey callback fires while its own combination is still HELD — you are still holding Alt
+-- when Alt+V arrives. Anything the callback then synthesises inherits those modifiers: the
+-- view toggle sent F10 and the application received Alt+F10, which is not Kontakt's shortcut,
+-- so the view stayed put while the DAW's screen-reader extension announced something else.
+-- The same trap applies to a synthesised CLICK, where Alt+click is a different gesture
+-- entirely in a lot of UIs.
+--
+-- ReaHotkey solves it by waiting (AccessibilityOverlay.ahk:1073-1075: `KeyWait` for every key
+-- of the combination), and this is that, asynchronously — we cannot block the thread that
+-- carries speech and the keyboard hook. Bounded, and it acts ANYWAY when the bound is reached:
+-- a key held down unusually long must not mean the control silently never fires.
+--
+-- What made this findable, after a wrong diagnosis: pressing Enter on the same control always
+-- worked, and Enter is a captured key with no modifier attached. Same callback, same F10, one
+-- difference — what was still under the user's finger.
+local MODIFIER_GRACE_TICKS = 40 -- x 15 ms ≈ 600 ms
+
+local function afterModifiersReleased(fn, tries)
+  if not (host.keys and host.keys.modifiersDown and host.timer) then return fn() end
+  if not host.keys.modifiersDown() then return fn() end
+  tries = (tries or 0) + 1
+  if tries > MODIFIER_GRACE_TICKS then return fn() end
+  host.timer.after(15, function() afterModifiersReleased(fn, tries) end)
+end
+
 -- (Re-)registers the per-control global hotkeys. Kept separate from the key CAPTURES,
 -- which must NOT be dropped and retaken on a re-sync: their release is token-scoped and
 -- shared with sibling overlays in the same module.
@@ -1320,13 +1347,32 @@ function Overlay:_syncControlHotkeys()
       end
     end
   end
+  local took, skipped = {}, {}
   for _, spec in ipairs(specs) do
     local candidates = claim[spec]
     if self:_visibleClaimant(candidates) then
+      took[#took + 1] = spec
       self.controlHotkeys[#self.controlHotkeys + 1] = host.hotkey.register(spec, function()
-        self:activate(self:_visibleClaimant(candidates) or candidates[1])
+        -- The claimant is resolved AFTER the wait, not before: the point of resolving at press
+        -- time is that the visible set can have changed, and waiting is time in which it can.
+        afterModifiersReleased(function()
+          self:activate(self:_visibleClaimant(candidates) or candidates[1])
+        end)
       end)
+    else
+      -- Every claimant hidden: the combination is deliberately NOT taken, so it reaches the
+      -- application instead of being swallowed by a control that cannot appear here.
+      skipped[#skipped + 1] = spec
     end
+  end
+  -- Said out loud, and only when it CHANGES, because "I pressed the key and something else
+  -- happened" has three causes that look identical from outside: we never asked for the key,
+  -- we asked and the OS refused, or we had it and gave it up (see _suspendControlHotkeys).
+  -- Only the middle one was ever logged.
+  local line = table.concat(took, " ") .. " | not taken: " .. table.concat(skipped, " ")
+  if line ~= self._hotkeyReport then
+    self._hotkeyReport = line
+    host.log.info(string.format("[keys] '%s' holds: %s", tostring(self.label), line))
   end
 end
 
@@ -1348,6 +1394,15 @@ end
 function Overlay:_suspendControlHotkeys(suspend)
   if suspend == (self._hotkeysSuspended == true) then return end
   self._hotkeysSuspended = suspend
+  -- Logged on every transition, because this is the state in which the overlay deliberately
+  -- owns none of its keys — and an overlay that has silently stopped responding to its own
+  -- hotkeys is indistinguishable from a broken one. It cost a round trip to find once (Alt+V
+  -- reaching REAPER instead of us, because the menu probe was answering a system-wide
+  -- question); it should never cost that again.
+  host.log.info(string.format(
+    "[keys] '%s' %s its per-control hotkeys (menu %s)",
+    tostring(self.label), suspend and "gave up" or "took back", suspend and "open" or "closed"
+  ))
   if suspend then
     for _, id in ipairs(self.controlHotkeys or {}) do
       host.hotkey.unregister(id)
@@ -1397,7 +1452,9 @@ function Overlay:_registerHotkeys()
       for tn, tab in ipairs(c.tabs) do
         if tab.hotkey then
           local n = tn
-          self.registered[#self.registered + 1] = host.hotkey.register(tab.hotkey, function() self:gotoTab(n) end)
+          self.registered[#self.registered + 1] = host.hotkey.register(tab.hotkey, function()
+            afterModifiersReleased(function() self:gotoTab(n) end)
+          end)
         end
       end
     end

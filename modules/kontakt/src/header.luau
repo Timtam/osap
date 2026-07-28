@@ -41,12 +41,22 @@ local function addRackControls(ov, cell)
   -- Kontakt 7 switches rack/single through its VIEW menu and has no such command, and the
   -- button did nothing there.
   --
-  -- Two controls, one key: F10 toggles, so the label has to say which way it will go.
-  -- Whichever is currently visible owns Alt+V — the runtime resolves a shared hotkey to its
-  -- visible claimant at press time, which is exactly this case.
+  -- Two controls, one key, because the toggle has to say which way it will go. Whichever is
+  -- currently visible owns Alt+V — the runtime resolves a shared hotkey to its visible
+  -- claimant at press time, which is exactly this case.
   --
-  -- (Kontakt 8's own "Play View" header button turns the modern view ON; it never toggles,
-  -- which is why there was no way back to the classic one without this.)
+  -- Alt+V used to do nothing here while Enter on the same control worked, which is the fact
+  -- that found the bug: same callback, same F10, one difference — the modifier still under
+  -- the user's finger. A hotkey callback runs WHILE its combination is held, so the F10 it
+  -- sent arrived as Alt+F10, which is not Kontakt's shortcut. The runtime now waits for the
+  -- modifiers to come up first (see afterModifiersReleased), as ReaHotkey does with KeyWait.
+  --
+  -- F10 STAYS, deliberately. Kontakt's header does expose an accessible "Play View" button,
+  -- and clicking that by name looked like the better answer — but F10 was already proven to
+  -- work here and the UIA click was not, and changing both at once produced a state the user
+  -- could not get out of with no way to tell which change caused it. Kontakt's own published
+  -- shortcut is the more conservative dependency anyway: it cannot drift the way a measured
+  -- coordinate can, and unlike the button it is documented to toggle both ways.
   if cell.hasViewToggle then
     ov:addCustomButton({
       label = "Switch to classic view",

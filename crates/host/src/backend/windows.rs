@@ -23,14 +23,16 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT_MOUSE,
     KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, VK_CONTROL, VK_MENU, VK_SHIFT,
+    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, VK_CONTROL, VK_LWIN,
+    VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumChildWindows,
-    EnumWindows, FindWindowW, GetAncestor, GetClassNameW, GetClientRect, GetCursorPos,
+    EnumWindows, GetAncestor, GetClassNameW, GetClientRect, GetCursorPos,
     GetForegroundWindow,
     GetGUIThreadInfo, GetMessageW, GetSystemMetrics, GetWindowRect,
     GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+    GUI_INMENUMODE, GUI_POPUPMENUMODE, GUI_SYSTEMMENUMODE,
     PostThreadMessageW, RegisterClassW, SetCursorPos, SetWindowsHookExW, TranslateMessage,
     EVENT_OBJECT_FOCUS, EVENT_OBJECT_NAMECHANGE, EVENT_SYSTEM_FOREGROUND, GA_PARENT, GUITHREADINFO,
     HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, SM_CXSCREEN, SM_CYSCREEN,
@@ -545,6 +547,13 @@ impl Backend for WindowsBackend {
         MENU_OPEN.store(open, Ordering::Relaxed);
     }
 
+    fn modifiers_down(&self) -> bool {
+        unsafe {
+            let down = |k: u16| (GetAsyncKeyState(k as i32) as u16 & 0x8000) != 0;
+            down(VK_MENU) || down(VK_CONTROL) || down(VK_SHIFT) || down(VK_LWIN) || down(VK_RWIN)
+        }
+    }
+
     fn native_menu_open(&self) -> bool {
         popup_menu_open()
     }
@@ -782,12 +791,26 @@ unsafe extern "system" fn win_event_proc(
 /// `WinExist("ahk_class #32768")` check. While a menu is up, captured navigation
 /// keys must pass through to it: its window is owned by the plugin, so the
 /// foreground window doesn't change and a foreground check alone can't see it.
+/// Is the FOREGROUND application currently in a menu?
+///
+/// This used to ask `FindWindowW("#32768")` — is there a visible popup-menu window ANYWHERE —
+/// and that is a system-wide question answering a local one. Any other application with a menu
+/// open (or a cached menu window that happens to be visible) made it say yes, and once the
+/// overlay believes a menu is up it gives up ALL of its hotkeys so they can reach that menu.
+/// Live consequence: Alt+V stopped reaching the overlay and REAPER's View menu got it instead.
+///
+/// `GetGUIThreadInfo(0, …)` reports the FOREGROUND thread, and its flags say whether that
+/// thread is in menu mode — which is exactly the question. Scoped to the application the user
+/// is actually in, so another program's menu cannot silently disarm us.
 fn popup_menu_open() -> bool {
-    const MENU_CLASS: [u16; 7] = [
-        b'#' as u16, b'3' as u16, b'2' as u16, b'7' as u16, b'6' as u16, b'8' as u16, 0,
-    ];
-    let hwnd = unsafe { FindWindowW(MENU_CLASS.as_ptr(), std::ptr::null()) };
-    !hwnd.is_null() && unsafe { IsWindowVisible(hwnd) != 0 }
+    unsafe {
+        let mut gti: GUITHREADINFO = std::mem::zeroed();
+        gti.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+        if GetGUIThreadInfo(0, &mut gti) == 0 {
+            return false;
+        }
+        gti.flags & (GUI_INMENUMODE | GUI_POPUPMENUMODE | GUI_SYSTEMMENUMODE) != 0
+    }
 }
 
 unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {

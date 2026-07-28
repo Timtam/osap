@@ -121,6 +121,9 @@ impl Backend for StubBackend {
     fn set_captured_keys(&self, _keys: &[(u32, u8)]) {}
     fn set_key_scope(&self, _to_foreground: bool) {}
     fn set_menu_open(&self, _open: bool) {}
+    fn modifiers_down(&self) -> bool {
+        false
+    }
     fn native_menu_open(&self) -> bool {
         false
     }
