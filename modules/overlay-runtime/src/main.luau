@@ -282,6 +282,12 @@ function Overlay:addGraphicalToggle(opts)
     offImage = opts.offImage,
     hotkey = opts.hotkey,
     hint = opts.hint,
+    -- `reveal`: this control lives inside a panel that can be COLLAPSED, and while it is,
+    -- the control is not on screen at all. { at = {x,y}, closedColor = {r,g,b}, settle = ms }
+    -- — the point whose colour says "still closed", which is also the point that opens it.
+    -- See ensureRevealed for why this has to run before the state is READ, not only before
+    -- the control is activated.
+    reveal = opts.reveal,
     -- Optional per-control overrides of the module-wide match robustness defaults.
     tolerance = opts.tolerance,
     scales = opts.scales,
@@ -866,13 +872,48 @@ local function hotspotToggleState(self, c)
   if don <= doff then return "on" else return "off" end
 end
 
+-- How far the probe may drift and still count as "closed".
+local REVEAL_TOLERANCE = 30
+
+-- Opens the panel this control lives in, if it is shut, and then continues.
+--
+-- ReaHotkey binds its ClickFXRack to a Soundiron toggle TWICE — before focus and before
+-- activation — and the doubling is the whole point. A state read taken while the rack is
+-- closed is not "off": the button is not on screen, so the templates match nothing and the
+-- control would report whatever the closed panel happens to look like. Revealing only on
+-- activation would fix the click and leave the announcement lying.
+--
+-- Asynchronous, because we cannot sleep — the 250 ms ReaHotkey spends blocked is a timer
+-- here, and everything after it is a continuation. Which means it can land in a different
+-- world: the continuation re-checks that the overlay is still active on the SAME window,
+-- exactly as the hotspot `points` sequence does, so a reveal started in one plug-in cannot
+-- deliver its answer into another.
+--
+-- Fails OPEN. If the probe cannot be read at all we carry on rather than refuse: a control
+-- that silently stops responding is worse than one that acts on a panel that was already
+-- open, and clicking the probe when it is open is what ReaHotkey's own colour test avoids.
+local function ensureRevealed(self, c, done)
+  local r = c.reveal
+  if not r or not r.at or not r.closedColor then return done() end
+  local ox, oy = originOf(self, c)
+  local px, py = ox + r.at[1], oy + r.at[2]
+  local p = host.screen.pixel(px, py)
+  if not p or colorDist(p, r.closedColor) > REVEAL_TOLERANCE then return done() end
+  if refuseOutside(self, c, px, py) then return end
+  local pinned = self:hwnd()
+  host.input.click(px, py)
+  host.timer.after(r.settle or 250, function()
+    if self.active and self:hwnd() == pinned then done() end
+  end)
+end
+
 -- The value of an image-read control, delivered to `done` when the worker answers.
 --
 -- Same measurement as the synchronous versions above and the same verdict, only off the
 -- main thread: one capture of the control's own region, every template matched against
 -- that single frame. `done(nil)` when there is nothing to say — a toggle whose templates
 -- both miss has no state to report, and inventing one is worse than silence.
-local function valueOf(self, c, done)
+local function valueOfNow(self, c, done)
   local ox, oy = originOf(self, c)
   local opts = {
     region = { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] },
@@ -897,6 +938,13 @@ local function valueOf(self, c, done)
     local pct = sliderPercent(self, c, { cx = hit.x + math.floor(hit.w / 2) })
     done(pct and (tostring(pct) .. " percent") or "not found")
   end)
+end
+
+-- Reading the value REVEALS first, so the region searched is one this control is actually
+-- drawn in. Nothing else changes: the read is still asynchronous and still delivers through
+-- `done`, so the reveal just adds itself to the front of a wait the caller already handles.
+local function valueOf(self, c, done)
+  ensureRevealed(self, c, function() valueOfNow(self, c, done) end)
 end
 
 -- What a toggle should ADD to its announcement once it is in a given state — ReaHotkey's
@@ -1192,12 +1240,16 @@ function Overlay:activate(index)
       host.input.click(cx, cy)
     end
   elseif c.kind == "gtoggle" and c.region then
-    local ox, oy = originOf(self, c)
-    host.input.click(ox + math.floor((c.region[1] + c.region[3]) / 2),
-      oy + math.floor((c.region[2] + c.region[4]) / 2))
-    -- Re-read the new state once the UI redraws. `withHint`: this is the transition, the
-    -- one moment a state hint is worth hearing (see hintFor).
-    if host.timer then host.timer.after(150, function() speakControl(self, i, false, true) end) end
+    -- Reveal first, for the same reason the state read does: a click aimed at a control
+    -- inside a collapsed panel lands on the panel, not the control.
+    ensureRevealed(self, c, function()
+      local ox, oy = originOf(self, c)
+      host.input.click(ox + math.floor((c.region[1] + c.region[3]) / 2),
+        oy + math.floor((c.region[2] + c.region[4]) / 2))
+      -- Re-read the new state once the UI redraws. `withHint`: this is the transition, the
+      -- one moment a state hint is worth hearing (see hintFor).
+      if host.timer then host.timer.after(150, function() speakControl(self, i, false, true) end) end
+    end)
   elseif c.kind == "hotspottoggle" and c.at then
     local px, py = hotspotPoint(self, c)
     if not px then return end
@@ -1740,6 +1792,16 @@ local function report(self, opts)
     end
     if c.kind == "gtoggle" and c.onImage == nil and c.offImage == nil then
       bad("%s has neither `onImage` nor `offImage`", who)
+    end
+    -- A half-declared reveal is the worst of both: it neither opens the panel nor says so,
+    -- and the control then reports a state read off a panel that is not showing it.
+    if c.reveal ~= nil then
+      if c.kind ~= "gtoggle" then
+        bad("%s: `reveal` is only honoured by a graphical toggle", who)
+      elseif type(c.reveal) ~= "table" or c.reveal.at == nil or c.reveal.closedColor == nil then
+        bad("%s: `reveal` needs `at` (the point that both reports and opens the panel) and "
+          .. "`closedColor` (what that point looks like while it is shut)", who)
+      end
     end
     if c.kind == "slider" then
       if c.region == nil then bad("%s has no `region` to look for its thumb in", who) end

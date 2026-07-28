@@ -115,13 +115,37 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
       stops short of its up/down arrows on purpose — an OCRButton CLICKS what it reads, and a
       click on an arrow would step the preset instead of opening the browser.
       **Impact Soundworks complete.**
-- [ ] **Soundiron (3)** — one image toggle ("Reverb") per product, but each is preceded by
-      `ClickFXRack` (`Soundiron.ahk:63-83`): if the FX-rack tab's pixel is still the closed
-      colour, click it and wait 250 ms. So the control needs a `prepare` hook that runs
-      before the state is READ as well as before it is activated — a state read taken while
-      the rack is closed is not "off", it is meaningless. Deliberately NOT designed yet: the
-      hook has to be asynchronous (we cannot sleep), and its contract should be written
-      against the real UI rather than against a guess about it.
+- [x] **Soundiron — Voices Of Gaia** ✓ (2026-07-28), and the design it forced is the point.
+      ReaHotkey opens the FX rack first via `ClickFXRack`, bound to the toggle TWICE (before
+      focus AND before activation) because a state read taken while the rack is closed is not
+      "off", it is meaningless. The runtime grew `reveal` for exactly that — and a calibration
+      shot then showed it cannot be used here: the FX-rack page does not EXPAND, it REPLACES,
+      so the artwork wordmark that identifies the library and anchors every coordinate is gone
+      precisely when it is needed. Measured: of the library area only Kontakt's top bar and
+      the strip below the tabs are pixel-identical across the pages; nothing product-specific
+      survives. So it is ONE OVERLAY PER PAGE (the Cerberus pattern), each gated on a landmark
+      that is actually on its page, Alt+R switching both ways because only one is ever active.
+      The reverb needs no image templates at all: lit (215,21,20) against unlit (113,52,46) is
+      159 apart and the whole 7x7 area separates, so one pixel is safer AND cheaper than a
+      region capture with two templates.
+- [ ] **Soundiron — Mimi Page Light & Shadow and the Voices of Wind family** are installed but
+      unmeasured, and deliberately not declared: an overlay pointing at unverified coordinates
+      announces things it did not do. ReaHotkey's numbers (Mimi Page's toggle at y 462..502
+      with its rack probe at y 652; Voices of Wind at y 663) suggest a TALLER window where the
+      rack coexists with the header — which would be the case `reveal` was built for, and the
+      first chance to find out whether it is right about anything.
+- [x] **Runtime: `reveal` on a graphical toggle** ✓ — the point whose colour says a panel is
+      shut and which also opens it, plus a settle delay. Asynchronous (we cannot sleep through
+      ReaHotkey's 250 ms), so the continuation re-checks that the overlay is still active on
+      the SAME window; fails OPEN, because a control that silently stops responding is worse
+      than one that clicks an already-open panel. Unused so far — see above.
+- [ ] **A tab row need not sit at the same height on every page it appears on.** Kontakt's
+      does not: y 504..522 on the Performance page, y 497..512 on the FX rack. A click authored
+      from the wrong page's shot landed 9 px low on background and did nothing — and the same
+      slip produced a FALSE MEASUREMENT, reading the background under a tab and concluding the
+      tab never changes colour. Worth remembering as a class: when two states of one UI are
+      being measured, a coordinate taken from the other state's picture is not an
+      approximation, it is a different place.
 - [x] **Audio Imperia — module started, Chorus measured and verified** (`modules/audio-imperia`,
       `com.platform.audio-imperia`). Its wordmark templates still match the current UI
       exactly, unlike its coordinates. ✓ (2026-07-27)
