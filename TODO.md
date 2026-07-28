@@ -276,10 +276,21 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
       Of Gaia keeps its own because it is a different layout (7x17 reverb template at another
       offset), which is also why its tile does not match Adey's — the one comparison that had
       been mistaken for evidence that collages are per product.
-- [ ] **Voices of Wind Audrey and Kimba still need their Performance-page landmarks.** Their FX
-      rack is already covered for free by the shared overlay; what is missing is only the
-      artwork wordmark that identifies each product on its own page, and the FX-rack tab button
-      that sits relative to it. One shot each.
+- [x] **Voices of Wind Audrey and Kimba — DONE, and cut a different way on purpose.** All three
+      Wind products draw "Voice of Wind" identically and differ only in the name below it, so a
+      landmark around the shared line would match all three and one around the artwork would
+      depend on the artwork — which is exactly what had just failed on Mimi Page. Both are cut
+      around the NAME alone and masked to its strokes: Audrey 2007 px (blue dominant by >80,
+      text reads (91,117,243)), Kimba 2201 px (darker than 100 on pale blue). One exact match
+      each across 30 shots. They also get the articulation read-out Adey cannot have — same
+      field, drawn here in plain sans-serif instead of handwriting, so OCR is the right tool
+      rather than the wrong one.
+- [ ] **Adey's own landmark is still 200x165 of pure watercolour.** It works and is verified not
+      to match its siblings, but it is the one shape this file now argues against, and it has no
+      lettering to fall back on: the name "Adey" is pink script over pink watercolour, which is
+      why the artwork route was taken in the first place. Re-cutting it around the name with a
+      colour mask is the obvious try; if the contrast is too low, this is the library that
+      justifies keeping an artwork landmark and saying so.
 - [x] **Is the FX-slot artwork stable? YES — across products AND patches.** Checked on a
       second patch ("Mimi Page Phrases 140BPM") after the first patch of the same library had
       just broken the Performance-page wordmark, so the question was live. The whole FX-rack

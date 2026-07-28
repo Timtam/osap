@@ -143,9 +143,9 @@ local MIMI = {
 -- font every time, so a picture of each vowel would be exact where OCR is hopeless), or an OCR
 -- engine that handles handwriting, addressed only where a module asks for it.
 --
--- ReaHotkey has a single "Voices of Wind Collection" overlay, but this landmark is 200x165 of
--- watercolour artwork specific to Adey and will not match Audrey or Kimba — so it is declared
--- per product, like Audio Imperia's eleven, and the other two await their own shots.
+-- ReaHotkey has a single "Voices of Wind Collection" overlay; ours is per product, like Audio
+-- Imperia's eleven. Adey's landmark is 200x165 of watercolour artwork, verified not to match
+-- either sibling — but see the note on those two for why that is the shape NOT to copy.
 local ADEY = {
   name = "Voice Of Wind Adey",
 
@@ -155,6 +155,41 @@ local ADEY = {
     articulation = { -192, 267, 32, 305 },
   },
 
+}
+
+-- ── Voices of Wind Audrey and Kimba: the NAME is the landmark, not the picture ──
+-- These two share their whole GUI with Adey, wordmark included: "Voice of Wind" is drawn
+-- identically on all three and only the name below it differs — "Audrey" in blue italic,
+-- "Kimba" in dark navy. So a landmark cut around the shared line would match all three, and one
+-- cut around the artwork would depend on the artwork.
+--
+-- Adey's is the second of those, 200x165 of pure watercolour, and it works: checked, it matches
+-- neither sibling. But it is the shape that had just failed on Mimi Page, where a backdrop
+-- redrawn ~20 brighter for a different patch cost the overlay entirely, and Adey's has no
+-- lettering to fall back to. So these two are cut around the NAME ALONE and masked to its
+-- strokes — 2007 px for Audrey (blue dominant over red and green by more than 80; the text
+-- reads (91,117,243)), 2201 for Kimba (darker than 100 against pale blue). Each matches exactly
+-- once across 30 shots, and neither can be broken by repainting the picture behind it.
+--
+-- Their reverb needs nothing declared here: the FX rack page is the shared one below.
+--
+-- The articulation IS declared, and that is a difference from Adey rather than an inconsistency
+-- with it. Adey's reads in a handwritten script that defeated both OCR engines, and the control
+-- was removed rather than shipped wrong. These two draw the same information in a plain
+-- sans-serif — "Legato - Ah" — which is what OCR is for. Same library family, different GUI
+-- generation, and the deciding factor is legibility rather than which product it is.
+local AUDREY = {
+  name = "Voice Of Wind Audrey",
+  landmark = "images/VoiceOfWindAudrey/Wordmark.png",  -- found at (569,412)
+  articulation = { 26, 88, 181, 116 },
+  fxRackTab = { -120, 255, 60, 310 },                  -- tab found at (-87, 273)
+}
+
+local KIMBA = {
+  name = "Voice Of Wind Kimba",
+  landmark = "images/VoiceOfWindKimba/Wordmark.png",   -- found at (609,425)
+  articulation = { -14, 75, 141, 103 },
+  fxRackTab = { -160, 240, 20, 300 },                  -- tab found at (-127, 260)
 }
 
 -- ── The FX rack page belongs to no product, so neither does its overlay ───────
@@ -356,6 +391,27 @@ return {
       })
     end)
 
+    for _, lib in ipairs({ AUDREY, KIMBA }) do
+      kontakt.library(lib.name, img(lib.landmark), function(ov)
+        ov:addStaticText(lib.name)
+        -- `readOnly` for the same reason as Mimi Page's: activating it would open a dropdown no
+        -- screen reader can read, which is a worse place to be than the page you started on.
+        ov:addOCRButton({
+          label = "Articulation",
+          region = lib.articulation,
+          readOnly = true,
+          hotkey = "Alt+B",
+        })
+        ov:addGraphicalButton({
+          label = "FX rack page",
+          image = img(TABS.fxRack),
+          region = lib.fxRackTab,
+          scales = { 1.0 },
+          hotkey = "Alt+R",
+        })
+      end)
+    end
+
     -- The FX rack page, ONE overlay for every product that draws it. Two-overlay-per-library
     -- shape as with Gaia, and for the same reason — the artwork wordmark that identifies a
     -- library is not drawn on this page, so an overlay gated on it would deactivate at the
@@ -383,7 +439,7 @@ return {
     end)
 
     host.log.info(
-      "Soundiron: Voices Of Gaia (2 pages) + Adey + Mimi Page + a shared FX rack ready."
+      "Soundiron: Gaia (2 pages) + Adey + Mimi Page + Audrey + Kimba + a shared FX rack ready."
     )
   end,
 }
