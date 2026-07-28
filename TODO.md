@@ -216,6 +216,99 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
         want the list, and arrow-key stepping now exists (the slider owns Left/Right), so
         that is the natural place to build on when either is ported.
 
+## Kontakt — open threads from the Soundiron port (2026-07-28)
+
+- [ ] **The status-bar toggles must report their STATE, not just act.** Side pane, info pane
+      and keyboard are toggles announced as plain buttons, so pressing one tells you nothing
+      about which way it went — the same defect as a `readOnly` OCR control calling itself a
+      button, and the same rule: a control must not be less informative than what it does.
+      Wanted as checked/unchecked or expanded/collapsed. A cheap and reliable source is
+      already to hand: each panel changes the PLUGIN WINDOW'S OWN SIZE, measured at 1010x679
+      with the side pane open against 664x679 with it closed, and the keyboard changes the
+      height the same way. So the state is readable from the origin rather than from a pixel
+      or a UIA property — no new measurement, and nothing that drifts with a theme. Verify
+      before building: a window resized for another reason must not read as a toggled panel.
+- [ ] **In the instrument EDIT view the play-view overlay is shown.** The view probe reads
+      Edit Mode as "classic" in a calibration shot (brightness 99), so this is not simply the
+      probe being wrong — Edit Mode is a THIRD state the two-way classic/play question cannot
+      express. The likely answer is the one the user proposed: its own overlay, which also
+      gives the collapsed Insert / Send / Main Effects sections somewhere to live.
+- [x] **ReaHotkey's Soundiron probes fit a TALLER Kontakt window.** CONFIRMED, 2026-07-28. The
+      hypothesis was right in full: Alt+9 grew the window from 664x679 to 664x965 and the
+      "Performance | FX Rack" row appeared at y 675..694 — ReaHotkey's published 663 plus the
+      Kontakt 8 offset of 29 is 692, inside it. Adey now has both pages and its reverb; see
+      below for what is still owed.
+
+## Kontakt — growing the window was one-way (2026-07-28)
+
+- [x] **FIXED by clamping, after three other routes were measured and failed.** Pressing
+      "taller" twice took the plug-in from 679 to 965 px, and at 965 the grip was unreachable:
+      the plug-in's view ended at y 1069, the host's own window content at ~1024, and the
+      taskbar began at ~1030, so the grip — 21 px in from the plug-in's bottom-right corner —
+      had passed under both. What did NOT work, each measured from window rectangles: resizing
+      the host's FX window (it shrank to 812 and the plug-in stayed 965 — the host passes no
+      size down); `SetWindowPos` on Kontakt's own Qt window (ignored, snapped straight back);
+      a drag aimed where the grip should have been (it went to the taskbar). Kontakt resizes
+      through that grip and nothing else. The fix is therefore to never let it leave the
+      screen: `host.screen.workArea()` was added to the backend and the growth step is clamped
+      to keep the grip inside it, refusing with a spoken reason when there is no room.
+      Resize controls are also gated on classic view now (8 of 27 shots have a grip, all
+      classic; 13 play-view shots at the same height have none).
+- [ ] **The window currently open is still 965 px and still stuck.** The clamp prevents this
+      state, it does not undo it. Recovering an already-stuck window needs the host window
+      lifted so the corner clears the taskbar, the grip dragged, and the host put back — which
+      our own app can do (it acts only while the plug-in has focus, so it owns the foreground)
+      but an outside script cannot: `SetForegroundWindow` from a background process is refused
+      by Windows, which is what stopped the attempt. Only worth building if the state recurs.
+
+## Soundiron — owed after Adey's reverb (2026-07-28)
+
+- [x] **Mimi Page's reverb — DONE, and it changed the design.** Its FX rack turned out to be
+      Adey's page to the pixel (tile at y 383, reverb at y 500, the same (-84,+117) between
+      them; the only difference between the two captures is the 346 px an open browser shifts
+      everything). The overlay gated on that page's collage therefore announced "Voice Of Wind
+      Adey, FX rack" over an instrument rack reading "Mimi Page Legato". Fixed by making it ONE
+      shared overlay named "Soundiron, FX rack" — the page carries no product identity, so the
+      overlay must not claim one. Which library is loaded is on Kontakt's own instrument header,
+      already read by the header overlay.
+- [x] **One shared Soundiron FX-rack overlay instead of one per product?** Answered by the
+      above, and not as a matter of taste: per product was WRONG, not merely redundant. Voices
+      Of Gaia keeps its own because it is a different layout (7x17 reverb template at another
+      offset), which is also why its tile does not match Adey's — the one comparison that had
+      been mistaken for evidence that collages are per product.
+- [ ] **Voices of Wind Audrey and Kimba still need their Performance-page landmarks.** Their FX
+      rack is already covered for free by the shared overlay; what is missing is only the
+      artwork wordmark that identifies each product on its own page, and the FX-rack tab button
+      that sits relative to it. One shot each.
+- [x] **Is the FX-slot artwork stable? YES — across products AND patches.** Checked on a
+      second patch ("Mimi Page Phrases 140BPM") after the first patch of the same library had
+      just broken the Performance-page wordmark, so the question was live. The whole FX-rack
+      page is byte-identical: tile at (761,383), reverb at (677,500), Performance tab at
+      (354,605), the same numbers Mimi Page Legato gives. Nothing here needs masking.
+- [ ] **Check every PERFORMANCE-page wordmark the way Mimi Page's had to be checked.** Loading
+      a second patch of that library ("Phrases 140BPM") produced NO overlay: the dark artwork
+      behind the lettering is drawn ~20 brighter in that patch, which put 29 of 17480 pixels
+      outside tolerance while the lettering itself was identical to the byte. Fixed by masking
+      the template to pixels brighter than 180 (6705 of them, all text, unique across 28 shots)
+      — 150 was tried first and shipped broken, because exactly ONE antialiased pixel was 22
+      away against a tolerance of 20 and the verifier had sampled 600 of the 9111.
+
+      The FX-rack check above narrows where this can happen: it is the LIBRARY'S OWN BACKDROP
+      that shifts, and only Performance pages have one. Ranked by how much of each template is
+      artwork rather than lettering, worst first — Talos 94%, Nucleus 94%, CSS Strings 92%,
+      Solo 87%, Chorus 83%, Dolce 81%, CSB 81%, Glade 77%, Areia 76%, Gaia's tile 67%, Gaia's
+      wordmark 58%, Jaeger 42%. Each needs one shot of a second patch.
+
+      Voice Of Wind Adey is a separate case and possibly a worse one: 0% dark, because it is
+      33000 px of pure watercolour with no lettering to mask down to. If its backdrop shifts
+      there is nothing to fall back on, and the fix would have to be something else entirely.
+- [ ] **A landmark that stops matching fails SILENTLY.** No overlay, no announcement, no log
+      line saying which gate was tried and how close it came — the user reported it, nothing
+      here noticed. That is the worst shape a failure can have for someone who cannot see the
+      screen: indistinguishable from "this library is not supported". Wanted: when an overlay's
+      landmark misses while its plug-in IS on screen, log the best match score and where, so
+      the next one of these is a lookup instead of an investigation.
+
 ## Decided against (so it is not reopened as an oversight)
 
 - **Generating landmark templates on the user's machine instead of shipping crops.** Raised

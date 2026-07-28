@@ -26,8 +26,19 @@
 -- from something that is not on screen.
 --
 -- `reveal` stays in the runtime, so far unused: it is right for a panel that expands WITHOUT
--- replacing the anchor, and ReaHotkey's remaining numbers hinted at that shape. A shot of
--- Mimi Page settled it — see below, it is a third shape again.
+-- replacing the anchor, and no page here is that shape. It was nearly extended to search for a
+-- moving probe by image, for this very tab row, and that was dropped for the same reason it is
+-- unused — with one overlay per page there is nothing to reveal. The overlay gated on the
+-- wordmark would deactivate at the instant the reveal succeeded.
+--
+-- ── Two products got here late, and the reason is worth keeping ───────────────
+-- Adey and Mimi Page were shipped without their reverbs and with a comment explaining that the
+-- FX rack "does not exist" in this version of the libraries. It did. Their windows were 679 px
+-- tall and the tab row sits at y 675..694, so every shot stopped just above the evidence, and a
+-- picture that stops above a thing cannot be cited for its absence. Making the window taller
+-- put the row on screen at the exact y ReaHotkey has always published. Both retracted comments
+-- are kept in place below rather than deleted, because the mistake is more instructive than the
+-- fix: the shot was real, the reading of it was careful, and the conclusion was still wrong.
 --
 -- ── Why none of ReaHotkey's coordinates could be carried over ─────────────────
 -- Its numbers are plugin-absolute with a per-host offset table, and the shot shows why that
@@ -39,13 +50,20 @@ local kontakt = host.require("com.platform.kontakt")
 local function img(rel) return host.path(rel) end
 
 -- Measured on Voices Of Gaia (Kontakt 8 in REAPER, browser open, 1010x679 of content).
--- ── Mimi Page Light & Shadow: ReaHotkey's control does not exist here ────────
--- ReaHotkey gives this product the same Reverb toggle, with an FX-rack probe at y 652. The
--- calibration shot says there is nothing of the sort: the instrument panel ends at y 570 with
--- the keyboard directly below, there is no "Performance | FX Rack" tab row at all, and no
--- scrollbar (the right edge is a uniform 0x1a top to bottom). So there is no FX page to open,
--- nothing to reveal, and no reverb to toggle — ReaHotkey's numbers describe a layout this
--- version of the library does not have, the same way its Kontakt coordinates had drifted.
+-- ── Mimi Page Light & Shadow: the reverb IS there, and this block twice said otherwise ──
+-- First it said the FX rack "does not exist here", on the strength of a shot in which no tab row
+-- appears. Then, once Adey disproved that, it said the reverb was probably there but would not
+-- be written until measured. Both are now settled by a picture: with the window made taller the
+-- tab row is at y 675..694, exactly where Adey's is, and the FX rack behind it is the same page
+-- down to the pixel — tile at y 383, reverb at y 500, the same offset between them.
+--
+-- So the reverb is ported, and NOT from this table: it lives on the shared FXRACK overlay below,
+-- because measuring it is what proved the page carries no product identity at all. Refusing to
+-- write it until there was a shot was right; what the shot then showed was that the entry did
+-- not belong here in the first place.
+--
+-- What stays here is this library's own page, and the one thing on it a blind user cannot
+-- otherwise reach:
 --
 -- Rather than ship a control that clicks into a keyboard, this overlay offers the one piece of
 -- state in that GUI a blind user cannot get at any other way: the articulation field, which
@@ -55,17 +73,60 @@ local function img(rel) return host.path(rel) end
 -- the dropdown, and a dropdown a screen reader cannot read is a worse place to be than the
 -- page you started on — and a `readOnly` control is announced with no control type at all,
 -- rather than as a "button" it would be unable to honour.
+-- The wordmark is MASKED to its lettering, and that is not a refinement — without it this
+-- overlay does not appear at all on a second patch of the same library.
+--
+-- Loading "Mimi Page Phrases 140BPM" produced no overlay whatsoever. The wordmark was on screen,
+-- in the same place, and the template still missed: of 17480 pixels, 29 were outside tolerance,
+-- 27 of them in one 8x7 corner. Reading the actual values explained it — the dark ARTWORK behind
+-- the lettering is a uniform ~20 brighter in that patch (39 against 59, 44/63, 45/60), while the
+-- lettering itself is identical to the byte (255 against 255). The library redraws its backdrop
+-- slightly differently per patch and leaves the wordmark alone.
+--
+-- So the template keeps only what actually identifies the library: pixels brighter than 180,
+-- which is 6705 of 17480 — text and nothing else. Unique across 28 shots (it matches four, all
+-- of them Mimi Page, including both captures of the patch that started this) without depending
+-- on a backdrop that was never the point. Contrast the earlier attempt at masking Kontakt's
+-- FX-rack tab, where the same idea left 78 opaque pixels and matched several hundred places:
+-- the technique is only as good as what survives it.
+--
+-- The threshold is 180 and not 150 because the first attempt SHIPPED BROKEN and was reported
+-- broken. At 150 the mask kept 9111 pixels, of which exactly ONE — an antialiased edge — was
+-- 22 away against a tolerance of 20, and one pixel is the whole difference between an overlay
+-- and no overlay. It read as verified because the tool used to check it sampled ~600 of those
+-- 9111. A subsampled comparison is a safe FILTER, since missing pixels can only add false
+-- candidates, and a worthless VERDICT. It now confirms every candidate against every opaque
+-- pixel, which is what the runtime does.
+--
+-- Two things follow. Artwork wordmarks are landmarks for the TEXT printed on them, not for the
+-- picture; and a landmark that stops matching is a SILENT failure — no overlay, no message, no
+-- log line saying why — which is why this one had to be reported by the user rather than noticed
+-- here. Worth a look at the other libraries' wordmarks before it happens again.
 local MIMI = {
   name = "Mimi Page Light & Shadow",
-  -- "LIGHT & SHADOW", the distinctive line of the artwork wordmark; verified to match once.
+  -- "MIMI PAGE / LIGHT & SHADOW", the artwork wordmark, masked to its lettering (see above).
   landmark = "images/MimiPage/Wordmark.png",
   articulation = { -115, 114, 165, 152 },
 }
 
--- ── Voice Of Wind Adey: no FX page either, and an OCR target in CURSIVE ─────
--- Same finding as Mimi Page — the panel ends at y 570 with the keyboard below and there is no
--- tab row, so ReaHotkey's rack probe at y 663 has nothing to probe. Its Reverb toggle is again
--- unportable, and again the substitute is the articulation, here "Legato - Ah": the vowel
+-- ── Voice Of Wind Adey: the FX page IS there, and this comment used to deny it ──
+-- What stood here was: "the panel ends at y 570 with the keyboard below and there is no tab
+-- row, so ReaHotkey's rack probe at y 663 has nothing to probe." Every word of that was read
+-- off a calibration shot, and the conclusion was still wrong. The window was 664x679 of
+-- content and the tab row sits at y 675..694 — INSIDE the instrument's own GUI, below the
+-- bottom of a window that short. It was never absent, only cut off, and "there is no tab row"
+-- is a claim a picture that stops above it cannot support.
+--
+-- ReaHotkey's y 663 + the Kontakt 8 offset of 29 = 692 lands in that row. Its number had not
+-- drifted; nothing about this library had changed. Three explanations came before that one —
+-- the library's own strip, drifted coordinates, a changed Kontakt frame — and the measurement
+-- that settled it was making the window taller and looking again.
+--
+-- What follows is therefore the reverb ReaHotkey ships, ported. The articulation read-out below
+-- stays gone for its own unrelated reason:
+--
+-- ── The articulation, an OCR target in CURSIVE ───────────────────────────────
+-- The substitute control was the articulation, here "Legato - Ah": the vowel
 -- within the loaded patch, which nothing else states (Kontakt's own rack names the PATCH,
 -- "Adey Legato", which is different information).
 --
@@ -87,8 +148,89 @@ local MIMI = {
 -- per product, like Audio Imperia's eleven, and the other two await their own shots.
 local ADEY = {
   name = "Voice Of Wind Adey",
-  landmark = "images/VoiceOfWindAdey/Wordmark.png",
-  articulation = { -192, 267, 32, 305 },
+
+  -- PERFORMANCE PAGE. Landmark: the watercolour wordmark, matched at (247,187) in the tall shot.
+  performance = {
+    landmark = "images/VoiceOfWindAdey/Wordmark.png",
+    articulation = { -192, 267, 32, 305 },
+  },
+
+}
+
+-- ── The FX rack page belongs to no product, so neither does its overlay ───────
+-- This was written first as ADEY.fxRack, gated on one tile of the FX-slot collage on that page,
+-- and the reasoning looked sound: Voices Of Gaia's tile does not match Adey's page, so the
+-- collages must be per product. Then Mimi Page's FX rack was opened and our overlay announced
+-- "Voice Of Wind Adey, FX rack" over an instrument rack that plainly read "Mimi Page Legato".
+--
+-- The collage is IDENTICAL on both. So is everything else: measured, the tile sits at y 383 in
+-- both shots and the reverb at y 500, giving the same tile-to-reverb offset of (-84, +117) to
+-- the pixel; the only difference between the two captures is the 346 px the open browser shifts
+-- everything, and two reverb settings the user can change. The controls were right the whole
+-- time. Only the NAME was wrong, and a name is not a small thing when it is the one sentence
+-- spoken to someone who cannot see which library is loaded.
+--
+-- One comparison was mistaken for a rule. Gaia differs because it is a DIFFERENT LAYOUT — a
+-- 7x17 reverb template at another offset — not because collages are per product. So this page
+-- gets one overlay for every product that draws it, named for what it can actually establish:
+-- Soundiron, the FX rack. Which product is loaded is not on this page, and Kontakt's own
+-- instrument header — already read by the header overlay above — is where that answer lives.
+--
+-- It covers Voices of Wind Audrey and Kimba too, unshot and unmeasured, for the same reason it
+-- covers Mimi Page: nothing here is per product.
+--
+-- Nor is anything here per PATCH, which had to be checked rather than assumed — the very next
+-- thing that happened after this overlay was written was a second patch of Mimi Page failing to
+-- match its Performance-page wordmark at all. This page came through byte-identical: tile at
+-- (761,383), reverb at (677,500), Performance tab at (354,605), the same numbers the first
+-- patch gives. The difference is what the two pages are made of. A Performance page is the
+-- library's own backdrop with a wordmark printed on it, and the backdrop is redrawn per patch;
+-- an FX rack is flat Kontakt chrome with fixed slot graphics on it. Being 80% artwork did this
+-- template no harm, because it is artwork nobody repaints.
+local FXRACK = {
+  name = "Soundiron FX rack",
+  landmark = "images/FxRack/Tile.png",
+
+  -- The reverb insert's bypass, as two templates rather than Gaia's single pixel — this switch
+  -- is a red bar with an ON/OFF legend, not a lit dot, and it is one ReaHotkey already
+  -- publishes. Its own ReverbOn.png matched our capture at (331,500), exactly inside the search
+  -- rect it declares (x 324..344, y 491..531), which is as direct a confirmation of a ported
+  -- coordinate as this project has had: two tools, two capture paths, one pixel.
+  --
+  -- ReverbOff was NOT verifiable when this was written — there was no shot of the reverb
+  -- switched off, and there could not be, since switching it off needs this control. It was
+  -- shipped with a safe failure mode (a graphical toggle whose templates both miss reports
+  -- NOTHING rather than guessing) and confirmed on the first press: the switch's mean red fell
+  -- from 173 to 77 while the delay bypass beside it stayed at ~95, so the change was the
+  -- control and not the lighting.
+  reverb = { -91, 108, -71, 148 },
+  reverbOn = "images/FxRack/ReverbOn.png",
+  reverbOff = "images/FxRack/ReverbOff.png",
+}
+
+-- The two tabs, FOUND rather than placed — and shared by both Adey pages, so they are declared
+-- once here rather than per product.
+--
+-- Found, because the row moves in both axes: its y follows the height of whatever GUI the
+-- library draws above it, its x follows whether Kontakt's browser is open. A fixed point cannot
+-- address it, which is why ReaHotkey's probe reads the right colour in a window of the right
+-- size and lands one row below the tab in ours.
+--
+-- One template each, because the row is drawn identically for every Soundiron product measured
+-- so far: Adey's and Gaia's crops of it differ by nothing at all once aligned — 0 pixels over
+-- tolerance at a 2-px x shift, which was the entire reason two separate templates appeared to
+-- be needed. Cutting them 2 px apart is not evidence of two things.
+--
+-- And each template is a STATE as much as a place. An unselected tab is filled with a fixed
+-- grey ramp (100, 91, 89, 87, 86, 84, 83, 81, 79, 77, 75, 74, 72, 64); the selected one is
+-- filled with its own page's background instead, so it matches nothing. That means each button
+-- is found exactly when it is the one you can usefully press — the FX-rack tab is invisible to
+-- the search once you are on the FX rack — and "not found" is the honest report for a tab you
+-- are already standing on. ReaHotkey encodes the same fact as an equality test against
+-- 0x565656, one sample of that ramp.
+local TABS = {
+  fxRack      = "images/fxrack-tab.png",
+  performance = "images/performance-tab.png",
 }
 
 local GAIA = {
@@ -178,17 +320,70 @@ return {
         readOnly = true,
         hotkey = "Alt+B",
       })
+      -- The way to the FX rack, added before anything on that page has been measured — which
+      -- is the order this project works in rather than an oversight. The page cannot be
+      -- photographed until someone can reach it, and the person who has to reach it cannot use
+      -- a mouse. So the switch comes first and the reverb follows from the picture it makes
+      -- possible, exactly as it went for Voices Of Gaia and then for Adey.
+      --
+      -- Measured on the 1010x965 shot: wordmark at (493,398), tab at (482,675).
+      ov:addGraphicalButton({
+        label = "FX rack page",
+        image = img(TABS.fxRack),
+        region = { -40, 260, 140, 315 },   -- tab found at (-11, 277), 126x20
+        scales = { 1.0 },
+        hotkey = "Alt+R",
+      })
     end)
 
-    kontakt.library(ADEY.name, img(ADEY.landmark), function(ov)
+    kontakt.library(ADEY.name, img(ADEY.performance.landmark), function(ov)
       ov:addStaticText(ADEY.name)
       -- The articulation read-out lived here and was removed; see the note above. Its measured
       -- region is kept, because it is the region whichever mechanism replaces OCR will need:
-      -- ADEY.articulation = { -192, 267, 32, 305 }, landmark-relative.
+      -- ADEY.performance.articulation = { -192, 267, 32, 305 }, landmark-relative.
+      --
+      -- The region is small and wordmark-relative on purpose. Kontakt loads several instruments
+      -- into one rack and each draws its OWN tab row: a shot with two of them has a second row
+      -- 557 px above this one, and a search across the whole plug-in would find whichever came
+      -- first rather than this instrument's. Anchoring to this instrument's wordmark and looking
+      -- only just below it cannot pick up the neighbour's.
+      ov:addGraphicalButton({
+        label = "FX rack page",
+        image = img(TABS.fxRack),
+        region = { -140, 470, 20, 525 },   -- tab found at (-111, 488), 126x20
+        scales = { 1.0 },                  -- fixed-size chrome; multi-scale invents hits
+        hotkey = "Alt+R",                  -- same key as Gaia's, and the same journey
+      })
+    end)
+
+    -- The FX rack page, ONE overlay for every product that draws it. Two-overlay-per-library
+    -- shape as with Gaia, and for the same reason — the artwork wordmark that identifies a
+    -- library is not drawn on this page, so an overlay gated on it would deactivate at the
+    -- moment of arrival. What is different here is that the second overlay is shared; see the
+    -- note on FXRACK.
+    kontakt.library(FXRACK.name, img(FXRACK.landmark), function(ov)
+      ov:addStaticText("Soundiron, FX rack")
+      ov:addGraphicalToggle({
+        label = "Reverb",
+        region = FXRACK.reverb,
+        onImage = img(FXRACK.reverbOn),
+        offImage = img(FXRACK.reverbOff),
+        hotkey = "Alt+B",
+      })
+      ov:addGraphicalButton({
+        label = "Performance page",
+        image = img(TABS.performance),
+        -- Tab found at (-407, 222), 126x20. The left edge is -415 and not a round number more:
+        -- that is exactly the plug-in's own left edge, and a search rect that starts outside the
+        -- window is a rect the capture has to clamp or refuse.
+        region = { -415, 205, -260, 260 },
+        scales = { 1.0 },
+        hotkey = "Alt+R",
+      })
     end)
 
     host.log.info(
-      "Soundiron: Voices Of Gaia (2 pages) + Mimi Page Light & Shadow + Voice Of Wind Adey ready."
+      "Soundiron: Voices Of Gaia (2 pages) + Adey + Mimi Page + a shared FX rack ready."
     )
   end,
 }
