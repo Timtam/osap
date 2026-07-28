@@ -34,6 +34,26 @@ local kk = host.tryRequire("com.platform.komplete-kontrol")
 -- split: a LIBRARY overlay has to keep Tab for its own controls (see addStandaloneHeader),
 -- so on a standalone Kontakt with a library loaded that pass-through is off, and without
 -- these the whole rack is unreachable — which is exactly what the user found.
+-- The wrench templates, resolved ONCE and reported, because whose module resolves them is
+-- the open question. This file is `host.include`d by the Kontakt module, but the Kontakt
+-- module is a CODE module — its source is evaluated inside every dependent library's VM. If
+-- `host.path` answers with the VM OWNER's root rather than the defining module's, then inside
+-- a library's VM these become <that library>/images/… , which do not exist, `load_template`
+-- errors, and the whole search call fails before it starts. That would look exactly like what
+-- was measured: the calibrator (running on Kontakt's own overlay) finds the button, while
+-- focusing the same control on a LIBRARY overlay produces a "searching…" line and no result
+-- at all. Logged once so the answer is a fact rather than another theory.
+local editImagesCache
+local function editImages()
+  if editImagesCache then return editImagesCache end
+  editImagesCache = {
+    host.path("images/instrument-edit-frame.png"),
+    host.path("images/instrument-edit-active-frame.png"),
+  }
+  host.log.info("[gbutton] wrench templates resolve to: " .. editImagesCache[1])
+  return editImagesCache
+end
+
 local function addRackControls(ov, cell)
   -- The view toggle, by Kontakt's OWN keyboard shortcut (F10) rather than through its
   -- menu: the menu entry reads "Switch to Classic View   F10", and a shortcut the
@@ -119,10 +139,7 @@ local function addRackControls(ov, cell)
     -- trustworthy and therefore the one most likely to be believed.
     rawOrigin = true,
     region = { 0, 40, 1010, 260 },
-    image = {
-      host.path("images/instrument-edit-frame.png"),
-      host.path("images/instrument-edit-active-frame.png"),
-    },
+    image = editImages(),
     -- ONE SCALE, and not a micro-optimisation. The module-wide default searches ten scales
     -- from 0.67 to 2.0, right for a library's ARTWORK at whatever zoom the plug-in is set to
     -- and wrong for a fixed-size button in the host's chrome: measured, this template has ZERO

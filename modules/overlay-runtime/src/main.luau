@@ -985,6 +985,11 @@ local function valueOfNow(self, c, done)
   -- gets no extra word (ReaHotkey's States maps found to ""); absent has to be said, because
   -- the alternative is a button that announces itself normally and then does nothing.
   if c.kind == "gbutton" then
+    -- Logged BEFORE the search, not only after it fails. Six rounds went into why this control
+    -- could not find its button, and the last report — Enter pressed, nothing in the log at
+    -- all — says the question was wrong: a search that never STARTS looks exactly like one
+    -- that starts and finds nothing, and only one of those is about templates.
+    host.log.info(string.format("[gbutton] '%s' searching…", tostring(c.label)))
     host.screen.imageSearchAsync(asList(c.image), opts, function(hit)
       if not hit then
         -- "not found" is the whole value of this control type, so when it says that, it has to
@@ -1351,6 +1356,7 @@ function Overlay:activate(index)
       if host.timer then host.timer.after(150, function() speakControl(self, i, false, true) end) end
     end)
   elseif c.kind == "gbutton" and c.region and c.image then
+    host.log.info(string.format("[gbutton] '%s' activated", tostring(c.label)))
     -- Located, then clicked, and never clicked unlocated. The search is asynchronous, so this
     -- is a continuation: it re-checks that the overlay is still active on the SAME window,
     -- exactly as the hotspot `points` sequence and the panel reveal do, because a click
