@@ -37,6 +37,12 @@ local MATCH_SCALES = { 1.0, 0.9, 1.1, 0.8, 1.2, 1.25, 0.75, 1.5, 0.67, 2.0 }
 -- introduced (verified: no bare specificity numbers remain outside the runtime).
 O.layer = { chrome = 10, base = 20, content = 30, dialog = 40 }
 
+-- How long after a control that OPENS a menu fires the menu watch keeps looking for a
+-- self-drawn one at full rate. Declared here rather than beside the watch because
+-- _menuOpening (far above it) is what sets the deadline.
+local MENU_PLAUSIBLE_MS = 8000
+local menuPlausibleUntil = 0
+
 -- The width and height of an origin's CONTENT, which is what coordinates are measured
 -- against — `client` for a window that has a frame, falling back to the window rect for
 -- anything that does not report one. An embedded plugin's control is borderless, so the
@@ -1280,6 +1286,10 @@ function Overlay:_menuOpening()
   if not self.active then return end
   host.keys.menuOpen(true)
   self:_suspendControlHotkeys(true)
+  -- Tells the menu watch that a self-drawn menu is now plausible, so its expensive
+  -- accessibility walk is worth running at full rate for a while. Outside that window the
+  -- walk drops to a backstop cadence — see watchMenus for what it costs.
+  menuPlausibleUntil = host.now() + MENU_PLAUSIBLE_MS
   -- The watch is what LOWERS the flag again, by seeing that no menu is there. An overlay
   -- that isn't watched has nothing to lower it — and a stranded suspension is an overlay
   -- whose every hotkey has silently stopped working, with nothing to tell the user why. So
@@ -1576,7 +1586,19 @@ end
 -- host arbiter, which decides — by specificity, across every overlay on that slot
 -- — whether this overlay activates; otherwise the overlay activates/deactivates
 -- itself directly (the legacy single-overlay path).
+-- A recheck, timed IN ITS PARTS.
+--
+-- Seven attempts to name the cost from outside — the arbiter, timer resolution, the menu
+-- watch, uncoalesced events, the template cache, Lua table conversion, screen pixels — and
+-- every one of them was wrong, while the dispatch measurement kept saying the same thing:
+-- eight callbacks, forty to sixty milliseconds each. The mistake was reasoning about WHICH
+-- host call must be expensive instead of asking the loop itself. So it is asked here, split
+-- where the work actually divides: finding the window this overlay lives in, and deciding
+-- whether what is loaded inside it is ours.
+local RECHECK_SLOW_MS = 15
+
 function Overlay:_recheck()
+  local t0 = host.now and host.now() or nil
   local matched = false
   for _, ctx in ipairs(self.contexts) do
     if ctx.match() then
@@ -1585,6 +1607,7 @@ function Overlay:_recheck()
       break
     end
   end
+  local tCtx = t0 and host.now() or nil
   if not matched then self.activeCtx = false end
   -- Stamped BEFORE the gate, because the two answer different questions: a context match
   -- means "this window is mine", the gate means "and what is loaded in it is mine too". The
@@ -1604,6 +1627,15 @@ function Overlay:_recheck()
   if matched and self._gate then
     matched = self._gate(self:origin()) == true
     if not matched then self.activeCtx = false end
+  end
+  if t0 then
+    local total = host.now() - t0
+    if total >= RECHECK_SLOW_MS then
+      host.log.info(string.format(
+        "[recheck] '%s' %d ms (context %d, gate %d) over %d context(s)",
+        tostring(self.label), total, tCtx - t0, host.now() - tCtx, #self.contexts
+      ))
+    end
   end
   if self._slot then
     host.arbiter.setMatching(self._slot, self._claim, matched)
@@ -2208,6 +2240,11 @@ end
 -- is live elsewhere.
 local menuWatched = {}
 local menuTimer = false
+-- How often the expensive Qt-menu check runs when no menu is plausible. 8 ticks x 150 ms is
+-- a worst case of ~1.2 s to notice a menu opened by some other route, against the permanent
+-- 100 %+ duty cycle it cost before.
+local MENU_BACKSTOP_TICKS = 8
+local menuTick = 0
 function Overlay:watchMenus()
   for _, o in ipairs(menuWatched) do
     if o == self then return self end
@@ -2221,14 +2258,39 @@ function Overlay:watchMenus()
   host.timer.every(150, function()
     local anyActive, open = false, false
     for _, o in ipairs(menuWatched) do
-      if o.active then
-        anyActive = true
-        local ctrl = o:origin()
-        if ctrl ~= nil and ctrl.id ~= nil
-          and host.uia.find(ctrl.id, "", host.uia.type.Menu) == true
-        then
-          open = true
-          break
+      if o.active then anyActive = true break end
+    end
+    if not anyActive then return end
+    -- THE CHEAP QUESTION FIRST: is a native popup menu on screen? One window-class lookup.
+    -- Every menu these overlays open themselves turns out to be a native one — u-he's preset
+    -- menu (verified live), Komplete Kontrol's menu bar, and the plug-in menus generally —
+    -- so this answers the common case outright.
+    open = host.keys.nativeMenuOpen() == true
+    -- THE EXPENSIVE ONE only when it can still pay. `host.uia.find(hwnd, "", Menu)` means
+    -- "any menu element anywhere in this tree" and therefore walks the plug-in's ENTIRE
+    -- accessibility tree, across a process boundary: measured at 50-194 ms per call, on a
+    -- 150 ms timer — more than its own interval, permanently, on the thread that owns the
+    -- keyboard hook. That was the single largest load in the whole runtime, and it was
+    -- being spent almost entirely on answering "no".
+    --
+    -- It is still asked, because a self-drawn Qt menu is invisible to the cheap check. But
+    -- only when a menu is PLAUSIBLE — just after a control that opens one fired, which the
+    -- runtime now knows from `opensMenu` — with a slow backstop the rest of the time so a
+    -- menu opened some other way is still noticed within about a second rather than never.
+    if not open then
+      menuTick = menuTick + 1
+      local plausible = host.now() < menuPlausibleUntil
+      if plausible or menuTick % MENU_BACKSTOP_TICKS == 0 then
+        for _, o in ipairs(menuWatched) do
+          if o.active then
+            local ctrl = o:origin()
+            if ctrl ~= nil and ctrl.id ~= nil
+              and host.uia.find(ctrl.id, "", host.uia.type.Menu) == true
+            then
+              open = true
+              break
+            end
+          end
         end
       end
     end

@@ -108,16 +108,50 @@ function W._hasTriggers()
   return #triggers > 0 or #focusCbs > 0
 end
 
+-- Both dispatches are TIMED, and report the slow ones with their own size.
+--
+-- This is the last unmeasured stretch of the activation path. The OS calls underneath are
+-- now answered once per epoch (one question in four hundred reaches the system) and the
+-- conversion to Lua costs nothing measurable, yet a window switch still blocks the pump
+-- thread for 400 ms — which is past the point where Windows stops waiting for our keyboard
+-- hook and delivers the keystroke without us. So the cost is in here, and "here" is one
+-- callback per registered overlay, in each module's own VM.
+--
+-- Reported per VM with a count, because the shape of the number is the diagnosis: one
+-- expensive callback reads differently from a hundred cheap ones, and a single VM standing
+-- out differently again from all nine sharing the load.
+local SLOW_DISPATCH_MS = 40
+
 function W._dispatchActivate(win)
+  local started = host.now and host.now() or nil
+  local fired = 0
   for _, t in ipairs(triggers) do
     if t.on == "activate" and matches(t.matcher, win) then
+      fired = fired + 1
       t.cb(win)
+    end
+  end
+  if started then
+    local ms = host.now() - started
+    if ms >= SLOW_DISPATCH_MS then
+      host.log.info(string.format(
+        "[dispatch] activate %d ms — %d of %d trigger(s) fired", ms, fired, #triggers
+      ))
     end
   end
 end
 
 function W._dispatchFocus()
+  local started = host.now and host.now() or nil
   for _, cb in ipairs(focusCbs) do
     cb()
+  end
+  if started then
+    local ms = host.now() - started
+    if ms >= SLOW_DISPATCH_MS then
+      host.log.info(string.format(
+        "[dispatch] focus %d ms — %d callback(s)", ms, #focusCbs
+      ))
+    end
   end
 end

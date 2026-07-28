@@ -545,6 +545,10 @@ impl Backend for WindowsBackend {
         MENU_OPEN.store(open, Ordering::Relaxed);
     }
 
+    fn native_menu_open(&self) -> bool {
+        popup_menu_open()
+    }
+
     fn watch_keys(&self) -> Result<(), String> {
         if KEY_HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
             return Ok(()); // already installed

@@ -15,6 +15,7 @@ mod uia;
 mod stub;
 
 /// A snapshot of a window's matchable properties (normalized across platforms).
+#[derive(Clone)]
 pub struct WinInfo {
     pub hwnd: isize,
     pub title: String,
@@ -218,6 +219,10 @@ pub trait Backend {
     /// Marks a (Qt/UIA) menu as open/closed in the focused plugin, so captured
     /// nav keys pass through to it (the Win32 menu check misses plugin menus).
     fn set_menu_open(&self, open: bool);
+    /// Is a NATIVE popup menu on screen? One window-class lookup, no traversal —
+    /// the cheap half of "is a menu open", which the key hook already uses and
+    /// which the menu watch should ask before paying for an accessibility walk.
+    fn native_menu_open(&self) -> bool;
     /// Installs the low-level keyboard hook (idempotent).
     fn watch_keys(&self) -> Result<(), String>;
 

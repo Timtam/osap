@@ -357,6 +357,28 @@ fn spawn_image_worker(
     });
 }
 
+/// One cached UIA element lookup. `key` renders the arguments; `go` does the traversal.
+fn located(
+    sh: &Rc<Shared>,
+    what: &str,
+    key: String,
+    go: impl FnOnce() -> Option<(i32, i32)>,
+) -> Option<(i32, i32)> {
+    {
+        let mut obs = sh.observations();
+        obs.asked += 1;
+        if let Some(cached) = obs.points.get(&key).copied() {
+            obs.served += 1;
+            return cached;
+        }
+    }
+    let t = Instant::now();
+    let found = go();
+    slow_observation(what, &key, t);
+    sh.observations().points.insert(key, found);
+    found
+}
+
 /// Names a single OS observation that blocked the pump thread for a long time.
 ///
 /// These are CROSS-PROCESS calls: a UIA traversal runs inside the target application, so its
@@ -395,14 +417,41 @@ fn slow_observation(what: &str, detail: &str, started: Instant) {
 #[derive(Default)]
 struct Observations {
     epoch: u64,
+    /// Also tracked, and also invalidating: the LOCATE family below returns points that get
+    /// CLICKED, and a click must never be aimed at a coordinate worked out before the last
+    /// thing that acted on the screen. `input_epoch` turns over on exactly that (driven
+    /// input, window activate), so pairing it with `epoch` makes a stale click impossible
+    /// while leaving the read-only questions as cheap as before.
+    input_epoch: u64,
     /// (hwnd, names, control types) → 1-based index of the matching name, or None.
     uia_any: HashMap<(isize, Vec<String>, Vec<i32>), Option<usize>>,
     /// (hwnd, name, control type) → present?
     uia_find: HashMap<(isize, String, i32), bool>,
     /// hwnd → its child controls. Rc so handing it out does not copy the vector.
     controls: HashMap<isize, Rc<Vec<backend::ControlInfo>>>,
+    /// The foreground window. Outer Option = not asked yet; inner = there isn't one.
+    /// Cheap-looking and not: it reads the title and class, then OPENS THE PROCESS to
+    /// read its image name, and every embedded overlay asks for it on every recheck.
+    active: Option<Option<backend::WinInfo>>,
+    /// The focused control up to its top-level window — a walk with a class read per
+    /// level, likewise asked once per overlay per recheck.
+    focus_chain: Option<Rc<Vec<backend::ControlInfo>>>,
     served: u32,
     asked: u32,
+    /// UIA element LOOKUPS: "where is the element called X?", keyed by a rendering of the
+    /// arguments. These are the expensive ones — uia_plugin_locate walks the RAW tree, the
+    /// only view that reaches into a DAW-embedded plugin's hosted fragment — and one of them
+    /// sits in `isRackView`, which every Kontakt cell consults on every recheck.
+    points: HashMap<String, Option<(i32, i32)>>,
+    /// Screen pixel reads this epoch, and what they cost. NOT cached — a pixel is the one
+    /// observation whose whole purpose can be to change between two reads — but counted,
+    /// because each is a compositor frame and they were invisible.
+    pixels: u32,
+    pixel_ms: u128,
+    /// Total time spent INSIDE these bindings this epoch, cache hits included. The
+    /// backend call is only half of what one costs: every hit still rebuilds the answer
+    /// as fresh Lua tables, once per calling overlay, in each of nine VMs.
+    binding_ms: u128,
 }
 
 impl Shared {
@@ -417,25 +466,36 @@ impl Shared {
     /// performance that nobody can check is just an assertion.
     fn observations(&self) -> std::cell::RefMut<'_, Observations> {
         let now = self.epoch.get();
+        let now_input = self.input_epoch.get();
         let mut obs = self.observations.borrow_mut();
-        if obs.epoch != now {
-            if obs.asked >= 20 {
+        if obs.epoch != now || obs.input_epoch != now_input {
+            if obs.asked >= 20 || obs.pixels > 0 {
                 logging::line(
                     "observe",
                     &format!(
-                        "epoch served {} of {} OS question(s) from cache ({} actually asked)",
+                        "epoch served {} of {} OS question(s) from cache ({} actually asked),                          {} ms inside the bindings, plus {} screen pixel read(s) costing {} ms",
                         obs.served,
                         obs.asked,
-                        obs.asked - obs.served
+                        obs.asked - obs.served,
+                        obs.binding_ms,
+                        obs.pixels,
+                        obs.pixel_ms
                     ),
                 );
             }
             obs.epoch = now;
+            obs.input_epoch = now_input;
+            obs.points.clear();
             obs.uia_any.clear();
             obs.uia_find.clear();
             obs.controls.clear();
+            obs.active = None;
+            obs.focus_chain = None;
             obs.served = 0;
             obs.asked = 0;
+            obs.binding_ms = 0;
+            obs.pixels = 0;
+            obs.pixel_ms = 0;
         }
         obs
     }
@@ -2465,6 +2525,15 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             Ok(())
         })?,
     )?;
+    // host.keys.nativeMenuOpen() -> bool. The CHEAP half of "is a menu open": one
+    // window-class lookup for a native popup, no accessibility traversal. The menu watch
+    // asks this before paying for the expensive question — measured at 50-194 ms per call,
+    // every 150 ms, which is more than its own interval.
+    let sh = shared.clone();
+    keys.set(
+        "nativeMenuOpen",
+        lua.create_function(move |_, ()| Ok(sh.backend.native_menu_open()))?,
+    )?;
     host.set("keys", keys)?;
 
     // host.now() -> milliseconds since the app started. A CLOCK, not a date: the only
@@ -2545,9 +2614,29 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     win.set(
         "active",
-        lua.create_function(move |lua, ()| match sh.backend.active_window() {
-            Some(w) => Ok(Some(win_to_table(lua, &w)?)),
-            None => Ok(None),
+        lua.create_function(move |lua, ()| {
+            let cached = {
+                let mut obs = sh.observations();
+                obs.asked += 1;
+                match obs.active.clone() {
+                    Some(w) => {
+                        obs.served += 1;
+                        w
+                    }
+                    None => {
+                        drop(obs);
+                        let t = Instant::now();
+                        let w = sh.backend.active_window();
+                        slow_observation("window.active", "", t);
+                        sh.observations().active = Some(w.clone());
+                        w
+                    }
+                }
+            };
+            match cached {
+                Some(w) => Ok(Some(win_to_table(lua, &w)?)),
+                None => Ok(None),
+            }
         })?,
     )?;
     // host.window.controls(win?) — child controls (class + geometry) of a window
@@ -2583,10 +2672,12 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                     }
                 }
             };
+            let conv = Instant::now();
             let t = lua.create_table()?;
             for c in controls.iter() {
                 t.push(control_to_table(lua, c)?)?;
             }
+            sh.observations().binding_ms += conv.elapsed().as_millis();
             Ok(t)
         })?,
     )?;
@@ -2596,10 +2687,30 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     win.set(
         "focusChain",
         lua.create_function(move |lua, ()| {
+            let chain = {
+                let mut obs = sh.observations();
+                obs.asked += 1;
+                match obs.focus_chain.clone() {
+                    Some(c) => {
+                        obs.served += 1;
+                        c
+                    }
+                    None => {
+                        drop(obs);
+                        let t = Instant::now();
+                        let c = Rc::new(sh.backend.window_focus_chain());
+                        slow_observation("window.focusChain", "", t);
+                        sh.observations().focus_chain = Some(c.clone());
+                        c
+                    }
+                }
+            };
+            let conv = Instant::now();
             let t = lua.create_table()?;
-            for c in sh.backend.window_focus_chain() {
-                t.push(control_to_table(lua, &c)?)?;
+            for c in chain.iter() {
+                t.push(control_to_table(lua, c)?)?;
             }
+            sh.observations().binding_ms += conv.elapsed().as_millis();
             Ok(t)
         })?,
     )?;
@@ -2762,7 +2873,10 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "pluginLocate",
         lua.create_function(
             move |lua, (hwnd, container, name, ctype): (isize, String, String, i32)| {
-                match sh.backend.uia_plugin_locate(hwnd, &container, &name, ctype) {
+                let key = format!("pluginLocate {hwnd} {container} {name} {ctype}");
+                match located(&sh, "uia.pluginLocate", key, || {
+                    sh.backend.uia_plugin_locate(hwnd, &container, &name, ctype)
+                }) {
                     Some((x, y)) => {
                         let t = lua.create_table()?;
                         t.set("x", x)?;
@@ -2862,7 +2976,17 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     screen.set(
         "pixel",
         lua.create_function(move |lua, (x, y): (i32, i32)| {
+            // Timed and counted: a single pixel read is a GDI screen touch, and this project
+            // has already measured one at a fixed ~16.7 ms — one compositor frame, whatever
+            // the size. Sixty of them is a second, and nothing in the log said they were
+            // happening.
+            let t0 = Instant::now();
             let (r, g, b) = sh.backend.pixel(x, y);
+            {
+                let mut obs = sh.observations();
+                obs.pixels += 1;
+                obs.pixel_ms += t0.elapsed().as_millis();
+            }
             let t = lua.create_table()?;
             t.set("r", r)?;
             t.set("g", g)?;
