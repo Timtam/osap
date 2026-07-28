@@ -985,11 +985,6 @@ local function valueOfNow(self, c, done)
   -- gets no extra word (ReaHotkey's States maps found to ""); absent has to be said, because
   -- the alternative is a button that announces itself normally and then does nothing.
   if c.kind == "gbutton" then
-    -- Logged BEFORE the search, not only after it fails. Six rounds went into why this control
-    -- could not find its button, and the last report — Enter pressed, nothing in the log at
-    -- all — says the question was wrong: a search that never STARTS looks exactly like one
-    -- that starts and finds nothing, and only one of those is about templates.
-    host.log.info(string.format("[gbutton] '%s' searching…", tostring(c.label)))
     host.screen.imageSearchAsync(asList(c.image), opts, function(hit)
       if not hit then
         -- "not found" is the whole value of this control type, so when it says that, it has to
@@ -1023,7 +1018,13 @@ local function valueOfNow(self, c, done)
           host.log.info("[gbutton] wrote what the search actually saw to " .. path)
         end
       end
-      done(hit and nil or "not found")
+      -- NOT `done(hit and nil or "not found")`. That idiom is broken whenever the middle
+      -- value is nil or false: `hit and nil` is nil even for a real hit, so the `or` branch
+      -- always wins and every successful search reported "not found". Eight rounds went into
+      -- the templates, the region, the scales, the coordinate frame and the identity scoping
+      -- because the search really was succeeding and saying otherwise — a diagnostic that
+      -- lies is worse than none, and this one was in the diagnostic itself.
+      if hit then done(nil) else done("not found") end
     end)
     return
   end
@@ -1158,6 +1159,16 @@ local function speakControl(self, index, moveMouse, withHint)
     local at = self.focus
     local pinned = self:hwnd()
     valueOf(self, c, function(value)
+      -- The utterance the user actually hears, logged for the one control type whose value
+      -- has been in dispute. Everything upstream said "hit"; the ear said "not found". Only
+      -- the words that leave here can settle which of the two the code really produced.
+      if c.kind == "gbutton" then
+        host.log.info(string.format(
+          "[gbutton] '%s' value callback -> %s (focus %s/%s, active %s)",
+          tostring(c.label), value == nil and "nil (say nothing)" or ("\"" .. tostring(value) .. "\""),
+          tostring(self.focus), tostring(at), tostring(self.active)
+        ))
+      end
       if value and self.active and self.focus == at and self:hwnd() == pinned then
         -- A graphic toggle's value IS its state ("on"/"off"), so the hint attaches here,
         -- to the same late utterance. A slider's is a percentage and matches no hint key.
@@ -1369,7 +1380,15 @@ function Overlay:activate(index)
       tolerance = c.tolerance or MATCH_TOLERANCE,
       scales = c.scales or MATCH_SCALES,
     }, function(hit)
-      if not (self.active and self:hwnd() == pinned) then return end
+      if not (self.active and self:hwnd() == pinned) then
+        -- Found, and deliberately NOT clicked, which was silent until it cost a diagnosis:
+        -- a refusal that says nothing is indistinguishable from a search that never answered.
+        host.log.info(string.format(
+          "[gbutton] '%s': the overlay moved on before the search answered; not clicking",
+          tostring(c.label)
+        ))
+        return
+      end
       if not hit then
         -- Said, not silent: the acknowledgement above already went out, so leaving it here
         -- would report an action that did not happen.
