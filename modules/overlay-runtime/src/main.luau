@@ -254,6 +254,11 @@ end
 function Overlay:addCustomButton(opts)
   return add(self, {
     kind = "custom", label = opts.label, onActivate = opts.onActivate,
+    -- `text = function(overlay) -> string`: read-out, announced with the label. On a button
+    -- it is how a control that ACTS can also say what it would act on — a panel toggle that
+    -- announces only its name leaves the user to press it and find out, which for a collapse
+    -- means losing the panel to learn that it was open.
+    text = opts.text,
     hotkey = opts.hotkey, opensMenu = opts.opensMenu, when = opts.when,
   })
 end
@@ -1186,7 +1191,7 @@ local function speakControl(self, index, moveMouse, withHint)
     if r and r.text and r.text ~= "" then label = r.text end
   end
   local parts = { label }
-  if c.kind == "static" and c.text then
+  if c.text then
     local ok, v = pcall(c.text, self)
     if ok and v ~= nil and v ~= "" then parts[#parts + 1] = tostring(v) end
   end
@@ -1200,6 +1205,11 @@ local function speakControl(self, index, moveMouse, withHint)
   local tl = TYPE_LABEL[c.kind]
   if c.kind == "ocr" and c.readOnly then tl = "" end
   if tl ~= "" then parts[#parts + 1] = tl end
+  -- The KEY, spoken on arrival. Without it a hotkey is only discoverable by being told, and
+  -- the whole point of these overlays is that a plug-in with no accessible tree can still be
+  -- learned from itself. Only on a focus read — repeating it when the user has just pressed
+  -- the key is noise, and they plainly know it.
+  if moveMouse and c.hotkey then parts[#parts + 1] = tostring(c.hotkey) end
   if (c.kind == "ocr" or c.kind == "ocredit") and c.region then
     local ox, oy = originOf(self, c)
     local region = { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] }

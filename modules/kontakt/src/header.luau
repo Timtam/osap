@@ -69,25 +69,130 @@ end
 -- the instrument area starts ~355 px in, and ReaHotkey's Soundiron coordinates (x 155, 162,
 -- 164) only make sense with it CLOSED. Every calibration shot so far has had it open, so those
 -- libraries have never been seen in the layout their published coordinates were written for.
+-- Each one's STATE, read off its own icon.
+--
+-- These announced their name and nothing else, which for a collapse is a poor bargain: the
+-- only way to learn that a panel was open was to close it. Asked for directly, and it is the
+-- same rule the read-only OCR control and the plug-in size read-out came from — a control must
+-- not be less informative than what it does.
+--
+-- UIA has nothing to offer here. All three come back as plain Buttons (type 50000) with no
+-- toggle pattern and a fixed name, so the state is not in the tree. It IS in the icon: Kontakt
+-- draws the indicator lighter while its panel is open. Measured on two shots of the same
+-- library differing only in the side pane, at the same point relative to the bottom-left
+-- corner: 202 closed against 240 open, held over six pixels of one column rather than a single
+-- antialiased edge.
+--
+-- Anchored to the BOTTOM of the plug-in, so the probe is computed per read rather than written
+-- down: the status bar sits at the foot of a window whose height these very controls change.
 local STATUS_TOGGLES = {
+  -- Per VIEW, because the two views draw this bar differently and the difference is not a
+  -- detail: play view uses a darker background with brighter glyphs and drops two buttons from
+  -- the right, which moves the keyboard toggle. Reading a classic reference in play view is how
+  -- the first version came to announce "collapsed" for a panel it had never measured.
+  --
+  -- Within a view: x from the LEFT edge when positive, from the RIGHT when negative; y always
+  -- from the BOTTOM, because the bar hangs at the foot of a window whose height these controls
+  -- change. `open`/`shut` are that icon's own two shades, measured per toggle — assuming the
+  -- side pane's pair would serve all three was wrong, the info pane runs the other way round
+  -- (its probe lands on the glyph rather than the fill) and is 109 apart rather than 38.
+  -- Both views, and the play pair proves these buttons WORK there — which nearly got them
+  -- hidden. Between two play-view shots only the keyboard icon had changed, so they looked
+  -- inert; pressing Alt+1 on purpose took the plug-in from 1010 to 649 wide. The evidence for
+  -- "does nothing" was really evidence that nobody had tried.
   { label = "Side pane", hotkey = "Alt+1",
+    classic = { probe = { 9, -12 }, open = 240, shut = 202 },
+    play    = { probe = { 9, -12 }, open = 236, shut = 188 },
     name = "Side Pane (F1): Toggles the visibility of the side pane." },
+  -- Classic only, and for a reason that took a dedicated shot to establish rather than for want
+  -- of trying. In play view the button WORKS — pressing it changes 3134 px, all of them in one
+  -- band above the status bar — but its icon does not move: the two captures are pixel-identical
+  -- across the whole bar. Kontakt simply does not indicate this one's state there.
+  --
+  -- Nor does the pane itself offer a probe. Only 8% of that band changes, so what appears is
+  -- HINT TEXT rather than a panel, and its content depends on whatever the mouse is over. There
+  -- is nothing stable to read, which is a different answer from "not measured yet" and worth
+  -- the distinction: this one is closed, not open.
   { label = "Info pane", hotkey = "Alt+2",
+    classic = { probe = { 43, -16 }, open = 131, shut = 240 },
     name = "Info Pane (F9): Toggles the visibility of the information hint." },
-  { label = "Keyboard panel", hotkey = "Alt+3",
+  -- Which state is which was settled by looking for the keyboard rather than by assuming
+  -- brighter means open — the info pane runs the other way round, so that assumption had
+  -- already been wrong once. The band above the bar is 55% near-white in one shot and 0% in
+  -- the other. Its play-view pair, 236 against 188, is the same pair the side pane shows
+  -- there: one palette per view, not one per button.
+  { label = "Keyboard panel", hotkey = "Alt+3", uiaState = true,
+    classic = { probe = { -86, -12 }, open = 240, shut = 202 },
+    play    = { probe = { -58, -12 }, open = 236, shut = 188 },
     name = "Keyboard (F3): Toggles the visibility of the Keyboard panel, which shows the virtual keyboard." },
 }
 
-local function addStatusToggles(ov)
+local PANEL_TOLERANCE = 12
+
+-- "expanded"/"collapsed" and the verb for pressing it, or nil when the reading is neither.
+--
+-- Nil is the common case rather than a failure, and checking 27 shots is what showed it. The
+-- play view lays its status bar out differently — the same three points read 236, 99 and 24
+-- there instead of 240, 131 and 240 — and once the plug-in is grown past its host window the
+-- bottom rows are not Kontakt at all, and all three read 51. Neither is a state, and saying so
+-- is the whole point: a wrong "expanded" costs the user the panel.
+local function panelState(ov, t, cell)
+  local classic = not (cell and cell.inClassic) or cell.inClassic(ov)
+  local ref = classic and t.classic or t.play
+  -- No reference for this toggle in this view means NO STATE, not a nearby one. Refusing beats
+  -- a close-enough number here because these controls act on the panel: a wrong reading is not
+  -- a wrong word, it is a lost panel. Measured in play view, the classic points read 236, 236
+  -- and 24 against 240, 131 and 240 — near enough that two of the three would have answered
+  -- confidently from a layout no reference had ever seen.
+  if not ref then return nil end
+  local o = ov:origin()
+  if not (o and o.client) then return nil end
+  local w, h = O.contentSize(o)
+  if w == 0 or h == 0 then return nil end
+  local px = ref.probe[1] >= 0 and ref.probe[1] or (w + ref.probe[1])
+  local p = host.screen.pixel(o.client.x + px, o.client.y + h + ref.probe[2])
+  if not p then return nil end
+  local v = (p.r + p.g + p.b) / 3
+  if math.abs(v - ref.open) <= PANEL_TOLERANCE then return "expanded", "collapse" end
+  if math.abs(v - ref.shut) <= PANEL_TOLERANCE then return "collapsed", "expand" end
+  -- The pixel says nothing — the plug-in has been grown past its host window, or this is a
+  -- layout no reference covers. Ask UIA, but only here: it is the same raw tree walk as
+  -- pluginLocate, 60-300 ms against a pixel's 17, and far too slow to put on every focus step.
+  -- Only the Keyboard toggle answers (measured); the other two carry no state at all.
+  if t.uiaState then
+    local checked = A.uiaChecked(t.name, host.uia.type.Button)
+    if checked == true then return "expanded", "collapse" end
+    if checked == false then return "collapsed", "expand" end
+  end
+  -- Also nil once the plug-in is grown past its host window: the bottom rows are then not
+  -- Kontakt at all and every probe reads the same 51.
+  return nil
+end
+
+local function addStatusToggles(ov, cell)
   for _, t in ipairs(STATUS_TOGGLES) do
     ov:addCustomButton({
       label = t.label,
       hotkey = t.hotkey,
-      onActivate = function()
+      text = function(o)
+        local state, action = panelState(o, t, cell)
+        if not state then return nil end
+        return state .. ", press to " .. action
+      end,
+      onActivate = function(o)
         -- Says so when the name does not resolve, rather than going quiet: these live in
         -- Kontakt's own chrome, which a DAW-embedded instance does not always expose.
         if not A.uiaClick(nil, t.name, host.uia.type.Button) then
           host.speech.output(t.label .. " not found", { interrupt = true })
+          return
+        end
+        -- Report the state it MOVED TO, once the panel has finished appearing. A toggle that
+        -- acts silently leaves the user to press it again to find out what happened.
+        if host.timer then
+          host.timer.after(250, function()
+            local state = panelState(o, t, cell)
+            if state then host.speech.output(t.label .. " " .. state, { interrupt = true }) end
+          end)
         end
       end,
     })
@@ -173,9 +278,12 @@ local function addResizeControls(ov, cell)
   -- one this whole thread has been about: the two controls below CHANGE the size and say so,
   -- but until now there was no way to ask what it is — only to alter it and listen. A value
   -- you can only learn by changing it is not a value you can check.
+  -- Offered in EVERY view, unlike the two controls below it. Gating it on the classic view was
+  -- a reflex — they are gated, so it was too — and wrong: this reports, it does not resize. A
+  -- number that is true in both views should be readable in both, and the first thing anyone
+  -- wanted it for was to check whether a control in the OTHER view had done anything.
   ov:addStaticText({
     label = "Plugin size",
-    when = cell.inClassic,
     text = function(o)
       local origin = o:origin()
       if not origin then return nil end
@@ -410,7 +518,7 @@ local function addPluginHeader(ov, cell)
     onActivate = function(o) A.invokeMenuItem(cell, o, "Reset multi") end,
   })
   addRackControls(ov, cell)
-  addStatusToggles(ov)
+  addStatusToggles(ov, cell)
   addResizeControls(ov, cell)
   for _, h in ipairs(geo.K7_CONTROLS) do
     -- Only those Kontakt 7 offers embedded, and only where the cell has the coordinate:

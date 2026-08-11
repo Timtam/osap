@@ -5,12 +5,13 @@
 
 use std::cell::RefCell;
 
-use windows::core::{BSTR, VARIANT};
+use windows::core::{Interface, BSTR, VARIANT};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationCondition, IUIAutomationElement,
-    IUIAutomationTreeWalker, TreeScope_Descendants, TreeScope_Subtree, UIA_ControlTypePropertyId,
-    UIA_NamePropertyId,
+    IUIAutomationLegacyIAccessiblePattern, IUIAutomationTogglePattern, IUIAutomationTreeWalker,
+    TreeScope_Descendants, TreeScope_Subtree, UIA_ControlTypePropertyId, UIA_NamePropertyId,
+    UIA_PATTERN_ID,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
@@ -447,6 +448,91 @@ pub fn uia_plugin_locate(
             });
             if hit.is_some() {
                 return hit;
+            }
+        }
+        None
+    })
+}
+
+/// What a named element says about its own STATE, as a diagnostic string.
+///
+/// Written because "UIA has nothing to offer here" was a conclusion drawn from the control
+/// TYPE — Kontakt's status-bar toggles come back as plain Buttons — and nothing had ever asked
+/// them a state question. Only Name, ClassName and ControlType were ever fetched, so the
+/// absence of a toggle state was never observed, only assumed. This asks properly: the Toggle
+/// pattern first, then LegacyIAccessible's state bits, which is where a control that behaves
+/// like a checkbox without declaring itself one usually keeps it.
+///
+/// Returns None when the element cannot be found at all, so "not found" and "found, says
+/// nothing" stay distinguishable.
+pub fn uia_state_probe(
+    hwnd: isize,
+    container_name: &str,
+    name: &str,
+    control_type: i32,
+) -> Option<(i32, i32)> {
+    AUTOMATION.with(|cell| unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let mut borrow = cell.borrow_mut();
+        if borrow.is_none() {
+            *borrow =
+                CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+                    .ok();
+        }
+        let automation = borrow.as_ref()?;
+        let root = automation.ElementFromHandle(HWND(hwnd as *mut _)).ok()?;
+        let walker = automation.RawViewWalker().ok()?;
+
+        let mut containers: Vec<(bool, IUIAutomationElement)> = Vec::new();
+        let mut budget = 4000;
+        raw_walk(&walker, &root, 0, &mut budget, &mut |el, _| {
+            let t = el.CurrentControlType().map(|t| t.0).unwrap_or(0);
+            if t == 50032 || t == 50033 {
+                let n = el.CurrentName().map(|b| b.to_string()).unwrap_or_default();
+                if n == container_name {
+                    let class = el.CurrentClassName().map(|b| b.to_string()).unwrap_or_default();
+                    containers.push((class.contains("QuickWindow"), el.clone()));
+                }
+            }
+            true
+        });
+        containers.sort_by_key(|(is_quick, _)| !*is_quick);
+
+        for (_, container) in &containers {
+            let mut found: Option<(i32, i32)> = None;
+            let mut budget = 4000;
+            raw_walk(&walker, container, 0, &mut budget, &mut |el, _| {
+                let t = el.CurrentControlType().map(|t| t.0).unwrap_or(0);
+                if t != control_type {
+                    return true;
+                }
+                let n = el.CurrentName().map(|b| b.to_string()).unwrap_or_default();
+                if n != name {
+                    return true;
+                }
+                // Toggle first (UIA_TogglePatternId = 10015); -1 when the pattern is absent,
+                // which is a different answer from "off" and has to stay distinguishable.
+                let toggle = el
+                    .GetCurrentPattern(UIA_PATTERN_ID(10015))
+                    .ok()
+                    .and_then(|unk| unk.cast::<IUIAutomationTogglePattern>().ok())
+                    .and_then(|tp| tp.CurrentToggleState().ok())
+                    .map(|v| v.0)
+                    .unwrap_or(-1);
+                // Then LegacyIAccessible (10018) state bits, where a control that behaves like a
+                // checkbox without declaring itself one usually keeps it: 0x10 CHECKED,
+                // 0x08 PRESSED, 0x04 FOCUSED, 0x100000 FOCUSABLE.
+                let legacy = el
+                    .GetCurrentPattern(UIA_PATTERN_ID(10018))
+                    .ok()
+                    .and_then(|unk| unk.cast::<IUIAutomationLegacyIAccessiblePattern>().ok())
+                    .and_then(|lp| lp.CurrentState().ok())
+                    .unwrap_or(0) as i32;
+                found = Some((toggle, legacy));
+                false
+            });
+            if found.is_some() {
+                return found;
             }
         }
         None

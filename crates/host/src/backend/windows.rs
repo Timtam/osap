@@ -251,6 +251,16 @@ impl Backend for WindowsBackend {
         super::uia::uia_raw_dump(hwnd)
     }
 
+    fn uia_state_probe(
+        &self,
+        hwnd: isize,
+        container_name: &str,
+        name: &str,
+        control_type: i32,
+    ) -> Option<(i32, i32)> {
+        super::uia::uia_state_probe(hwnd, container_name, name, control_type)
+    }
+
     fn uia_class_nav_point(
         &self,
         hwnd: isize,

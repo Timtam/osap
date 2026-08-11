@@ -105,6 +105,16 @@ impl Backend for StubBackend {
     fn uia_raw_dump(&self, _hwnd: isize) -> Vec<(i32, String, String, i32)> {
         Vec::new()
     }
+
+    fn uia_state_probe(
+        &self,
+        _hwnd: isize,
+        _container_name: &str,
+        _name: &str,
+        _control_type: i32,
+    ) -> Option<(i32, i32)> {
+        None
+    }
     fn uia_class_nav_point(
         &self,
         _hwnd: isize,

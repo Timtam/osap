@@ -152,6 +152,16 @@ pub trait Backend {
     /// fragment that the condition-based dump cannot see.
     fn uia_raw_dump(&self, hwnd: isize) -> Vec<(i32, String, String, i32)>;
 
+    /// What a named element reports about its own state (Toggle pattern, then
+    /// LegacyIAccessible state bits), as a diagnostic string. None when not found.
+    fn uia_state_probe(
+        &self,
+        hwnd: isize,
+        container_name: &str,
+        name: &str,
+        control_type: i32,
+    ) -> Option<(i32, i32)>;
+
     /// Click-point (screen centre) of the element reached from the first element
     /// whose ClassName contains `class_substr` + ControlType == `ctype` by walking
     /// `child` (nth child, 0 = none) then `sibling` raw-view siblings. Ports

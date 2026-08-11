@@ -39,6 +39,42 @@ local function pluginLocate(name, ctype)
   end
   return nil
 end
+-- Whether a named element reports itself CHECKED, or nil when it does not carry a state.
+--
+-- Written after "UIA has nothing to offer here" turned out to be a conclusion drawn from the
+-- control TYPE rather than a measurement: these come back as plain Buttons, and until this
+-- existed nothing had ever asked one of them a state question — only Name, ClassName and
+-- ControlType were ever fetched.
+--
+-- Asked properly, the answer is split. Kontakt's Keyboard toggle DOES carry one: a Toggle
+-- pattern that reads 1 then 0 across a press, and the LegacyIAccessible CHECKED bit (0x10)
+-- with it. The Side pane and Info pane carry none — their legacy state goes 0x100000 to
+-- 0x100004 across a press, and 0x4 is FOCUSED, which is the consequence of our own click
+-- rather than a panel state.
+--
+-- EXPENSIVE: the same raw tree walk as pluginLocate, measured at 60-300 ms on the pump, against
+-- ~17 ms for a single pixel. So this is a fallback for where the cheap probe cannot answer, not
+-- the primary route.
+local function uiaChecked(name, ctype)
+  local fg = host.window.active()
+  if not (fg and fg.id and host.uia.stateProbe) then return nil end
+  local st
+  local via = kontaktPaneName(fg.id)
+  if via then
+    st = host.uia.stateProbe(fg.id, via, name, ctype)
+  else
+    for _, v in ipairs(VARIANTS) do
+      st = host.uia.stateProbe(fg.id, v.name, name, ctype)
+      if st then break end
+    end
+  end
+  if not st then return nil end
+  if st.toggle ~= nil then return st.toggle == 1 end
+  -- No Toggle pattern: the CHECKED bit is only meaningful for an element that actually uses
+  -- it, and for these two it never sets. Reporting `false` would be inventing an answer.
+  return nil
+end
+
 local function uiaClick(_, name, ctype)
   local p = pluginLocate(name, ctype)
   if p then
@@ -325,6 +361,7 @@ end
 return {
   pluginLocate = pluginLocate,
   uiaClick = uiaClick,
+  uiaChecked = uiaChecked,
   closeWhatsNew = closeWhatsNew,
   onPluginActive = onPluginActive,
   openFileMenu = openFileMenu,

@@ -2919,6 +2919,28 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             },
         )?,
     )?;
+    // host.uia.stateProbe(hwnd, container, name, ctype) -> string | nil — what a named
+    // element says about its OWN state, rather than what its control type implies.
+    let sh = shared.clone();
+    uia.set(
+        "stateProbe",
+        lua.create_function(
+            move |lua, (hwnd, container, name, ctype): (isize, String, String, i32)| {
+                match sh.backend.uia_state_probe(hwnd, &container, &name, ctype) {
+                    None => Ok(None),
+                    Some((toggle, legacy)) => {
+                        let t = lua.create_table()?;
+                        if toggle >= 0 {
+                            t.set("toggle", toggle)?;
+                        }
+                        t.set("legacyState", legacy)?;
+                        t.set("checked", legacy & 0x10 != 0)?;
+                        Ok(Some(t))
+                    }
+                }
+            },
+        )?,
+    )?;
     // host.uia.dump(hwnd) -> { {depth, name, class, ctype}, … } — diagnostic UIA
     // tree walk (raw view) for discovering plugin identity properties.
     let sh = shared.clone();
