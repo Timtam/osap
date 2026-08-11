@@ -296,85 +296,29 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
       just broken the Performance-page wordmark, so the question was live. The whole FX-rack
       page is byte-identical: tile at (761,383), reverb at (677,500), Performance tab at
       (354,605), the same numbers Mimi Page Legato gives. Nothing here needs masking.
-- [ ] **Check every PERFORMANCE-page wordmark the way Mimi Page's had to be checked.** Loading
-      a second patch of that library ("Phrases 140BPM") produced NO overlay: the dark artwork
-      behind the lettering is drawn ~20 brighter in that patch, which put 29 of 17480 pixels
-      outside tolerance while the lettering itself was identical to the byte. Fixed by masking
-      the template to pixels brighter than 180 (6705 of them, all text, unique across 28 shots)
-      — 150 was tried first and shipped broken, because exactly ONE antialiased pixel was 22
-      away against a tolerance of 20 and the verifier had sampled 600 of the 9111.
+- [ ] **Artwork is not a landmark — check every library gated on one.** Two failures, each
+      worse than the last, and both reported by the user rather than noticed here.
 
-      The FX-rack check above narrows where this can happen: it is the LIBRARY'S OWN BACKDROP
-      that shifts, and only Performance pages have one. Ranked by how much of each template is
-      artwork rather than lettering, worst first — Talos 94%, Nucleus 94%, CSS Strings 92%,
-      Solo 87%, Chorus 83%, Dolce 81%, CSB 81%, Glade 77%, Areia 76%, Gaia's tile 67%, Gaia's
-      wordmark 58%, Jaeger 42%. Each needs one shot of a second patch.
+      Mimi Page: a second patch drew the backdrop ~20 brighter, putting 29 of 17480 pixels
+      outside tolerance while the LETTERING stayed identical to the byte. Fixed by masking to
+      pixels brighter than 180.
 
-      Voice Of Wind Adey is a separate case and possibly a worse one: 0% dark, because it is
-      33000 px of pure watercolour with no lettering to mask down to. If its backdrop shifts
-      there is nothing to fall back on, and the fix would have to be something else entirely.
-- [x] **A landmark that stops matching fails SILENTLY — now diagnosed.** No overlay, no
-      announcement, no line saying which gate was tried or how close it came; the user reported
-      it and nothing here noticed. What makes it loggable without drowning the log is that a
-      MISS IS NORMAL — twelve library overlays search every poll and eleven are supposed to
-      fail — so the signal is not the miss but how close it came. A full-region miss now
-      re-runs the same search once at three times the tolerance, and says something only if
-      THAT hits, at most once per window and once more whenever a landmark that had been
-      matching stops (which is the shape a patch change takes).
+      Voices Of Gaia: a second singer RECOLOURS THE WHOLE GUI — gold for Francesca, silver for
+      Bryn, same shapes throughout. 80% of the wordmark outside tolerance, and masking to the
+      brightest makes it worse (1174 of 1174 fail), because the bright pixels are the recoloured
+      ones. Fixed by anchoring on the red "SUSTAIN:" caption instead: of its 182 red-dominant
+      pixels, zero differ across the two schemes.
 
-      Validated against the actual failure: the template that shipped broken, checked against
-      the shot that reported it, misses at tolerance 20 and 25 and matches at 30, 40 and 60. So
-      the probe would have written exactly the missing line. Zero near-miss lines across a full
-      session of normal use.
+      The rule that comes out of both: a landmark must be the part a vendor does not restyle —
+      lettering rather than picture, and a fixed accent colour rather than a themed one. Still
+      unchecked on a second patch: Audio Imperia's eleven, Cinematic Studio's two, and Adey,
+      whose landmark is 33000 px of pure watercolour with no lettering to retreat to.
+      Ranked by artwork share, worst first: Talos 94%, Nucleus 94%, CSS Strings 92%, Solo 87%,
+      Chorus 83%, Dolce 81%, CSB 81%, Glade 77%, Areia 76%, Jaeger 42%.
 
-## Decided against (so it is not reopened as an oversight)
-
-- **Generating landmark templates on the user's machine instead of shipping crops.** Raised
-  because the modules declare MIT over cropped vendor artwork. DECLINED by the maintainer,
-  2026-07-28, with reasons: the crops serve an accessibility purpose, per-install generation is
-  effort out of proportion to the risk, and ReaHotkey has shipped the same kind of crops for
-  years without a complaint. If one ever comes, the module goes offline or a way round is
-  found. Recorded here so a later pass does not re-raise it as something nobody noticed.
-
-## Detection cost and the keyboard-hook hazard (2026-07-27/28)
-
-Started as "the KK overlay takes longer to appear than the Kontakt one" and turned into the
-one open CORRECTNESS bug: the low-level keyboard hook is installed on the pump thread, and
-past `LowLevelHooksTimeout` (~300 ms) Windows stops waiting for it and delivers the keystroke
-WITHOUT us — a Tab the overlay believed it had captured lands in the plugin instead,
-intermittently, with nothing logged. For someone who navigates entirely by Tab and cannot see
-where the focus went, that is not a performance problem.
-
-Measured across the whole arc:
-
-| | before | after |
-|---|---|---|
-| announcement late | 21×, up to 1303 ms | none |
-| poll tick | ~600 ms of work per 500 ms | under its 25 ms reporting threshold |
-| menu watch, expensive walks | ~20 | 1 |
-| OS questions per epoch | every one | 1 |
-| questions per epoch (peak) | 5077 | 1771 |
-| dispatch | 315–520 ms | 45–176 ms |
-| pump overruns | 24 | 11 |
-
-- [x] **Ask the OS once per epoch** ✓ — an epoch means "the world may have changed", so
-      within one the same question has the same answer by definition. `uia.find`/`findAny`,
-      `window.controls`, `window.active` (which OPENS THE PROCESS to read its image name) and
-      the locate family are memoized in the host. Negative answers cached too: in a poll
-      almost every identity check is expected to fail, which is where the saving is. The
-      locate family is keyed on `input_epoch` as well, because those points get CLICKED and a
-      click must never aim at a coordinate worked out before the last thing that acted.
-- [x] **The menu watch asked the expensive question first** ✓ — `uia.find(hwnd, "", Menu)`
-      walks a plug-in's entire accessibility tree, 50–194 ms, every 150 ms, permanently. Now
-      the cheap native-popup check first, the walk only while a self-drawn menu is plausible
-      (a control declared `opensMenu` fired), plus a backstop every eighth tick.
-- [x] **Don't ask a question whose answer cannot matter** ✓ — the arbiter test that guarded
-      the image search now guards the whole recheck.
-- [x] **One scene per epoch instead of six cells re-deriving it** ✓ (verified live: an empty
-      KK, then Areia loaded, detected and switched — the transition a wrongly-cached
-      RELATIONAL verdict would have broken). Needs the new `O.memoByEpoch`, the counterpart
-      to `memoByOrigin`: per-window caching is wrong for a verdict that depends on what else
-      is in the window.
+      Note what does NOT need this: Gaia's FX-rack tile matches a Bryn patch unchanged, because
+      that page is flat Kontakt chrome with fixed slot graphics rather than the singer artwork.
+      The exposure is specific to a library's own themed page.
 - [ ] **The hazard is halved, not gone.** A pump iteration still exceeds ~300 ms on a window
       switch. What is left is neither the OS calls (1 question per epoch reaches the system),
       nor Lua table conversion (0.0 ms at microsecond resolution across 5077 calls), nor

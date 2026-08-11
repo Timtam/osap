@@ -35,26 +35,6 @@ local kk = host.tryRequire("com.platform.komplete-kontrol")
 -- split: a LIBRARY overlay has to keep Tab for its own controls (see addStandaloneHeader),
 -- so on a standalone Kontakt with a library loaded that pass-through is off, and without
 -- these the whole rack is unreachable — which is exactly what the user found.
--- The wrench templates, resolved ONCE and reported, because whose module resolves them is
--- the open question. This file is `host.include`d by the Kontakt module, but the Kontakt
--- module is a CODE module — its source is evaluated inside every dependent library's VM. If
--- `host.path` answers with the VM OWNER's root rather than the defining module's, then inside
--- a library's VM these become <that library>/images/… , which do not exist, `load_template`
--- errors, and the whole search call fails before it starts. That would look exactly like what
--- was measured: the calibrator (running on Kontakt's own overlay) finds the button, while
--- focusing the same control on a LIBRARY overlay produces a "searching…" line and no result
--- at all. Logged once so the answer is a fact rather than another theory.
-local editImagesCache
-local function editImages()
-  if editImagesCache then return editImagesCache end
-  editImagesCache = {
-    host.path("images/instrument-edit-frame.png"),
-    host.path("images/instrument-edit-active-frame.png"),
-  }
-  host.log.info("[gbutton] wrench templates resolve to: " .. editImagesCache[1])
-  return editImagesCache
-end
-
 -- Kontakt's own STATUS BAR toggles, by name.
 --
 -- All three are keyboard shortcuts Kontakt documents (F1, F9, F3) and all three are lost in a
@@ -209,6 +189,11 @@ end
 --
 -- FOUND by template, because a resize grip is the clearest case for it: dragging the thing
 -- MOVES it, so a fixed coordinate would be right exactly once.
+-- The wrench's centre, measured from the RIGHT edge because Kontakt's instrument panel has a
+-- fixed width and hangs there: 650 px in for the button's left edge at 1010 and at 664 px of
+-- window width alike, so 632 for its middle.
+local WRENCH_FROM_RIGHT, WRENCH_Y = 632, 88
+
 local RESIZE_STEP = 220
 
 -- Say what the resize actually did, and warn if it cost the grip.
@@ -402,69 +387,53 @@ local function addRackControls(ov, cell)
       onActivate = function() host.input.send("F10") end,
     })
   end
-  -- KONTAKT'S OWN INSTRUMENT EDITOR, and the way back out of it. One control, both templates.
+  -- KONTAKT'S OWN INSTRUMENT EDITOR, by COORDINATE rather than by image.
   --
-  -- This is what ReaHotkey's Soundiron reverb toggles actually need: their template is a 9x19
-  -- red bypass switch, a Kontakt FX-rack insert bypass, and the route to that rack is the
-  -- wrench in the instrument's own header. Not the library's — Voices Of Gaia builds a
-  -- "Performance | FX Rack" strip into its GUI and the older Soundiron libraries do not, which
-  -- is why hunting for a tab row found one for Gaia and nothing for Adey or Mimi Page.
+  -- It was found by template with a border mask, and the mask was the mistake. Its opaque ring
+  -- sat on the outer 3 px of the crop, which is not the button but what is BESIDE it — and that
+  -- is the library's own coloured strip: red on Voice Of Wind Adey, black on Voices Of Gaia. So
+  -- it worked on the libraries it had been cut from and reported "not found" everywhere else,
+  -- which is what a user hit on the first library that had never been tried. Measured, 220 of
+  -- its 312 compared pixels fail on another library and every one of them is in the outer two
+  -- rings; the innermost line matches perfectly. The old comment claimed the border was
+  -- "identical pixel for pixel across every variant seen", and it was — every variant seen had
+  -- been the same library.
   --
-  -- FOUND, not placed, and it has to be: the wrench belongs to an instrument row, so it moves
-  -- with the browser's width, the rack's scroll and how many instruments are loaded. Kontakt
-  -- exposes no accessible element for it (a raw walk of the classic view lists the Header and
-  -- the Status bar and nothing of the rack), so an image is the only handle — which is exactly
-  -- the control type ReaHotkey has for this and we had not ported.
+  -- Re-cutting the ring further in would work and is still the wrong answer, because there is
+  -- nothing here to search FOR. The wrench is Kontakt's own chrome at a fixed place on a panel
+  -- of fixed width that hangs off the right edge of the window: the template matched 650 px
+  -- from the right at 1010 px of width, and 650 px from the right at 664. A coordinate is
+  -- exact, costs no capture, and cannot be broken by whatever a library paints beside it.
   --
-  -- MASKED TO THE BORDER, after four attempts at collecting appearances failed.
-  --
-  -- The wrench toggles, so Edit Mode draws it differently (blue glyph) — that was expected.
-  -- What was not: it is drawn at least TWO ways within the classic view alone, and not subtly.
-  -- Measured at the same pixels across two shots of the same library in the same view:
-  -- background 248-250 against 226-237, glyph 24-48 against 81-95. The glyph is 60 apart,
-  -- three times the match tolerance, so a template cut from one can never match the other.
-  -- That is what "not found" kept reporting — correctly — after the coordinate frame and the
-  -- scale had both already been fixed. Adding the second appearance did not help either: the
-  -- next capture showed a third, so collecting them is a game with no end.
-  --
-  -- What IS invariant is the button's BORDER: identical pixel for pixel across every variant
-  -- seen. Alpha 0 is a wildcard in this matcher, so the templates keep a 3-px opaque ring and
-  -- wildcard everything inside it. One template per toggle state instead of one per appearance.
-  --
-  -- Verified rather than assumed, because a border-only template is generic enough to be a
-  -- real false-positive risk: at scale 1, the classic frame matches at exactly one position in
-  -- BOTH classic variants and nowhere in Edit Mode or the play view; the active frame matches
-  -- exactly once in Edit Mode and nowhere else. Neither matches anything in the play view, so
-  -- the control honestly reports "not found" there.
-  --
-  -- UNGATED, deliberately, though the view probe reads Edit Mode as "classic" and a gate would
-  -- work. This is the way OUT of a mode a user cannot leave with the mouse, and an escape that
-  -- can be hidden by a mis-read probe is not an escape. It costs one Tab stop in the play view,
-  -- where neither template matches and it honestly says so.
-  ov:addGraphicalButton({
-    label = "Instrument edit view",
-    -- `rawOrigin` like every other rack control: the rack is Kontakt's chrome, not the
-    -- library's content, so it must not carry the cell's content offset. Without it the region
-    -- shifted down by that offset and clipped the template's top rows — a correct image
-    -- reported as "not found", which is the message this control type exists to make
-    -- trustworthy and therefore the one most likely to be believed.
-    rawOrigin = true,
-    region = { 0, 40, 1010, 260 },
-    image = editImages(),
-    -- ONE SCALE, and not a micro-optimisation. The module-wide default searches ten scales
-    -- from 0.67 to 2.0, right for a library's ARTWORK at whatever zoom the plug-in is set to
-    -- and wrong for a fixed-size button in the host's chrome: measured, this template has ZERO
-    -- strict matches in Edit Mode at scale 1, and the multi-scale search still reported a hit
-    -- at a size the button is never drawn at. So it said "not found" when read and clicked
-    -- something else when pressed — the worst possible pair. One scale makes "not found" mean it.
-    scales = { 1.0 },
+  -- Its STATE now comes from the view probe rather than from the button's own appearance, which
+  -- is the other thing the image did badly: two templates, one per state, each library-specific.
+  ov:addCustomButton({
+    label = "Instrument editor",
     hotkey = "Alt+E",
+    when = cell.inClassic,
+    text = function(o)
+      if not cell.inEdit then return nil end
+      return cell.inEdit(o) and "open, press to close" or "closed, press to open"
+    end,
+    onActivate = function(o)
+      local origin = o:origin()
+      if not (origin and origin.client) then return end
+      local w = O.contentSize(origin)
+      if w <= WRENCH_FROM_RIGHT then
+        host.speech.output("The instrument editor button is off screen", { interrupt = true })
+        return
+      end
+      host.input.click(origin.client.x + w - WRENCH_FROM_RIGHT, origin.client.y + WRENCH_Y)
+    end,
   })
   -- Offered only while that view is up. The coordinates are right for it, but in the other
   -- view the same points fall inside whatever library is loaded — one of them sat on
   -- Cinematic Studio Strings' "Sustain", so Ctrl+P changed the articulation instead of the
   -- instrument. ReaHotkey gates them the same way (`If This.GetPluginView() = "rack"`).
-  ov:group(cell.inClassic, function(ov)
+  -- `inRack`, not `inClassic`: the instrument EDITOR also answers "classic" to the view probe,
+  -- and every one of these addresses a rack it has replaced. Offering them there was the
+  -- defect — a control that announces itself and then clicks into someone else's panel.
+  ov:group(cell.inRack, function(ov)
     for _, h in ipairs(cell.header.arrows) do
       ov:addHotspotButton({
         label = h.label,

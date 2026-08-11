@@ -250,6 +250,51 @@ end
 -- offered. Never to decide where to click.
 local VIEW_PROBE_FROM_RIGHT, VIEW_PROBE_Y = 262, 24
 
+-- EDIT MODE, the third view the classic/play question cannot express.
+--
+-- Kontakt's instrument editor reads as CLASSIC to the probe above — measured, both edit shots
+-- give it 99, exactly what the rack gives — so every rack control was being offered there, with
+-- its coordinates pointing at whatever the editor happens to draw in that spot. That is the
+-- defect this exists to fix, and it is not the probe being wrong: two states genuinely share
+-- one answer, so a second question is needed rather than a better first one.
+--
+-- Also right-anchored, and for a reason worth stating: Kontakt's instrument panel has a FIXED
+-- width and hangs off the right edge, with the side pane added to its left. So a point measured
+-- from the right is at the same place on the panel whether that pane is open or shut, which a
+-- left-anchored one is not — 652 px in lands on the "Edit Mode" caption at 1010 wide and at
+-- 664 alike. Across 27 shots it reads 134 in edit mode and 71 in EVERY classic-rack shot,
+-- spanning 664..1010 px of width and 679..965 of height. The play-view readings vary (14, 24,
+-- 36, 200) and do not matter: this question is only asked once the first one has said classic.
+local EDIT_PROBE_FROM_RIGHT, EDIT_PROBE_Y = 652, 46
+local EDIT_PROBE_VALUE, EDIT_PROBE_TOLERANCE = 134, 25
+
+local editKey, editCache = nil, false
+local function isEditView(origin)
+  if not (origin and origin.client and origin.bounds) then return false end
+  local gen = host.inputEpoch and host.inputEpoch() or (host.epoch and host.epoch() or 0)
+  local key = tostring(origin.id) .. "@" .. tostring(gen)
+  if editKey == key then return editCache end
+  editKey = key
+  local w = O.contentSize(origin)
+  if w <= EDIT_PROBE_FROM_RIGHT then
+    editCache = false
+    return false
+  end
+  local p = host.screen.pixel(
+    origin.client.x + w - EDIT_PROBE_FROM_RIGHT,
+    origin.client.y + EDIT_PROBE_Y
+  )
+  local was = editCache
+  editCache = p ~= nil
+    and math.abs((p.r + p.g + p.b) / 3 - EDIT_PROBE_VALUE) <= EDIT_PROBE_TOLERANCE
+  if editCache ~= was then
+    host.log.info(string.format("[view] instrument editor %s (probe reads %s)",
+      editCache and "open" or "closed",
+      p and string.format("%d", (p.r + p.g + p.b) / 3) or "nothing"))
+  end
+  return editCache
+end
+
 local viewKey, viewCache = nil, false
 local function isClassicView(origin)
   if not (origin and origin.client and origin.bounds) then return false end
@@ -345,6 +390,7 @@ return {
   constantFrame = constantFrame,
   kontaktPaneName = kontaktPaneName,
   isClassicView = isClassicView,
+  isEditView = isEditView,
   isRackView = isRackView,
   inOwnDialog = inOwnDialog,
 }

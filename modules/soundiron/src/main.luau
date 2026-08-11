@@ -271,14 +271,37 @@ local TABS = {
 local GAIA = {
   name = "Voices Of Gaia",
 
-  -- PERFORMANCE PAGE. Landmark: the upper word of the artwork wordmark, our own crop.
+  -- PERFORMANCE PAGE. Landmark: the red "SUSTAIN:" label, and NOT the artwork — which is the
+  -- whole lesson of this library.
+  --
+  -- It was the wordmark, and a user loading "Bryn Legato" got no overlay at all. Voices Of Gaia
+  -- RECOLOURS ITS ENTIRE GUI per singer: gold for Francesca, silver for Bryn. Same artwork, same
+  -- lettering, same size, same position — 80% of the wordmark's pixels outside tolerance, and
+  -- masking to the brightest ones makes it worse rather than better, because the bright pixels
+  -- are precisely the recoloured ones (1174 of 1174 fail). Not a scale change either: 1.00 fits
+  -- far better than anything else tried.
+  --
+  -- So no colour-based template of the artwork can identify this library, and every template
+  -- anyone has is colour-based — ReaHotkey searches a product image too, with no tolerance at
+  -- all, and its answer to variants is a LIST of images per product. That does not end: three
+  -- singers here, and the next library will have its own count.
+  --
+  -- What survives the recolouring is the one element drawn in a fixed colour: the red "SUSTAIN:"
+  -- caption. Measured across the two schemes, of its 182 red-dominant pixels ZERO are outside
+  -- tolerance while 22% of the surrounding crop is. So the template keeps the red and wildcards
+  -- the rest, and matches both singers, in both views, at both window widths, and nothing else
+  -- across 45 shots.
   performance = {
-    landmark = "images/VoicesOfGaia/Wordmark.png",
+    landmark = "images/VoicesOfGaia/SustainLabel.png",
     -- The FX-rack tab, wordmark-relative and measured ON THIS PAGE — which matters more than
     -- it sounds, see the note on `performanceTab` below. Grey (81,81,81) here means the rack
     -- is closed; it goes dark once selected. (ReaHotkey compares against 0x575757 = (87,87,87)
     -- with EXACT equality and would no longer match; the number kept is the measured one.)
-    fxRackTab = { -33, 450 },
+    -- Re-anchored with the landmark: the wordmark sat 206 px right and 251 px above the
+    -- "SUSTAIN:" caption, so what was (-33, 450) from one is (173, 199) from the other. Checked
+    -- against the shot rather than only arithmetic — the tab's centre lands at the same
+    -- absolute point either way.
+    fxRackTab = { 173, 199 },
   },
 
   -- FX RACK PAGE. Landmark: one of the library's own effect tiles. Vendor marks are no use

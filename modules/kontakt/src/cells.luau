@@ -107,6 +107,15 @@ for vIdx, v in ipairs(D.VARIANTS) do
       or function() return D.isRackView() end,
     inModern = isK8 and function(o) return D.isClassicView(o:origin()) ~= true end
       or function() return false end,
+    -- `inClassic` covers BOTH the instrument rack and the instrument editor, because the
+    -- status bar and the resize grip are the same in each. The rack's own controls are not:
+    -- their coordinates address a rack that the editor has replaced, so they take `inRack`.
+    inEdit = isK8 and function(o)
+        return D.isClassicView(o:origin()) == true and D.isEditView(o:origin()) == true
+      end or function() return false end,
+    inRack = isK8 and function(o)
+        return D.isClassicView(o:origin()) == true and D.isEditView(o:origin()) ~= true
+      end or function() return D.isRackView() end,
   }
 
   CELLS[#CELLS + 1] = setmetatable({
