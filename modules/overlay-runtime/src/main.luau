@@ -1908,11 +1908,42 @@ end
 -- screen reader's own window-title announcement and get clobbered. Named because it is a
 -- FIXED part of every activation the user experiences, and any measurement that does not
 -- separate it out is measuring a deliberate pause and calling it slowness.
+-- LOOK AGAIN SHORTLY AFTER ACTIVATING, once.
+--
+-- Every screen probe in every module has the same exposure, and it is not a flaky reading — it
+-- is the wrong window. `host.screen.pixel` returns the COMPOSITED desktop, and for a moment
+-- after a focus change that still shows whatever was in front before. Measured on Kontakt's
+-- view probe: with REAPER behind a browser the same point reads 255,255,255 from the screen and
+-- 99,99,99 from the window rendered by itself.
+--
+-- Activation is exactly when this bites, because that IS the focus change, and it is also when
+-- a user is listening hardest. Rejecting improbable values does not save it: Kontakt's two
+-- states read 24 and 99, and 24 is what almost any dark chrome reads, so a stale glance is
+-- accepted as a confident answer.
+--
+-- So the fix has to be temporal, and it belongs here rather than in each module: 250 ms after an
+-- overlay comes up, the generation counter turns over and the overlay reconsiders. Anything that
+-- caches a screen reading keys on `O.stateGeneration()` and is re-read exactly once; anything
+-- that reads fresh each time is re-read by the recheck itself. One extra probe per activation.
+local stateGen = 0
+function O.stateGeneration()
+  return stateGen
+end
+
+local CONFIRM_DELAY = 250
+
 local ANNOUNCE_DELAY = 350
 
 function Overlay:_activate()
   if self.active then return end
   self.active = true
+  if host.timer then
+    host.timer.after(CONFIRM_DELAY, function()
+      if not self.active then return end
+      stateGen = stateGen + 1
+      self:_recheck()
+    end)
+  end
   -- The other half of the interaction path, timed like the Tab step already is.
   --
   -- A Tab step is a focus move inside an overlay that is already up; this is everything

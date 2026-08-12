@@ -250,36 +250,6 @@ end
 -- offered. Never to decide where to click.
 local VIEW_PROBE_FROM_RIGHT, VIEW_PROBE_Y = 262, 24
 
--- CONFIRM EVERY FRESH READING, once, after the screen has had time to catch up.
---
--- `host.screen.pixel` reads the COMPOSITED SCREEN, and for a moment after a focus change that
--- still shows the window which used to be in front. Measured directly: with REAPER behind a
--- browser, the probe point reads 255,255,255 from the screen and 99,99,99 from the window
--- rendered by itself. So a probe that runs as an overlay activates can be reading someone
--- else's window.
---
--- Rejecting unrecognised values was tried first and is not enough, which is the interesting
--- part. It catches 255 and 51, and it cannot catch the common case: the two states read 24 and
--- 99, and 24 is what almost any dark chrome reads. A stale glance at another window's
--- background is then accepted as a confident "play view" — no refusal, no log, and the wrong
--- overlay for as long as the cache holds.
---
--- The fault is temporal, so the fix has to be. Every reading that actually touches the screen
--- schedules ONE confirmation: 250 ms later the cache is dropped, the probe runs again against a
--- screen that has certainly repainted, and the overlay is asked to reconsider. One extra pixel
--- per activation, and the answer stops depending on when it was asked.
-local pending = {}
-local function confirmLater(ov, drop)
-  if not (ov and host.timer) then return end
-  if pending[ov] then return end
-  pending[ov] = true
-  host.timer.after(250, function()
-    pending[ov] = nil
-    drop()
-    if ov._recheck then ov:_recheck() end
-  end)
-end
-
 -- EDIT MODE, the third view the classic/play question cannot express.
 --
 -- Kontakt's instrument editor reads as CLASSIC to the probe above — measured, both edit shots
@@ -302,7 +272,11 @@ local editKey, editCache = nil, false
 local function isEditView(origin, ov)
   if not (origin and origin.client and origin.bounds) then return false end
   local gen = host.inputEpoch and host.inputEpoch() or (host.epoch and host.epoch() or 0)
-  local key = tostring(origin.id) .. "@" .. tostring(gen)
+  -- Keyed on the runtime's state generation as well, which turns over 250 ms after any overlay
+  -- activates. Without it a reading taken while the screen still showed the PREVIOUS window
+  -- survived until the user acted — the "it thinks I am in the play view until I toggle twice"
+  -- that this probe was reported for.
+  local key = tostring(origin.id) .. "@" .. tostring(gen) .. "/" .. tostring(O.stateGeneration())
   if editKey == key then return editCache end
   editKey = key
   local w = O.contentSize(origin)
@@ -310,7 +284,6 @@ local function isEditView(origin, ov)
     editCache = false
     return false
   end
-  confirmLater(ov, function() editKey = nil end)
   local p = host.screen.pixel(
     origin.client.x + w - EDIT_PROBE_FROM_RIGHT,
     origin.client.y + EDIT_PROBE_Y
@@ -351,7 +324,7 @@ local function isClassicView(origin, ov)
   -- Tab, measured at 21-38 ms of a ~70 ms step, to re-answer a question whose answer
   -- pressing Tab cannot have changed.
   local gen = host.inputEpoch and host.inputEpoch() or (host.epoch and host.epoch() or 0)
-  local key = tostring(origin.id) .. "@" .. tostring(gen)
+  local key = tostring(origin.id) .. "@" .. tostring(gen) .. "/" .. tostring(O.stateGeneration())
   if viewKey == key then return viewCache end
   viewKey = key
 
@@ -368,7 +341,6 @@ local function isClassicView(origin, ov)
   --
   -- Against the CONTENT's right edge, not the window frame's: standalone, the frame is
   -- 16 px wider than the plugin, which is enough to read a neighbouring icon instead.
-  confirmLater(ov, function() viewKey = nil end)
   local p = host.screen.pixel(
     origin.client.x + O.contentSize(origin) - VIEW_PROBE_FROM_RIGHT,
     origin.client.y + VIEW_PROBE_Y
