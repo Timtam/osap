@@ -281,6 +281,13 @@ impl Backend for WindowsBackend {
     }
 
     fn pixel(&self, x: i32, y: i32) -> (u8, u8, u8) {
+        // The SCREEN, deliberately, and with a caveat the callers have to know: this is what is
+        // composited at that point, which after a focus change is briefly still the window that
+        // used to be there. Measured — with REAPER behind a browser, the same point reads
+        // 255,255,255 from the screen and 99,99,99 from PrintWindow(PW_RENDERFULLCONTENT) on the
+        // window itself. A probe that runs at the moment an overlay activates can therefore read
+        // the previous window. Rendering the window instead would be immune, and is not done
+        // here because it renders the WHOLE window per call; the callers re-ask instead.
         unsafe {
             let dc = GetDC(std::ptr::null_mut());
             let c = GetPixel(dc, x, y); // COLORREF = 0x00BBGGRR

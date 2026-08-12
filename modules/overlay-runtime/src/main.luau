@@ -344,6 +344,16 @@ function Overlay:addGraphicalButton(opts)
     -- May also be `function(overlay, hit) -> dx, dy, why`, for a handle with a limit only the
     -- caller knows. Returning no offset declines the drag and speaks `why`.
     dragBy = opts.dragBy,
+    -- `clickOffset = {dx, dy}`: press somewhere OTHER than the middle of what was found, for a
+    -- control whose only findable part is not its clickable part. Kontakt's editor sections are
+    -- the case: the caption "Insert Effects" is what can be recognised — Kontakt's own chrome,
+    -- the same on every library — while the thing to press is the small fold button beside it,
+    -- which carries no text and looks identical on all five.
+    clickOffset = opts.clickOffset,
+    -- `state = function(overlay, hit) -> string|nil`: what to announce after the label, worked
+    -- out from WHERE the control was just found. A second template per state would do the same
+    -- job and cost a second full search; a caller that knows the offset can read one pixel.
+    state = opts.state,
     -- `unavailable = function(overlay) -> string|nil`: what to announce INSTEAD of searching,
     -- when the caller knows the control cannot act right now. See valueOfNow.
     unavailable = opts.unavailable,
@@ -1110,6 +1120,10 @@ local function valueOfNow(self, c, done)
           host.log.info("[gbutton] wrote what the search actually saw to " .. path)
         end
       end
+      if hit and c.state then
+        local ok, v = pcall(c.state, self, hit)
+        if ok and v ~= nil and v ~= "" then return done(tostring(v)) end
+      end
       -- NOT `done(hit and nil or "not found")`. That idiom is broken whenever the middle
       -- value is nil or false: `hit and nil` is nil even for a real hit, so the `or` branch
       -- always wins and every successful search reported "not found". Eight rounds went into
@@ -1496,6 +1510,9 @@ function Overlay:activate(index)
         return
       end
       local cx, cy = hit.x + math.floor(hit.w / 2), hit.y + math.floor(hit.h / 2)
+      if c.clickOffset then
+        cx, cy = hit.x + c.clickOffset[1], hit.y + c.clickOffset[2]
+      end
       if refuseOutside(self, c, cx, cy) then return end
       if c.dragBy then
         -- `dragBy` may be a FUNCTION of where the handle was just found, not only a fixed

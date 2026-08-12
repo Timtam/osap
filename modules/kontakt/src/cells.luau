@@ -103,18 +103,21 @@ for vIdx, v in ipairs(D.VARIANTS) do
     header = geo.HEADER[v.name],
     uiaFileMenu = geo.UIA_FILE_MENU[v.name],
     hasViewToggle = isK8,
-    inClassic = isK8 and function(o) return D.isClassicView(o:origin()) == true end
+    -- `o` is passed through so a probe that could not read can ask the overlay to look again.
+    -- Without it a refused reading waits for the next question, and after activation there may
+    -- not be one: the arbiter picks an overlay from the wrong answer and then stops asking.
+    inClassic = isK8 and function(o) return D.isClassicView(o:origin(), o) == true end
       or function() return D.isRackView() end,
-    inModern = isK8 and function(o) return D.isClassicView(o:origin()) ~= true end
+    inModern = isK8 and function(o) return D.isClassicView(o:origin(), o) ~= true end
       or function() return false end,
     -- `inClassic` covers BOTH the instrument rack and the instrument editor, because the
     -- status bar and the resize grip are the same in each. The rack's own controls are not:
     -- their coordinates address a rack that the editor has replaced, so they take `inRack`.
     inEdit = isK8 and function(o)
-        return D.isClassicView(o:origin()) == true and D.isEditView(o:origin()) == true
+        return D.isClassicView(o:origin(), o) == true and D.isEditView(o:origin(), o) == true
       end or function() return false end,
     inRack = isK8 and function(o)
-        return D.isClassicView(o:origin()) == true and D.isEditView(o:origin()) ~= true
+        return D.isClassicView(o:origin(), o) == true and D.isEditView(o:origin(), o) ~= true
       end or function() return D.isRackView() end,
   }
 

@@ -250,6 +250,36 @@ end
 -- offered. Never to decide where to click.
 local VIEW_PROBE_FROM_RIGHT, VIEW_PROBE_Y = 262, 24
 
+-- CONFIRM EVERY FRESH READING, once, after the screen has had time to catch up.
+--
+-- `host.screen.pixel` reads the COMPOSITED SCREEN, and for a moment after a focus change that
+-- still shows the window which used to be in front. Measured directly: with REAPER behind a
+-- browser, the probe point reads 255,255,255 from the screen and 99,99,99 from the window
+-- rendered by itself. So a probe that runs as an overlay activates can be reading someone
+-- else's window.
+--
+-- Rejecting unrecognised values was tried first and is not enough, which is the interesting
+-- part. It catches 255 and 51, and it cannot catch the common case: the two states read 24 and
+-- 99, and 24 is what almost any dark chrome reads. A stale glance at another window's
+-- background is then accepted as a confident "play view" — no refusal, no log, and the wrong
+-- overlay for as long as the cache holds.
+--
+-- The fault is temporal, so the fix has to be. Every reading that actually touches the screen
+-- schedules ONE confirmation: 250 ms later the cache is dropped, the probe runs again against a
+-- screen that has certainly repainted, and the overlay is asked to reconsider. One extra pixel
+-- per activation, and the answer stops depending on when it was asked.
+local pending = {}
+local function confirmLater(ov, drop)
+  if not (ov and host.timer) then return end
+  if pending[ov] then return end
+  pending[ov] = true
+  host.timer.after(250, function()
+    pending[ov] = nil
+    drop()
+    if ov._recheck then ov:_recheck() end
+  end)
+end
+
 -- EDIT MODE, the third view the classic/play question cannot express.
 --
 -- Kontakt's instrument editor reads as CLASSIC to the probe above — measured, both edit shots
@@ -266,10 +296,10 @@ local VIEW_PROBE_FROM_RIGHT, VIEW_PROBE_Y = 262, 24
 -- spanning 664..1010 px of width and 679..965 of height. The play-view readings vary (14, 24,
 -- 36, 200) and do not matter: this question is only asked once the first one has said classic.
 local EDIT_PROBE_FROM_RIGHT, EDIT_PROBE_Y = 652, 46
-local EDIT_PROBE_VALUE, EDIT_PROBE_TOLERANCE = 134, 25
+local EDIT_PROBE_VALUE, RACK_PROBE_VALUE, EDIT_PROBE_TOLERANCE = 134, 71, 25
 
 local editKey, editCache = nil, false
-local function isEditView(origin)
+local function isEditView(origin, ov)
   if not (origin and origin.client and origin.bounds) then return false end
   local gen = host.inputEpoch and host.inputEpoch() or (host.epoch and host.epoch() or 0)
   local key = tostring(origin.id) .. "@" .. tostring(gen)
@@ -280,13 +310,28 @@ local function isEditView(origin)
     editCache = false
     return false
   end
+  confirmLater(ov, function() editKey = nil end)
   local p = host.screen.pixel(
     origin.client.x + w - EDIT_PROBE_FROM_RIGHT,
     origin.client.y + EDIT_PROBE_Y
   )
+  -- Same rule as the view probe above, and for the same failure: "not 134" was being treated as
+  -- "the editor is closed", so a reading taken before the plug-in painted said closed and stuck.
+  -- The rack reads 71 and the editor 134; anything else is a different picture.
+  local v = p ~= nil and (p.r + p.g + p.b) / 3 or nil
+  if v == nil or (math.abs(v - EDIT_PROBE_VALUE) > EDIT_PROBE_TOLERANCE
+                  and math.abs(v - RACK_PROBE_VALUE) > EDIT_PROBE_TOLERANCE) then
+    editKey = nil
+    host.log.info(string.format(
+      "[view] unrecognised editor reading %s at (%d,%d) — origin %d,%d %dx%d — keeping '%s'",
+      v and string.format("%d", v) or "nothing",
+      origin.client.x + w - EDIT_PROBE_FROM_RIGHT, origin.client.y + EDIT_PROBE_Y,
+      origin.client.x, origin.client.y, w, select(2, O.contentSize(origin)),
+      editCache and "open" or "closed"))
+    return editCache
+  end
   local was = editCache
-  editCache = p ~= nil
-    and math.abs((p.r + p.g + p.b) / 3 - EDIT_PROBE_VALUE) <= EDIT_PROBE_TOLERANCE
+  editCache = math.abs(v - EDIT_PROBE_VALUE) <= EDIT_PROBE_TOLERANCE
   if editCache ~= was then
     host.log.info(string.format("[view] instrument editor %s (probe reads %s)",
       editCache and "open" or "closed",
@@ -296,7 +341,7 @@ local function isEditView(origin)
 end
 
 local viewKey, viewCache = nil, false
-local function isClassicView(origin)
+local function isClassicView(origin, ov)
   if not (origin and origin.client and origin.bounds) then return false end
   -- Keyed on `inputEpoch`, NOT `epoch`. Which view Kontakt is in can only change when
   -- something acts — our F10, or a click in its menu — and both go through host.input,
@@ -323,12 +368,41 @@ local function isClassicView(origin)
   --
   -- Against the CONTENT's right edge, not the window frame's: standalone, the frame is
   -- 16 px wider than the plugin, which is enough to read a neighbouring icon instead.
+  confirmLater(ov, function() viewKey = nil end)
   local p = host.screen.pixel(
     origin.client.x + O.contentSize(origin) - VIEW_PROBE_FROM_RIGHT,
     origin.client.y + VIEW_PROBE_Y
   )
+  -- ACCEPT ONLY A RECOGNISED READING, and do not remember an unrecognised one.
+  --
+  -- This was `> 60`, and a threshold answers which SIDE a number is on without ever asking
+  -- whether it came from the right world. The first read after our app starts can happen before
+  -- the plug-in has painted, or while something else is still in front — and the answer was then
+  -- cached against `inputEpoch`, which only turns over when we act. So one bad reading stuck
+  -- until the user clicked something, which is exactly the "toggle it twice and it comes right"
+  -- they reported.
+  --
+  -- The two states read 24 and 99 across every calibration shot. Anything else is not this
+  -- probe's question being answered wrongly, it is a different picture, and the honest response
+  -- is to keep the previous answer and leave the cache unset so the next poll looks again.
+  local v = p ~= nil and (p.r + p.g + p.b) / 3 or nil
+  if v == nil or (math.abs(v - 24) > 20 and math.abs(v - 99) > 20) then
+    viewKey = nil
+    -- WITH THE POINT AND THE WINDOW, because "unrecognised" on its own says only that the
+    -- number is wrong, not where it came from. A reading of 255 is not a misread of Kontakt's
+    -- chrome, it is a different surface; the only way to tell a stale origin from an unpainted
+    -- window from something on top is to record where the pixel was taken.
+    host.log.info(string.format(
+      "[view] unrecognised reading %s at (%d,%d) — origin %d,%d %dx%d, foreground %s — keeping '%s'",
+      v and string.format("%d", v) or "nothing",
+      origin.client.x + O.contentSize(origin) - VIEW_PROBE_FROM_RIGHT,
+      origin.client.y + VIEW_PROBE_Y,
+      origin.client.x, origin.client.y, O.contentSize(origin), select(2, O.contentSize(origin)),
+      tostring((host.window.active() or {}).id), viewCache and "classic" or "play"))
+    return viewCache
+  end
   local was = viewCache
-  viewCache = p ~= nil and (p.r + p.g + p.b) / 3 > 60
+  viewCache = v > 60
   -- Only on a CHANGE of answer, so this cannot log per focus move — but with the reading in
   -- it, because "the detection is wrong" and "the detection is right about a state I did not
   -- expect it to see" are different problems and the number tells them apart.

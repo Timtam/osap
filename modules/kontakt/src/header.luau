@@ -258,6 +258,65 @@ end
 -- 13 play-view shots at the SAME 679 px of content have none. Play view is not resizable, so
 -- offering a resize there is a button that can only ever report "not found".
 --
+-- KONTAKT'S INSTRUMENT-EDITOR SECTIONS, found by their captions.
+--
+-- Five stacked blocks that fold away — Instrument Buses, Insert Effects, Send Effects, Main
+-- Effects, Modulation — each with a small button to the left of its name. Without these the
+-- editor is a wall with nothing openable in it from a keyboard.
+--
+-- FOUND rather than placed, because they move: opening one pushes every block below it down by
+-- however tall its contents are. Measured, "Modulation" sits at y 513 in one shot and y 649 in
+-- another of the same view. And found by the CAPTION rather than the button, because the button
+-- carries no text and looks identical on all five, while the caption is Kontakt's own chrome and
+-- the same on every library. Masked to its lettering, which is the rule this project arrived at
+-- the hard way: 163-241 dark pixels each, matching all four edit shots at 1010 and 664 px of
+-- width, and nothing else across 45 captures.
+--
+-- UIA offers nothing here, and that is measured rather than assumed — a raw walk in this very
+-- view lists Kontakt's header and status bar and stops. The editor is not in the tree at all.
+--
+-- The STATE comes from one pixel rather than a second template per block. The fold button shows
+-- a triangle when shut and a cross when open, and at 18 px left and 9 px below the caption's
+-- corner that reads 225 against 71 — 154 apart, identical across all four shut blocks in a shot
+-- that has one open. A second template would answer the same question for the price of a second
+-- full-region search.
+local EDIT_SECTIONS = {
+  { label = "Instrument buses", image = "images/edit/instrument-buses.png", hotkey = "Alt+Q" },
+  { label = "Insert effects",   image = "images/edit/insert-effects.png",   hotkey = "Alt+W" },
+  { label = "Send effects",     image = "images/edit/send-effects.png",     hotkey = "Alt+Y" },
+  { label = "Main effects",     image = "images/edit/main-effects.png",     hotkey = "Alt+X" },
+  { label = "Modulation",       image = "images/edit/modulation.png",       hotkey = "Alt+M" },
+}
+
+-- From the caption's top-left corner: where the fold button is, and where to read its glyph.
+local FOLD_CLICK = { -19, 8 }
+local FOLD_PROBE = { -18, 9 }
+local FOLD_SHUT, FOLD_OPEN = 225, 71
+
+local function addEditSections(ov, cell)
+  for _, sec in ipairs(EDIT_SECTIONS) do
+    ov:addGraphicalButton({
+      label = sec.label,
+      when = cell.inEdit,
+      rawOrigin = true,
+      image = host.path(sec.image),
+      scales = { 1.0 },
+      clickOffset = FOLD_CLICK,
+      state = function(_, hit)
+        local p = host.screen.pixel(hit.x + FOLD_PROBE[1], hit.y + FOLD_PROBE[2])
+        if not p then return nil end
+        local v = (p.r + p.g + p.b) / 3
+        -- Refuses between the two, as every state probe in this file does: these controls fold
+        -- a panel away, so a wrong answer costs the user the panel rather than a word.
+        if math.abs(v - FOLD_SHUT) <= 40 then return "collapsed, press to expand" end
+        if math.abs(v - FOLD_OPEN) <= 40 then return "expanded, press to collapse" end
+        return nil
+      end,
+      hotkey = sec.hotkey,
+    })
+  end
+end
+
 local function addResizeControls(ov, cell)
   -- The size itself, readable by arriving at it. Asked for directly, and the reason is the
   -- one this whole thread has been about: the two controls below CHANGE the size and say so,
@@ -489,6 +548,7 @@ local function addPluginHeader(ov, cell)
   addRackControls(ov, cell)
   addStatusToggles(ov, cell)
   addResizeControls(ov, cell)
+  addEditSections(ov, cell)
   for _, h in ipairs(geo.K7_CONTROLS) do
     -- Only those Kontakt 7 offers embedded, and only where the cell has the coordinate:
     -- Kontakt 8's geometry simply has no entry, so the loop skips it without a version
