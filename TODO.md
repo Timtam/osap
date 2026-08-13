@@ -72,9 +72,14 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       Windows through Qt's Windows accessibility provider; the macOS bridge is a different
       one. If they do not survive, those modules need a different anchor on macOS. The
       accessibility dump answers it.
-- [ ] **Hotkeys collide with VoiceOver.** Control-Option is VoiceOver's own modifier and
-      every shipped overlay uses `Ctrl+Alt+…`. macOS module variants need their own key
-      choices; the mechanism already exists (`host.os.is("macos")`), the decision does not.
+- [ ] **Decide the macOS key vocabulary.** Not a VoiceOver collision — no shipped overlay
+      binds `Ctrl+Alt`; they use `Alt+<key>`, `Ctrl+<key>` and `Ctrl+Shift+<key>`. The two
+      things that do sit on VoiceOver's Control-Option modifier are the calibrator (dev-only,
+      behind `AUTOMATION_PLATFORM_CALIBRATE=1`) and the reload key, which also needs `fn` or
+      the standard-function-keys setting. The real question is that `Alt` is Option, the
+      accented-character layer, and `Ctrl+<letter>` is macOS's emacs text-editing layer where
+      the platform convention would be `Command+<letter>`. The mechanism for a per-platform
+      choice already exists (`host.os.is("macos")`); the choice does not.
 - [ ] **Speech goes around VoiceOver, not through it.** `tts` picks AVFoundation on macOS, a
       separate voice talking over VoiceOver, with no braille. The VoiceOver-via-AppleScript
       path that [docs/prior-art-vocr.md](docs/prior-art-vocr.md) documents needs an

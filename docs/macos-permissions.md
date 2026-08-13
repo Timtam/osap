@@ -70,17 +70,32 @@ happening once the application is signed with a Developer ID and notarised.
 Keeping the bundle identifier stable is what makes even that much work, which is why it is
 fixed in `package-macos.sh` and not to be edited casually.
 
-## VoiceOver and the overlay's shortcuts
+## Keys, and where they land on a Mac
 
-Worth knowing before the first session: **Control-Option is VoiceOver's own modifier**, and
-the shipped overlays were written for Windows, where `Ctrl+Alt+<key>` is free. On a Mac with
-VoiceOver running, those combinations belong to VoiceOver and will not reach the overlay.
+**Control-Option is VoiceOver's own modifier**, so anything on it belongs to VoiceOver
+first. Two things in this project sit there, and neither is an overlay shortcut:
 
-macOS variants of the modules therefore need their own key choices — a module can ask which
-platform it is on (`host.os.is("macos")`) and register a different combination. Until that
-is done, expect Control-Option shortcuts to be swallowed. The application's own
-reload-everything shortcut has the same issue in a different form: it uses F5, so it needs
-"Use F1, F2, etc. as standard function keys" turned on, or the `fn` key held.
+- the **calibrator's** `Ctrl+Alt+Shift+S/T/V`, which only exist in a run started with
+  `AUTOMATION_PLATFORM_CALIBRATE=1`, and
+- the application's own **reload-everything** key, `Ctrl+Shift+Win+Alt+F5`. It also uses an
+  F-key, so it additionally needs "Use F1, F2, etc. as standard function keys" turned on, or
+  the `fn` key held down.
+
+The overlays themselves use `Alt+<key>`, `Ctrl+<key>` and `Ctrl+Shift+<key>`, and their
+macOS question is a different one:
+
+- `Alt` becomes **Option**, which on a Mac is the layer that types accented characters. That
+  is harmless for a shortcut the platform consumes, but a combination it fails to claim
+  types a character into the plugin rather than doing nothing.
+- `Ctrl` becomes **Control**, and `Control+<letter>` on macOS is the text-editing layer
+  inherited from emacs — `Control+A`, `Control+E`, `Control+N`, `Control+P` all mean
+  something inside any text field. A registered global shortcut wins, but it takes the key
+  away from the plugin's own text entry while the overlay is active, and the macOS
+  convention for a command would be `Command+<letter>` anyway.
+
+So macOS module variants want their own key choices rather than the Windows ones. The
+mechanism exists — a module can ask which platform it is on with `host.os.is("macos")` and
+register accordingly — and the choice has not been made yet.
 
 ## Where this is not the whole story
 
