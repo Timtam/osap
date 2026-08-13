@@ -234,6 +234,14 @@ function Overlay:addTabControl(opts)
     --       than a name that is missing — the worse of the two for someone who cannot check.
     verticalStep = opts.verticalStep,
     verticalName = opts.verticalName,
+    -- `hotkeyKeepsFocus`: a tab's own hotkey SELECTS it without jumping to it.
+    --
+    -- Moving focus is the right default and stays the default: pressing a tab's key usually
+    -- means "take me there", and the controls that follow belong to that tab. It is wrong when
+    -- the tab control is a SETTING rather than a place — Melodyne's tool bar is one, and its
+    -- F-keys are Melodyne's own, so a user changing tool in the middle of editing gets thrown
+    -- out of the editor and has to find their way back for every switch.
+    hotkeyKeepsFocus = opts.hotkeyKeepsFocus == true,
   })
   self._hasTabControl = true
   return {
@@ -720,10 +728,12 @@ function Overlay:stepTabVertical(dir)
   end
 end
 
-function Overlay:gotoTab(n)
+function Overlay:gotoTab(n, keepFocus)
   local i, c = findTabControl(self)
   if not c or n < 1 or n > #c.tabs then return end
-  self.focus = i
+  -- The selection still happens and is still announced either way; what `keepFocus` decides is
+  -- only whether the user is taken along with it.
+  if not (keepFocus or c.hotkeyKeepsFocus) then self.focus = i end
   c._current = n
   selectTab(self, c)
 end

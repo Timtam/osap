@@ -216,6 +216,11 @@ do
     -- the wrong thing about what they are looking at. Celemony calls it the Toolbox;
     -- "horizontal tool bar" names it and says which way the arrows go.
     typeLabel = "horizontal tool bar",
+    -- F1 to F6 pick a tool WITHOUT dragging the user to the tool bar. Changing tool is
+    -- something you do in the middle of editing notes, and being moved out of the Note Editor
+    -- on every switch — then having to walk back — is worse than the switch is worth. Tab still
+    -- reaches the bar when the bar is what you want.
+    hotkeyKeepsFocus = true,
     current = function(o)
       local i = activeTool(o)
       if not i then return nil end
