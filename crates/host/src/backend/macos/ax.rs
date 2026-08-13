@@ -227,6 +227,8 @@ thread_local! {
     /// this out: it looks cheap and is not, because it resolves the owning process's name,
     /// and every embedded overlay asks for it on every recheck.
     static EXE_BY_PID: RefCell<HashMap<i32, String>> = RefCell::new(HashMap::new());
+    /// Bundle identifiers by pid, cached for the same reason and read on the same path.
+    static BUNDLE_BY_PID: RefCell<HashMap<i32, String>> = RefCell::new(HashMap::new());
     /// Window classes whose content rect was found to sit below the frame, so the
     /// derivation is reported once per class rather than once per call.
     static INSET_REPORTED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
@@ -781,6 +783,30 @@ fn role_matches(snap: &Snap, roles: &[&str]) -> bool {
 /// of a call that looks cheap and that every embedded overlay makes on every recheck. Only
 /// successful answers are cached: a process that has not finished launching has no
 /// executable URL yet, and remembering that emptiness would outlast the reason for it.
+/// The application's bundle identifier for a pid — `"com.native-instruments.Kontakt8"`.
+///
+/// The stable identity on this platform, and the one a matcher should prefer when it wants
+/// to be exact: the executable inside a bundle is named by the vendor's build system, so it
+/// can differ from the product's name and from what the same product's executable is called
+/// on Windows. Cached for the same reason `exe_for_pid` is — both are read on every
+/// activation, and a process lookup is not free.
+fn bundle_id_for_pid(pid: i32) -> String {
+    if pid == 0 {
+        return String::new();
+    }
+    if let Some(hit) = BUNDLE_BY_PID.with(|c| c.borrow().get(&pid).cloned()) {
+        return hit;
+    }
+    let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) else {
+        return String::new();
+    };
+    let id = app.bundleIdentifier().map(|s| s.to_string()).unwrap_or_default();
+    if !id.is_empty() {
+        BUNDLE_BY_PID.with(|c| c.borrow_mut().insert(pid, id.clone()));
+    }
+    id
+}
+
 fn exe_for_pid(pid: i32) -> String {
     if pid == 0 {
         return String::new();
@@ -934,6 +960,7 @@ fn win_info(el: CFRetained<AXUIElement>, require_title: bool) -> Option<WinInfo>
         class,
         pid: pid as u32,
         exe: exe_for_pid(pid),
+        bundle_id: bundle_id_for_pid(pid),
         x,
         y,
         w,

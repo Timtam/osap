@@ -4290,6 +4290,7 @@ fn win_to_table(lua: &Lua, w: &WinInfo) -> mlua::Result<Table> {
         .unwrap_or_else(|| w.exe.clone());
     app.set("name", name)?;
     app.set("exe", w.exe.clone())?;
+    app.set("bundleId", w.bundle_id.clone())?;
     app.set("pid", w.pid)?;
     t.set("app", app)?;
 

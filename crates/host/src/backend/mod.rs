@@ -34,6 +34,15 @@ pub struct WinInfo {
     pub class: String,
     pub pid: u32,
     pub exe: String,
+    /// The application's bundle identifier — `"com.native-instruments.Kontakt8"`. Empty
+    /// where the platform has no such thing, which is everywhere but macOS.
+    ///
+    /// It exists because `exe` is not a stable identity there: the executable inside a
+    /// bundle is named by the vendor's build system rather than by the product, so
+    /// "Ableton Live 11 Suite.exe" on Windows is plain "Live" on macOS while the bundle id
+    /// still says `com.ableton.live`. A matcher that wants one identity for both platforms
+    /// matches `app.name`; one that wants to be exact on macOS matches this.
+    pub bundle_id: String,
     pub x: i32,
     pub y: i32,
     pub w: i32,

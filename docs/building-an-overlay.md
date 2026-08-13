@@ -225,7 +225,71 @@ Each file runs once per VM, and sees the same `host` as the file that included i
 
 ---
 
-## Step 8 — when it does not appear
+## Step 8 — the same module on Windows and macOS
+
+Almost all of an overlay is already portable, and that is not a coincidence: coordinates are
+points with the origin at the top left of the primary display on both systems, a capture is
+one pixel per point on both, and clicking, dragging, typing, image search and OCR take the
+same numbers and mean the same thing. **Nothing about the controls, the geometry, the
+hotkeys or the actions needs to know which system it is on.**
+
+What genuinely differs is *identity* — how you say "this window is Kontakt". There is no
+common vocabulary for it: Windows has a window class, macOS has an accessibility role and a
+bundle identifier, and no abstraction can make `NINormalWindow` and `AXWindow` the same
+string. So identity is the one thing a matcher spells twice, and the grammar keeps that
+confined to a single table per platform:
+
+```lua
+local KONTAKT = {
+  title = { contains = "Kontakt" },        -- shared, and often enough on its own
+  windows = { class = { prefix = "NINormalWindow" },
+              app = { exe = { contains = "Kontakt" } } },
+  macos   = { axSubrole = "AXStandardWindow",
+              app = { bundleId = { contains = "native-instruments" } } },
+}
+```
+
+A platform block takes the same fields as the top level — `title`, `app`, `class` — plus,
+on macOS, `axRole`, `axSubrole` and `axIdentifier`. Those three are parts of the one `class`
+string the macOS backend publishes (`AXRole/AXSubrole/AXIdentifier`, both separators always
+present); matching them individually just saves writing a pattern around the separators.
+
+Three more rules worth knowing:
+
+- **A matcher with no platform block at all matches everywhere.** If title and application
+  name are enough to identify the window, you have written a cross-platform matcher without
+  meaning to.
+- **A matcher that names platforms matches only on those.** That is the OS gate, and it is
+  why a Windows-only module is a clean no-op on a Mac rather than a source of wrong matches.
+  `os = { "windows" }` says the same thing for a matcher that needs no block.
+- **Any single field can be given per platform**, since the OS keys and the match modes are
+  different words: `class = { windows = "NINormalWindow", macos = "AXWindow//" }`. Use it
+  where one field differs and the rest of the matcher does not.
+
+The embedded binding has one more of these, for the same reason — a host names its plugin
+surface with a window class on Windows and an accessibility role on macOS:
+
+```lua
+O.embedded {
+  hosts = daw.reaper,
+  control = { windows = "^Plugin%x+$", macos = "^AXGroup/" },
+}
+```
+
+And for the genuine one-off, `host.os.is("macos")` and `host.os.current` are always there:
+
+```lua
+if host.os.is("macos") then ... end
+local step = host.os.pick { windows = 3, macos = 1 }
+```
+
+Reach for that last. A module that branches on the operating system in ten places is a
+module that will drift apart into two, and the reason the rest of this page never mentions
+platforms is that it does not have to.
+
+---
+
+## Step 9 — when it does not appear
 
 Every failure here is silent by nature: nothing errors, the overlay simply never activates. Three places tell you why.
 

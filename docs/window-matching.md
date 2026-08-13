@@ -1,6 +1,7 @@
-# Window Matching & Triggers (Draft)
+# Window Matching & Triggers
 
-*Status: Draft, 2026-06-21. Belongs to [host-api-capability-catalog.md](host-api-capability-catalog.md) (`host.window`). Formalizes "capability detection instead of parity" for window detection.*
+*Status: implemented, 2026-08-13 — the platform blocks, the macOS `ax*` fields, `os = {…}`
+gating and per-field OS keys all work as described. Originally drafted 2026-06-21. Belongs to [host-api-capability-catalog.md](host-api-capability-catalog.md) (`host.window`). Formalizes "capability detection instead of parity" for window detection.*
 
 ## Principle
 
@@ -42,6 +43,33 @@ local matcher = host.match {
 **Evaluation:** shared fields AND the block matching the current OS. **If the OS block is missing → no match on that OS** (OS gating for free). The `where` predicate runs **last** — cascade: cheap structured fields first (title/app/class), then callback/image/OCR only on candidates (like ReaHotkey).
 
 **Match modes per field:** `{ exact = "…" }` (default), `{ contains = "…" }`, `{ regex = "…" }`, `{ prefix/suffix = "…" }`, `{ not = … }` (exclude).
+
+## Any single field, per platform
+
+The match modes (`exact`, `contains`, `prefix`, `suffix`, `pattern`, `regex`, `not`) and the
+platform names (`windows`, `macos`, `linux`) are different words, so one table can carry
+either and a matcher only reaches for the platform keys at the field that actually differs:
+
+```lua
+{ title = { contains = "Kontakt" },
+  class = { windows = { prefix = "NINormalWindow" }, macos = "AXWindow/AXStandardWindow/" } }
+```
+
+A field that names platforms and not the current one does **not** match — the same rule the
+blocks follow, and for the same reason: a field that quietly matched everything on a fourth
+system would be a Windows-only module claiming a Mac window.
+
+`host.os.pick { windows = …, macos = … }` applies the same resolution outside a matcher, for
+the places that are not fields — the control-class pattern of an embedded binding, mostly.
+
+## What macOS actually publishes in `class`
+
+One string, composed as `AXRole/AXSubrole/AXIdentifier`, both separators always present and
+a missing part empty: `"AXWindow/AXStandardWindow/"`, `"AXGroup//NI.Kontakt.Main"`. It is
+one field because `class` is what every module's detection already matches on. A matcher can
+name a part instead — `macos = { axRole = …, axSubrole = …, axIdentifier = … }` — and the
+accessibility dump prints the identical string, so what you read in a dump is what you write
+in a matcher.
 
 ## OS gating
 

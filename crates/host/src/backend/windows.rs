@@ -1040,6 +1040,8 @@ fn window_info(hwnd_val: isize, require_title: bool) -> Option<WinInfo> {
             class,
             pid,
             exe,
+            // Windows has no such concept; the field exists for the platform that does.
+            bundle_id: String::new(),
             x: rect.left,
             y: rect.top,
             w: rect.right - rect.left,
