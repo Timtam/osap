@@ -194,49 +194,34 @@ do
       variant = activeVariant(o, TOOLS[i])
       return i
     end,
+    -- Down and Up step this tool's stacked variants, which is where they belong: a variant is a
+    -- property of the tool, not a separate thing beside it. This was briefly a control of its
+    -- own on Alt+V, which worked and said the wrong thing about the shape of the UI.
+    verticalName = function(o, i)
+      local tool = TOOLS[i]
+      if not (tool and tool.variants) then return nil end
+      variant = activeVariant(o, tool)
+      if variant <= 1 then return nil end -- the base tool: the tab's own label is right
+      return tool.variants[variant - 1].name .. " tool, has vertical variations"
+    end,
+    verticalStep = function(o, i, dir)
+      local tool = TOOLS[i]
+      if not (tool and tool.variants) then
+        return (tool and tool.name or "This tool") .. " has no variants"
+      end
+      local count = #tool.variants + 1
+      -- Clamped rather than wrapped: at either end the name is repeated instead of jumping to
+      -- the far side, so holding the key cannot cycle past the edge unnoticed.
+      local target = math.max(1, math.min(count, variant + dir))
+      if target ~= variant then selectVariant(o, tool, target) end
+      return (target == 1 and tool.name or tool.variants[target - 1].name) .. " tool"
+    end,
   })
 end
 
 -- Celemony's own name for the main editing area, where the note blobs live. A static text
 -- rather than a control, because there is nothing here to press — it marks the place.
 ov:addStaticText("Note Editor")
-
--- ── The variants, as their own control ────────────────────────────────────────
--- The draft puts these on Down/Up of the tool bar, which is the better shape and needs an axis
--- the tab control does not have. Until it does, they are a control of their own: it names the
--- live variant on arrival and steps to the next one when pressed, wrapping at the end.
---
--- Announced as what it is even when the current tool has none, rather than vanishing, because a
--- control that disappears is a control a user cannot learn about.
-ov:addCustomButton({
-  label = "Tool variant",
-  hotkey = "Alt+V",
-  text = function(o)
-    local i = activeTool(o)
-    if not i then return "no tool detected" end
-    local tool = TOOLS[i]
-    if not tool.variants then return tool.name .. ", no variants" end
-    variant = activeVariant(o, tool)
-    local name = variant == 1 and tool.name or tool.variants[variant - 1].name
-    return name .. ", " .. #tool.variants + 1 .. " to choose from"
-  end,
-  onActivate = function(o)
-    local i = activeTool(o)
-    if not i then
-      return host.speech.output("No tool detected", { interrupt = true })
-    end
-    local tool = TOOLS[i]
-    if not tool.variants then
-      return host.speech.output(tool.name .. " has no variants", { interrupt = true })
-    end
-    local count = #tool.variants + 1
-    local target = variant % count + 1
-    selectVariant(o, tool, target)
-    host.speech.output(
-      (target == 1 and tool.name or tool.variants[target - 1].name) .. " tool",
-      { interrupt = true })
-  end,
-})
 
 -- ── The menu bar ──────────────────────────────────────────────────────────────
 -- Melodyne swallows Alt, F10 and even the WM_SYSCOMMAND that would normally open its menu bar,

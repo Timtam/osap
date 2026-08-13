@@ -220,6 +220,20 @@ function Overlay:addTabControl(opts)
     -- moment the user changes the same setting by the app's own shortcut — Melodyne's tool bar
     -- has F1 to F6 for exactly that. Returning nil leaves the remembered position alone.
     current = opts.current,
+    -- A SECOND AXIS. Left and Right choose among the tabs; Up and Down step something WITHIN
+    -- the current one. Melodyne's tool bar is the case: each icon can stack extra tools behind
+    -- a press-and-hold, so the variant is a property OF the tool rather than a control beside
+    -- it, and putting it on a stop of its own said otherwise.
+    --
+    --   verticalStep = function(overlay, tabIndex, dir) -> string|nil
+    --       performs the change and returns what to announce; nil declines — no second axis
+    --       here, or already at the end of it.
+    --   verticalName = function(overlay, tabIndex) -> string|nil
+    --       what this tab is called RIGHT NOW, when the sub-value has a name of its own.
+    --       Without it the tab announces its base label, which is a name that is WRONG rather
+    --       than a name that is missing — the worse of the two for someone who cannot check.
+    verticalStep = opts.verticalStep,
+    verticalName = opts.verticalName,
   })
   self._hasTabControl = true
   return {
@@ -695,6 +709,17 @@ function Overlay:cycleTab(dir)
 end
 
 -- Ctrl+<n>: jump straight to tab n and move focus onto the tab control.
+-- One step along a tab control's second axis, announced by whatever performed it — the caller
+-- knows what it picked, so nothing has to be re-detected to say it.
+function Overlay:stepTabVertical(dir)
+  local _, c = findTabControl(self)
+  if not (c and c.verticalStep) then return end
+  local ok, said = pcall(c.verticalStep, self, c._current, dir)
+  if ok and type(said) == "string" and said ~= "" then
+    host.speech.output(said, { interrupt = true })
+  end
+end
+
 function Overlay:gotoTab(n)
   local i, c = findTabControl(self)
   if not c or n < 1 or n > #c.tabs then return end
@@ -1186,8 +1211,14 @@ local function speakControl(self, index, moveMouse, withHint)
       local ok, n = pcall(c.current, self)
       if ok and type(n) == "number" and c.tabs[n] then c._current = n end
     end
-    host.speech.output(tabMessage(c.tabs[c._current], c.typeLabel or "tab control"),
-      { interrupt = true })
+    local tab = c.tabs[c._current]
+    if c.verticalName then
+      local ok, name = pcall(c.verticalName, self, c._current)
+      if ok and type(name) == "string" and name ~= "" then
+        tab = { label = name, hotkeyLabel = tab and tab.hotkeyLabel }
+      end
+    end
+    host.speech.output(tabMessage(tab, c.typeLabel or "tab control"), { interrupt = true })
     return
   end
   -- A pass-through announces that Tab goes INTO the plugin from here, because nothing else
@@ -1907,6 +1938,19 @@ function Overlay:_syncNativeKeys()
   elseif not wantArrows and self._arrowTokens then
     for _, t in ipairs(self._arrowTokens) do host.keys.release(t) end
     self._arrowTokens = false
+  end
+  -- Up and Down, only while a tab control that HAS a second axis is focused. Left alone
+  -- otherwise, on the same principle as everything else here: the application keeps every key
+  -- the focused control does not itself need.
+  local wantVertical = c ~= nil and c.kind == "tabcontrol" and c.verticalStep ~= nil
+  if wantVertical and not self._verticalTokens then
+    self._verticalTokens = {
+      host.keys.capture("Up", function() self:stepTabVertical(-1) end),
+      host.keys.capture("Down", function() self:stepTabVertical(1) end),
+    }
+  elseif not wantVertical and self._verticalTokens then
+    for _, t in ipairs(self._verticalTokens) do host.keys.release(t) end
+    self._verticalTokens = false
   end
 end
 
