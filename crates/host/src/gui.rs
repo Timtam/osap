@@ -83,6 +83,10 @@ pub fn run_gui(
     on_reload: impl Fn(usize) -> Result<(ModuleInfo, crate::ReloadReport), String> + 'static,
     mut pump: impl FnMut() + 'static,
     mut drain_errors: impl FnMut() -> Vec<(String, String)> + 'static,
+    // Speech belongs to the host, which owns the single engine — a second one is an error
+    // on macOS, where both of the `tts` crate's backends register the same Objective-C
+    // class name. So the GUI is handed the ability to say something rather than the means.
+    announce: impl Fn(&str) + 'static,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let on_reload = std::rc::Rc::new(on_reload);
     wxdragon::main(move |app| {
@@ -668,6 +672,15 @@ pub fn run_gui(
         });
 
         // System tray icon + right-click menu (Show / Quit).
+        // A status item in the menu bar, not a Dock icon. The default type maps to the
+        // Dock on macOS, and the application ships as an agent with no Dock icon, so the
+        // menu would have had nowhere to appear. VoiceOver reaches the menu bar extras
+        // with VO-M twice.
+        #[cfg(target_os = "macos")]
+        let taskbar = TaskBarIcon::builder()
+            .with_icon_type(wxdragon::widgets::taskbar_icon::TaskBarIconType::CustomStatusItem)
+            .build();
+        #[cfg(not(target_os = "macos"))]
         let taskbar = TaskBarIcon::builder().build();
         if let Some(icon) = make_icon() {
             taskbar.set_icon(&icon, "Automation Platform");
@@ -695,13 +708,19 @@ pub fn run_gui(
             frame.centre();
         });
 
-        let _ = taskbar.show_balloon(
-            "Automation Platform",
-            "Running in the system tray. Double-click the tray icon to manage modules.",
-            0,
-            0,
-            None,
-        );
+        // The one signal that the application actually started. `show_balloon` is
+        // Windows-only — it returns false everywhere else without doing anything — and on
+        // macOS there is no Dock icon to notice either, so a user who cannot see the screen
+        // would have nothing at all to go on. Speech is the honest channel here: it reaches
+        // the person the application is for, on both platforms, and it is the same channel
+        // everything else in the product uses.
+        #[cfg(target_os = "macos")]
+        let hint = "Automation Platform is running in the menu bar.                     Open its menu to manage modules.";
+        #[cfg(not(target_os = "macos"))]
+        let hint = "Running in the system tray. Double-click the tray icon to manage modules.";
+        if !taskbar.show_balloon("Automation Platform", hint, 0, 0, None) {
+            announce(hint);
+        }
         std::mem::forget(taskbar); // keep the icon + its handlers alive
 
         // wxWidgets owns the loop now, so this recurring tick is how our OS events
@@ -1182,6 +1201,13 @@ fn sync_checks(
     states: &RefCell<Vec<bool>>,
     on_toggle: &RefCell<Box<dyn FnMut(usize, bool)>>,
 ) {
+    // Without real checkboxes underneath, `get` cannot answer and returns false for every
+    // row — which reads as "the user just unticked everything", and this function would
+    // dutifully disable every module and persist it. One click, every module off, no
+    // message. Until a platform has a checkbox backend, this does nothing at all.
+    if !native_checkboxes::supported() {
+        return;
+    }
     let mut states = states.borrow_mut();
     let mut cb = on_toggle.borrow_mut();
     for (i, row) in rows.iter().enumerate() {
@@ -1204,6 +1230,11 @@ mod native_checkboxes {
     use std::ffi::c_void;
 
     use windows_sys::Win32::Foundation::{HWND, LPARAM, WPARAM};
+
+    /// Real checkboxes, driven by the OS. See the module comment.
+    pub fn supported() -> bool {
+        true
+    }
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetWindowLongPtrW, SendMessageW, SetWindowLongPtrW, GWL_STYLE,
     };
@@ -1316,10 +1347,19 @@ mod native_checkboxes {
 }
 
 /// Non-Windows stub: a native TVS_CHECKBOXES equivalent (macOS/GTK) comes later.
+///
+/// The honest answer to `supported()` is what keeps this from being worse than useless.
+/// On macOS `wxTreeCtrl` is the generic, custom-drawn one — it has no native controls
+/// underneath, so there is nothing to ask and nothing to tick, and callers that assume a
+/// reading means something would act on a fabricated one.
 #[cfg(not(windows))]
 mod native_checkboxes {
     use std::ffi::c_void;
     use wxdragon::widgets::treectrl::TreeItemId;
+
+    pub fn supported() -> bool {
+        false
+    }
 
     pub fn enable(_hwnd: *mut c_void) {}
     pub fn set(_hwnd: *mut c_void, _item: &TreeItemId, _checked: bool) {}

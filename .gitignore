@@ -11,3 +11,6 @@ modules/*/calibration/
 # Packaged builds — `package.ps1` output. The staged tree is 58 MB of binaries and the zip
 # another 28; both are reproducible from a tag and neither belongs in the history.
 dist/
+
+# Agent worktrees created by background tasks — separate checkouts, not content.
+/.claude/

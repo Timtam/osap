@@ -2077,6 +2077,7 @@ impl Manager {
                     .collect();
                 let backend = self.shared.backend.clone();
                 let shared = self.shared.clone();
+                let speak_shared = self.shared.clone();
                 let toggle_shared = self.shared.clone();
                 let set_shared = self.shared.clone();
                 let modules = self.modules.clone();
@@ -2211,6 +2212,9 @@ impl Manager {
                         }
                     },
                     move || errors_shared.drain_errors(),
+                    move |text: &str| {
+                        let _ = speak_shared.tts.borrow_mut().speak(text.to_string(), false);
+                    },
                 )
                 .map_err(|e| anyhow::anyhow!("{e}"))
                 .context("wx GUI loop failed")?;
@@ -2235,6 +2239,15 @@ impl Manager {
     }
 }
 
+/// The folder the application lives in — where its log, settings and modules are.
+///
+/// Exposed because the launcher needs the same answer the host uses; two rules that agreed
+/// on Windows and disagreed inside a macOS application bundle is exactly the bug this
+/// module exists to prevent.
+pub fn app_dir() -> &'static std::path::Path {
+    portable::base_dir()
+}
+
 /// Convenience entry: load each directory as a module and run them together.
 pub fn run(dirs: &[String]) -> Result<()> {
     logging::init();
@@ -2252,6 +2265,17 @@ pub fn run(dirs: &[String]) -> Result<()> {
     // "segfault". The thread is bounded (load the model + one dummy inference).
     if let Some(h) = warmup {
         let _ = h.join();
+    }
+    // Whatever went wrong, it goes in the log before it goes anywhere else.
+    //
+    // Returning the error is enough on a developer's machine, where it lands in a terminal.
+    // It is enough nowhere else: a windowed process has no stderr worth the name, and an
+    // application launched from a macOS Finder writes it to the unified log, which a blind
+    // tester will never be asked to find. Without this line the most likely first-run
+    // failures — no speech engine, a module directory that will not load — produce a log
+    // that contains the session header and then simply stops.
+    if let Err(e) = &result {
+        logging::line("host", &format!("fatal: {e:#}"));
     }
     result
 }

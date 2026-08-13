@@ -114,7 +114,22 @@ fn main() -> Result<()> {
                     .map(|m| m.dir.to_string_lossy().into_owned())
                     .collect();
                 if installed.is_empty() {
-                    vec!["examples/hello".to_string()]
+                    // The demo, resolved against the application's own folder rather than
+                    // the working directory — launched from a Finder or a shortcut, the
+                    // working directory is somewhere unrelated (on macOS it is "/"), and a
+                    // relative path there fails for a reason nobody could guess from the
+                    // outside.
+                    //
+                    // And if it is not there either, that is not an error: start with
+                    // nothing loaded. The manager runs perfectly well empty — that is how
+                    // someone installs their first module — whereas exiting leaves a user
+                    // with an application that did not appear and never said why.
+                    let demo = host::app_dir().join("examples").join("hello");
+                    if demo.is_dir() {
+                        vec![demo.to_string_lossy().into_owned()]
+                    } else {
+                        Vec::new()
+                    }
                 } else {
                     installed
                 }

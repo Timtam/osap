@@ -14,6 +14,14 @@ All controls are **native OS controls** (real checkboxes, list, buttons, dialogs
 so a screen reader (NVDA/JAWS) exposes their state and labels correctly. Dialogs
 are read silently by the screen reader — the app never speaks over it.
 
+> **On macOS this is not yet true of the module list.** wxWidgets draws its tree
+> control itself there rather than using a real one, so VoiceOver sees a single
+> opaque element and there are no checkboxes to tick. The list is therefore
+> read-only for now: enabling and disabling a module happens through the same
+> mechanism as before, but not from that list. Everything else in the window —
+> the tabs, the buttons, the dialogs, the settings fields — is native and behaves
+> as described. See [macos-port.md](macos-port.md).
+
 > Closing the window **hides it to the tray**; modules keep running. Use the
 > tray icon's **Quit** to actually exit.
 
@@ -51,6 +59,10 @@ other modules. Useful while **developing** a module.
   keep their old copy until restarted — the reload dialog names them.
 
 ### Reload everything: Ctrl+Shift+Win+Alt+F5
+
+> On macOS the same combination means Control-Shift-Command-Option-F5, and it needs
+> either "Use F1, F2, etc. as standard function keys" turned on in System Settings or
+> the `fn` key held down as well.
 
 The same rebuild for **every** loaded module at once, on a **system-wide** key — it
 works from inside the plugin you are testing, so you never have to leave it, find the
