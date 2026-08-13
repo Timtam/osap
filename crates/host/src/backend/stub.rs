@@ -47,6 +47,10 @@ impl Backend for StubBackend {
     fn mouse_move(&self, _x: i32, _y: i32) {}
     fn mouse_click(&self, _x: i32, _y: i32, _button: MouseButton) {}
     fn mouse_drag(&self, _x1: i32, _y1: i32, _x2: i32, _y2: i32, _button: MouseButton) {}
+    fn mouse_down(&self, _x: i32, _y: i32, _button: MouseButton) {}
+
+    fn mouse_up(&self, _x: i32, _y: i32, _button: MouseButton) {}
+
     fn mouse_scroll(&self, _x: i32, _y: i32, _amount: i32) {}
     fn key_send(&self, _combo: &str) -> Result<(), String> {
         Err("input is not implemented on this platform yet".to_string())

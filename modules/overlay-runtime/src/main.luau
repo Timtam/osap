@@ -211,6 +211,15 @@ function Overlay:addTabControl(opts)
   local c = add(self, {
     kind = "tabcontrol", label = opts.label or "", tabs = opts.tabs or {},
     _current = 1, when = opts.when,
+    -- `typeLabel`: what to call it instead of "tab control". A row of tool icons navigated
+    -- with Left/Right IS a tab control mechanically, and calling it one tells the user the
+    -- wrong thing about what they are looking at.
+    typeLabel = opts.typeLabel,
+    -- `current = function(overlay) -> index|nil`: where the application actually is, consulted
+    -- on arrival. Without it this control only knows what IT last did, which is wrong the
+    -- moment the user changes the same setting by the app's own shortcut — Melodyne's tool bar
+    -- has F1 to F6 for exactly that. Returning nil leaves the remembered position alone.
+    current = opts.current,
   })
   self._hasTabControl = true
   return {
@@ -1173,7 +1182,12 @@ local function speakControl(self, index, moveMouse, withHint)
   -- user knows Left/Right — or Ctrl+Tab, Ctrl+number — switch it). Its current tab's
   -- controls are the ones Tab then steps into (see isFocusable's `when` gating).
   if c.kind == "tabcontrol" then
-    host.speech.output(tabMessage(c.tabs[c._current], "tab control"), { interrupt = true })
+    if c.current then
+      local ok, n = pcall(c.current, self)
+      if ok and type(n) == "number" and c.tabs[n] then c._current = n end
+    end
+    host.speech.output(tabMessage(c.tabs[c._current], c.typeLabel or "tab control"),
+      { interrupt = true })
     return
   end
   -- A pass-through announces that Tab goes INTO the plugin from here, because nothing else
@@ -1779,8 +1793,15 @@ function Overlay:_registerHotkeys()
     -- addition). Captured only when this overlay has a tab control, so these keys stay
     -- free everywhere else.
     if self._hasTabControl then
-      cap("Left", function() self:switchTab(-1) end)
-      cap("Right", function() self:switchTab(1) end)
+      -- Ctrl+Tab and Ctrl+<n> stay STATIC: they are ours everywhere in the overlay, and no
+      -- application uses them for anything a user would miss. Plain Left and Right do NOT —
+      -- they moved to _syncNativeKeys, so the tab control owns them only while it is focused.
+      --
+      -- Statically was wrong and it cost a real application its keyboard: with the overlay up
+      -- on Melodyne, its arrow keys stopped reaching the editor entirely, and the user's own
+      -- diagnosis is the right rule — everything should pass through except what the CONTROL
+      -- IN FOCUS explicitly wants. A tab control three stops away wanting Left is not a reason
+      -- to take Left away from the thing the user is actually working in.
       cap("Ctrl+Tab", function() self:cycleTab(1) end)
       cap("Ctrl+Shift+Tab", function() self:cycleTab(-1) end)
       local _, tcCtrl = findTabControl(self)
@@ -1845,8 +1866,14 @@ function Overlay:_syncNativeKeys()
   if not self.active then return end
   local c = self.controls[self.focus]
   local passthrough = c ~= nil and c.kind == "passthrough"
-  local wantSpace = not passthrough and not (c ~= nil and c.kind == "ocredit")
-  local wantReturn = not passthrough
+  -- Only where pressing actually DOES something. A static text has no activation, and taking
+  -- Space from an application to give it to a control that ignores it is pure loss — in
+  -- Melodyne, Space is transport play/stop, so the overlay was silently disabling the one key
+  -- that gets used most.
+  local inert = c == nil or passthrough or c.kind == "static"
+    or (c.kind == "ocr" and c.readOnly)
+  local wantSpace = not inert and c.kind ~= "ocredit"
+  local wantReturn = not inert
   if wantSpace and not self._spaceToken then
     self._spaceToken = host.keys.capture("Space", function() self:activate() end)
   elseif not wantSpace and self._spaceToken then
@@ -1864,11 +1891,18 @@ function Overlay:_syncNativeKeys()
   -- has focus), which is exactly what this is — the overlay's slider IS that control.
   -- Skipped when the overlay also has a tab control, which claims Left/Right statically;
   -- the declaration report says so out loud rather than leaving a slider silently inert.
-  local wantArrows = c ~= nil and c.kind == "slider" and not self._hasTabControl
+  local wantArrows = c ~= nil and (c.kind == "slider" or c.kind == "tabcontrol")
   if wantArrows and not self._arrowTokens then
+    -- The same two keys mean different things to the two controls that want them, so which
+    -- one is focused decides what they do.
+    local isTab = c.kind == "tabcontrol"
     self._arrowTokens = {
-      host.keys.capture("Left", function() self:adjust(-1) end),
-      host.keys.capture("Right", function() self:adjust(1) end),
+      host.keys.capture("Left", function()
+        if isTab then self:switchTab(-1) else self:adjust(-1) end
+      end),
+      host.keys.capture("Right", function()
+        if isTab then self:switchTab(1) else self:adjust(1) end
+      end),
     }
   elseif not wantArrows and self._arrowTokens then
     for _, t in ipairs(self._arrowTokens) do host.keys.release(t) end
@@ -1994,7 +2028,16 @@ function Overlay:_activate()
   -- (another window comes forward), Tab/Enter pass to it natively, and resume here once
   -- the plugin window is focused again.
   host.keys.scope(true)
-  if self._onActivate then self._onActivate(self) end
+  -- Guarded, because a module's own activate hook must not be able to stop the overlay from
+  -- coming up. One did: a bad key spec threw out of it, activation aborted half-done, and the
+  -- symptom reported was "the plug-in is not detected any more" — which is a long way from the
+  -- cause. The error is still reported, it just no longer takes the overlay with it.
+  if self._onActivate then
+    local ok, err = pcall(self._onActivate, self)
+    if not ok then
+      host.log.info(("[overlay] %s: onActivate failed: %s"):format(tostring(self.label), tostring(err)))
+    end
+  end
   -- Announce the focused control shortly after the window gains focus, once the
   -- screen reader's window-title announcement has passed (so it isn't clobbered).
   if host.timer and self.focus > 0 then

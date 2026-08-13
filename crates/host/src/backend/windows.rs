@@ -3,7 +3,7 @@
 //! foreground-change events (`SetWinEventHook`), and screen capture (GDI).
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
 use super::{Backend, CapturedImage, ControlInfo, HostEvents, MouseButton, OcrText, OcrWord, WinInfo};
 
@@ -80,6 +80,9 @@ static FG_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 /// HWND (isize) the captured-key suppression is scoped to (0 = global). The hook
 /// only intercepts a captured key while this window is foreground — so a menu a
 /// control opened (another window) gets Tab/Enter natively, ReaHotkey-style.
+/// Which modifier is currently held with nothing pressed since — 0 when none is, which is
+/// also what any other key down resets it to. See the tap branch in the hook.
+static TAP_ARMED: AtomicI32 = AtomicI32::new(0);
 static KEY_SCOPE: AtomicIsize = AtomicIsize::new(0);
 
 /// Set by an overlay while a (Qt/UIA) menu is open in the focused plugin, so its
@@ -416,6 +419,22 @@ impl Backend for WindowsBackend {
             SetCursorPos(x1, y1);
             send_mouse_event(down, 0);
             SetCursorPos(x2, y2);
+            send_mouse_event(up, 0);
+        }
+    }
+
+    fn mouse_down(&self, x: i32, y: i32, button: MouseButton) {
+        let (down, _) = button_flags(button);
+        unsafe {
+            SetCursorPos(x, y);
+            send_mouse_event(down, 0);
+        }
+    }
+
+    fn mouse_up(&self, x: i32, y: i32, button: MouseButton) {
+        let (_, up) = button_flags(button);
+        unsafe {
+            SetCursorPos(x, y);
             send_mouse_event(up, 0);
         }
     }
@@ -858,6 +877,45 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
             }
             if down(0x5B) || down(0x5C) {
                 mask |= 8; // VK_LWIN / VK_RWIN
+            }
+            // A MODIFIER TAP: pressed and released with nothing in between.
+            //
+            // Melodyne is why. It swallows Alt, F10 and even the WM_SYSCOMMAND that would
+            // normally open its menu bar, so the only way in is a click — and the way every
+            // other application offers that is a bare Alt. Recognising one needs the hook,
+            // because "was another key pressed while Alt was down" is not a question anything
+            // else in the system can answer after the fact.
+            //
+            // Never suppressed, and that is the whole difficulty: Alt has to keep working as a
+            // modifier, so this dispatches on the way past rather than intercepting.
+            let is_modifier = vk == 0x12 || vk == 0xA4 || vk == 0xA5;
+            if is_down && !is_modifier {
+                TAP_ARMED.store(0, Ordering::Relaxed);
+            } else if is_down && is_modifier {
+                // Only a FRESH press arms it; auto-repeat while held must not re-arm, or a
+                // long hold followed by a release would read as a tap.
+                if TAP_ARMED.load(Ordering::Relaxed) == 0 {
+                    TAP_ARMED.store(vk as i32, Ordering::Relaxed);
+                }
+            } else if !is_down && is_modifier {
+                let armed = TAP_ARMED.swap(0, Ordering::Relaxed);
+                if armed == vk as i32 {
+                    // Left and right Alt both report as the generic VK_MENU, so a capture of
+                    // "Alt tap" catches either without the caller having to say which.
+                    let generic = if vk == 0xA4 || vk == 0xA5 { 0x12 } else { vk };
+                    let wanted = CAPTURED_KEYS
+                        .with(|c| c.borrow().iter().any(|&(v, m)| v == generic && m == 0x10));
+                    let scope = KEY_SCOPE.load(Ordering::Relaxed);
+                    let in_scope = scope == 0 || GetForegroundWindow() as isize == scope;
+                    if wanted && in_scope && !popup_menu_open() && !MENU_OPEN.load(Ordering::Relaxed)
+                    {
+                        KEY_QUEUE.with(|q| q.borrow_mut().push((generic, 0x10)));
+                        let tid = HOOK_THREAD.load(Ordering::Relaxed);
+                        if tid != 0 {
+                            PostThreadMessageW(tid, WM_NULL, 0, 0);
+                        }
+                    }
+                }
             }
             // Match only the exact combo, so "Tab" (mask 0) leaves Alt+Tab alone.
             let matched =

@@ -3384,6 +3384,24 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     )?;
     let sh = shared.clone();
     input.set(
+        "mouseDown",
+        lua.create_function(move |_, (x, y, opts): (i32, i32, Option<Table>)| {
+            sh.bump_input_epoch();
+            sh.backend.mouse_down(x, y, button_from(opts.as_ref()));
+            Ok(())
+        })?,
+    )?;
+    let sh = shared.clone();
+    input.set(
+        "mouseUp",
+        lua.create_function(move |_, (x, y, opts): (i32, i32, Option<Table>)| {
+            sh.bump_input_epoch();
+            sh.backend.mouse_up(x, y, button_from(opts.as_ref()));
+            Ok(())
+        })?,
+    )?;
+    let sh = shared.clone();
+    input.set(
         "drag",
         lua.create_function(move |_, (x1, y1, x2, y2, opts): (i32, i32, i32, i32, Option<Table>)| {
             sh.bump_input_epoch();

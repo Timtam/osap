@@ -202,9 +202,24 @@ pub trait Backend {
     fn mouse_move(&self, x: i32, y: i32);
     fn mouse_click(&self, x: i32, y: i32, button: MouseButton);
     fn mouse_drag(&self, x1: i32, y1: i32, x2: i32, y2: i32, button: MouseButton);
+
+    /// Press a mouse button and LEAVE IT DOWN, and release it, as separate acts.
+    ///
+    /// `mouse_drag` presses and moves in the same breath, which is the right shape for a
+    /// scrollbar and the wrong one for anything that only reveals itself while held —
+    /// Melodyne's tool variants appear as a flyout after a press is sustained, and a drag that
+    /// moves immediately misses them entirely.
+    ///
+    /// Split rather than given a timed variant with sleeps, because the sleeps would be in the
+    /// pump: holding, gliding and settling is the better part of a second, and nothing else —
+    /// speech, hotkeys, detection — may stop for that long. Split, a caller composes the
+    /// gesture from timers and the pump keeps running between the parts.
+    fn mouse_down(&self, x: i32, y: i32, button: MouseButton);
+    fn mouse_up(&self, x: i32, y: i32, button: MouseButton);
     fn mouse_scroll(&self, x: i32, y: i32, amount: i32);
     /// Sends a key combo like "Ctrl+S".
     fn key_send(&self, combo: &str) -> Result<(), String>;
+
     /// Types Unicode text.
     fn type_text(&self, text: &str);
 
@@ -307,7 +322,28 @@ pub const MASK_ALT: u8 = 4;
 pub const MASK_WIN: u8 = 8;
 
 /// Parses a key spec like "Tab", "Shift+Tab", "Ctrl+Right" into (vk, modifier mask).
+/// A modifier pressed and released with nothing in between — "Alt tap" and friends.
+///
+/// Its own mask bit rather than a mask of zero, because a bare modifier IS a mask of zero as
+/// far as the ordinary matcher is concerned, and every combination would then look like one.
+/// The hook never suppresses a tap: the modifier has to keep working as a modifier.
+pub const MASK_TAP: u8 = 0x10;
+
 pub fn key_spec(spec: &str) -> Option<(u32, u8)> {
+    // "<modifier> tap": pressed alone, no other key in between, and passed through.
+    if let Some(rest) = spec.strip_suffix(" tap").or_else(|| spec.strip_suffix(" Tap")) {
+        // Resolved here rather than in `key_to_vk`, deliberately: a bare modifier is a key in a
+        // TAP and a mistake anywhere else, and putting it in the general table would make
+        // "Alt" quietly acceptable as an ordinary hotkey.
+        let vk = match rest.trim().to_ascii_lowercase().as_str() {
+            "alt" | "option" => 0x12u32,
+            "ctrl" | "control" => 0x11,
+            "shift" => 0x10,
+            "win" | "super" | "cmd" | "command" | "meta" => 0x5B,
+            other => key_to_vk(other)?,
+        };
+        return Some((vk, MASK_TAP));
+    }
     let parts: Vec<&str> = spec
         .split('+')
         .map(|s| s.trim())

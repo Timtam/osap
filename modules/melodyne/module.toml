@@ -1,0 +1,8 @@
+id = "com.platform.melodyne"
+name = "Melodyne overlay"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
+dependencies = ["com.platform.overlay"]
+
+[capabilities]
+require = ["window", "overlay", "screen", "ocr", "input", "speech", "hotkey"]
