@@ -4,7 +4,7 @@
 #   .\docs-offline.ps1 -Out … -Build     build the site first (needs npm)
 #
 # Why this exists rather than copying docs-site\build: that build is made for GitHub Pages and
-# every page carries ~25 references beginning `/operating-system-automation-platform/`. Opened
+# every page carries ~25 references beginning `/osap/`. Opened
 # from a folder those resolve against the drive root, so nothing loads — no stylesheet, no
 # links, nothing. Measured, not assumed.
 #

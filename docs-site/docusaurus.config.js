@@ -3,8 +3,10 @@ import {themes as prismThemes} from 'prism-react-renderer';
 
 // Docs content lives in the repo's top-level ../docs (single source of truth,
 // also referenced by code + the design notes); this site renders + versions it.
-// GitHub Pages settings below are placeholders — adjust organizationName /
-// projectName / url / baseUrl to the real repo when you push + enable Pages.
+// GitHub Pages settings for github.com/Timtam/osap. baseUrl has to match the repository
+// name exactly — Pages serves a project site under /<repo>/, and every absolute reference
+// in the built site is written from this value, so a mismatch produces a site whose every
+// stylesheet and link 404s. docs-offline.ps1 reads it from here for the same reason.
 
 /** @type {import('@docusaurus/types').Config} */
 const config = {
@@ -19,9 +21,9 @@ const config = {
   markdown: {format: 'detect', hooks: {onBrokenMarkdownLinks: 'warn'}},
 
   url: 'https://timtam.github.io',
-  baseUrl: '/operating-system-automation-platform/',
+  baseUrl: '/osap/',
   organizationName: 'Timtam',
-  projectName: 'operating-system-automation-platform',
+  projectName: 'osap',
 
   onBrokenLinks: 'throw',
 
@@ -56,7 +58,7 @@ const config = {
         items: [
           {type: 'docsVersionDropdown', position: 'right'},
           {
-            href: 'https://github.com/Timtam/operating-system-automation-platform',
+            href: 'https://github.com/Timtam/osap',
             label: 'GitHub',
             position: 'right',
           },

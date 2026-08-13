@@ -109,7 +109,7 @@ done
 if [ -d "$root/docs-site/build" ]; then
   cp -R "$root/docs-site/build" "$stage/docs"
   echo "Docs copied. NOTE: the offline rewrite (docs-offline.ps1) has no shell port yet —"
-  echo "  these pages still contain absolute /operating-system-automation-platform/ links."
+  echo "  these pages still contain absolute /osap/ links."
 fi
 
 # Ad-hoc signing, deliberately, and not as a formality.
