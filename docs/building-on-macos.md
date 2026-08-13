@@ -22,7 +22,40 @@ Be a little suspicious of a first run. As of this writing:
 
 What is worth reporting is anything the log cannot explain.
 
-## Prerequisites
+## The one-command path
+
+```bash
+./bootstrap-macos.sh
+```
+
+Installs whatever is missing, builds, packages, and prints what to do next. Safe to run
+again. Someone who is testing rather than developing needs that command and
+[macos-tester-briefing.md](macos-tester-briefing.md), and nothing else on this page.
+
+## Intel or Apple silicon
+
+`cargo build` produces a binary for the Mac it runs on, and **the two are not
+interchangeable**: an Apple-silicon binary will not start on an Intel Mac at all. Rosetta
+translates Intel code so it runs on Apple silicon, never the other way round. So a build
+someone else sends has to have been made for your architecture — `uname -m` says which you
+have, `arm64` or `x86_64`. It is the strongest argument for building locally.
+
+The CI job builds for Intel by default, because that is what the machine being tested on
+is; its dispatch form offers `macos-14` for an Apple-silicon build instead.
+
+One binary that runs on both is a *universal* binary — two builds joined with `lipo`:
+
+```bash
+rustup target add x86_64-apple-darwin aarch64-apple-darwin
+cargo build --release --target x86_64-apple-darwin
+cargo build --release --target aarch64-apple-darwin
+./package-macos.sh --universal
+```
+
+Right for a release, where one download has to work anywhere. Not worth the doubled build
+for a test build that one known person installs on one known machine.
+
+## Prerequisites, if you would rather do it by hand
 
 ```bash
 xcode-select --install          # clang, and the libclang bindgen needs
