@@ -48,6 +48,45 @@ Architecture and feasibility foundation: [docs/architecture-feasibility-study.md
 - [ ] **Packaging:** release builds must bundle the screen-reader client DLLs the `tolk` feature deploys next to the binary (`nvdaControllerClient64.dll`, `SAAPI64.dll`), so `host.speech` routes to NVDA/JAWS on end-user machines.
 - [x] **Logging off stdout:** diagnostics now go to a file `<exe_dir>/automation-platform.log` (portable — next to the binary) via `host::logging`, not stdout/stderr (a screen reader reads the focused terminal). ✓ (2026-06-21)
 
+## macOS (2026-08-13, written blind)
+
+The backend, the packaging and the documentation exist; nothing has ever run on a Mac.
+See [docs/macos-port.md](docs/macos-port.md) for the decisions and
+[docs/building-on-macos.md](docs/building-on-macos.md) for how to build it.
+
+- [ ] **Get the CI build green.** `.github/workflows/macos-build.yml` is the only place this
+      code is ever linked — `check-macos.ps1` runs the compiler front end only, and `host`
+      itself cannot be checked from Windows at all (`tts` pulls `objc_exception`, whose
+      build script needs a C compiler). Everything below is downstream of that job passing.
+- [ ] **The seven first-session measurements** in docs/macos-port.md, in that order: does
+      anything appear, are coordinates right on Retina, is a capture real, does the tap
+      suppress, does OCR read plugin text, does `_AXUIElementGetWindow` work, what does the
+      pump cost.
+- [ ] **Does Apple Vision read a lone digit?** The one measurement that decides whether the
+      second OCR engine has to become cross-platform: Windows runs a neural fallback
+      precisely because the system engine refuses single glyphs, and that fallback is a
+      Windows-only dependency. Ten minutes with one request against the crops the Windows
+      spike already produced.
+- [ ] **Do Qt object names survive into `AXIdentifier`?** The strings the Kontakt and
+      Komplete Kontrol modules navigate by (`FileTypeSelector`, `WhatsNewScreen`) reach
+      Windows through Qt's Windows accessibility provider; the macOS bridge is a different
+      one. If they do not survive, those modules need a different anchor on macOS. The
+      accessibility dump answers it.
+- [ ] **Hotkeys collide with VoiceOver.** Control-Option is VoiceOver's own modifier and
+      every shipped overlay uses `Ctrl+Alt+…`. macOS module variants need their own key
+      choices; the mechanism already exists (`host.os.is("macos")`), the decision does not.
+- [ ] **Speech goes around VoiceOver, not through it.** `tts` picks AVFoundation on macOS, a
+      separate voice talking over VoiceOver, with no braille. The VoiceOver-via-AppleScript
+      path that [docs/prior-art-vocr.md](docs/prior-art-vocr.md) documents needs an
+      entitlement and a consent prompt — a distribution question more than a code one.
+- [ ] **The module list has no checkboxes on macOS.** wxWidgets draws its tree control
+      itself there, so there is nothing native underneath to tick and VoiceOver sees one
+      opaque element. `sync_checks` is disarmed so a click cannot silently disable
+      everything; the real fix is `wxCheckListBox` (native, and wxdragon already binds it).
+- [ ] **Developer ID + notarisation.** Ad-hoc signatures change on every rebuild, so every
+      test build a tester receives asks for its permissions again. Survivable for testing,
+      not for release.
+
 ## Documentation
 
 - [x] **API-version-specific, web-based documentation:** a versioned **Docusaurus** site in `docs-site/` renders `docs/` — the guides plus the `host.*` API reference in `docs/api/` — with a version switcher (first snapshot `versioned_docs/version-0.1.0`) and a GitHub Pages deploy workflow (`.github/workflows/deploy-docs.yml`). Includes the step-by-step **[Building an overlay](docs/building-an-overlay.md)** tutorial, written because the vocabulary (cell, overlay, layer, slot, landmark) had grown faster than anything explained it. ✓
