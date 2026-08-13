@@ -1,4 +1,4 @@
-# Runs the platform with every REAL module — everything under modules/, which is the whole
+﻿# Runs the platform with every REAL module — everything under modules/, which is the whole
 # point of keeping the API demos in examples/ and the dev tools in tools/. Loading them by
 # hand meant whichever module was not on the current command line went untested; sforzando
 # sat unloaded through an entire refactor that way.

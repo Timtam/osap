@@ -1,4 +1,4 @@
-# Builds a self-contained, distributable copy — everything a tester needs and nothing else.
+﻿# Builds a self-contained, distributable copy — everything a tester needs and nothing else.
 #
 #   .\package.ps1                 build and stage into dist\, then zip it
 #   .\package.ps1 -Version 0.3.0  name the zip for that version instead of the date
@@ -83,6 +83,18 @@ Get-ChildItem (Join-Path $root "modules") -Directory |
   }
 if ($shipped -eq 0) { throw "no modules found under $root\modules" }
 
+# The documentation, made to work from the folder rather than from a web server — see
+# docs-offline.ps1 for why that is a conversion and not a copy. Skipped rather than fatal when
+# the site has never been built: a tester without docs still has a working application, and
+# failing the whole package over them would be the wrong trade.
+$docsOut = Join-Path $stage "docs"
+if (Test-Path (Join-Path $root "docs-site\build")) {
+  & (Join-Path $root "docs-offline.ps1") -Out $docsOut
+} else {
+  Write-Host "No built docs at docs-site\build — packaging without them."
+  Write-Host "  Build them once with:  cd docs-site; npm run build"
+}
+
 # A note for whoever unpacks it. Short on purpose: the two things that actually go wrong are
 # extracting somewhere unwritable and expecting a console window.
 @"
@@ -96,6 +108,9 @@ log to automation-platform.log beside the executable. Settings go to settings.to
 the same place, so the whole folder is portable and can be deleted to reset.
 
 Speech goes through NVDA or System Access if one of them is running.
+
+The documentation is in docs\index.html — open it in a browser. It works from
+this folder; no internet connection and no server are needed.
 
 $shipped module(s) included.
 "@ | Set-Content (Join-Path $stage "README.txt") -Encoding UTF8
