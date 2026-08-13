@@ -1,0 +1,63 @@
+# Builds the macOS application on a real Mac, because nobody on the project has one.
+#
+# The macOS backend is written blind. `check-macos.ps1` type-checks it from Windows, which
+# catches wrong signatures but never links — so a missing framework, a bad `#[link]`, or an
+# undefined Carbon symbol would go unnoticed until a tester's first launch. This job is
+# where those show up, and it is the reason the port can be developed at all without Apple
+# hardware.
+#
+# It also produces the artifact a tester downloads: a zipped .app with the modules and a
+# README beside it.
+name: macOS build
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'crates/**'
+      - 'modules/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'package-macos.sh'
+      - '.github/workflows/macos-build.yml'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    # Apple silicon, which is what a tester in 2026 is overwhelmingly likely to have — and
+    # the arm64 build is the one whose Retina coordinate handling we are least sure of.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # wxWidgets is compiled from source by wxdragon's build script; it is by far the
+      # longest part of the job, and it only changes when the dependency does.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-wx
+
+      - name: Install build tools
+        run: brew install ninja cmake
+
+      - name: Point bindgen at the Xcode toolchain's libclang
+        run: echo "LIBCLANG_PATH=$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --release
+
+      # The platform-independent logic — dependency ordering, key parsing, the bundle-path
+      # rule — on a machine where the bundle-path rule is not hypothetical.
+      - name: Test
+        run: cargo test --release
+
+      - name: Package
+        run: ./package-macos.sh --no-build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutomationPlatform-macos
+          path: dist/*.zip
+          if-no-files-found: error
