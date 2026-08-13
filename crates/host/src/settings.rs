@@ -141,14 +141,35 @@ impl Store {
         }
     }
 
-    /// Atomically writes the store (tmp + rename) next to the executable.
+    /// Atomically writes the store (tmp + rename) in the application's own folder.
+    ///
+    /// A failure here used to be swallowed entirely, which is survivable on a machine you
+    /// can look at and not on one you cannot: an application folder that is not writable —
+    /// the ordinary state of anything dragged into /Applications on macOS — means every
+    /// setting and every enable/disable silently stops persisting, and the only symptom is
+    /// that yesterday's choices are gone this morning. Logged once per session, because a
+    /// setting change that fails will keep failing and the log is not a place to shout.
     pub fn save(&self) {
-        if let Ok(body) = toml::to_string_pretty(self) {
-            let path = store_path();
-            let tmp = path.with_extension("toml.tmp");
-            if std::fs::write(&tmp, body).is_ok() {
-                let _ = std::fs::rename(&tmp, &path);
+        let path = store_path();
+        let complain = |what: &str| {
+            static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                crate::logging::line(
+                    "settings",
+                    &format!("cannot save settings to {}: {what}", store_path().display()),
+                );
             }
+        };
+        let body = match toml::to_string_pretty(self) {
+            Ok(b) => b,
+            Err(e) => return complain(&format!("could not be serialized ({e})")),
+        };
+        let tmp = path.with_extension("toml.tmp");
+        if let Err(e) = std::fs::write(&tmp, body) {
+            return complain(&format!("{e}"));
+        }
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            complain(&format!("{e}"));
         }
     }
 

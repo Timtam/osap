@@ -523,6 +523,12 @@ fn extract_zip_stripped(bytes: &[u8], dest: &Path) -> Result<()> {
         if rel.is_empty() {
             continue;
         }
+        // A zip can name its way out of the directory it is being extracted into, and this
+        // one comes off the internet. Nothing in a GitHub source archive ever needs to, so
+        // an entry that tries is refused rather than sanitised.
+        if rel.contains("..") {
+            anyhow::bail!("archive entry '{rel}' tries to escape the module directory");
+        }
         let out = dest.join(rel);
         if file.is_dir() {
             std::fs::create_dir_all(&out)?;
@@ -533,6 +539,15 @@ fn extract_zip_stripped(bytes: &[u8], dest: &Path) -> Result<()> {
             let mut buf = Vec::with_capacity(file.size() as usize);
             file.read_to_end(&mut buf)?;
             std::fs::write(&out, &buf)?;
+            // The executable bit, which `fs::write` does not carry over. It costs nothing
+            // on Windows and matters on macOS the moment a module ships anything under
+            // native/macos-arm64/ — a payload that arrives without it fails to run for a
+            // reason that has nothing to do with the module.
+            #[cfg(unix)]
+            if let Some(mode) = file.unix_mode() {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&out, std::fs::Permissions::from_mode(mode));
+            }
         }
     }
     Ok(())
