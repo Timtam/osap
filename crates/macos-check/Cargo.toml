@@ -36,11 +36,11 @@ dispatch2 = "0.3"
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-foundation]
 version = "0.3"
-features = ["NSString", "NSArray", "NSValue", "NSGeometry", "NSDictionary", "NSError", "NSData", "NSRunLoop", "NSThread", "NSObjCRuntime", "NSEnumerator", "NSURL", "NSProcessInfo", "NSNotification", "NSOperation", "NSAppleScript"]
+features = ["NSString", "NSArray", "NSValue", "NSGeometry", "NSDictionary", "NSError", "NSData", "NSRunLoop", "NSThread", "NSObjCRuntime", "NSEnumerator", "NSURL", "NSProcessInfo", "NSNotification", "NSOperation", "NSAppleScript", "NSDate", "NSRange", "block2"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-app-kit]
 version = "0.3"
-features = ["NSWorkspace", "NSRunningApplication", "NSScreen", "NSApplication", "NSResponder", "NSGraphics", "NSAccessibilityProtocols", "NSAccessibilityConstants", "NSEvent"]
+features = ["NSWorkspace", "NSRunningApplication", "NSScreen", "NSApplication", "NSResponder", "NSGraphics", "NSAccessibilityProtocols", "NSAccessibilityConstants", "NSEvent", "objc2-core-foundation"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-core-foundation]
 version = "0.3"
@@ -52,7 +52,7 @@ features = ["CGBase", "CGEvent", "CGEventTypes", "CGEventSource", "CGDirectDispl
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-vision]
 version = "0.3"
-features = ["VNRequest", "VNRecognizeTextRequest", "VNObservation", "VNRequestHandler", "VNTypes", "VNGeometry", "VNError", "objc2-core-graphics"]
+features = ["VNRequest", "VNRecognizeTextRequest", "VNObservation", "VNRequestHandler", "VNTypes", "VNGeometry", "VNError", "VNUtils", "VNRequestRevisionProviding", "objc2-core-graphics", "objc2-core-foundation"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-application-services]
 version = "0.3"
