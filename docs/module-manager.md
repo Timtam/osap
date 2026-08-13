@@ -50,6 +50,24 @@ other modules. Useful while **developing** a module.
 - Other modules that **inherit this module's code** (`code_module` dependents)
   keep their old copy until restarted — the reload dialog names them.
 
+### Reload everything: Ctrl+Shift+Win+Alt+F5
+
+The same rebuild for **every** loaded module at once, on a **system-wide** key — it
+works from inside the plugin you are testing, so you never have to leave it, find the
+tray, and come back. The result is **spoken** ("11 modules reloaded", or the names of
+the ones that failed), because the window you are looking at is not ours and there is
+nothing on screen to check.
+
+Modules are rebuilt **dependencies first**: a module copies its code dependencies'
+functions when it is built, so the other order would hand a module the old code and
+the change would only appear after a restart — the exact thing this key exists to
+avoid. One module failing does not stop the rest; it is named in the announcement and
+the reason is in the log.
+
+The combination is awkward on purpose: it rebuilds every VM in the application, and it
+has to be impossible to hit by accident while working in a plugin. If something else on
+the system already owns it, the app logs that at startup and carries on without it.
+
 ### Uninstall
 
 Removes the selected module's files and disables it immediately. **Dependency-safe:**

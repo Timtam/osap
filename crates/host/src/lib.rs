@@ -73,6 +73,17 @@ struct ArbiterSlot {
 struct Shared {
     backend: Rc<dyn Backend>,
     tts: RefCell<Tts>,
+    /// The app's OWN hotkey id, taken from `alloc_id` before any module is loaded so that
+    /// no module can ever be handed the same one. A fixed number would not do: the counter
+    /// never resets, and re-registering the same id at the same window silently REPLACES
+    /// the earlier hotkey — the reload key would just stop working one day.
+    reload_hotkey_id: Cell<i32>,
+    /// Asked for by the reload-everything hotkey, drained by the pump.
+    ///
+    /// The keystroke cannot do the work itself: it arrives at a Dispatcher, which BORROWS the
+    /// module list, and rebuilding a module has to replace entries in that same list. So the
+    /// key only asks, and the loop — which owns the list — answers on its next turn.
+    reload_all: Cell<bool>,
     /// Audio output, opened lazily on first `host.sound.play` so we don't hold
     /// the audio device at startup — this tool overlays audio software, and
     /// grabbing the device can interrupt it. Kept alive as (stream, handle).
@@ -1935,6 +1946,8 @@ impl Manager {
         let shared = Rc::new(Shared {
             backend,
             tts: RefCell::new(tts),
+            reload_hotkey_id: Cell::new(0),
+            reload_all: Cell::new(false),
             audio: RefCell::new(None),
             next_id: Cell::new(0),
             roots: RefCell::new(Vec::new()),
@@ -1966,6 +1979,10 @@ impl Manager {
             template_seq: Cell::new(0),
             recheck_requested: Cell::new(false),
         });
+        // Claimed before the first module is loaded, so it is the one id no module can be
+        // given (see the field). Registering with the OS happens later, in `run`, on the
+        // thread that will receive it.
+        shared.reload_hotkey_id.set(shared.alloc_id());
         Ok(Self {
             shared,
             modules: Rc::new(RefCell::new(Vec::new())),
@@ -2026,6 +2043,23 @@ impl Manager {
                 // wxWidgets owns the loop. Snapshot the module list for the tray
                 // manager window, then drain our OS events from its timer tick.
                 logging::line("manager", "module manager running in the system tray");
+                // Registered HERE, not in `new`: on Windows a hotkey is delivered to the
+                // thread that registered it, and this is the thread whose loop pumps below.
+                // A failure is logged rather than fatal — the combination could already be
+                // held by something else, and everything apart from this key still works.
+                // Logged either way: the key has no visible presence at all, so "did it
+                // even register" is otherwise unanswerable after the fact.
+                let reload_id = self.shared.reload_hotkey_id.get();
+                match self.shared.backend.register_hotkey(reload_id, RELOAD_HOTKEY_SPEC) {
+                    Ok(()) => logging::line(
+                        "manager",
+                        &format!("{RELOAD_HOTKEY_SPEC} reloads every module"),
+                    ),
+                    Err(e) => logging::line(
+                        "manager",
+                        &format!("reload hotkey {RELOAD_HOTKEY_SPEC} unavailable: {e}"),
+                    ),
+                }
                 let module_infos: Vec<gui::ModuleInfo> = self
                     .modules
                     .borrow()
@@ -2148,6 +2182,25 @@ impl Manager {
                             dispatcher.on_focus_change();
                         }
                         shared.flush_if_dirty();
+                        // The reload key only ASKED (see Shared::reload_all). Answering it
+                        // means replacing entries in the very list the dispatch above holds
+                        // borrowed, so it happens here, once that borrow is gone.
+                        if shared.reload_all.replace(false) {
+                            drop(dispatcher);
+                            drop(mods);
+                            // Said first: rebuilding every VM takes long enough that silence
+                            // would read as "the key did nothing", and the user is working in
+                            // another application with no window to look at.
+                            let _ = shared
+                                .tts
+                                .borrow_mut()
+                                .speak("Reloading modules".to_string(), true);
+                            let (done, failed) = reload_everything(&shared, &modules);
+                            let _ = shared
+                                .tts
+                                .borrow_mut()
+                                .speak(reload_report_text(&done, &failed), true);
+                        }
                     },
                     move || errors_shared.drain_errors(),
                 )
@@ -2195,6 +2248,100 @@ pub fn run(dirs: &[String]) -> Result<()> {
     result
 }
 
+/// Deliberately awkward. This rebuilds every module's VM while the user is working in some
+/// other application, so it must be impossible to hit by accident; and the modules themselves
+/// claim ordinary combinations, so it has to stay out of their way.
+const RELOAD_HOTKEY_SPEC: &str = "Ctrl+Shift+Win+Alt+F5";
+
+/// Rebuild every module from source, dependencies before dependents.
+///
+/// Order is the whole difficulty. A dependent holds a COPY of a code dependency's functions —
+/// that is what `host.require` does for a code module — so rebuilding a dependent before its
+/// dependency copies the old code and the change stays invisible until a restart, which is
+/// exactly the symptom this is meant to remove.
+///
+/// A module that fails to rebuild is reported and skipped rather than aborting the rest: the
+/// others do not depend on it, and stopping halfway leaves more of the system stale than
+/// carrying on does.
+fn reload_everything(
+    shared: &Rc<Shared>,
+    modules: &Rc<RefCell<Vec<Module>>>,
+) -> (Vec<String>, Vec<String>) {
+    let graph: Vec<(String, Vec<String>)> =
+        modules.borrow().iter().map(|m| (m.id.clone(), m.dependencies.clone())).collect();
+
+    // Dependencies first: repeatedly take whatever has no unbuilt dependency left. A cycle
+    // would stall this, so anything still unplaced at the end is appended in its own order —
+    // rebuilding it in the wrong order is better than not rebuilding it at all.
+    let mut order: Vec<String> = Vec::new();
+    let mut placed: HashSet<String> = HashSet::new();
+    loop {
+        let mut progressed = false;
+        for (id, deps) in &graph {
+            if placed.contains(id) {
+                continue;
+            }
+            if deps.iter().all(|d| placed.contains(d) || !graph.iter().any(|(g, _)| g == d)) {
+                order.push(id.clone());
+                placed.insert(id.clone());
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    for (id, _) in &graph {
+        if !placed.contains(id) {
+            order.push(id.clone());
+        }
+    }
+
+    // Names rather than ids from here on: the result is spoken, and
+    // "com.platform.kontakt" is not something anyone wants to hear read out.
+    let (mut done, mut failed) = (Vec::new(), Vec::new());
+    for id in order {
+        let found = modules.borrow().iter().position(|m| m.id == id);
+        let Some(idx) = found else { continue };
+        let name = modules.borrow()[idx].name.clone();
+        match reload_module(shared, modules, idx) {
+            Ok(_) => done.push(name),
+            Err(e) => {
+                logging::line("manager", &format!("reload of '{id}' failed: {e:#}"));
+                failed.push(name);
+            }
+        }
+    }
+    logging::line(
+        "manager",
+        &format!(
+            "reload-all: {} reloaded{}",
+            done.len(),
+            if failed.is_empty() {
+                String::new()
+            } else {
+                format!(", {} failed: {}", failed.len(), failed.join(", "))
+            }
+        ),
+    );
+    (done, failed)
+}
+
+/// Announce the outcome of a reload-all.
+///
+/// Spoken, not shown: the key can be pressed from inside any application, and the tray
+/// window is usually not open — a silent rebuild is indistinguishable from a key that did
+/// not arrive. Failures are named because that is the part that needs acting on; successes
+/// are counted because eleven module names is not feedback, it is a recital.
+fn reload_report_text(done: &[String], failed: &[String]) -> String {
+    match (done.len(), failed.len()) {
+        (0, 0) => "No modules to reload".to_string(),
+        (n, 0) => format!("{n} module{} reloaded", if n == 1 { "" } else { "s" }),
+        (0, _) => format!("Reload failed: {}", failed.join(", ")),
+        (n, _) => format!("{n} reloaded, {} failed: {}", failed.len(), failed.join(", ")),
+    }
+}
+
 /// Bridges OS events from the backend into the owning module's Luau callbacks.
 struct Dispatcher<'a> {
     shared: &'a Shared,
@@ -2225,6 +2372,12 @@ impl HostEvents for Dispatcher<'_> {
                 .map(|r| r.spec.clone())
                 .unwrap_or_else(|| format!("id {id}"));
             logging::line("keys", &format!("hotkey {spec} arrived"));
+        }
+        // The app's own key, before any module lookup: it belongs to no module, so it is not in
+        // that map and would otherwise fall through as an unknown id.
+        if id == self.shared.reload_hotkey_id.get() {
+            self.shared.reload_all.set(true);
+            return;
         }
         let found = {
             let map = self.shared.hotkeys.borrow();
@@ -2465,6 +2618,13 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     hk.set(
         "unregister",
         lua.create_function(move |_, id: i32| {
+            // Whatever number Lua passes goes straight to the OS, so a stale or
+            // made-up id could release the app's own reload key — and nothing would
+            // report it; the key would simply stop working. It is not a module's to
+            // release.
+            if id == sh.reload_hotkey_id.get() {
+                return Ok(());
+            }
             sh.backend.unregister_hotkey(id);
             sh.hotkeys.borrow_mut().remove(&id);
             Ok(())
