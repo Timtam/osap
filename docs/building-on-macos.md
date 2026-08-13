@@ -121,8 +121,8 @@ knowing which one catches what:
 - `./check-macos.ps1` runs `cargo check --target aarch64-apple-darwin`. It is the compiler
   front end only — it never links — and it covers the **backend** and its two support
   files. It catches wrong signatures and missing feature flags within minutes.
-- `.github/workflows/macos-build.yml` builds and links the **whole thing** on a macos-14
-  runner and uploads the packaged app. That is the only place a missing framework, a bad
+- `.github/workflows/macos-build.yml` builds and links the **whole thing** on a real Mac
+  runner — Intel by default, see above — and uploads the packaged app. That is the only place a missing framework, a bad
   `#[link]`, or an undefined Carbon symbol shows up — and the only place the GUI layer is
   compiled for macOS at all, since the check crate deliberately excludes it.
 
