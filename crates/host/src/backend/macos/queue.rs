@@ -129,11 +129,3 @@ pub fn run_event_loop(events: &mut dyn HostEvents) -> Result<(), String> {
         drain(events);
     }
 }
-
-/// Is anything waiting? Used by the tap watchdog to decide whether a quiet period is
-/// suspicious.
-pub fn idle() -> bool {
-    HOTKEYS.with(|q| q.borrow().is_empty())
-        && KEYS.with(|q| q.borrow().is_empty())
-        && ACTIVATED.with(|q| q.borrow().is_empty())
-}

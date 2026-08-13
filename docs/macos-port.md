@@ -84,12 +84,19 @@ the sort, so the backend composes one, and it must be the **same** string everyw
 appears or a module will match against something the diagnostic dump never shows:
 
 ```
-AXRole[:AXSubrole][#AXIdentifier]        e.g.  AXWindow:AXStandardWindow#NIMainWindow
+AXRole/AXSubrole/AXIdentifier      e.g.  AXWindow/AXStandardWindow/   AXGroup//NI.Kontakt.Main
 ```
 
-Role always; subrole and identifier only when the element has them. `uia_raw_dump` — which
-is how anyone will discover what a plugin's tree actually contains — puts the identical
-string in its own `class` slot.
+Both separators always, a missing part empty — so a pattern can anchor on them and an
+element with nothing to say still yields `"//"`, which can be matched, rather than a nil
+that cannot. None of the three parts is ever localised, which the title and the role
+*description* both are. `uia_raw_dump` — how anyone will discover what a plugin's tree
+actually contains — prints the identical string in its own `class` slot, so an author can
+paste what a dump shows straight into a matcher.
+
+A matcher can also name one part on its own: `macos = { axRole = "AXWindow" }`,
+`axSubrole`, `axIdentifier`. The prelude splits the composed string; the backend publishes
+one field.
 
 Whether the Qt object names the Windows modules match on (`FileTypeSelector`,
 `WhatsNewScreen`) survive into `AXIdentifier` is unknown: they reach Windows through Qt's
@@ -100,21 +107,42 @@ diagnostic afterthought.
 
 ## Where the event tap lives
 
-On its **own thread, with its own run loop** — not the main one, even though the main one
-is right there and already running.
+On the **main run loop**, with a watchdog — and this is the decision most likely to have to
+change on real hardware, so it is worth stating the argument on both sides.
 
-The reason is the pump. macOS switches off an event tap whose callback does not return
-quickly enough, and it does not switch it back on. A tap on the main run loop cannot answer
-while that thread is inside a slow accessibility call, and slow accessibility calls are
-routine here: a cross-process attribute read against a DAW mid-redraw has been measured in
-the hundreds of milliseconds on Windows, and one of the state probes the modules use costs
-60–300 ms by design. Sharing a thread with that would mean the tap dies during ordinary use
-and every captured key silently stops working.
+macOS switches off an event tap whose callback does not answer quickly enough, and it does
+not switch it back on by itself. The main run loop is also the pump, and the pump routinely
+spends a long time inside a cross-process accessibility call: one of the state probes the
+modules use costs 60–300 ms by design. So the tap can be disabled during ordinary use.
 
-The cost of the separate thread is that its callback may not touch accessibility at all, so
-everything it needs to decide must be readable without asking: the captured-key table, the
-scope window, and whether a menu is open all live in shared atomics that the pump thread
-writes and the tap thread only reads.
+What makes that survivable rather than fatal is that the disable is *observable*. The tap
+re-enables itself from a run-loop observer, the pump asks again on every tick, both are
+rate-limited to one cheap query every couple of seconds, and every re-enable is logged. The
+failure is therefore a second or two of lost keys with a line in the log naming it — not a
+platform that quietly stops answering.
+
+Its own thread would remove the mechanism entirely, and that is the escalation if a first
+session shows the tap dying repeatedly. It is not free: the tap's callback would then be
+forbidden from touching accessibility at all, and the scope gate currently asks which window
+is frontmost. That has to become a cached value maintained by the activation observer before
+the thread can move. Doing the harder thing first, blind, to fix a problem that may not
+occur, is how a port acquires bugs nobody can find.
+
+Either way the state is already shared rather than thread-local — atomics and one mutex — so
+the move costs no rewrite.
+
+## How "is a menu open" is answered
+
+Not by asking. It is precomputed: applications post `AXMenuOpened` and `AXMenuClosed` as
+their menus track, the per-application observer already listening for focus changes hears
+them too, and the question reduces to reading a counter. That matters because the question
+is asked from inside the key path on every captured keystroke, where an accessibility
+traversal would be catastrophic.
+
+The design note that this could ride on `NSMenu`'s tracking notifications was wrong, and
+the implementation says so: those are posted on the *in-process* notification centre and
+know only about our own menus, never a plugin's. The accessibility notifications are the
+only cross-process signal that is not a traversal.
 
 ## Window handles
 

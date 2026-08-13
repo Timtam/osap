@@ -16,6 +16,16 @@ mod macos;
 #[cfg(not(any(windows, target_os = "macos")))]
 mod stub;
 
+/// The macOS key table, compiled on every other platform too, for its tests alone.
+///
+/// It is a table of integers with no platform dependency, and it is the one part of that
+/// backend whose correctness can be checked without a Mac: that every key `key_to_vk`
+/// accepts has a macOS key code, and that the translation round-trips. Left inside `mod
+/// macos` those tests would only ever run on a machine nobody on the project has.
+#[cfg(all(test, not(target_os = "macos")))]
+#[path = "macos/keys.rs"]
+mod macos_keys;
+
 /// A snapshot of a window's matchable properties (normalized across platforms).
 #[derive(Clone)]
 pub struct WinInfo {

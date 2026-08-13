@@ -3,15 +3,930 @@
 //! The regions this is asked about are tiny and the text in them is small — a parameter
 //! read-out of a few characters, sometimes a single digit. Word boxes come back in
 //! capture-region coordinates; the host adds the region origin itself.
+//!
+//! Two things about the Windows implementation have to be understood before this one makes
+//! sense, because they are the reason it looks the way it does.
+//!
+//! The first is that Windows does not hand the captured region to its recogniser as it
+//! found it. For anything up to 400x200 it crops to the content's bounding box and upscales
+//! that crop until the glyphs are around 64 px tall, because a recogniser trained on
+//! photographs of documents is bad at eight-pixel UI text and good at the same text
+//! enlarged. The same is true of Vision, so the same preprocessing happens here.
+//!
+//! The second is that Windows runs a *second*, independent recogniser for small regions and
+//! uses its answer only when the first comes back empty — that split is why Melodyne's note
+//! field is readable at all, and `modules/melodyne/src/main.luau` documents at length what
+//! happened when a change made the primary non-empty and the fallback stopped firing. That
+//! second engine is a Windows-only dependency and does not exist here. Vision therefore has
+//! to carry the small-text case alone, and everything it is given is chosen for that: the
+//! capture is taken at full backing resolution rather than the point-sized one the rest of
+//! the platform uses (`capture::capture_backing`, the same path with the downsample left
+//! off), recognition is `.accurate`, language correction is off (these are
+//! values, not words — correction is exactly what turns "+36 Ct" into a dictionary word),
+//! and the minimum text height is dropped to zero. When the tightened pass still comes back
+//! empty, one further pass runs over the untightened capture, on the same "only when empty"
+//! rule as the Windows fallback and for the same reason: a content crop that went wrong
+//! (a border, a caret, a stray highlight) shrinks the effective upscale, and by then there
+//! is nothing left to lose.
+//!
+//! Nothing here returns `Err`. The binding turns an `Err` into a thrown Lua error inside the
+//! module's timer callback, so a screen that could not be captured would take the callback
+//! down rather than simply reading as nothing; every failure is logged and answered with
+//! empty text instead. That makes the log the only evidence a remote tester can send, which
+//! is why there is so much of it.
 
-use crate::backend::OcrText;
+use std::cell::RefCell;
+use std::collections::HashSet;
+use std::time::Instant;
 
-pub fn recognize(
-    _x: i32,
-    _y: i32,
-    _w: i32,
-    _h: i32,
-    _lang: Option<&str>,
+use objc2::rc::Retained;
+use objc2::runtime::AnyObject;
+use objc2::AllocAnyThread;
+use objc2_core_foundation::{CFRetained, CGFloat, CGPoint, CGRect, CGSize};
+use objc2_core_graphics::{
+    CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext, CGImage,
+    CGImageAlphaInfo, CGImageByteOrderInfo, CGInterpolationQuality, CGPreflightScreenCaptureAccess,
+};
+use objc2_foundation::{NSArray, NSDictionary, NSRange, NSString};
+use objc2_vision::{
+    VNImageRequestHandler, VNRecognizeTextRequest, VNRequest, VNRequestTextRecognitionLevel,
+};
+
+use crate::backend::{OcrText, OcrWord};
+
+/// Background border added around the upscaled content, in pixels of the processed image.
+///
+/// Same figure as the Windows path. A recogniser expects text to sit in a page, not to run
+/// off the edge of one, and a few characters cropped hard to their own ink read badly.
+const OCR_PAD: usize = 24;
+
+/// How tall the content is aimed at in the processed image.
+///
+/// Apple's own guidance for the accurate recognition level puts the comfortable floor at
+/// around 32 px of text height; 64 is the figure the Windows path settled on and it leaves
+/// room for the crop being a little loose.
+const TARGET_CONTENT_PX: usize = 64;
+
+/// Above this size, in points, the region is passed through untouched.
+///
+/// Identical to the Windows thresholds on purpose: whether a region gets the small-text
+/// treatment is observable from Lua (it changes which of two adjacent read-outs is legible),
+/// so the two platforms have to draw the line in the same place.
+const SMALL_W: i32 = 400;
+const SMALL_H: i32 = 200;
+
+pub fn recognize(x: i32, y: i32, w: i32, h: i32, lang: Option<&str>) -> Result<OcrText, String> {
+    // Vision produces a good deal of temporary Objective-C on every pass — an observation
+    // and a candidate string per line, an array per call — and one module asks for this
+    // sixteen times a second. The result is plain Rust data, so the pool can close over
+    // everything the recognition made rather than leaving it for whenever the run loop next
+    // drains its own.
+    objc2::rc::autoreleasepool(|_| recognize_inner(x, y, w, h, lang))
+}
+
+fn recognize_inner(
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    lang: Option<&str>,
 ) -> Result<OcrText, String> {
-    Err("OCR is not implemented on macOS yet".to_string())
+    let started = Instant::now();
+    // A zero-sized region is not a failure: `read_region` clamps a reversed rectangle to
+    // zero (`lib.rs`, `(x2 - x1).max(0)`), so a module with its geometry momentarily wrong
+    // gets here rather than being stopped earlier.
+    if w <= 0 || h <= 0 {
+        crate::logging::trace("macos", || {
+            format!("ocr: nothing to read, region is {w}x{h} at {x},{y}")
+        });
+        return Ok(empty());
+    }
+
+    let debug = std::env::var_os("AUTOMATION_PLATFORM_OCR_DEBUG").is_some();
+
+    // Everything below works in capture pixels and converts to points only at the very end,
+    // through this one factor. On a Retina display it is 2.0, and the whole reason the
+    // capture is taken at backing resolution is that halving it first would throw away the
+    // detail that makes eight-point text readable — so the division belongs on the answer,
+    // not on the input.
+    let Some((native, scale)) = super::capture::capture_backing(x, y, w, h) else {
+        report_capture_failure(x, y, w, h);
+        return Ok(empty());
+    };
+    let nw = CGImage::width(Some(&native));
+    let nh = CGImage::height(Some(&native));
+
+    let small = w <= SMALL_W && h <= SMALL_H;
+    let result = if !small {
+        // A whole window, or something like it. Multi-word layout and speed matter more
+        // than the last per-glyph pixel, and cropping to content would be meaningless.
+        let plan = Plan::identity(nw, nh);
+        if debug {
+            // Vision is handed the capture itself here, so the raw image and the processed
+            // one are the same file.
+            if let Some((rgba, dw, dh)) = cgimage_to_rgba(&native) {
+                debug_dump("ocr-debug.bmp", &rgba, dw, dh);
+            }
+        }
+        run_vision(&native, lang, &|bb| map_box(&plan, scale, bb))
+    } else {
+        let Some((rgba, px_w, px_h)) = cgimage_to_rgba(&native) else {
+            warn_once(
+                "ocr-convert",
+                "ocr: could not read the captured pixels back out of CoreGraphics",
+            );
+            return Ok(empty());
+        };
+        if debug {
+            debug_dump("ocr-debug-raw.bmp", &rgba, px_w, px_h);
+        }
+        // The margin is a physical distance, not a pixel count: three pixels of slack round
+        // the ink at 1x is one and a half at 2x, and the crop would start clipping antialias
+        // fringes off Retina glyphs.
+        let margin = (3.0 * scale).round().max(1.0) as usize;
+        let plan = Plan::content(&rgba, px_w, px_h, margin);
+        crate::logging::trace("macos", || {
+            let (pw, ph) = plan.out_size();
+            format!(
+                "ocr: cropped {}x{} px at {},{} of {px_w}x{px_h}, upscaled {}x, framed to {pw}x{ph}",
+                plan.cw, plan.ch, plan.x0, plan.y0, plan.up
+            )
+        });
+        let out = render(&native, &plan).and_then(|(img, buf)| {
+            if debug {
+                let (pw, ph) = plan.out_size();
+                debug_dump("ocr-debug.bmp", &buf, pw, ph);
+            }
+            let r = run_vision(&img, lang, &|bb| map_box(&plan, scale, bb));
+            // `buf` is the bitmap context's backing store and the image created from it is
+            // a copy-on-write of that memory. Dropping it before Vision has read the image
+            // would be a use-after-free that only shows up on the machine nobody here owns.
+            drop(buf);
+            r
+        });
+
+        match out {
+            // Only when the tightened pass found nothing, and only when it actually cropped
+            // — if it already fell back to the whole region there is no second input to try
+            // and the retry would just pay for the same answer twice.
+            Some((ref t, _)) if t.trim().is_empty() && plan.cropped => {
+                crate::logging::trace("macos", || {
+                    "ocr: tightened pass read nothing, trying the whole region".to_string()
+                });
+                let plan = Plan::whole(&rgba, px_w, px_h);
+                render(&native, &plan).and_then(|(img, buf)| {
+                    if debug {
+                        let (pw, ph) = plan.out_size();
+                        debug_dump("ocr-debug-retry.bmp", &buf, pw, ph);
+                    }
+                    let r = run_vision(&img, lang, &|bb| map_box(&plan, scale, bb));
+                    drop(buf);
+                    r
+                })
+            }
+            other => other,
+        }
+    };
+
+    let (text, words) = result.unwrap_or_else(|| (String::new(), Vec::new()));
+    let ms = started.elapsed().as_secs_f64() * 1000.0;
+    crate::logging::trace("macos", || {
+        format!(
+            "ocr {w}x{h} pt at {x},{y} -> {nw}x{nh} px (scale {scale:.2}), {:.1} ms, {} word(s): '{}'",
+            ms,
+            words.len(),
+            text.replace('\n', " ")
+        )
+    });
+    note_cost(ms, w, h);
+    Ok(OcrText { text, words })
+}
+
+fn empty() -> OcrText {
+    OcrText {
+        text: String::new(),
+        words: Vec::new(),
+    }
+}
+
+/// Makes Vision load its recognition model now, on a thread of its own, so that the first
+/// real recognition does not.
+///
+/// The model load is a one-off of anything from half a second to two seconds, and `ocr` runs
+/// synchronously on the pump thread — which is also the thread carrying speech, timers and
+/// the overlay's own polling. Paying it there means a frozen interface and a late
+/// announcement at exactly the moment a user first asked to read something. `docs/macos-
+/// port.md` names this as one of the three failures the port is shaped to avoid.
+///
+/// Nothing crosses the thread boundary: every Objective-C object is made on the thread that
+/// uses it, because none of them are `Send`, and the result is thrown away. Vision's request
+/// handler is documented as usable from any thread and needs no run loop, which is what makes
+/// this legal at all.
+#[allow(dead_code)] // Called from `MacBackend::new`; see this file's entry in docs/macos-port.md.
+pub fn warm_up() {
+    // A thread that is not the main one has no autorelease pool of its own and no run loop to
+    // drain one, so everything Vision autoreleases here would simply stay.
+    std::thread::spawn(|| objc2::rc::autoreleasepool(|_| warm_up_in_pool()));
+}
+
+fn warm_up_in_pool() {
+    let started = Instant::now();
+    let Some((image, buf)) = synthetic_page() else {
+        crate::logging::line(
+            "macos",
+            "ocr: could not build a warm-up image; Vision will load its model on the first real recognition instead, which will be slow",
+        );
+        return;
+    };
+    let read = run_vision(&image, None, &|_| (0, 0, 1, 1));
+    drop(buf);
+    crate::logging::line(
+        "macos",
+        &format!(
+            "ocr: Vision warmed up in {:.0} ms{}",
+            started.elapsed().as_secs_f64() * 1000.0,
+            match read {
+                Some((text, _)) if !text.trim().is_empty() => " and read its test page",
+                // The bars are not letters, so finding nothing in them is the expected
+                // outcome; the model is loaded either way, which is the whole point.
+                Some(_) => "",
+                None => ", or rather did not: the request failed",
+            }
+        ),
+    );
+}
+
+/// A small image with dark bars on a light ground, for the warm-up.
+///
+/// Not a screen capture on purpose: warming must not depend on Screen Recording having been
+/// granted, and it must not read the user's screen before anything has asked it to. The bars
+/// are there so the text *detector* passes something to the *recogniser* — it is the second
+/// of those two models that the first real call would otherwise wait for.
+fn synthetic_page() -> Option<(CFRetained<CGImage>, Vec<u8>)> {
+    let (w, h) = (240usize, 64usize);
+    let bytes_per_row = w * 4;
+    let mut buf = vec![0u8; bytes_per_row * h];
+    let space = CGColorSpace::new_device_rgb()?;
+    let info = CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0;
+    // SAFETY: as in `render` — the buffer is sized to the geometry and outlives the context.
+    let ctx = unsafe {
+        CGBitmapContextCreate(
+            buf.as_mut_ptr() as *mut core::ffi::c_void,
+            w,
+            h,
+            8,
+            bytes_per_row,
+            Some(&space),
+            info,
+        )
+    }?;
+    CGContext::set_rgb_fill_color(Some(&ctx), 1.0, 1.0, 1.0, 1.0);
+    CGContext::fill_rect(
+        Some(&ctx),
+        CGRect::new(
+            CGPoint::new(0.0, 0.0),
+            CGSize::new(w as CGFloat, h as CGFloat),
+        ),
+    );
+    CGContext::set_rgb_fill_color(Some(&ctx), 0.05, 0.05, 0.05, 1.0);
+    for i in 0..6 {
+        CGContext::fill_rect(
+            Some(&ctx),
+            CGRect::new(
+                CGPoint::new(24.0 + i as CGFloat * 32.0, 16.0),
+                CGSize::new(8.0, 32.0),
+            ),
+        );
+    }
+    CGContext::flush(Some(&ctx));
+    let image = CGBitmapContextCreateImage(Some(&ctx))?;
+    drop(ctx);
+    Some((image, buf))
+}
+
+/// Says, once, why nothing could be captured.
+///
+/// Missing Screen Recording is the likely cause and it is invisible from inside the process:
+/// the permission is not something an application can grant itself, and without it macOS
+/// does not return an error — it returns a picture of the wallpaper. A tester who is blind
+/// cannot see that the overlay is reading an empty desktop, so it has to be said in words.
+fn report_capture_failure(x: i32, y: i32, w: i32, h: i32) {
+    if screen_capture_permitted() {
+        warn_once(
+            "ocr-capture",
+            &format!("ocr: the screen region {w}x{h} at {x},{y} could not be captured, although Screen Recording is granted"),
+        );
+    }
+}
+
+/// Whether this application may read the screen — asked of the system once, then remembered.
+///
+/// Asked once because the callers are polls: a region that reads as blank sixteen times a
+/// second must not become sixteen TCC queries a second on the thread that also owns the
+/// keyboard tap. Remembering it is safe in the direction that matters, since a Screen
+/// Recording grant made while the application is running does not take effect until it is
+/// restarted anyway. Logs the missing case itself, because every caller wants to say the
+/// same sentence.
+fn screen_capture_permitted() -> bool {
+    thread_local! {
+        static ALLOWED: RefCell<Option<bool>> = const { RefCell::new(None) };
+    }
+    ALLOWED.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        if let Some(known) = *cell {
+            return known;
+        }
+        let allowed = CGPreflightScreenCaptureAccess();
+        *cell = Some(allowed);
+        if !allowed {
+            crate::logging::line(
+                "macos",
+                "ocr: nothing can be read off the screen — grant this application Screen Recording in System Settings, Privacy & Security, then restart it",
+            );
+        } else {
+            crate::logging::trace("macos", || {
+                "ocr: Screen Recording is granted".to_string()
+            });
+        }
+        allowed
+    })
+}
+
+/// Logs the cost of a recognition where a user can act on it.
+///
+/// The first one is called out separately because it is not representative: Vision loads its
+/// model on first use, and that one-off can be an order of magnitude above the steady state.
+/// After that, 50 ms is the host's own threshold for "this blocked the pump" — one module
+/// polls this every 120 ms and issues two calls a tick, measured at 19-31 ms each on
+/// Windows, so a materially larger figure here is the number that decides whether the macOS
+/// port can keep that module at all.
+///
+/// Only a new worst time is written, and only if it is clearly worse than the last one
+/// reported. A slow recogniser is called sixteen times a second by that same module, and a
+/// line per call would bury the log it is meant to be evidence in.
+fn note_cost(ms: f64, w: i32, h: i32) {
+    thread_local! {
+        static WORST: RefCell<Option<f64>> = const { RefCell::new(None) };
+    }
+    let previous = WORST.with(|worst| {
+        let mut worst = worst.borrow_mut();
+        let previous = *worst;
+        if previous.is_none_or(|p| ms > p) {
+            *worst = Some(ms);
+        }
+        previous
+    });
+    match previous {
+        None => crate::logging::line(
+            "macos",
+            &format!("ocr: first recognition of a {w}x{h} pt region took {ms:.0} ms, Vision's model load included"),
+        ),
+        Some(p) if ms >= 50.0 && ms > p * 1.25 => crate::logging::line(
+            "macos",
+            &format!("ocr: reading a {w}x{h} pt region took {ms:.0} ms, the slowest so far"),
+        ),
+        _ => {}
+    }
+}
+
+/// One recognition pass over an image Vision is given as-is.
+///
+/// `map` turns a Vision rectangle into the caller's coordinates; it is the only thing that
+/// knows about the preprocessing, so this function stays honest about what it was handed.
+/// `None` means the pass failed and has already said so; an empty string means it ran and
+/// found nothing, which is an ordinary answer here.
+fn run_vision(
+    image: &CGImage,
+    lang: Option<&str>,
+    map: &dyn Fn(CGRect) -> (i32, i32, i32, i32),
+) -> Option<(String, Vec<OcrWord>)> {
+    let request = VNRecognizeTextRequest::new();
+    request.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
+    // Language correction is a dictionary pass over the result, and every string this
+    // platform reads is a value: a note name, a cent offset, a lone digit. Correction is
+    // what turns those into words that were never on the screen.
+    request.setUsesLanguageCorrection(false);
+    // Relative to the image height, default one thirty-second. The preprocessing already
+    // makes the text a large fraction of the image, so this only matters on the pass-through
+    // path — where it is the difference between reading a small label in a big window and
+    // not seeing it at all.
+    request.setMinimumTextHeight(0.0);
+    if let Some(code) = lang {
+        let langs = [NSString::from_str(code)];
+        request.setRecognitionLanguages(&NSArray::from_retained_slice(&langs));
+    }
+    // The request's revision is deliberately left alone. Naming revision 3 explicitly would
+    // fail the request outright on macOS 12, where it does not exist, and the default is
+    // already the newest revision the running system supports.
+    //
+    // `setCustomWords` is likewise skipped: Vision only consults it during the
+    // language-correction stage, which is switched off above, so it would be a no-op that
+    // reads like a precaution.
+
+    let options: Retained<NSDictionary<NSString, AnyObject>> = NSDictionary::new();
+    let handler = unsafe {
+        VNImageRequestHandler::initWithCGImage_options(
+            VNImageRequestHandler::alloc(),
+            image,
+            &options,
+        )
+    };
+    // Synchronous: it returns when the requests have finished. No completion handler, no
+    // queue, no run loop — which is what makes it usable from the pump thread at all.
+    let requests: Retained<NSArray<VNRequest>> =
+        NSArray::from_slice(&[request.as_ref() as &VNRequest]);
+    if let Err(e) = handler.performRequests_error(&requests) {
+        warn_once(
+            "ocr-perform",
+            &format!("ocr: Vision refused the request — {}", e.localizedDescription()),
+        );
+        return None;
+    }
+
+    // No results at all is the ordinary "there was no text here" answer, not a failure.
+    let mut lines: Vec<Line> = Vec::new();
+    for observation in request.results().into_iter().flatten() {
+        let candidates = observation.topCandidates(1);
+        let Some(top) = candidates.firstObject() else {
+            continue;
+        };
+        let line = top.string().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        // SAFETY: reading a property off an observation Vision just produced.
+        let line_box = unsafe { observation.boundingBox() };
+        let (lx, ly, _, lh) = map(line_box);
+
+        let mut words = Vec::new();
+        for (start, len, text) in split_words(&line) {
+            let range = NSRange {
+                location: start,
+                length: len,
+            };
+            // SAFETY: the range indexes the very string this candidate returned.
+            let word_box = match unsafe { top.boundingBoxForRange_error(range) } {
+                Ok(rect) => unsafe { rect.boundingBox() },
+                Err(_) => {
+                    // Documented as approximate and for UI purposes; when it declines
+                    // entirely, the line's own box at least puts the word on the right line
+                    // rather than at the origin.
+                    crate::logging::trace("macos", || {
+                        format!("ocr: no box for '{text}' within '{line}', using the line's")
+                    });
+                    line_box
+                }
+            };
+            let (wx, wy, ww, wh) = map(word_box);
+            words.push(OcrWord {
+                text,
+                x: wx,
+                y: wy,
+                w: ww,
+                h: wh,
+            });
+        }
+        lines.push(Line {
+            x: lx,
+            y: ly,
+            h: lh,
+            text: line,
+            words,
+        });
+    }
+
+    let ordered = reading_order(lines);
+    let text = ordered
+        .iter()
+        .map(|l| l.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let words = ordered.into_iter().flat_map(|l| l.words).collect();
+    Some((text, words))
+}
+
+/// One observation: a run of text Vision read, and where it put it.
+struct Line {
+    x: i32,
+    y: i32,
+    h: i32,
+    text: String,
+    words: Vec<OcrWord>,
+}
+
+/// Puts the observations into reading order.
+///
+/// Vision promises no order at all, and the host hands the joined text straight to a module
+/// that compares it against what it read last tick — an order that wobbles between ticks
+/// reads as the value having changed.
+///
+/// Sorting by y and then x is not enough, because Vision returns one observation per *run*
+/// of text: a row with a gap in it, which is exactly how two read-outs sit side by side in
+/// Melodyne's tool strip, arrives as two observations whose tops differ by a pixel or two.
+/// Whichever happened to sit higher would come first. So runs are gathered into rows first,
+/// by a tolerance of half a line height, and only then ordered left to right within the row.
+fn reading_order(mut lines: Vec<Line>) -> Vec<Line> {
+    lines.sort_by_key(|l| (l.y, l.x));
+    let mut rows = Vec::with_capacity(lines.len());
+    let mut row = 0i32;
+    let mut top: Option<(i32, i32)> = None;
+    for line in &lines {
+        match top {
+            Some((row_y, row_h)) if line.y - row_y <= row_h.max(line.h) / 2 => {}
+            _ => {
+                row += 1;
+                top = Some((line.y, line.h));
+            }
+        }
+        rows.push(row);
+    }
+    let mut ranked: Vec<(i32, i32, Line)> = lines
+        .into_iter()
+        .zip(rows)
+        .map(|(line, row)| (row, line.x, line))
+        .collect();
+    ranked.sort_by_key(|(row, x, _)| (*row, *x));
+    ranked.into_iter().map(|(_, _, line)| line).collect()
+}
+
+/// Splits a recognised line into words, with each word's offset and length in UTF-16 code
+/// units.
+///
+/// `boundingBoxForRange:` indexes an `NSString`, and an `NSRange` counts UTF-16 code units —
+/// not bytes and not characters. For "+36 Ct" all three agree, which is exactly why getting
+/// it wrong here would survive every test anyone thought to run.
+fn split_words(line: &str) -> Vec<(usize, usize, String)> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    let mut start = 0usize;
+    let mut current = String::new();
+    for ch in line.chars() {
+        let units = ch.len_utf16();
+        if ch.is_whitespace() {
+            if !current.is_empty() {
+                out.push((start, offset - start, std::mem::take(&mut current)));
+            }
+            offset += units;
+            start = offset;
+        } else {
+            if current.is_empty() {
+                start = offset;
+            }
+            current.push(ch);
+            offset += units;
+        }
+    }
+    if !current.is_empty() {
+        out.push((start, offset - start, current));
+    }
+    out
+}
+
+/// What was done to the capture before Vision saw it, and therefore what has to be undone to
+/// its answers.
+struct Plan {
+    /// Content-crop origin within the capture, in capture pixels.
+    x0: usize,
+    y0: usize,
+    /// Crop size in capture pixels.
+    cw: usize,
+    ch: usize,
+    /// Integer upscale applied to the crop.
+    up: usize,
+    /// Background border around the upscaled crop, in processed pixels.
+    pad: usize,
+    /// Fill colour for that border, 0..1 per channel.
+    bg: [f64; 3],
+    /// Whether the crop actually narrowed anything — the retry hinges on this.
+    cropped: bool,
+}
+
+impl Plan {
+    /// The capture untouched: what a large region gets, and the case where every mapping
+    /// below reduces to dividing by the backing scale.
+    fn identity(nw: usize, nh: usize) -> Plan {
+        Plan {
+            x0: 0,
+            y0: 0,
+            cw: nw,
+            ch: nh,
+            up: 1,
+            pad: 0,
+            bg: [0.0; 3],
+            cropped: false,
+        }
+    }
+
+    /// The whole capture, upscaled and framed but not cropped.
+    fn whole(rgba: &[u8], nw: usize, nh: usize) -> Plan {
+        Plan {
+            x0: 0,
+            y0: 0,
+            cw: nw,
+            ch: nh,
+            up: upscale_for(nh),
+            pad: OCR_PAD,
+            bg: corner_background(rgba, nw, nh),
+            cropped: false,
+        }
+    }
+
+    /// Cropped to the ink and upscaled so the ink is large.
+    ///
+    /// Upscaling the whole padded region instead leaves a tiny digit tiny, because the
+    /// factor is then decided by the region's height rather than the glyph's — which is the
+    /// single change that made small read-outs legible on the Windows side.
+    fn content(rgba: &[u8], nw: usize, nh: usize, margin: usize) -> Plan {
+        let bg = corner_background(rgba, nw, nh);
+        if nw < 3 || nh < 3 {
+            return Plan::whole(rgba, nw, nh);
+        }
+        // Distance from the background colour, in the same 0..255 space and against the same
+        // threshold the Windows path uses, so the two platforms crop the same pixels. Squared
+        // on both sides: this walks every pixel of the capture on the thread that owns the
+        // keyboard tap, and a square root per pixel buys nothing an inequality needs.
+        let threshold_sq = 55.0f64 * 55.0;
+        let (bgr, bgg, bgb) = (bg[0] * 255.0, bg[1] * 255.0, bg[2] * 255.0);
+        let (mut x0, mut y0, mut x1, mut y1) = (nw, nh, 0usize, 0usize);
+        let mut found = false;
+        // Row by row through the slice rather than by index, so the bounds check happens once
+        // per row instead of three times per pixel.
+        for (y, row) in rgba.chunks_exact(nw * 4).enumerate() {
+            for (x, px) in row.chunks_exact(4).enumerate() {
+                let dr = px[0] as f64 - bgr;
+                let dg = px[1] as f64 - bgg;
+                let db = px[2] as f64 - bgb;
+                if dr * dr + dg * dg + db * db > threshold_sq {
+                    found = true;
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x);
+                    y1 = y1.max(y);
+                }
+            }
+        }
+        if !found {
+            // A region that is one flat colour is either genuinely blank — a read-out with
+            // nothing in it — or a capture that saw nothing. The second case is exactly what
+            // a missing Screen Recording grant looks like from in here, and it is worth one
+            // question to the system to tell them apart.
+            crate::logging::trace("macos", || {
+                format!("ocr: {nw}x{nh} px capture is one flat colour, nothing to crop to")
+            });
+            screen_capture_permitted();
+            return Plan::whole(rgba, nw, nh);
+        }
+
+        let x0 = x0.saturating_sub(margin);
+        let y0 = y0.saturating_sub(margin);
+        let x1 = (x1 + margin).min(nw - 1);
+        let y1 = (y1 + margin).min(nh - 1);
+        let (cw, ch) = (x1 - x0 + 1, y1 - y0 + 1);
+        Plan {
+            x0,
+            y0,
+            cw,
+            ch,
+            up: upscale_for(ch),
+            pad: OCR_PAD,
+            bg,
+            cropped: cw < nw || ch < nh,
+        }
+    }
+
+    /// Size of the image Vision is handed, in pixels.
+    fn out_size(&self) -> (usize, usize) {
+        (self.cw * self.up + self.pad * 2, self.ch * self.up + self.pad * 2)
+    }
+}
+
+/// The integer upscale that brings content of this height to roughly the target.
+///
+/// Integer division gives 1 as soon as the content is already tall enough, which is the
+/// right answer: the upscale exists to rescue small glyphs, and doubling text that Vision
+/// can read as it stands only costs time. The ceiling stops a one-pixel-tall artefact from
+/// asking for a sixty-fold blit.
+fn upscale_for(content_px: usize) -> usize {
+    (TARGET_CONTENT_PX / content_px.max(1)).clamp(1, 10)
+}
+
+/// Average of the four corners, 0..1 per channel — the region's background.
+///
+/// The regions in question are fixed slices of a plugin's chrome with padding around the
+/// text, so the corners are background by construction. Taking all four rather than one
+/// survives a gradient.
+fn corner_background(rgba: &[u8], nw: usize, nh: usize) -> [f64; 3] {
+    if nw == 0 || nh == 0 || rgba.len() < nw * nh * 4 {
+        return [0.0; 3];
+    }
+    let at = |x: usize, y: usize| {
+        let p = (y * nw + x) * 4;
+        [rgba[p] as f64, rgba[p + 1] as f64, rgba[p + 2] as f64]
+    };
+    let corners = [at(0, 0), at(nw - 1, 0), at(0, nh - 1), at(nw - 1, nh - 1)];
+    let mut out = [0.0f64; 3];
+    for c in 0..3 {
+        out[c] = corners.iter().map(|p| p[c]).sum::<f64>() / 4.0 / 255.0;
+    }
+    out
+}
+
+/// Turns one of Vision's normalised rectangles into points relative to the requested region.
+///
+/// Three coordinate systems meet here and each one is a chance to be silently wrong.
+/// Vision's box is normalised to the *processed* image, and its origin is the box's
+/// **bottom** edge with y growing **upward** — so the flip is `1 - origin.y - height`, not
+/// `1 - origin.y`. That lands in processed pixels; undoing the border and the upscale and
+/// adding the crop origin lands in capture pixels; dividing by the backing scale lands in
+/// points, which is the only space allowed to cross the trait boundary.
+fn map_box(plan: &Plan, scale: f64, bb: CGRect) -> (i32, i32, i32, i32) {
+    let (pw, ph) = plan.out_size();
+    let (pw, ph) = (pw as f64, ph as f64);
+    let px = bb.origin.x * pw;
+    let py = (1.0 - bb.origin.y - bb.size.height) * ph;
+    let pwidth = bb.size.width * pw;
+    let pheight = bb.size.height * ph;
+
+    let up = plan.up as f64;
+    let pad = plan.pad as f64;
+    let cx = (px - pad) / up + plan.x0 as f64;
+    let cy = (py - pad) / up + plan.y0 as f64;
+
+    (
+        (cx / scale).round() as i32,
+        (cy / scale).round() as i32,
+        // A word narrower than a point still has to have a width, or a caller measuring it
+        // divides by zero.
+        (pwidth / up / scale).round().max(1.0) as i32,
+        (pheight / up / scale).round().max(1.0) as i32,
+    )
+}
+
+/// Renders the plan: crops, upscales and frames the capture into a fresh image for Vision.
+///
+/// The crop is done by drawing the whole capture offset and letting the context clip, rather
+/// than by `CGImageCreateWithImageInRect`, whose rectangle is documented in the image's own
+/// coordinate space — a convention this port has no way to test. Clipping is unambiguous.
+///
+/// Returns the image together with the buffer behind it: the image created from a bitmap
+/// context shares that memory copy-on-write, so the caller has to keep it alive.
+fn render(source: &CGImage, plan: &Plan) -> Option<(CFRetained<CGImage>, Vec<u8>)> {
+    let (pw, ph) = plan.out_size();
+    if pw == 0 || ph == 0 {
+        return None;
+    }
+    let sw = CGImage::width(Some(source)) as f64;
+    let sh = CGImage::height(Some(source)) as f64;
+    let bytes_per_row = pw * 4;
+    let mut buf = vec![0u8; bytes_per_row * ph];
+    let space = CGColorSpace::new_device_rgb()?;
+    let info = CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0;
+    // SAFETY: the buffer is sized to exactly the geometry described here, and it outlives the
+    // context — the context is released below, the buffer is handed to the caller.
+    let ctx = unsafe {
+        CGBitmapContextCreate(
+            buf.as_mut_ptr() as *mut core::ffi::c_void,
+            pw,
+            ph,
+            8,
+            bytes_per_row,
+            Some(&space),
+            info,
+        )
+    }?;
+
+    CGContext::set_rgb_fill_color(Some(&ctx), plan.bg[0], plan.bg[1], plan.bg[2], 1.0);
+    CGContext::fill_rect(
+        Some(&ctx),
+        CGRect::new(
+            CGPoint::new(0.0, 0.0),
+            CGSize::new(pw as CGFloat, ph as CGFloat),
+        ),
+    );
+    CGContext::set_interpolation_quality(Some(&ctx), CGInterpolationQuality::High);
+
+    // A bitmap context has its origin at the BOTTOM left while its memory starts at the top
+    // row, so placing the crop at (pad, pad) in the picture means computing where the
+    // image's bottom edge has to sit for its top edge to land there. Written out: memory row
+    // r is at context y = ph - r; the crop's top row must land at r = pad; the source's own
+    // top row is y0 crop-rows above that.
+    let up = plan.up as f64;
+    let pad = plan.pad as f64;
+    let dest = CGRect::new(
+        CGPoint::new(
+            pad - plan.x0 as f64 * up,
+            ph as f64 - pad + plan.y0 as f64 * up - sh * up,
+        ),
+        CGSize::new(sw * up, sh * up),
+    );
+    CGContext::draw_image(Some(&ctx), dest, Some(source));
+    CGContext::flush(Some(&ctx));
+
+    let image = CGBitmapContextCreateImage(Some(&ctx))?;
+    drop(ctx);
+    Some((image, buf))
+}
+
+/// The capture as tightly packed, top-down RGBA.
+///
+/// Rendering into a context we describe ourselves rather than reading the capture's own
+/// bytes: a screen `CGImage` on Apple silicon comes back premultiplied-first in
+/// little-endian order — BGRA in memory — with a row stride that need not be the width, and
+/// deriving that permutation at runtime is a guess this port cannot check. Here the layout
+/// is stated rather than discovered, and one extra blit of a region this size costs nothing
+/// next to the capture itself.
+fn cgimage_to_rgba(image: &CGImage) -> Option<(Vec<u8>, usize, usize)> {
+    let w = CGImage::width(Some(image));
+    let h = CGImage::height(Some(image));
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let bytes_per_row = w * 4;
+    let mut buf = vec![0u8; bytes_per_row * h];
+    let space = CGColorSpace::new_device_rgb()?;
+    let info = CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0;
+    // SAFETY: the buffer outlives the context, which is dropped before the buffer is read.
+    let ctx = unsafe {
+        CGBitmapContextCreate(
+            buf.as_mut_ptr() as *mut core::ffi::c_void,
+            w,
+            h,
+            8,
+            bytes_per_row,
+            Some(&space),
+            info,
+        )
+    }?;
+    CGContext::draw_image(
+        Some(&ctx),
+        CGRect::new(
+            CGPoint::new(0.0, 0.0),
+            CGSize::new(w as CGFloat, h as CGFloat),
+        ),
+        Some(image),
+    );
+    CGContext::flush(Some(&ctx));
+    drop(ctx);
+    Some((buf, w, h))
+}
+
+/// Says a thing to the log the first time, and only to the trace thereafter.
+///
+/// Everything that can fail here is polled: a missing permission would otherwise write the
+/// same line sixteen times a second and bury the rest of the session.
+fn warn_once(key: &'static str, msg: &str) {
+    thread_local! {
+        static SAID: RefCell<HashSet<&'static str>> = RefCell::new(HashSet::new());
+    }
+    if SAID.with(|s| s.borrow_mut().insert(key)) {
+        crate::logging::line("macos", msg);
+    } else {
+        crate::logging::trace("macos", || msg.to_string());
+    }
+}
+
+/// Writes what Vision was given next to the executable, when `AUTOMATION_PLATFORM_OCR_DEBUG`
+/// is set — the same switch as on Windows.
+///
+/// The one question a log cannot answer is "what did the recogniser actually see", and it is
+/// the question that matters when a region reads as empty on a machine none of us has. BMP
+/// rather than PNG because it needs no encoder: the whole point is that this file must not
+/// drag a dependency into the check crate to earn its place.
+fn debug_dump(name: &str, rgba: &[u8], w: usize, h: usize) {
+    if w == 0 || h == 0 || rgba.len() < w * h * 4 {
+        return;
+    }
+    let stride = w * 4;
+    let image_size = (stride * h) as u32;
+    let mut out = Vec::with_capacity(54 + image_size as usize);
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&(54 + image_size).to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&54u32.to_le_bytes());
+    out.extend_from_slice(&40u32.to_le_bytes()); // BITMAPINFOHEADER
+    out.extend_from_slice(&(w as i32).to_le_bytes());
+    out.extend_from_slice(&(h as i32).to_le_bytes()); // positive: rows bottom-up
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&32u16.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB
+    out.extend_from_slice(&image_size.to_le_bytes());
+    out.extend_from_slice(&2835i32.to_le_bytes());
+    out.extend_from_slice(&2835i32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    for y in (0..h).rev() {
+        for x in 0..w {
+            let p = y * stride + x * 4;
+            out.extend_from_slice(&[rgba[p + 2], rgba[p + 1], rgba[p], 255]);
+        }
+    }
+    let path = crate::portable::base_dir().join(name);
+    match std::fs::write(&path, out) {
+        Ok(()) => crate::logging::line("macos", &format!("ocr: wrote {}", path.display())),
+        Err(e) => crate::logging::line(
+            "macos",
+            &format!("ocr: could not write {}: {e}", path.display()),
+        ),
+    }
 }

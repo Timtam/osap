@@ -9,10 +9,47 @@ local function ci(s)
   return string.lower(s or "")
 end
 
+local PLATFORMS = { "windows", "macos", "linux" }
+
+-- Is this table keyed by operating system rather than by match mode?
+--
+-- The two vocabularies are disjoint — `windows`/`macos`/`linux` against
+-- `exact`/`contains`/`prefix`/`suffix`/`pattern`/`regex`/`not` — so one grammar can carry
+-- both without a marker, and a module only reaches for the OS keys at the one field that
+-- genuinely differs. Everything around it stays a single shared spelling.
+local function os_keyed(t)
+  for _, p in ipairs(PLATFORMS) do
+    if t[p] ~= nil then return true end
+  end
+  return false
+end
+
+-- Resolves a possibly OS-keyed value to the one for the platform we are on.
+--
+-- Absent for this platform means NO MATCH, not "unconstrained" — the same rule the
+-- matcher's platform blocks already follow. A field that named three systems and
+-- accidentally matched everything on a fourth would be a Windows-only module quietly
+-- claiming a Mac window.
+local function for_this_os(v)
+  if type(v) == "table" and os_keyed(v) then
+    return v[host.os.current]
+  end
+  return v
+end
+
+-- Exposed for module code that has to branch outside a matcher — the control-class
+-- pattern of an embedded plugin, mostly. `host.os.pick { windows = …, macos = … }`.
+function host.os.pick(t)
+  return for_this_os(t)
+end
+
 -- A field matcher is a string (case-insensitive equals) or a table with one of:
--- exact / contains / prefix / suffix / pattern / regex / not.
+-- exact / contains / prefix / suffix / pattern / regex / not — or one keyed by OS,
+-- carrying any of those per platform.
 local function match_field(spec, actual)
   actual = actual or ""
+  spec = for_this_os(spec)
+  if spec == nil then return false end
   if type(spec) == "string" then
     return ci(actual) == ci(spec)
   elseif type(spec) == "table" then
@@ -31,11 +68,26 @@ end
 local function match_app(spec, app)
   if spec.name ~= nil and not match_field(spec.name, app.name) then return false end
   if spec.exe ~= nil and not match_field(spec.exe, app.exe) then return false end
+  -- The macOS identity. Empty on Windows, so a matcher that asks for it there does not
+  -- match — which is why a cross-platform matcher asks for `name`, or puts `bundleId` in
+  -- its `macos` block.
+  if spec.bundleId ~= nil and not match_field(spec.bundleId, app.bundleId) then return false end
   if spec.pid ~= nil and app.pid ~= spec.pid then return false end
   return true
 end
 
-local PLATFORMS = { "windows", "macos", "linux" }
+-- The accessibility identity of a macOS window, taken apart.
+--
+-- The backend publishes it as ONE string in `class`, `AXRole/AXSubrole/AXIdentifier`, with
+-- both separators always present and a missing part empty — "AXWindow/AXStandardWindow/",
+-- "AXGroup//NI.Kontakt.Main". It is one field because `class` is what every module's
+-- detection already matches on, and a second field would have meant a second code path in
+-- every module. Splitting it here lets a matcher name the part it cares about instead of
+-- writing a pattern around the separators.
+local function ax_parts(class)
+  local role, sub, ident = string.match(class or "", "^([^/]*)/([^/]*)/(.*)$")
+  return role, sub, ident
+end
 
 local function matches(m, win)
   -- OS gating: if the matcher names any platform blocks but not the current OS,
@@ -49,14 +101,36 @@ local function matches(m, win)
   end
   if hasPlatform and not currentPresent then return false end
 
+  -- Explicit gating, for a matcher that needs no platform block at all — everything it
+  -- asks for is shared, and it simply is not meant to run everywhere.
+  if m.os ~= nil then
+    local allowed = false
+    for _, p in ipairs(m.os) do
+      if p == host.os.current then allowed = true end
+    end
+    if not allowed then return false end
+  end
+
   -- Common fields.
   if m.title ~= nil and not match_field(m.title, win.title) then return false end
   if m.app ~= nil and not match_app(m.app, win.app) then return false end
 
-  -- Current-OS block (e.g. windows = { class = ... }).
+  -- Current-OS block. It takes the same grammar as the top level, so identity that has no
+  -- shared spelling — a Win32 class here, an accessibility role there — lives in exactly
+  -- one table per platform and the rest of the matcher stays written once.
   local block = m[host.os.current]
   if block ~= nil then
+    if block.title ~= nil and not match_field(block.title, win.title) then return false end
+    if block.app ~= nil and not match_app(block.app, win.app) then return false end
     if block.class ~= nil and not match_field(block.class, win.class) then return false end
+    if block.axRole ~= nil or block.axSubrole ~= nil or block.axIdentifier ~= nil then
+      local role, sub, ident = ax_parts(win.class)
+      if block.axRole ~= nil and not match_field(block.axRole, role) then return false end
+      if block.axSubrole ~= nil and not match_field(block.axSubrole, sub) then return false end
+      if block.axIdentifier ~= nil and not match_field(block.axIdentifier, ident) then
+        return false
+      end
+    end
   end
 
   -- Escape hatch predicate, evaluated last.

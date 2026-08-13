@@ -88,11 +88,6 @@ pub fn get(id: isize) -> Option<Entry> {
     TABLE.with(|t| t.borrow().by_id.get(&id).cloned())
 }
 
-/// Just the element — the common case.
-pub fn element(id: isize) -> Option<CFRetained<AXUIElement>> {
-    get(id).map(|e| e.element)
-}
-
 /// Drops everything owned by processes that have gone away.
 ///
 /// Handles of dead windows must not be *reused* — a module could still be holding one, and

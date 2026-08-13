@@ -6,21 +6,637 @@
 //! adds a match offset straight back onto the requested origin. On a Retina display the
 //! backing store has four times as many pixels as that, so the image is downsampled here
 //! and nowhere else.
+//!
+//! The downsample is not a resampling pass over the returned bytes: the destination bitmap
+//! is created at exactly the requested size in points and the captured image is drawn into
+//! it. That makes `cap.w == w`, `cap.h == h` and `rgba.len() == w * h * 4` structural
+//! properties of the buffer rather than something to check and hope for, and it costs one
+//! blit that a Retina machine would have had to pay anyway. The scale factor never appears
+//! in the arithmetic, which is exactly why it cannot be got wrong; where it is needed (the
+//! OCR path wants the sharp image) it is derived from the image the window server actually
+//! returned rather than asked for and cached, because a laptop docked to an external
+//! display changes it mid-session.
+//!
+//! The failure mode this file spends the most code on is not a failure at all as far as
+//! macOS is concerned: without Screen Recording permission a capture succeeds and returns a
+//! picture of the desktop wallpaper with every other application's window removed. Nothing
+//! errors, nothing is empty, and the only symptom is that image search and OCR stop
+//! matching. A blind tester would report "it does not find anything" forever. So the
+//! permission is preflighted the first time anything is captured and again when several
+//! captures in a row come back a single flat colour, and either way the log says so in
+//! words the user can act on — once, not per call.
+
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::time::{Duration, Instant};
+
+use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
+use objc2_core_graphics::{
+    CGBitmapContextCreate, CGColorSpace, CGContext, CGDirectDisplayID, CGDisplayBounds, CGError,
+    CGGetDisplaysWithPoint, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo,
+    CGInterpolationQuality, CGMainDisplayID, CGPreflightScreenCaptureAccess, CGWindowImageOption,
+    CGWindowListOption,
+};
+
+// Both capture entry points are `#[deprecated = "Please use ScreenCaptureKit instead."]` and
+// both are used anyway, deliberately. ScreenCaptureKit is asynchronous: a capture is
+// delivered to a completion handler or a stream delegate, which needs a run loop turning on
+// the calling thread. `capture_region` is handed to the image worker as a bare `fn` and
+// called from a thread that has no run loop and must not acquire one, and every other caller
+// is on the pump thread, where waiting for a callback would mean blocking the thread that
+// also carries speech, hotkeys and the event tap. These two functions are synchronous
+// round-trips to the window server with no such requirement. They still work through
+// macOS 15; when they stop, the replacement is a ScreenCaptureKit session owned by a
+// dedicated thread with its own run loop, kept behind these same three functions.
+#[allow(deprecated)]
+use objc2_core_graphics::{CGDisplayCreateImageForRect, CGWindowListCreateImage};
 
 use crate::backend::CapturedImage;
 
+/// How much of the screen a `pixel()` read grabs, in points, and where the asked-for point
+/// sits inside it.
+///
+/// Sized from the one module that makes this method hurt: Melodyne's tool bar is read with
+/// up to eight `pixel()` calls per keystroke (`modules/melodyne/src/main.luau`, `activeTool`
+/// + `activeVariant`), and every one of those points lies within x 84..200, y 59..72 of the
+/// window's client origin. A tile that reaches 96 points left and 32 points up from the
+/// first of them covers all eight, so a keystroke costs one round trip to the window server
+/// instead of eight. Kontakt's two probes are far apart and gain nothing, which is fine —
+/// they cost exactly what they cost today.
+const TILE_W: i32 = 256;
+const TILE_H: i32 = 96;
+const TILE_BACK_X: i32 = 96;
+const TILE_BACK_Y: i32 = 32;
+
+/// How long a tile may answer for.
+///
+/// Short enough that no tile survives from one 15 ms pump tick to the next, which is the
+/// blunt half of the argument. The sharper half: the callers that must not be answered from
+/// a cache are the ones that have just driven input and want to see the result — the host
+/// bumps its input epoch for exactly that reason. But a click is a `CGEvent` posted to
+/// another process, which then has to notice it and repaint, and that is at minimum one
+/// compositor frame away. A capture taken 5 ms after a click shows the same pre-click screen
+/// the cache does, so the cache adds no staleness the caller was not already going to get.
+/// Anything on the order of a frame would not be true, which is why this is milliseconds.
+const TILE_TTL: Duration = Duration::from_millis(5);
+
+/// Flat captures in a row before the permission is questioned. More than one because a
+/// legitimately uniform region does occur — a plugin's flat panel background — and fewer
+/// than this would cry wolf at it.
+const FLAT_RUN_ALARM: u32 = 4;
+
+/// Refuse a request bigger than this many points in total rather than trying to allocate
+/// four bytes for each of them. 40 M points is well past any real display and still only
+/// 160 MB, so nothing legitimate is refused and a nonsense request cannot abort the process
+/// on a failed allocation.
+const MAX_POINTS: i64 = 40_000_000;
+
+static PERMISSION_PREFLIGHTED: AtomicBool = AtomicBool::new(false);
+static PERMISSION_WARNED: AtomicBool = AtomicBool::new(false);
+static FLAT_WARNED: AtomicBool = AtomicBool::new(false);
+static FLAT_RUN: AtomicU32 = AtomicU32::new(0);
+static FIRST_CAPTURE_REPORTED: AtomicBool = AtomicBool::new(false);
+static SLOW_CAPTURE_REPORTED: AtomicBool = AtomicBool::new(false);
+static FALLBACK_REPORTED: AtomicBool = AtomicBool::new(false);
+static FAILURE_REPORTED: AtomicBool = AtomicBool::new(false);
+static OVERSIZE_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// Last reported primary-display size, so a change is a log line and a repeat is not.
+static LAST_SCREEN_W: AtomicI32 = AtomicI32::new(0);
+static LAST_SCREEN_H: AtomicI32 = AtomicI32::new(0);
+
 /// Primary display, in points.
+///
+/// `CGDisplayBounds` is already in points with the primary display's top-left at (0,0),
+/// which is the platform's coordinate space, so nothing is converted here. Deliberately not
+/// `CGDisplayPixelsWide`: despite the name that one also reports points, and relying on a
+/// function whose name says the opposite of what it does is how the units get lost.
+///
+/// Only the default region for a Lua caller that omitted one — never a clipping bound. The
+/// other three methods here work outside it, on secondary displays and at negative
+/// coordinates, because the host uses both.
 pub fn screen_size() -> (i32, i32) {
-    (0, 0)
+    let bounds = CGDisplayBounds(CGMainDisplayID());
+    let (w, h) = (bounds.size.width as i32, bounds.size.height as i32);
+
+    // A changed primary display size is worth a line rather than a trace: it is what happens
+    // when the tester docks the laptop, and it moves every coordinate a module ever measured.
+    // Both swaps run before the test, deliberately — short-circuiting past the second would
+    // leave it holding the old height and report the change twice.
+    let was_w = LAST_SCREEN_W.swap(w, Ordering::Relaxed);
+    let was_h = LAST_SCREEN_H.swap(h, Ordering::Relaxed);
+    if was_w != w || was_h != h {
+        crate::logging::line("macos", &format!("primary display is {w}x{h} points"));
+    }
+    if w <= 0 || h <= 0 {
+        crate::logging::trace("macos", || {
+            format!("CGDisplayBounds gave a degenerate primary display: {bounds:?}")
+        });
+    }
+    (w, h)
+}
+
+/// A tile of the screen, and when it was taken.
+struct Tile {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    rgba: Vec<u8>,
+    taken: Instant,
+}
+
+thread_local! {
+    /// The last region a `pixel()` read grabbed. Thread-local rather than shared: the only
+    /// caller is the pump thread, and a lock in the pump to serve a thread that is not
+    /// contending for it would be pure cost.
+    static TILE: RefCell<Option<Tile>> = const { RefCell::new(None) };
 }
 
 /// What is composited at that point right now.
-pub fn pixel(_x: i32, _y: i32) -> (u8, u8, u8) {
+///
+/// The same caveat the Windows implementation records applies unchanged, because it is a
+/// property of compositing rather than of an API: right after a focus change this still
+/// reads the window that used to be there. Callers re-ask; nothing here tries to hide it.
+///
+/// This is the expensive method on every platform and there is no cheap version of it — a
+/// point on the screen can only be read by capturing the screen. Windows pays a measured
+/// fixed ~16.7 ms per read, one compositor frame, regardless of size. The macOS cost is a
+/// synchronous round trip to the window server and is **unmeasured**; the first capture of a
+/// session is timed into the log so the tester's log answers it. What this can do is ask
+/// fewer times: a read grabs a tile rather than a point and the next few reads inside it are
+/// free, which turns Melodyne's eight probes per keystroke into one round trip.
+///
+/// No failure value exists — `(0,0,0)` is a real black pixel — so a failure is logged rather
+/// than signalled.
+pub fn pixel(x: i32, y: i32) -> (u8, u8, u8) {
+    if let Some(px) = TILE.with(|cell| {
+        let tile = cell.borrow();
+        let t = tile.as_ref()?;
+        if t.taken.elapsed() > TILE_TTL
+            || x < t.x
+            || y < t.y
+            || x >= t.x + t.w
+            || y >= t.y + t.h
+        {
+            return None;
+        }
+        sample(&t.rgba, t.w, x - t.x, y - t.y)
+    }) {
+        crate::logging::trace("macos", || {
+            format!("pixel({x},{y}) = {},{},{} from the held tile", px.0, px.1, px.2)
+        });
+        return px;
+    }
+
+    let (tx, ty, tw, th) = tile_rect(x, y);
+    if let Some(rgba) = capture_rgba(tx, ty, tw, th) {
+        if let Some(px) = sample(&rgba, tw, x - tx, y - ty) {
+            TILE.with(|cell| {
+                *cell.borrow_mut() = Some(Tile {
+                    x: tx,
+                    y: ty,
+                    w: tw,
+                    h: th,
+                    rgba,
+                    taken: Instant::now(),
+                });
+            });
+            crate::logging::trace("macos", || {
+                format!(
+                    "pixel({x},{y}) = {},{},{} from a fresh {tw}x{th} tile at {tx},{ty}",
+                    px.0, px.1, px.2
+                )
+            });
+            return px;
+        }
+    }
+    // The tile is gone either way — a stale one must not answer for a point it never covered.
+    TILE.with(|cell| *cell.borrow_mut() = None);
+
+    // A tile can fail where a single point does not: it reaches past the edge of the display
+    // and the window server clips it, which `grab` refuses because a clipped image drawn into
+    // an unclipped destination is a silent geometry lie. One point cannot be clipped.
+    if let Some(rgba) = capture_rgba(x, y, 1, 1) {
+        if let Some(px) = sample(&rgba, 1, 0, 0) {
+            crate::logging::trace("macos", || {
+                format!("pixel({x},{y}) = {},{},{} from a single-point read", px.0, px.1, px.2)
+            });
+            return px;
+        }
+    }
+
+    if !FAILURE_REPORTED.swap(true, Ordering::Relaxed) {
+        crate::logging::line(
+            "macos",
+            &format!(
+                "could not read the screen at {x},{y} — pixel reads will report black until this \
+                 clears. Check the Screen Recording permission; this is logged once."
+            ),
+        );
+    }
+    crate::logging::trace("macos", || format!("pixel({x},{y}) failed; reporting black"));
     (0, 0, 0)
 }
 
 /// A region as an image. A bare `fn` on purpose: the image worker calls it from another
 /// thread, without the backend.
-pub fn capture_region(_x: i32, _y: i32, _w: i32, _h: i32) -> Option<CapturedImage> {
-    None
+///
+/// Nothing in the path below needs the main thread, a run loop, an autorelease pool or any
+/// state of ours: `CGWindowListCreateImage` and `CGDisplayCreateImageForRect` are
+/// synchronous window-server calls, `CGImage` is documented `Send + Sync` in these bindings,
+/// and the bitmap context is created, used and dropped inside one call. The tile cache that
+/// `pixel()` keeps is thread-local, so a worker-thread capture neither reads nor disturbs it.
+pub fn capture_region(x: i32, y: i32, w: i32, h: i32) -> Option<CapturedImage> {
+    if w <= 0 || h <= 0 {
+        crate::logging::trace("macos", || {
+            format!("capture({x},{y},{w},{h}) refused: a region must have both dimensions")
+        });
+        return None;
+    }
+    if w as i64 * h as i64 > MAX_POINTS {
+        if !OVERSIZE_REPORTED.swap(true, Ordering::Relaxed) {
+            crate::logging::line(
+                "macos",
+                &format!("capture({x},{y},{w},{h}) refused: {} points is past anything a display \
+                          holds, and allocating for it would take the process down", w as i64 * h as i64),
+            );
+        }
+        return None;
+    }
+
+    let rgba = capture_rgba(x, y, w, h)?;
+
+    // Only here, and not in the pixel path: a region asked for by name is one a module means
+    // to search or read, and a flat one is a symptom. A pixel probe's tile is very often
+    // deliberately flat — Kontakt's panel toggles read a plain background — so watching those
+    // would raise the alarm on the thing working correctly.
+    watch_for_blank(&rgba, w, h);
+
+    Some(CapturedImage {
+        w: w as u32,
+        h: h as u32,
+        rgba,
+    })
+}
+
+/// The same capture at the resolution the display actually has, plus the scale that came
+/// back, for the one caller that wants the sharp image: OCR.
+///
+/// Downsampling to points first would throw away exactly the detail that makes a 67x13 point
+/// read-out legible, so Vision is handed the backing-store image and the word boxes it
+/// reports are divided by this scale on the way out. The scale is measured from the returned
+/// image rather than read from the display, so it is right even where a mode change has just
+/// happened and cannot disagree with the image it describes.
+#[allow(dead_code)] // Used by `ocr`; see docs/macos-port.md, "Units".
+pub fn capture_backing(x: i32, y: i32, w: i32, h: i32) -> Option<(CFRetained<CGImage>, f64)> {
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    // The image is owned outright, so it outlives the pool; see `capture_rgba`.
+    objc2::rc::autoreleasepool(|_| grab(x, y, w, h, true))
+}
+
+/// One byte triple out of a tightly packed RGBA buffer.
+fn sample(rgba: &[u8], stride_px: i32, dx: i32, dy: i32) -> Option<(u8, u8, u8)> {
+    if dx < 0 || dy < 0 || stride_px <= 0 {
+        return None;
+    }
+    let i = (dy as usize).checked_mul(stride_px as usize)?.checked_add(dx as usize)?.checked_mul(4)?;
+    let px = rgba.get(i..i + 3)?;
+    Some((px[0], px[1], px[2]))
+}
+
+/// Where to put the tile a `pixel()` read grabs.
+///
+/// Clamped to the display the point is on, because a rect that reaches past the edge comes
+/// back clipped and is then refused; clamping keeps the fast path fast for a plugin window
+/// sitting against the edge of the screen instead of making every read there cost two round
+/// trips. A point on no display at all gets a single point, which will fail, which is the
+/// honest answer.
+fn tile_rect(x: i32, y: i32) -> (i32, i32, i32, i32) {
+    let Some((_, left, top, right, bottom)) = display_at(x, y) else {
+        crate::logging::trace("macos", || {
+            format!("no display contains {x},{y}; reading the single point")
+        });
+        return (x, y, 1, 1);
+    };
+
+    let tx = (x - TILE_BACK_X).max(left);
+    let ty = (y - TILE_BACK_Y).max(top);
+    let tw = TILE_W.min(right - tx);
+    let th = TILE_H.min(bottom - ty);
+    if tw < 1 || th < 1 || x < tx || y < ty || x >= tx + tw || y >= ty + th {
+        // A display smaller than the tile, or a layout the arithmetic above did not survive.
+        // One point always works and is never clipped, so it is the safe answer.
+        return (x, y, 1, 1);
+    }
+    (tx, ty, tw, th)
+}
+
+/// The display a point sits on and its bounds in points, right and bottom exclusive.
+fn display_at(x: i32, y: i32) -> Option<(CGDirectDisplayID, i32, i32, i32, i32)> {
+    let mut ids: [CGDirectDisplayID; 8] = [0; 8];
+    let mut found: u32 = 0;
+    // SAFETY: both out parameters point at live storage of at least the declared capacity,
+    // and `ids.len()` is what is declared.
+    let err = unsafe {
+        CGGetDisplaysWithPoint(
+            CGPoint::new(x as f64, y as f64),
+            ids.len() as u32,
+            ids.as_mut_ptr(),
+            &mut found,
+        )
+    };
+    if err != CGError::Success || found == 0 {
+        return None;
+    }
+    // Mirrored displays all contain the point; any of them shows the same picture.
+    let id = ids[0];
+    let b = CGDisplayBounds(id);
+    Some((
+        id,
+        b.origin.x as i32,
+        b.origin.y as i32,
+        (b.origin.x + b.size.width) as i32,
+        (b.origin.y + b.size.height) as i32,
+    ))
+}
+
+/// A region of the screen as exactly `w * h` pixels of tightly packed top-down RGBA.
+fn capture_rgba(x: i32, y: i32, w: i32, h: i32) -> Option<Vec<u8>> {
+    if !PERMISSION_PREFLIGHTED.swap(true, Ordering::Relaxed) {
+        check_screen_recording("first capture of the session");
+    }
+
+    let started = Instant::now();
+    // Around the whole round trip, because the image worker's thread has no pool of its own.
+    // Core Graphics is a C API and the objects here are all owned outright, but it uses
+    // Objective-C underneath and anything it autoreleases on a thread without a pool leaks for
+    // the life of the process — and this is the one function called several times a second
+    // from a thread we did not create.
+    let (rgba, scale) = objc2::rc::autoreleasepool(|_| {
+        let (image, scale) = grab(x, y, w, h, false)?;
+        let rgba = image_to_rgba(&image, w, h)?;
+        Some((rgba, scale))
+    })?;
+    let elapsed = started.elapsed();
+
+    // What a capture costs on this platform is one of the numbers docs/macos-port.md lists as
+    // unmeasured, and the tester's log is the only instrument that will ever measure it.
+    if !FIRST_CAPTURE_REPORTED.swap(true, Ordering::Relaxed) {
+        crate::logging::line(
+            "macos",
+            &format!(
+                "first screen capture: {w}x{h} points at {x},{y} came back at {scale:.2}x and took \
+                 {} ms",
+                elapsed.as_millis()
+            ),
+        );
+    }
+    if elapsed.as_millis() >= 50 && !SLOW_CAPTURE_REPORTED.swap(true, Ordering::Relaxed) {
+        crate::logging::line(
+            "macos",
+            &format!(
+                "a {w}x{h} point capture took {} ms. Everything runs on one thread here, and past \
+                 roughly 300 ms in a single pump iteration macOS disables the event tap outright. \
+                 Logged once; turn on AUTOMATION_PLATFORM_TRACE for every capture.",
+                elapsed.as_millis()
+            ),
+        );
+    }
+    crate::logging::trace("macos", || {
+        format!(
+            "capture {w}x{h} points at {x},{y}: {scale:.2}x, {} ms, {} bytes",
+            elapsed.as_millis(),
+            rgba.len()
+        )
+    });
+    Some(rgba)
+}
+
+/// One capture, as the window server hands it over, with the scale it came back at.
+///
+/// `CGWindowListCreateImage` first because its rect is in the same global point space
+/// everything else on this boundary uses — no per-display arithmetic, and a region that
+/// spans two displays is composed for us. It is asked for a nominal-resolution image, which
+/// is 1 pixel per point and halves what crosses the wire; whether that option is honoured is
+/// not relied on, because the caller draws whatever comes back into a destination of the
+/// requested size either way.
+///
+/// A returned image whose two axes imply different scales has been clipped — the rect
+/// reached past the edge of the desktop — and is refused rather than stretched, because a
+/// stretched capture is a coordinate lie of exactly the kind this file exists to prevent,
+/// and the host handles `None` as "no match" everywhere.
+#[allow(deprecated)]
+fn grab(x: i32, y: i32, w: i32, h: i32, best: bool) -> Option<(CFRetained<CGImage>, f64)> {
+    let rect = CGRect::new(
+        CGPoint::new(x as f64, y as f64),
+        CGSize::new(w as f64, h as f64),
+    );
+    let resolution = if best {
+        CGWindowImageOption::BestResolution
+    } else {
+        CGWindowImageOption::NominalResolution
+    };
+
+    if let Some(image) = CGWindowListCreateImage(
+        rect,
+        CGWindowListOption::OptionOnScreenOnly,
+        0,
+        resolution,
+    ) {
+        if let Some(scale) = uniform_scale(&image, w, h) {
+            return Some((image, scale));
+        }
+        crate::logging::trace("macos", || {
+            format!(
+                "window-list capture of {w}x{h} at {x},{y} came back {}x{} — clipped, not a whole \
+                 region; trying the display path",
+                CGImage::width(Some(&image)),
+                CGImage::height(Some(&image))
+            )
+        });
+    }
+
+    // Fallback. Its rect is display-local, so the origin of the display the region starts on
+    // is subtracted first; on the primary display that subtraction is zero, which is the
+    // common case and the one that stays right even if this convention is the other way
+    // round. Anything that lands here is logged once, because it means the primary path has
+    // stopped answering and that is a finding, not a detail.
+    let (display, left, top, _, _) = display_at(x, y)?;
+    let local = CGRect::new(
+        CGPoint::new((x - left) as f64, (y - top) as f64),
+        CGSize::new(w as f64, h as f64),
+    );
+    let image = CGDisplayCreateImageForRect(display, local)?;
+    let scale = uniform_scale(&image, w, h)?;
+    if !FALLBACK_REPORTED.swap(true, Ordering::Relaxed) {
+        crate::logging::line(
+            "macos",
+            "CGWindowListCreateImage returned nothing usable; captures are coming from \
+             CGDisplayCreateImageForRect instead. On a secondary display that path depends on the \
+             rect being display-local — if coordinates are wrong on the second monitor only, this \
+             line is why.",
+        );
+    }
+    Some((image, scale))
+}
+
+/// The scale an image came back at, or `None` if its two axes disagree about what that scale
+/// is, which means it is not the region that was asked for.
+fn uniform_scale(image: &CGImage, w: i32, h: i32) -> Option<f64> {
+    let (iw, ih) = (
+        CGImage::width(Some(image)) as f64,
+        CGImage::height(Some(image)) as f64,
+    );
+    if iw < 1.0 || ih < 1.0 {
+        return None;
+    }
+    let (sx, sy) = (iw / w as f64, ih / h as f64);
+    if !(0.2..=8.0).contains(&sx) || !(0.2..=8.0).contains(&sy) {
+        return None;
+    }
+    // An absolute floor as well as a relative tolerance: on a one-point read the rounding is
+    // the whole of the number, and 2% of it would refuse a perfectly good pixel.
+    if (sx - sy).abs() > 0.25_f64.max(0.02 * sx.max(sy)) {
+        return None;
+    }
+    Some((sx + sy) / 2.0)
+}
+
+/// Draw a captured image into a buffer whose layout we chose, at exactly `dw * dh` pixels.
+///
+/// The layout is stated to Core Graphics rather than read off the image: a screen `CGImage`
+/// on Apple silicon reports premultiplied-first with little-endian byte order, which means
+/// the bytes in memory are BGRA, and that combination is a well-known trap to get wrong by
+/// hand. Asking a bitmap context for `PremultipliedLast | Order32Big` makes RGBA a
+/// compile-time constant instead of a runtime negotiation, tightly packed with no stride
+/// padding, and it survives a future macOS changing what the capture format is.
+///
+/// Drawing into a destination of the requested point size is also where the Retina
+/// downsample happens, and why there is no separate resampling step to get wrong.
+fn image_to_rgba(image: &CGImage, dw: i32, dh: i32) -> Option<Vec<u8>> {
+    let (dw, dh) = (dw as usize, dh as usize);
+    let bytes_per_row = dw.checked_mul(4)?;
+    let mut buf = vec![0u8; bytes_per_row.checked_mul(dh)?];
+    let space = CGColorSpace::new_device_rgb()?;
+    let bitmap_info: u32 = CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0;
+
+    // SAFETY: `buf` is `bytes_per_row * dh` bytes, which is what the context is told, and it
+    // outlives the context — the context is dropped below before anything reads the buffer.
+    let ctx = unsafe {
+        CGBitmapContextCreate(
+            buf.as_mut_ptr() as *mut core::ffi::c_void,
+            dw,
+            dh,
+            8,
+            bytes_per_row,
+            Some(&space),
+            bitmap_info,
+        )
+    }?;
+
+    // Stated rather than left to the context's default, so that two machines running the same
+    // build downsample a Retina capture the same way. Low is a box-average rather than a
+    // nearest-neighbour pick: a probe point on a 2x rendering then reads the colour of that
+    // point rather than whichever of its four backing pixels happened to be first, which is
+    // what a module measuring against a 1x reference asked for.
+    CGContext::set_interpolation_quality(Some(&ctx), CGInterpolationQuality::Low);
+    CGContext::draw_image(
+        Some(&ctx),
+        CGRect::new(
+            CGPoint::new(0.0, 0.0),
+            CGSize::new(dw as f64, dh as f64),
+        ),
+        Some(image),
+    );
+    CGContext::flush(Some(&ctx));
+    drop(ctx);
+
+    // Opaque, always. The matcher ignores the capture's alpha, but `host.screen.save` writes
+    // it straight into a PNG, and a fully transparent calibration screenshot is one the blind
+    // author's sighted helper cannot see anything in.
+    for px in buf.chunks_exact_mut(4) {
+        px[3] = 255;
+    }
+    Some(buf)
+}
+
+/// Notice captures that come back a single flat colour, and question the permission when
+/// several do in a row.
+///
+/// Only for regions big enough that flatness means something: a plugin's panel background is
+/// genuinely one colour, and every `pixel()` tile would otherwise raise this. The test itself
+/// samples rather than scans, and gives up at the first pixel that differs, so the cost on a
+/// normal capture is a handful of comparisons.
+fn watch_for_blank(rgba: &[u8], w: i32, h: i32) {
+    if w < 64 || h < 64 {
+        return;
+    }
+    if !looks_flat(rgba) {
+        FLAT_RUN.store(0, Ordering::Relaxed);
+        return;
+    }
+    let run = FLAT_RUN.fetch_add(1, Ordering::Relaxed) + 1;
+    if run != FLAT_RUN_ALARM {
+        return;
+    }
+    FLAT_RUN.store(0, Ordering::Relaxed);
+    if !check_screen_recording("several captures in a row came back a single flat colour")
+        || FLAT_WARNED.swap(true, Ordering::Relaxed)
+    {
+        return;
+    }
+    crate::logging::line(
+        "macos",
+        &format!(
+            "{FLAT_RUN_ALARM} captures in a row of a {w}x{h} point region came back one flat \
+             colour, and Screen Recording IS granted — so the region is covered, off-screen, or \
+             the window is not where the module thinks it is. Logged once."
+        ),
+    );
+}
+
+/// Is every sampled pixel the same colour? Sampled on a stride so a full-screen capture is
+/// not scanned byte by byte; a real plugin UI differs within the first few samples.
+fn looks_flat(rgba: &[u8]) -> bool {
+    let count = rgba.len() / 4;
+    if count < 2 {
+        return false;
+    }
+    let stride = (count / 512).max(1);
+    let first = &rgba[0..3];
+    for i in (0..count).step_by(stride) {
+        let px = &rgba[i * 4..i * 4 + 3];
+        if px != first {
+            return false;
+        }
+    }
+    true
+}
+
+/// Preflight Screen Recording and, if it is missing, say so in the log in words the user can
+/// act on. Returns whether it is granted. The warning is written once per session however
+/// many times this is asked, because the caller that notices is in the capture path.
+fn check_screen_recording(reason: &str) -> bool {
+    if CGPreflightScreenCaptureAccess() {
+        crate::logging::trace("macos", || {
+            format!("screen recording permission is granted ({reason})")
+        });
+        return true;
+    }
+    if !PERMISSION_WARNED.swap(true, Ordering::Relaxed) {
+        crate::logging::line(
+            "macos",
+            &format!(
+                "SCREEN RECORDING PERMISSION IS NOT GRANTED ({reason}). macOS does not fail a \
+                 capture without it — it returns a picture of the desktop wallpaper with every \
+                 other application's windows removed, so image search and OCR will never match \
+                 and nothing else will look wrong. Grant it in System Settings > Privacy & \
+                 Security > Screen Recording, tick this application, and restart it."
+            ),
+        );
+    }
+    false
 }

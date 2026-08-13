@@ -46,6 +46,11 @@ impl MacBackend {
         // form of the check is the only way an application can raise the Accessibility
         // dialog at all, and everything this platform does needs it.
         perm::request_accessibility_once();
+        // Vision loads its model on the first request — half a second to two seconds — and
+        // `ocr` runs on the thread that carries the keyboard. Warming it on a background
+        // thread now is the difference between a first read-out that is merely slow and one
+        // that stalls the pump long enough for the system to switch off the event tap.
+        ocr::warm_up();
         MacBackend
     }
 }
@@ -243,6 +248,10 @@ impl Backend for MacBackend {
     }
 
     fn pump_pending(&self, events: &mut dyn HostEvents) {
+        // Belt and braces. The tap re-enables itself from a run-loop observer, but the
+        // moment it most needs to is the moment this thread was too busy to answer — so it
+        // is also asked here, where being busy has just finished. Rate-limited inside.
+        tap::health_check();
         queue::drain(events);
     }
 }

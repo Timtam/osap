@@ -2706,7 +2706,12 @@ end
 -- area, so the same regions work standalone and embedded.
 function Overlay:attachEmbedded(spec, opts)
   local hosts = spec.hosts or { spec.host }
-  local pattern = spec.control
+  -- The one thing in an embedded binding that cannot be written once. A host names its
+  -- plugin surface with a Win32 window class on Windows and an accessibility role on
+  -- macOS, and no amount of abstraction makes "Qt5152QWindowIcon" and "AXGroup" the same
+  -- string. So this accepts an OS-keyed table — `control = { windows = …, macos = … }` —
+  -- and everything else about the binding stays shared.
+  local pattern = host.os.pick(spec.control)
   -- Optional identity check: the control class often matches *any* plugin in a
   -- host (e.g. REAPER's "Plugin<ptr>"), so `spec.identify(control)` confirms it
   -- is really this plugin (via UIA / OCR landmark / image search — the module's
