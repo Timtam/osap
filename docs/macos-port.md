@@ -51,10 +51,70 @@ Two places pay for it:
 The scale factor is read per capture rather than cached: a laptop docked to an external
 display changes it mid-session, and a cached 2 would then be wrong for every click.
 
-**AX is already top-left.** `kAXPositionAttribute` measures from the top-left of the
-primary display, the same as Windows. `NSScreen`/`NSWindow` frames do not — they are
-bottom-left — and Vision's normalised boxes are bottom-left too. Both are converted at the
-point they are read, never later.
+**AX is already top-left, and so is CoreGraphics.** `kAXPositionAttribute`,
+`CGDisplayBounds`, `CGEvent` locations and `CGWarpMouseCursorPosition` all measure from the
+top-left of the primary display, y growing downward — the same frame Windows uses. There is
+**no global flip** anywhere in this backend, and adding one would mirror every window
+rectangle and every click.
+
+Exactly two bottom-left sources exist, and each is converted in the one function that reads
+it: `NSScreen`'s frames, which are therefore **kept out of the geometry path entirely** in
+favour of `CGDisplayBounds`, and Vision's normalised boxes.
+
+## `client_*` on a platform that has no client area
+
+Windows distinguishes a window's frame from its content, and every overlay coordinate in
+every module is relative to the content origin. macOS accessibility has no such
+distinction: `AXPosition`/`AXSize` describe the whole window, title bar included, and there
+is no attribute that reports the content rect.
+
+So the rule here is **`client` equals the frame, always** — no heuristic, no guessing at a
+title-bar height. It is predictable, which matters more than it looks: macOS module
+variants have not been written yet, so they will be authored against whatever this reports,
+and a rule that is consistently "including the title bar" costs an author nothing, whereas
+one that is right for borderless plugin windows and subtly wrong for titled ones would
+produce a module whose coordinates are all correct and another whose coordinates are all
+shifted, with nothing to tell them apart.
+
+## What `class` says
+
+`class` is the string every module's plugin detection matches against — on Windows it is
+the window class, matched with patterns like `"Qt%d+.-QWindowIcon"`. macOS has nothing of
+the sort, so the backend composes one, and it must be the **same** string everywhere it
+appears or a module will match against something the diagnostic dump never shows:
+
+```
+AXRole[:AXSubrole][#AXIdentifier]        e.g.  AXWindow:AXStandardWindow#NIMainWindow
+```
+
+Role always; subrole and identifier only when the element has them. `uia_raw_dump` — which
+is how anyone will discover what a plugin's tree actually contains — puts the identical
+string in its own `class` slot.
+
+Whether the Qt object names the Windows modules match on (`FileTypeSelector`,
+`WhatsNewScreen`) survive into `AXIdentifier` is unknown: they reach Windows through Qt's
+Windows accessibility provider, and the macOS bridge is a different one. This is the single
+biggest open question for the "port the ReaHotkey overlays" goal, and the dump is the only
+instrument that can answer it — which is why it ships in the first build rather than as a
+diagnostic afterthought.
+
+## Where the event tap lives
+
+On its **own thread, with its own run loop** — not the main one, even though the main one
+is right there and already running.
+
+The reason is the pump. macOS switches off an event tap whose callback does not return
+quickly enough, and it does not switch it back on. A tap on the main run loop cannot answer
+while that thread is inside a slow accessibility call, and slow accessibility calls are
+routine here: a cross-process attribute read against a DAW mid-redraw has been measured in
+the hundreds of milliseconds on Windows, and one of the state probes the modules use costs
+60–300 ms by design. Sharing a thread with that would mean the tap dies during ordinary use
+and every captured key silently stops working.
+
+The cost of the separate thread is that its callback may not touch accessibility at all, so
+everything it needs to decide must be readable without asking: the captured-key table, the
+scope window, and whether a menu is open all live in shared atomics that the pump thread
+writes and the tap thread only reads.
 
 ## Window handles
 
@@ -175,3 +235,29 @@ Every item here needs a Mac. They are listed in the order a first session should
    fallback is carrying it.
 7. **The pump budget** — Windows drops keystrokes if one iteration exceeds ~300 ms; macOS
    disables an event tap that is too slow. The equivalent number here is unmeasured.
+8. **Does Vision read a lone digit** — the one measurement that decides whether the second
+   OCR engine has to become cross-platform. Windows runs a neural fallback specifically
+   because the system engine refuses single digits, and that fallback is a Windows-only
+   dependency, so on macOS Vision carries the case alone. Ten minutes with one request
+   against the crops the Windows work already produced.
+9. **Do Qt object names survive into `AXIdentifier`** — see the `class` section. If they do
+   not, the modules that navigate by them need a different anchor on macOS.
+
+## Two things that were nearly built wrong
+
+Worth recording, because both were caught by review rather than by a compiler and both
+would have been invisible until a Mac was in the room.
+
+**A global coordinate flip.** The first draft of the contract called for flipping Cocoa's
+bottom-left origin at the backend boundary. That is true of `NSScreen` and of Vision, and
+false of everything else this backend touches — accessibility geometry and CoreGraphics
+events are already top-left. A blanket flip would have mirrored every window rectangle and
+every click, and a partial one that forgot Vision would have left OCR boxes mirrored, which
+is invisible on single-line text and wrong on everything else.
+
+**The first OCR call killing the keyboard.** Vision loads its model on the first request —
+routinely half a second to two seconds — and OCR runs synchronously on the pump thread. On
+a shared run loop that alone would have exceeded the tap's tolerance and disabled key
+capture permanently, mid-session, in a way that reads as "it worked and then stopped". The
+tap living on its own thread removes the mechanism; warming Vision on a background thread
+at startup, as the Windows backend already does for its second engine, removes the stall.
