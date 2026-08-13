@@ -88,6 +88,20 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       itself there, so there is nothing native underneath to tick and VoiceOver sees one
       opaque element. `sync_checks` is disarmed so a click cannot silently disable
       everything; the real fix is `wxCheckListBox` (native, and wxdragon already binds it).
+- [ ] **Left standing after the adversarial review** (2026-08-13), each because the fix
+      wants a measurement more than it wants a decision:
+  - `focus_step` can in the worst case cost thousands of cross-process round trips per Tab
+    press — it re-enumerates the ring on every step, which is a Windows-side invariant, and
+    it times itself. Measure before optimising; the answer may be that the trees are small.
+  - `walk` bounds nodes and depth but not TIME, and each node is a synchronous round trip
+    whose own ceiling is the messaging timeout. A time bound is the right shape, but the
+    number to give it is unmeasured.
+  - The content-view probe caps the top inset at 64 pt and looks at the first eight children
+    only, so a window with a toolbar above its content derives the wrong client rect. It
+    logs the inset it found, which is how the first session can check it.
+  - Creating an `AXObserver` for an application on its first activation is six synchronous
+    round trips on the pump thread. Once per application, and there is no off-thread way to
+    do it — but if a DAW's first activation stutters, this is why.
 - [ ] **Developer ID + notarisation.** Ad-hoc signatures change on every rebuild, so every
       test build a tester receives asks for its permissions again. Survivable for testing,
       not for release.
