@@ -1,7 +1,7 @@
 //! Platform backend abstraction. The host talks to the OS only through this
-//! trait; one implementation per platform, selected at compile time. Currently:
-//! Windows (real) and a stub (other platforms). The macOS backend will be a
-//! second `impl Backend`. See `docs/architecture-feasibility-study.md` §3.
+//! trait; one implementation per platform, selected at compile time: Windows,
+//! macOS, and a stub that answers nothing anywhere else. See `docs/macos-port.md`
+//! for the second one, which was written without a Mac to run it on.
 
 use std::rc::Rc;
 
@@ -11,7 +11,9 @@ mod windows;
 mod paddle_ocr;
 #[cfg(windows)]
 mod uia;
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(not(any(windows, target_os = "macos")))]
 mod stub;
 
 /// A snapshot of a window's matchable properties (normalized across platforms).
@@ -406,7 +408,9 @@ pub fn warmup_ocr() -> Option<std::thread::JoinHandle<()>> {
 pub fn platform() -> Rc<dyn Backend> {
     #[cfg(windows)]
     let backend: Rc<dyn Backend> = Rc::new(windows::WindowsBackend::new());
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    let backend: Rc<dyn Backend> = macos::new();
+    #[cfg(not(any(windows, target_os = "macos")))]
     let backend: Rc<dyn Backend> = Rc::new(stub::StubBackend);
     backend
 }

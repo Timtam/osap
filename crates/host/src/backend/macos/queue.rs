@@ -1,0 +1,139 @@
+//! What the OS callbacks leave behind, and the one place it is handed to the host.
+//!
+//! Nothing is dispatched from a callback. The event tap, the Carbon hotkey handler and the
+//! accessibility observers all push here and return immediately — a tap that takes too long
+//! inside its callback is **switched off by the system** and does not come back on its own,
+//! which would silently disable every captured key the platform has. The wxWidgets timer
+//! calls [`drain`] every 15 ms and that is where the host hears about any of it.
+//!
+//! The order things come out in is part of the contract, not an accident. See [`drain`].
+
+use std::cell::{Cell, RefCell};
+use std::time::{Duration, Instant};
+
+use crate::backend::HostEvents;
+
+thread_local! {
+    static HOTKEYS: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
+    /// Foreground changes, as the window id at the time. Resolved to a `WinInfo` in
+    /// `drain` rather than in the callback: reading a window's geometry and its owner's
+    /// name is an accessibility round-trip into another process, and that is not something
+    /// to do inside a notification handler.
+    static ACTIVATED: RefCell<Vec<isize>> = const { RefCell::new(Vec::new()) };
+    static KEYS: RefCell<Vec<(u32, u8)>> = const { RefCell::new(Vec::new()) };
+    static FOCUS_DIRTY: Cell<bool> = const { Cell::new(false) };
+    /// Deadlines for the re-check ladder — see `drain`.
+    static RECHECKS: RefCell<Vec<Instant>> = RefCell::new(Vec::new());
+}
+
+pub fn push_hotkey(id: i32) {
+    HOTKEYS.with(|q| q.borrow_mut().push(id));
+}
+
+pub fn push_activated(window: isize) {
+    ACTIVATED.with(|q| q.borrow_mut().push(window));
+    // A foreground change is also a focus change. Windows learned this the hard way: the
+    // activate can be dropped for a window that has no title yet, and the focus path asks
+    // `active_window()`, which does not require one.
+    mark_focus_dirty();
+}
+
+pub fn push_key(vk: u32, mods: u8) {
+    KEYS.with(|q| q.borrow_mut().push((vk, mods)));
+}
+
+pub fn mark_focus_dirty() {
+    FOCUS_DIRTY.with(|f| f.set(true));
+}
+
+/// Arms the 200 / 500 / 1000 ms re-check ladder.
+///
+/// For a window that becomes foreground before it has a title — Komplete Kontrol's
+/// Preferences dialog does exactly this, and sets its title a beat later with no further
+/// event. Armed only when nothing is pending, so window churn cannot pile ladders up.
+fn arm_recheck_ladder() {
+    RECHECKS.with(|r| {
+        let mut r = r.borrow_mut();
+        if !r.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        for ms in [200u64, 500, 1000] {
+            r.push(now + Duration::from_millis(ms));
+        }
+    });
+}
+
+/// Hands everything queued since the last call to the host, in the order the host needs.
+///
+/// 1. hotkeys, 2. window activations, 3. captured keys, 4. **one** focus change if anything
+/// dirtied it, 5. any re-check that has come due.
+///
+/// Activations must precede the keys that arrived in that window: an activation invalidates
+/// every cached coordinate in the host, a key does not, and a key handled against stale
+/// coordinates clicks where the plugin used to be. The focus dispatch is coalesced to one
+/// per drain because it fans out to every module VM and every overlay each of them owns —
+/// it is the most expensive thing the host does, and delivering it twice does nothing twice.
+pub fn drain(events: &mut dyn HostEvents) {
+    for id in HOTKEYS.with(|q| std::mem::take(&mut *q.borrow_mut())) {
+        events.on_hotkey(id);
+    }
+
+    let activated = ACTIVATED.with(|q| std::mem::take(&mut *q.borrow_mut()));
+    for window in activated {
+        // Titled only, matching `enumerate_windows` and the Windows activate path: an
+        // untitled window is not matchable yet, so it is not announced as an activation —
+        // the ladder below comes back for it.
+        match super::ax::window_info(window, true) {
+            Some(win) => events.on_window_activate(win),
+            None => arm_recheck_ladder(),
+        }
+    }
+
+    for (vk, mods) in KEYS.with(|q| std::mem::take(&mut *q.borrow_mut())) {
+        events.on_key(vk, mods);
+    }
+
+    if FOCUS_DIRTY.with(|f| f.replace(false)) {
+        events.on_focus_change();
+    }
+
+    let now = Instant::now();
+    let due = RECHECKS.with(|r| {
+        let mut r = r.borrow_mut();
+        let n = r.iter().filter(|d| **d <= now).count();
+        r.retain(|d| *d > now);
+        n
+    });
+    if due > 0 {
+        events.on_focus_change();
+    }
+}
+
+/// Used only in headless mode; the shipped path runs under wxWidgets, which owns the loop.
+///
+/// A run loop with a repeating timer that drains at the same cadence the GUI tick would,
+/// so the two paths deliver events identically and headless stays a fair test of the rest.
+pub fn run_event_loop(events: &mut dyn HostEvents) -> Result<(), String> {
+    crate::logging::line("macos", "headless: running the CoreFoundation run loop");
+    loop {
+        // Blocks until something happens or the interval is up, whichever comes first, and
+        // returns after handling it — the OS callbacks queue while we are inside here.
+        unsafe {
+            objc2_core_foundation::CFRunLoop::run_in_mode(
+                objc2_core_foundation::kCFRunLoopDefaultMode,
+                0.015,
+                false,
+            );
+        }
+        drain(events);
+    }
+}
+
+/// Is anything waiting? Used by the tap watchdog to decide whether a quiet period is
+/// suspicious.
+pub fn idle() -> bool {
+    HOTKEYS.with(|q| q.borrow().is_empty())
+        && KEYS.with(|q| q.borrow().is_empty())
+        && ACTIVATED.with(|q| q.borrow().is_empty())
+}
