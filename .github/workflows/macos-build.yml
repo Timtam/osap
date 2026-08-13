@@ -10,18 +10,32 @@
 # README beside it.
 name: macOS build
 
+# Deliberately narrow triggers, and the reason is money rather than taste.
+#
+# In a PRIVATE repository, Actions minutes come out of the account's monthly allowance and a
+# macOS minute costs about ten Linux minutes ($0.062 against $0.006 at the January 2026
+# prices). A Free plan's 2,000 included minutes are therefore around 200 minutes of macOS
+# time a month — and the first build of this project compiles wxWidgets from source, which
+# is the better part of that on its own. Public repositories pay nothing for standard
+# runners, so this gets less delicate the moment the repo is public.
+#
+# So: automatic only when the macOS code itself changes, plus a button. Widening this back
+# to every push is a decision about the month's budget, not a convenience.
 on:
   push:
     branches: [main, master]
     paths:
-      - 'crates/**'
-      - 'modules/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
+      - 'crates/host/src/backend/macos/**'
+      - 'crates/host/Cargo.toml'
+      - 'crates/macos-check/**'
       - 'package-macos.sh'
       - '.github/workflows/macos-build.yml'
-  pull_request:
   workflow_dispatch:
+
+# A superseded run is wasted allowance.
+concurrency:
+  group: macos-build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -35,6 +49,9 @@ jobs:
 
       # wxWidgets is compiled from source by wxdragon's build script; it is by far the
       # longest part of the job, and it only changes when the dependency does.
+      # Without this the wxWidgets build runs every time, and that is the expensive part.
+      # Worth knowing: Actions evicts a cache after 7 days without a hit, so a job that only
+      # runs once a month is always cold — budget for the full build, not the cached one.
       - uses: Swatinem/rust-cache@v2
         with:
           key: macos-wx
