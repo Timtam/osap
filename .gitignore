@@ -1,4 +1,7 @@
 /target
+# check-macos.ps1 keeps its own, because sharing one with the Windows build makes every
+# switch between the two targets rebuild everything.
+/target-macos
 **/*.rs.bk
 Cargo.lock.bak
 

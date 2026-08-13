@@ -92,6 +92,17 @@ pub enum MouseButton {
 /// OS-level operations the host needs. Lua-agnostic on purpose: callback/state
 /// mapping stays in the host; only OS specifics live behind this trait.
 pub trait Backend {
+    /// What this machine looks like from the backend's side, as name/value pairs, written
+    /// to the log once at startup.
+    ///
+    /// This exists for the failures we cannot see. The platform is used by a blind person,
+    /// increasingly on a machine nobody here owns, and the interesting faults are
+    /// environmental: a permission that was never granted, a display scale that makes every
+    /// coordinate half of what it should be, a screen reader that is not running. Each of
+    /// those otherwise arrives as "it does not work" with no way back to a cause. Asked
+    /// once, so it may take its time and prompt nothing.
+    fn environment(&self) -> Vec<(String, String)>;
+
     fn enumerate_windows(&self) -> Vec<WinInfo>;
     fn active_window(&self) -> Option<WinInfo>;
 

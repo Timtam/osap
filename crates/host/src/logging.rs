@@ -1,39 +1,139 @@
-//! Minimal file logging. Diagnostics go to `<exe_dir>/automation-platform.log`
-//! (portable — next to the executable), **not** stdout/stderr: a screen reader
-//! reads the focused terminal, so console output would be spoken aloud.
+//! Diagnostics to `<app folder>/automation-platform.log` (see [`crate::portable`]) —
+//! **not** stdout/stderr: a screen reader reads the focused terminal, so console output
+//! would be spoken aloud.
+//!
+//! The log is the only instrument we have on a machine we cannot touch. A tester on macOS
+//! is blind, remote, and cannot describe a screen; whatever is not in this file did not
+//! happen as far as we are concerned. That shapes three things here that a smaller logger
+//! would not have: a **session header** that states the ground truth of the machine before
+//! anything can go wrong, a **trace level** that can be turned on without a new build, and
+//! **rotation**, because a log nobody can send is a log nobody has.
 
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::PathBuf;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-static LOG: Mutex<Option<std::fs::File>> = Mutex::new(None);
+use crate::portable;
 
-/// Log file path, next to the executable (falls back to the working directory).
-fn log_path() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_default()
-        .join("automation-platform.log")
+static LOG: Mutex<Option<std::fs::File>> = Mutex::new(None);
+static TRACE: AtomicBool = AtomicBool::new(false);
+
+/// Roll over at 8 MB. Chosen to stay attachable to an email or an issue: a trace-level
+/// session can produce that in an afternoon, and the previous file is kept because the
+/// interesting part is often the startup that happened before the symptom.
+const MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Log file path. Beside the application, or — only if that is not writable — in the
+/// per-user fallback, because a tester with no log has nothing to send.
+pub fn log_path() -> &'static Path {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let base = portable::base_dir();
+        let dir = if portable::is_writable(base) {
+            base.to_path_buf()
+        } else {
+            let alt = portable::fallback_dir();
+            let _ = std::fs::create_dir_all(&alt);
+            alt
+        };
+        dir.join("automation-platform.log")
+    })
 }
 
-/// Opens the log file (append) next to the executable. Silent on failure.
+/// Is trace logging on? Set by `AUTOMATION_PLATFORM_TRACE=1`.
+pub fn is_trace() -> bool {
+    TRACE.load(Ordering::Relaxed)
+}
+
+/// Opens the log file (append) and writes the session header. Silent on failure.
+///
+/// Rotation happens here rather than per line: the size only matters between sessions, and
+/// checking it on every write would put a filesystem call in the pump.
 pub fn init() {
-    if let Ok(file) = OpenOptions::new().create(true).append(true).open(log_path()) {
+    TRACE.store(
+        std::env::var_os("AUTOMATION_PLATFORM_TRACE").is_some_and(|v| v != "0"),
+        Ordering::Relaxed,
+    );
+
+    let path = log_path();
+    if std::fs::metadata(path).map(|m| m.len() > MAX_BYTES).unwrap_or(false) {
+        // One generation back, overwritten. Two files is enough to see "it worked
+        // yesterday"; more is a folder the user has to explain.
+        let _ = std::fs::rename(path, path.with_extension("log.1"));
+    }
+    if let Ok(file) = OpenOptions::new().create(true).append(true).open(path) {
         if let Ok(mut guard) = LOG.lock() {
             *guard = Some(file);
         }
-        line("host", "session start");
+    }
+    header();
+}
+
+/// The state of the machine, written before anything can go wrong.
+///
+/// Every line here has been the answer to a support question at least once in this
+/// project's short life: which build is running, where it is writing, whether it is even
+/// looking in the right place for modules.
+fn header() {
+    line("host", "session start");
+    line("host", &format!("version {}", env!("CARGO_PKG_VERSION")));
+    line(
+        "host",
+        &format!(
+            "os {} {} — {}",
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            os_release()
+        ),
+    );
+    match std::env::current_exe() {
+        Ok(p) => line("host", &format!("executable {}", p.display())),
+        Err(e) => line("host", &format!("executable unknown: {e}")),
+    }
+    let base = portable::base_dir();
+    line(
+        "host",
+        &format!(
+            "app folder {} ({})",
+            base.display(),
+            if portable::is_writable(base) { "writable" } else { "NOT WRITABLE" }
+        ),
+    );
+    line("host", &format!("log {}", log_path().display()));
+    if is_trace() {
+        line("host", "trace logging is ON (AUTOMATION_PLATFORM_TRACE)");
+    }
+}
+
+/// A human-readable OS version, best effort.
+///
+/// There is no portable way to ask, and the per-platform ways are worth their few lines:
+/// on macOS especially, the version decides whether a capture API still works at all, and
+/// asking the tester to read it out is asking them to navigate a settings pane by voice.
+fn os_release() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        // sw_vers rather than an API call: this runs before the backend exists, and the
+        // ProcessInfo route would drag AppKit into a module that is otherwise pure std.
+        if let Ok(out) = std::process::Command::new("sw_vers").arg("-productVersion").output() {
+            let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !v.is_empty() {
+                return format!("macOS {v}");
+            }
+        }
+        "macOS (version unknown)".to_string()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::env::var("OS").unwrap_or_else(|_| "unknown".to_string())
     }
 }
 
 fn epoch_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 /// Appends one line to the log file. No-op if logging wasn't initialized.
@@ -43,5 +143,27 @@ pub fn line(scope: &str, msg: &str) {
             let _ = writeln!(file, "{} [{scope}] {msg}", epoch_secs());
             let _ = file.flush();
         }
+    }
+}
+
+/// Appends a line only when trace logging is on.
+///
+/// For the detail that is too much for normal running and exactly right when a remote
+/// machine is misbehaving: every OS call that failed, every permission that was refused,
+/// every element a walk did not find. `msg` is a closure so composing that detail costs
+/// nothing when the level is off — some of these sit in the pump.
+pub fn trace(scope: &str, msg: impl FnOnce() -> String) {
+    if is_trace() {
+        line(scope, &msg());
+    }
+}
+
+/// Writes a labelled block of name/value pairs — a backend's account of the machine.
+///
+/// One line each rather than one long line: this is what a tester copies out, and what we
+/// grep. See `Backend::environment`.
+pub fn report(scope: &str, pairs: &[(String, String)]) {
+    for (k, v) in pairs {
+        line(scope, &format!("{k}: {v}"));
     }
 }

@@ -1,0 +1,59 @@
+# Type-checks the macOS backend from a Windows machine.
+#
+# The macOS backend is being written BLIND — there is no Mac to run it on yet. Code that
+# has never been compiled is not an implementation, it is a guess, so this crate exists to
+# turn the guess into something the compiler has agreed with:
+#
+#   cargo check --target aarch64-apple-darwin -p macos-check
+#
+# That works from Windows because `check` never links: rustup's aarch64-apple-darwin std
+# plus the objc2 crates (pure Rust bindings, no build scripts that need Apple tooling) are
+# all the front end needs. It cannot catch a wrong constant, a wrong coordinate convention,
+# or a call that is legal and does the wrong thing — but it catches every misremembered
+# signature, and on a blind port that is most of the mistakes.
+#
+# Why a separate crate rather than checking `host` for the Mac target: `host` depends on
+# wxdragon, whose build script compiles wxWidgets itself and cannot do that for macOS from
+# a Windows host. So this crate pulls in the two files that matter — the backend and the
+# logging it writes to — via #[path], and nothing else.
+#
+# It is empty on every platform but macOS, so a Windows build walks straight past it.
+[package]
+name = "macos-check"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+
+# Kept in one place, because the real crate needs the identical set: `host` declares these
+# again under [target.'cfg(target_os = "macos")'.dependencies], and a feature enabled here
+# but missing there would make this crate check code that the real build cannot compile.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+objc2 = "0.6"
+block2 = "0.6"
+dispatch2 = "0.3"
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-foundation]
+version = "0.3"
+features = ["NSString", "NSArray", "NSValue", "NSGeometry", "NSDictionary", "NSError", "NSData", "NSRunLoop", "NSThread", "NSObjCRuntime", "NSEnumerator", "NSURL", "NSProcessInfo", "NSNotification", "NSOperation", "NSAppleScript"]
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-app-kit]
+version = "0.3"
+features = ["NSWorkspace", "NSRunningApplication", "NSScreen", "NSApplication", "NSResponder", "NSGraphics", "NSAccessibilityProtocols", "NSAccessibilityConstants", "NSEvent"]
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-core-foundation]
+version = "0.3"
+features = ["CFBase", "CFString", "CFArray", "CFDictionary", "CFNumber", "CFRunLoop", "CFCGTypes", "CFData", "CFMachPort"]
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-core-graphics]
+version = "0.3"
+features = ["CGBase", "CGEvent", "CGEventTypes", "CGEventSource", "CGDirectDisplay", "CGDisplayConfiguration", "CGWindow", "CGWindowLevel", "CGImage", "CGGeometry", "CGRemoteOperation", "CGColorSpace", "CGDataProvider", "CGContext", "CGBitmapContext", "CGError", "libc", "objc2"]
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-vision]
+version = "0.3"
+features = ["VNRequest", "VNRecognizeTextRequest", "VNObservation", "VNRequestHandler", "VNTypes", "VNGeometry", "VNError", "objc2-core-graphics"]
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-application-services]
+version = "0.3"
+features = ["AXUIElement", "AXValue", "AXError", "AXAttributeConstants", "AXRoleConstants", "AXNotificationConstants", "AXActionConstants", "AXValueConstants", "HIServices", "Processes"]

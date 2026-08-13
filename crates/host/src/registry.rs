@@ -44,12 +44,9 @@ pub struct Source {
     pub sha: String,
 }
 
-/// The portable modules directory (next to the executable).
+/// The portable modules directory, in the application's own folder.
 pub fn modules_dir() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("modules")))
-        .unwrap_or_else(|| PathBuf::from("modules"))
+    crate::portable::base_dir().join("modules")
 }
 
 // --- HTTP (ureq 3.3; 4xx/5xx surface as Err(StatusCode), redirects automatic) --

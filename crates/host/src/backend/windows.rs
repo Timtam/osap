@@ -14,6 +14,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     DIB_RGB_COLORS, SRCCOPY,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
 use windows_sys::Win32::System::Threading::{
     GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
 };
@@ -154,7 +155,38 @@ fn capture_screen(x: i32, y: i32, w: i32, h: i32) -> Option<CapturedImage> {
     }
 }
 
+/// Is a DLL of that name loaded in THIS process? Used only for the startup report: the
+/// speech clients are loaded by the `tts` crate on demand, so their presence is a fair
+/// proxy for "a screen reader answered", and it costs one call rather than a process walk.
+fn module_running(name: &str) -> bool {
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    !unsafe { GetModuleHandleW(wide.as_ptr()) }.is_null()
+}
+
 impl Backend for WindowsBackend {
+    fn environment(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let (w, h) = self.screen_size();
+        out.push(("display".to_string(), format!("{w}x{h} px (primary)")));
+        // Whether we are DPI-aware decides whether every coordinate in every module is
+        // real or scaled behind our back — the manifest asks for per-monitor v2, and this
+        // is the line that proves it took.
+        let dpi = unsafe { GetDpiForSystem() };
+        out.push((
+            "system dpi".to_string(),
+            format!("{dpi} ({}%)", (dpi as f32 / 96.0 * 100.0).round() as i32),
+        ));
+        out.push((
+            "screen reader".to_string(),
+            match (module_running("nvdaControllerClient64"), module_running("SAAPI64")) {
+                (true, _) => "NVDA client loaded".to_string(),
+                (_, true) => "System Access client loaded".to_string(),
+                _ => "none detected (speech falls back to SAPI)".to_string(),
+            },
+        ));
+        out
+    }
+
     fn enumerate_windows(&self) -> Vec<WinInfo> {
         let mut hwnds: Vec<isize> = Vec::new();
         unsafe {

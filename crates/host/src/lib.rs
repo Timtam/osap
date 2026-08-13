@@ -8,6 +8,7 @@
 mod backend;
 mod gui;
 pub mod logging;
+mod portable;
 pub mod registry;
 mod settings;
 
@@ -1936,6 +1937,13 @@ impl Manager {
     pub fn new() -> Result<Self> {
         let backend = backend::platform();
         let tts = Tts::default().context("failed to initialize TTS engine")?;
+        // What the backend sees of this machine, before anything else can fail. On a
+        // machine we cannot touch — and increasingly that is the case — this block is the
+        // difference between "it does not work" and a cause.
+        //
+        // After the speech engine, not before: part of the report is which screen reader
+        // answered, and none has been asked until the engine is up.
+        logging::report("env", &backend.environment());
         let store = settings::Store::load();
         let disabled_ids = store.disabled_ids();
         let (image_tasks, image_task_rx) = std::sync::mpsc::channel::<ImageTask>();

@@ -114,10 +114,7 @@ fn yes() -> bool {
 }
 
 fn dir() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_default()
+    crate::portable::base_dir().to_path_buf()
 }
 
 fn store_path() -> PathBuf {

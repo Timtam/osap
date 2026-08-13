@@ -6,6 +6,13 @@ use super::{Backend, CapturedImage, ControlInfo, HostEvents, MouseButton, OcrTex
 pub struct StubBackend;
 
 impl Backend for StubBackend {
+    fn environment(&self) -> Vec<(String, String)> {
+        vec![(
+            "backend".to_string(),
+            format!("none — {} is not supported", std::env::consts::OS),
+        )]
+    }
+
     fn enumerate_windows(&self) -> Vec<WinInfo> {
         Vec::new()
     }
