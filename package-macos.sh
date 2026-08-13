@@ -5,6 +5,8 @@
 #   ./package-macos.sh --version 0.3.0 name the zip for that version instead of the date
 #   ./package-macos.sh --no-zip        stage only, for looking at what would ship
 #   ./package-macos.sh --no-build      package whatever is already in target/release
+#   ./package-macos.sh --universal     join an Intel and an Apple-silicon build into one
+#                                      binary (both must already exist — see below)
 #
 # This has to run ON a Mac (it compiles). Nobody on the project owns one, so it is also run
 # by .github/workflows/macos-build.yml on a GitHub runner — that is currently the only way
@@ -16,11 +18,13 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 version=""
 do_zip=1
 do_build=1
+universal=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --version) version="$2"; shift 2 ;;
     --no-zip)  do_zip=0; shift ;;
     --no-build) do_build=0; shift ;;
+    --universal) universal=1; do_build=0; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -48,6 +52,29 @@ if [ "$do_build" = "1" ]; then
 fi
 
 exe="$rel/automation-platform"
+
+# A universal binary is two builds glued together, and the gluing is the easy part. Both
+# slices have to exist first, which means two passes — on one Mac:
+#
+#   rustup target add x86_64-apple-darwin aarch64-apple-darwin
+#   cargo build --release --target x86_64-apple-darwin
+#   cargo build --release --target aarch64-apple-darwin
+#   ./package-macos.sh --universal
+#
+# Worth doing for a release, where one download has to work on any Mac. Not worth it for a
+# test build that one known person installs on one known machine, which is why the ordinary
+# path builds for whatever this Mac is.
+if [ "$universal" = "1" ]; then
+  intel="$root/target/x86_64-apple-darwin/release/automation-platform"
+  arm="$root/target/aarch64-apple-darwin/release/automation-platform"
+  for slice in "$intel" "$arm"; do
+    [ -x "$slice" ] || { echo "missing $slice — see the note above --universal" >&2; exit 1; }
+  done
+  exe="$root/target/universal-automation-platform"
+  lipo -create -output "$exe" "$intel" "$arm"
+  echo "Universal binary: $(lipo -archs "$exe")"
+fi
+
 [ -x "$exe" ] || { echo "no executable at $exe — build first" >&2; exit 1; }
 
 dist="$root/dist"
@@ -104,6 +131,18 @@ for dir in "$root"/modules/*/; do
 done
 [ "$shipped" -gt 0 ] || { echo "no modules found under $root/modules" >&2; exit 1; }
 
+# The window probe, which is not an ordinary module and ships here on purpose.
+#
+# This build exists to answer questions about a machine nobody here can touch, and the probe
+# is the instrument that answers them: one keystroke records everything about the window in
+# front — its identity, its geometry, its accessibility tree, a picture of it, and what OCR
+# reads in it. Without it, a tester who cannot see the screen has nothing to send but an
+# impression. It is left out of the Windows package, where that problem does not exist.
+if [ -d "$root/tools/probe" ]; then
+  cp -R "$root/tools/probe" "$modules_out/probe"
+  shipped=$((shipped + 1))
+fi
+
 # The documentation, if it has been built. Skipped rather than fatal: a tester without docs
 # still has a working application.
 if [ -d "$root/docs-site/build" ]; then
@@ -149,7 +188,13 @@ behave as if the application is broken, so please do them all.
    After granting either, QUIT AND REOPEN the application. macOS only hands the new
    permission to a process that started after it was granted.
 
-5. Everything the application knows about your machine is written to
+5. To record a plugin window for us: put it in front and press
+       Command-Shift-F9
+   That writes everything about it to the log and a picture of it next to the .app,
+   which together are what we need to make the overlays work on macOS. Press it over
+   a plugin you would want an overlay for.
+
+6. Everything the application knows about your machine is written to
        automation-platform.log
    beside the .app, starting with a block that lists the permissions it actually has.
    That file is what to send when something does not work. For much more detail:

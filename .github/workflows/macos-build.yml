@@ -31,6 +31,14 @@ on:
       - 'package-macos.sh'
       - '.github/workflows/macos-build.yml'
   workflow_dispatch:
+    inputs:
+      runner:
+        description: Which Mac to build for
+        type: choice
+        default: macos-15-intel
+        options:
+          - macos-15-intel
+          - macos-14
 
 # A superseded run is wasted allowance.
 concurrency:
@@ -39,9 +47,14 @@ concurrency:
 
 jobs:
   build:
-    # Apple silicon, which is what a tester in 2026 is overwhelmingly likely to have — and
-    # the arm64 build is the one whose Retina coordinate handling we are least sure of.
-    runs-on: macos-14
+    # Intel by default, because the machine the build has to RUN on is Intel and an arm64
+    # binary will not start there at all — Rosetta translates Intel code for Apple silicon,
+    # never the other way round. Both labels are standard runners and both draw on the same
+    # included minutes, so this is a choice about who can run the result, not about cost.
+    #
+    # A universal binary needs both slices and `lipo`, which means two runs; see
+    # package-macos.sh --universal. Not worth it for a test build that one person installs.
+    runs-on: ${{ inputs.runner || 'macos-15-intel' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -54,7 +67,7 @@ jobs:
       # runs once a month is always cold — budget for the full build, not the cached one.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: macos-wx
+          key: macos-wx-${{ inputs.runner || 'macos-15-intel' }}
 
       - name: Install build tools
         run: brew install ninja cmake
@@ -75,6 +88,9 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: AutomationPlatform-macos
+          # Named by the machine it runs on, because the two are not interchangeable and a
+          # download called "macos" that will not launch is a bad half hour for whoever
+          # tries it.
+          name: AutomationPlatform-${{ inputs.runner || 'macos-15-intel' }}
           path: dist/*.zip
           if-no-files-found: error

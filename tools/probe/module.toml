@@ -1,0 +1,7 @@
+id = "com.tool.probe"
+name = "Window probe"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
+
+[capabilities]
+require = ["window", "screen", "ocr", "uia", "speech", "log", "hotkey"]
