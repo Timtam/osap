@@ -35,24 +35,37 @@ pub struct Entry {
     pub window_id: u32,
 }
 
-#[derive(Default)]
 struct Table {
     next: isize,
     by_element: HashMap<CFRetained<AXUIElement>, isize>,
     by_id: HashMap<isize, Entry>,
+    /// The size at which the next sweep happens. A watermark rather than a constant: see
+    /// `sweep`.
+    next_sweep: usize,
+}
+
+impl Default for Table {
+    fn default() -> Self {
+        Table {
+            next: 0,
+            by_element: HashMap::new(),
+            by_id: HashMap::new(),
+            next_sweep: FIRST_SWEEP,
+        }
+    }
 }
 
 thread_local! {
     static TABLE: RefCell<Table> = RefCell::new(Table::default());
 }
 
-/// Above this, the table is swept for entries whose process has exited.
+/// The size at which the table is first swept for entries whose process has exited.
 ///
 /// It grows by one per newly seen control, and a plugin's tree is hundreds of them, so
 /// without a sweep a long session in a DAW would accumulate steadily. The sweep is not on a
 /// timer: it costs a `kill(pid, 0)` per distinct process and only runs when the table has
 /// actually grown, which in practice means a few times an hour.
-const SWEEP_AT: usize = 4096;
+const FIRST_SWEEP: usize = 4096;
 
 /// The handle for this element — the same one as last time, if it has been seen before.
 ///
@@ -72,7 +85,7 @@ pub fn intern(element: CFRetained<AXUIElement>, pid: i32, window_id: u32) -> isi
             }
             return id;
         }
-        if t.by_id.len() >= SWEEP_AT {
+        if t.by_id.len() >= t.next_sweep {
             sweep(&mut t);
         }
         t.next += 1;
@@ -102,8 +115,19 @@ fn sweep(t: &mut Table) {
     });
     let live_ids: std::collections::HashSet<isize> = t.by_id.keys().copied().collect();
     t.by_element.retain(|_, id| live_ids.contains(id));
+    // Where the next one happens. Without this the threshold is a trap: once the table
+    // reaches it with every owning process still alive — one DAW, one large plugin, and it
+    // will — the condition stays true for ever and every newly seen element pays for a full
+    // two-map rebuild plus a syscall per process. Doubling means a sweep that frees nothing
+    // buys twice as long before the next attempt, and one that frees most of the table
+    // returns the threshold to where it was.
+    t.next_sweep = FIRST_SWEEP.max(t.by_id.len() * 2);
     crate::logging::line(
         "macos",
-        &format!("handle table swept: {} of {before} entries dropped", before - t.by_id.len()),
+        &format!(
+            "handle table swept: {} of {before} entries dropped, next sweep at {}",
+            before - t.by_id.len(),
+            t.next_sweep
+        ),
     );
 }

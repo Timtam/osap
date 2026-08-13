@@ -34,8 +34,8 @@ use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGDirectDisplayID, CGDisplayBounds, CGError,
     CGGetDisplaysWithPoint, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo,
-    CGInterpolationQuality, CGMainDisplayID, CGPreflightScreenCaptureAccess, CGWindowImageOption,
-    CGWindowListOption,
+    CGGetActiveDisplayList, CGInterpolationQuality, CGMainDisplayID, CGPreflightScreenCaptureAccess,
+    CGWindowImageOption, CGWindowListOption,
 };
 
 // Both capture entry points are `#[deprecated = "Please use ScreenCaptureKit instead."]` and
@@ -97,6 +97,9 @@ static FLAT_WARNED: AtomicBool = AtomicBool::new(false);
 static FLAT_RUN: AtomicU32 = AtomicU32::new(0);
 static FIRST_CAPTURE_REPORTED: AtomicBool = AtomicBool::new(false);
 static SLOW_CAPTURE_REPORTED: AtomicBool = AtomicBool::new(false);
+/// Said once: a capture reached past the edge of the desktop and was placed rather than
+/// stretched. Worth knowing, because it usually means a module's region arithmetic is off.
+static CLIPPED_REPORTED: AtomicBool = AtomicBool::new(false);
 static FALLBACK_REPORTED: AtomicBool = AtomicBool::new(false);
 static FAILURE_REPORTED: AtomicBool = AtomicBool::new(false);
 static OVERSIZE_REPORTED: AtomicBool = AtomicBool::new(false);
@@ -293,6 +296,19 @@ pub fn capture_backing(x: i32, y: i32, w: i32, h: i32) -> Option<(CFRetained<CGI
     if w <= 0 || h <= 0 {
         return None;
     }
+    // Refused rather than trimmed, unlike the image path. The caller maps recognised text
+    // back to screen coordinates by adding this region's origin to a box measured within the
+    // returned image; an image covering only part of the region would put every word out by
+    // the part that was cut, and a plausible wrong coordinate is worse than none. A region
+    // that hangs off the desktop is a module's arithmetic being wrong anyway, so it is said
+    // out loud.
+    if on_screen_part(x, y, w, h) != Some((x, y, w, h)) {
+        crate::logging::line(
+            "macos",
+            &format!("not reading text in {w}x{h} at {x},{y}: part of it is off the desktop"),
+        );
+        return None;
+    }
     // The image is owned outright, so it outlives the pool; see `capture_rgba`.
     objc2::rc::autoreleasepool(|_| grab(x, y, w, h, true))
 }
@@ -332,6 +348,52 @@ fn tile_rect(x: i32, y: i32) -> (i32, i32, i32, i32) {
         return (x, y, 1, 1);
     }
     (tx, ty, tw, th)
+}
+
+/// The rectangle that all displays together cover, in points.
+///
+/// A bounding box, so it can include a gap between two displays of different heights — it is
+/// used to trim a request, never to promise that everything inside it is visible. `None`
+/// when no display could be enumerated at all, which is not a state worth guessing around.
+fn desktop_bounds() -> Option<(i32, i32, i32, i32)> {
+    let mut ids: [CGDirectDisplayID; 16] = [0; 16];
+    let mut found: u32 = 0;
+    // SAFETY: both out parameters point at live storage of at least the declared capacity.
+    let err = unsafe { CGGetActiveDisplayList(ids.len() as u32, ids.as_mut_ptr(), &mut found) };
+    if err != CGError::Success || found == 0 {
+        return None;
+    }
+    let mut bounds: Option<(i32, i32, i32, i32)> = None;
+    for id in ids.iter().take(found as usize) {
+        let b = CGDisplayBounds(*id);
+        let (l, t) = (b.origin.x as i32, b.origin.y as i32);
+        let (r, bo) = (l + b.size.width as i32, t + b.size.height as i32);
+        bounds = Some(match bounds {
+            None => (l, t, r, bo),
+            Some((cl, ct, cr, cb)) => (cl.min(l), ct.min(t), cr.max(r), cb.max(bo)),
+        });
+    }
+    bounds
+}
+
+/// The part of a requested region that is actually on a display, as (x, y, w, h).
+///
+/// Returns `None` when none of it is. Returns the request unchanged when all of it is, which
+/// is the overwhelmingly common case and costs one display enumeration.
+///
+/// This exists because a capture of a region that hangs over the edge of the desktop comes
+/// back SMALLER than it was asked for, and nothing in the returned image says by how much or
+/// from which side. Working it out afterwards from the ratio of the sizes cannot distinguish
+/// a clipped capture from a scaled one, so the trimming has to happen before the call, where
+/// the numbers are still known.
+fn on_screen_part(x: i32, y: i32, w: i32, h: i32) -> Option<(i32, i32, i32, i32)> {
+    let (dl, dt, dr, db) = desktop_bounds()?;
+    let (l, t) = (x.max(dl), y.max(dt));
+    let (r, b) = ((x + w).min(dr), (y + h).min(db));
+    if r <= l || b <= t {
+        return None;
+    }
+    Some((l, t, r - l, b - t))
 }
 
 /// The display a point sits on and its bounds in points, right and bottom exclusive.
@@ -375,11 +437,27 @@ fn capture_rgba(x: i32, y: i32, w: i32, h: i32) -> Option<Vec<u8>> {
     // Objective-C underneath and anything it autoreleases on a thread without a pool leaks for
     // the life of the process — and this is the one function called several times a second
     // from a thread we did not create.
+    // Trimmed to the desktop BEFORE the capture, not judged afterwards. A region that hangs
+    // over the edge — a plugin window docked against the bottom of the screen is the ordinary
+    // case — comes back as a smaller image, and drawing that into the full-size destination
+    // would stretch it: every template match and every reported coordinate inside it
+    // displaced by a few per cent, silently, with the module clicking near the control
+    // instead of on it. The part that exists is drawn at its true position and true size;
+    // the rest stays the black that a Windows capture of off-screen area also produces.
+    let (vx, vy, vw, vh) = on_screen_part(x, y, w, h)?;
     let (rgba, scale) = objc2::rc::autoreleasepool(|_| {
-        let (image, scale) = grab(x, y, w, h, false)?;
-        let rgba = image_to_rgba(&image, w, h)?;
+        let (image, scale) = grab(vx, vy, vw, vh, false)?;
+        let rgba = image_to_rgba(&image, w, h, vx - x, vy - y, vw, vh)?;
         Some((rgba, scale))
     })?;
+    if (vx, vy, vw, vh) != (x, y, w, h) && !CLIPPED_REPORTED.swap(true, Ordering::Relaxed) {
+        crate::logging::line(
+            "macos",
+            &format!(
+                "a {w}x{h} capture at {x},{y} reaches past the edge of the desktop; the                  {vw}x{vh} part that exists was placed at its true offset and the rest is black"
+            ),
+        );
+    }
     let elapsed = started.elapsed();
 
     // What a capture costs on this platform is one of the numbers docs/macos-port.md lists as
@@ -516,7 +594,15 @@ fn uniform_scale(image: &CGImage, w: i32, h: i32) -> Option<f64> {
 ///
 /// Drawing into a destination of the requested point size is also where the Retina
 /// downsample happens, and why there is no separate resampling step to get wrong.
-fn image_to_rgba(image: &CGImage, dw: i32, dh: i32) -> Option<Vec<u8>> {
+fn image_to_rgba(
+    image: &CGImage,
+    dw: i32,
+    dh: i32,
+    at_x: i32,
+    at_y: i32,
+    fill_w: i32,
+    fill_h: i32,
+) -> Option<Vec<u8>> {
     let (dw, dh) = (dw as usize, dh as usize);
     let bytes_per_row = dw.checked_mul(4)?;
     let mut buf = vec![0u8; bytes_per_row.checked_mul(dh)?];
@@ -543,11 +629,19 @@ fn image_to_rgba(image: &CGImage, dw: i32, dh: i32) -> Option<Vec<u8>> {
     // point rather than whichever of its four backing pixels happened to be first, which is
     // what a module measuring against a 1x reference asked for.
     CGContext::set_interpolation_quality(Some(&ctx), CGInterpolationQuality::Low);
+    // The destination rectangle is the part of the region that was captured, at its own size
+    // and offset — not the whole destination. Drawing into the whole destination is what
+    // would turn a clipped capture into a scaled one.
+    //
+    // Core Graphics draws with the origin at the BOTTOM left of the context, which is the one
+    // place in this backend where that matters: a band missing from the top of the region has
+    // to be left blank at the top of the buffer, and the buffer's rows run top-down.
+    let bottom_gap = dh as f64 - (at_y as f64 + fill_h as f64);
     CGContext::draw_image(
         Some(&ctx),
         CGRect::new(
-            CGPoint::new(0.0, 0.0),
-            CGSize::new(dw as f64, dh as f64),
+            CGPoint::new(at_x as f64, bottom_gap),
+            CGSize::new(fill_w as f64, fill_h as f64),
         ),
         Some(image),
     );

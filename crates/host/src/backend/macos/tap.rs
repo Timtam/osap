@@ -31,7 +31,7 @@ use objc2_core_graphics::{
     CGEventTapPlacement, CGEventTapProxy, CGEventType,
 };
 
-use super::{ax, keys, queue, watch};
+use super::{keys, queue, watch};
 use crate::backend::{MASK_ALT, MASK_CTRL, MASK_SHIFT, MASK_TAP, MASK_WIN};
 use crate::logging;
 
@@ -89,6 +89,9 @@ static CAPTURED: Mutex<Vec<(u32, u8)>> = Mutex::new(Vec::new());
 /// The window suppression is scoped to, 0 for everywhere. A snapshot the caller took.
 static KEY_SCOPE: AtomicIsize = AtomicIsize::new(0);
 
+/// The frontmost window as `watch` last saw it. See `gate_closed`.
+static FOREGROUND: AtomicIsize = AtomicIsize::new(0);
+
 /// A plugin-drawn menu is open, so captured navigation keys belong to it, not to us.
 static MENU_OPEN: AtomicBool = AtomicBool::new(false);
 
@@ -119,7 +122,6 @@ static SUPPRESSED_HI: AtomicU64 = AtomicU64::new(0);
 static REENABLES: AtomicU32 = AtomicU32::new(0);
 
 static LAST_HEALTH_MS: AtomicU64 = AtomicU64::new(0);
-static LAST_SLOW_SCOPE_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_LOCK_FAIL_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Milliseconds since the first call, for rate limiting. `Instant` cannot be a `const`
@@ -280,6 +282,7 @@ pub fn health_check() {
     let port = unsafe { &*port };
     if !CGEvent::tap_is_enabled(port) {
         CGEvent::tap_enable(port, true);
+        forget_held_keys();
         let n = REENABLES.fetch_add(1, Ordering::Relaxed) + 1;
         logging::line(
             "macos",
@@ -353,6 +356,7 @@ unsafe extern "C-unwind" fn tap_callback(
             // SAFETY: the pointer came from a `CFRetained` that is never released.
             CGEvent::tap_enable(unsafe { &*port }, true);
         }
+        forget_held_keys();
         logging::line(
             "macos",
             &format!("the system disabled the event tap ({why}) — re-enabled (#{n})"),
@@ -526,8 +530,8 @@ fn mask_of(flags: CGEventFlags) -> u8 {
 /// no native menu, no plugin-drawn menu. `None` means take it, `Some(reason)` means let it
 /// past — and when it goes past, nothing is queued either.
 ///
-/// Ordered cheapest first. The scoped-window comparison is last because it is the only one
-/// that can reach into another process.
+/// Every one of them is an atomic read. Nothing in here reaches into another process, and
+/// that is a requirement rather than an optimisation — see the scope comparison.
 fn gate_closed() -> Option<&'static str> {
     if MENU_OPEN.load(Ordering::Relaxed) {
         return Some("a plugin menu is open");
@@ -539,26 +543,46 @@ fn gate_closed() -> Option<&'static str> {
     if scope == 0 {
         return None; // global: nothing to compare, and nothing to pay for
     }
-    let started = Instant::now();
-    let foreground = ax::foreground_window_id();
-    let took = started.elapsed();
-    if took.as_millis() >= 5 && due(&LAST_SLOW_SCOPE_MS, 5000) {
-        // This runs inside the tap callback. If it is slow the system will eventually take
-        // the tap away, and the log should already have said why by then.
-        logging::line(
-            "macos",
-            &format!(
-                "resolving the foreground window inside the key tap took {} ms — the tap is \
-                 at risk of being disabled for being slow",
-                took.as_millis()
-            ),
-        );
-    }
-    if foreground == scope {
+    // Read, not asked. Resolving the frontmost window here would mean a synchronous
+    // cross-process accessibility round trip inside the callback whose promptness decides
+    // whether the system leaves this tap switched on at all — and against an application
+    // that is busy redrawing, that round trip can take the whole messaging timeout. The
+    // keystroke that pays for it is the one the user is pressing.
+    //
+    // `watch` is already listening to the two notifications that can change the answer —
+    // the frontmost application changing, and the focused window changing within one — so
+    // the answer is here before the key arrives.
+    if FOREGROUND.load(Ordering::Relaxed) == scope {
         None
     } else {
         Some("the scoped window is not frontmost")
     }
+}
+
+/// Told to us by [`super::watch`] whenever the frontmost window can have changed.
+///
+/// A number the callback can read rather than a question it has to ask. Deliberately not
+/// resolved here: this is called from notification handlers on the main thread, where the
+/// work is already being done for other reasons.
+pub fn note_foreground(window: isize) {
+    FOREGROUND.store(window, Ordering::Relaxed);
+}
+
+/// Forgets every key the tap believes is still held.
+///
+/// Called whenever the tap comes back from being switched off, because everything it
+/// remembers from before is now a lie: the key-ups it was waiting for happened while it was
+/// deaf. A remembered key-down that never gets its up leaves a bit set, and that bit is then
+/// spent swallowing the release of some later, unrelated press — the application sees a key
+/// go down and never come back up, which for a plugin means a stuck note or a stuck modifier.
+///
+/// The same reasoning covers the armed modifier tap: a modifier released while the tap was
+/// off would otherwise fire a tap the user never made, the next time they let go of anything.
+fn forget_held_keys() {
+    SUPPRESSED_LO.store(0, Ordering::Relaxed);
+    SUPPRESSED_HI.store(0, Ordering::Relaxed);
+    TAP_ARMED.store(0, Ordering::Relaxed);
+    MOD_DOWN.store(0, Ordering::Relaxed);
 }
 
 /// A bitmap over the 128 keycodes rather than a set, so remembering a swallowed key-down

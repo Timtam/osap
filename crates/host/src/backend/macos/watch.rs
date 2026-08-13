@@ -270,6 +270,9 @@ fn on_app_activated(notification: &NSNotification) {
             &format!("resolving the frontmost window of {name} (pid {pid}) took {took} ms"),
         );
     }
+    // The key tap compares against this rather than resolving it itself; doing that inside
+    // its callback would be a cross-process call on the one path that must not make any.
+    super::tap::note_foreground(window);
     crate::logging::trace("macos", || {
         format!("activated: {name} (pid {pid}), frontmost window handle {window}")
     });
@@ -506,9 +509,17 @@ fn on_notification(pid: i32, name: &CFString) {
     // not filter its focus event either, and a focus move can legitimately arrive a beat
     // before the activation that explains it, so a pid test here would drop exactly the
     // event that says a plugin window has just opened.
-    if name == ns_to_cf(unsafe { NSAccessibilityFocusedUIElementChangedNotification })
-        || name == ns_to_cf(unsafe { NSAccessibilityFocusedWindowChangedNotification })
-    {
+    if name == ns_to_cf(unsafe { NSAccessibilityFocusedWindowChangedNotification }) {
+        // The other half of what the key tap's scope gate reads. A different window of the
+        // same application coming to the front raises no workspace notification, so without
+        // this the gate would go on comparing against a window that is no longer in front —
+        // and keep swallowing keys that belong to whatever replaced it.
+        super::tap::note_foreground(super::ax::foreground_window_id());
+        crate::logging::trace("macos", || format!("focused window changed in pid {pid}"));
+        super::queue::mark_focus_dirty();
+        return;
+    }
+    if name == ns_to_cf(unsafe { NSAccessibilityFocusedUIElementChangedNotification }) {
         crate::logging::trace("macos", || format!("focus moved within pid {pid}"));
         super::queue::mark_focus_dirty();
         return;

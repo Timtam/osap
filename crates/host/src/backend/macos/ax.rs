@@ -223,6 +223,9 @@ fn note_error(err: AXError, what: &str) {
 
 thread_local! {
     static TIMEOUT_SET: Cell<bool> = const { Cell::new(false) };
+    /// Whether a walk has ever run out of budget. One line per session is the right amount:
+    /// if it happens once it will happen on every recheck.
+    static BUDGET_REPORTED: Cell<bool> = const { Cell::new(false) };
     /// Executable file names by pid. The host's own comment about `active_window` calls
     /// this out: it looks cheap and is not, because it resolves the owning process's name,
     /// and every embedded overlay asks for it on every recheck.
@@ -621,7 +624,22 @@ fn walk(
     budget: &mut i32,
     visit: &mut impl FnMut(&AXUIElement, &Snap, i32) -> WalkStep,
 ) -> bool {
-    if depth > max_depth || *budget <= 0 {
+    if *budget <= 0 {
+        // Said out loud, once, and not at trace level. A walk that ran out of budget returns
+        // exactly what a walk that finished and found nothing returns, so without this line
+        // a plugin whose tree is larger than the bound answers "that element is not here" to
+        // every question, for ever, and the overlay simply never activates — with nothing
+        // anywhere to distinguish it from a plugin we do not support.
+        if !BUDGET_REPORTED.with(Cell::get) {
+            BUDGET_REPORTED.with(|c| c.set(true));
+            crate::logging::line(
+                "macos",
+                "an accessibility walk hit its node budget and stopped early — any answer                  from it is 'not found so far', not 'not there'. If detection is failing on a                  large plugin, this is the first thing to look at.",
+            );
+        }
+        return true;
+    }
+    if depth > max_depth {
         return true;
     }
     *budget -= 1;
@@ -885,16 +903,23 @@ fn content_rect(el: &AXUIElement, snap: &Snap, frame: CGRect, hwnd: isize) -> CG
             }
         }
     }
-    let delta = match best {
-        Some(r) => (
+    // A measurement is remembered; a failure to measure is not.
+    //
+    // The probe can come up empty for a reason that will not last — a window asked about in
+    // the moment between appearing and laying out its content has no qualifying child yet.
+    // Caching that answer would fix the client rect at the whole frame for the life of the
+    // window, so every coordinate a module authored against the content would sit a title
+    // bar too high, permanently, on that window and not on the identical one opened a second
+    // later. Falling back to the frame for this call is right; deciding for ever is not.
+    if let Some(r) = best {
+        let delta = (
             r.origin.x - frame.origin.x,
             r.origin.y - frame.origin.y,
             r.size.width - frame.size.width,
             r.size.height - frame.size.height,
-        ),
-        None => (0.0, 0.0, 0.0, 0.0),
-    };
-    INSET_BY_HANDLE.with(|c| c.borrow_mut().insert(hwnd, delta));
+        );
+        INSET_BY_HANDLE.with(|c| c.borrow_mut().insert(hwnd, delta));
+    }
     match best {
         Some(r) => {
             let class = join_class(snap);
@@ -1787,17 +1812,19 @@ pub fn class_nav_point(
         WalkStep::Descend
     });
     if found.is_none() {
-        // Second pass on the role description, which is what a toolkit that does not set an
-        // identifier usually does carry. Separate pass rather than an OR in the first one,
-        // so an exact identifier match always wins over a loose description match.
+        // Second pass on the DESCRIPTION, which is what a toolkit that sets no identifier
+        // usually does carry. A separate pass rather than an OR in the first one, so an
+        // exact identifier match always wins over a loose description match.
+        //
+        // `AXDescription`, not `AXRoleDescription`: the role description is a localised
+        // phrase for the KIND of thing ("button", "Schaltfläche"), so matching a vendor's
+        // object name against it could only ever succeed by accident, and on a German
+        // machine not even that. The batched snapshot has already fetched this one, so the
+        // pass costs no extra round trip per element.
         let mut budget = QUERY_NODES;
-        walk(&root, 0, QUERY_DEPTH, &mut budget, &mut |el, snap, _| {
-            if !role_matches(snap, roles) {
-                return WalkStep::Descend;
-            }
-            let desc = attribute_string(el, a_description()).unwrap_or_default();
-            if desc.contains(class_substr) {
-                found = Some(el.retain());
+        walk(&root, 0, QUERY_DEPTH, &mut budget, &mut |_el, snap, _| {
+            if role_matches(snap, roles) && snap.description.contains(class_substr) {
+                found = Some(_el.retain());
                 return WalkStep::Stop;
             }
             WalkStep::Descend

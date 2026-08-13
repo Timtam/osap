@@ -140,8 +140,16 @@ pub const kEventHotKeyPressed: u32 = 5;
 /// `'hkid'` — the parameter type an `EventHotKeyID` is fetched as.
 pub const typeEventHotKeyID: EventParamType = fourcc(b"hkid");
 
-/// `'ee--'` — the event's subject, which for a hotkey event is its `EventHotKeyID`.
-pub const kEventParamDirectObject: EventParamName = fourcc(b"ee--");
+/// `'----'` — the event's subject, which for a hotkey event is its `EventHotKeyID`.
+///
+/// Four hyphens, `0x2D2D2D2D`. It is the same code Apple Events uses for `keyDirectObject`
+/// and Carbon reuses it verbatim; `CarbonEvents.h` spells it `kEventParamDirectObject =
+/// '----'`. A transcription of `'ee--'` reached this file from the API survey and survived
+/// a compile, because a wrong four-character code is still a valid `u32` — the handler
+/// would simply never have found the parameter, `GetEventParameter` would have returned an
+/// error, and every registered hotkey in the application would have done nothing at all,
+/// silently, with the registration itself reporting success.
+pub const kEventParamDirectObject: EventParamName = fourcc(b"----");
 
 /// No options, which is what every use of this call has passed since it existed. The
 /// header's other value, `kEventHotKeyExclusive` (1 << 0), claims some form of exclusivity
