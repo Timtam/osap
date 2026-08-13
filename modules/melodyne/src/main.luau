@@ -277,6 +277,13 @@ ov:addStaticText("Note Editor")
 --
 -- A control as well, because a gesture nobody can see is a gesture nobody can find: this one is
 -- in the Tab ring and says its own name, and the tap is the shortcut for it.
+--
+-- The CLICK stays, and that is a portability decision rather than a shrug. Melodyne's menu bar
+-- is an ordinary Win32 menu — verified, its binary imports CreateMenu and GetMenuItemInfoW but
+-- never TrackPopupMenu — so it can be enumerated and driven with WM_COMMAND, and that was built
+-- and measured here at 184 entries. It was then removed: a posted WM_COMMAND has no counterpart
+-- on macOS, which this project is meant to reach, whereas a click does. And it buys nothing —
+-- once the bar is open the operating system's own accessibility reads it.
 local function engageMenuBar(o)
   local origin = o:origin()
   if not (origin and origin.client) then return end
@@ -293,70 +300,6 @@ ov:addCustomButton({
   hotkey = "Alt+F",
   onActivate = engageMenuBar,
 })
-
-local function captureAltTap(o)
-  o._altTap = host.keys.capture("Alt tap", function() engageMenuBar(o) end)
-end
-ov:onDeactivate(function(o)
-  if o._altTap then
-    host.keys.release(o._altTap)
-    o._altTap = nil
-  end
-end)
-
--- ── What Melodyne is busy with ────────────────────────────────────────────────
--- Melodyne analyses audio before it can be edited, and while it does it shows a progress disc
--- in the middle of the editor with the name of the pass under it ("Polyphonic Detection"). For
--- a sighted user that is unmissable; without it, a Melodyne that is merely BUSY is
--- indistinguishable from one that is broken — which is exactly how it was reported: "either the
--- audio is still loading, or the hotkeys are not getting through".
---
--- The LABEL rather than the percentage, and that is a decision rather than a shortcut. The disc
--- fills as a pie, so a percentage means knowing its centre and radius; measured from the one
--- capture available, the grey-pixel search caught the waveform and the caption too and returned
--- a radius half again too large, and the ring samples run 90 to 250 because the caption crosses
--- them. Pinning that needs two captures at different points of the same pass, and inventing it
--- from one would be the same mistake this project keeps paying for.
---
--- Centred on the CLIENT AREA rather than written down: the disc sits in the middle of the
--- editor, so its position follows the window's size.
-local BUSY_W, BUSY_H = 190, 26
-
-local function busyText(o)
-  local origin = o:origin()
-  if not (origin and origin.client) then return nil end
-  local w, h = O.contentSize(origin)
-  if w == 0 or h == 0 then return nil end
-  local cx, cy = origin.client.x + w // 2, origin.client.y + h // 2
-  local r = host.ocr.recognize({
-    region = { cx - BUSY_W // 2, cy - BUSY_H // 2, cx + BUSY_W // 2, cy + BUSY_H // 2 },
-  })
-  if not (r and r.text and r.text ~= "") then return nil end
-  return r.text
-end
-
-ov:addCustomButton({
-  label = "Analysis",
-  hotkey = "Alt+A",
-  text = function(o) return busyText(o) or "idle" end,
-  -- Nothing to press. Announced as a plain read-out rather than a button, because a control
-  -- must not offer an affordance it does not have.
-  readOnly = true,
-  onActivate = function(o)
-    host.speech.output(busyText(o) or "Melodyne is idle", { interrupt = true })
-  end,
-})
-
--- Said on arrival, unprompted, because that is when it matters: a user tabbing into a Melodyne
--- that is still analysing needs to know before they wonder why nothing responds.
-ov:onActivate(function(o)
-  captureAltTap(o)
-  host.timer.after(400, function()
-    if not o.active then return end
-    local busy = busyText(o)
-    if busy then host.speech.output("Busy: " .. busy, { interrupt = false }) end
-  end)
-end)
 
 -- The two read-outs in the tool strip (SIBIAC's Edit1 and Edit2). `readOnly`, because
 -- activating them does nothing in Melodyne and a control must not announce itself as a button

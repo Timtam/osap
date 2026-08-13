@@ -233,8 +233,8 @@ pub trait Backend {
     /// would bypass it.
     fn key_post(&self, hwnd: isize, key: &str) -> Result<(), String>;
 
+    /// Sends a key combo like "Ctrl+S" as synthetic input.
     fn key_send(&self, combo: &str) -> Result<(), String>;
-
     /// Types Unicode text.
     fn type_text(&self, text: &str);
 
