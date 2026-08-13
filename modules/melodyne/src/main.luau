@@ -29,24 +29,39 @@ local melodyne = {
 -- press-and-hold. `drag` is how far below the icon that entry sits in the flyout, and `probes`
 -- are points that read near-black ONLY while that variant is the live one. Both are SIBIAC's,
 -- verified by the draft's author for the Time column.
+-- Sub-tool names and press counts from Celemony's own manual, checked against the binary
+-- rather than taken from the earlier draft: that list was short, because Fade and Sibilant
+-- Balance are Melodyne 5 additions and any list inherited from a Melodyne 4 era necessarily
+-- misses them. Celemony's spelling varies between its own pages (Time Tool vs Timing Tool,
+-- Separation Type Tool vs Note Separation Type Tool), so these are the forms that appear most
+-- often in the manual.
+--
+-- `press` is how many times the tool's function key selects that entry, which is Celemony's
+-- documented route to the sub-tools. `probes` read near-black ONLY while that variant is live
+-- and come from SIBIAC; the entries without probes are the ones nobody has mapped, and they
+-- report the base tool rather than inventing a state.
 local TOOLS = {
-  { name = "Main", key = "F1", at = { 84, 59 } },
-  { name = "Pitch", key = "F2", at = { 100, 60 }, variants = {
-      { name = "Pitch modulation", drag = 24, probes = { { 107, 68 }, { 107, 62 } } },
-      { name = "Pitch drift", drag = 48, probes = { { 111, 62 }, { 112, 69 } } },
+  { name = "Main", key = "F1", at = { 84, 59 }, variants = {
+      { name = "Scroll", press = 2, probes = {} },
+      { name = "Zoom", press = 3, probes = {} },
     } },
+  { name = "Pitch", key = "F2", at = { 100, 60 }, variants = {
+      { name = "Pitch Modulation", press = 2, probes = { { 107, 68 }, { 107, 62 } } },
+      { name = "Pitch Drift", press = 3, probes = { { 111, 62 }, { 112, 69 } } },
+    } },
+  -- The only base tool with no sub-tools at all, and it is visible as well as documented:
+  -- its icon carries no drop-down triangle.
   { name = "Formant", key = "F3", at = { 129, 59 } },
   { name = "Amplitude", key = "F4", at = { 153, 60 }, variants = {
-      { name = "Sibilant balance", drag = 48, probes = { { 151, 67 } } },
+      { name = "Fade", press = 2, probes = {} },
+      { name = "Sibilant Balance", press = 3, probes = { { 151, 67 } } },
     } },
   { name = "Time", key = "F5", at = { 175, 60 }, variants = {
-      { name = "Attack speed", drag = 48, probes = { { 177, 62 }, { 177, 72 } } },
+      { name = "Time Handle", press = 2, probes = {} },
+      { name = "Attack Speed", press = 3, probes = { { 177, 62 }, { 177, 72 } } },
     } },
-  -- The draft flags this one as unverified: drag 24 is a guess at the next flyout slot, and
-  -- SIBIAC never mapped its probes. Carried over with the doubt intact — with no probes the
-  -- detection below simply reports the base tool rather than inventing a variant.
-  { name = "Note separation", key = "F6", at = { 200, 60 }, variants = {
-      { name = "Separation Type", drag = 24, probes = {} },
+  { name = "Note Separation", key = "F6", at = { 200, 60 }, variants = {
+      { name = "Separation Type", press = 2, probes = {} },
     } },
 }
 
@@ -109,48 +124,63 @@ local ov = O.new("Melodyne")
 
 -- 1-based position in the current tool's variant stack; 1 is the base tool.
 local variant = 1
+-- Which tool the tracker's position belongs to; a different tool means start at its base.
+local lastTool = nil
 
--- ── Selecting a variant: press, wait, glide, settle, release ──────────────────
--- Melodyne shows the flyout only while the icon is HELD, so a drag that presses and moves in
--- the same breath misses it — the draft records that as tried and not working.
+-- ── Selecting a variant, by function key ──────────────────────────────────────
+-- This was a press-and-hold-then-glide drag, copied from the draft. Celemony documents no such
+-- gesture: searching the whole 280-page manual gives zero hits for "click and hold", "flyout"
+-- and "popup", and the only third-party descriptions are of a standing drop-down menu, on an
+-- older Melodyne, with nobody at all describing a DRAG. What Celemony does document is that
+-- pressing a tool's function key REPEATEDLY steps through its sub-tools.
 --
--- Composed from timers rather than done in one blocking call, and that is the whole reason
--- `host.input.mouseDown` / `mouseUp` exist as separate primitives now. The gesture takes the
--- better part of a second; performing it synchronously would stop speech, hotkeys and detection
--- for that long. Between the steps the pump keeps running.
-local HOLD, GLIDE_STEPS, GLIDE_MS, SETTLE = 350, 12, 20, 150
+-- So: click the icon to land on the base tool, then post the function key (target - 1) times.
+-- Starting from a known base makes it deterministic whichever way Melodyne's own cycling
+-- wraps — a question the manual does not answer.
+--
+-- Posted rather than sent, because our own hotkey registration would otherwise catch the key
+-- we just synthesised. And spaced out in time: how quickly two presses have to follow one
+-- another to count as a repeat is not documented either, so this leaves a gap that is
+-- comfortable rather than minimal, and reports what it actually reached.
+local PRESS_GAP = 180
 
 local function selectVariant(o, tool, target)
   local origin = o:origin()
   if not (origin and origin.client) then return end
-  local x, y = origin.client.x + tool.at[1], origin.client.y + tool.at[2]
-  if target == 1 then
-    host.input.click(x, y)
-    variant = 1
-    return
-  end
-  local drag = tool.variants[target - 1].drag
-  local pinned = o:hwnd()
-  host.input.mouseDown(x, y)
-  -- Every continuation re-checks that the overlay is still on the same window, exactly as the
-  -- hotspot sequences and the panel reveal do: a gesture that spans a second can otherwise
-  -- finish its glide inside whatever the user switched to.
-  host.timer.after(HOLD, function()
-    if not (o.active and o:hwnd() == pinned) then return host.input.mouseUp(x, y) end
-    local step = 0
-    local glide
-    glide = function()
-      if not (o.active and o:hwnd() == pinned) then return host.input.mouseUp(x, y) end
-      step = step + 1
-      host.input.move(x, y + math.floor(drag * step / GLIDE_STEPS))
-      if step < GLIDE_STEPS then
-        host.timer.after(GLIDE_MS, glide)
-      else
-        host.timer.after(SETTLE, function() host.input.mouseUp(x, y + drag) end)
-      end
+  local hwnd = o:hwnd()
+  host.input.click(origin.client.x + tool.at[1], origin.client.y + tool.at[2])
+  variant = 1
+  if target <= 1 or not hwnd then return end
+  local presses = tool.variants[target - 1].press - 1
+  local sent = 0
+  local step
+  step = function()
+    if not (o.active and o:hwnd() == hwnd) then return end
+    host.input.post(hwnd, tool.key)
+    sent = sent + 1
+    if sent < presses then
+      host.timer.after(PRESS_GAP, step)
+    else
+      -- Say what was REACHED, not what was asked for, wherever the probes can tell. Where they
+      -- cannot — Scroll, Zoom, Fade, Time Handle, Separation Type have never been mapped — the
+      -- log records the disagreement rather than the announcement claiming certainty.
+      host.timer.after(PRESS_GAP, function()
+        if not o.active then return end
+        -- CHECKED against the probes, not CORRECTED by them. Overwriting the tracked position
+        -- with the measurement is what broke stepping: the probes report the base tool most of
+        -- the time even when the sub-tool was plainly reached, so every Down recomputed 1+1
+        -- and the third entry was unreachable. Of the eight sub-tools only three were ever
+        -- mapped by anyone, so a probe that says "1" means "nothing to see here" far more
+        -- often than it means "still on the base tool".
+        local seen = activeVariant(o, tool)
+        if seen ~= target then
+          host.log.info(("[melodyne] variant: asked for %d (%s), probes report %d")
+            :format(target, tool.variants[target - 1].name, seen))
+        end
+      end)
     end
-    glide()
-  end)
+  end
+  host.timer.after(PRESS_GAP, step)
   variant = target
 end
 
@@ -189,9 +219,20 @@ do
     current = function(o)
       local i = activeTool(o)
       if not i then return nil end
-      -- Re-detected rather than remembered, so a variant the user picked inside Melodyne is
-      -- reported too, not only one we selected ourselves.
-      variant = activeVariant(o, TOOLS[i])
+      -- The TOOL is re-detected every time, because its probe is a clean bright-against-grey
+      -- reading and Melodyne's own F-keys change it behind our back.
+      --
+      -- The VARIANT is not, and the asymmetry is the point: a sub-tool probe only exists for
+      -- three of the eight, so a reading of "base tool" is usually the absence of a probe
+      -- rather than the presence of the base. It may upgrade what we think — if it positively
+      -- recognises a sub-tool, that beats our record, and it catches one chosen inside Melodyne
+      -- — but it may not reset us to the base.
+      if lastTool ~= i then
+        variant = 1
+        lastTool = i
+      end
+      local seen = activeVariant(o, TOOLS[i])
+      if seen > 1 then variant = seen end
       return i
     end,
     -- Down and Up step this tool's stacked variants, which is where they belong: a variant is a

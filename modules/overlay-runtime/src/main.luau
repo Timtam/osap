@@ -1877,9 +1877,16 @@ function Overlay:_unregisterHotkeys()
     host.keys.release(self._returnToken)
     self._returnToken = false
   end
-  if self._arrowTokens then
-    for _, t in ipairs(self._arrowTokens) do host.keys.release(t) end
-    self._arrowTokens = false
+  -- EVERY per-focus capture, and the list is the hazard. These are held outside
+  -- `capturedKeys` because they come and go with the focused control, so each one has to be
+  -- named here as well — and the vertical pair was added without being added here, which left
+  -- Up and Down captured globally after the overlay went away. The symptom was arrow keys
+  -- misbehaving in an unrelated application's text box, which points nowhere near this file.
+  for _, field in ipairs({ "_arrowTokens", "_verticalTokens" }) do
+    if self[field] then
+      for _, t in ipairs(self[field]) do host.keys.release(t) end
+      self[field] = false
+    end
   end
 end
 

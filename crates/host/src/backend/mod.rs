@@ -218,6 +218,21 @@ pub trait Backend {
     fn mouse_up(&self, x: i32, y: i32, button: MouseButton);
     fn mouse_scroll(&self, x: i32, y: i32, amount: i32);
     /// Sends a key combo like "Ctrl+S".
+    /// Deliver a key to a specific window as a MESSAGE, bypassing the input queue.
+    ///
+    /// For a hotkey that has to act AND still let the application have the key. Synthesising it
+    /// the ordinary way does not work: our own hotkey registration sees synthesised input just
+    /// as it sees real input, so the send re-triggers the handler that sent it. A posted message
+    /// goes straight to the window and is seen by nobody else.
+    ///
+    /// This existed once, was removed when its last caller went away, and is back because
+    /// Melodyne's sub-tools are reached by pressing a function key REPEATEDLY — documented by
+    /// Celemony, unlike the press-and-hold-and-drag gesture it replaces. Posting is also the
+    /// path most likely to work here: Melodyne runs its own message pump with its own
+    /// accelerator table, so a posted WM_KEYDOWN reaches TranslateAccelerator while a sent one
+    /// would bypass it.
+    fn key_post(&self, hwnd: isize, key: &str) -> Result<(), String>;
+
     fn key_send(&self, combo: &str) -> Result<(), String>;
 
     /// Types Unicode text.

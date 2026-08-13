@@ -26,6 +26,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, VK_CONTROL, VK_LWIN,
     VK_MENU, VK_RWIN, VK_SHIFT,
 };
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::MapVirtualKeyW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumChildWindows,
     EnumWindows, GetAncestor, GetClassNameW, GetClientRect, GetCursorPos,
@@ -33,7 +34,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetGUIThreadInfo, GetMessageW, GetSystemMetrics, GetWindowRect,
     GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
     GUI_INMENUMODE, GUI_POPUPMENUMODE, GUI_SYSTEMMENUMODE,
-    PostThreadMessageW, RegisterClassW, SetCursorPos, SetWindowsHookExW,
+    PostMessageW, PostThreadMessageW, RegisterClassW, SetCursorPos, SetWindowsHookExW,
     TranslateMessage,
     EVENT_OBJECT_FOCUS, EVENT_OBJECT_NAMECHANGE, EVENT_SYSTEM_FOREGROUND, GA_PARENT, GUITHREADINFO,
     HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, SM_CXSCREEN, SM_CYSCREEN,
@@ -444,6 +445,21 @@ impl Backend for WindowsBackend {
             SetCursorPos(x, y);
             send_mouse_event(MOUSEEVENTF_WHEEL, amount * 120); // 120 == WHEEL_DELTA
         }
+    }
+
+    fn key_post(&self, hwnd: isize, key: &str) -> Result<(), String> {
+        let vk = parse_key(key)? as u16;
+        // The scan code goes in the lParam because some applications read it rather than the
+        // virtual key, and Melodyne decodes keys itself (it imports GetKeyboardState, ToUnicode
+        // and MapVirtualKeyW) rather than leaving it to the defaults.
+        let scan = unsafe { MapVirtualKeyW(vk as u32, 0) } as isize;
+        let lp_down = 1isize | (scan << 16);
+        let lp_up = 1isize | (scan << 16) | (1 << 30) | (1 << 31);
+        unsafe {
+            PostMessageW(hwnd as HWND, WM_KEYDOWN, vk as usize, lp_down);
+            PostMessageW(hwnd as HWND, WM_KEYUP, vk as usize, lp_up);
+        }
+        Ok(())
     }
 
     fn key_send(&self, combo: &str) -> Result<(), String> {

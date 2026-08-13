@@ -3384,6 +3384,15 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     )?;
     let sh = shared.clone();
     input.set(
+        "post",
+        lua.create_function(move |_, (hwnd, key): (i64, String)| {
+            sh.backend
+                .key_post(hwnd as isize, &key)
+                .map_err(mlua::Error::external)
+        })?,
+    )?;
+    let sh = shared.clone();
+    input.set(
         "mouseDown",
         lua.create_function(move |_, (x, y, opts): (i32, i32, Option<Table>)| {
             sh.bump_input_epoch();
