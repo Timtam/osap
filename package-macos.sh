@@ -168,7 +168,19 @@ fi
 IDENTITY="${OSAP_SIGN_IDENTITY:-OSAP Local Signing}"
 if command -v codesign >/dev/null 2>&1; then
   if security find-identity -v -p codesigning 2>/dev/null | grep -qF "$IDENTITY"; then
-    codesign --force --deep --sign "$IDENTITY" "$app" 2>/dev/null       && echo "Signed with \"$IDENTITY\" — granted permissions will survive a rebuild."       || echo "codesign failed with \"$IDENTITY\"; permissions will not stick."
+    if codesign --force --deep --sign "$IDENTITY" "$app" 2>/dev/null; then
+      echo "Signed with \"$IDENTITY\" — granted permissions will survive a rebuild."
+    else
+      # Falling through to ad-hoc rather than leaving the bundle unsigned. A failure here
+      # used to do exactly that, and an unsigned bundle is the worst of the three states:
+      # macOS keys its permissions on the path alone, so they appear to work and then stop
+      # for reasons nobody can see. Measured — a tester's bundle came out with
+      # "signature: none" in its own startup report.
+      echo "codesign failed with \"$IDENTITY\" (is the certificate still in the keychain?);"
+      echo "  falling back to an ad-hoc signature, which means permissions will not survive"
+      echo "  the next rebuild."
+      codesign --force --deep --sign - "$app" 2>/dev/null         || echo "  ad-hoc signing failed too; this bundle is UNSIGNED."
+    fi
   else
     codesign --force --deep --sign - "$app" 2>/dev/null && echo "Signed ad-hoc."       || echo "codesign failed — permissions may not stick between launches."
     echo "  NOTE: an ad-hoc signature changes on every rebuild, so macOS will treat the next"

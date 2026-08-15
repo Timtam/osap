@@ -721,14 +721,29 @@ fn check_screen_recording(reason: &str) -> bool {
         return true;
     }
     if !PERMISSION_WARNED.swap(true, Ordering::Relaxed) {
+        // Stated as a report rather than a verdict, because this check has been caught
+        // being wrong. Measured on macOS 12.7.6 with the application added to the Screen
+        // Recording list by hand: the preflight answered "not granted" at startup and again
+        // at the first capture, while the capture itself came back with the plugin's real
+        // window in it — OCR read fifty-three words of its interface out of the very frame
+        // this line was complaining about.
+        //
+        // So the wording matters. Shouting that a permission is missing, at somebody who
+        // cannot see the screen and cannot check, sends them to fix something that is not
+        // broken; and a silent wrong answer here is exactly what this message exists to
+        // prevent. The honest form says what was asked, what the answer was, and what it
+        // would look like if the answer were right.
         crate::logging::line(
             "macos",
             &format!(
-                "SCREEN RECORDING PERMISSION IS NOT GRANTED ({reason}). macOS does not fail a \
-                 capture without it — it returns a picture of the desktop wallpaper with every \
-                 other application's windows removed, so image search and OCR will never match \
-                 and nothing else will look wrong. Grant it in System Settings > Privacy & \
-                 Security > Screen Recording, tick this application, and restart it."
+                "screen recording: the system reports this application as NOT permitted \
+                 ({reason}). If that is true, captures come back showing the desktop with \
+                 other applications' windows removed — image search and OCR then never \
+                 match and nothing else looks wrong. If image search and OCR are working, \
+                 the report is wrong and there is nothing to do; this check has been \
+                 observed answering 'no' for an application that could capture perfectly \
+                 well. Grant it in {} > Screen Recording and restart the application.",
+                super::perm::privacy_pane()
             ),
         );
     }

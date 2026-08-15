@@ -194,7 +194,7 @@ fn signature_of(bundle_path: &str) -> Vec<(String, String)> {
 /// round into "Privacy & Security". Telling a Monterey user to open a pane named after a
 /// version they do not have sends them looking for something that is not there — and this
 /// text is read aloud to somebody who cannot scan the window for the nearest match.
-fn privacy_pane() -> &'static str {
+pub(super) fn privacy_pane() -> &'static str {
     if NSProcessInfo::processInfo().operatingSystemVersion().majorVersion >= 13 {
         "System Settings > Privacy & Security"
     } else {
@@ -334,8 +334,11 @@ pub fn environment_report() -> Vec<(String, String)> {
     } else {
         push(
             "screen recording",
-            "NOT granted — captures return the wallpaper only, so every image search and \
-             every OCR read fails silently"
+            "reported as NOT granted — if that is right, a capture comes back as the \
+             desktop with other applications' windows removed, so every image search and \
+             every OCR read fails silently. This check has been caught answering 'no' for \
+             an application that could capture perfectly well, so read the capture lines \
+             further down before acting on it."
                 .into(),
         );
         push(
