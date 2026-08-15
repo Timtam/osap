@@ -43,9 +43,13 @@ if the application is broken**:
 1. `open dist/AutomationPlatform/AutomationPlatform.app`
    Nothing visible happens: it lives in the menu bar, not in a window. With VoiceOver, VO-M
    twice reaches the menu-bar extras.
+   On the first launch it asks for **Accessibility** and for **Screen Recording**. Both
+   prompts may appear at once, and answering them does not finish the job — see step 4.
 2. **System Settings → Privacy & Security → Accessibility**: switch it on for
    AutomationPlatform.
-3. **System Settings → Privacy & Security → Screen Recording**: the same.
+3. **System Settings → Privacy & Security → Screen Recording**: the same. It only appears in
+   that list once the application has asked for it, which it does at launch — so if it is not
+   there, the application has not been started yet.
 4. **Quit the application and open it again.** macOS only hands a newly granted permission
    to a process that started *after* it was granted. This is the single most common reason
    a permission appears not to have worked.

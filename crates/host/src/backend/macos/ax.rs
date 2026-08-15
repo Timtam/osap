@@ -27,7 +27,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use core::ffi::c_void;
 use core::ptr::NonNull;
@@ -169,6 +169,46 @@ thread_local! {
     /// Last time an app-is-busy failure was reported, so a stuck plugin says so
     /// periodically rather than continuously.
     static LAST_BUSY: Cell<Option<Instant>> = const { Cell::new(None) };
+
+    /// Applications that failed to answer, and when it is worth asking them again.
+    ///
+    /// One unresponsive application used to cost the messaging timeout SEVERAL TIMES per
+    /// call, because resolving its frontmost window asks for a focused window, then a main
+    /// window, then the window list. Measured on a first macOS session: 699 ms inside one
+    /// `active_window`, against a pump budget of 15 ms and a threshold of 300 ms past which
+    /// the system switches the key tap off. Remembering that an application is not talking
+    /// turns that into one timeout every few seconds instead of three per question.
+    static BUSY_UNTIL: RefCell<HashMap<i32, Instant>> = RefCell::new(HashMap::new());
+}
+
+/// How long an application that failed to answer is left alone.
+///
+/// Long enough that a wedged plugin cannot dominate the pump, short enough that one that
+/// was merely busy redrawing is back in the conversation before the user notices. A guess,
+/// and one the log can correct: every skipped question is traced.
+const BUSY_PENALTY: Duration = Duration::from_millis(1500);
+
+/// Note that an application is not answering.
+fn note_busy(pid: i32) {
+    if pid > 0 {
+        BUSY_UNTIL.with(|b| b.borrow_mut().insert(pid, Instant::now() + BUSY_PENALTY));
+    }
+}
+
+/// Is this application still in the penalty box? Expired entries are dropped as they are
+/// found, so the map cannot grow beyond the applications that have recently misbehaved.
+pub(super) fn is_busy(pid: i32) -> bool {
+    BUSY_UNTIL.with(|b| {
+        let mut b = b.borrow_mut();
+        match b.get(&pid) {
+            Some(until) if *until > Instant::now() => true,
+            Some(_) => {
+                b.remove(&pid);
+                false
+            }
+            None => false,
+        }
+    })
 }
 
 /// Classifies a failed accessibility call and logs the ones a person could act on.
@@ -299,6 +339,12 @@ pub(super) fn attribute(el: &AXUIElement, name: &CFString) -> Option<CFRetained<
     let mut raw: *const CFType = core::ptr::null();
     let err = unsafe { el.copy_attribute_value(name, NonNull::from(&mut raw)) };
     if err != AXError::Success {
+        if err == AXError::CannotComplete {
+            // Recorded here because this is the funnel every attribute read goes through,
+            // and it is the only place that has both the failure and the element to ask
+            // which application produced it.
+            note_busy(element_pid(el));
+        }
         note_error(err, &name.to_string());
         return None;
     }
@@ -1049,6 +1095,16 @@ pub(super) fn frontmost_window_element() -> Option<(CFRetained<AXUIElement>, i32
     let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
     let pid = app.processIdentifier();
     if pid <= 0 {
+        return None;
+    }
+    // Asked of the workspace, which is local and cheap, BEFORE anything is asked of the
+    // application itself. The three reads below are tried in turn, so an application that
+    // is not answering charges the messaging timeout three times over — and this is the
+    // hottest question in the system.
+    if is_busy(pid) {
+        crate::logging::trace("macos", || {
+            format!("skipping pid {pid}: it did not answer a moment ago")
+        });
         return None;
     }
     let app_el = app_element(pid);

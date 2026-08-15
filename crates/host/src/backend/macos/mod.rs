@@ -46,6 +46,10 @@ impl MacBackend {
         // form of the check is the only way an application can raise the Accessibility
         // dialog at all, and everything this platform does needs it.
         perm::request_accessibility_once();
+        // And screen recording, which has to be ASKED for rather than checked: an
+        // application that never asks is never listed in that settings pane, so the user
+        // cannot grant it even when they want to.
+        perm::request_screen_recording_once();
         // Vision loads its model on the first request — half a second to two seconds — and
         // `ocr` runs on the thread that carries the keyboard. Warming it on a background
         // thread now is the difference between a first read-out that is merely slow and one

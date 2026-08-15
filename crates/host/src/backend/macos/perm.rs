@@ -23,6 +23,7 @@ use objc2_core_foundation::{CFBoolean, CFDictionary, CFRetained, CFString};
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayMode, CGError,
     CGGetActiveDisplayList, CGMainDisplayID, CGPreflightScreenCaptureAccess,
+    CGRequestScreenCaptureAccess,
 };
 use objc2_foundation::{MainThreadMarker, NSProcessInfo, NSString};
 
@@ -59,6 +60,49 @@ pub fn request_accessibility_once() {
             crate::logging::line("macos", msg);
         }
         crate::logging::line("macos", &format!("accessibility: {RESTART_NOTE}"));
+    });
+}
+
+/// Asks for Screen Recording once, with the system prompt.
+///
+/// Separate from the accessibility request and not optional, because of a macOS detail that
+/// cost a tester their first session: **an application does not appear in the Screen
+/// Recording list until it has asked.** `CGPreflightScreenCaptureAccess` is a question, not
+/// a request — it reports the current state, raises no dialog, and enrols nothing. So an
+/// application that only ever preflights is invisible in that pane, and the user is left
+/// looking for a switch that is not there, with no way to grant a permission the
+/// application will then complain about not having. Measured on macOS 12.7.6:
+/// "Could grant accessibility permission, but it doesn't make itself available for screen
+/// recording yet."
+///
+/// `CGRequestScreenCaptureAccess` is the one that both prompts and enrols. It answers with
+/// the state as it was at process start, so a user who grants it in response to this very
+/// prompt still sees `false` — which is why the restart note is logged either way.
+pub fn request_screen_recording_once() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        if CGPreflightScreenCaptureAccess() {
+            crate::logging::line("macos", "screen recording: granted");
+            return;
+        }
+        let granted = CGRequestScreenCaptureAccess();
+        crate::logging::line(
+            "macos",
+            if granted {
+                "screen recording: granted after asking"
+            } else {
+                "screen recording: NOT granted — asked for it, which is also what puts this                  application into the Screen Recording list in the first place"
+            },
+        );
+        if !granted {
+            for msg in [
+                "screen recording: without it a capture does not fail — it returns a picture                  of the wallpaper, so every image search and every OCR read comes back empty                  with nothing to explain why",
+                "screen recording: System Settings > Privacy & Security > Screen Recording,                  switch this application on in the list",
+            ] {
+                crate::logging::line("macos", msg);
+            }
+            crate::logging::line("macos", &format!("screen recording: {RESTART_NOTE}"));
+        }
     });
 }
 
