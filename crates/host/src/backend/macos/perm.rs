@@ -285,12 +285,24 @@ pub fn environment_report() -> Vec<(String, String)> {
         );
     }
 
+    // Reported, not asked for. Observed across three sessions on one machine: it read
+    // `unknown` before Accessibility was granted, `granted` immediately afterwards, and
+    // denied again once a rebuild invalidated the Accessibility grant — tracking it exactly,
+    // without the user ever opening that pane. A process trusted for Accessibility is
+    // allowed to listen to events, so this usually needs no grant of its own. It is listed
+    // because it can be switched off independently, and because if it ever disagrees with
+    // Accessibility that disagreement is the finding.
     match input_monitoring() {
-        Some(ACCESS_GRANTED) => push("input monitoring", "granted".into()),
+        Some(ACCESS_GRANTED) => push(
+            "input monitoring",
+            "granted (it normally follows the Accessibility grant rather than needing one of              its own)"
+                .into(),
+        ),
         Some(ACCESS_DENIED) => {
             push(
                 "input monitoring",
-                "NOT granted — the event tap cannot see or swallow keys".into(),
+                "NOT granted — the event tap cannot see or swallow keys. Usually this                  resolves itself when Accessibility is granted; only if it does not is the                  pane below worth opening."
+                    .into(),
             );
             push("input monitoring symptom", INPUT_MONITORING_SYMPTOM.into());
             push(

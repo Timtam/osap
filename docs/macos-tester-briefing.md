@@ -53,8 +53,10 @@ if the application is broken**:
    twice reaches the menu-bar extras.
    On the first launch it asks for **Accessibility** and for **Screen Recording**. Both
    prompts may appear at once, and answering them does not finish the job — see step 4.
-2. **System Settings → Privacy & Security → Accessibility**: switch it on for
-   AutomationPlatform.
+   There are three permissions in play but **only two to grant**: Input Monitoring comes
+   along with Accessibility by itself.
+2. **Accessibility**: switch it on for AutomationPlatform in the privacy settings — the log
+   names the pane in your macOS version's own wording.
 3. **Screen Recording**: the same pane. The application asks for this at launch, and asking
    is what normally puts it into the list.
 

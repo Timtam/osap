@@ -15,6 +15,13 @@ failure. This page is what to grant, how to check, and what each absence looks l
 | **Screen Recording** | capture, image search, OCR | **captures silently return the desktop wallpaper** — never an error |
 | **Input Monitoring** | intercepting and suppressing keys | overlay keys reach the plugin instead of the overlay |
 
+Only the first two need granting. **Input Monitoring normally follows the Accessibility
+grant** rather than needing one of its own — observed across three sessions on one machine:
+it read *unknown* before Accessibility was granted, *granted* immediately afterwards without
+that pane ever being opened, and denied again once a rebuild invalidated the Accessibility
+grant. It is listed because it can be switched off independently, and because if it ever
+disagrees with Accessibility, that disagreement is itself the finding.
+
 The pane is called **System Settings → Privacy & Security** on Ventura and later, and
 **System Preferences → Security & Privacy → Privacy** on Monterey and earlier. The log names
 whichever one this machine actually has.
@@ -64,6 +71,9 @@ this and say so, but the check cannot be perfect — if captures are behaving od
 this switch first.
 
 **Input Monitoring** is needed only for keys the overlay *takes away* from the plugin —
+and, as above, is usually granted implicitly with Accessibility, since a process trusted for
+Accessibility is allowed to listen to events. What follows is what its absence would mean if
+it ever were absent on its own:
 Tab, the arrows, Space inside an overlay. Global shortcuts do **not** need it: those are
 registered through an older, narrower mechanism precisely so the main interaction keeps
 working before the fussiest permission has been granted. So an application with
