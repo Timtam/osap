@@ -933,10 +933,22 @@ fn content_rect(el: &AXUIElement, snap: &Snap, frame: CGRect, hwnd: isize) -> CG
         return frame;
     }
     let mut best: Option<CGRect> = None;
-    for child in children(el).into_iter().take(8) {
+    let mut button_centre: Option<f64> = None;
+    for child in children(el).into_iter().take(24) {
         let Some(r) = element_rect_cg(&child) else {
             continue;
         };
+        // The window's own buttons, which are the measuring instrument when there is no
+        // content view to find. See below.
+        if let Some(s) = attribute_string(&child, a_subrole()) {
+            if matches!(s.as_str(), "AXCloseButton" | "AXMinimizeButton" | "AXZoomButton") {
+                let centre = r.origin.y + r.size.height / 2.0 - frame.origin.y;
+                if centre > 0.0 && button_centre.is_none_or(|c| centre < c) {
+                    button_centre = Some(centre);
+                }
+                continue;
+            }
+        }
         let inset = r.origin.y - frame.origin.y;
         let spans = r.size.width >= frame.size.width - 2.0;
         let inside = r.origin.x >= frame.origin.x - 1.0
@@ -947,6 +959,32 @@ fn content_rect(el: &AXUIElement, snap: &Snap, frame: CGRect, hwnd: isize) -> CG
             if best.is_none_or(|b| r.size.height > b.size.height) {
                 best = Some(r);
             }
+        }
+    }
+
+    // No content view — and that is the common case, not the exception.
+    //
+    // Measured on Sforzando standalone, the first real plugin probed on a Mac: its window's
+    // direct children are buttons, a slider and labels, with no container among them. So the
+    // search above finds nothing and the client rect falls back to the frame, which puts
+    // every authored coordinate exactly one title bar too high. That was measured too — the
+    // three read-outs the Windows module targets were found by OCR at dy of +32, +31 and
+    // +32, with dx of −4, +7 and −5. One constant, vertical only.
+    //
+    // The window's own close button is what states that constant. It sits vertically centred
+    // in the title bar, so twice its centre offset IS the bar's height: 2 × 14 = 28 points
+    // on that machine, against the 31-32 the OCR comparison implied — the remainder being
+    // the margin an authored region carries around its glyph, not a disagreement.
+    //
+    // This matters far beyond one plugin: with it, a module's Windows coordinates land on
+    // the same controls on macOS, and the port is one module rather than two.
+    if best.is_none() {
+        if let Some(centre) = button_centre {
+            let bar = (centre * 2.0).clamp(8.0, 64.0);
+            best = Some(CGRect::new(
+                CGPoint::new(frame.origin.x, frame.origin.y + bar),
+                CGSize::new(frame.size.width, frame.size.height - bar),
+            ));
         }
     }
     // A measurement is remembered; a failure to measure is not.

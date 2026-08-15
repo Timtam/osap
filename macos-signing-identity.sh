@@ -22,10 +22,27 @@ set -euo pipefail
 NAME="OSAP Local Signing"
 KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 
-if security find-identity -v -p codesigning 2>/dev/null | grep -qF "$NAME"; then
-  echo "The identity \"$NAME\" already exists. Nothing to do."
-  echo "package-macos.sh will find and use it on its own."
-  exit 0
+# Without -v. `-v` lists only VALID identities, validity requires a trust chain, and a
+# self-signed certificate has none — so the identity this script creates does not appear in
+# a `-v` listing at all. Checking that way is how the first version of this arrangement
+# managed to create an identity, not find it, and quietly sign ad-hoc anyway.
+if security find-identity -p codesigning 2>/dev/null | grep -qF "$NAME"; then
+  echo "The identity \"$NAME\" already exists."
+  echo "Checking that codesign can actually use it..."
+  probe="$(mktemp -d)/probe"
+  cp /usr/bin/true "$probe"
+  if codesign --force --sign "$NAME" "$probe" 2>/dev/null; then
+    echo "  It works. package-macos.sh will use it."
+    exit 0
+  fi
+  echo "  It exists but codesign will not use it. That is usually the keychain refusing"
+  echo "  access to the private key: the first use raises a dialog, and if it was dismissed"
+  echo "  or answered with Deny, the answer sticks."
+  echo ""
+  echo "  Open Keychain Access, find \"$NAME\" under login > My Certificates, expand it,"
+  echo "  double-click the private key beneath it, go to Access Control, and either choose"
+  echo "  \"Allow all applications\" or add /usr/bin/codesign to the list."
+  exit 1
 fi
 
 tmp="$(mktemp -d)"
@@ -49,6 +66,26 @@ echo "    macOS may ask you to unlock the keychain. That is expected."
 # -T lets codesign use the private key without asking every time. macOS may still show a
 # "wants to sign using a key in your keychain" dialog the first time; choose Always Allow.
 security import "$tmp/identity.p12" -k "$KEYCHAIN" -P "" -T /usr/bin/codesign
+
+# Trust it for code signing, so that tools which ask for VALID identities can see it too.
+# Not strictly needed for codesign itself, which will use an untrusted certificate from the
+# keychain quite happily — but every listing that filters on validity hides it otherwise,
+# and that hiding is what made the first version of this fail silently. A user-domain trust
+# setting, so no administrator password is needed; macOS may still ask to confirm.
+if ! security add-trusted-cert -p codeSign -k "$KEYCHAIN" "$tmp/cert.pem" 2>/dev/null; then
+  echo "    (could not mark it trusted — not fatal, codesign can still use it)"
+fi
+
+echo "==> Checking that codesign will actually use it"
+probe="$tmp/probe"
+cp /usr/bin/true "$probe"
+if codesign --force --sign "$NAME" "$probe" 2>/dev/null; then
+  echo "    It works."
+else
+  echo "    codesign could not use the new identity. If a keychain dialog appeared, answer"
+  echo "    it with Always Allow and run this script again."
+  exit 1
+fi
 
 cat <<DONE
 

@@ -68,7 +68,17 @@ every module is relative to the content origin. macOS accessibility has no such
 distinction: `AXPosition`/`AXSize` describe the whole window, title bar included, and there
 is no attribute that reports the content rect.
 
-> **Measured 2026-08-15, and it puts this rule in doubt.** Sforzando standalone, probed on
+> **Settled 2026-08-15 — the rule below is superseded.** The window buttons state the
+> title-bar height directly: Sforzando's close, minimise and zoom buttons sit at y 93 with
+> height 16 in a frame whose top is 87, so their centre is 14 points down and the bar is
+> twice that — **28 points**. The OCR comparison implied 31–32; the remainder is the margin
+> an authored region carries around its glyph, not a disagreement. `content_rect` now
+> derives the inset from those buttons when a window has no content view to find, which is
+> the common case rather than the exception — Sforzando's window has buttons, a slider and
+> labels as direct children and no container among them. A module's Windows coordinates
+> therefore land on the same controls on macOS, and the port is one module rather than two.
+>
+> **Originally measured, and what prompted it:** Sforzando standalone, probed on
 > a Mac: the three read-outs the Windows module authors coordinates for were found by OCR at
 > `dx` of −4, +7, −5 and `dy` of **+32, +31, +32**. The horizontal layout is identical and
 > the vertical is off by one constant — a title bar. So `client == frame` is what stands

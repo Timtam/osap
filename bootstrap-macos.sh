@@ -66,7 +66,10 @@ echo "    Rust: $(cargo --version)"
 
 # Offered before the build rather than after, because taking it changes what the build
 # produces and the alternative costs the tester three permission grants per rebuild.
-if ! security find-identity -v -p codesigning 2>/dev/null | grep -qF "OSAP Local Signing"; then
+# Without -v: that flag means "valid", validity means a trust chain, and a self-signed
+# certificate has none. Asking for valid identities is how this check used to miss the very
+# identity it was looking for.
+if ! security find-identity -p codesigning 2>/dev/null | grep -qF "OSAP Local Signing"; then
   step "One thing worth doing first"
   echo "    There is no local signing identity, so this build will be signed ad-hoc — and"
   echo "    macOS will therefore treat every rebuild as a different application and forget"

@@ -144,7 +144,11 @@ pub fn request_screen_recording_once() {
 /// before the rebuild are not honoured after it.
 fn signature_of(bundle_path: &str) -> Vec<(String, String)> {
     let Ok(out) = std::process::Command::new("/usr/bin/codesign")
-        .args(["-dv", "--verbose=2", bundle_path])
+        // verbose=4, not 2. At 2 there is no CDHash line at all, and an ad-hoc signature
+        // prints "Signature=adhoc" with no Authority — which the first version of this
+        // function read as "not signed", and then said so in a tester's log about a bundle
+        // that was signed perfectly well, just not the way we wanted.
+        .args(["-dv", "--verbose=4", bundle_path])
         .output()
     else {
         return Vec::new();
@@ -154,6 +158,8 @@ fn signature_of(bundle_path: &str) -> Vec<(String, String)> {
     let mut authority: Option<String> = None;
     let mut cdhash: Option<String> = None;
     let mut ident: Option<String> = None;
+    let mut adhoc = false;
+    let mut unsigned = false;
     for line in text.lines() {
         if let Some(v) = line.strip_prefix("Authority=") {
             // The first Authority line is the leaf; the rest are the chain above it.
@@ -162,21 +168,24 @@ fn signature_of(bundle_path: &str) -> Vec<(String, String)> {
             cdhash.get_or_insert_with(|| v.trim().to_string());
         } else if let Some(v) = line.strip_prefix("Identifier=") {
             ident.get_or_insert_with(|| v.trim().to_string());
+        } else if line.trim() == "Signature=adhoc" {
+            adhoc = true;
+        } else if line.contains("not signed at all") {
+            unsigned = true;
         }
     }
     let mut out_pairs = Vec::new();
-    match (&authority, &cdhash) {
-        (Some(a), _) => out_pairs.push(("signature".to_string(), format!("signed by {a}"))),
-        (None, Some(_)) => out_pairs.push((
-            "signature".to_string(),
-            "ad-hoc (no certificate) — this identity changes on every rebuild, so macOS              forgets every permission each time. ./macos-signing-identity.sh fixes it."
-                .to_string(),
-        )),
-        (None, None) => out_pairs.push((
-            "signature".to_string(),
-            "none — not signed at all, so no permission will be remembered".to_string(),
-        )),
-    }
+    let verdict = if let Some(a) = &authority {
+        format!("signed by {a} — permissions survive a rebuild")
+    } else if adhoc {
+        "ad-hoc (no certificate). The identity is derived from the binary, so it changes on          every rebuild and macOS forgets every permission each time.          ./macos-signing-identity.sh fixes that."
+            .to_string()
+    } else if unsigned {
+        "none — not signed at all, so no permission will be remembered".to_string()
+    } else {
+        "could not be determined".to_string()
+    };
+    out_pairs.push(("signature".to_string(), verdict));
     if let Some(i) = ident {
         out_pairs.push(("signature identifier".to_string(), i));
     }

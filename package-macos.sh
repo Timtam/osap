@@ -167,26 +167,28 @@ fi
 # because the cost lands on whoever is testing rather than on whoever is building.
 IDENTITY="${OSAP_SIGN_IDENTITY:-OSAP Local Signing}"
 if command -v codesign >/dev/null 2>&1; then
-  if security find-identity -v -p codesigning 2>/dev/null | grep -qF "$IDENTITY"; then
-    if codesign --force --deep --sign "$IDENTITY" "$app" 2>/dev/null; then
-      echo "Signed with \"$IDENTITY\" — granted permissions will survive a rebuild."
-    else
-      # Falling through to ad-hoc rather than leaving the bundle unsigned. A failure here
-      # used to do exactly that, and an unsigned bundle is the worst of the three states:
-      # macOS keys its permissions on the path alone, so they appear to work and then stop
-      # for reasons nobody can see. Measured — a tester's bundle came out with
-      # "signature: none" in its own startup report.
-      echo "codesign failed with \"$IDENTITY\" (is the certificate still in the keychain?);"
-      echo "  falling back to an ad-hoc signature, which means permissions will not survive"
-      echo "  the next rebuild."
-      codesign --force --deep --sign - "$app" 2>/dev/null         || echo "  ad-hoc signing failed too; this bundle is UNSIGNED."
-    fi
+  # Tried, not looked up.
+  #
+  # This used to gate on `security find-identity -v -p codesigning`, and that is what made
+  # the whole arrangement useless: `-v` means VALID identities, validity means a trust
+  # chain, and a self-signed certificate has none unless it has been explicitly trusted. So
+  # the identity existed, the grep missed it, every build fell through to ad-hoc, and the
+  # tester went on re-granting permissions after every rebuild exactly as before — while
+  # being told the problem was fixed. Attempting the signature answers the only question
+  # that matters, and it answers it about this machine rather than about a listing.
+  if codesign --force --deep --sign "$IDENTITY" "$app" 2>/dev/null; then
+    echo "Signed with \"$IDENTITY\" — granted permissions will survive a rebuild."
   else
-    codesign --force --deep --sign - "$app" 2>/dev/null && echo "Signed ad-hoc."       || echo "codesign failed — permissions may not stick between launches."
-    echo "  NOTE: an ad-hoc signature changes on every rebuild, so macOS will treat the next"
-    echo "  build as a different application and ask for all three permissions again."
-    echo "  Run ./macos-signing-identity.sh once to stop that happening."
+    echo "Could not sign with \"$IDENTITY\"; falling back to an ad-hoc signature."
+    echo "  That means macOS will treat the next build as a different application and ask"
+    echo "  for Accessibility and Screen Recording again. ./macos-signing-identity.sh"
+    echo "  creates the identity; if you have already run it, run it again — it will say"
+    echo "  what is wrong with the one that is there."
+    codesign --force --deep --sign - "$app" 2>/dev/null       || echo "  ad-hoc signing failed too; this bundle is UNSIGNED."
   fi
+  # Said out loud either way, because the tester's log reports the same fact from the other
+  # side and the two should agree.
+  codesign -dv --verbose=2 "$app" 2>&1 | grep -E "^(Authority|Signature)=" | sed 's/^/  /' || true
 fi
 
 cat > "$stage/README.txt" <<TXT
