@@ -50,14 +50,20 @@ local function dumpTree(label, id)
   line("  tree %s — %d element(s)", label, #elements)
   for _, e in ipairs(elements) do
     -- The class is the join key a matcher is written against, so it is printed exactly as
-    -- the backend composes it, with nothing trimmed or prettified.
+    -- the backend composes it, with nothing trimmed or prettified. The rectangle is the
+    -- other half: it is what an author actually needs, and it measures things nothing else
+    -- can — the window's own close button, for instance, says how tall the title bar is,
+    -- and that is the difference between a Windows-authored coordinate landing on a control
+    -- and landing a title bar above it.
+    local b = e.bounds or { x = 0, y = 0, w = 0, h = 0 }
     line(
-      "    %s depth=%d type=%d class='%s' name='%s'",
+      "    %s depth=%d type=%d class='%s' name='%s' at %d,%d %dx%d",
       string.rep(" ", math.min(e.depth or 0, 12)),
       e.depth or 0,
       e.ctype or -1,
       e.class or "",
-      e.name or ""
+      e.name or "",
+      b.x, b.y, b.w, b.h
     )
   end
   return #elements
@@ -114,6 +120,11 @@ host.hotkey.register(KEY, function()
     line("  [%d] class='%s' %d,%d %dx%d", i, c.class or "", c.bounds.x, c.bounds.y, c.bounds.w, c.bounds.h)
   end
 
+  line(
+    "note: tree rectangles below are SCREEN coordinates; subtract the content origin "
+      .. "(%d,%d) to get what a module would author",
+    win.client.x, win.client.y
+  )
   local total = dumpTree(string.format("window '%s'", win.title or ""), win.id)
   for i, c in ipairs(controls) do
     -- Every surface, not only the ones matching a toolkit pattern: on a platform where

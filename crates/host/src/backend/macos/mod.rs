@@ -23,7 +23,9 @@
 
 use std::rc::Rc;
 
-use super::{Backend, CapturedImage, ControlInfo, HostEvents, MouseButton, OcrText, WinInfo};
+use super::{
+    Backend, CapturedImage, ControlInfo, DumpNode, HostEvents, MouseButton, OcrText, WinInfo,
+};
 
 mod ax;
 mod capture;
@@ -113,11 +115,11 @@ impl Backend for MacBackend {
         ax::plugin_locate(hwnd, container_name, name, control_type)
     }
 
-    fn uia_dump(&self, hwnd: isize) -> Vec<(i32, String, String, i32)> {
+    fn uia_dump(&self, hwnd: isize) -> Vec<DumpNode> {
         ax::dump(hwnd)
     }
 
-    fn uia_raw_dump(&self, hwnd: isize) -> Vec<(i32, String, String, i32)> {
+    fn uia_raw_dump(&self, hwnd: isize) -> Vec<DumpNode> {
         // No two views of the tree on this platform: AX has one. Both dumps answer the same
         // question, and the calibrator calls this one.
         ax::dump(hwnd)

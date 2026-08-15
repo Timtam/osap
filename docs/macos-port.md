@@ -68,6 +68,15 @@ every module is relative to the content origin. macOS accessibility has no such
 distinction: `AXPosition`/`AXSize` describe the whole window, title bar included, and there
 is no attribute that reports the content rect.
 
+> **Measured 2026-08-15, and it puts this rule in doubt.** Sforzando standalone, probed on
+> a Mac: the three read-outs the Windows module authors coordinates for were found by OCR at
+> `dx` of −4, +7, −5 and `dy` of **+32, +31, +32**. The horizontal layout is identical and
+> the vertical is off by one constant — a title bar. So `client == frame` is what stands
+> between a module written once and a module written twice, and the next probe (which now
+> reports every element's rectangle, including the window's own close button) should be able
+> to derive that constant rather than guess it. The rule below is what the code does today,
+> not what it should do once that measurement lands.
+
 So the rule here is **`client` equals the frame, always** — no heuristic, no guessing at a
 title-bar height. It is predictable, which matters more than it looks: macOS module
 variants have not been written yet, so they will be authored against whatever this reports,

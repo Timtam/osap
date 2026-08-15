@@ -103,6 +103,27 @@ pub struct OcrText {
     pub words: Vec<OcrWord>,
 }
 
+/// One element of an accessibility dump: what it is, what it is called, and WHERE it is.
+///
+/// The rectangle was added after the first real macOS session. A dump without it says a
+/// plugin has a slider and does not say where — which is half an answer when the whole
+/// purpose of the dump is to let someone author coordinates for a machine they cannot see.
+/// It also measures things nothing else can: the first probe of a plugin showed every
+/// Windows-authored coordinate sitting exactly one title bar too high on macOS, and the
+/// window's own close button is the element that says how tall that title bar is.
+///
+/// Screen coordinates, and `(0, 0, 0, 0)` for an element with no rectangle of its own.
+pub struct DumpNode {
+    pub depth: i32,
+    pub name: String,
+    pub class: String,
+    pub ctype: i32,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
 /// Mouse button for input synthesis.
 pub enum MouseButton {
     Left,
@@ -178,11 +199,11 @@ pub trait Backend {
     /// Dev/diagnostic: the "interesting" elements of `hwnd`'s UIA subtree (raw
     /// view), as (depth, Name, ClassName, ControlType). For discovering plugin
     /// identity properties.
-    fn uia_dump(&self, hwnd: isize) -> Vec<(i32, String, String, i32)>;
+    fn uia_dump(&self, hwnd: isize) -> Vec<DumpNode>;
 
     /// Like `uia_dump`, but over the RAW TreeWalker, which crosses into a hosted Qt
     /// fragment that the condition-based dump cannot see.
-    fn uia_raw_dump(&self, hwnd: isize) -> Vec<(i32, String, String, i32)>;
+    fn uia_raw_dump(&self, hwnd: isize) -> Vec<DumpNode>;
 
     /// What a named element reports about its own state (Toggle pattern, then
     /// LegacyIAccessible state bits), as a diagnostic string. None when not found.

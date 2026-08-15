@@ -59,7 +59,7 @@ use objc2_core_graphics::{
 use objc2_foundation::NSString;
 
 use super::handles;
-use crate::backend::{ControlInfo, WinInfo};
+use crate::backend::{ControlInfo, DumpNode, WinInfo};
 
 /// How long any one accessibility call may take before it is abandoned, in seconds.
 ///
@@ -1755,7 +1755,7 @@ pub fn plugin_locate(
 /// actually contains. So `class` is the exact join-key string [`join_class`] publishes —
 /// what is printed can be pasted into a module's pattern — and the control type is the UIA
 /// id that will match that role again.
-pub fn dump(hwnd: isize) -> Vec<(i32, String, String, i32)> {
+pub fn dump(hwnd: isize) -> Vec<DumpNode> {
     let Some(root) = root_of(hwnd, "dump") else {
         return Vec::new();
     };
@@ -1769,7 +1769,22 @@ pub fn dump(hwnd: isize) -> Vec<(i32, String, String, i32)> {
         };
         let class = join_class(snap);
         if !name.is_empty() || !snap.role.is_empty() {
-            out.push((depth, name, class, ctype_for_role(&snap.role)));
+            // The rectangle comes from the same batched read as everything else, so it
+            // costs nothing extra — and it is what turns a dump from a list of what a
+            // plugin contains into something an overlay can be authored against.
+            // No rectangle at all is a legitimate answer for an element the toolkit
+            // never places, and zeros say so without pretending otherwise.
+            let (x, y, w, h) = snap.rect.map(rect_i32).unwrap_or((0, 0, 0, 0));
+            out.push(DumpNode {
+                depth,
+                name,
+                class,
+                ctype: ctype_for_role(&snap.role),
+                x,
+                y,
+                w,
+                h,
+            });
         }
         WalkStep::Descend
     });

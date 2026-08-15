@@ -5,6 +5,7 @@
 
 use std::cell::RefCell;
 
+use super::DumpNode;
 use windows::core::{Interface, BSTR, VARIANT};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{
@@ -194,13 +195,24 @@ pub fn uia_locate_via(
     })
 }
 
+/// An element's on-screen rectangle, or all zeros when it has none.
+///
+/// Part of a dump because a dump exists to let somebody author coordinates for a machine
+/// they cannot look at, and "there is a slider" without "and it is here" is half an answer.
+fn rect_of(el: &IUIAutomationElement) -> (i32, i32, i32, i32) {
+    match unsafe { el.CurrentBoundingRectangle() } {
+        Ok(r) => (r.left, r.top, r.right - r.left, r.bottom - r.top),
+        Err(_) => (0, 0, 0, 0),
+    }
+}
+
 /// Dev/diagnostic: walk `hwnd`'s UIA subtree in the RAW view and return the
 /// "interesting" elements — those with a non-empty Name, plus Qt window panes —
 /// as (depth, Name, ClassName, ControlType). Bounded (≤600 nodes, ≤16 deep). Used
 /// to discover the Name/ClassName/ControlType to key a plugin's identity on, e.g.
 /// a Kontakt rendered inside Komplete Kontrol's own Qt window.
-pub fn uia_dump(hwnd: isize) -> Vec<(i32, String, String, i32)> {
-    let mut out: Vec<(i32, String, String, i32)> = Vec::new();
+pub fn uia_dump(hwnd: isize) -> Vec<DumpNode> {
+    let mut out: Vec<DumpNode> = Vec::new();
     AUTOMATION.with(|cell| unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let mut borrow = cell.borrow_mut();
@@ -235,7 +247,8 @@ pub fn uia_dump(hwnd: isize) -> Vec<(i32, String, String, i32)> {
                 let class = el.CurrentClassName().map(|b| b.to_string()).unwrap_or_default();
                 let ctype = el.CurrentControlType().map(|t| t.0).unwrap_or(0);
                 if !name.is_empty() || !class.is_empty() {
-                    out.push((0, name, class, ctype));
+                    let (x, y, w, h) = rect_of(&el);
+                    out.push(DumpNode { depth: 0, name, class, ctype, x, y, w, h });
                 }
             }
         }
@@ -337,8 +350,8 @@ unsafe fn raw_walk(
 /// condition-based FindAll, so it crosses into a hosted Qt fragment (a DAW-embedded
 /// Kontakt's real UI, which FindAll cannot see). Returns (depth, Name, ClassName,
 /// ControlType); bounded by node budget and depth.
-pub fn uia_raw_dump(hwnd: isize) -> Vec<(i32, String, String, i32)> {
-    let mut out: Vec<(i32, String, String, i32)> = Vec::new();
+pub fn uia_raw_dump(hwnd: isize) -> Vec<DumpNode> {
+    let mut out: Vec<DumpNode> = Vec::new();
     AUTOMATION.with(|cell| unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let mut borrow = cell.borrow_mut();
@@ -365,7 +378,8 @@ pub fn uia_raw_dump(hwnd: isize) -> Vec<(i32, String, String, i32)> {
             let class = el.CurrentClassName().map(|b| b.to_string()).unwrap_or_default();
             let ctype = el.CurrentControlType().map(|t| t.0).unwrap_or(0);
             if !name.is_empty() || !class.is_empty() {
-                out.push((depth, name, class, ctype));
+                let (x, y, w, h) = rect_of(el);
+                out.push(DumpNode { depth, name, class, ctype, x, y, w, h });
             }
             true
         });

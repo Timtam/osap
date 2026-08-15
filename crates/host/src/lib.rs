@@ -3140,13 +3140,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "dump",
         lua.create_function(move |lua, hwnd: isize| {
             let arr = lua.create_table()?;
-            for (i, (depth, name, class, ctype)) in sh.backend.uia_dump(hwnd).into_iter().enumerate() {
-                let t = lua.create_table()?;
-                t.set("depth", depth)?;
-                t.set("name", name)?;
-                t.set("class", class)?;
-                t.set("ctype", ctype)?;
-                arr.set(i + 1, t)?;
+            for (i, n) in sh.backend.uia_dump(hwnd).into_iter().enumerate() {
+                arr.set(i + 1, dump_node_to_table(lua, n)?)?;
             }
             Ok(arr)
         })?,
@@ -3158,15 +3153,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "rawDump",
         lua.create_function(move |lua, hwnd: isize| {
             let arr = lua.create_table()?;
-            for (i, (depth, name, class, ctype)) in
-                sh.backend.uia_raw_dump(hwnd).into_iter().enumerate()
-            {
-                let t = lua.create_table()?;
-                t.set("depth", depth)?;
-                t.set("name", name)?;
-                t.set("class", class)?;
-                t.set("ctype", ctype)?;
-                arr.set(i + 1, t)?;
+            for (i, n) in sh.backend.uia_raw_dump(hwnd).into_iter().enumerate() {
+                arr.set(i + 1, dump_node_to_table(lua, n)?)?;
             }
             Ok(arr)
         })?,
@@ -4273,6 +4261,26 @@ fn control_to_table(lua: &Lua, c: &ControlInfo) -> mlua::Result<Table> {
     cl.set("w", c.client_w)?;
     cl.set("h", c.client_h)?;
     t.set("client", cl)?;
+    Ok(t)
+}
+
+/// One element of an accessibility dump, as Lua sees it.
+///
+/// The rectangle is screen coordinates, and it is the half of a dump that makes it usable:
+/// a list of what a plugin contains, without where any of it is, cannot be turned into an
+/// overlay by somebody who cannot look at the screen.
+fn dump_node_to_table(lua: &Lua, n: backend::DumpNode) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("depth", n.depth)?;
+    t.set("name", n.name)?;
+    t.set("class", n.class)?;
+    t.set("ctype", n.ctype)?;
+    let b = lua.create_table()?;
+    b.set("x", n.x)?;
+    b.set("y", n.y)?;
+    b.set("w", n.w)?;
+    b.set("h", n.h)?;
+    t.set("bounds", b)?;
     Ok(t)
 }
 

@@ -1,7 +1,7 @@
 //! Fallback backend for platforms without a real implementation yet.
 //! Window queries return empty; hotkey registration returns an error.
 
-use super::{Backend, CapturedImage, ControlInfo, HostEvents, MouseButton, OcrText, WinInfo};
+use super::{Backend, CapturedImage, ControlInfo, DumpNode, HostEvents, MouseButton, OcrText, WinInfo};
 
 pub struct StubBackend;
 
@@ -114,10 +114,10 @@ impl Backend for StubBackend {
     ) -> Option<(i32, i32)> {
         None
     }
-    fn uia_dump(&self, _hwnd: isize) -> Vec<(i32, String, String, i32)> {
+    fn uia_dump(&self, _hwnd: isize) -> Vec<DumpNode> {
         Vec::new()
     }
-    fn uia_raw_dump(&self, _hwnd: isize) -> Vec<(i32, String, String, i32)> {
+    fn uia_raw_dump(&self, _hwnd: isize) -> Vec<DumpNode> {
         Vec::new()
     }
 

@@ -5,7 +5,10 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicI32, AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
-use super::{Backend, CapturedImage, ControlInfo, HostEvents, MouseButton, OcrText, OcrWord, WinInfo};
+use super::{
+    Backend, CapturedImage, ControlInfo, DumpNode, HostEvents, MouseButton, OcrText, OcrWord,
+    WinInfo,
+};
 
 use windows_sys::Win32::Foundation::{CloseHandle, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -279,11 +282,11 @@ impl Backend for WindowsBackend {
         super::uia::uia_plugin_locate(hwnd, container_name, name, control_type)
     }
 
-    fn uia_dump(&self, hwnd: isize) -> Vec<(i32, String, String, i32)> {
+    fn uia_dump(&self, hwnd: isize) -> Vec<DumpNode> {
         super::uia::uia_dump(hwnd)
     }
 
-    fn uia_raw_dump(&self, hwnd: isize) -> Vec<(i32, String, String, i32)> {
+    fn uia_raw_dump(&self, hwnd: isize) -> Vec<DumpNode> {
         super::uia::uia_raw_dump(hwnd)
     }
 
