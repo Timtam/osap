@@ -15,6 +15,16 @@ failure. This page is what to grant, how to check, and what each absence looks l
 | **Screen Recording** | capture, image search, OCR | **captures silently return the desktop wallpaper** — never an error |
 | **Input Monitoring** | intercepting and suppressing keys | overlay keys reach the plugin instead of the overlay |
 
+The pane is called **System Settings → Privacy & Security** on Ventura and later, and
+**System Preferences → Security & Privacy → Privacy** on Monterey and earlier. The log names
+whichever one this machine actually has.
+
+**On Monterey, expect no Screen Recording prompt.** The application asks for the permission
+at launch, and asking is what normally enrols it in that list — but on macOS 12 the request
+frequently raises no dialog and adds no entry. Measured, and reported independently by a
+second person for a different permission on the same OS version. Add it by hand: unlock the
+padlock, press **+**, choose `AutomationPlatform.app`.
+
 After granting any of them, **quit and reopen the application**. macOS only hands a newly
 granted permission to a process that started *after* it was granted; the running one keeps
 the old answer until it is restarted. This is the single most common reason a permission

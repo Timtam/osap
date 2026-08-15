@@ -47,9 +47,16 @@ if the application is broken**:
    prompts may appear at once, and answering them does not finish the job — see step 4.
 2. **System Settings → Privacy & Security → Accessibility**: switch it on for
    AutomationPlatform.
-3. **System Settings → Privacy & Security → Screen Recording**: the same. It only appears in
-   that list once the application has asked for it, which it does at launch — so if it is not
-   there, the application has not been started yet.
+3. **Screen Recording**: the same pane. The application asks for this at launch, and asking
+   is what normally puts it into the list.
+
+   **On Monterey (macOS 12) the prompt often never appears and the application is never
+   added.** That is a macOS behaviour, not a fault here, and waiting for a dialog that is not
+   coming is the trap. Add it by hand instead: unlock the padlock at the bottom of the pane,
+   press the **+** button, and choose `AutomationPlatform.app`. The log says which pane to
+   open, in the wording your macOS version actually uses — Monterey and earlier call it
+   *System Preferences → Security & Privacy → Privacy*, Ventura and later *System Settings →
+   Privacy & Security*.
 4. **Quit the application and open it again.** macOS only hands a newly granted permission
    to a process that started *after* it was granted. This is the single most common reason
    a permission appears not to have worked.

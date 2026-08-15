@@ -52,13 +52,19 @@ pub fn request_accessibility_once() {
         for msg in [
             "accessibility: NOT granted — window reads, control reads and key capture will \
              all return nothing until it is",
-            "accessibility: a system dialog may be open now; its 'Open System Settings' \
-             button leads to the right pane",
-            "accessibility: otherwise open System Settings > Privacy & Security > \
-             Accessibility, switch this application on in the list",
+            "accessibility: a system dialog may be open now; the button on it that opens the \
+             settings leads to the right pane",
         ] {
             crate::logging::line("macos", msg);
         }
+        crate::logging::line(
+            "macos",
+            &format!(
+                "accessibility: otherwise open {} > Accessibility and switch this \
+                 application on in the list",
+                privacy_pane()
+            ),
+        );
         crate::logging::line("macos", &format!("accessibility: {RESTART_NOTE}"));
     });
 }
@@ -85,25 +91,67 @@ pub fn request_screen_recording_once() {
             crate::logging::line("macos", "screen recording: granted");
             return;
         }
-        let granted = CGRequestScreenCaptureAccess();
+        if CGRequestScreenCaptureAccess() {
+            crate::logging::line("macos", "screen recording: granted after asking");
+            return;
+        }
         crate::logging::line(
             "macos",
-            if granted {
-                "screen recording: granted after asking"
-            } else {
-                "screen recording: NOT granted — asked for it, which is also what puts this                  application into the Screen Recording list in the first place"
-            },
+            "screen recording: NOT granted. Asking is also what puts an application into \
+             that list at all, so it is done even when the answer is already known.",
         );
-        if !granted {
+        crate::logging::line(
+            "macos",
+            "screen recording: without it a capture does not fail. It comes back as a \
+             picture of the wallpaper, so every image search and every OCR read reads empty \
+             with nothing anywhere to explain why.",
+        );
+        if prompt_is_unreliable() {
+            // The honest instruction for THIS machine. Waiting for a dialog that is not
+            // going to appear is worse than being told to go and add it by hand, and
+            // somebody who cannot see the screen has no way to tell "no prompt yet" from
+            // "no prompt ever".
             for msg in [
-                "screen recording: without it a capture does not fail — it returns a picture                  of the wallpaper, so every image search and every OCR read comes back empty                  with nothing to explain why",
-                "screen recording: System Settings > Privacy & Security > Screen Recording,                  switch this application on in the list",
+                "screen recording: on this version of macOS the request often raises no \
+                 dialog and adds nothing to the list. That is a known macOS behaviour and \
+                 not a fault in this application.",
+                "screen recording: add it by hand instead. Open the pane named on the next \
+                 line, unlock the padlock, press the + button, and choose \
+                 AutomationPlatform.app",
             ] {
                 crate::logging::line("macos", msg);
             }
-            crate::logging::line("macos", &format!("screen recording: {RESTART_NOTE}"));
         }
+        crate::logging::line(
+            "macos",
+            &format!("screen recording: {} > Screen Recording, {RESTART_NOTE}", privacy_pane()),
+        );
     });
+}
+
+/// What the privacy settings are actually CALLED on the machine this is running on.
+///
+/// Ventura renamed System Preferences to System Settings and turned "Security & Privacy"
+/// round into "Privacy & Security". Telling a Monterey user to open a pane named after a
+/// version they do not have sends them looking for something that is not there — and this
+/// text is read aloud to somebody who cannot scan the window for the nearest match.
+fn privacy_pane() -> &'static str {
+    if NSProcessInfo::processInfo().operatingSystemVersion().majorVersion >= 13 {
+        "System Settings > Privacy & Security"
+    } else {
+        "System Preferences > Security & Privacy > Privacy tab (unlock the padlock first)"
+    }
+}
+
+/// Whether this macOS is old enough that the screen-recording prompt cannot be relied on.
+///
+/// Measured rather than assumed. On 12.7.6 the request raised no dialog and added nothing to
+/// the list, and the tester got past it by adding the application by hand with the + button;
+/// the same shape of problem was reported independently on Monterey for a different
+/// permission entirely, which points at the OS version rather than at anything this
+/// application does.
+fn prompt_is_unreliable() -> bool {
+    NSProcessInfo::processInfo().operatingSystemVersion().majorVersion < 13
 }
 
 /// The startup environment block: displays and their scale, the three permissions, the
@@ -215,7 +263,7 @@ pub fn environment_report() -> Vec<(String, String)> {
         );
         push(
             "accessibility fix",
-            format!("System Settings > Privacy & Security > Accessibility, {RESTART_NOTE}"),
+            format!("{} > Accessibility, {RESTART_NOTE}", privacy_pane()),
         );
     }
 
@@ -233,7 +281,7 @@ pub fn environment_report() -> Vec<(String, String)> {
         );
         push(
             "screen recording fix",
-            format!("System Settings > Privacy & Security > Screen Recording, {RESTART_NOTE}"),
+            format!("{} > Screen Recording, {RESTART_NOTE}", privacy_pane()),
         );
     }
 
@@ -247,7 +295,7 @@ pub fn environment_report() -> Vec<(String, String)> {
             push("input monitoring symptom", INPUT_MONITORING_SYMPTOM.into());
             push(
                 "input monitoring fix",
-                format!("System Settings > Privacy & Security > Input Monitoring, {RESTART_NOTE}"),
+                format!("{} > Input Monitoring, {RESTART_NOTE}", privacy_pane()),
             );
         }
         other => {
