@@ -129,6 +129,65 @@ pub fn request_screen_recording_once() {
     });
 }
 
+/// How this bundle is signed, as `codesign` sees it.
+///
+/// Asked of the tool rather than of an API because the answer only has to be readable, not
+/// programmable, and `codesign` is the same thing a person would run to check. It writes to
+/// stderr, which is why that is what gets parsed. Failure is silent by design: an
+/// unsignable or unsigned bundle is a legitimate state and the absence of these lines says
+/// so as clearly as a message would.
+///
+/// Two fields matter and they answer different questions. `authority` is WHO signed it — an
+/// ad-hoc signature has none, a local certificate names itself — and it changing means the
+/// signing arrangement changed. `cdhash` is the content, and for an ad-hoc signature it is
+/// the whole identity, so it changing between two runs is exactly why permissions granted
+/// before the rebuild are not honoured after it.
+fn signature_of(bundle_path: &str) -> Vec<(String, String)> {
+    let Ok(out) = std::process::Command::new("/usr/bin/codesign")
+        .args(["-dv", "--verbose=2", bundle_path])
+        .output()
+    else {
+        return Vec::new();
+    };
+    // codesign reports on stderr even when it succeeds.
+    let text = String::from_utf8_lossy(&out.stderr);
+    let mut authority: Option<String> = None;
+    let mut cdhash: Option<String> = None;
+    let mut ident: Option<String> = None;
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("Authority=") {
+            // The first Authority line is the leaf; the rest are the chain above it.
+            authority.get_or_insert_with(|| v.trim().to_string());
+        } else if let Some(v) = line.strip_prefix("CDHash=") {
+            cdhash.get_or_insert_with(|| v.trim().to_string());
+        } else if let Some(v) = line.strip_prefix("Identifier=") {
+            ident.get_or_insert_with(|| v.trim().to_string());
+        }
+    }
+    let mut out_pairs = Vec::new();
+    match (&authority, &cdhash) {
+        (Some(a), _) => out_pairs.push(("signature".to_string(), format!("signed by {a}"))),
+        (None, Some(_)) => out_pairs.push((
+            "signature".to_string(),
+            "ad-hoc (no certificate) — this identity changes on every rebuild, so macOS              forgets every permission each time. ./macos-signing-identity.sh fixes it."
+                .to_string(),
+        )),
+        (None, None) => out_pairs.push((
+            "signature".to_string(),
+            "none — not signed at all, so no permission will be remembered".to_string(),
+        )),
+    }
+    if let Some(i) = ident {
+        out_pairs.push(("signature identifier".to_string(), i));
+    }
+    if let Some(h) = cdhash {
+        // The number to compare between two logs. If it differs and permissions stopped
+        // working, that is the whole explanation.
+        out_pairs.push(("signature cdhash".to_string(), h));
+    }
+    out_pairs
+}
+
 /// What the privacy settings are actually CALLED on the machine this is running on.
 ///
 /// Ventura renamed System Preferences to System Settings and turned "Security & Privacy"
@@ -352,6 +411,19 @@ pub fn environment_report() -> Vec<(String, String)> {
                  the packaged application do not apply to this process and vice versa"
                     .into(),
             );
+        }
+    }
+    // Who macOS thinks we are, in the terms it records permissions against.
+    //
+    // This is the line that settles an argument the log could not otherwise settle: a
+    // permission the user has clearly granted, against an application that clearly still
+    // cannot use it. TCC stores a requirement describing the signed identity, so a build
+    // signed differently from the one that was granted is a different application to it —
+    // while still appearing, ticked, in the settings list. Two runs of this line say
+    // immediately whether the identity moved.
+    if let Some(path) = bundle_path.as_ref() {
+        for (k, v) in signature_of(path) {
+            push(&k, v);
         }
     }
     push(

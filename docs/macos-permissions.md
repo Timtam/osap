@@ -80,6 +80,29 @@ working before the fussiest permission has been granted. So an application with
 Accessibility but not Input Monitoring is half-alive: shortcuts open overlays, and
 navigating inside one leaks keys to the plugin.
 
+## When the switch is on and the application still cannot use it
+
+This happens, and it is not the user's mistake. macOS does not remember "AutomationPlatform
+is allowed"; it remembers a description of the *signed identity* that was allowed. A build
+signed differently from the one that was granted is a different application as far as that
+record is concerned — while still appearing in the list, still ticked.
+
+The log names the identity in play:
+
+```
+[env] signature: ad-hoc (no certificate) — this identity changes on every rebuild …
+[env] signature cdhash: 8a3f…
+```
+
+Compare that `cdhash` between two runs. If it changed and the permissions stopped working,
+that is the entire explanation, and there is nothing else to look for.
+
+The remedy is to make the record match the application again: **remove the entry from the
+list (select it, press −), then add it back**, and restart the application. Toggling the
+switch off and on is usually not enough — the stale requirement stays attached to the entry.
+
+`./macos-signing-identity.sh` stops it recurring.
+
 ## Permissions and rebuilds
 
 macOS records these against an application's **code identity**, not against its path or its
