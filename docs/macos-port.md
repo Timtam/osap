@@ -68,32 +68,28 @@ every module is relative to the content origin. macOS accessibility has no such
 distinction: `AXPosition`/`AXSize` describe the whole window, title bar included, and there
 is no attribute that reports the content rect.
 
-> **Settled 2026-08-15 — the rule below is superseded.** The window buttons state the
-> title-bar height directly: Sforzando's close, minimise and zoom buttons sit at y 93 with
-> height 16 in a frame whose top is 87, so their centre is 14 points down and the bar is
-> twice that — **28 points**. The OCR comparison implied 31–32; the remainder is the margin
-> an authored region carries around its glyph, not a disagreement. `content_rect` now
-> derives the inset from those buttons when a window has no content view to find, which is
-> the common case rather than the exception — Sforzando's window has buttons, a slider and
-> labels as direct children and no container among them. A module's Windows coordinates
-> therefore land on the same controls on macOS, and the port is one module rather than two.
->
-> **Originally measured, and what prompted it:** Sforzando standalone, probed on
-> a Mac: the three read-outs the Windows module authors coordinates for were found by OCR at
-> `dx` of −4, +7, −5 and `dy` of **+32, +31, +32**. The horizontal layout is identical and
-> the vertical is off by one constant — a title bar. So `client == frame` is what stands
-> between a module written once and a module written twice, and the next probe (which now
-> reports every element's rectangle, including the window's own close button) should be able
-> to derive that constant rather than guess it. The rule below is what the code does today,
-> not what it should do once that measurement lands.
+So the rule is: **a window without a title bar reports its frame as its content, and a
+window with one has the bar subtracted.** Which sounds obvious and was not, because macOS
+gives no way to ask how tall the bar is.
 
-So the rule here is **`client` equals the frame, always** — no heuristic, no guessing at a
-title-bar height. It is predictable, which matters more than it looks: macOS module
-variants have not been written yet, so they will be authored against whatever this reports,
-and a rule that is consistently "including the title bar" costs an author nothing, whereas
-one that is right for borderless plugin windows and subtly wrong for titled ones would
-produce a module whose coordinates are all correct and another whose coordinates are all
-shifted, with nothing to tell them apart.
+The window's own buttons answer it. Close, minimise and zoom sit vertically centred in the
+bar, so twice their centre offset is the bar's height — measured on Sforzando standalone:
+buttons at y 93, height 16, in a frame whose top is 87, giving 2 × 14 = **28 points**. When
+a window does have a real content view, that is used instead; when it has neither, the frame
+stands, which is right for the borderless windows Qt and JUCE draw for plugins.
+
+The measurement that forced this is worth keeping, because it is the whole argument for the
+port being one module rather than two. The three read-outs the Windows Sforzando module
+authors coordinates for were found by OCR on macOS at `dx` of −4, +7, −5 and `dy` of **+32,
++31, +32** — the horizontal layout identical, the vertical off by one constant. With the bar
+subtracted, a module's Windows coordinates land on the same controls on both platforms. (The
+28 derived from the buttons against the 31–32 the OCR implied is the margin an authored
+region carries around its glyph, not a disagreement.)
+
+The answer is cached as the four edge offsets rather than as a rectangle, so it survives the
+window being moved or resized, and a failed probe is deliberately *not* cached — a window
+asked about before it has laid itself out would otherwise report its whole frame as content
+for the rest of its life.
 
 ## What `class` says
 
