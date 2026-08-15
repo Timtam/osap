@@ -64,6 +64,18 @@ if ! have cargo; then
 fi
 echo "    Rust: $(cargo --version)"
 
+# Offered before the build rather than after, because taking it changes what the build
+# produces and the alternative costs the tester three permission grants per rebuild.
+if ! security find-identity -v -p codesigning 2>/dev/null | grep -qF "OSAP Local Signing"; then
+  step "One thing worth doing first"
+  echo "    There is no local signing identity, so this build will be signed ad-hoc — and"
+  echo "    macOS will therefore treat every rebuild as a different application and forget"
+  echo "    its Accessibility, Screen Recording and Input Monitoring permissions each time."
+  echo ""
+  echo "    ./macos-signing-identity.sh  creates one, once, and stops that happening."
+  echo "    Carrying on without it now; nothing breaks, it is just tedious."
+fi
+
 step "Building"
 echo "    The FIRST build compiles wxWidgets from source and takes roughly 10 to 25 minutes."
 echo "    Later builds take a minute or two. It is not stuck; it is compiling."

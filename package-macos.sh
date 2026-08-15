@@ -151,16 +151,30 @@ if [ -d "$root/docs-site/build" ]; then
   echo "  these pages still contain absolute /osap/ links."
 fi
 
-# Ad-hoc signing, deliberately, and not as a formality.
+# Signing, and why it decides whether testing is bearable.
 #
-# An UNSIGNED binary gets no stable identity, so macOS re-asks for Accessibility on every
-# rebuild and sometimes refuses to remember it at all. Ad-hoc (`-` as the identity) is not
-# notarised and Gatekeeper will still object on first launch, but it gives the bundle a
-# consistent code identity, which is what TCC keys on. A Developer ID and notarisation are
-# the real answer and need an Apple account — see docs/macos-port.md.
+# macOS records Accessibility, Screen Recording and Input Monitoring against an
+# application's CODE IDENTITY. For an ad-hoc signature that identity is derived from the
+# contents of the binary, so every rebuild is a different application and all three
+# permissions have to be granted again — on Monterey including adding the app to Screen
+# Recording by hand, because the prompt does not appear there. Measured on a tester's second
+# run: every permission back to "NOT granted", and the probe reporting no focused window
+# because accessibility reads were refused.
+#
+# A local self-signed certificate makes the identity "this bundle id, signed by this
+# certificate", and neither half changes when the code does. So it is used when it exists —
+# see macos-signing-identity.sh — and its absence is called out rather than passed over,
+# because the cost lands on whoever is testing rather than on whoever is building.
+IDENTITY="${OSAP_SIGN_IDENTITY:-OSAP Local Signing}"
 if command -v codesign >/dev/null 2>&1; then
-  codesign --force --deep --sign - "$app" 2>/dev/null && echo "Signed ad-hoc." \
-    || echo "codesign failed — permissions may not stick between launches."
+  if security find-identity -v -p codesigning 2>/dev/null | grep -qF "$IDENTITY"; then
+    codesign --force --deep --sign "$IDENTITY" "$app" 2>/dev/null       && echo "Signed with \"$IDENTITY\" — granted permissions will survive a rebuild."       || echo "codesign failed with \"$IDENTITY\"; permissions will not stick."
+  else
+    codesign --force --deep --sign - "$app" 2>/dev/null && echo "Signed ad-hoc."       || echo "codesign failed — permissions may not stick between launches."
+    echo "  NOTE: an ad-hoc signature changes on every rebuild, so macOS will treat the next"
+    echo "  build as a different application and ask for all three permissions again."
+    echo "  Run ./macos-signing-identity.sh once to stop that happening."
+  fi
 fi
 
 cat > "$stage/README.txt" <<TXT

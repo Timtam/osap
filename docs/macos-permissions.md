@@ -72,10 +72,22 @@ navigating inside one leaks keys to the plugin.
 
 ## Permissions and rebuilds
 
-A test build signed ad-hoc has a signature that changes every time it is rebuilt, and macOS
-treats a changed signature as a different application. **Every new build you are sent will
-ask for its permissions again.** That is expected, it is not a regression, and it stops
-happening once the application is signed with a Developer ID and notarised.
+macOS records these against an application's **code identity**, not against its path or its
+name. An ad-hoc signature — `codesign -s -`, the default here — derives that identity from
+the contents of the binary, so **every rebuild is a different application** and all three
+permissions are forgotten. Measured on a tester's second run: everything back to "NOT
+granted", and the probe reporting no focused window because accessibility reads were being
+refused. On Monterey that also means re-adding the app to Screen Recording by hand, since no
+prompt appears there.
+
+`./macos-signing-identity.sh` fixes it in a minute. It creates a local self-signed
+certificate, after which the identity is "this bundle id, signed by this certificate" —
+neither half of which changes when the code does. `package-macos.sh` picks it up by name and
+uses it automatically. Grant the three permissions once more after the first build that uses
+it, and they stay granted.
+
+That is for local testing only. A Developer ID and notarisation are the answer for anything
+distributed, and are a separate piece of work.
 
 Keeping the bundle identifier stable is what makes even that much work, which is why it is
 fixed in `package-macos.sh` and not to be edited casually.

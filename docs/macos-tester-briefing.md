@@ -31,8 +31,16 @@ entirely, because it builds for the Mac it is on.
 ```bash
 git clone https://github.com/Timtam/osap.git
 cd osap
+./macos-signing-identity.sh     # once, ever — see below
 ./bootstrap-macos.sh
 ```
+
+**Run `./macos-signing-identity.sh` before the first build.** macOS records permissions
+against an application's code identity, and without a signing certificate that identity is
+derived from the binary itself — so every rebuild is a different application to macOS, and
+all three permissions have to be granted again, every time. The script creates a local
+self-signed certificate once and the grants then survive every later build. It takes about a
+minute and asks to unlock your keychain.
 
 The first build compiles wxWidgets from source and takes roughly 10 to 25 minutes. It is not
 stuck. Everything after that is a minute or two.
@@ -133,9 +141,11 @@ the log large, so use it for a targeted run rather than all day.
 
 ## Things that will look like faults and are not
 
-- **A new build asks for its permissions again.** Test builds are signed ad-hoc, so their
-  signature changes every time, and macOS treats a changed signature as a different
-  application. It stops once the application is properly signed.
+- **A new build asks for its permissions again** — if you skipped
+  `./macos-signing-identity.sh`. Without a signing certificate every rebuild is a different
+  application as far as macOS is concerned. Run that script once and it stops.
+- **The first build after creating the identity still asks once.** The identity is new, so
+  the old grants do not carry over. It is the last time.
 - **No Dock icon, no entry in the app switcher.** It is a menu-bar application by design.
 - **Control-Option shortcuts do nothing.** That is VoiceOver's own modifier; the overlays'
   Windows key choices have not been adapted for macOS yet.
