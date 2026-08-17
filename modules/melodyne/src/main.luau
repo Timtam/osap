@@ -802,6 +802,42 @@ end
 -- user; it is here so that the question "what does THIS tool show in those two boxes" is
 -- answered by using Melodyne, by whoever is already using it, rather than by anybody
 -- describing a screen.
+-- ── Position ─────────────────────────────────────────────────────────────────
+--
+-- The transport's position read-out in the top bar, measured in our own calibration capture:
+-- field interior x408-530, y12-34, ink x451-488, glyphs 14 px tall — a third taller than the
+-- tool-bar boxes, on a clear background with no neighbouring text. The easiest OCR target in
+-- the whole window.
+--
+-- The one numeric time read-out in the whole application, and it took a differential pixel
+-- measurement to find it — not in the note editor, where everybody looked, but in the transport.
+--
+-- The evidence, from the user's own session: walking notes with the arrow keys moves a
+-- two-pixel, near-full-height line across the note area, and this field changes in lockstep
+-- with it, backwards steps included —
+--
+--   x869-870 / x888-889   transport="38.1.3"
+--   x892-893 / x888-889   transport="38.1.4"
+--   x880-881 / x892-893   transport="38.1.2"   <- the line went back; so did the number
+--   x893-894 / x907-908   transport="38.2.1"
+--
+-- So the line is Melodyne's position cursor, selecting a note takes the cursor to it, and the
+-- transport prints where it is. Bar.beat.sixteenth, for tools that display nothing at all: Time,
+-- Time Handle, Note Separation, Fade. It is the POSITION OF THE CURSOR, which is the selected
+-- note's position while you are walking notes and the playhead's while you are playing — and
+-- that is what the label says, because those are not the same claim.
+--
+-- Not in the selection watcher: it would speak on every arrow press, over the note name and the
+-- cents. A stop you can reach when you want it.
+local TRANSPORT_REGION = { 408, 12, 530, 34 }
+
+ov:addOCRButton({
+  label = "Position",
+  region = TRANSPORT_REGION,
+  readOnly = true,
+  fallback = "no value",
+})
+
 -- ── Where is the SELECTED note? ───────────────────────────────────────────────
 --
 -- The question everything else in the note area waits on. Melodyne draws a selected blob
@@ -835,11 +871,6 @@ end
 -- whatever is BEHIND it — another application's pixels, reported as Melodyne's note editor and
 -- indistinguishable from it in the log. So the right edge and the bottom are trimmed to the
 -- content the overlay actually has, and the log line says which columns it covered.
--- The transport's position read-out in the top bar, measured in our own calibration capture:
--- field interior x408-530, y12-34, ink x451-488, glyphs 14 px tall — a third taller than the
--- tool-bar boxes, on a clear background with no neighbouring text. The easiest OCR target in
--- the whole window, and the only place the application prints a musical position at all.
-local TRANSPORT_REGION = { 408, 12, 530, 34 }
 local NOTE_AREA = { 48, 118, 935, 640 }
 local NOTE_AREA_MS = 400
 local lastAreaSize = nil
@@ -917,6 +948,16 @@ local function measureNoteArea(o)
   -- Silence when nothing moved: this runs on a timer now, and a line every 400 ms saying that
   -- an idle screen is still idle would bury the ones that matter.
   if #runs == 0 then return end
+  -- A MASS change is the view moving, not a note moving, and it is the one case where the
+  -- differential premise fails outright. It showed up the first evening: walking past the right
+  -- edge made Melodyne scroll, and two frames reported 48 and 53 runs while the position jumped
+  -- from bar 38 to bar 40. Everything after such a frame is measured against a picture of a
+  -- different stretch of music, so the baseline is thrown away rather than believed.
+  if #runs > 12 then
+    host.log.info(("[melodyne] note area: %d run(s) — the view moved, re-baselining"):format(#runs))
+    lastArea = nil
+    return
+  end
   table.sort(runs, function(a, b) return a.peak > b.peak end)
   -- WHAT the moving feature is, settled by correlation rather than by argument.
   --
