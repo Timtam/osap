@@ -1186,10 +1186,42 @@ local function measureNoteArea(o)
     -- score everywhere, and a nearly unchanged picture matches equally well at every offset.
     -- A wrong number here is worse than saying nothing, because there is nothing else in this
     -- window for the user to check it against.
-    -- Scored over the changed columns, standing still is now a LARGE number and a real shift a
-    -- small one, so the two tests finally bite: the fit must beat standing still by half and be
-    -- small in its own right.
-    local confident = moved ~= 0 and sBest < sStill * 0.5 and sBest < 20
+    -- WHERE THE DARKNESS APPEARED against WHERE IT LEFT — a sign that cannot alias.
+    --
+    -- The correlation above is the wrong instrument for this picture and the user's test proved
+    -- it: three deliberate Ctrl+Rights, the runs marching right in every frame (327, 345, 380,
+    -- 467), and the answers were -44, -26, +47. Notes in a phrase sit 8 to 40 pixels apart while
+    -- the search window reaches 60, so a shifted copy fits the NEIGHBOURING note as well as the
+    -- right one. A quasi-periodic picture has several equally good alignments and which wins is
+    -- an accident; no threshold repairs that.
+    --
+    -- Centroids cannot make that mistake. Whatever the magnitude, if a thing moved right then
+    -- the columns that got darker lie to the right of the columns that got lighter. It says
+    -- nothing reliable about HOW FAR — for a move shorter than the note's own width the two
+    -- centroids are a note-width apart, not a displacement apart — which is exactly why it is
+    -- logged beside the correlation rather than spoken instead of it.
+    local aSum, aN, dSum, dN = 0, 0, 0, 0
+    for _, r in ipairs(runs) do
+      for i = r.from, r.to do
+        local now, was = minv[i] or 0, prevMin[i] or 0
+        if now + ARRIVED <= was then aSum, aN = aSum + i, aN + 1
+        elseif was + ARRIVED <= now then dSum, dN = dSum + i, dN + 1 end
+      end
+    end
+    local centroid = (aN > 0 and dN > 0) and (aSum / aN - dSum / dN) or nil
+    if host.calibrating then
+      host.log.info(("[melodyne] centroid says %s (%d arrived, %d left)")
+        :format(centroid and (centroid > 0 and "right" or "left") or "nothing", aN, dN))
+    end
+    -- SPOKEN: NOT YET, and this is a deliberate stop rather than an oversight.
+    --
+    -- Three versions of this went to a blind user tonight and each of them spoke a direction
+    -- that was sometimes the opposite of what he had pressed. He has nothing in that window to
+    -- check a spoken direction against — that is the whole reason the channel exists — so a
+    -- wrong one is worse than silence, and worse still because it teaches a habit. The
+    -- measurement keeps running and keeps writing down what it would have said. It speaks again
+    -- when a session's log shows the sign matching the keys, and not before.
+    local confident = false
     if host.calibrating then
       host.log.info(("[melodyne] shift %d px (fit %.1f against %.1f standing still) -> %s")
         :format(moved, sBest, sStill, confident and "spoken" or "not confident, silent"))
