@@ -123,6 +123,32 @@ local function activeToolCached(ov)
   return toolMemo.index
 end
 
+-- A read-out change that the user CAUSED by changing tool is not news.
+--
+-- The tool bar and the two read-outs are the same strip of pixels: pick a different tool and
+-- the left box shows that tool's own value instead. The watcher at the bottom of this file saw
+-- the box change and announced it — over the top of the tool name the user had just asked for,
+-- with interrupt, so the answer to "which tool is this" was cut off by its own side effect.
+--
+-- A window rather than a flag, because the strip does not repaint within one tick and a
+-- sub-tool is reached by a whole run of key presses. During it the caches keep updating, so
+-- nothing is announced late either: the new values become the baseline silently, which is what
+-- they are. Declared up here because the two things that arm it — the tool bar's `onSelect` and
+-- the variant stepper — both come before the watcher that reads it.
+local READOUT_HOLD_MS = 500
+local holdUntil = 0
+local function holdReadouts(ms)
+  if not host.now then return end -- no clock, no window; better than a hold that never lifts
+  holdUntil = host.now() + (ms or READOUT_HOLD_MS)
+end
+
+-- What we last DELIBERATELY selected, for the log line only.
+--
+-- The runtime hands the tab index to `onSelect`, which is better than any probe: we did not
+-- infer the tool, we chose it. It can still go stale if the tool is changed inside Melodyne by
+-- mouse, so the log says which of the two it is rather than presenting both as the same fact.
+local selectedToolName = nil
+
 -- The active tool ONLY if it is already known — never at the price of a fresh probe.
 --
 -- For the log, and the restraint is the point. Recording which tool a read-out belonged to is
@@ -137,6 +163,19 @@ local function activeToolIfKnown()
   if toolMemo.gen ~= gen then return nil end
   local i = toolMemo.index
   return i and TOOLS[i] and TOOLS[i].name or nil
+end
+
+-- The tool this read-out belongs to, and HOW we know — measured, chosen, or not at all.
+--
+-- Three different facts wear the same word otherwise, and the log is where the difference will
+-- matter: a probed name was read off the screen just now, a selected one is what we clicked and
+-- could have been overridden inside Melodyne since, and "?" is the honest answer when neither
+-- is available and the alternative would be six screen reads on the note-stepping path.
+local function toolForLog()
+  local probed = activeToolIfKnown()
+  if probed then return probed .. " (probed)" end
+  if selectedToolName then return selectedToolName .. " (selected)" end
+  return "?"
 end
 
 -- Which variant of a tool is live: the first whose probe points ALL read near-black, else the
@@ -184,6 +223,10 @@ local function selectVariant(o, tool, target)
   local origin = o:origin()
   if not (origin and origin.client) then return end
   local hwnd = o:hwnd()
+  -- Long enough to cover the whole press sequence and the repaint after it. A variant change
+  -- moves the same strip the read-outs live in, and the announcement that matters is the one
+  -- this function ends with — the sub-tool it actually reached.
+  holdReadouts(PRESS_GAP * (target > 1 and target or 1) + READOUT_HOLD_MS)
   host.input.click(origin.client.x + tool.at[1], origin.client.y + tool.at[2])
   variant = 1
   if target <= 1 or not hwnd then return end
@@ -257,6 +300,15 @@ do
     -- on every switch — then having to walk back — is worse than the switch is worth. Tab still
     -- reaches the bar when the bar is what you want.
     hotkeyKeepsFocus = true,
+    -- The tool bar and the read-outs are the same strip: choosing a tool changes what the left
+    -- box shows, and the watcher was announcing that over the top of the tool's own name. The
+    -- answer to "which tool is this" was being cut off by its own side effect. So the read-outs
+    -- are held for a moment here — and the index is recorded, because being TOLD which tool was
+    -- selected beats probing the icons for it.
+    onSelect = function(_, i)
+      selectedToolName = TOOLS[i] and TOOLS[i].name or nil
+      holdReadouts()
+    end,
     current = function(o)
       local i = activeTool(o)
       if not i then return nil end
@@ -430,8 +482,31 @@ ov:addOCRButton({
 -- is a trade against the pump that should be made with the figure in view rather than by feel.
 local WATCH_MS = 120
 local watchTicks, watchCost = 0, 0
-local watchRegion = { NOTE_REGION[1], NOTE_REGION[2], PITCH_REGION[3], PITCH_REGION[4] }
-local lastSeen = nil
+
+-- ONE CACHE PER FIELD, because a change in one box is not news about the other.
+--
+-- Walking a note's pitch up in cents read the note name again at every step — "A4, +12 cents",
+-- "A4, +13 cents", "A4, +14 cents" — when the only thing that had changed was the number. The
+-- name is the part the user already knows; it is the part they are holding in their head while
+-- they listen for the number. So each box is remembered on its own and only the boxes that
+-- CHANGED are spoken: "A4, +12 cents", then "+13 cents", "+14 cents", and the note name comes
+-- back exactly when the note does — "A#4, +0 cents".
+--
+-- Still ONE utterance per tick, both changed boxes in it. Two utterances for one event would be
+-- two interruptions, which is what the single combined cache was avoiding when it caused this.
+local lastLeft, lastRight = "", ""
+local haveBaseline = false
+
+-- Whitespace off both ends, so a stray space from the recogniser does not read as a change.
+local function trimmed(v)
+  return (tostring(v or ""):match("^%s*(.-)%s*$"))
+end
+
+-- Worth saying out loud. A dash is Melodyne's "nothing to report", in any of the three widths
+-- the recogniser might hand back for it.
+local function speakable(v)
+  return v ~= "" and v ~= "-" and v ~= "–" and v ~= "—"
+end
 
 -- TWO reads, one per field, and one announcement.
 --
@@ -482,9 +557,15 @@ host.timer.every(WATCH_MS, function()
   -- does not announce a change that never happened.
   if host.keys.nativeMenuOpen and host.keys.nativeMenuOpen() then return end
   if not ov.active then
-    -- Forget on the way out, so returning to a Melodyne that changed while we were away
-    -- announces the new selection instead of staying silent about it.
-    lastSeen = nil
+    -- Forget on the way out. Whatever the boxes said when Melodyne went away is not a fact
+    -- about the Melodyne we come back to, and holding it would mean the first real change
+    -- after returning is measured against a stale reading.
+    --
+    -- Coming back is therefore SILENT about the selection: the read that re-establishes the
+    -- baseline does not announce it, and the arrival announcement is the overlay's own. Two
+    -- sentences at once, one of them unasked for, is worse than one.
+    haveBaseline = false
+    lastLeft, lastRight = "", ""
     return
   end
   local began = host.now and host.now() or nil
@@ -499,28 +580,46 @@ host.timer.every(WATCH_MS, function()
     end
   end
   if combined == nil then return end
-  if lastSeen == nil then
+  local left, right = trimmed(note), trimmed(pitch)
+  -- An EMPTY READ IS NOT AN EMPTY FIELD, and this distinction is load-bearing.
+  --
+  -- The recogniser drops out on these small low-contrast boxes now and then: the log has "0 ct"
+  -- and "" alternating within the same second with nothing on screen moving. Treating that as
+  -- "the field went empty" and then as "it came back" would announce the same unchanged value
+  -- over and over — precisely the noise these caches exist to remove. So "" means "no reading
+  -- this tick": nothing is announced, and nothing is forgotten either.
+  local changedLeft = left ~= "" and left ~= lastLeft
+  local changedRight = right ~= "" and right ~= lastRight
+  if left ~= "" then lastLeft = left end
+  if right ~= "" then lastRight = right end
+  if not haveBaseline then
     -- The first read after arriving establishes the baseline rather than announcing it: the
     -- overlay already says what is focused, and a second sentence on top of that is noise.
-    lastSeen = combined
+    haveBaseline = true
     return
   end
-  if combined == lastSeen then return end
-  lastSeen = combined
+  if not (changedLeft or changedRight) then return end
+  local holding = host.now ~= nil and host.now() < holdUntil
+  -- One line per change, kept permanently: it is what turned "only the cents are announced"
+  -- from three indistinguishable guesses into one reading. Written even while the announcement
+  -- is being held back, because a tool switch is exactly when the boxes reveal what that tool
+  -- puts in them — the held ticks are the evidence, not the noise.
+  --
+  -- Named left and right rather than note and deviation, because that is all we actually know:
+  -- the left box holds a note name under the pitch tools and a level in decibels under
+  -- Amplitude, and what the right one holds away from pitch is the open question this line
+  -- exists to answer. Calling a field by the value one tool puts in it is the mistake that
+  -- produced the gate this replaced.
+  host.log.info(("[melodyne] selection: tool=%s left=%q right=%q%s")
+    :format(toolForLog(), left, right, holding and "  (held: the tool was just changed)" or ""))
+  if holding then return end
   local parts = {}
-  if note ~= "" then parts[#parts + 1] = note end
-  if pitch ~= "" then parts[#parts + 1] = pitch end
+  -- Only what changed, and a DASH is not spoken. Melodyne draws "-" in a box with nothing to
+  -- report, so it is a real reading and belongs in the cache — but "minus" is not a thing a
+  -- person needs to hear when they have just deselected a note.
+  if changedLeft and speakable(left) then parts[#parts + 1] = left end
+  if changedRight and speakable(right) then parts[#parts + 1] = right end
   if #parts > 0 then
-    -- One line per change, kept permanently: it is what turned "only the cents are announced"
-    -- from three indistinguishable guesses into one reading.
-    --
-    -- Named left and right rather than note and deviation, because that is all we actually
-    -- know: the left box holds a note name under the pitch tools and a level in decibels under
-    -- Amplitude, and what the right one holds away from pitch is the open question this line
-    -- exists to answer. Calling a field by the value one tool puts in it is the mistake that
-    -- produced the gate this replaced.
-    host.log.info(("[melodyne] selection: tool=%s left=%q right=%q")
-      :format(activeToolIfKnown() or "?", note, pitch))
     host.speech.output(table.concat(parts, ", "), { interrupt = true })
   end
 end)

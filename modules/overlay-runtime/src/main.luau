@@ -242,6 +242,15 @@ function Overlay:addTabControl(opts)
     -- F-keys are Melodyne's own, so a user changing tool in the middle of editing gets thrown
     -- out of the editor and has to find their way back for every switch.
     hotkeyKeepsFocus = opts.hotkeyKeepsFocus == true,
+    -- `onSelect = function(overlay, tabIndex)`: this tab was just selected and announced.
+    --
+    -- For the module that has something ELSE watching the same window and must not talk over
+    -- the announcement. Melodyne is the case: its tool bar and its two read-outs are the same
+    -- strip of pixels, so changing tool changes the read-outs, and the watcher that speaks a
+    -- changed read-out was cutting off the name of the tool the user had just chosen. The
+    -- module cannot see the switch any other way — a tab is selected by a hotkey, by Left and
+    -- Right, by Ctrl+Tab and by Ctrl+<n>, and all four end up here.
+    onSelect = opts.onSelect,
   })
   self._hasTabControl = true
   return {
@@ -695,6 +704,15 @@ local function selectTab(self, c)
   -- The new tab exposes a different set of controls, so the hotkeys they claim change.
   if self.active then self:_syncControlHotkeys() end
   host.speech.output(tabMessage(tab), { interrupt = true })
+  -- After the announcement, so a module that uses this to hold its own speech back is armed
+  -- for what follows rather than for what was just said. Guarded like every other module
+  -- callback: a bad hook must not take the tab switch with it.
+  if c.onSelect then
+    local ok, err = pcall(c.onSelect, self, c._current)
+    if not ok then
+      host.log.info(("[overlay] %s: tab onSelect failed: %s"):format(tostring(self.label), tostring(err)))
+    end
+  end
 end
 
 -- Left / Right on a focused tab control: switch its tab by `dir` (±1), wrapping. No-op
