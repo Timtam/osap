@@ -505,6 +505,23 @@ local PITCH_REGION = { 300, 61, 367, 74 }
 -- verdict cannot.
 local BOX_EDGES = { { 218, 67 }, { 289, 67 }, { 298, 67 }, { 369, 67 } }
 
+-- A WIDER look, for the log only, because our own window may be cutting the answer in half.
+--
+-- Melodyne's binary carries one inspector field that is not like the others:
+-- `MUElementTimeInspector`, bound to `startTime`, with the entry mask 9999|00|00|000 —
+-- bar|beat|sixteenth|ticks — and 100 design units wide where every other field in the family is
+-- 72. Anchored like the pitch fields it would run from x218 to x318. That swallows the right-
+-- hand border probe at x298 and the gap probe at x294, and it overflows the 67-pixel OCR window
+-- at x220-287. In other words: if the Time tool DOES show its position, this module could not
+-- have seen it, and every "the time tools show nothing" in this file would be an artefact of
+-- where we chose to look.
+--
+-- So: one wide recognition and a row of raw greys across the whole strip, written to the log at
+-- each tool switch and nowhere else. No control reads them, nothing is announced from them.
+-- They are here to answer the question before anybody acts on an answer.
+local WIDE_REGION = { 218, 61, 320, 74 }
+local EDGE_ROW = { 212, 218, 250, 289, 294, 298, 310, 320, 330, 369, 375 }
+
 -- Two of those four, used as a live test rather than a log entry: the right box's left border,
 -- and a point in the GAP between the boxes that is bare tool bar whether or not the right box
 -- exists (x290-297 lies past the left box's own border at 289).
@@ -747,20 +764,44 @@ reportFieldsAfterSwitch = function(toolName, afterMs)
     if host.keys.nativeMenuOpen and host.keys.nativeMenuOpen() then return end
     local _, note, pitch = readSelection(ov)
     if note == nil then return end
-    -- Four pixels, ~17 ms each, once per tool switch, in a callback that is already waiting
-    -- for a repaint. Nowhere near the Tab path and nowhere near note-stepping.
+    -- Pixels at ~17 ms each, once per tool switch, in a callback already waiting for a repaint.
+    -- Nowhere near the Tab path and nowhere near note-stepping.
     local edges = {}
-    for i, e in ipairs(BOX_EDGES) do
-      local p = at(ov, e[1], e[2])
-      edges[i] = p and tostring(p.r) or "?"
+    for i, x in ipairs(EDGE_ROW) do
+      local p = at(ov, x, 67)
+      edges[i] = string.format("%d:%s", x, p and tostring(p.r) or "?")
     end
+    local origin = ov:origin()
+    local wide = ""
+    if origin and origin.client then
+      local r = host.ocr.recognize({
+        region = {
+          origin.client.x + WIDE_REGION[1], origin.client.y + WIDE_REGION[2],
+          origin.client.x + WIDE_REGION[3], origin.client.y + WIDE_REGION[4],
+        },
+      })
+      wide = trimmed(r and r.text)
+    end
+    -- The name is what we ASKED FOR, and saying so is the point.
+    --
+    -- It is not a measurement. We click an icon or post a function key and write down what we
+    -- intended; whether Melodyne agreed is a separate question, and the log already shows it
+    -- disagreeing — there are lines reading `tool=Fade left="0.00 dB"`, which is Amplitude's
+    -- value under a sub-tool that never took, and `tool=Note Separation` beside a note name and
+    -- cents. Every conclusion drawn from those labels was drawn from something we told
+    -- ourselves. So the label is marked, and the pixels beside it are what can be trusted.
+    --
     -- The legend names the CONTRAST, not two magic numbers: the border read 157 in one capture
     -- and 146 in another, because Melodyne's greys move with its appearance setting (and with
     -- whatever it draws over itself — the first shot was taken behind a detection dialog). What
     -- does not move is that a border is far darker than the 191 of bare tool bar. A threshold
     -- written into this line would have been wrong within four days.
-    host.log.info(("[melodyne] fields under tool=%s: left=%q right=%q  box borders %s (dark ~146-157 = box drawn, 191 = bare strip)")
-      :format(tostring(toolName or "?"), trimmed(note), trimmed(pitch), table.concat(edges, " ")))
+    host.log.info((
+      "[melodyne] fields after asking for tool=%s: left=%q right=%q wide=%q  greys %s"
+      .. "  (dark ~146-157 = box border, 191 = bare strip; wide covers x218-320 in case the"
+      .. " time field is 100 units rather than 72)"
+    ):format(tostring(toolName or "?"), trimmed(note), trimmed(pitch), wide,
+      table.concat(edges, " ")))
   end)
 end
 
