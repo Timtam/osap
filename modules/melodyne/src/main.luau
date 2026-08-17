@@ -416,17 +416,16 @@ ov:addCustomButton({
 -- them does nothing in Melodyne and a control must not announce itself as a button it cannot
 -- honour — the rule this project arrived at through a "button" that only reported.
 --
--- They were "Selected note" and "Pitch deviation", and that was true of one tool out of six.
--- The toolbar inspector is ONE slot that only spreads into two fields for the Pitch tool;
--- Pitch Modulation, Pitch Drift, Formant, Amplitude and Attack Speed each show a SINGLE field
--- at the same left position, and the unit is theirs rather than the note's: per cent for
--- modulation, drift, attack speed and sibilant balance, decibels for amplitude, cents for
--- formants. So the second control was reading a field that mostly is not there, and the first
--- was calling whatever it found a note.
+-- The LEFT one was called "Selected note", and that was true of one tool out of six. The strip
+-- is tool-dependent: the left box holds whatever parameter the live tool owns, and the unit is
+-- that tool's rather than the note's — per cent for modulation, drift and attack speed,
+-- decibels for amplitude, cents for formants, a note name only under the pitch tools. So it
+-- announces WHICH TOOL's value it is reading, which is what the label could never say.
 --
--- Hence: the left field announces WHICH TOOL's value it is reading, and the right field only
--- exists while the field itself does. Neither is a guess about the layout — it is
--- docs/melodyne-reference.md §3.4, from Celemony's own figures.
+-- The number of boxes varies too — SIBIAC's model is "zero, one or two parameter controls,
+-- depending on the tool" — but that is the plugin's business and not something this file
+-- should hold a table about. A box that is not drawn reads as nothing and is announced as
+-- nothing. See the second control below for the whole argument, and what it cost to learn.
 local NOTE_REGION = { 220, 61, 287, 74 }
 local PITCH_REGION = { 300, 61, 367, 74 }
 
@@ -447,6 +446,10 @@ ov:addOCRButton({
   label = "Inspector",
   region = NOTE_REGION,
   readOnly = true,
+  -- The plug-in's terms, not the recogniser's: a box that is genuinely empty is Melodyne
+  -- having no value to show, and "no text" would report on us instead. The AutoHotkey draft
+  -- this is ported from said exactly this, and it was right.
+  fallback = "no value",
   -- Between the label and the value, so it reads "Inspector, Amplitude, -3.0 dB" — the unit
   -- alone would not say which parameter it belongs to, and the tool strip is a Tab away.
   text = inspectorOwner,
@@ -479,6 +482,10 @@ ov:addOCRButton({
   label = "Pitch deviation",
   region = PITCH_REGION,
   readOnly = true,
+  -- And this is the one that needs it most: under a single-parameter tool the box is not
+  -- drawn at all, so the honest answer to a Tab landing here is that there is no value —
+  -- not silence, and not a sentence about optical character recognition.
+  fallback = "no value",
 })
 
 -- ── Announcing a new selection without being asked ────────────────────────────

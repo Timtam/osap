@@ -312,6 +312,21 @@ function Overlay:addOCRButton(opts)
   return add(self, {
     kind = "ocr", label = opts.label, region = opts.region, hotkey = opts.hotkey,
     readOnly = opts.readOnly, opensMenu = opts.opensMenu, when = opts.when,
+    -- `text = function(overlay) -> string`: announced between the label and the value, the
+    -- same as on a custom button. A read-out whose MEANING changes needs it — Melodyne's
+    -- left inspector box holds whichever parameter the live tool owns, so "Inspector,
+    -- Amplitude, -3.0 dB" is the only reading of it that is not a guess.
+    --
+    -- It was accepted by the module and silently dropped here for a day: the option was
+    -- passed, nothing complained, and the tool name simply never reached the user. That is
+    -- the failure mode of building a control table field by field.
+    text = opts.text,
+    -- `fallback`: what to say when the region reads as nothing. The generic answer is "no
+    -- text", which describes OUR RECOGNISER rather than the application — true, but the
+    -- wrong subject. A field that is legitimately empty under some states of the plug-in
+    -- should say so in the plug-in's terms ("no value"), and the prior art this project
+    -- ports from did exactly that.
+    fallback = opts.fallback,
   })
 end
 
@@ -1308,7 +1323,7 @@ local function speakControl(self, index, moveMouse, withHint)
         oy + math.floor((c.region[2] + c.region[4]) / 2))
     end
     local r = host.ocr.recognize({ region = region })
-    parts[#parts + 1] = (r.text ~= "" and r.text or "no text")
+    parts[#parts + 1] = (r.text ~= "" and r.text) or c.fallback or "no text"
     -- An OCREdit drops the caret into the real edit control on focus, so the user can type
     -- to change the value right away. Read first (clean), then click. `moveMouse` is true
     -- only on a focus read, so navigating away doesn't re-click.
