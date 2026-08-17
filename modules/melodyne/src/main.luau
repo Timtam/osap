@@ -938,6 +938,35 @@ local lastArea, lastAreaMin = nil, nil
 -- The bar lines of the previous frame, so a scroll can be told from an edit.
 local prevLines = nil
 
+-- A distance as a FRACTION OF A BAR, named when it is close to a simple one.
+--
+-- Melodyne moves a note by whole grid units, so pressing the key twice does the same thing
+-- twice; the measurement of it carries about two pixels of noise. Read out to the percent that
+-- became "33, 38, 31, 35, 33, 34" for six identical presses, which sounds random and is not.
+-- The user called it inconsistent, and he was describing my arithmetic rather than his edit.
+--
+-- The measured ratios sat at 0.31 to 0.38 against a bar that stayed within 98 to 102 pixels, so
+-- the honest reading is a third of a bar, six times. Naming the nearest simple fraction when the
+-- measurement is within five hundredths of it says exactly that and stays silent about a
+-- precision the picture does not carry. Anything further from a named fraction keeps the
+-- percentage, because inventing a name for 0.44 would be worse than admitting the number.
+--
+-- Fractions of a BAR, still, never note values: those need a time signature, and
+-- bar.beat.sixteenth tells us how the transport counts, not how many beats a bar holds.
+local FRACTIONS = {
+  { 1 / 16, "a sixteenth of a bar" }, { 1 / 12, "a twelfth of a bar" },
+  { 1 / 8, "an eighth of a bar" }, { 1 / 6, "a sixth of a bar" },
+  { 1 / 4, "a quarter of a bar" }, { 1 / 3, "a third of a bar" },
+  { 1 / 2, "half a bar" }, { 2 / 3, "two thirds of a bar" },
+  { 3 / 4, "three quarters of a bar" }, { 1, "a bar" },
+}
+local function asFraction(ratio)
+  for _, f in ipairs(FRACTIONS) do
+    if math.abs(ratio - f[1]) <= 0.05 then return f[2] end
+  end
+  return nil
+end
+
 -- The bar lines, found in the same profile that finds the note.
 --
 -- They are the only ruler we have, and they are not optional: a note that moved eleven pixels
@@ -1322,7 +1351,9 @@ local function measureNoteArea(o)
       local barW = barWidthAt(lines, math.floor(aSum / aN))
       local dir = moved > 0 and "right" or "left"
       if barW and barW > 0 then
-        local pct = math.floor(math.abs(moved) / barW * 100 + 0.5)
+        local ratio = math.abs(moved) / barW
+        local pct = math.floor(ratio * 100 + 0.5)
+        local named = asFraction(ratio)
         -- Both numbers, because the user heard the percentage SHRINK while the pixel step held
         -- steady at 33 to 35 — one grid step per press, six presses running. The bars are not
         -- equally wide (99 to 131 measured across one view), so the same distance is a smaller
@@ -1330,10 +1361,12 @@ local function measureNoteArea(o)
         -- is Melodyne slowing down or my line detector calling two different things a bar is
         -- exactly what these two numbers side by side will show.
         if host.calibrating then
-          host.log.info(("[melodyne] spoke %d%%: %d px against a bar of %d px at x%d")
-            :format(pct, math.abs(moved), barW, math.floor(aSum / aN) + NOTE_AREA[1] - 1))
+          host.log.info(("[melodyne] spoke %s: %d px against a bar of %d px (ratio %.3f) at x%d")
+            :format(named or (pct .. "%"), math.abs(moved), barW, ratio,
+              math.floor(aSum / aN) + NOTE_AREA[1] - 1))
         end
-        host.speech.output(("%s, %d%% of a bar"):format(dir, pct), { interrupt = true })
+        host.speech.output(named and (dir .. ", " .. named) or ("%s, %d%% of a bar"):format(dir, pct),
+          { interrupt = true })
       else
         -- No two bar lines in view: the direction is still true, and a pixel count is not.
         host.speech.output(dir, { interrupt = true })
