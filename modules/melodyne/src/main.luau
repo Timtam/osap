@@ -1167,10 +1167,16 @@ local function measureNoteArea(o)
     -- Where a dark thing IS now has one answer to "where was that darkness a moment ago". So the
     -- arrival columns alone are scored, and the sign follows from the physics rather than from
     -- whichever half of the change happened to be larger.
+    -- A LOWER bar for "arrived" than for "changed at all", and deliberately so. The run list is
+    -- built from either channel, so a run can exist because the mean moved while the minimum
+    -- barely did; requiring the full change threshold again here left half the frames with fewer
+    -- than four arrival columns and therefore silent. The user heard a value, two gaps, another
+    -- value — correct numbers that sounded like noise because of what was missing between them.
+    local ARRIVED = 10
     local cols = {}
     for _, r in ipairs(runs) do
       for i = r.from, r.to do
-        if (minv[i] or 0) + MIN_THRESHOLD <= (prevMin[i] or 0) then cols[#cols + 1] = i end
+        if (minv[i] or 0) + ARRIVED <= (prevMin[i] or 0) then cols[#cols + 1] = i end
       end
     end
     local moved, sBest, sStill = bestShift(prevMin, minv, cols)
