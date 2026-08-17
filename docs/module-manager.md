@@ -87,6 +87,30 @@ if another loaded module (transitively) depends on it, the uninstall is blocked
 and names the dependents. After a successful uninstall you're offered to also
 remove dependencies it pulled in that nothing else needs (orphan cleanup).
 
+## Application settings
+
+**Application settings…**, in the Installed tab's button row, opens the platform's own
+settings — the ones that are about the application rather than about any module: detailed
+(trace) logging, saving the images OCR was given, the calibration keys inside overlays,
+loading modules not meant for this system, and running without a window.
+
+Each is a checkbox in the same dialog shape a module's settings use, and each label says
+**when it takes effect** — immediately, after reloading modules, or after a restart — because
+a setting that appears to do nothing is worse than one that admits it needs a restart.
+Changes are written to `settings.toml` beside the application, so they survive a restart.
+
+These were environment variables, and a variable is the wrong shape for them: it has to be
+decided before the process starts, cannot be changed while it runs, is invisible to anybody
+who did not set it, and has to be typed into a terminal to be used at all. Somebody who needs
+trace logging for one keystroke should be able to switch it on, do the thing, and switch it
+off again.
+
+The variables still work, for the launches that have no dialog to click — a CI job running
+headless, a tester told to start with tracing on. A variable that is set **forces** its
+setting on for that run, and the dialog says so on the label instead of offering a control
+that cannot do what it says. The log's session header lists every setting that is on and
+which of the two turned it on.
+
 ## Browse tab
 
 Searches the public module ecosystem — GitHub repositories tagged with the module

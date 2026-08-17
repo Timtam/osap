@@ -102,6 +102,13 @@ pub struct ModuleEntry {
 pub struct Store {
     #[serde(default = "one")]
     pub schema_version: u32,
+    /// The application's own settings — the ones that used to be environment variables.
+    /// See [`crate::appcfg`] for what they are and why they moved.
+    ///
+    /// A map rather than a struct, so that a settings file written by a newer build keeps
+    /// its unknown keys instead of losing them the next time an older build saves.
+    #[serde(default)]
+    pub app: BTreeMap<String, Value>,
     #[serde(default)]
     pub modules: BTreeMap<String, ModuleEntry>,
 }
@@ -125,8 +132,23 @@ impl Store {
     fn empty() -> Store {
         Store {
             schema_version: 1,
+            app: BTreeMap::new(),
             modules: BTreeMap::new(),
         }
+    }
+
+    /// One application setting as a bool, or `None` when it has never been set.
+    pub fn app_flag(&self, key: &str) -> Option<bool> {
+        match self.app.get(key) {
+            Some(Value::Bool(b)) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// Records one application setting. Saving is the caller's business, as everywhere else
+    /// in this store.
+    pub fn set_app_flag(&mut self, key: &str, on: bool) {
+        self.app.insert(key.to_string(), Value::Bool(on));
     }
 
     /// Loads the store, migrating a legacy `disabled-modules.txt` if present,

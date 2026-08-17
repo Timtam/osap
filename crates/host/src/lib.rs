@@ -8,6 +8,7 @@
 mod backend;
 mod gui;
 pub mod logging;
+mod appcfg;
 mod portable;
 pub mod registry;
 mod settings;
@@ -680,7 +681,7 @@ impl Shared {
             .collect();
         set.sort_unstable();
         set.dedup();
-        if std::env::var("AUTOMATION_PLATFORM_CALIBRATE").as_deref() == Ok("1") {
+        if appcfg::calibrate() {
             logging::line(
                 "keys",
                 &format!(
@@ -1612,7 +1613,7 @@ fn load_module(
     let os = std::env::consts::OS;
     if !module.manifest.runs_on(os) {
         let claimed = module.manifest.supported_os.join(", ");
-        if std::env::var_os("AUTOMATION_PLATFORM_IGNORE_SUPPORTED_OS").is_some() {
+        if appcfg::ignore_supported_os() {
             logging::line(
                 "manager",
                 &format!(
@@ -2055,7 +2056,7 @@ impl Manager {
         let has_hotkeys = !self.shared.hotkeys.borrow().is_empty();
         let has_keys = !self.shared.keys.borrow().is_empty();
         let has_triggers = self.modules.borrow().iter().any(|m| window_has_triggers(&m.lua));
-        let headless = std::env::var_os("AUTOMATION_PLATFORM_HEADLESS").is_some();
+        let headless = appcfg::headless();
 
         // The tray manager is shown whenever there's a window (non-headless), even
         // with nothing loaded yet, so modules can be browsed/installed/managed.
@@ -2286,6 +2287,11 @@ pub fn app_dir() -> &'static std::path::Path {
 
 /// Convenience entry: load each directory as a module and run them together.
 pub fn run(dirs: &[String]) -> Result<()> {
+    // The settings before the log, because the log's own header reports them — and before
+    // anything else, because `headless` decides whether there is going to be a window at all.
+    // Read straight from the file rather than through the Manager's store: this happens
+    // before a Manager exists, and the two read the same file.
+    appcfg::load(|key| settings::Store::load().app_flag(key));
     logging::init();
     let warmup = backend::warmup_ocr(); // preload the neural OCR model off the hot path
     let result = (|| -> Result<()> {
@@ -2469,7 +2475,7 @@ impl HostEvents for Dispatcher<'_> {
 
     fn on_key(&mut self, vk: u32, mods: u8) {
         self.shared.bump_epoch();
-        if std::env::var("AUTOMATION_PLATFORM_CALIBRATE").as_deref() == Ok("1") {
+        if appcfg::calibrate() {
             logging::line("keys", &format!("dispatch vk 0x{vk:02X}/m{mods}"));
         }
         let found = {
@@ -3912,7 +3918,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // once with the variable set. Same shape as AUTOMATION_PLATFORM_OCR_DEBUG.
     host.set(
         "calibrating",
-        std::env::var("AUTOMATION_PLATFORM_CALIBRATE").as_deref() == Ok("1"),
+        appcfg::calibrate(),
     )?;
 
     Ok(host)

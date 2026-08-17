@@ -354,7 +354,7 @@ impl Backend for WindowsBackend {
         let cap = self
             .capture(x, y, w, h)
             .ok_or_else(|| "screen capture failed".to_string())?;
-        let debug = std::env::var_os("AUTOMATION_PLATFORM_OCR_DEBUG").is_some();
+        let debug = crate::appcfg::ocr_debug();
         if debug {
             save_debug(&cap, "ocr-debug-raw.png");
         }

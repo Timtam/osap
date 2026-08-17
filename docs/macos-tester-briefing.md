@@ -150,13 +150,18 @@ Both sit beside `AutomationPlatform.app`, in `dist/AutomationPlatform/`. If that
 not writable, the log went to `~/Library/Application Support/AutomationPlatform/` instead —
 the log's own first lines say which it chose.
 
-**For much more detail**, when something specific is being chased:
+**For much more detail**, when something specific is being chased, there are two ways and
+the first is easier: open the menu-bar menu, choose **Show module manager**, and tick
+**Detailed (trace) logging** under **Application settings…**. It takes effect at once, it can
+be turned off again the same way, and it is remembered.
+
+The other way, for a run that has to start with it already on:
 
 ```bash
 AUTOMATION_PLATFORM_TRACE=1 open dist/AutomationPlatform/AutomationPlatform.app
 ```
 
-That records every OS call that failed and every decision the key handling made. It makes
+Either records every OS call that failed and every decision the key handling made. It makes
 the log large, so use it for a targeted run rather than all day.
 
 ## Things that will look like faults and are not

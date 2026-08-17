@@ -12,14 +12,12 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::portable;
 
 static LOG: Mutex<Option<std::fs::File>> = Mutex::new(None);
-static TRACE: AtomicBool = AtomicBool::new(false);
 
 /// Roll over at 8 MB. Chosen to stay attachable to an email or an issue: a trace-level
 /// session can produce that in an afternoon, and the previous file is kept because the
@@ -43,9 +41,13 @@ pub fn log_path() -> &'static Path {
     })
 }
 
-/// Is trace logging on? Set by `AUTOMATION_PLATFORM_TRACE=1`.
+/// Is trace logging on?
+///
+/// Owned by [`crate::appcfg`], which loads it from the settings file and lets the settings
+/// dialog change it while the application runs. This is the read every `trace` call makes,
+/// so it has to stay a plain atomic load.
 pub fn is_trace() -> bool {
-    TRACE.load(Ordering::Relaxed)
+    crate::appcfg::trace()
 }
 
 /// Opens the log file (append) and writes the session header. Silent on failure.
@@ -53,11 +55,6 @@ pub fn is_trace() -> bool {
 /// Rotation happens here rather than per line: the size only matters between sessions, and
 /// checking it on every write would put a filesystem call in the pump.
 pub fn init() {
-    TRACE.store(
-        std::env::var_os("AUTOMATION_PLATFORM_TRACE").is_some_and(|v| v != "0"),
-        Ordering::Relaxed,
-    );
-
     let path = log_path();
     if std::fs::metadata(path).map(|m| m.len() > MAX_BYTES).unwrap_or(false) {
         // One generation back, overwritten. Two files is enough to see "it worked
@@ -103,8 +100,13 @@ fn header() {
         ),
     );
     line("host", &format!("log {}", log_path().display()));
-    if is_trace() {
-        line("host", "trace logging is ON (AUTOMATION_PLATFORM_TRACE)");
+    // Every application setting that is on, and where each came from — the settings file
+    // or an environment variable forcing it. It belongs in the header because it changes how
+    // the rest of the log should be read, and because "why is this log enormous" and "why is
+    // there no detail in it" are both answered here.
+    let on = crate::appcfg::active();
+    if !on.is_empty() {
+        line("host", &format!("settings on: {}", on.join(", ")));
     }
 }
 

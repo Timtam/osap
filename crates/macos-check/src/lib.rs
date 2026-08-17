@@ -7,6 +7,9 @@
 //! `host`, or the code would compile in one crate and not the other.
 #![cfg(target_os = "macos")]
 
+#[path = "../../host/src/appcfg.rs"]
+pub mod appcfg;
+
 #[path = "../../host/src/portable.rs"]
 pub mod portable;
 

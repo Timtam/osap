@@ -102,7 +102,7 @@ fn recognize_inner(
         return Ok(empty());
     }
 
-    let debug = std::env::var_os("AUTOMATION_PLATFORM_OCR_DEBUG").is_some();
+    let debug = crate::appcfg::ocr_debug();
 
     // Everything below works in capture pixels and converts to points only at the very end,
     // through this one factor. On a Retina display it is 2.0, and the whole reason the

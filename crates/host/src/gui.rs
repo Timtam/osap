@@ -138,9 +138,14 @@ pub fn run_gui(
         let settings_btn = Button::builder(&installed).with_label("Settings…").build();
         let reload_btn = Button::builder(&installed).with_label("Reload").build();
         let uninstall_btn = Button::builder(&installed).with_label("Uninstall").build();
+        // The application's own settings, last in the row: the three before it act on the
+        // SELECTED module and this one does not, so it comes after them rather than
+        // interrupting them. It is in this tab because this is the tab a user is already in.
+        let app_btn = Button::builder(&installed).with_label("Application settings…").build();
         inst_buttons.add(&settings_btn, 0, SizerFlag::All, 6);
         inst_buttons.add(&reload_btn, 0, SizerFlag::All, 6);
         inst_buttons.add(&uninstall_btn, 0, SizerFlag::All, 6);
+        inst_buttons.add(&app_btn, 0, SizerFlag::All, 6);
         is.add_sizer(&inst_buttons, 0, SizerFlag::All, 6);
         installed.set_sizer(is, true);
         notebook.add_page(&installed, "Installed", true, None);
@@ -243,7 +248,61 @@ pub fn run_gui(
                     modal_message(&frame, "Settings", "This module has no settings.", false);
                     return;
                 }
-                open_settings_dialog(&frame, module_idx, &settings, &on_set);
+                {
+                    let on_set = on_set.clone();
+                    let mut apply = move |key: String, v: settings::Value| {
+                        on_set.borrow_mut()(module_idx, key, v);
+                    };
+                    open_settings_dialog(&frame, "Module settings", &settings, &mut apply);
+                }
+            });
+        }
+
+        // The application's own settings — what used to be environment variables. Built
+        // from `appcfg::SWITCHES` so that adding one there adds it here, and shown through
+        // the same dialog as a module's settings so there is only one shape to learn.
+        {
+            let frame = frame.clone();
+            app_btn.on_click(move |_| {
+                let descs: Vec<SettingDesc> = crate::appcfg::SWITCHES
+                    .iter()
+                    .map(|sw| {
+                        // A switch a variable is forcing on cannot be turned off from here,
+                        // and the label says so rather than offering a control that lies.
+                        let forced = crate::appcfg::forced_by_env(sw.key);
+                        let label = if forced {
+                            format!(
+                                "{} — forced on by {}, cannot be changed here",
+                                sw.label,
+                                crate::appcfg::env_name(sw.key)
+                            )
+                        } else {
+                            sw.label.to_string()
+                        };
+                        SettingDesc {
+                            key: sw.key.to_string(),
+                            label,
+                            kind: settings::Kind::Bool,
+                            value: settings::Value::Bool(crate::appcfg::get(sw.key)),
+                            min: None,
+                            max: None,
+                            choices: None,
+                        }
+                    })
+                    .collect();
+                let mut apply = |key: String, v: settings::Value| {
+                    if let settings::Value::Bool(on) = v {
+                        crate::appcfg::set(&key, on);
+                        let mut store = settings::Store::load();
+                        store.set_app_flag(&key, on);
+                        store.save();
+                        crate::logging::line(
+                            "settings",
+                            &format!("{key} is now {}", if crate::appcfg::get(&key) { "on" } else { "off" }),
+                        );
+                    }
+                };
+                open_settings_dialog(&frame, "Application settings", &descs, &mut apply);
             });
         }
 
@@ -1043,12 +1102,17 @@ fn modal_message(parent: &Frame, title: &str, message: &str, yes_no: bool) -> bo
 }
 
 /// Opens a modal settings dialog for one module, building a native control per
-/// setting (checkbox / number field / dropdown / text). On OK, applies each via `on_set`.
+/// setting (checkbox / number field / dropdown / text). On OK, hands each to `apply`.
+///
+/// Used for a module's own settings and for the application's, because the second thing a
+/// screen-reader user learns about a dialog is its shape — and two dialogs that do the same
+/// job differently are two things to learn. The caller supplies the title and decides what a
+/// changed value means.
 fn open_settings_dialog(
     parent: &Frame,
-    idx: usize,
+    title: &str,
     descs: &[SettingDesc],
-    on_set: &RefCell<Box<dyn FnMut(usize, String, settings::Value)>>,
+    apply: &mut dyn FnMut(String, settings::Value),
 ) {
     enum Ctl {
         Bool(CheckBox),
@@ -1057,7 +1121,7 @@ fn open_settings_dialog(
         Text(TextCtrl),
     }
 
-    let dialog = Dialog::builder(parent, "Module settings").build();
+    let dialog = Dialog::builder(parent, title).build();
     // Controls go on a Panel (not the bare Dialog): standard wxWidgets practice,
     // and it gives the screen reader correct control labeling + Tab navigation.
     let panel = Panel::builder(&dialog).build();
@@ -1140,7 +1204,6 @@ fn open_settings_dialog(
     dialog.set_sizer_and_fit(dlg_sizer, true);
 
     if dialog.show_modal() == ID_OK {
-        let mut apply = on_set.borrow_mut();
         for (key, ctl) in &controls {
             let value: Option<settings::Value> = match ctl {
                 Ctl::Bool(c) => Some(settings::Value::Bool(c.get_value())),
@@ -1166,7 +1229,7 @@ fn open_settings_dialog(
                 Ctl::Text(c) => Some(settings::Value::Str(c.get_value())),
             };
             if let Some(v) = value {
-                apply(idx, key.clone(), v);
+                apply(key.clone(), v);
             }
         }
     }
