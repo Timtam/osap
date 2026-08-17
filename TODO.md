@@ -58,6 +58,12 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       code is ever linked — `check-macos.ps1` runs the compiler front end only, and `host`
       itself cannot be checked from Windows at all (`tts` pulls `objc_exception`, whose
       build script needs a C compiler). Everything below is downstream of that job passing.
+- [x] **First working macOS overlay: Sforzando standalone** (2026-08-15). Written from what
+      two probes measured — `AXWindow/AXStandardWindow/` + `com.Plogue.sforzando` for identity,
+      and the title-bar derivation that brought the authored coordinates within a few points
+      of the Windows ones. The three OCR regions are per-platform because sforzando's own two
+      builds differ by a few points, not because the coordinate systems do. Untested on
+      hardware; the pitchbend region is the one most likely to want a nudge.
 - [ ] **The seven first-session measurements** in docs/macos-port.md, in that order: does
       anything appear, are coordinates right on Retina, is a capture real, does the tap
       suppress, does OCR read plugin text, does `_AXUIElementGetWindow` work, what does the

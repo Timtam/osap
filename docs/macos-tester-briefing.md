@@ -16,9 +16,10 @@ room, so **nothing in it has ever run** before you run it.
 
 Two things are expected to be true on the first day, and neither is a fault to report:
 
-- **No overlay will appear over any plugin.** Every plugin is currently identified by a
-  Windows-only detail. Making them identifiable on macOS is what your session is for — see
-  step 4.
+- **One overlay works: Sforzando standalone.** It was written from the accessibility tree
+  and the coordinates your first probes recorded, and it is the thing to try first — see
+  step 3. Every *other* plugin is still identified by a Windows-only detail, so nothing else
+  will activate; making them identifiable is what the probe is for.
 - **Speech comes out in the system voice, not VoiceOver's**, and there is no braille. That
   is a known, separate piece of work.
 
@@ -93,7 +94,24 @@ If your Mac is set to use F1–F12 as media keys, hold **fn** as well.
 This one keystroke proves that shortcut registration, the key path and speech all work. If
 it says nothing, that is worth reporting on its own, with the log.
 
-### 3. Record a plugin window — this is the important one
+### 3. Try the one overlay that should work
+
+Open **Sforzando standalone**, click into its window, and press **Tab**.
+
+It should say "Instrument", and Tab again "Polyphony", and again "Pitchbend range" — each
+with the value it reads off the screen. Shift-Tab goes back. Those three read-outs are the
+same ones the Windows version speaks, from the same authored coordinates.
+
+This is the first thing on macOS that has ever been more than plumbing, and it is built
+entirely on what your two probes measured: the window's identity, and the discovery that
+every Windows coordinate sat exactly one title bar too high until the backend learned to
+subtract it.
+
+If it says nothing at all, the overlay did not activate — send the log. If it speaks but a
+value is wrong or empty, that is a coordinate a few points out, which is worth knowing
+precisely: say which of the three, and the log will have the OCR to go with it.
+
+### 4. Record a plugin window — still the important one
 
 Open a music plugin (in a DAW or standalone; either is useful, both is better), put its
 window in front, and press **Command-Shift-F9**.
@@ -115,7 +133,7 @@ of the plugin, **Screen Recording was not granted** (or the application was not 
 after granting it). macOS does not report that as an error — it just hands back the
 wallpaper.
 
-### 4. Does anything block
+### 5. Does anything block
 
 If the machine feels sluggish, or a keystroke goes missing, say when it happened. The log
 records anything that took too long, and "around the time I opened the browser" is enough to

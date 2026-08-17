@@ -2712,6 +2712,18 @@ function Overlay:attachEmbedded(spec, opts)
   -- string. So this accepts an OS-keyed table — `control = { windows = …, macos = … }` —
   -- and everything else about the binding stays shared.
   local pattern = host.os.pick(spec.control)
+  -- No pattern for this platform means this binding has nothing to say here. Returning
+  -- rather than matching against nil is the difference between a module that is honestly
+  -- inert on a platform nobody has measured yet and one that throws on the first focus
+  -- change; and an OS-keyed `control` with no entry for the current system is exactly how a
+  -- module declares "not here, not yet".
+  if pattern == nil then
+    host.log.info(string.format(
+      "[%s] embedded binding is inactive on %s: no control pattern for this platform",
+      self.name or "overlay", host.os.current
+    ))
+    return self
+  end
   -- Optional identity check: the control class often matches *any* plugin in a
   -- host (e.g. REAPER's "Plugin<ptr>"), so `spec.identify(control)` confirms it
   -- is really this plugin (via UIA / OCR landmark / image search — the module's
