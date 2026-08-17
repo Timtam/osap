@@ -1594,6 +1594,42 @@ fn load_module(
     if modules.borrow().iter().any(|m| m.id == id) {
         return Ok((id, false)); // already loaded (e.g. a shared dependency)
     }
+
+    // A module that says it is not for this system is not loaded on it.
+    //
+    // Its window matchers would already keep it inert — one without a block for this
+    // platform never matches — so this is not about correctness. It is about what an inert
+    // module still costs: a VM, a matcher evaluated on every focus change, any timer it
+    // starts, and any global shortcut it registers, which on the wrong platform claims a
+    // combination for something that can never happen and shows the user a conflict dialog
+    // about it.
+    //
+    // Skipped LOUDLY, and only on an explicit claim. A stale manifest is the predictable
+    // failure here — Sforzando was Windows-only one day and worked on both the next — so a
+    // module that says nothing loads everywhere, an exclusion always names itself in the
+    // log, and the override exists for the case where the manifest is simply behind the
+    // code.
+    let os = std::env::consts::OS;
+    if !module.manifest.runs_on(os) {
+        let claimed = module.manifest.supported_os.join(", ");
+        if std::env::var_os("AUTOMATION_PLATFORM_IGNORE_SUPPORTED_OS").is_some() {
+            logging::line(
+                "manager",
+                &format!(
+                    "loading '{id}' anyway: it declares {claimed} and this is {os}, but AUTOMATION_PLATFORM_IGNORE_SUPPORTED_OS is set"
+                ),
+            );
+        } else {
+            logging::line(
+                "manager",
+                &format!(
+                    "not loading '{id}' ({}): it declares supported_os = [{claimed}] and this is {os}. If it does work here, the manifest is behind the code — set AUTOMATION_PLATFORM_IGNORE_SUPPORTED_OS=1 to load it anyway.",
+                    module.manifest.name
+                ),
+            );
+            return Ok((id, false));
+        }
+    }
     if !loading.insert(id.clone()) {
         anyhow::bail!("dependency cycle involving module '{id}'");
     }

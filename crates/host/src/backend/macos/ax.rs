@@ -680,7 +680,7 @@ fn walk(
             BUDGET_REPORTED.with(|c| c.set(true));
             crate::logging::line(
                 "macos",
-                "an accessibility walk hit its node budget and stopped early — any answer                  from it is 'not found so far', not 'not there'. If detection is failing on a                  large plugin, this is the first thing to look at.",
+                "an accessibility walk hit its node budget and stopped early — any answer from it is 'not found so far', not 'not there'. If detection is failing on a large plugin, this is the first thing to look at.",
             );
         }
         return true;

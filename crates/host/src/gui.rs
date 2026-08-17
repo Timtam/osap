@@ -538,9 +538,25 @@ pub fn run_gui(
                 } else {
                     caps.join("\n\u{2022} ")
                 };
+                // The operating-system claim, when the module makes one that excludes this
+                // machine. A warning rather than a refusal: the manifest may simply be
+                // behind the code, the user may be installing on one machine for another,
+                // and refusing an install on the strength of a line in a text file is a
+                // stronger claim than that line can carry. The install still happens; the
+                // module just will not load here, and the log says so at every start.
+                let os = std::env::consts::OS;
+                let os_note = if manifest.runs_on(os) {
+                    String::new()
+                } else {
+                    format!(
+                        "\n\nNOT FOR THIS SYSTEM\nIt declares support for: {}\nThis machine is: \
+                         {os}\n\nIt can be installed, but it will not be loaded here.",
+                        manifest.supported_os.join(", ")
+                    )
+                };
                 let msg = format!(
-                    "\u{201c}{}\u{201d} v{} ({})\n\nRequested capabilities:\n\u{2022} {}\n\nInstall this module?",
-                    manifest.name, manifest.version, manifest.id, caps_str
+                    "\u{201c}{}\u{201d} v{} ({})\n\nRequested capabilities:\n\u{2022} {}{}\n\nInstall this module?",
+                    manifest.name, manifest.version, manifest.id, caps_str, os_note
                 );
                 if !modal_message(&frame, "Review capabilities", &msg, true) {
                     busy.set(false);
@@ -715,7 +731,7 @@ pub fn run_gui(
         // the person the application is for, on both platforms, and it is the same channel
         // everything else in the product uses.
         #[cfg(target_os = "macos")]
-        let hint = "Automation Platform is running in the menu bar.                     Open its menu to manage modules.";
+        let hint = "Automation Platform is running in the menu bar. Open its menu to manage modules.";
         #[cfg(not(target_os = "macos"))]
         let hint = "Running in the system tray. Double-click the tray icon to manage modules.";
         if !taskbar.show_balloon("Automation Platform", hint, 0, 0, None) {

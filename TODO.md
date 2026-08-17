@@ -32,6 +32,12 @@ Architecture and feasibility foundation: [docs/architecture-feasibility-study.md
 - [x] **Persist the enabled set:** the manager remembers disabled modules across runs (re-applied right after a module's entry loads, revoking its OS registrations). Originally a `disabled-modules.txt`; folded into the unified settings store below. ✓ (2026-06-21)
 - [x] **Slice 16 — settings format + GUI:** `host.settings` (`define`/`get`/`set`/`onChange`, `host.config` alias) — modules declare typed, validated, auto-persisted settings; each module sees only its own. Unified portable store `host::settings` (`<exe_dir>/settings.toml`: per-module `enabled` flag + `settings` map; atomic write; corrupt-file quarantine; auto-migrates the old `disabled-modules.txt`). The tray manager has a **per-module Settings… dialog** with native, screen-reader-labeled controls (checkbox / number field / dropdown / text — each labeled by a leading `wxStaticText` + `set_name`, the only thing NVDA reliably reads; see [[accessibility-native-controls]]). Example: `examples/settings`. ✓ (2026-06-21)
   - Follow-up: optional advisory `[settings.<key>]` block in `module.toml` for pre-run GUI introspection (deferred); bump `engine_api` (additive).
+- [ ] **A module excluded by `supported_os` is invisible in the manager.** The Installed list
+      is built from what was loaded, so a module skipped for this platform has no row —
+      somebody who installs past the "will not be loaded here" warning and then looks for it
+      will not find it. A synthesised row needs Settings, Reload and Uninstall to refuse for
+      it, in the one window a blind user depends on, which is why it was not done in the same
+      change. The log names every exclusion at every start in the meantime.
 - [ ] **Module manager follow-ups:** CLI/IPC control surface; a **native macOS/GTK checkbox path** (`TVS_CHECKBOXES` is Windows-only — non-Windows currently shows no checkboxes). Out-of-process only for the untrusted-native-FFI tier. See [docs/module-runtime-and-lifecycle.md](docs/module-runtime-and-lifecycle.md).
   - Lifted out of the completed entries below, where they were easy to lose:
   - [ ] **Hotkey conflicts are resolved at registration only.** A binding skipped because another module held the combo does not activate when that owner is later disabled (needs a restart), and `apply_enabled`'s re-register on enable neither conflict-checks nor surfaces a clash.

@@ -178,7 +178,7 @@ fn signature_of(bundle_path: &str) -> Vec<(String, String)> {
     let verdict = if let Some(a) = &authority {
         format!("signed by {a} — permissions survive a rebuild")
     } else if adhoc {
-        "ad-hoc (no certificate). The identity is derived from the binary, so it changes on          every rebuild and macOS forgets every permission each time.          ./macos-signing-identity.sh fixes that."
+        "ad-hoc (no certificate). The identity is derived from the binary, so it changes on every rebuild and macOS forgets every permission each time.          ./macos-signing-identity.sh fixes that."
             .to_string()
     } else if unsigned {
         "none — not signed at all, so no permission will be remembered".to_string()
@@ -366,13 +366,13 @@ pub fn environment_report() -> Vec<(String, String)> {
     match input_monitoring() {
         Some(ACCESS_GRANTED) => push(
             "input monitoring",
-            "granted (it normally follows the Accessibility grant rather than needing one of              its own)"
+            "granted (it normally follows the Accessibility grant rather than needing one of its own)"
                 .into(),
         ),
         Some(ACCESS_DENIED) => {
             push(
                 "input monitoring",
-                "NOT granted — the event tap cannot see or swallow keys. Usually this                  resolves itself when Accessibility is granted; only if it does not is the                  pane below worth opening."
+                "NOT granted — the event tap cannot see or swallow keys. Usually this resolves itself when Accessibility is granted; only if it does not is the pane below worth opening."
                     .into(),
             );
             push("input monitoring symptom", INPUT_MONITORING_SYMPTOM.into());

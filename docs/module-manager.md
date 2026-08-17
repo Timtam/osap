@@ -99,6 +99,12 @@ dependency tree**: each declared dependency is resolved to its repo via the topi
 search and fetched too. A freshly installed module is **hot-loaded** into the
 running app — usable without a restart.
 
+A module whose manifest declares `supported_os` without this system is **flagged in that
+same review** — *"it can be installed, but it will not be loaded here"* — and installed
+anyway if you say so. It then names itself in the log at every start instead of loading.
+Omitting the field means no claim and no exclusion; see
+[module-package-format.md](module-package-format.md).
+
 ## Updates tab
 
 **Check for updates** compares each remotely-installed module against its upstream

@@ -43,6 +43,9 @@ code_module  = false            # true = this module's CODE (its functions) is
                                 # host.require — not just serialized data. Set it on
                                 # base / library modules that others build on.
 
+# Operating systems this module is written for. OMITTING IT MEANS EVERYWHERE — see below.
+supported_os = ["windows", "macos"]
+
 [capabilities]                  # Default-deny, see study §7
 require = ["window.read", "input.click", "screen.imagesearch", "ocr", "speech"]
 # "ffi.native" only if native/ is used — highest level, signature-required
@@ -53,6 +56,38 @@ require = ["window.read", "input.click", "screen.imagesearch", "ocr", "speech"]
 ```
 
 TOML, because it is declarative and **readable without code execution** — the host can check capabilities/trust *before* Luau runs.
+
+### `supported_os`, and why omitting it is the safe default
+
+A module is already gated at runtime by its window matchers: one whose matcher has no block
+for the current platform never matches, and the module sits there inert. So this field is not
+what makes a module correct. It is what lets the application say something useful *before*
+running it — warn before installing something that cannot work here, and not pay for loading
+it.
+
+What loading an inert module costs is small but not nothing: a VM, a matcher evaluated on
+every focus change, any timer it starts, and any global shortcut it registers — which on the
+wrong platform claims a key combination for something that can never happen, and shows the
+user a conflict dialog about it.
+
+Against that stands the fact that a manifest is a **claim**, and claims rot. Sforzando was
+Windows-only one day and worked on both the next; a manifest still saying `["windows"]` would
+have excluded a module that had just started working, and the reason would have been a line
+in a file nobody reads. So:
+
+- **Omitted means no claim, and no claim means every platform.** Every module written before
+  this field existed goes on loading exactly as it did.
+- A module that names platforms and not this one is **not loaded**, and says so in the log at
+  every start, by name, with the reason.
+- `AUTOMATION_PLATFORM_IGNORE_SUPPORTED_OS=1` loads it anyway — for the case where the
+  manifest is simply behind the code.
+- The install review says *"it can be installed, but it will not be loaded here"* rather than
+  refusing. Refusing an install on the strength of one line in a text file is a stronger
+  claim than that line can carry.
+
+Names are `windows`, `macos`, `linux` — Rust's `std::env::consts::OS` values — matched
+case-insensitively, because the file is written by hand and `"Windows"` is what a person
+types.
 
 ## Multi-file code (fixed entry point, no mono-file)
 

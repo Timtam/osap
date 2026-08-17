@@ -35,6 +35,12 @@ pub struct InstalledModule {
     pub dependencies: Vec<String>,
     /// (repo, branch, commit sha) it was installed from, if installed remotely.
     pub source: Option<Source>,
+    /// What the manifest claims about operating systems, verbatim and possibly empty.
+    ///
+    /// Carried so the manager can SHOW a module it did not load, with the reason. A module
+    /// that silently disappears from the list is a support question; one that is listed as
+    /// "declares windows, this is macos" answers itself.
+    pub supported_os: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -276,6 +282,7 @@ pub fn installed() -> Vec<InstalledModule> {
                     .map(|s| module_manifest::dep_id(s).to_string())
                     .collect(),
                 source: read_source(&dir),
+                supported_os: m.manifest.supported_os,
                 dir,
             });
         }

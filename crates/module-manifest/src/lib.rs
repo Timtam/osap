@@ -40,8 +40,45 @@ pub struct ModuleManifest {
     /// `docs/nested-overlays-design.md`.
     #[serde(default)]
     pub code_module: bool,
+    /// Operating systems this module is written for, as `std::env::consts::OS` names —
+    /// `["windows", "macos"]`. **Omitted means no claim, and no claim means everywhere.**
+    ///
+    /// That default is the whole design. A module is already gated at RUNTIME by its window
+    /// matchers: one without a `macos` block never matches there and is inert. So this field
+    /// is not what makes a module correct — it is what lets the application say something
+    /// useful *before* running it: warn before installing something that cannot work here,
+    /// and not pay for loading it.
+    ///
+    /// It is therefore a claim, and claims rot. Sforzando was Windows-only one day and
+    /// worked on both the next; a manifest still saying `["windows"]` would have excluded a
+    /// module that had just started working, and the reason would have sat in a file nobody
+    /// reads. So the three defences against a stale claim are: absent is not "unsupported";
+    /// every exclusion names itself in the log at every start, with the override that loads
+    /// it anyway; and the install review says "it can be installed, but it will not be loaded
+    /// here" before anyone commits to it.
+    ///
+    /// One gap, deliberately left rather than papered over: an excluded module does not
+    /// appear in the manager's Installed list, because that list is built from what was
+    /// loaded. Someone who installs past the warning and then looks for it will not find it.
+    /// Synthesising a row for something with no VM means a row whose Settings, Reload and
+    /// Uninstall buttons all have to refuse, in the one window a blind user depends on, and
+    /// that is not a change to make for a cosmetic gain. See TODO.md.
+    #[serde(default)]
+    pub supported_os: Vec<String>,
     #[serde(default)]
     pub capabilities: Capabilities,
+}
+
+impl ModuleManifest {
+    /// Does this module claim to run on `os` (an `std::env::consts::OS` name)?
+    ///
+    /// True when it makes no claim at all — see the field. Comparison is
+    /// case-insensitive, because a manifest is written by hand and "Windows" is what a
+    /// person types.
+    pub fn runs_on(&self, os: &str) -> bool {
+        self.supported_os.is_empty()
+            || self.supported_os.iter().any(|s| s.eq_ignore_ascii_case(os))
+    }
 }
 
 /// `[capabilities]` block: which host capabilities the module requests (default-deny).
@@ -163,5 +200,49 @@ mod tests {
         // Surrounding / extra whitespace is tolerated.
         assert_eq!(dep_id("  com.x.y   ^2  "), "com.x.y");
         assert_eq!(dep_constraint("  com.x.y   ^2  "), Some("^2"));
+    }
+
+    fn manifest_with(os: &[&str]) -> ModuleManifest {
+        let list = os.iter().map(|s| format!("\"{s}\"")).collect::<Vec<_>>().join(", ");
+        let text = format!(
+            "id = \"com.x.y\"
+name = \"X\"
+version = \"1.0.0\"
+supported_os = [{list}]
+"
+        );
+        toml::from_str(&text).expect("manifest parses")
+    }
+
+    #[test]
+    fn a_module_that_makes_no_claim_runs_everywhere() {
+        // The load-bearing default. Every module written before this field existed says
+        // nothing, and every one of them must go on loading exactly as it did.
+        let m: ModuleManifest =
+            toml::from_str("id = \"com.x.y\"
+name = \"X\"
+version = \"1.0.0\"
+")
+                .expect("manifest parses");
+        assert!(m.supported_os.is_empty());
+        for os in ["windows", "macos", "linux", "something-new"] {
+            assert!(m.runs_on(os), "no claim must mean {os} too");
+        }
+    }
+
+    #[test]
+    fn a_claim_includes_what_it_names_and_excludes_the_rest() {
+        let m = manifest_with(&["windows", "macos"]);
+        assert!(m.runs_on("windows"));
+        assert!(m.runs_on("macos"));
+        assert!(!m.runs_on("linux"));
+    }
+
+    #[test]
+    fn a_claim_is_read_the_way_a_person_writes_it() {
+        // Hand-written file, so "Windows" and "macOS" are what will actually appear.
+        let m = manifest_with(&["Windows", "macOS"]);
+        assert!(m.runs_on("windows"));
+        assert!(m.runs_on("macos"));
     }
 }
