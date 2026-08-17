@@ -1179,13 +1179,9 @@ local function measureNoteArea(o)
         if (minv[i] or 0) + ARRIVED <= (prevMin[i] or 0) then cols[#cols + 1] = i end
       end
     end
-    local moved, sBest, sStill = bestShift(prevMin, minv, cols)
-    -- SILENCE UNLESS IT IS CLEAR. The shifted comparison has to explain the change much better
-    -- than "nothing moved" does, and the leftover difference has to be small in its own right.
-    -- Neither test alone is enough: a picture that changed for some other reason has a poor
-    -- score everywhere, and a nearly unchanged picture matches equally well at every offset.
-    -- A wrong number here is worse than saying nothing, because there is nothing else in this
-    -- window for the user to check it against.
+    -- Kept as a SECOND OPINION in the log and nothing more. It is the estimate that aliased,
+    -- and a shift it agrees on is a small reassurance while a disagreement is worth seeing.
+    local corr, sBest, sStill = bestShift(prevMin, minv, cols)
     -- WHERE THE DARKNESS APPEARED against WHERE IT LEFT — a sign that cannot alias.
     --
     -- The correlation above is the wrong instrument for this picture and the user's test proved
@@ -1220,22 +1216,30 @@ local function measureNoteArea(o)
           centroid and (centroid > 0 and "right" or "left") or "nothing",
           centroid and string.format("%.0f", math.abs(centroid)) or "?", aN, dN))
     end
-    -- SPOKEN: NOT YET, and this is a deliberate stop rather than an oversight.
+    -- SPOKEN AGAIN, on the centroid and not on the correlation, because a controlled test
+    -- earned it: five Ctrl+Rights followed by five Ctrl+Lefts produced
     --
-    -- Three versions of this went to a blind user tonight and each of them spoke a direction
-    -- that was sometimes the opposite of what he had pressed. He has nothing in that window to
-    -- check a spoken direction against — that is the whole reason the channel exists — so a
-    -- wrong one is worse than silence, and worse still because it teaches a habit. The
-    -- measurement keeps running and keeps writing down what it would have said. It speaks again
-    -- when a session's log shows the sign matching the keys, and not before.
-    local confident = false
+    --   right 13, right 27, right 56, right 22, right 22, right 21
+    --   left 21, left 22, left 22, left 56, left 27
+    --
+    -- Eleven signs out of eleven, and the magnitudes come back MIRRORED — the same journey
+    -- retraced. That symmetry is the part no estimator can fake by guessing, and it is why this
+    -- is evidence where "two correct answers" was not.
+    --
+    -- A sample floor rather than a fit threshold: the failures that remain are frames with two
+    -- or three changed columns, where a centroid is an average of almost nothing. Five columns
+    -- on each side keeps every frame of the test above and drops exactly those.
+    local confident = centroid ~= nil and aN >= 5 and dN >= 5 and math.abs(centroid) >= 4
+    local moved = centroid or 0
     if host.calibrating then
-      host.log.info(("[melodyne] shift %d px (fit %.1f against %.1f standing still) -> %s")
-        :format(moved, sBest, sStill, confident and "spoken" or "not confident, silent"))
+      host.log.info(("[melodyne] correlation says %d px (fit %.1f against %.1f standing still)")
+        :format(corr, sBest, sStill))
     end
     if confident then
       local lines = barLines(mean)
-      local barW = barWidthAt(lines, cols[math.floor(#cols / 2) + 1] or runs[1].from)
+      -- Scaled where the note ARRIVED, since that is where it now is and the bars are not
+      -- evenly spaced.
+      local barW = barWidthAt(lines, math.floor(aSum / aN))
       local dir = moved > 0 and "right" or "left"
       if barW and barW > 0 then
         local pct = math.floor(math.abs(moved) / barW * 100 + 0.5)
