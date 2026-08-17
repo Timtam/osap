@@ -103,6 +103,26 @@ local function activeTool(ov)
   return nil
 end
 
+-- Which tool is active, asked at most once per input epoch.
+--
+-- `activeTool` costs up to six pixel reads, and a pixel read costs a fixed compositor frame —
+-- around 17 ms, measured, whatever its size. Two things now ask the question on every focus
+-- move (the read-outs below, to know which of them exist), so asking it six times per move
+-- would put a tenth of a second between a Tab and its announcement.
+--
+-- Keyed on `inputEpoch` rather than `epoch`: which tool is selected changes only when
+-- something ACTS — the user pressing a function key, or us clicking an icon — and that is
+-- exactly what turns that counter over. An ordinary epoch would re-read on every question.
+local toolMemo = { gen = -1, index = nil }
+local function activeToolCached(ov)
+  local gen = host.inputEpoch and host.inputEpoch() or (host.epoch and host.epoch() or 0)
+  if toolMemo.gen ~= gen then
+    toolMemo.gen = gen
+    toolMemo.index = activeTool(ov)
+  end
+  return toolMemo.index
+end
+
 -- Which variant of a tool is live: the first whose probe points ALL read near-black, else the
 -- base. Only meaningful while that tool's icon is lit, since the probes read its glyph against
 -- the lit white box.
@@ -306,18 +326,61 @@ ov:addCustomButton({
   onActivate = engageMenuBar,
 })
 
--- The two read-outs in the tool strip (SIBIAC's Edit1 and Edit2). `readOnly`, because
--- activating them does nothing in Melodyne and a control must not announce itself as a button
--- it cannot honour — the rule this project arrived at through a "button" that only reported.
+-- The read-outs in the tool strip (SIBIAC's Edit1 and Edit2). `readOnly`, because activating
+-- them does nothing in Melodyne and a control must not announce itself as a button it cannot
+-- honour — the rule this project arrived at through a "button" that only reported.
+--
+-- They were "Selected note" and "Pitch deviation", and that was true of one tool out of six.
+-- The toolbar inspector is ONE slot that only spreads into two fields for the Pitch tool;
+-- Pitch Modulation, Pitch Drift, Formant, Amplitude and Attack Speed each show a SINGLE field
+-- at the same left position, and the unit is theirs rather than the note's: per cent for
+-- modulation, drift, attack speed and sibilant balance, decibels for amplitude, cents for
+-- formants. So the second control was reading a field that mostly is not there, and the first
+-- was calling whatever it found a note.
+--
+-- Hence: the left field announces WHICH TOOL's value it is reading, and the right field only
+-- exists while the field itself does. Neither is a guess about the layout — it is
+-- docs/melodyne-reference.md §3.4, from Celemony's own figures.
 local NOTE_REGION = { 220, 61, 287, 74 }
 local PITCH_REGION = { 300, 61, 367, 74 }
 
-ov:addOCRButton({ label = "Selected note", region = NOTE_REGION, readOnly = true })
-ov:addOCRButton({ label = "Pitch deviation", region = PITCH_REGION, readOnly = true })
+-- What the left field is showing, in the words of the tool that owns it. Nil when no tool
+-- reads as lit, in which case the label alone is the honest answer.
+local function inspectorOwner(o)
+  local i = activeToolCached(o)
+  if not i then return nil end
+  local tool = TOOLS[i]
+  local v = activeVariant(o, tool)
+  if v > 1 and tool.variants and tool.variants[v - 1] then
+    return tool.variants[v - 1].name
+  end
+  return tool.name
+end
+
+ov:addOCRButton({
+  label = "Inspector",
+  region = NOTE_REGION,
+  readOnly = true,
+  -- Between the label and the value, so it reads "Inspector, Amplitude, -3.0 dB" — the unit
+  -- alone would not say which parameter it belongs to, and the tool strip is a Tab away.
+  text = inspectorOwner,
+})
+ov:addOCRButton({
+  label = "Pitch deviation",
+  region = PITCH_REGION,
+  readOnly = true,
+  -- Only the Pitch tool itself has a second field. Its own sub-tools do not: Pitch Modulation
+  -- and Pitch Drift are single-field like the rest, which is why this asks for the base
+  -- variant and not merely for the Pitch group.
+  when = function(o)
+    local i = activeToolCached(o)
+    return i ~= nil and TOOLS[i].name == "Pitch" and activeVariant(o, TOOLS[i]) == 1
+  end,
+})
 
 -- ── Announcing a new selection without being asked ────────────────────────────
--- Selecting a different note changes both read-outs, and a user working in the editor should
--- not have to tab away to find out what they just landed on.
+-- Selecting a different note changes the read-out, and a user working in the editor should not
+-- have to tab away to find out what they just landed on.
 --
 -- Watched rather than triggered by the keys that do it, which was the first idea and the wrong
 -- one: those keys are Melodyne's, they pass through untouched by design, and adding a way to
@@ -325,8 +388,9 @@ ov:addOCRButton({ label = "Pitch deviation", region = PITCH_REGION, readOnly = t
 -- simpler and truer — it catches a selection made with the mouse, or by Melodyne itself, which
 -- watching our own keys never would.
 --
--- ONE announcement for BOTH fields. They change together, so a watcher per field would say the
--- note and then say the deviation as two separate interruptions for a single event.
+-- ONE announcement for whatever fields are there. When the Pitch tool gives two, they change
+-- together, so a watcher per field would say the note and then the deviation as two separate
+-- interruptions for a single event.
 --
 -- The two regions are adjacent on the same line, so the CHANGE DETECTOR is a single read across
 -- both of them. That keeps the steady state at one OCR per tick rather than two, and only when
@@ -371,7 +435,14 @@ local function readSelection(o)
     })
     return (r and r.text) or ""
   end
-  local note, pitch = field(NOTE_REGION), field(PITCH_REGION)
+  -- The right-hand field only exists while the Pitch tool itself is active; for every other
+  -- tool that region is empty toolbar. Reading it anyway cost a second OCR per tick for
+  -- nothing, and — worse — put whatever the recogniser made of an empty strip into the
+  -- announcement. See the read-out controls above and docs/melodyne-reference.md §3.4.
+  local i = activeToolCached(o)
+  local twoFields = i ~= nil and TOOLS[i].name == "Pitch" and activeVariant(o, TOOLS[i]) == 1
+  local note = field(NOTE_REGION)
+  local pitch = twoFields and field(PITCH_REGION) or ""
   return note .. "|" .. pitch, note, pitch
 end
 
@@ -426,4 +497,7 @@ end)
 -- navigation keys have to reach it rather than steer the overlay.
 ov:attach(melodyne, { menus = true })
 
-host.log.info("Melodyne: standalone overlay ready — tool bar, variants, menu bar, 2 read-outs.")
+host.log.info(
+  "Melodyne: standalone overlay ready — tool bar, variants, menu bar, the inspector read-out, "
+    .. "and the pitch deviation whenever the Pitch tool has it."
+)
