@@ -926,6 +926,14 @@ local NOTE_AREA_MS = 200
 local lastAreaSize = nil
 local CHANGE_THRESHOLD = 6 -- mean, of 255; below this is recogniser and compositor noise
 local MIN_THRESHOLD = 8 -- INK: rows of a column, against a floor of about 19 and a blob of 30-57
+-- What the LAST TICK actually read, as opposed to what is remembered.
+--
+-- The caches above deliberately never forget: an empty OCR read is not an empty field, so a
+-- value survives a recogniser drop-out. That is right for announcing and wrong for asking
+-- "does this tool show anything at all" — once any tool had displayed a value the answer was
+-- yes for ever, and the note-area measurement, which only runs when the answer is no, went
+-- silent for a whole session without a line to say why.
+local readOutsSilent = true
 local lastArea, lastAreaMin = nil, nil
 -- The bar lines of the previous frame, so a scroll can be told from an edit.
 local prevLines = nil
@@ -1034,7 +1042,7 @@ local function measureNoteArea(o)
   -- silent — which is measured, not assumed, and is exactly the tools that have no number
   -- anywhere in the application. Under Pitch or Amplitude it does not run at all, so the
   -- overlay does not pay a capture every 400 ms for a window that is already answering.
-  local silent = not speakable(lastLeft) and not speakable(lastRight)
+  local silent = readOutsSilent
   if not (host.calibrating or silent) then return end
   if not ov.active then
     -- Forget on the way out, exactly as the read-out watcher does and for the same reason: a
@@ -1164,7 +1172,7 @@ local function measureNoteArea(o)
   -- supports. "Eleven pixels" is not an answer a musician can act on, and a note value would
   -- assume a time signature nobody has measured: bar.beat.sixteenth tells us how the transport
   -- counts, not how many beats a bar holds. A fraction of a bar assumes nothing.
-  if not speakable(lastLeft) and not speakable(lastRight) and #runs >= 1 then
+  if readOutsSilent and #runs >= 1 then
     -- Every column that changed, and nothing else. See bestShift for why the surroundings must
     -- stay out of it.
     -- Only the columns where something ARRIVED — where the picture got DARKER than it was here.
@@ -1453,6 +1461,7 @@ host.timer.every(WATCH_MS, function()
   -- "the field went empty" and then as "it came back" would announce the same unchanged value
   -- over and over — precisely the noise these caches exist to remove. So "" means "no reading
   -- this tick": nothing is announced, and nothing is forgotten either.
+  readOutsSilent = not speakable(left) and not speakable(right)
   local changedLeft = left ~= "" and left ~= lastLeft
   local changedRight = right ~= "" and right ~= lastRight
   if left ~= "" then lastLeft = left end
