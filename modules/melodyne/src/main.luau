@@ -917,7 +917,12 @@ ov:addStaticText({ label = "Position", text = readPosition })
 -- indistinguishable from it in the log. So the right edge and the bottom are trimmed to the
 -- content the overlay actually has, and the log line says which columns it covered.
 local NOTE_AREA = { 48, 118, 935, 640 }
-local NOTE_AREA_MS = 400
+-- Faster than the first guess, because the announcement is per FRAME and the user presses per
+-- KEY. At 400 ms two quick presses land in one frame and are announced as one move of double the
+-- size, which reads as "the values are not continuous" — and they were not. A capture is 17 ms,
+-- so 200 ms is under a tenth of the timer thread, and it is only paid under the tools that have
+-- nothing else to say.
+local NOTE_AREA_MS = 200
 local lastAreaSize = nil
 local CHANGE_THRESHOLD = 6 -- mean, of 255; below this is recogniser and compositor noise
 local MIN_THRESHOLD = 24 -- minimum, of 255; higher because a minimum is one pixel and noisier
@@ -1150,9 +1155,23 @@ local function measureNoteArea(o)
   if not speakable(lastLeft) and not speakable(lastRight) and #runs >= 1 then
     -- Every column that changed, and nothing else. See bestShift for why the surroundings must
     -- stay out of it.
+    -- Only the columns where something ARRIVED — where the picture got DARKER than it was here.
+    --
+    -- The changed set holds both halves of a move: the columns the note came to, and the ones
+    -- it left. Those two are mirror images, so a shifted comparison fits the first at +d and the
+    -- second at -d about equally well, and which of them wins is a coin toss. That is exactly
+    -- what the user heard: "left" for a Ctrl+Right and back again, with the fit looking healthy
+    -- every time — 5 to 14 against 25 to 40 standing still. The estimator was measuring
+    -- correctly and answering a question with two answers.
+    --
+    -- Where a dark thing IS now has one answer to "where was that darkness a moment ago". So the
+    -- arrival columns alone are scored, and the sign follows from the physics rather than from
+    -- whichever half of the change happened to be larger.
     local cols = {}
     for _, r in ipairs(runs) do
-      for i = r.from, r.to do cols[#cols + 1] = i end
+      for i = r.from, r.to do
+        if (minv[i] or 0) + MIN_THRESHOLD <= (prevMin[i] or 0) then cols[#cols + 1] = i end
+      end
     end
     local moved, sBest, sStill = bestShift(prevMin, minv, cols)
     -- SILENCE UNLESS IT IS CLEAR. The shifted comparison has to explain the change much better
