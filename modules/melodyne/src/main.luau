@@ -922,8 +922,6 @@ local lastAreaSize = nil
 local CHANGE_THRESHOLD = 6 -- mean, of 255; below this is recogniser and compositor noise
 local MIN_THRESHOLD = 24 -- minimum, of 255; higher because a minimum is one pixel and noisier
 local lastArea, lastAreaMin = nil, nil
--- Where the strongest run sat last time, so a displacement can be formed at all.
-local lastNoteRun = nil
 
 -- The bar lines, found in the same profile that finds the note.
 --
@@ -969,6 +967,46 @@ local function barWidthAt(lines, col)
   return lines[#lines] - lines[#lines - 1]
 end
 
+-- By how many columns did the changed part of the picture MOVE?
+--
+-- The first attempt tracked the strongest run from frame to frame, and the log showed why that
+-- cannot work: a Ctrl+Right produces eight or nine changed runs, not two, because the notes in a
+-- phrase sit close enough that moving one disturbs the columns of its neighbours. The strongest
+-- run then jumps between unrelated notes, and the difference between two of those is a number
+-- about nothing — which is exactly what the user heard: a figure when nothing had moved, silence
+-- when something had.
+--
+-- The question the picture can actually answer is not "where did this run go" but "what shift
+-- best explains the change". So: over the span that changed, slide the previous minimum profile
+-- against the current one and take the offset with the smallest mean difference. Several notes
+-- moving together, a note passing its neighbours, a run splitting in two — all of it is one
+-- shift, which is what it physically is.
+--
+-- ONLY the minimum channel. The mean sees the position cursor and barely sees a blob; the
+-- cursor moves when the SELECTION moves, which is not an edit, and announcing it as one was the
+-- other half of what the user reported.
+local MAX_SHIFT = 60
+local function bestShift(prevMin, minv, lo, hi)
+  local function score(k)
+    local sum, n = 0, 0
+    for i = lo, hi do
+      local j = i - k
+      if j >= 1 and j <= #prevMin then
+        sum = sum + math.abs((minv[i] or 0) - (prevMin[j] or 0))
+        n = n + 1
+      end
+    end
+    if n == 0 then return math.huge end
+    return sum / n
+  end
+  local best, bestScore = 0, math.huge
+  for k = -MAX_SHIFT, MAX_SHIFT do
+    local s = score(k)
+    if s < bestScore then best, bestScore = k, s end
+  end
+  return best, bestScore, score(0)
+end
+
 local function measureNoteArea(o)
   -- Runs for TWO reasons, and neither of them is "always". While calibrating it is an
   -- instrument and writes to the log. The rest of the time it runs only when the read-outs are
@@ -982,7 +1020,7 @@ local function measureNoteArea(o)
     -- frame from before an excursion is not a fact about the Melodyne we come back to, and this
     -- instrument's whole premise is that only ONE thing changed between two frames. Diffing
     -- across a trip to another window would report that trip as a note move.
-    lastArea, lastAreaMin, lastAreaSize, lastNoteRun = nil, nil, nil, nil
+    lastArea, lastAreaMin, lastAreaSize = nil, nil, nil
     return
   end
   if host.keys.nativeMenuOpen and host.keys.nativeMenuOpen() then return end
@@ -998,7 +1036,7 @@ local function measureNoteArea(o)
   -- clamped to the same numbers for every window at least this wide — so the size is kept.
   local size = cw .. "x" .. ch
   if lastAreaSize ~= size then
-    lastArea, lastAreaMin, lastAreaSize, lastNoteRun = nil, nil, size, nil
+    lastArea, lastAreaMin, lastAreaSize = nil, nil, size
   end
   local p = host.screen.profile({
     region = {
@@ -1072,7 +1110,7 @@ local function measureNoteArea(o)
   -- different stretch of music, so the baseline is thrown away rather than believed.
   if #runs > 12 then
     host.log.info(("[melodyne] note area: %d run(s) — the view moved, re-baselining"):format(#runs))
-    lastArea, lastAreaMin, lastNoteRun = nil, nil, nil
+    lastArea, lastAreaMin = nil, nil
     return
   end
   -- Ranked by whichever channel saw the most, so a blob move is not buried under a cursor move.
@@ -1096,12 +1134,31 @@ local function measureNoteArea(o)
   -- assume a time signature nobody has measured: bar.beat.sixteenth tells us how the transport
   -- counts, not how many beats a bar holds. A fraction of a bar assumes nothing.
   if not speakable(lastLeft) and not speakable(lastRight) and #runs >= 1 then
-    local newest = runs[1]
-    local moved = lastNoteRun and (newest.from - lastNoteRun)
-    lastNoteRun = newest.from
-    if moved and moved ~= 0 then
+    -- The span that changed, padded so a shifted shape is fully inside the window being
+    -- compared: without the padding the edges of the moved thing fall outside and every offset
+    -- scores about the same.
+    local lo, hi = #mean, 1
+    for _, r in ipairs(runs) do
+      if r.from < lo then lo = r.from end
+      if r.to > hi then hi = r.to end
+    end
+    lo = math.max(1, lo - MAX_SHIFT)
+    hi = math.min(#mean, hi + MAX_SHIFT)
+    local moved, sBest, sStill = bestShift(prevMin, minv, lo, hi)
+    -- SILENCE UNLESS IT IS CLEAR. The shifted comparison has to explain the change much better
+    -- than "nothing moved" does, and the leftover difference has to be small in its own right.
+    -- Neither test alone is enough: a picture that changed for some other reason has a poor
+    -- score everywhere, and a nearly unchanged picture matches equally well at every offset.
+    -- A wrong number here is worse than saying nothing, because there is nothing else in this
+    -- window for the user to check it against.
+    local confident = moved ~= 0 and sBest < sStill * 0.5 and sBest < 12
+    if host.calibrating then
+      host.log.info(("[melodyne] shift %d px (fit %.1f against %.1f standing still) -> %s")
+        :format(moved, sBest, sStill, confident and "spoken" or "not confident, silent"))
+    end
+    if confident then
       local lines = barLines(mean)
-      local barW = barWidthAt(lines, newest.from)
+      local barW = barWidthAt(lines, math.floor((lo + hi) / 2))
       local dir = moved > 0 and "right" or "left"
       if barW and barW > 0 then
         local pct = math.floor(math.abs(moved) / barW * 100 + 0.5)
