@@ -422,12 +422,44 @@ ov:addCustomButton({
 -- decibels for amplitude, cents for formants, a note name only under the pitch tools. So it
 -- announces WHICH TOOL's value it is reading, which is what the label could never say.
 --
--- The number of boxes varies too — SIBIAC's model is "zero, one or two parameter controls,
--- depending on the tool" — but that is the plugin's business and not something this file
--- should hold a table about. A box that is not drawn reads as nothing and is announced as
--- nothing. See the second control below for the whole argument, and what it cost to learn.
+-- SIBIAC's model says the number of boxes varies too — "zero, one or two parameter controls,
+-- depending on the tool" — and this file deliberately holds no table about that. What varies in
+-- every reading anyone has taken is the CONTENT: a tool with one parameter leaves the second
+-- box saying nothing, and nothing is what gets announced. Whether the box itself is ever
+-- undrawn has never actually been measured; see `BOX_EDGES` below, which will settle it from
+-- ordinary use.
 local NOTE_REGION = { 220, 61, 287, 74 }
 local PITCH_REGION = { 300, 61, 367, 74 }
+
+-- The RIGHT box's left border — one pixel that answers a question no amount of OCR can.
+--
+-- Everything ever observed about the second field was a reading of its CONTENT, and that is
+-- the flaw at the bottom of this whole affair. Melodyne's "nothing to report" is a dash three
+-- ink pixels wide on a single row; the recogniser drops it exactly as it drops bare tool bar.
+-- So "the deviation read as empty" has never distinguished "there is no box here" from "the
+-- box is here and holds a dash" — and a control was taken out of the Tab ring on the strength
+-- of that distinction, which nobody had ever made.
+--
+-- The border makes it. Measured across row y=67 of calibration/Melodyne-clean.png: the strip
+-- runs 191, each box is bordered by a solid 157 column (x=218 and x=289 for the left box, 298
+-- and 369 for the right) and filled with 194. The column at x=298 holds 157 from y=62 to y=73
+-- without a break. 157 against 191 is a wider separation than the tool icons' own probe, which
+-- this file already trusts, and the FILL would not do: 194 against 191 is three units.
+--
+-- All FOUR borders, not just the right box's, because three different states have to be told
+-- apart and two probes cannot do it:
+--   157 157 157 157   both boxes drawn — the right one is present and merely empty
+--   157 157 191 191   the right box is genuinely not there under this tool
+--   none of them 157  the strip has moved; the window is a size these coordinates do not fit,
+--                     and every reading in this file is suspect rather than just this one
+-- That last row is the one a single probe would misreport as "the box is gone", and a wrong
+-- fact recorded confidently is what this whole affair was.
+--
+-- Logged as raw numbers and NOT turned into a predicate. No frame anyone has captured shows
+-- that box absent, so a gate would again be a claim without an observation — and a number in
+-- the log can still be reinterpreted by somebody who later learns what it meant, which a
+-- verdict cannot.
+local BOX_EDGES = { { 218, 67 }, { 289, 67 }, { 298, 67 }, { 369, 67 } }
 
 -- What the left field is showing, in the words of the tool that owns it. Nil when no tool
 -- reads as lit, in which case the label alone is the honest answer.
@@ -482,9 +514,13 @@ ov:addOCRButton({
   label = "Pitch deviation",
   region = PITCH_REGION,
   readOnly = true,
-  -- And this is the one that needs it most: under a single-parameter tool the box is not
-  -- drawn at all, so the honest answer to a Tab landing here is that there is no value —
-  -- not silence, and not a sentence about optical character recognition.
+  -- And this is the one that needs it most. Under a single-parameter tool this box reads as
+  -- nothing — measured, eleven times in a hundred and seventy-eight, and again in the log the
+  -- day this line was written: Formant gives left="0 ct" right="", Amplitude left="0.00 dB"
+  -- right="". Whether that means an undrawn box or a drawn one holding Melodyne's dash is NOT
+  -- known, and this control does not need to know: either way there is nothing to report, and
+  -- the honest thing to say is that there is no value — not silence, and not a sentence about
+  -- optical character recognition. `BOX_EDGES` above is what will decide it.
   fallback = "no value",
 })
 
@@ -595,8 +631,15 @@ reportFieldsAfterSwitch = function(toolName)
     if host.keys.nativeMenuOpen and host.keys.nativeMenuOpen() then return end
     local _, note, pitch = readSelection(ov)
     if note == nil then return end
-    host.log.info(("[melodyne] fields under tool=%s: left=%q right=%q")
-      :format(tostring(toolName or "?"), trimmed(note), trimmed(pitch)))
+    -- Four pixels, ~17 ms each, once per tool switch, in a callback that is already waiting
+    -- for a repaint. Nowhere near the Tab path and nowhere near note-stepping.
+    local edges = {}
+    for i, e in ipairs(BOX_EDGES) do
+      local p = at(ov, e[1], e[2])
+      edges[i] = p and tostring(p.r) or "?"
+    end
+    host.log.info(("[melodyne] fields under tool=%s: left=%q right=%q  box borders %s (157=drawn, 191=bare strip)")
+      :format(tostring(toolName or "?"), trimmed(note), trimmed(pitch), table.concat(edges, " ")))
   end)
 end
 
