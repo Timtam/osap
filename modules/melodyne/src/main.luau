@@ -916,7 +916,7 @@ ov:addStaticText({ label = "Position", text = readPosition })
 -- whatever is BEHIND it — another application's pixels, reported as Melodyne's note editor and
 -- indistinguishable from it in the log. So the right edge and the bottom are trimmed to the
 -- content the overlay actually has, and the log line says which columns it covered.
-local NOTE_AREA = { 48, 118, 935, 640 }
+local NOTE_AREA = { 48, 118, 958, 640 }
 -- Faster than the first guess, because the announcement is per FRAME and the user presses per
 -- KEY. At 400 ms two quick presses land in one frame and are announced as one move of double the
 -- size, which reads as "the values are not continuous" — and they were not. A capture is 17 ms,
@@ -1323,6 +1323,16 @@ local function measureNoteArea(o)
       local dir = moved > 0 and "right" or "left"
       if barW and barW > 0 then
         local pct = math.floor(math.abs(moved) / barW * 100 + 0.5)
+        -- Both numbers, because the user heard the percentage SHRINK while the pixel step held
+        -- steady at 33 to 35 — one grid step per press, six presses running. The bars are not
+        -- equally wide (99 to 131 measured across one view), so the same distance is a smaller
+        -- fraction of a wider bar, and the fraction moved while the edit did not. Whether that
+        -- is Melodyne slowing down or my line detector calling two different things a bar is
+        -- exactly what these two numbers side by side will show.
+        if host.calibrating then
+          host.log.info(("[melodyne] spoke %d%%: %d px against a bar of %d px at x%d")
+            :format(pct, math.abs(moved), barW, math.floor(aSum / aN) + NOTE_AREA[1] - 1))
+        end
         host.speech.output(("%s, %d%% of a bar"):format(dir, pct), { interrupt = true })
       else
         -- No two bar lines in view: the direction is still true, and a pixel count is not.
