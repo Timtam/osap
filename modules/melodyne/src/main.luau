@@ -922,15 +922,67 @@ local lastAreaSize = nil
 local CHANGE_THRESHOLD = 6 -- mean, of 255; below this is recogniser and compositor noise
 local MIN_THRESHOLD = 24 -- minimum, of 255; higher because a minimum is one pixel and noisier
 local lastArea, lastAreaMin = nil, nil
+-- Where the strongest run sat last time, so a displacement can be formed at all.
+local lastNoteRun = nil
+
+-- The bar lines, found in the same profile that finds the note.
+--
+-- They are the only ruler we have, and they are not optional: a note that moved eleven pixels
+-- has moved nothing a person can act on, while "an eighth" is an answer. The spacing is NOT a
+-- constant — measured in this window at 99, 110, 108, 113, 112, 117 and 131 pixels, because the
+-- tempo varies — so it is measured every time rather than remembered, and the two lines nearest
+-- the movement are the ones that scale it.
+--
+-- A bar line is a column whose mean sits well below its surroundings on BOTH sides. Comparing
+-- against neighbours eight columns away rather than against a global background is what makes
+-- it survive a scrolled view, a different zoom and a screenful of note blobs: blobs are wide and
+-- lines are not, so a blob lowers its neighbours with it and a line does not.
+local BAR_LINE_CONTRAST = 14
+local function barLines(mean)
+  local lines, last = {}, -99
+  for i = 9, #mean - 8 do
+    local m = mean[i]
+    if (mean[i - 8] - m) > BAR_LINE_CONTRAST and (mean[i + 8] - m) > BAR_LINE_CONTRAST then
+      -- One entry per line: the columns of a two-pixel line would otherwise both count.
+      if i - last > 4 then lines[#lines + 1] = i end
+      last = i
+    end
+  end
+  return lines
+end
+
+-- The bar width AT a given column, from the two detected lines that bracket it.
+--
+-- Interpolating locally rather than averaging the lot is the whole point: an average across a
+-- variable tempo would describe a bar that occurs nowhere, and the note is always between two
+-- particular lines.
+local function barWidthAt(lines, col)
+  if #lines < 2 then return nil end
+  for i = 1, #lines - 1 do
+    if col >= lines[i] and col <= lines[i + 1] then
+      return lines[i + 1] - lines[i]
+    end
+  end
+  -- Outside the detected run of lines: the nearest gap is the best available scale, and saying
+  -- so is better than refusing to speak about a note near the edge of the view.
+  if col < lines[1] then return lines[2] - lines[1] end
+  return lines[#lines] - lines[#lines - 1]
+end
 
 local function measureNoteArea(o)
-  if not host.calibrating then return end
+  -- Runs for TWO reasons, and neither of them is "always". While calibrating it is an
+  -- instrument and writes to the log. The rest of the time it runs only when the read-outs are
+  -- silent — which is measured, not assumed, and is exactly the tools that have no number
+  -- anywhere in the application. Under Pitch or Amplitude it does not run at all, so the
+  -- overlay does not pay a capture every 400 ms for a window that is already answering.
+  local silent = not speakable(lastLeft) and not speakable(lastRight)
+  if not (host.calibrating or silent) then return end
   if not ov.active then
     -- Forget on the way out, exactly as the read-out watcher does and for the same reason: a
     -- frame from before an excursion is not a fact about the Melodyne we come back to, and this
     -- instrument's whole premise is that only ONE thing changed between two frames. Diffing
     -- across a trip to another window would report that trip as a note move.
-    lastArea, lastAreaMin, lastAreaSize = nil, nil, nil
+    lastArea, lastAreaMin, lastAreaSize, lastNoteRun = nil, nil, nil, nil
     return
   end
   if host.keys.nativeMenuOpen and host.keys.nativeMenuOpen() then return end
@@ -946,7 +998,7 @@ local function measureNoteArea(o)
   -- clamped to the same numbers for every window at least this wide — so the size is kept.
   local size = cw .. "x" .. ch
   if lastAreaSize ~= size then
-    lastArea, lastAreaMin, lastAreaSize = nil, nil, size
+    lastArea, lastAreaMin, lastAreaSize, lastNoteRun = nil, nil, size, nil
   end
   local p = host.screen.profile({
     region = {
@@ -1020,13 +1072,46 @@ local function measureNoteArea(o)
   -- different stretch of music, so the baseline is thrown away rather than believed.
   if #runs > 12 then
     host.log.info(("[melodyne] note area: %d run(s) — the view moved, re-baselining"):format(#runs))
-    lastArea, lastAreaMin = nil, nil
+    lastArea, lastAreaMin, lastNoteRun = nil, nil, nil
     return
   end
   -- Ranked by whichever channel saw the most, so a blob move is not buried under a cursor move.
   table.sort(runs, function(a, b)
     return math.max(a.peak, a.peakMin) > math.max(b.peak, b.peakMin)
   end)
+  -- SPOKEN, when nothing else in this window will say anything.
+  --
+  -- Under Time, Time Handle, Note Separation and Fade there is no read-out to change and no
+  -- number anywhere in the application: the position belongs to the cursor and the cursor does
+  -- not follow an edit (measured — twelve semitone moves and four time moves, transport
+  -- unchanged throughout). A blind user pressing Ctrl+Right there gets silence, which is
+  -- indistinguishable from a key that did nothing.
+  --
+  -- The condition is measured rather than assumed: we speak only when the read-outs themselves
+  -- said nothing this tick, so the pitch, formant and amplitude tools — which do have a number
+  -- and do announce it — are never talked over.
+  --
+  -- What is said is a DISPLACEMENT, in bars, because that is what the picture actually
+  -- supports. "Eleven pixels" is not an answer a musician can act on, and a note value would
+  -- assume a time signature nobody has measured: bar.beat.sixteenth tells us how the transport
+  -- counts, not how many beats a bar holds. A fraction of a bar assumes nothing.
+  if not speakable(lastLeft) and not speakable(lastRight) and #runs >= 1 then
+    local newest = runs[1]
+    local moved = lastNoteRun and (newest.from - lastNoteRun)
+    lastNoteRun = newest.from
+    if moved and moved ~= 0 then
+      local lines = barLines(mean)
+      local barW = barWidthAt(lines, newest.from)
+      local dir = moved > 0 and "right" or "left"
+      if barW and barW > 0 then
+        local pct = math.floor(math.abs(moved) / barW * 100 + 0.5)
+        host.speech.output(("%s, %d%% of a bar"):format(dir, pct), { interrupt = true })
+      else
+        -- No two bar lines in view: the direction is still true, and a pixel count is not.
+        host.speech.output(dir, { interrupt = true })
+      end
+    end
+  end
   -- WHAT the moving feature is, settled by correlation rather than by argument.
   --
   -- It is two pixels wide, very nearly full height, and 130 to 180 units of column mean darker
@@ -1040,7 +1125,7 @@ local function measureNoteArea(o)
   -- Either answer is worth having and neither requires anybody to look at a screen. One OCR per
   -- moved frame, only while calibrating.
   local transport = ""
-  if origin.client then
+  if host.calibrating and origin.client then
     local tr = host.ocr.recognize({
       region = {
         origin.client.x + TRANSPORT_REGION[1], origin.client.y + TRANSPORT_REGION[2],
@@ -1060,8 +1145,12 @@ local function measureNoteArea(o)
     parts[#parts + 1] = string.format("x%d-%d(mean%d min%d)",
       NOTE_AREA[1] + r.from - 1, NOTE_AREA[1] + r.to - 1, math.floor(r.peak + 0.5), r.peakMin)
   end
-  host.log.info(("[melodyne] note area: %d run(s) moved, strongest %s  transport=%q")
-    :format(#runs, table.concat(parts, " "), transport))
+  -- Logged only while calibrating: during ordinary use this fires whenever a note moves, and
+  -- a log that writes on every edit is a log nobody reads.
+  if host.calibrating then
+    host.log.info(("[melodyne] note area: %d run(s) moved, strongest %s  transport=%q")
+      :format(#runs, table.concat(parts, " "), transport))
+  end
 end
 
 reportFieldsAfterSwitch = function(toolName, afterMs)
