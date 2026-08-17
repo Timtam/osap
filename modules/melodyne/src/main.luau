@@ -948,8 +948,8 @@ local function measureNoteArea(o)
     parts[#parts + 1] = string.format("x%d-%d(d%d)",
       NOTE_AREA[1] + r.from - 1, NOTE_AREA[1] + r.to - 1, r.peak)
   end
-  host.log.info(("[melodyne] note area: %d run(s) moved, strongest %s")
-    :format(#runs, table.concat(parts, " ")))
+  host.log.info(("[melodyne] note area: %d run(s) moved, strongest %s  transport=%q")
+    :format(#runs, table.concat(parts, " "), transport))
 end
 
 reportFieldsAfterSwitch = function(toolName, afterMs)
