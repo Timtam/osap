@@ -123,6 +123,22 @@ local function activeToolCached(ov)
   return toolMemo.index
 end
 
+-- The active tool ONLY if it is already known — never at the price of a fresh probe.
+--
+-- For the log, and the restraint is the point. Recording which tool a read-out belonged to is
+-- how we will learn what the second field holds under the tools nobody has measured yet, but
+-- the read-outs change while the user walks from note to note with the arrow keys, and six
+-- screen reads at a compositor frame each on that path would buy that knowledge with the
+-- responsiveness of the thing being described. So: free when the epoch already asked, absent
+-- otherwise. It fills in whenever the user has just been in the overlay, which is exactly when
+-- somebody is looking at a read-out anyway.
+local function activeToolIfKnown()
+  local gen = host.inputEpoch and host.inputEpoch() or (host.epoch and host.epoch() or 0)
+  if toolMemo.gen ~= gen then return nil end
+  local i = toolMemo.index
+  return i and TOOLS[i] and TOOLS[i].name or nil
+end
+
 -- Which variant of a tool is live: the first whose probe points ALL read near-black, else the
 -- base. Only meaningful while that tool's icon is lit, since the probes read its glyph against
 -- the lit white box.
@@ -365,17 +381,27 @@ ov:addOCRButton({
   -- alone would not say which parameter it belongs to, and the tool strip is a Tab away.
   text = inspectorOwner,
 })
+-- The second field, and it is ALWAYS there.
+--
+-- This control was briefly gated to the Pitch base tool, on the reasoning that the other tools
+-- show a single value and the rest of that strip is bare tool bar. The user said otherwise from
+-- memory — the deviation had been there under the Main tool too — and the picture settles it:
+-- modules/overlay-runtime/calibration/Melodyne-clean.png, taken with the MAIN tool lit, shows
+-- BOTH boxes drawn, each holding a "-". The calibration shot beside it puts a crosshair in the
+-- middle of each, so these two regions are the two boxes and nothing else.
+--
+-- So the box does not come and go; its CONTENT does, and "-" is Melodyne's own way of saying it
+-- has nothing to report. A control that disappears when the value is a dash would be a worse
+-- lie than one that reads the dash out: the user would learn that the field exists only
+-- sometimes, which is not true of anything on that tool bar.
+--
+-- What the box holds under the tools that are not about pitch is still unmeasured — the watcher
+-- below now records it per tool, so the log answers that by itself the next time Melodyne is
+-- used, instead of someone having to look at a screen.
 ov:addOCRButton({
   label = "Pitch deviation",
   region = PITCH_REGION,
   readOnly = true,
-  -- Only the Pitch tool itself has a second field. Its own sub-tools do not: Pitch Modulation
-  -- and Pitch Drift are single-field like the rest, which is why this asks for the base
-  -- variant and not merely for the Pitch group.
-  when = function(o)
-    local i = activeToolCached(o)
-    return i ~= nil and TOOLS[i].name == "Pitch" and activeVariant(o, TOOLS[i]) == 1
-  end,
 })
 
 -- ── Announcing a new selection without being asked ────────────────────────────
@@ -435,14 +461,13 @@ local function readSelection(o)
     })
     return (r and r.text) or ""
   end
-  -- The right-hand field only exists while the Pitch tool itself is active; for every other
-  -- tool that region is empty toolbar. Reading it anyway cost a second OCR per tick for
-  -- nothing, and — worse — put whatever the recogniser made of an empty strip into the
-  -- announcement. See the read-out controls above and docs/melodyne-reference.md §3.4.
-  local i = activeToolCached(o)
-  local twoFields = i ~= nil and TOOLS[i].name == "Pitch" and activeVariant(o, TOOLS[i]) == 1
+  -- Both, always, because both boxes are always drawn (see the control above). This briefly
+  -- skipped the second read when it believed only the Pitch tool had a second field. It cost
+  -- more than the OCR it saved: it also put a PIXEL PROBE of the tool bar into every tick, so a
+  -- 120 ms watcher paid six screen reads at a compositor frame each every time the user pressed
+  -- anything. The tool is asked once per CHANGE now, for the log line, and not per tick.
   local note = field(NOTE_REGION)
-  local pitch = twoFields and field(PITCH_REGION) or ""
+  local pitch = field(PITCH_REGION)
   return note .. "|" .. pitch, note, pitch
 end
 
@@ -488,7 +513,14 @@ host.timer.every(WATCH_MS, function()
   if #parts > 0 then
     -- One line per change, kept permanently: it is what turned "only the cents are announced"
     -- from three indistinguishable guesses into one reading.
-    host.log.info(("[melodyne] selection: note=%q deviation=%q"):format(note, pitch))
+    --
+    -- Named left and right rather than note and deviation, because that is all we actually
+    -- know: the left box holds a note name under the pitch tools and a level in decibels under
+    -- Amplitude, and what the right one holds away from pitch is the open question this line
+    -- exists to answer. Calling a field by the value one tool puts in it is the mistake that
+    -- produced the gate this replaced.
+    host.log.info(("[melodyne] selection: tool=%s left=%q right=%q")
+      :format(activeToolIfKnown() or "?", note, pitch))
     host.speech.output(table.concat(parts, ", "), { interrupt = true })
   end
 end)
@@ -498,6 +530,6 @@ end)
 ov:attach(melodyne, { menus = true })
 
 host.log.info(
-  "Melodyne: standalone overlay ready — tool bar, variants, menu bar, the inspector read-out, "
-    .. "and the pitch deviation whenever the Pitch tool has it."
+  "Melodyne: standalone overlay ready — tool bar, variants, menu bar, and both inspector "
+    .. "read-outs."
 )
