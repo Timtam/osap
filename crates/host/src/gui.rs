@@ -138,14 +138,9 @@ pub fn run_gui(
         let settings_btn = Button::builder(&installed).with_label("Settings…").build();
         let reload_btn = Button::builder(&installed).with_label("Reload").build();
         let uninstall_btn = Button::builder(&installed).with_label("Uninstall").build();
-        // The application's own settings, last in the row: the three before it act on the
-        // SELECTED module and this one does not, so it comes after them rather than
-        // interrupting them. It is in this tab because this is the tab a user is already in.
-        let app_btn = Button::builder(&installed).with_label("Application settings…").build();
         inst_buttons.add(&settings_btn, 0, SizerFlag::All, 6);
         inst_buttons.add(&reload_btn, 0, SizerFlag::All, 6);
         inst_buttons.add(&uninstall_btn, 0, SizerFlag::All, 6);
-        inst_buttons.add(&app_btn, 0, SizerFlag::All, 6);
         is.add_sizer(&inst_buttons, 0, SizerFlag::All, 6);
         installed.set_sizer(is, true);
         notebook.add_page(&installed, "Installed", true, None);
@@ -187,6 +182,88 @@ pub fn run_gui(
         us.add(&updates_status, 0, SizerFlag::All, 6);
         updates.set_sizer(us, true);
         notebook.add_page(&updates, "Updates", false, None);
+
+        // ===== "Application" tab: the platform's own settings =====
+        //
+        // A tab rather than a dialog, and each change applies as it is made. A modal would
+        // mean opening it, changing something, confirming, and only then finding out what it
+        // did; a tab is somewhere you can be, tick something, hear the result, and untick it.
+        // There is no OK button for the same reason there is none on the module checkboxes in
+        // the Installed list: the change IS the action.
+        //
+        // Built from `appcfg::SWITCHES`, so a setting added there appears here without anyone
+        // remembering to come back.
+        let app_tab = Panel::builder(&notebook).build();
+        let as_ = BoxSizer::builder(Orientation::Vertical).build();
+        as_.add(
+            &StaticText::builder(&app_tab)
+                .with_label(
+                    "Settings for the application itself. Each takes effect when its label                      says, and is remembered.",
+                )
+                .build(),
+            0,
+            SizerFlag::All,
+            12,
+        );
+        for sw in crate::appcfg::SWITCHES {
+            // A variable set in the environment forces its setting on and nothing here can
+            // undo that until the application is started without it. So the box is shown
+            // ticked and disabled, with the reason in its name — rather than a control that
+            // would accept being unticked and then quietly stay on.
+            let forced = crate::appcfg::forced_by_env(sw.key);
+            let label = if forced {
+                format!(
+                    "{} — forced on by the {} environment variable, so it cannot be changed here",
+                    sw.label,
+                    crate::appcfg::env_name(sw.key)
+                )
+            } else {
+                sw.label.to_string()
+            };
+            // A leading StaticText carries the name, because a checkbox's own label is not
+            // what the screen reader announces here — the same arrangement as the module
+            // settings dialog, for the same reason.
+            as_.add(
+                &StaticText::builder(&app_tab).with_label(&label).build(),
+                0,
+                SizerFlag::Left | SizerFlag::Top,
+                10,
+            );
+            let cb = CheckBox::builder(&app_tab).build();
+            cb.set_name(&label);
+            cb.set_value(crate::appcfg::get(sw.key));
+            if forced {
+                cb.enable(false);
+            }
+            as_.add(&cb, 0, SizerFlag::Left | SizerFlag::All, 8);
+            // The explanation under the control rather than in it: it is a sentence, not a
+            // name, and a name that long is tiring to hear on every visit.
+            as_.add(
+                &StaticText::builder(&app_tab).with_label(sw.help).build(),
+                0,
+                SizerFlag::Left | SizerFlag::Bottom,
+                10,
+            );
+            let key = sw.key;
+            cb.on_toggled(move |event| {
+                // The box's own new state, from the event — not the inverse of what the
+                // setting was. Deriving it by inversion looks equivalent and is not: the two
+                // can already disagree (an environment variable forces one on regardless of
+                // what is stored), and then every click would flip the wrong way.
+                let want = event.is_checked();
+                crate::appcfg::set(key, want);
+                let now = crate::appcfg::get(key);
+                let mut store = settings::Store::load();
+                store.set_app_flag(key, now);
+                store.save();
+                crate::logging::line(
+                    "settings",
+                    &format!("{key} is now {}", if now { "on" } else { "off" }),
+                );
+            });
+        }
+        app_tab.set_sizer(as_, true);
+        notebook.add_page(&app_tab, "Application", false, None);
 
         sizer.add(&notebook, 1, SizerFlag::All | SizerFlag::Expand, 0);
         let hint = StaticText::builder(&panel)
@@ -255,54 +332,6 @@ pub fn run_gui(
                     };
                     open_settings_dialog(&frame, "Module settings", &settings, &mut apply);
                 }
-            });
-        }
-
-        // The application's own settings — what used to be environment variables. Built
-        // from `appcfg::SWITCHES` so that adding one there adds it here, and shown through
-        // the same dialog as a module's settings so there is only one shape to learn.
-        {
-            let frame = frame.clone();
-            app_btn.on_click(move |_| {
-                let descs: Vec<SettingDesc> = crate::appcfg::SWITCHES
-                    .iter()
-                    .map(|sw| {
-                        // A switch a variable is forcing on cannot be turned off from here,
-                        // and the label says so rather than offering a control that lies.
-                        let forced = crate::appcfg::forced_by_env(sw.key);
-                        let label = if forced {
-                            format!(
-                                "{} — forced on by {}, cannot be changed here",
-                                sw.label,
-                                crate::appcfg::env_name(sw.key)
-                            )
-                        } else {
-                            sw.label.to_string()
-                        };
-                        SettingDesc {
-                            key: sw.key.to_string(),
-                            label,
-                            kind: settings::Kind::Bool,
-                            value: settings::Value::Bool(crate::appcfg::get(sw.key)),
-                            min: None,
-                            max: None,
-                            choices: None,
-                        }
-                    })
-                    .collect();
-                let mut apply = |key: String, v: settings::Value| {
-                    if let settings::Value::Bool(on) = v {
-                        crate::appcfg::set(&key, on);
-                        let mut store = settings::Store::load();
-                        store.set_app_flag(&key, on);
-                        store.save();
-                        crate::logging::line(
-                            "settings",
-                            &format!("{key} is now {}", if crate::appcfg::get(&key) { "on" } else { "off" }),
-                        );
-                    }
-                };
-                open_settings_dialog(&frame, "Application settings", &descs, &mut apply);
             });
         }
 

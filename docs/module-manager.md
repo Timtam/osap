@@ -87,16 +87,21 @@ if another loaded module (transitively) depends on it, the uninstall is blocked
 and names the dependents. After a successful uninstall you're offered to also
 remove dependencies it pulled in that nothing else needs (orphan cleanup).
 
-## Application settings
+## Application tab
 
-**Application settings…**, in the Installed tab's button row, opens the platform's own
-settings — the ones that are about the application rather than about any module: detailed
-(trace) logging, saving the images OCR was given, the calibration keys inside overlays,
-loading modules not meant for this system, and running without a window.
+The platform's own settings — the ones about the application rather than about any module:
+detailed (trace) logging, saving the images OCR was given, the calibration keys inside
+overlays, loading modules not meant for this system, and running without a window.
 
-Each is a checkbox in the same dialog shape a module's settings use, and each label says
-**when it takes effect** — immediately, after reloading modules, or after a restart — because
-a setting that appears to do nothing is worse than one that admits it needs a restart.
+A tab rather than a dialog, and **each change applies as it is made**. There is no OK button,
+for the same reason the module checkboxes in the Installed list have none: the change is the
+action. A modal would mean opening it, changing something, confirming, and only then finding
+out what it did; a tab is somewhere you can be, tick something, hear the result, and untick
+it.
+
+Every label says **when its setting takes effect** — immediately, after reloading modules, or
+after a restart — because a setting that appears to do nothing is worse than one that admits
+it needs a restart. Under each checkbox is a sentence saying what the setting is for.
 Changes are written to `settings.toml` beside the application, so they survive a restart.
 
 These were environment variables, and a variable is the wrong shape for them: it has to be
@@ -105,10 +110,10 @@ who did not set it, and has to be typed into a terminal to be used at all. Someb
 trace logging for one keystroke should be able to switch it on, do the thing, and switch it
 off again.
 
-The variables still work, for the launches that have no dialog to click — a CI job running
+The variables still work, for the launches that have no window to click in — a CI job running
 headless, a tester told to start with tracing on. A variable that is set **forces** its
-setting on for that run, and the dialog says so on the label instead of offering a control
-that cannot do what it says. The log's session header lists every setting that is on and
+setting on for that run; its checkbox is shown ticked and disabled, with the reason in its
+name, rather than accepting a click it cannot honour. The log's session header lists every setting that is on and
 which of the two turned it on.
 
 ## Browse tab

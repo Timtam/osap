@@ -151,9 +151,9 @@ not writable, the log went to `~/Library/Application Support/AutomationPlatform/
 the log's own first lines say which it chose.
 
 **For much more detail**, when something specific is being chased, there are two ways and
-the first is easier: open the menu-bar menu, choose **Show module manager**, and tick
-**Detailed (trace) logging** under **Application settings…**. It takes effect at once, it can
-be turned off again the same way, and it is remembered.
+the first is easier: open the menu-bar menu, choose **Show module manager**, go to the
+**Application** tab, and tick **Detailed (trace) logging**. It takes effect the moment you
+tick it, it can be turned off the same way, and it is remembered.
 
 The other way, for a run that has to start with it already on:
 
