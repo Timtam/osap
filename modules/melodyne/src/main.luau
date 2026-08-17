@@ -144,8 +144,11 @@ end
 
 -- Assigned further down, once the field reader it needs exists. The tool bar is declared before
 -- that reader and has to be able to call it, and a forward local is a smaller price than moving
--- either of them somewhere it does not belong.
+-- either of them somewhere it does not belong. `forgetBoxes` is here for the same reason: the
+-- read-out boxes belong beside the regions they measure, and everything that CHANGES which
+-- boxes exist — the tool bar, the variant stepper — is declared before that point.
 local reportFieldsAfterSwitch = nil
+local forgetBoxes = nil
 
 -- What we last DELIBERATELY selected, for the log line only.
 --
@@ -252,6 +255,7 @@ local function selectVariant(o, tool, target)
   -- moves the same strip the read-outs live in, and the announcement that matters is the one
   -- this function ends with — the sub-tool it actually reached.
   holdReadouts(PRESS_GAP * (target > 1 and target or 1) + READOUT_HOLD_MS)
+  if forgetBoxes then forgetBoxes() end
   host.input.click(origin.client.x + tool.at[1], origin.client.y + tool.at[2])
   variant = 1
   if target <= 1 or not hwnd then return end
@@ -337,6 +341,10 @@ do
     onSelect = function(_, i)
       selectedToolName = TOOLS[i] and TOOLS[i].name or nil
       holdReadouts()
+      -- Which boxes exist is a property of the tool, so the answer we are holding is stale from
+      -- this instant. Not measured here: the next question asks, and it will come within
+      -- milliseconds anyway.
+      if forgetBoxes then forgetBoxes() end
       -- And every tool switch is a MEASUREMENT of what that tool puts in the two boxes.
       --
       -- The watcher cannot supply this on its own: it reports what CHANGED, and a tool whose
@@ -555,15 +563,26 @@ local BOX_EDGE_CONTRAST = 20
 -- Defaults to DRAWN when the pixels cannot be read. A control that quietly vanishes tells a
 -- user who cannot see the screen nothing about why, and "there is a stop here that says no
 -- value" is a far smaller failure than "the stop you were looking for is gone".
-local boxMemo = { left = { gen = -1, drawn = true }, right = { gen = -1, drawn = true } }
+-- Held for a while, and NOT keyed on the input epoch.
+--
+-- Which boxes are drawn is a property of the TOOL, not of the selection — and the input epoch
+-- turns over on every keystroke, so an epoch-keyed memo re-measured twice on every arrow press
+-- while the user walked notes, which is the one path that must stay quick. A short time window
+-- plus an explicit invalidation when we change tool matches what actually varies: free during a
+-- walk, fresh immediately after a switch, and self-healing within half a second if the tool ever
+-- changes without our seeing it.
+local BOX_MEMO_MS = 500
+local boxMemo = { left = { at = nil, drawn = true }, right = { at = nil, drawn = true } }
+forgetBoxes = function()
+  boxMemo.left.at, boxMemo.right.at = nil, nil
+end
 local function boxDrawn(o, which)
   local m, p = boxMemo[which], BOX_PROBES[which]
-  local gen = host.inputEpoch and host.inputEpoch() or (host.epoch and host.epoch() or 0)
-  if m.gen ~= gen then
-    m.gen = gen
-    local edge, gap = at(o, p.edge[1], p.edge[2]), at(o, p.gap[1], p.gap[2])
-    m.drawn = (edge == nil or gap == nil) or (gap.r - edge.r) > BOX_EDGE_CONTRAST
-  end
+  local now = host.now and host.now() or nil
+  if m.at and now and (now - m.at) < BOX_MEMO_MS then return m.drawn end
+  local edge, gap = at(o, p.edge[1], p.edge[2]), at(o, p.gap[1], p.gap[2])
+  m.drawn = (edge == nil or gap == nil) or (gap.r - edge.r) > BOX_EDGE_CONTRAST
+  m.at = now
   return m.drawn
 end
 local function leftBoxDrawn(o) return boxDrawn(o, "left") end
@@ -736,13 +755,25 @@ local function readSelection(o)
     })
     return (r and r.text) or ""
   end
-  -- Both, always, because both boxes are always drawn (see the control above). This briefly
-  -- skipped the second read when it believed only the Pitch tool had a second field. It cost
-  -- more than the OCR it saved: it also put a PIXEL PROBE of the tool bar into every tick, so a
-  -- 120 ms watcher paid six screen reads at a compositor frame each every time the user pressed
-  -- anything. The tool is asked once per CHANGE now, for the log line, and not per tick.
+  -- The left box always; the right one only when it is DRAWN, and this time the condition is a
+  -- measurement rather than a table of tool names.
+  --
+  -- What is MEASURED: the watcher's own instrumentation reports ~25-32 ms per tick while it
+  -- read one box, ~40-55 while it read two with content in them, and 64-74 during a session
+  -- spent in the single-field tools — where the second read lands on bare tool bar. Reading a
+  -- box the application is not drawing costs something real, eight times a second, forever.
+  --
+  -- What is NOT measured, and what I asserted before the user rightly asked: WHY. The backend
+  -- runs the neural recogniser concurrently and waits for it only when WinRT comes back empty,
+  -- so the theory is that an empty region pays that wait — but the empty case is also the one
+  -- where `tighten` has no content to crop to, and neither half was ever timed. The OCR line
+  -- now reports both. Until it has said which, the honest statement is the first paragraph.
+  --
+  -- An earlier version of this file skipped the read too, and was wrong for a different reason:
+  -- it asked which TOOL was selected and looked the answer up in a list. Skipping because we
+  -- LOOKED and the box is not drawn is the same saving without the claim.
   local note = field(NOTE_REGION)
-  local pitch = field(PITCH_REGION)
+  local pitch = boxDrawn(o, "right") and field(PITCH_REGION) or ""
   return note .. "|" .. pitch, note, pitch
 end
 
@@ -772,12 +803,22 @@ end
 --
 -- Calibration only. This is an instrument, not a feature: it says nothing to the user, and a
 -- measurement that runs when nobody is measuring is just a slower overlay.
+--
+-- ON ITS OWN CLOCK, and the first attempt got that wrong in a way worth writing down. It hung
+-- off the read-out watcher's "something changed" branch, which sounds like the same event and is
+-- not: under the Amplitude tool every note in the phrase read "0.00 dB", so the selection walked
+-- the whole way and the read-out never moved — the measurement fired once, printed its baseline,
+-- and never spoke again. The selection changing and the read-out changing are different facts,
+-- and only one of them is what this measures.
 local NOTE_AREA = { 48, 118, 935, 640 }
+local NOTE_AREA_MS = 400
 local CHANGE_THRESHOLD = 6 -- of 255; below this is recogniser and compositor noise
 local lastArea = nil
 
 local function measureNoteArea(o)
   if not host.calibrating then return end
+  if not ov.active then return end
+  if host.keys.nativeMenuOpen and host.keys.nativeMenuOpen() then return end
   if not (host.screen and host.screen.profile) then return end
   local origin = o:origin()
   if not (origin and origin.client) then return end
@@ -817,10 +858,9 @@ local function measureNoteArea(o)
     end
   end
   if from then runs[#runs + 1] = { from = from, to = #mean, peak = peak } end
-  if #runs == 0 then
-    host.log.info("[melodyne] note area: nothing moved")
-    return
-  end
+  -- Silence when nothing moved: this runs on a timer now, and a line every 400 ms saying that
+  -- an idle screen is still idle would bury the ones that matter.
+  if #runs == 0 then return end
   table.sort(runs, function(a, b) return a.peak > b.peak end)
   local parts = {}
   for i = 1, math.min(#runs, 6) do
@@ -885,6 +925,15 @@ reportFieldsAfterSwitch = function(toolName, afterMs)
       table.concat(edges, " ")))
   end)
 end
+
+-- The note-area instrument, on its own clock and only while calibrating.
+--
+-- Registered unconditionally because `host.calibrating` is read when the VM is built and the
+-- timer is the cheapest possible no-op when it is off: one comparison per 400 ms. Silent unless
+-- something actually moved, so an idle Melodyne writes nothing at all.
+host.timer.every(NOTE_AREA_MS, function()
+  measureNoteArea(ov)
+end)
 
 host.timer.every(WATCH_MS, function()
   -- Not while a menu is up. A menu is drawn OVER the tool strip, so the read-out region stops
@@ -953,9 +1002,6 @@ host.timer.every(WATCH_MS, function()
   host.log.info(("[melodyne] selection: tool=%s left=%q right=%q%s")
     :format(toolForLog(), left, right, holding and "  (held: the tool was just changed)" or ""))
   if holding then return end
-  -- The selection moved, so the picture moved: measure it while the difference is fresh. Does
-  -- nothing unless the calibration switch is on.
-  measureNoteArea(ov)
   local parts = {}
   -- Only what changed, and a DASH is not spoken. Melodyne draws "-" in a box with nothing to
   -- report, so it is a real reading and belongs in the cache — but "minus" is not a thing a

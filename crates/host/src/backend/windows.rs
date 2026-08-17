@@ -380,7 +380,9 @@ impl Backend for WindowsBackend {
             std::thread::spawn(move || super::paddle_ocr::recognize(&probe))
         });
 
+        let t_tight = std::time::Instant::now();
         let tight = if small { Some(tighten(&cap)) } else { None };
+        let tight_ms = t_tight.elapsed().as_secs_f64() * 1000.0;
         let img: &CapturedImage = tight.as_ref().map(|t| &t.img).unwrap_or(&cap);
         if debug {
             save_debug(img, "ocr-debug.png");
@@ -390,9 +392,22 @@ impl Backend for WindowsBackend {
         let win_ms = t_win.elapsed().as_secs_f64() * 1000.0;
 
         let mut used_paddle = false;
+        // What the JOIN costs, which is the number that decides whether a read of an empty
+        // region is expensive or merely useless.
+        //
+        // It was never measured. The line below reported WinRT's time and marked the fallback
+        // with a bare "+paddle", so "the empty case costs max(winrt, paddle)" was an argument
+        // about the code rather than an observation of it — and this project has spent a day
+        // learning what those are worth. The two are not the same claim either: the recogniser
+        // runs concurrently, so the join costs whatever is LEFT of paddle after WinRT finished,
+        // which is zero when paddle was quicker and everything when it was not.
+        let mut wait_ms = 0.0;
         if let Some(handle) = paddle {
             if text.trim().is_empty() {
-                if let Some(t) = handle.join().ok().flatten() {
+                let t_wait = std::time::Instant::now();
+                let got = handle.join().ok().flatten();
+                wait_ms = t_wait.elapsed().as_secs_f64() * 1000.0;
+                if let Some(t) = got {
                     text = t;
                     words.clear(); // recognition-only fallback returns text without boxes
                     used_paddle = true;
@@ -400,15 +415,26 @@ impl Backend for WindowsBackend {
             }
             // else: WinRT won; the paddle thread finishes in the background.
         }
-        if debug {
+        // Behind TRACE as well as the OCR-debug switch. Saving the images is for "was the region
+        // right"; the timings answer "where did the time go", which is a different question and
+        // was reachable only by also writing PNG files for every read.
+        if debug || crate::appcfg::trace() {
             crate::logging::line(
                 "ocr",
                 &format!(
-                    "{}x{} winrt {:.1}ms{} -> '{}'",
+                    "{}x{} tighten {:.1}ms winrt {:.1}ms{} -> '{}'",
                     cap.w,
                     cap.h,
+                    tight_ms,
                     win_ms,
-                    if used_paddle { " +paddle" } else { "" },
+                    if wait_ms > 0.0 {
+                        format!(
+                            " + waited {wait_ms:.1}ms for paddle ({})",
+                            if used_paddle { "which answered" } else { "which had nothing" }
+                        )
+                    } else {
+                        String::new()
+                    },
                     text.replace('\n', " ")
                 ),
             );

@@ -3356,6 +3356,14 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 obs.pixel_us += t0.elapsed().as_micros();
             }
             let (w, h) = (cap.w as usize, cap.h as usize);
+            // Trust the buffer only as far as it goes. Every index below is computed from w and
+            // h, so a capture that came back short — a clipped region, a backend that rounded a
+            // dimension — would index past the end, and a panic inside a Lua binding is not a
+            // module error that gets reported: it is the process. Answering nil is what every
+            // other failure in this function does.
+            if w == 0 || h == 0 || cap.rgba.len() < w * h * 4 {
+                return Ok(mlua::Value::Nil);
+            }
             // Accumulators for both axes in ONE traversal: the capture is already the whole
             // cost, and walking it twice to keep the code symmetrical would be the only part
             // of this that scales with area.
