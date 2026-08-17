@@ -32,6 +32,7 @@
 | **[≠]** | Quellen widersprechen sich — beide Seiten genannt |
 | **[KAL]** | Auf dieser Maschine aus einer Kalibrieraufnahme gemessen — echtes Melodyne unter Windows |
 | **[LOG]** | Aus dem Log dieser Plattform gemessen, während jemand Melodyne wirklich benutzt hat |
+| **[NUTZER]** | Vom Nutzer an der laufenden Anwendung geprüft — er hört das Ergebnis, auch wenn er es nicht sieht |
 
 **Grundwarnung zu allen Pixelangaben:** Sämtliche Abbildungen von Celemony sind **macOS-Screenshots** [FIG]. Es gibt in keiner autoritativen Quelle ein Windows-Bild von Melodyne 5. Alle Pixelmaße unten sind **Verhältnisse innerhalb der Abbildung**, keine bestätigten nativen Windows-Pixel. Drei Quellen liefern drei Skalen (Celemony ~31 px Buttonraster @1×, protoolstraining 26 px, altes Melodyne 22 px) — **keine davon ist Grundwahrheit für die Zielmaschine.**
 
@@ -373,6 +374,26 @@ Je Feld: Ziehen **oder Doppelklick und tippen**. Mehrfachauswahl zeigt `–`; Zi
 **NA-Modus** [BIN]: `Strg+Shift+N` = `handleToggleDetectionEditor` — **im Handbuch nicht erwähnt**; `Strg+Alt+A` = Insert Attack at Cursor and Split Note.
 **Framework (nicht MDActionPool)** [BIN]: `Command-,` Preferences · `Command-m` Miniaturize · `Command-Alt-Shift-b/s/d/e/f/p` Debug. **[LÜCKE]** Ob diese unter Windows überhaupt aktiv sind und ob sie in der Shortcut-Liste auftauchen — ungeprüft.
 **Mehrdeutig** [BIN]: `Command-Shift-t` / `Command-Shift-c` liegen neben `Arm Transfer` und `Clear Track-Transfer Buttons` — **welche Taste zu welcher Aktion gehört, ist aus dem Dump nicht bestimmbar.**
+
+**[NUTZER, 17.08.2026 — zwei Prüfungen am laufenden Melodyne 5.4.1, standalone]**
+
+- **Blanke Pfeiltasten wählen Noten aus, auch unter dem Fade-Werkzeug.** Celemonys „Neu in
+  Melodyne 5" liest sich, als verschöben Links/Rechts *ohne Modifikator* den Fade und Hoch/Runter
+  seine Steilheit; das stimmt nicht. Der Action Pool behält recht: bare Pfeile sind Select.
+  Geprüft mit tatsächlich aktivem Fade-Werkzeug — die Kalibrieraufnahme `Melodyne-3-clean.png`
+  zeigt den vierten Werkzeugplatz hell hinterlegt und sein Glyph um die Variantenmarke ergänzt,
+  gegen denselben Platz inaktiv und ohne Marke in `Melodyne-2-clean.png`.
+- **Der Undo-Eintrag im Edit-Menü nennt die Aktion NICHT.** Damit fällt der naheliegendste
+  Klartext-Zeuge dafür weg, ob ein Tastendruck unter einem der anzeigelosen Werkzeuge überhaupt
+  etwas bewirkt hat. Was bleibt, ist der *Zustand* der Undo-Zelle in der Top-Bar
+  (`MDToolbarUndoCtrl`), also aktiv gegen inaktiv — ungemessen.
+
+**[KAL, 17.08.2026] Das Werkzeug-Icon zeigt die aktive VARIANTE.** Der vierte Platz trägt unter
+dem Basiswerkzeug das Amplitude-Glyph und unter Fade dasselbe Glyph plus zwei kleine senkrechte
+Striche. Das ist wichtiger als es klingt: die Varianten-Sonden von SIBIAC decken nur drei der
+acht Stapel ab, und für die übrigen meldet das Overlay `probes report 1` — es kann also nicht
+bestätigen, was es gerade ausgewählt hat. Ein Bildvergleich des Icon-Feldes könnte das für
+**alle** Varianten, weil die Unterscheidung dort sichtbar ist statt nur an einzelnen Punkten.
 
 ### 8.1 Zwei Fallen
 
