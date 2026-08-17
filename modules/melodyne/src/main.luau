@@ -927,6 +927,8 @@ local lastAreaSize = nil
 local CHANGE_THRESHOLD = 6 -- mean, of 255; below this is recogniser and compositor noise
 local MIN_THRESHOLD = 24 -- minimum, of 255; higher because a minimum is one pixel and noisier
 local lastArea, lastAreaMin = nil, nil
+-- The bar lines of the previous frame, so a scroll can be told from an edit.
+local prevLines = nil
 
 -- The bar lines, found in the same profile that finds the note.
 --
@@ -1229,14 +1231,56 @@ local function measureNoteArea(o)
     -- A sample floor rather than a fit threshold: the failures that remain are frames with two
     -- or three changed columns, where a centroid is an average of almost nothing. Five columns
     -- on each side keeps every frame of the test above and drops exactly those.
-    local confident = centroid ~= nil and aN >= 5 and dN >= 5 and math.abs(centroid) >= 4
-    local moved = centroid or 0
+    -- HOW FAR DID THE VIEW ITSELF MOVE? Everything above is window-relative, and that is the
+    -- flaw underneath every version of this so far.
+    --
+    -- Melodyne scrolls to follow a note being dragged out of view. When it does, the note and
+    -- the whole picture move together, a window-relative measurement sees an enormous
+    -- displacement, and it grows with every press — which is exactly what the user heard: 39,
+    -- 39, 47, 59, 54, with the changed columns spread across two hundred pixels at once. The
+    -- earlier test that came back eleven-for-eleven and mirrored simply never scrolled.
+    --
+    -- The bar lines are the anchor, and they are already found reliably (verified against a real
+    -- capture: eight lines, no false positives, on a picture full of blobs). They belong to the
+    -- MUSIC, so if they moved, the view moved by that much, and the note's real displacement is
+    -- what is left after subtracting it. A scroll with no edit then measures zero, which is the
+    -- truth, instead of the largest number of the session.
+    local lines = barLines(mean)
+    local viewShift = nil
+    if prevLines and #prevLines >= 2 and #lines >= 2 then
+      -- Median of the nearest-neighbour offsets: a line entering or leaving the view at the
+      -- edge must not drag the estimate with it.
+      local offs = {}
+      for _, a in ipairs(lines) do
+        local best, bestD = nil, math.huge
+        for _, b in ipairs(prevLines) do
+          local d = math.abs(a - b)
+          if d < bestD then best, bestD = b, d end
+        end
+        if best and bestD <= MAX_SHIFT then offs[#offs + 1] = a - best end
+      end
+      if #offs >= 2 then
+        table.sort(offs)
+        viewShift = offs[math.floor(#offs / 2) + 1]
+      end
+    end
+    prevLines = lines
+    local real = centroid and (centroid - (viewShift or 0)) or nil
+    if host.calibrating then
+      host.log.info(("[melodyne] view moved %s px, so the note moved %s px")
+        :format(viewShift and tostring(viewShift) or "?",
+          real and string.format("%.0f", real) or "?"))
+    end
+    -- SILENT AGAIN until a session shows the corrected number surviving a scroll. The last time
+    -- this spoke it was on a test that happened not to scroll, and I took that for the general
+    -- case; the user paid for it with a run of numbers that grew without meaning.
+    local confident = false
+    local moved = real or 0
     if host.calibrating then
       host.log.info(("[melodyne] correlation says %d px (fit %.1f against %.1f standing still)")
         :format(corr, sBest, sStill))
     end
     if confident then
-      local lines = barLines(mean)
       -- Scaled where the note ARRIVED, since that is where it now is and the bars are not
       -- evenly spaced.
       local barW = barWidthAt(lines, math.floor(aSum / aN))
