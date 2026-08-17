@@ -112,15 +112,43 @@ fn capture_screen(x: i32, y: i32, w: i32, h: i32) -> Option<CapturedImage> {
     if w <= 0 || h <= 0 {
         return None;
     }
+    // The buffer length in usize, and refused when it does not fit.
+    //
+    // It was `(w * h * 4) as usize`, computed in i32 — so a region a caller passes in (Lua can
+    // ask for any rectangle) needs only ~23 megapixels to wrap that multiplication negative,
+    // and `vec![0u8; negative as usize]` is an allocation of about four exabytes. Nothing
+    // downstream could have caught it: the panic happens before any guard sees the result.
+    let bytes = match (w as i64)
+        .checked_mul(h as i64)
+        .and_then(|n| n.checked_mul(4))
+        .filter(|n| *n <= isize::MAX as i64)
+    {
+        Some(n) => n as usize,
+        None => return None,
+    };
     unsafe {
         let screen_dc = GetDC(std::ptr::null_mut());
         if screen_dc.is_null() {
             return None;
         }
         let mem_dc = CreateCompatibleDC(screen_dc);
+        if mem_dc.is_null() {
+            ReleaseDC(std::ptr::null_mut(), screen_dc);
+            return None;
+        }
         let bmp = CreateCompatibleBitmap(screen_dc, w, h);
+        if bmp.is_null() {
+            DeleteDC(mem_dc);
+            ReleaseDC(std::ptr::null_mut(), screen_dc);
+            return None;
+        }
         let old = SelectObject(mem_dc, bmp);
-        BitBlt(mem_dc, 0, 0, w, h, screen_dc, x, y, SRCCOPY);
+        // CHECKED, because the alternative is worse than an error: GDI leaves the bitmap as it
+        // found it, GetDIBits then dutifully copies a buffer of zeros, and the caller receives a
+        // perfectly black picture that every downstream guard accepts as a genuine capture. An
+        // overlay that reads pixels for a living must be able to tell "the screen is dark" from
+        // "the screen was never read".
+        let blitted = BitBlt(mem_dc, 0, 0, w, h, screen_dc, x, y, SRCCOPY) != 0;
 
         let mut bmi: BITMAPINFO = std::mem::zeroed();
         bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
@@ -130,8 +158,8 @@ fn capture_screen(x: i32, y: i32, w: i32, h: i32) -> Option<CapturedImage> {
         bmi.bmiHeader.biBitCount = 32;
         bmi.bmiHeader.biCompression = BI_RGB as u32;
 
-        let mut buf = vec![0u8; (w * h * 4) as usize];
-        GetDIBits(
+        let mut buf = vec![0u8; bytes];
+        let lines = GetDIBits(
             mem_dc,
             bmp,
             0,
@@ -145,6 +173,10 @@ fn capture_screen(x: i32, y: i32, w: i32, h: i32) -> Option<CapturedImage> {
         DeleteObject(bmp);
         DeleteDC(mem_dc);
         ReleaseDC(std::ptr::null_mut(), screen_dc);
+
+        if !blitted || lines != h {
+            return None;
+        }
 
         // GDI returns BGRA; swap to RGBA.
         for px in buf.chunks_exact_mut(4) {
@@ -354,102 +386,44 @@ impl Backend for WindowsBackend {
         let cap = self
             .capture(x, y, w, h)
             .ok_or_else(|| "screen capture failed".to_string())?;
-        let debug = crate::appcfg::ocr_debug();
-        if debug {
-            save_debug(&cap, "ocr-debug-raw.png");
-        }
-        // Windows.Media.Ocr struggles with small UI text, especially lone glyphs.
-        // For a small region, crop to the actual content and upscale *that* so the
-        // glyphs are large (far better than scaling the whole padded region, which
-        // leaves tiny digits tiny). Large regions (e.g. a whole window) are left
-        // alone so multi-word layout and speed are preserved.
-        let small = cap.w <= 400 && cap.h <= 200;
+        recognize_image(&cap, lang)
+    }
 
-        // Run the neural recognizer (PaddleOCR via ONNX Runtime) CONCURRENTLY for
-        // small regions. Its result is used only when Windows.Media.Ocr comes back
-        // empty — notably a lone digit, which WinRT rejects regardless of size — so
-        // that case costs about max(winrt, paddle) instead of their sum. When WinRT
-        // succeeds the background thread just finishes unused (negligible at human
-        // focus rates). WinRT stays the trusted primary and the only multi-word path.
-        let paddle = small.then(|| {
-            let probe = CapturedImage {
-                w: cap.w,
-                h: cap.h,
-                rgba: cap.rgba.clone(),
-            };
-            std::thread::spawn(move || super::paddle_ocr::recognize(&probe))
-        });
-
-        let t_tight = std::time::Instant::now();
-        let tight = if small { Some(tighten(&cap)) } else { None };
-        let tight_ms = t_tight.elapsed().as_secs_f64() * 1000.0;
-        let img: &CapturedImage = tight.as_ref().map(|t| &t.img).unwrap_or(&cap);
-        if debug {
-            save_debug(img, "ocr-debug.png");
+    /// Several regions, one capture. See the trait for why the recognitions stay separate.
+    fn ocr_regions(
+        &self,
+        regions: &[(i32, i32, i32, i32)],
+        lang: Option<&str>,
+    ) -> Vec<Result<OcrText, String>> {
+        let one_each = |b: &Self| -> Vec<Result<OcrText, String>> {
+            regions.iter().map(|(x, y, w, h)| b.ocr(*x, *y, *w, *h, lang)).collect()
+        };
+        if regions.len() < 2 || regions.iter().any(|(_, _, w, h)| *w <= 0 || *h <= 0) {
+            return one_each(self);
         }
-        let t_win = std::time::Instant::now();
-        let (mut text, mut words) = run_ocr(img, lang).map_err(|e| format!("OCR failed: {e}"))?;
-        let win_ms = t_win.elapsed().as_secs_f64() * 1000.0;
-
-        let mut used_paddle = false;
-        // What the JOIN costs, which is the number that decides whether a read of an empty
-        // region is expensive or merely useless.
-        //
-        // It was never measured. The line below reported WinRT's time and marked the fallback
-        // with a bare "+paddle", so "the empty case costs max(winrt, paddle)" was an argument
-        // about the code rather than an observation of it — and this project has spent a day
-        // learning what those are worth. The two are not the same claim either: the recogniser
-        // runs concurrently, so the join costs whatever is LEFT of paddle after WinRT finished,
-        // which is zero when paddle was quicker and everything when it was not.
-        let mut wait_ms = 0.0;
-        if let Some(handle) = paddle {
-            if text.trim().is_empty() {
-                let t_wait = std::time::Instant::now();
-                let got = handle.join().ok().flatten();
-                wait_ms = t_wait.elapsed().as_secs_f64() * 1000.0;
-                if let Some(t) = got {
-                    text = t;
-                    words.clear(); // recognition-only fallback returns text without boxes
-                    used_paddle = true;
-                }
-            }
-            // else: WinRT won; the paddle thread finishes in the background.
+        let x0 = regions.iter().map(|r| r.0).min().unwrap_or(0);
+        let y0 = regions.iter().map(|r| r.1).min().unwrap_or(0);
+        let x1 = regions.iter().map(|r| r.0 + r.2).max().unwrap_or(0);
+        let y1 = regions.iter().map(|r| r.1 + r.3).max().unwrap_or(0);
+        let (bw, bh) = (x1 - x0, y1 - y0);
+        let big = match self.capture(x0, y0, bw, bh) {
+            Some(c) => c,
+            None => return one_each(self),
+        };
+        // A capture that came back a different size than asked for was CLIPPED — the region ran
+        // off a screen edge — and every offset computed below would then point somewhere else.
+        // Falling back to one capture each is slower and right, which is the correct trade for
+        // an overlay that speaks what it read.
+        if big.w as i32 != bw || big.h as i32 != bh {
+            return one_each(self);
         }
-        // Behind TRACE as well as the OCR-debug switch. Saving the images is for "was the region
-        // right"; the timings answer "where did the time go", which is a different question and
-        // was reachable only by also writing PNG files for every read.
-        if debug || crate::appcfg::trace() {
-            crate::logging::line(
-                "ocr",
-                &format!(
-                    "{}x{} tighten {:.1}ms winrt {:.1}ms{} -> '{}'",
-                    cap.w,
-                    cap.h,
-                    tight_ms,
-                    win_ms,
-                    if wait_ms > 0.0 {
-                        format!(
-                            " + waited {wait_ms:.1}ms for paddle ({})",
-                            if used_paddle { "which answered" } else { "which had nothing" }
-                        )
-                    } else {
-                        String::new()
-                    },
-                    text.replace('\n', " ")
-                ),
-            );
-        }
-        // Map word coordinates from the processed image back to the captured region.
-        if let Some(t) = &tight {
-            let (s, pad) = (t.scale as i32, t.pad as i32);
-            for word in &mut words {
-                word.x = (word.x - pad) / s + t.off_x as i32;
-                word.y = (word.y - pad) / s + t.off_y as i32;
-                word.w /= s;
-                word.h /= s;
-            }
-        }
-        Ok(OcrText { text, words })
+        regions
+            .iter()
+            .map(|(x, y, w, h)| match crop(&big, x - x0, y - y0, *w, *h) {
+                Some(sub) => recognize_image(&sub, lang),
+                None => Err("region outside the captured area".to_string()),
+            })
+            .collect()
     }
 
     fn cursor_pos(&self) -> (i32, i32) {
@@ -1356,4 +1330,127 @@ unsafe fn send_key_event(vk: u16, scan: u16, flags: u32) {
     input.Anonymous.ki.wScan = scan;
     input.Anonymous.ki.dwFlags = flags;
     SendInput(1, &input, std::mem::size_of::<INPUT>() as i32);
+}
+
+/// Crop a sub-image out of a capture. `x`/`y` are relative to the capture's own top-left.
+fn crop(src: &CapturedImage, x: i32, y: i32, w: i32, h: i32) -> Option<CapturedImage> {
+    if x < 0 || y < 0 || w <= 0 || h <= 0 {
+        return None;
+    }
+    let (sx, sy, sw, sh) = (x as usize, y as usize, w as usize, h as usize);
+    let (bw, bh) = (src.w as usize, src.h as usize);
+    if sx + sw > bw || sy + sh > bh || src.rgba.len() < bw * bh * 4 {
+        return None;
+    }
+    let mut rgba = Vec::with_capacity(sw * sh * 4);
+    for row in 0..sh {
+        let o = ((sy + row) * bw + sx) * 4;
+        rgba.extend_from_slice(&src.rgba[o..o + sw * 4]);
+    }
+    Some(CapturedImage { w: w as u32, h: h as u32, rgba })
+}
+
+/// Everything the OCR path does AFTER the pixels are in hand: crop-and-upscale for small
+/// regions, Windows.Media.Ocr, the concurrent neural fallback, and mapping word boxes back.
+///
+/// Split out of `ocr` so that a caller with SEVERAL regions can pay for one capture instead of
+/// one per region — measured at ~17 ms against 4-6 ms for the recognition itself, so the
+/// capture was two thirds of a two-region read.
+fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, String> {
+        let debug = crate::appcfg::ocr_debug();
+        if debug {
+            save_debug(cap, "ocr-debug-raw.png");
+        }
+        // Windows.Media.Ocr struggles with small UI text, especially lone glyphs.
+        // For a small region, crop to the actual content and upscale *that* so the
+        // glyphs are large (far better than scaling the whole padded region, which
+        // leaves tiny digits tiny). Large regions (e.g. a whole window) are left
+        // alone so multi-word layout and speed are preserved.
+        let small = cap.w <= 400 && cap.h <= 200;
+
+        // Run the neural recognizer (PaddleOCR via ONNX Runtime) CONCURRENTLY for
+        // small regions. Its result is used only when Windows.Media.Ocr comes back
+        // empty — notably a lone digit, which WinRT rejects regardless of size — so
+        // that case costs about max(winrt, paddle) instead of their sum. When WinRT
+        // succeeds the background thread just finishes unused (negligible at human
+        // focus rates). WinRT stays the trusted primary and the only multi-word path.
+        let paddle = small.then(|| {
+            let probe = CapturedImage {
+                w: cap.w,
+                h: cap.h,
+                rgba: cap.rgba.clone(),
+            };
+            std::thread::spawn(move || super::paddle_ocr::recognize(&probe))
+        });
+
+        let t_tight = std::time::Instant::now();
+        let tight = if small { Some(tighten(cap)) } else { None };
+        let tight_ms = t_tight.elapsed().as_secs_f64() * 1000.0;
+        let img: &CapturedImage = tight.as_ref().map(|t| &t.img).unwrap_or(cap);
+        if debug {
+            save_debug(img, "ocr-debug.png");
+        }
+        let t_win = std::time::Instant::now();
+        let (mut text, mut words) = run_ocr(img, lang).map_err(|e| format!("OCR failed: {e}"))?;
+        let win_ms = t_win.elapsed().as_secs_f64() * 1000.0;
+
+        let mut used_paddle = false;
+        // What the JOIN costs, which is the number that decides whether a read of an empty
+        // region is expensive or merely useless.
+        //
+        // It was never measured. The line below reported WinRT's time and marked the fallback
+        // with a bare "+paddle", so "the empty case costs max(winrt, paddle)" was an argument
+        // about the code rather than an observation of it — and this project has spent a day
+        // learning what those are worth. The two are not the same claim either: the recogniser
+        // runs concurrently, so the join costs whatever is LEFT of paddle after WinRT finished,
+        // which is zero when paddle was quicker and everything when it was not.
+        let mut wait_ms = 0.0;
+        if let Some(handle) = paddle {
+            if text.trim().is_empty() {
+                let t_wait = std::time::Instant::now();
+                let got = handle.join().ok().flatten();
+                wait_ms = t_wait.elapsed().as_secs_f64() * 1000.0;
+                if let Some(t) = got {
+                    text = t;
+                    words.clear(); // recognition-only fallback returns text without boxes
+                    used_paddle = true;
+                }
+            }
+            // else: WinRT won; the paddle thread finishes in the background.
+        }
+        // Behind TRACE as well as the OCR-debug switch. Saving the images is for "was the region
+        // right"; the timings answer "where did the time go", which is a different question and
+        // was reachable only by also writing PNG files for every read.
+        if debug || crate::appcfg::trace() {
+            crate::logging::line(
+                "ocr",
+                &format!(
+                    "{}x{} tighten {:.1}ms winrt {:.1}ms{} -> '{}'",
+                    cap.w,
+                    cap.h,
+                    tight_ms,
+                    win_ms,
+                    if wait_ms > 0.0 {
+                        format!(
+                            " + waited {wait_ms:.1}ms for paddle ({})",
+                            if used_paddle { "which answered" } else { "which had nothing" }
+                        )
+                    } else {
+                        String::new()
+                    },
+                    text.replace('\n', " ")
+                ),
+            );
+        }
+        // Map word coordinates from the processed image back to the captured region.
+        if let Some(t) = &tight {
+            let (s, pad) = (t.scale as i32, t.pad as i32);
+            for word in &mut words {
+                word.x = (word.x - pad) / s + t.off_x as i32;
+                word.y = (word.y - pad) / s + t.off_y as i32;
+                word.w /= s;
+                word.h /= s;
+            }
+        }
+        Ok(OcrText { text, words })
 }

@@ -772,8 +772,26 @@ local function readSelection(o)
   -- An earlier version of this file skipped the read too, and was wrong for a different reason:
   -- it asked which TOOL was selected and looked the answer up in a list. Skipping because we
   -- LOOKED and the box is not drawn is the same saving without the claim.
-  local note = field(NOTE_REGION)
-  local pitch = boxDrawn(o, "right") and field(PITCH_REGION) or ""
+  local wantRight = boxDrawn(o, "right")
+  if not wantRight then
+    local note = field(NOTE_REGION)
+    return note .. "|", note, ""
+  end
+  -- BOTH boxes, one screen touch. `recognizeMany` captures the rectangle that encloses them
+  -- once and recognises each region out of that single frame — which is the whole cost here:
+  -- the recognition measured 4-6 ms against a capture's fixed ~17. Two separate calls put this
+  -- tick at 44 ms; this puts it at 27, and the two regions stay two regions, so the per-region
+  -- fallback that once rescued a dropped note name is untouched.
+  local rs = host.ocr.recognizeMany({
+    regions = {
+      { origin.client.x + NOTE_REGION[1], origin.client.y + NOTE_REGION[2],
+        origin.client.x + NOTE_REGION[3], origin.client.y + NOTE_REGION[4] },
+      { origin.client.x + PITCH_REGION[1], origin.client.y + PITCH_REGION[2],
+        origin.client.x + PITCH_REGION[3], origin.client.y + PITCH_REGION[4] },
+    },
+  })
+  local note = (rs[1] and rs[1].text) or ""
+  local pitch = (rs[2] and rs[2].text) or ""
   return note .. "|" .. pitch, note, pitch
 end
 
@@ -810,22 +828,48 @@ end
 -- the whole way and the read-out never moved — the measurement fired once, printed its baseline,
 -- and never spoke again. The selection changing and the read-out changing are different facts,
 -- and only one of them is what this measures.
+-- Clamped to the window, because the capture is of the SCREEN.
+--
+-- These four numbers were read off one 962x660 capture, and left absolute they describe that
+-- window and no other. On a smaller Melodyne the region runs past the client area and profiles
+-- whatever is BEHIND it — another application's pixels, reported as Melodyne's note editor and
+-- indistinguishable from it in the log. So the right edge and the bottom are trimmed to the
+-- content the overlay actually has, and the log line says which columns it covered.
 local NOTE_AREA = { 48, 118, 935, 640 }
 local NOTE_AREA_MS = 400
+local lastAreaSize = nil
 local CHANGE_THRESHOLD = 6 -- of 255; below this is recogniser and compositor noise
 local lastArea = nil
 
 local function measureNoteArea(o)
   if not host.calibrating then return end
-  if not ov.active then return end
+  if not ov.active then
+    -- Forget on the way out, exactly as the read-out watcher does and for the same reason: a
+    -- frame from before an excursion is not a fact about the Melodyne we come back to, and this
+    -- instrument's whole premise is that only ONE thing changed between two frames. Diffing
+    -- across a trip to another window would report that trip as a note move.
+    lastArea, lastAreaSize = nil, nil
+    return
+  end
   if host.keys.nativeMenuOpen and host.keys.nativeMenuOpen() then return end
   if not (host.screen and host.screen.profile) then return end
   local origin = o:origin()
   if not (origin and origin.client) then return end
+  local cw, ch = O.contentSize(origin)
+  if not (cw and ch) then return end
+  local x2, y2 = math.min(NOTE_AREA[3], cw - 2), math.min(NOTE_AREA[4], ch - 2)
+  if x2 - NOTE_AREA[1] < 40 or y2 - NOTE_AREA[2] < 40 then return end
+  -- A window that changed size re-baselines instead of being diffed: the whole picture moved,
+  -- and every column would be a run. The column COUNT cannot catch this by itself — it is
+  -- clamped to the same numbers for every window at least this wide — so the size is kept.
+  local size = cw .. "x" .. ch
+  if lastAreaSize ~= size then
+    lastArea, lastAreaSize = nil, size
+  end
   local p = host.screen.profile({
     region = {
       origin.client.x + NOTE_AREA[1], origin.client.y + NOTE_AREA[2],
-      origin.client.x + NOTE_AREA[3], origin.client.y + NOTE_AREA[4],
+      origin.client.x + x2, origin.client.y + y2,
     },
     -- Columns only: a note's identity is a horizontal position, and asking for rows as well
     -- would double the reduction for something nothing reads.
@@ -835,8 +879,11 @@ local function measureNoteArea(o)
   local mean, prev = p.columns.mean, lastArea
   lastArea = mean
   if not prev or #prev ~= #mean then
-    host.log.info(("[melodyne] note area: baseline, %d columns from client x=%d")
-      :format(#mean, NOTE_AREA[1]))
+    -- The region is in the line because it is a GUESS clamped to this window, and a wrong one
+    -- is otherwise invisible: a profile of the wrong pixels looks exactly like a profile of the
+    -- right ones.
+    host.log.info(("[melodyne] note area: baseline, %d columns, client x %d-%d, y %d-%d, window %s")
+      :format(#mean, NOTE_AREA[1], x2, NOTE_AREA[2], y2, tostring(lastAreaSize)))
     return
   end
   -- Contiguous runs of changed columns, so the log names REGIONS rather than a list of
@@ -857,7 +904,11 @@ local function measureNoteArea(o)
       end
     end
   end
-  if from then runs[#runs + 1] = { from = from, to = #mean, peak = peak } end
+  -- The run ends where its last CHANGED column was, not at the end of the array:  counts
+  -- the unchanged columns already walked past, and charging them to the run reports it wider
+  -- than it is — by one column in the ordinary case, which is the whole width of the feature
+  -- these runs turned out to be.
+  if from then runs[#runs + 1] = { from = from, to = #mean - gap, peak = peak } end
   -- Silence when nothing moved: this runs on a timer now, and a line every 400 ms saying that
   -- an idle screen is still idle would bury the ones that matter.
   if #runs == 0 then return end

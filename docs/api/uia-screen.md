@@ -126,20 +126,23 @@ host.log("screen is " .. s.w .. "x" .. s.h)
 **Signature:** `host.screen.profile(opts: { region: Region?, axes: ("both" | "columns" | "rows")? }?) -> { x, y, w, h, columns: Axis?, rows: Axis? } | nil`
 where `Axis = { min: number[], max: number[], mean: number[], r: number[], g: number[], b: number[] }`
 
-Takes **one** capture of `region` and reduces it, per column and per row, to: the darkest pixel, the lightest, the mean, and the mean of each colour channel — all 0–255, luminance by ITU-R BT.601. Index `1` is the left (or top) edge of the region; `x`, `y`, `w`, `h` report what was actually captured. Returns `nil` when the region is empty or the capture fails.
+Takes **one** capture of `region` (see [Region form](#region-form); **omitted, it profiles the whole primary screen**) and reduces it, per column and per row, to: the darkest pixel, the lightest, the mean, and the mean of each colour channel. Luminance is ITU-R BT.601. `min` and `max` are whole numbers 0–255 because they are particular pixels; the means are **fractional** — a mean over hundreds of rows moves by less than one unit when something note-sized changes inside it, and rounding would floor exactly the signal you are looking for.
 
-Use it to find something whose **position** you do not know: a vertical line is a dark column in a light band, an edge is where the mean steps, a shape's extent is where its run of changed columns begins and ends, and a differently coloured patch shows up in `r`/`g`/`b` while the luminance stays flat.
+Index `1` is the left (or top) edge of the region, so a column index maps back as `x + i - 1`. `x`, `y`, `w`, `h` are the **requested** rectangle: nothing is clipped to the desktop, and a region that runs off the screen comes back with black in the part that is not there. Returns `nil` when the region is empty, when the capture fails, or when the capture came back shorter than its own dimensions. `axes` must be exactly `"both"`, `"columns"` or `"rows"` — anything else is an error rather than a silent `"both"`.
 
-`axes` skips the half you do not need; the capture costs the same either way, only the reduction and the table-building are saved.
+Use it to find something whose **position** you do not know: a vertical line is a dark column in a light band, an edge is where the mean steps, a shape's extent is where its run of changed columns begins and ends, and a differently coloured patch shows up in `r`/`g`/`b` while the luminance stays flat. For a feature much smaller than the region, prefer `min`/`max` over `mean`: a two-pixel dark line moves a column's minimum by everything and its mean by a little.
 
-**Why this rather than many `pixel` calls:** a screen capture costs a fixed compositor frame — measured on the reference machine at 16.6 ms for 55×27 and 16.7 ms for 1028×666 — and `host.screen.pixel` costs the same 16.7 ms *for one pixel*. Area is free; touching the screen is what costs. Four point probes are four frames, while a profile of the whole window is one.
+**Why this rather than many `pixel` calls:** a screen capture costs a fixed compositor frame — measured on the reference machine at 16.6 ms for 55×27 and 16.7 ms for 1028×666 — and `host.screen.pixel` costs the same 16.7 ms *for one pixel*. Four point probes are four frames; a profile of the whole window is one. The **capture** is size-independent, but this call's reduction is not: it walks every pixel and builds up to six sequences on the event loop, so profile the band you need rather than the screen. `axes` skips the half you do not want.
 
 ```luau
 -- Where are the dark vertical lines in this strip?
+local x, y = 100, 200
 local p = host.screen.profile({ region = { x, y, x + 400, y + 20 }, axes = "columns" })
-for i, m in ipairs(p.columns.min) do
-    if m < 160 then
-        host.log.info("line at client x " .. (i - 1))
+if p then
+    for i, m in ipairs(p.columns.min) do
+        if m < 160 then
+            host.log.info("line at screen x " .. (p.x + i - 1))
+        end
     end
 end
 ```
@@ -186,7 +189,7 @@ host.screen.imageSearchAsync({ "images/close-v8.png", "images/close-v7.png" },
 
 ## Region form
 
-Several functions (`host.screen.imageSearch`, `host.ocr.recognize`) accept an optional `region` table inside their options. A region describes an axis-aligned rectangle by its top-left and bottom-right corners and may be written in **named** or **positional** form (named keys take precedence):
+Several functions (`host.screen.imageSearch`, `host.screen.profile`, `host.ocr.recognize`, and each entry of `host.ocr.recognizeMany`'s `regions` list) accept a `region` table. A region describes an axis-aligned rectangle by its top-left and bottom-right corners and may be written in **named** or **positional** form (named keys take precedence):
 
 - Named: `{ x1 = .., y1 = .., x2 = .., y2 = .. }`
 - Positional: `{ x1, y1, x2, y2 }` (array indices `[1]`=x1, `[2]`=y1, `[3]`=x2, `[4]`=y2)

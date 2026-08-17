@@ -3344,17 +3344,23 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 .as_ref()
                 .and_then(|o| o.get::<String>("axes").ok())
                 .unwrap_or_else(|| "both".to_string());
-            let (want_cols, want_rows) = (axes != "rows", axes != "columns");
+            // Refused, not silently widened. A typo would otherwise cost exactly the work the
+            // option exists to save, and say nothing about why.
+            let (want_cols, want_rows) = match axes.as_str() {
+                "both" => (true, true),
+                "columns" => (true, false),
+                "rows" => (false, true),
+                other => {
+                    return Err(mlua::Error::external(format!(
+                        "host.screen.profile: axes must be \"both\", \"columns\" or \"rows\", got \"{other}\""
+                    )))
+                }
+            };
             let t0 = Instant::now();
             let cap = match sh.backend.capture(rx, ry, rw, rh) {
                 Some(c) => c,
                 None => return Ok(mlua::Value::Nil),
             };
-            {
-                let mut obs = sh.observations();
-                obs.pixels += 1;
-                obs.pixel_us += t0.elapsed().as_micros();
-            }
             let (w, h) = (cap.w as usize, cap.h as usize);
             // Trust the buffer only as far as it goes. Every index below is computed from w and
             // h, so a capture that came back short — a clipped region, a backend that rounded a
@@ -3406,6 +3412,13 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                     }
                 }
             }
+            // The means are REAL numbers, not truncated to a byte.
+            //
+            // Integer division looked harmless and is not: a mean over 522 rows moves by less
+            // than one whole unit when a note-sized shape changes inside it, so `as u8` would
+            // floor exactly the signal a caller is looking for down to zero. Lua numbers are
+            // doubles; there is nothing to save by rounding on the way in. `min` and `max` stay
+            // bytes because they ARE bytes — a particular pixel's value, not an average.
             let axis = |lua: &Lua,
                         min: &[u8],
                         max: &[u8],
@@ -3413,17 +3426,18 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                         ch: &[[u64; 3]],
                         n: u64|
              -> mlua::Result<Table> {
+                let n = n.max(1) as f64;
                 let t = lua.create_table()?;
                 t.set("min", lua.create_sequence_from(min.iter().copied())?)?;
                 t.set("max", lua.create_sequence_from(max.iter().copied())?)?;
                 t.set(
                     "mean",
-                    lua.create_sequence_from(sum.iter().map(|s| (s / n.max(1)) as u8))?,
+                    lua.create_sequence_from(sum.iter().map(|s| *s as f64 / n))?,
                 )?;
                 for (i, name) in ["r", "g", "b"].iter().enumerate() {
                     t.set(
                         *name,
-                        lua.create_sequence_from(ch.iter().map(|c| (c[i] / n.max(1)) as u8))?,
+                        lua.create_sequence_from(ch.iter().map(|c| c[i] as f64 / n))?,
                     )?;
                 }
                 Ok(t)
@@ -3438,6 +3452,15 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             }
             if want_rows {
                 out.set("rows", axis(lua, &rmin, &rmax, &rsum, &rch, w as u64)?)?;
+            }
+            // Timed to HERE, not to the end of the capture. The capture is a fixed frame; the
+            // traversal and the six sequences are the only part that grows with the region, and
+            // leaving them outside the measurement would hide them from the one report this
+            // project uses to find event-loop stalls — while making this call look free.
+            {
+                let mut obs = sh.observations();
+                obs.pixels += 1;
+                obs.pixel_us += t0.elapsed().as_micros();
             }
             Ok(mlua::Value::Table(out))
         })?,
@@ -3721,6 +3744,71 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             }
             t.set("words", words)?;
             Ok(t)
+        })?,
+    )?;
+    // host.ocr.recognizeMany{ regions = { Region, … }, lang? } -> { { text, words }, … }
+    //
+    // The same recognitions, ONE screen touch. Measured on this machine: recognising a 67x13
+    // read-out costs 4-6 ms and cropping it 0.5, while the capture underneath is a fixed ~17 ms
+    // compositor frame whatever its size — so two adjacent read-outs read one after the other
+    // spent two thirds of their time photographing the screen twice. Melodyne's selection
+    // watcher did exactly that, eight times a second, and measured 44 ms a tick against 27 for
+    // one region.
+    //
+    // The regions are NOT merged into one recognition, and that distinction is the whole reason
+    // this is a new call rather than a wider rectangle: the fallback to the neural recogniser
+    // fires per region, only when that region came back empty, and a merged strip is never
+    // empty — so a note name Windows.Media.Ocr dropped stayed dropped while the cents beside it
+    // came through. Every region is still recognised on its own, with its own fallback, and its
+    // word boxes are still relative to itself.
+    //
+    // A region that failed comes back as `{ text = "", error = "…" }` rather than as a hole in
+    // the sequence: a caller indexing results[2] must never get the third region's answer.
+    let sh = shared.clone();
+    ocr.set(
+        "recognizeMany",
+        lua.create_function(move |lua, opts: Table| {
+            let (sw, shh) = sh.backend.screen_size();
+            let regions: Table = opts.get("regions")?;
+            let lang: Option<String> = opts.get::<String>("lang").ok();
+            let mut rects: Vec<(i32, i32, i32, i32)> = Vec::new();
+            for r in regions.sequence_values::<Table>() {
+                let r = r?;
+                let x1: i32 = r.get("x1").or_else(|_| r.get(1)).unwrap_or(0);
+                let y1: i32 = r.get("y1").or_else(|_| r.get(2)).unwrap_or(0);
+                let x2: i32 = r.get("x2").or_else(|_| r.get(3)).unwrap_or(sw);
+                let y2: i32 = r.get("y2").or_else(|_| r.get(4)).unwrap_or(shh);
+                rects.push((x1, y1, (x2 - x1).max(0), (y2 - y1).max(0)));
+            }
+            let results = sh.backend.ocr_regions(&rects, lang.as_deref());
+            let out = lua.create_table()?;
+            for (i, res) in results.into_iter().enumerate() {
+                let (rx, ry) = rects.get(i).map(|r| (r.0, r.1)).unwrap_or((0, 0));
+                let t = lua.create_table()?;
+                match res {
+                    Ok(r) => {
+                        t.set("text", r.text)?;
+                        let words = lua.create_table()?;
+                        for wd in r.words {
+                            let w = lua.create_table()?;
+                            w.set("text", wd.text)?;
+                            w.set("x", rx + wd.x)?;
+                            w.set("y", ry + wd.y)?;
+                            w.set("w", wd.w)?;
+                            w.set("h", wd.h)?;
+                            words.push(w)?;
+                        }
+                        t.set("words", words)?;
+                    }
+                    Err(e) => {
+                        t.set("text", "")?;
+                        t.set("words", lua.create_table()?)?;
+                        t.set("error", e)?;
+                    }
+                }
+                out.push(t)?;
+            }
+            Ok(out)
         })?,
     )?;
     host.set("ocr", ocr)?;

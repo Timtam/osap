@@ -250,6 +250,35 @@ pub trait Backend {
     /// Recognizes text in a screen region.
     fn ocr(&self, x: i32, y: i32, w: i32, h: i32, lang: Option<&str>) -> Result<OcrText, String>;
 
+    /// Several regions, ONE screen touch.
+    ///
+    /// Measured on Windows: recognising a 67x13 read-out costs 4-6 ms, cropping and upscaling
+    /// it another 0.5 — while the capture underneath costs a fixed ~17 ms compositor frame
+    /// whatever its size. So two adjacent read-outs on the same row, read one after the other,
+    /// spend two thirds of their time photographing the screen twice. Melodyne's selection
+    /// watcher does exactly that eight times a second.
+    ///
+    /// The regions are NOT merged into one recognition: that was tried and it lost values. The
+    /// per-region fallback to the neural recogniser only fires for a region that came back
+    /// empty, and a merged strip is never empty, so a note name that WinRT dropped stayed
+    /// dropped while the cents beside it came through. Only the capture is shared; every region
+    /// is still recognised on its own, with its own fallback, and its word coordinates are
+    /// still relative to itself.
+    ///
+    /// The default implementation is the honest one for a backend that has not specialised it:
+    /// the same calls in the same order, one capture each. Overriding it is an optimisation,
+    /// never a change in meaning.
+    fn ocr_regions(
+        &self,
+        regions: &[(i32, i32, i32, i32)],
+        lang: Option<&str>,
+    ) -> Vec<Result<OcrText, String>> {
+        regions
+            .iter()
+            .map(|(x, y, w, h)| self.ocr(*x, *y, *w, *h, lang))
+            .collect()
+    }
+
     /// Current mouse cursor position (screen coordinates).
     fn cursor_pos(&self) -> (i32, i32);
     fn mouse_move(&self, x: i32, y: i32);

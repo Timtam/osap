@@ -27,6 +27,26 @@ for _, word in ipairs(res.words) do
 end
 ```
 
+## host.ocr.recognizeMany(opts)
+
+Recognizes several regions from **one** screen capture.
+
+**Signature:** `host.ocr.recognizeMany(opts: { regions: { x1, y1, x2, y2 }[], lang?: string }) -> { { text: string, words: {…}, error?: string } }[]`
+
+Returns one entry per region, in the order given, each shaped like `host.ocr.recognize`'s result — with word boxes still in absolute screen coordinates relative to **that** region. A region that could not be read comes back as `{ text = "", words = {}, error = "…" }` rather than as a hole, so `results[2]` is always the second region's answer.
+
+**Why:** recognition is cheap and the capture is not. Measured on the reference machine, a 67×13 read-out recognizes in 4–6 ms while the capture underneath costs a fixed ~17 ms compositor frame whatever its size — so two adjacent read-outs, read one after the other, spend two thirds of their time photographing the screen twice. A watcher polling two boxes at 120 ms measured 44 ms per tick with two calls and 27 ms with one.
+
+The regions are **not** merged into a single wider recognition, and that is the point of the call rather than an oversight: the fallback to the neural recognizer fires per region and only for a region that came back empty, and a merged strip is never empty — so a value the primary recognizer dropped would stay dropped while its neighbour came through. Only the capture is shared.
+
+```luau
+local r = host.ocr.recognizeMany({ regions = {
+  { x1 = 220, y1 = 61, x2 = 287, y2 = 74 },
+  { x1 = 300, y1 = 61, x2 = 367, y2 = 74 },
+} })
+host.log.info(r[1].text .. " / " .. r[2].text)
+```
+
 ## host.input.cursorPos()
 
 Returns the current mouse cursor position in screen coordinates.
