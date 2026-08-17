@@ -1294,10 +1294,23 @@ local function measureNoteArea(o)
         :format(viewShift and tostring(viewShift) or "?",
           real and string.format("%.0f", real) or "?"))
     end
-    -- SILENT AGAIN until a session shows the corrected number surviving a scroll. The last time
-    -- this spoke it was on a test that happened not to scroll, and I took that for the general
-    -- case; the user paid for it with a run of numbers that grew without meaning.
-    local confident = false
+    -- SPOKEN. Earned on the ink channel by a controlled test, and by the same standard of
+    -- evidence that the earlier attempt failed to meet:
+    --
+    --   right  +32 +26 +40 +41
+    --   left   -41 -40 -26 -32 -36 -44 -41
+    --
+    -- Eleven signs, all correct, with the magnitudes mirrored — 32, 26, 40, 41 out and 41, 40,
+    -- 26, 32 back, the same journey retraced. The raw runs corroborate it independently: 786,
+    -- 819, 854, 888, 922 and exactly back down the same columns. And unlike every earlier
+    -- version, this channel was measured against the picture BEFORE anything was built on it.
+    --
+    -- A magnitude floor rather than a sample floor. The ink channel reports single columns, so
+    -- a run of five on each side — the rule the previous attempt used — would have silenced six
+    -- of these eleven correct measurements and reproduced exactly the disconnected feel the user
+    -- reported. Both sides must be present, since a centroid needs two, and the move must be
+    -- worth mentioning.
+    local confident = real ~= nil and aN >= 1 and dN >= 1 and math.abs(real) >= 8
     local moved = real or 0
     if host.calibrating then
       host.log.info(("[melodyne] correlation says %d px (fit %.1f against %.1f standing still)")
