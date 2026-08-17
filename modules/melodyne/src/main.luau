@@ -925,7 +925,7 @@ local NOTE_AREA = { 48, 118, 935, 640 }
 local NOTE_AREA_MS = 200
 local lastAreaSize = nil
 local CHANGE_THRESHOLD = 6 -- mean, of 255; below this is recogniser and compositor noise
-local MIN_THRESHOLD = 24 -- minimum, of 255; higher because a minimum is one pixel and noisier
+local MIN_THRESHOLD = 8 -- INK: rows of a column, against a floor of about 19 and a blob of 30-57
 local lastArea, lastAreaMin = nil, nil
 -- The bar lines of the previous frame, so a scroll can be told from an edit.
 local prevLines = nil
@@ -1067,9 +1067,19 @@ local function measureNoteArea(o)
     -- Columns only: a note's identity is a horizontal position, and asking for rows as well
     -- would double the reduction for something nothing reads.
     axes = "columns",
+    -- 190 rather than the default: Melodyne's note area is a light page, and the measured
+    -- classes above were separated at exactly this level.
+    dark = 190,
   })
-  if not (p and p.columns and p.columns.mean and p.columns.min) then return end
-  local mean, minv = p.columns.mean, p.columns.min
+  if not (p and p.columns and p.columns.mean and p.columns.dark) then return end
+  -- The INK COUNT is the working channel; the mean is kept only for the bar lines, which are
+  -- full-height and show up in it plainly.
+  --
+  -- Measured on a real capture at threshold 190: background and grid lines about 19 rows per
+  -- column, note blobs 29 to 57, a full-height cursor 470 to 516. Three classes, cleanly apart.
+  -- The mean gave a blob four units out of 255 and the minimum gave it nothing at all, because
+  -- in a busy picture nearly every column already holds something black and cannot go blacker.
+  local mean, minv = p.columns.mean, p.columns.dark
   local prev, prevMin = lastArea, lastAreaMin
   lastArea, lastAreaMin = mean, minv
   if not (prev and prevMin) or #prev ~= #mean then
@@ -1174,11 +1184,16 @@ local function measureNoteArea(o)
     -- barely did; requiring the full change threshold again here left half the frames with fewer
     -- than four arrival columns and therefore silent. The user heard a value, two gaps, another
     -- value — correct numbers that sounded like noise because of what was missing between them.
-    local ARRIVED = 10
+    -- Ink ARRIVING in a column, in rows. A blob covers 30 to 57 rows where the page floor is
+    -- about 19, so eight rows is a clear arrival and still well above the flicker of anti-
+    -- aliasing on a redraw.
+    local ARRIVED = 8
     local cols = {}
     for _, r in ipairs(runs) do
       for i = r.from, r.to do
-        if (minv[i] or 0) + ARRIVED <= (prevMin[i] or 0) then cols[#cols + 1] = i end
+        -- MORE ink than before. The comparison points the other way from the luminance one it
+        -- replaces, and getting that backwards would invert every direction this speaks.
+        if (minv[i] or 0) >= (prevMin[i] or 0) + ARRIVED then cols[#cols + 1] = i end
       end
     end
     -- Kept as a SECOND OPINION in the log and nothing more. It is the estimate that aliased,
@@ -1208,8 +1223,8 @@ local function measureNoteArea(o)
     local aSum, aN, dSum, dN = 0, 0, 0, 0
     for i = 1, #minv do
       local now, was = minv[i] or 0, prevMin[i] or 0
-      if now + ARRIVED <= was then aSum, aN = aSum + i, aN + 1
-      elseif was + ARRIVED <= now then dSum, dN = dSum + i, dN + 1 end
+      if now >= was + ARRIVED then aSum, aN = aSum + i, aN + 1
+      elseif was >= now + ARRIVED then dSum, dN = dSum + i, dN + 1 end
     end
     local centroid = (aN > 0 and dN > 0) and (aSum / aN - dSum / dN) or nil
     if host.calibrating then

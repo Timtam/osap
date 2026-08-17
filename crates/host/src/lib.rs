@@ -3373,6 +3373,21 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             // Accumulators for both axes in ONE traversal: the capture is already the whole
             // cost, and walking it twice to keep the code symmetrical would be the only part
             // of this that scales with area.
+            // How many pixels in this column/row are darker than `dark`.
+            //
+            // The third statistic, and for finding a SHAPE it is the only one of the three that
+            // works. A mean over hundreds of rows dilutes a note-sized object to a couple of
+            // units; a minimum saturates, because in a busy picture almost every column already
+            // contains something black and cannot go blacker. A count does neither — it is
+            // proportional to how much of the column the object covers. Measured on a real
+            // Melodyne capture at threshold 190: background and grid lines about 19 rows, note
+            // blobs 29 to 57, a full-height cursor 470 to 516. Three classes, cleanly apart,
+            // where the other two channels saw one.
+            let dark_t: u8 = opts
+                .as_ref()
+                .and_then(|o| o.get::<u8>("dark").ok())
+                .unwrap_or(128);
+            let (mut cdark, mut rdark) = (vec![0u32; w], vec![0u32; h]);
             let (mut cmin, mut cmax) = (vec![255u8; w], vec![0u8; w]);
             let (mut rmin, mut rmax) = (vec![255u8; h], vec![0u8; h]);
             let (mut csum, mut rsum) = (vec![0u64; w], vec![0u64; h]);
@@ -3387,6 +3402,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                     // with a plain average anyway; the note blobs are not.
                     let l = ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000) as u8;
                     if want_cols {
+                        if l < dark_t {
+                            cdark[x] += 1;
+                        }
                         if l < cmin[x] {
                             cmin[x] = l;
                         }
@@ -3399,6 +3417,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                         cch[x][2] += b as u64;
                     }
                     if want_rows {
+                        if l < dark_t {
+                            rdark[y] += 1;
+                        }
                         if l < rmin[y] {
                             rmin[y] = l;
                         }
@@ -3422,6 +3443,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             let axis = |lua: &Lua,
                         min: &[u8],
                         max: &[u8],
+                        dark: &[u32],
                         sum: &[u64],
                         ch: &[[u64; 3]],
                         n: u64|
@@ -3430,6 +3452,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 let t = lua.create_table()?;
                 t.set("min", lua.create_sequence_from(min.iter().copied())?)?;
                 t.set("max", lua.create_sequence_from(max.iter().copied())?)?;
+                t.set("dark", lua.create_sequence_from(dark.iter().copied())?)?;
                 t.set(
                     "mean",
                     lua.create_sequence_from(sum.iter().map(|s| *s as f64 / n))?,
@@ -3448,10 +3471,10 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             out.set("w", cap.w)?;
             out.set("h", cap.h)?;
             if want_cols {
-                out.set("columns", axis(lua, &cmin, &cmax, &csum, &cch, h as u64)?)?;
+                out.set("columns", axis(lua, &cmin, &cmax, &cdark, &csum, &cch, h as u64)?)?;
             }
             if want_rows {
-                out.set("rows", axis(lua, &rmin, &rmax, &rsum, &rch, w as u64)?)?;
+                out.set("rows", axis(lua, &rmin, &rmax, &rdark, &rsum, &rch, w as u64)?)?;
             }
             // Timed to HERE, not to the end of the capture. The capture is a fixed frame; the
             // traversal and the six sequences are the only part that grows with the region, and
