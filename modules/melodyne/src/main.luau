@@ -200,6 +200,26 @@ local function activeVariant(ov, tool)
   return 1
 end
 
+-- The same reading, asked at most once per input epoch per tool.
+--
+-- Three callers want it while the tool bar is being announced — the tab's `current`, its
+-- `verticalName`, and the left read-out's owner name — and each probe point is a screen read at
+-- a compositor frame. Landing on the tool bar was measured at 89 to 110 ms of pure announcement
+-- because of it, which is a tenth of a second of silence after a Tab.
+--
+-- Keyed on the input epoch for the reason `activeToolCached` is: which variant is live changes
+-- only when something ACTS, and that is exactly what turns the counter over. A user walking the
+-- Tab ring does not turn it, so the walk is free after the first look.
+local variantMemo = { gen = -1, tool = nil, index = 1 }
+local function activeVariantCached(ov, tool)
+  local gen = host.inputEpoch and host.inputEpoch() or (host.epoch and host.epoch() or 0)
+  if variantMemo.gen ~= gen or variantMemo.tool ~= tool then
+    variantMemo.gen, variantMemo.tool = gen, tool
+    variantMemo.index = activeVariant(ov, tool)
+  end
+  return variantMemo.index
+end
+
 local ov = O.new("Melodyne")
 
 -- 1-based position in the current tool's variant stack; 1 is the base tool.
@@ -328,10 +348,15 @@ do
       if reportFieldsAfterSwitch then reportFieldsAfterSwitch(selectedToolName) end
     end,
     current = function(o)
-      local i = activeTool(o)
+      local i = activeToolCached(o)
       if not i then return nil end
-      -- The TOOL is re-detected every time, because its probe is a clean bright-against-grey
-      -- reading and Melodyne's own F-keys change it behind our back.
+      -- The TOOL is re-detected whenever anything ACTED, because its probe is a clean
+      -- bright-against-grey reading and Melodyne's own F-keys change it behind our back. Not on
+      -- every announcement, though: this runs each time the tool bar is spoken, and six screen
+      -- reads at a compositor frame each measured 89 to 110 ms of silence after a Tab. The
+      -- input epoch is exactly the right clock — it turns over when a key or a click happens,
+      -- which is the only way the tool can have changed, and a walk around the Tab ring does
+      -- not turn it.
       --
       -- The VARIANT is not, and the asymmetry is the point: a sub-tool probe only exists for
       -- three of the eight, so a reading of "base tool" is usually the absence of a probe
@@ -342,7 +367,7 @@ do
         variant = 1
         lastTool = i
       end
-      local seen = activeVariant(o, TOOLS[i])
+      local seen = activeVariantCached(o, TOOLS[i])
       if seen > 1 then variant = seen end
       return i
     end,
@@ -363,7 +388,7 @@ do
       -- tool is live and when the probe simply cannot tell. The log says how often that is —
       -- "asked for 2 (Fade), probes report 1", over and over — since only three of the eight
       -- variant stacks have probe points at all.
-      local seen = activeVariant(o, tool)
+      local seen = activeVariantCached(o, tool)
       if seen > 1 then variant = seen end
       if variant <= 1 then return nil end -- the base tool: the tab's own label is right
       return tool.variants[variant - 1].name .. " tool, has vertical variations"
@@ -533,7 +558,7 @@ local function inspectorOwner(o)
   local i = activeToolCached(o)
   if not i then return nil end
   local tool = TOOLS[i]
-  local v = activeVariant(o, tool)
+  local v = activeVariantCached(o, tool)
   if v > 1 and tool.variants and tool.variants[v - 1] then
     return tool.variants[v - 1].name
   end
