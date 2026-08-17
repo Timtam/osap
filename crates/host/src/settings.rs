@@ -93,7 +93,14 @@ impl Field {
 pub struct ModuleEntry {
     #[serde(default = "yes")]
     pub enabled: bool,
-    #[serde(default)]
+    /// Left out of the file entirely when empty, rather than written as a bare
+    /// `[modules."x".settings]` header with nothing under it.
+    ///
+    /// Most modules declare no settings at all, so the file was mostly section headers
+    /// standing for nothing — and a person opening it to check one value had to read past
+    /// eleven of them. An empty table and an absent one deserialize identically (`default`),
+    /// so nothing is lost by not writing it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub settings: BTreeMap<String, Value>,
 }
 
@@ -107,9 +114,12 @@ pub struct Store {
     ///
     /// A map rather than a struct, so that a settings file written by a newer build keeps
     /// its unknown keys instead of losing them the next time an older build saves.
-    #[serde(default)]
+    ///
+    /// Omitted when empty, for the same reason as a module's: with every switch off there is
+    /// nothing to say, and a lone `[app]` heading says it at length.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub app: BTreeMap<String, Value>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub modules: BTreeMap<String, ModuleEntry>,
 }
 
@@ -155,10 +165,27 @@ impl Store {
     /// and quarantining a corrupt `settings.toml` rather than wiping it.
     pub fn load() -> Store {
         match std::fs::read_to_string(store_path()) {
-            Ok(s) => toml::from_str(&s).unwrap_or_else(|_| {
-                quarantine();
-                Store::empty()
-            }),
+            Ok(s) => {
+                let store: Store = match toml::from_str(&s) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        quarantine();
+                        return Store::empty();
+                    }
+                };
+                // Rewrite once when the file on disk is not what this build would write.
+                //
+                // Otherwise a change in what gets serialized only reaches the file the next
+                // time somebody happens to alter a setting — so the empty `[…settings]`
+                // headings this build stopped writing would have sat there for weeks, and the
+                // person who reported them would have had to take it on trust. Re-serializing
+                // preserves unknown keys (both maps are open), so a file written by a newer
+                // build survives this untouched.
+                if toml::to_string_pretty(&store).map(|b| b != s).unwrap_or(false) {
+                    store.save();
+                }
+                store
+            }
             Err(_) => migrate_legacy().unwrap_or_else(Store::empty),
         }
     }
@@ -304,5 +331,46 @@ mod store_rollback_tests {
         // No orphan section left behind for a module that never finished loading.
         assert!(s.get("new", "k").is_none());
         assert!(s.snapshot("new").is_none());
+    }
+
+    /// A module with no settings writes no settings section — and the file still round-trips.
+    ///
+    /// Eleven modules ship here and two of them declare a setting, so the file was nine
+    /// headings standing for nothing. Someone opening it to check one value had to read past
+    /// them all, which for a file whose whole purpose is being readable by hand is the wrong
+    /// trade for a byte.
+    #[test]
+    fn an_empty_settings_table_is_not_written_but_still_reads_back() {
+        // Real ids, because they carry dots and TOML then quotes the key — the assertions
+        // below would otherwise be testing a spelling this file never actually writes.
+        let (plain, off, configured) =
+            ("com.platform.plain", "com.platform.off", "com.platform.configured");
+        let mut s = Store::empty();
+        s.set_enabled(plain, true);
+        s.set_enabled(off, false);
+        s.set(configured, "vol", Value::Int(7));
+        let text = toml::to_string_pretty(&s).expect("serialize");
+        assert!(!text.contains(&format!("\"{plain}\".settings")), "empty table written:\n{text}");
+        assert!(!text.contains(&format!("\"{off}\".settings")), "empty table written:\n{text}");
+        assert!(
+            text.contains(&format!("\"{configured}\".settings")),
+            "real settings lost:\n{text}"
+        );
+        // The absent table and an empty one mean the same thing on the way back in, which is
+        // what makes leaving it out safe rather than merely tidier.
+        let back: Store = toml::from_str(&text).expect("deserialize");
+        assert_eq!(back.modules.get(plain).map(|m| m.enabled), Some(true));
+        assert_eq!(back.modules.get(off).map(|m| m.enabled), Some(false));
+        assert!(back.modules[plain].settings.is_empty());
+        assert_eq!(back.modules[configured].settings.get("vol"), Some(&Value::Int(7)));
+    }
+
+    /// With every application switch off, no `[app]` heading either.
+    #[test]
+    fn an_untouched_app_section_is_not_written() {
+        let s = Store::empty();
+        let text = toml::to_string_pretty(&s).expect("serialize");
+        assert!(!text.contains("[app]"), "empty app table written:\n{text}");
+        assert!(toml::from_str::<Store>(&text).is_ok());
     }
 }
