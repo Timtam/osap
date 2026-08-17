@@ -831,12 +831,57 @@ end
 -- cents. A stop you can reach when you want it.
 local TRANSPORT_REGION = { 408, 12, 530, 34 }
 
-ov:addOCRButton({
-  label = "Position",
-  region = TRANSPORT_REGION,
-  readOnly = true,
-  fallback = "no value",
-})
+-- Checked against the shape Melodyne prints, and re-read once when it does not fit.
+--
+-- The raw recogniser is not reliable enough here to speak unedited, and the log says so: over a
+-- single playback it produced "42.2.2", "43.1.1", "44.1.2" — and also "441.1", "442.2", "42. I",
+-- "..", and a lone ".". The field itself is not the problem; it is the largest, cleanest text in
+-- the window. The reads land mid-repaint, because the number changes several times a second
+-- while the transport runs.
+--
+-- So: three groups of digits with SOMETHING between them (the separator glyph is the first
+-- thing lost, and which glyph it was does not matter), and beat and sixteenth within a bar's
+-- range. One retry, because a second look costs one frame and mid-repaint failures do not
+-- repeat. When it still does not fit, the raw text is announced as itself rather than dressed
+-- up as a position — "441.1" spoken as "bar 441" would be a confident lie, and this whole
+-- evening is a record of what those cost.
+--
+-- The range check also guards a case nobody has tested: Melodyne's ruler can be switched to
+-- seconds, and "0:12.345" would parse as three groups just as happily. A sixteenth of 345 is
+-- not a sixteenth, so it falls through to the raw reading instead of being mislabelled.
+local function readPosition(o)
+  local origin = o:origin()
+  if not (origin and origin.client) then return nil end
+  local function once()
+    local r = host.ocr.recognize({
+      region = {
+        origin.client.x + TRANSPORT_REGION[1], origin.client.y + TRANSPORT_REGION[2],
+        origin.client.x + TRANSPORT_REGION[3], origin.client.y + TRANSPORT_REGION[4],
+      },
+    })
+    return trimmed(r and r.text)
+  end
+  local function musical(s)
+    local bar, beat, six = s:match("^(%d+)%D+(%d+)%D+(%d+)$")
+    if not bar then return nil end
+    if tonumber(beat) > 16 or tonumber(six) > 16 then return nil end
+    return ("bar %s, beat %s, sixteenth %s"):format(bar, beat, six)
+  end
+  local raw = once()
+  local said = musical(raw)
+  if not said then
+    local again = once()
+    said = musical(again)
+    if not said then
+      host.log.info(("[melodyne] position not in bar.beat.sixteenth form: %q then %q")
+        :format(raw, again))
+      return again ~= "" and again or (raw ~= "" and raw or nil)
+    end
+  end
+  return said
+end
+
+ov:addStaticText({ label = "Position", text = readPosition })
 
 -- ── Where is the SELECTED note? ───────────────────────────────────────────────
 --
