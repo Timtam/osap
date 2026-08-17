@@ -121,6 +121,29 @@ local s = host.screen.size()
 host.log("screen is " .. s.w .. "x" .. s.h)
 ```
 
+## host.screen.profile(opts?)
+
+**Signature:** `host.screen.profile(opts: { region: Region?, axes: ("both" | "columns" | "rows")? }?) -> { x, y, w, h, columns: Axis?, rows: Axis? } | nil`
+where `Axis = { min: number[], max: number[], mean: number[], r: number[], g: number[], b: number[] }`
+
+Takes **one** capture of `region` and reduces it, per column and per row, to: the darkest pixel, the lightest, the mean, and the mean of each colour channel — all 0–255, luminance by ITU-R BT.601. Index `1` is the left (or top) edge of the region; `x`, `y`, `w`, `h` report what was actually captured. Returns `nil` when the region is empty or the capture fails.
+
+Use it to find something whose **position** you do not know: a vertical line is a dark column in a light band, an edge is where the mean steps, a shape's extent is where its run of changed columns begins and ends, and a differently coloured patch shows up in `r`/`g`/`b` while the luminance stays flat.
+
+`axes` skips the half you do not need; the capture costs the same either way, only the reduction and the table-building are saved.
+
+**Why this rather than many `pixel` calls:** a screen capture costs a fixed compositor frame — measured on the reference machine at 16.6 ms for 55×27 and 16.7 ms for 1028×666 — and `host.screen.pixel` costs the same 16.7 ms *for one pixel*. Area is free; touching the screen is what costs. Four point probes are four frames, while a profile of the whole window is one.
+
+```luau
+-- Where are the dark vertical lines in this strip?
+local p = host.screen.profile({ region = { x, y, x + 400, y + 20 }, axes = "columns" })
+for i, m in ipairs(p.columns.min) do
+    if m < 160 then
+        host.log.info("line at client x " .. (i - 1))
+    end
+end
+```
+
 ## host.screen.imageSearch(template, opts?)
 
 **Signature:** `host.screen.imageSearch(template: string, opts: { region: Region?, tolerance: number? }?) -> { x: number, y: number, w: number, h: number } | nil`

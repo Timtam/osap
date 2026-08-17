@@ -3311,6 +3311,129 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             Ok(t)
         })?,
     )?;
+    // host.screen.profile{ region = {x1,y1,x2,y2}, axes = "both"|"columns"|"rows" }
+    //   -> { x, y, w, h, columns = {min,max,mean,r,g,b}, rows = {…} }  |  nil
+    //
+    // ONE capture, reduced in Rust to a shape a module can reason about.
+    //
+    // The reason this exists is a measurement, not a preference. On this machine a BitBlt
+    // capture costs ~16.6 ms at 55x27 and ~16.7 ms at 1028x666, while GetPixel costs 16.7 ms
+    // for ONE pixel: the compositor serialises every screen touch to its vsync, so area is
+    // free and touching is what costs. A module that wants to know where an edge is therefore
+    // had only one honest option — probe a handful of points and hope they were the right ones
+    // — and the alternative, shipping a whole bitmap into Lua, would trade a cheap capture for
+    // an expensive marshal and a slow scan in a scripting language.
+    //
+    // So the reduction happens here. Per column and per row: the darkest pixel, the lightest,
+    // the mean, and the mean of each channel. That is enough to find a vertical line (a dark
+    // column in a light band), an edge (where the mean steps), the extent of a shape, and a
+    // patch of a different colour — which is the whole of what these overlays have ever needed
+    // to read out of a picture, and none of it is expressible with point probes.
+    //
+    // Counted as one screen touch in the observation log, because that is exactly what it is.
+    let sh = shared.clone();
+    screen.set(
+        "profile",
+        lua.create_function(move |lua, opts: Option<Table>| {
+            let (sw, sh2) = sh.backend.screen_size();
+            let (rx, ry, rw, rh) = read_region(opts.as_ref(), sw, sh2);
+            if rw <= 0 || rh <= 0 {
+                return Ok(mlua::Value::Nil);
+            }
+            let axes = opts
+                .as_ref()
+                .and_then(|o| o.get::<String>("axes").ok())
+                .unwrap_or_else(|| "both".to_string());
+            let (want_cols, want_rows) = (axes != "rows", axes != "columns");
+            let t0 = Instant::now();
+            let cap = match sh.backend.capture(rx, ry, rw, rh) {
+                Some(c) => c,
+                None => return Ok(mlua::Value::Nil),
+            };
+            {
+                let mut obs = sh.observations();
+                obs.pixels += 1;
+                obs.pixel_us += t0.elapsed().as_micros();
+            }
+            let (w, h) = (cap.w as usize, cap.h as usize);
+            // Accumulators for both axes in ONE traversal: the capture is already the whole
+            // cost, and walking it twice to keep the code symmetrical would be the only part
+            // of this that scales with area.
+            let (mut cmin, mut cmax) = (vec![255u8; w], vec![0u8; w]);
+            let (mut rmin, mut rmax) = (vec![255u8; h], vec![0u8; h]);
+            let (mut csum, mut rsum) = (vec![0u64; w], vec![0u64; h]);
+            let mut cch = vec![[0u64; 3]; w];
+            let mut rch = vec![[0u64; 3]; h];
+            for y in 0..h {
+                for x in 0..w {
+                    let o = (y * w + x) * 4;
+                    let (r, g, b) = (cap.rgba[o], cap.rgba[o + 1], cap.rgba[o + 2]);
+                    // ITU-R BT.601, so a coloured mark is weighted the way an eye would weight
+                    // it. Melodyne's chrome is neutral grey (r == g == b), where this agrees
+                    // with a plain average anyway; the note blobs are not.
+                    let l = ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000) as u8;
+                    if want_cols {
+                        if l < cmin[x] {
+                            cmin[x] = l;
+                        }
+                        if l > cmax[x] {
+                            cmax[x] = l;
+                        }
+                        csum[x] += l as u64;
+                        cch[x][0] += r as u64;
+                        cch[x][1] += g as u64;
+                        cch[x][2] += b as u64;
+                    }
+                    if want_rows {
+                        if l < rmin[y] {
+                            rmin[y] = l;
+                        }
+                        if l > rmax[y] {
+                            rmax[y] = l;
+                        }
+                        rsum[y] += l as u64;
+                        rch[y][0] += r as u64;
+                        rch[y][1] += g as u64;
+                        rch[y][2] += b as u64;
+                    }
+                }
+            }
+            let axis = |lua: &Lua,
+                        min: &[u8],
+                        max: &[u8],
+                        sum: &[u64],
+                        ch: &[[u64; 3]],
+                        n: u64|
+             -> mlua::Result<Table> {
+                let t = lua.create_table()?;
+                t.set("min", lua.create_sequence_from(min.iter().copied())?)?;
+                t.set("max", lua.create_sequence_from(max.iter().copied())?)?;
+                t.set(
+                    "mean",
+                    lua.create_sequence_from(sum.iter().map(|s| (s / n.max(1)) as u8))?,
+                )?;
+                for (i, name) in ["r", "g", "b"].iter().enumerate() {
+                    t.set(
+                        *name,
+                        lua.create_sequence_from(ch.iter().map(|c| (c[i] / n.max(1)) as u8))?,
+                    )?;
+                }
+                Ok(t)
+            };
+            let out = lua.create_table()?;
+            out.set("x", rx)?;
+            out.set("y", ry)?;
+            out.set("w", cap.w)?;
+            out.set("h", cap.h)?;
+            if want_cols {
+                out.set("columns", axis(lua, &cmin, &cmax, &csum, &cch, h as u64)?)?;
+            }
+            if want_rows {
+                out.set("rows", axis(lua, &rmin, &rmax, &rsum, &rch, w as u64)?)?;
+            }
+            Ok(mlua::Value::Table(out))
+        })?,
+    )?;
     let sh = shared.clone();
     screen.set(
         "imageSearch",
@@ -3942,10 +4065,15 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
 
     install_include(lua, shared, idx, &host)?;
 
-    // host.calibrating — true when the app was started with AUTOMATION_PLATFORM_CALIBRATE=1.
-    // The overlay runtime arms its calibration keys only then, so a normal user never has
-    // those combinations taken away, and a module author gets them by starting the app
-    // once with the variable set. Same shape as AUTOMATION_PLATFORM_OCR_DEBUG.
+    // host.calibrating — true while "Calibration keys in overlays" is on (the Application
+    // settings tab, or the AUTOMATION_PLATFORM_CALIBRATE variable for a launch with no window
+    // to click in). The overlay runtime arms its calibration keys only then, so a normal user
+    // never has those combinations taken away.
+    //
+    // Read once, when the VM is built — which is exactly why that setting's label says "reload
+    // modules to apply" and not "immediately". Modules also use it to gate MEASUREMENTS that
+    // are too expensive to run for somebody who is not measuring: a capture per selection
+    // change is an instrument, not a feature.
     host.set(
         "calibrating",
         appcfg::calibrate(),

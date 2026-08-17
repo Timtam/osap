@@ -753,6 +753,87 @@ end
 -- user; it is here so that the question "what does THIS tool show in those two boxes" is
 -- answered by using Melodyne, by whoever is already using it, rather than by anybody
 -- describing a screen.
+-- ── Where is the SELECTED note? ───────────────────────────────────────────────
+--
+-- The question everything else in the note area waits on. Melodyne draws a selected blob
+-- differently from an unselected one, but nobody has measured how, and without knowing WHICH
+-- blob is the selected one, any geometry we read describes some note rather than the note.
+--
+-- The measurement is differential, which is why it needs no idea of what "selected" looks like.
+-- The user walks notes with the arrow keys; between two selections the only part of the picture
+-- that changes is the blob that was selected and the one that no longer is. So: one column
+-- profile of the note area per selection change, compared against the previous one, and the
+-- columns that moved are logged. Over a walk down a phrase those runs march across the area and
+-- draw the map by themselves.
+--
+-- One capture per selection change, ~17 ms, and the AREA IS FREE — a capture costs the same
+-- fixed compositor frame at 890x520 as a single GetPixel does for one point. That is the whole
+-- reason `host.screen.profile` exists.
+--
+-- Calibration only. This is an instrument, not a feature: it says nothing to the user, and a
+-- measurement that runs when nobody is measuring is just a slower overlay.
+local NOTE_AREA = { 48, 118, 935, 640 }
+local CHANGE_THRESHOLD = 6 -- of 255; below this is recogniser and compositor noise
+local lastArea = nil
+
+local function measureNoteArea(o)
+  if not host.calibrating then return end
+  if not (host.screen and host.screen.profile) then return end
+  local origin = o:origin()
+  if not (origin and origin.client) then return end
+  local p = host.screen.profile({
+    region = {
+      origin.client.x + NOTE_AREA[1], origin.client.y + NOTE_AREA[2],
+      origin.client.x + NOTE_AREA[3], origin.client.y + NOTE_AREA[4],
+    },
+    -- Columns only: a note's identity is a horizontal position, and asking for rows as well
+    -- would double the reduction for something nothing reads.
+    axes = "columns",
+  })
+  if not (p and p.columns and p.columns.mean) then return end
+  local mean, prev = p.columns.mean, lastArea
+  lastArea = mean
+  if not prev or #prev ~= #mean then
+    host.log.info(("[melodyne] note area: baseline, %d columns from client x=%d")
+      :format(#mean, NOTE_AREA[1]))
+    return
+  end
+  -- Contiguous runs of changed columns, so the log names REGIONS rather than a list of
+  -- hundreds of indices. A gap of one column does not end a run: a blob's outline can leave a
+  -- column untouched in the middle of a shape that plainly moved.
+  local runs, from, peak, gap = {}, nil, 0, 0
+  for i = 1, #mean do
+    local d = math.abs(mean[i] - prev[i])
+    if d >= CHANGE_THRESHOLD then
+      if not from then from, peak = i, 0 end
+      if d > peak then peak = d end
+      gap = 0
+    elseif from then
+      gap = gap + 1
+      if gap > 1 then
+        runs[#runs + 1] = { from = from, to = i - gap, peak = peak }
+        from = nil
+      end
+    end
+  end
+  if from then runs[#runs + 1] = { from = from, to = #mean, peak = peak } end
+  if #runs == 0 then
+    host.log.info("[melodyne] note area: nothing moved")
+    return
+  end
+  table.sort(runs, function(a, b) return a.peak > b.peak end)
+  local parts = {}
+  for i = 1, math.min(#runs, 6) do
+    local r = runs[i]
+    -- Client coordinates, not indices into the capture, so the numbers can be compared with
+    -- every other coordinate in this file.
+    parts[#parts + 1] = string.format("x%d-%d(d%d)",
+      NOTE_AREA[1] + r.from - 1, NOTE_AREA[1] + r.to - 1, r.peak)
+  end
+  host.log.info(("[melodyne] note area: %d run(s) moved, strongest %s")
+    :format(#runs, table.concat(parts, " ")))
+end
+
 reportFieldsAfterSwitch = function(toolName, afterMs)
   if not host.timer then return end
   -- The delay is a parameter because a VARIANT is not reached in one step: `selectVariant`
@@ -872,6 +953,9 @@ host.timer.every(WATCH_MS, function()
   host.log.info(("[melodyne] selection: tool=%s left=%q right=%q%s")
     :format(toolForLog(), left, right, holding and "  (held: the tool was just changed)" or ""))
   if holding then return end
+  -- The selection moved, so the picture moved: measure it while the difference is fresh. Does
+  -- nothing unless the calibration switch is on.
+  measureNoteArea(ov)
   local parts = {}
   -- Only what changed, and a DASH is not spoken. Melodyne draws "-" in a box with nothing to
   -- report, so it is a real reading and belongs in the cache — but "minus" is not a thing a
