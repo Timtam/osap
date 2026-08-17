@@ -1200,18 +1200,25 @@ local function measureNoteArea(o)
     -- nothing reliable about HOW FAR — for a move shorter than the note's own width the two
     -- centroids are a note-width apart, not a displacement apart — which is exactly why it is
     -- logged beside the correlation rather than spoken instead of it.
+    -- Over the WHOLE profile, not over the runs.
+    --
+    -- The runs are a summary written for the log — grouped, gap-tolerant, one to three columns
+    -- wide — and building a centroid inside them left samples of two and five columns. Two
+    -- correct answers out of a sample that small is indistinguishable from two lucky guesses,
+    -- and this estimate exists precisely because the last one was believed too early. Every
+    -- column that changed enough counts here; it costs one pass over 887 numbers.
     local aSum, aN, dSum, dN = 0, 0, 0, 0
-    for _, r in ipairs(runs) do
-      for i = r.from, r.to do
-        local now, was = minv[i] or 0, prevMin[i] or 0
-        if now + ARRIVED <= was then aSum, aN = aSum + i, aN + 1
-        elseif was + ARRIVED <= now then dSum, dN = dSum + i, dN + 1 end
-      end
+    for i = 1, #minv do
+      local now, was = minv[i] or 0, prevMin[i] or 0
+      if now + ARRIVED <= was then aSum, aN = aSum + i, aN + 1
+      elseif was + ARRIVED <= now then dSum, dN = dSum + i, dN + 1 end
     end
     local centroid = (aN > 0 and dN > 0) and (aSum / aN - dSum / dN) or nil
     if host.calibrating then
-      host.log.info(("[melodyne] centroid says %s (%d arrived, %d left)")
-        :format(centroid and (centroid > 0 and "right" or "left") or "nothing", aN, dN))
+      host.log.info(("[melodyne] centroid says %s by %s px (%d arrived, %d left)")
+        :format(
+          centroid and (centroid > 0 and "right" or "left") or "nothing",
+          centroid and string.format("%.0f", math.abs(centroid)) or "?", aN, dN))
     end
     -- SPOKEN: NOT YET, and this is a deliberate stop rather than an oversight.
     --
