@@ -269,13 +269,40 @@ eingeschlossen, und ohne Werkzeugnamen. Der AutoHotkey-Entwurf des Nutzers, aus 
 Regionen stammen, legt beide Anzeigen **bedingungslos** an und fängt ein leeres Feld mit dem
 Ersatztext `"No value"` ab — also gerade nicht mit einer Werkzeugbedingung.
 
-→ **[LÜCKE bleibt]** Was **Time** und **Note Separation** in den Kästchen zeigen, ist weiter
-unbekannt: bei beiden waren im Log *beide* Felder leer, und das Modul schrieb damals nur eine
-Zeile, wenn wenigstens eines etwas enthielt — sie erscheinen also gar nicht. Seit 17.08.2026
-schreibt das Overlay bei **jedem Werkzeugwechsel** eine Zeile
-`[melodyne] fields under tool=… left=… right=…`, gemessen kurz nach dem Umschalten und
-ausdrücklich auch dann, wenn beides leer ist. Die Lücke schließt sich damit beim bloßen Benutzen,
-ohne dass jemand auf einen Bildschirm sehen muss.
+**[LOG, 17.08.2026 — das Kästchen wird wirklich weggenommen, nicht nur geleert]**
+
+Bis hierher war jede Beobachtung des zweiten Feldes eine **OCR seines Inhalts** — und die kann
+die beiden Fälle prinzipiell nicht trennen: Melodynes „nichts zu melden" ist ein Strich von drei
+Tintenpixeln, den der Erkenner genauso fallen lässt wie blanke Leiste. Ein **Randpixel** trennt
+sie. Das Overlay liest seit 17.08.2026 bei jedem Werkzeugwechsel die vier Kästchenränder
+(x 218, 289, 298, 369 bei y 67) und schreibt die rohen Grauwerte ins Log. Innerhalb von Minuten:
+
+```
+fields under tool=Pitch:     left="Ab 4"     right="-1 ct"  box borders 146 146 146 146
+fields under tool=Formant:   left="0 ct"     right=""       box borders 146 146 191 191
+fields under tool=Amplitude: left="0.00 dB"  right=""       box borders 146 146 191 191
+```
+
+Unter **Pitch** sind alle vier Ränder dunkel: beide Kästchen gezeichnet. Unter **Formant** und
+**Amplitude** lesen die beiden rechten Ränder **191**, den Grauwert der blanken Leiste — das
+zweite Kästchen ist dort **nicht vorhanden**, nicht bloß leer. Die Kalibrieraufnahme
+`Melodyne-2-clean.png` derselben Minute zeigt es auch mit bloßem Auge: ein einzelnes Kästchen mit
+`0 ct` und rechts daneben Werkzeugleiste.
+
+Damit ist SIBIACs „zero, one or two parameter controls" bestätigt und der **Mechanismus** dieses
+Abschnitts ebenfalls — falsch war allein die Liste, aus der das Main Tool fehlte.
+
+⚠ **Keine Schwellwerte aus diesen Zahlen ableiten.** Derselbe Rand las am 13.08. **157** und am
+17.08. **146**; die Kästchenfüllung 194 gegen 209. Melodynes Graustufen verschieben sich mit der
+Darstellungseinstellung und mit dem, was die Anwendung über sich selbst zeichnet (die Aufnahme
+vom 13.08. entstand hinter dem Erkennungsdialog). Stabil ist nur der **Kontrast**: ein Rand ist
+deutlich dunkler als die 191 der blanken Leiste.
+
+→ **[LÜCKE bleibt]** Was **Time** und **Note Separation** zeigen, ist weiter unbekannt — bei
+beiden waren im Log *beide* Felder leer, und das Modul schrieb damals nur eine Zeile, wenn
+wenigstens eines etwas enthielt, sie erscheinen also gar nicht. Die neue Zeile wird auch im
+leeren Fall geschrieben; die Lücke schließt sich beim bloßen Benutzen, ohne dass jemand auf einen
+Bildschirm sehen muss.
 
 **Geometrie Pitch-Tool [FIG]:** Feld 1 außen x**284–380** (96 px), Feld 2 außen x**392–488** (96 px) — **gleich breit**, Abstand **12 px**, Höhe außen 24 px (Rahmen y14/y37), innen 21 px. Text horizontal zentriert (Tinte-Mitte 331,0 vs. Feldmitte 332,0 / 441,0 vs. 440,0). Feldinnenfläche Luminanz ≈ 209, Toolbar-Panel 191, Tinte ≤ 130.
 **[FIG]** Rechts vom Inspector stehen **weitere Toolbar-Buttons** (~x500–620) — der Inspector ist nicht das rechteste Element.

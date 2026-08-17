@@ -514,13 +514,21 @@ ov:addOCRButton({
   label = "Pitch deviation",
   region = PITCH_REGION,
   readOnly = true,
-  -- And this is the one that needs it most. Under a single-parameter tool this box reads as
-  -- nothing — measured, eleven times in a hundred and seventy-eight, and again in the log the
-  -- day this line was written: Formant gives left="0 ct" right="", Amplitude left="0.00 dB"
-  -- right="". Whether that means an undrawn box or a drawn one holding Melodyne's dash is NOT
-  -- known, and this control does not need to know: either way there is nothing to report, and
-  -- the honest thing to say is that there is no value — not silence, and not a sentence about
-  -- optical character recognition. `BOX_EDGES` above is what will decide it.
+  -- And this is the one that needs it most, because under a single-parameter tool the box is
+  -- GENUINELY NOT THERE — measured within minutes of `BOX_EDGES` existing, which is the whole
+  -- case for measuring instead of arguing:
+  --
+  --   fields under tool=Pitch:     left="Ab 4"    right="-1 ct"  box borders 146 146 146 146
+  --   fields under tool=Formant:   left="0 ct"    right=""       box borders 146 146 191 191
+  --   fields under tool=Amplitude: left="0.00 dB" right=""       box borders 146 146 191 191
+  --
+  -- Both boxes drawn under Pitch; under the single-parameter tools the right pair of borders
+  -- reads bare tool bar. SIBIAC's "zero, one or two parameter controls" was right, and so was
+  -- the reference document's mechanism — only its list of which tools left the Main tool out.
+  --
+  -- So a Tab landing here under Formant is landing on something Melodyne is not drawing, and
+  -- "no value" is the honest thing to say: not silence, which would be indistinguishable from
+  -- a broken overlay, and not a sentence about optical character recognition.
   fallback = "no value",
 })
 
@@ -638,7 +646,12 @@ reportFieldsAfterSwitch = function(toolName)
       local p = at(ov, e[1], e[2])
       edges[i] = p and tostring(p.r) or "?"
     end
-    host.log.info(("[melodyne] fields under tool=%s: left=%q right=%q  box borders %s (157=drawn, 191=bare strip)")
+    -- The legend names the CONTRAST, not two magic numbers: the border read 157 in one capture
+    -- and 146 in another, because Melodyne's greys move with its appearance setting (and with
+    -- whatever it draws over itself — the first shot was taken behind a detection dialog). What
+    -- does not move is that a border is far darker than the 191 of bare tool bar. A threshold
+    -- written into this line would have been wrong within four days.
+    host.log.info(("[melodyne] fields under tool=%s: left=%q right=%q  box borders %s (dark ~146-157 = box drawn, 191 = bare strip)")
       :format(tostring(toolName or "?"), trimmed(note), trimmed(pitch), table.concat(edges, " ")))
   end)
 end
