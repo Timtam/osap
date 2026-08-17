@@ -502,10 +502,13 @@ local function trimmed(v)
   return (tostring(v or ""):match("^%s*(.-)%s*$"))
 end
 
--- Worth saying out loud. A dash is Melodyne's "nothing to report", in any of the three widths
--- the recogniser might hand back for it.
+-- Worth saying out loud. A dash is Melodyne's "no single value": it stands there when nothing
+-- is selected (measured — see docs/melodyne-reference.md §6.1) and when SEVERAL notes are and
+-- they disagree. Every width the recogniser might hand back, and the three-hyphen form too:
+-- two Celemony figures and five pages say one dash, one English page says three, so the
+-- reference document's own instruction is to tolerate both (§7).
 local function speakable(v)
-  return v ~= "" and v ~= "-" and v ~= "–" and v ~= "—"
+  return v ~= "" and v ~= "-" and v ~= "–" and v ~= "—" and v ~= "--" and v ~= "---"
 end
 
 -- TWO reads, one per field, and one announcement.
