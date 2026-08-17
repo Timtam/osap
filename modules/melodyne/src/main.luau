@@ -985,18 +985,32 @@ end
 -- ONLY the minimum channel. The mean sees the position cursor and barely sees a blob; the
 -- cursor moves when the SELECTION moves, which is not an edit, and announcing it as one was the
 -- other half of what the user reported.
+-- Scored over the CHANGED columns only, and that is not a detail — it is the whole method.
+--
+-- The first version compared a window padded by sixty columns on each side, so more than nine
+-- tenths of what it scored was unchanged surroundings. Those match perfectly at offset zero and
+-- badly at every other offset, so zero won every time and the estimator was silent for a whole
+-- session. The log said so in the plainest possible way: "shift 0 px (fit 2.1 against 2.1)" —
+-- the same number twice, which can only mean the two comparisons were looking at the same
+-- unchanging thing.
+--
+-- Comparing only the columns that CHANGED inverts it. At offset zero those columns are, by
+-- definition, different — that is why they are in the list. At the true offset each of them
+-- should hold what its neighbour one shift back held a moment ago. So a good fit is now a small
+-- number where standing still is a large one, and the two are finally measuring different
+-- things.
 local MAX_SHIFT = 60
-local function bestShift(prevMin, minv, lo, hi)
+local function bestShift(prevMin, minv, cols)
   local function score(k)
     local sum, n = 0, 0
-    for i = lo, hi do
+    for _, i in ipairs(cols) do
       local j = i - k
       if j >= 1 and j <= #prevMin then
         sum = sum + math.abs((minv[i] or 0) - (prevMin[j] or 0))
         n = n + 1
       end
     end
-    if n == 0 then return math.huge end
+    if n < 4 then return math.huge end
     return sum / n
   end
   local best, bestScore = 0, math.huge
@@ -1134,31 +1148,30 @@ local function measureNoteArea(o)
   -- assume a time signature nobody has measured: bar.beat.sixteenth tells us how the transport
   -- counts, not how many beats a bar holds. A fraction of a bar assumes nothing.
   if not speakable(lastLeft) and not speakable(lastRight) and #runs >= 1 then
-    -- The span that changed, padded so a shifted shape is fully inside the window being
-    -- compared: without the padding the edges of the moved thing fall outside and every offset
-    -- scores about the same.
-    local lo, hi = #mean, 1
+    -- Every column that changed, and nothing else. See bestShift for why the surroundings must
+    -- stay out of it.
+    local cols = {}
     for _, r in ipairs(runs) do
-      if r.from < lo then lo = r.from end
-      if r.to > hi then hi = r.to end
+      for i = r.from, r.to do cols[#cols + 1] = i end
     end
-    lo = math.max(1, lo - MAX_SHIFT)
-    hi = math.min(#mean, hi + MAX_SHIFT)
-    local moved, sBest, sStill = bestShift(prevMin, minv, lo, hi)
+    local moved, sBest, sStill = bestShift(prevMin, minv, cols)
     -- SILENCE UNLESS IT IS CLEAR. The shifted comparison has to explain the change much better
     -- than "nothing moved" does, and the leftover difference has to be small in its own right.
     -- Neither test alone is enough: a picture that changed for some other reason has a poor
     -- score everywhere, and a nearly unchanged picture matches equally well at every offset.
     -- A wrong number here is worse than saying nothing, because there is nothing else in this
     -- window for the user to check it against.
-    local confident = moved ~= 0 and sBest < sStill * 0.5 and sBest < 12
+    -- Scored over the changed columns, standing still is now a LARGE number and a real shift a
+    -- small one, so the two tests finally bite: the fit must beat standing still by half and be
+    -- small in its own right.
+    local confident = moved ~= 0 and sBest < sStill * 0.5 and sBest < 20
     if host.calibrating then
       host.log.info(("[melodyne] shift %d px (fit %.1f against %.1f standing still) -> %s")
         :format(moved, sBest, sStill, confident and "spoken" or "not confident, silent"))
     end
     if confident then
       local lines = barLines(mean)
-      local barW = barWidthAt(lines, math.floor((lo + hi) / 2))
+      local barW = barWidthAt(lines, cols[math.floor(#cols / 2) + 1] or runs[1].from)
       local dir = moved > 0 and "right" or "left"
       if barW and barW > 0 then
         local pct = math.floor(math.abs(moved) / barW * 100 + 0.5)
