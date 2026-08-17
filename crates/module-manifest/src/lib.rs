@@ -245,4 +245,56 @@ version = \"1.0.0\"
         assert!(m.runs_on("windows"));
         assert!(m.runs_on("macos"));
     }
+
+    /// Every Luau file that ships in this repository still COMPILES.
+    ///
+    /// Nothing checked that. A typo in a module was found by starting the application and
+    /// pressing the reload key, and the person doing that is blind — the error was surfaced
+    /// safely and accessibly, which is not the same as its being an acceptable way to learn
+    /// about a missing `end`. This is the cheap half of what `macos-check` does for Rust:
+    /// front-end only, no host bindings, no window, no `host` table. It cannot say a module
+    /// WORKS; it can say the parser will accept it, which is the failure that costs a session.
+    ///
+    /// Compiled, not run: a module's top level calls `host.*` immediately, so running it here
+    /// would fail for reasons that say nothing about the source.
+    #[test]
+    fn every_shipped_luau_module_parses() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("repository root")
+            .to_path_buf();
+        let lua = mlua::Lua::new();
+        let mut checked = 0usize;
+        // The dev tools and the API demos too: they are loaded by run-dev.ps1 and by whoever
+        // is learning the API from them, so a broken one wastes exactly the same session.
+        for set in ["modules", "examples", "tools"] {
+            let dir = root.join(set);
+            if !dir.is_dir() {
+                continue;
+            }
+            for entry in std::fs::read_dir(&dir).expect("read module set") {
+                let src = entry.expect("dir entry").path().join("src");
+                if !src.is_dir() {
+                    continue;
+                }
+                for f in std::fs::read_dir(&src).expect("read module src") {
+                    let path = f.expect("dir entry").path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("luau") {
+                        continue;
+                    }
+                    let code = std::fs::read_to_string(&path).expect("read luau");
+                    // `set_name` so a failure names the file rather than `[string "..."]`.
+                    let rel = path.strip_prefix(&root).unwrap_or(&path).display().to_string();
+                    if let Err(e) = lua.load(&code).set_name(&rel).into_function() {
+                        panic!("{rel} does not compile: {e}");
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        // Or the test would pass by finding nothing — the failure mode of every check that
+        // walks a directory.
+        assert!(checked >= 10, "expected the shipped modules, found {checked} Luau file(s)");
+    }
 }

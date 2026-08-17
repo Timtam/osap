@@ -9,3 +9,10 @@ anyhow = "1.0.102"
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.1.2"
 zip = "8.6.0"
+
+# Only for the test that every shipped module still PARSES — see the bottom of lib.rs. It
+# lives here, and not in `host`, because this crate builds and links in seconds while `host`
+# drags wxWidgets behind it, and a gate nobody can afford to run is not a gate. Same version
+# and the same `luau` feature as host, so it is the same parser that will load the module.
+[dev-dependencies]
+mlua = { version = "0.11.6", features = ["luau"] }
