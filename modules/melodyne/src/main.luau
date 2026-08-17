@@ -352,7 +352,19 @@ do
     verticalName = function(o, i)
       local tool = TOOLS[i]
       if not (tool and tool.variants) then return nil end
-      variant = activeVariant(o, tool)
+      -- CHECKED against the probes, never CORRECTED by them — the same rule `current` above
+      -- argues for at length, and this function was quietly breaking it.
+      --
+      -- It assigned the raw probe reading straight into `variant`, which meant a probe that
+      -- failed to recognise a sub-tool reset us to the base. And it runs on every announcement
+      -- of this control, so Tabbing away and back was enough: pick the middle of three
+      -- variants, leave, come back, and Down moved to the FIRST variant instead of the third,
+      -- because our record had been overwritten by a reading that says "1" both when the base
+      -- tool is live and when the probe simply cannot tell. The log says how often that is —
+      -- "asked for 2 (Fade), probes report 1", over and over — since only three of the eight
+      -- variant stacks have probe points at all.
+      local seen = activeVariant(o, tool)
+      if seen > 1 then variant = seen end
       if variant <= 1 then return nil end -- the base tool: the tab's own label is right
       return tool.variants[variant - 1].name .. " tool, has vertical variations"
     end,
@@ -366,7 +378,14 @@ do
       -- the far side, so holding the key cannot cycle past the edge unnoticed.
       local target = math.max(1, math.min(count, variant + dir))
       if target ~= variant then selectVariant(o, tool, target) end
-      return (target == 1 and tool.name or tool.variants[target - 1].name) .. " tool"
+      local reached = target == 1 and tool.name or tool.variants[target - 1].name
+      -- Measured here as well as on a tab switch, because a VARIANT changes the strip exactly
+      -- as a tool does — and the log had no line for any of them, which is why the Fade tool's
+      -- read-outs were an open question after a session spent in it.
+      if reportFieldsAfterSwitch then
+        reportFieldsAfterSwitch(reached, PRESS_GAP * (target > 1 and target or 1) + READOUT_HOLD_MS - 150)
+      end
+      return reached .. " tool"
     end,
   })
 end
@@ -470,7 +489,13 @@ local BOX_EDGES = { { 218, 67 }, { 289, 67 }, { 298, 67 }, { 369, 67 } }
 -- appearance setting and with what the application draws over itself. What does not move is the
 -- CONTRAST: 45 units apart when the box is there, 0 when the strip runs straight through. A
 -- threshold would have been wrong within four days; a comparison cannot be.
-local BOX_EDGE, BOX_GAP = { 298, 67 }, { 294, 67 }
+-- Per box: its left border, and a point just outside it that is bare tool bar either way. For
+-- the right box that is the gap between the two (x290-297, past the left box's own border at
+-- 289); for the left box it is the run between the last tool icon and the box (x212-217).
+local BOX_PROBES = {
+  left = { edge = { 218, 67 }, gap = { 215, 67 } },
+  right = { edge = { 298, 67 }, gap = { 294, 67 } },
+}
 local BOX_EDGE_CONTRAST = 20
 
 -- Is the right box drawn RIGHT NOW?
@@ -488,16 +513,19 @@ local BOX_EDGE_CONTRAST = 20
 -- Defaults to DRAWN when the pixels cannot be read. A control that quietly vanishes tells a
 -- user who cannot see the screen nothing about why, and "there is a stop here that says no
 -- value" is a far smaller failure than "the stop you were looking for is gone".
-local boxMemo = { gen = -1, drawn = true }
-local function rightBoxDrawn(o)
+local boxMemo = { left = { gen = -1, drawn = true }, right = { gen = -1, drawn = true } }
+local function boxDrawn(o, which)
+  local m, p = boxMemo[which], BOX_PROBES[which]
   local gen = host.inputEpoch and host.inputEpoch() or (host.epoch and host.epoch() or 0)
-  if boxMemo.gen ~= gen then
-    boxMemo.gen = gen
-    local edge, gap = at(o, BOX_EDGE[1], BOX_EDGE[2]), at(o, BOX_GAP[1], BOX_GAP[2])
-    boxMemo.drawn = (edge == nil or gap == nil) or (gap.r - edge.r) > BOX_EDGE_CONTRAST
+  if m.gen ~= gen then
+    m.gen = gen
+    local edge, gap = at(o, p.edge[1], p.edge[2]), at(o, p.gap[1], p.gap[2])
+    m.drawn = (edge == nil or gap == nil) or (gap.r - edge.r) > BOX_EDGE_CONTRAST
   end
-  return boxMemo.drawn
+  return m.drawn
 end
+local function leftBoxDrawn(o) return boxDrawn(o, "left") end
+local function rightBoxDrawn(o) return boxDrawn(o, "right") end
 
 -- What the left field is showing, in the words of the tool that owns it. Nil when no tool
 -- reads as lit, in which case the label alone is the honest answer.
@@ -516,6 +544,13 @@ ov:addOCRButton({
   label = "Inspector",
   region = NOTE_REGION,
   readOnly = true,
+  -- Gated on its own box being drawn, like the second one. Under the FADE tool that box is
+  -- drawn and EMPTY — measured: borders 157 and 194 fill, and not a mark inside it — which is
+  -- Melodyne having a field with nothing to put in it (Celemony's own Note Inspector leaves
+  -- fades out of its parameter list too). So the stop stays and says so. SIBIAC's model allows
+  -- for ZERO controls under some tool, and this is what will hide the stop when that turns up,
+  -- without anybody having to work out which tool it was.
+  when = leftBoxDrawn,
   -- The plug-in's terms, not the recogniser's: a box that is genuinely empty is Melodyne
   -- having no value to show, and "no text" would report on us instead. The AutoHotkey draft
   -- this is ported from said exactly this, and it was right.
@@ -676,9 +711,13 @@ end
 -- user; it is here so that the question "what does THIS tool show in those two boxes" is
 -- answered by using Melodyne, by whoever is already using it, rather than by anybody
 -- describing a screen.
-reportFieldsAfterSwitch = function(toolName)
+reportFieldsAfterSwitch = function(toolName, afterMs)
   if not host.timer then return end
-  host.timer.after(READOUT_HOLD_MS - 150, function()
+  -- The delay is a parameter because a VARIANT is not reached in one step: `selectVariant`
+  -- clicks the icon and then posts the function key once per position, spaced out in time. A
+  -- measurement taken at the tab-switch delay would photograph the strip halfway through that
+  -- sequence and record the tool we were passing through.
+  host.timer.after(afterMs or (READOUT_HOLD_MS - 150), function()
     if not ov.active then return end
     if host.keys.nativeMenuOpen and host.keys.nativeMenuOpen() then return end
     local _, note, pitch = readSelection(ov)
