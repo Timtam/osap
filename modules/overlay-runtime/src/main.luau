@@ -1361,6 +1361,18 @@ local function isFocusable(self, index)
   return true
 end
 
+-- Where the ring WOULD start, without moving focus there.
+--
+-- On arrival the overlay says what is in front of the user, and saying it must not be the same
+-- act as standing on it: a focused control takes the keys it needs (see _syncNativeKeys), and
+-- on arrival those keys still belong to the plug-in.
+local function firstFocusable(self)
+  for i = 1, #self.controls do
+    if isFocusable(self, i) then return i end
+  end
+  return 0
+end
+
 -- A Tab step, timed in its two halves.
 --
 -- This is THE interaction path: everything the user does is a focus move followed by an
@@ -1411,7 +1423,13 @@ end
 
 function Overlay:focusPrev()
   if self:_stepPassThrough(-1) then return end
-  focusStep(self, function(i, n) return ((i - 2) % n) + 1 end, "Shift+Tab")
+  focusStep(self, function(i, n)
+    -- From OUTSIDE the ring (focus 0, nobody in it yet), backwards means the LAST control.
+    -- The modular step would answer n-1 from 0 and quietly skip the end of the ring, which
+    -- is the one place a user reaches for when they suspect they missed something.
+    if i == 0 then return n end
+    return ((i - 2) % n) + 1
+  end, "Shift+Tab")
 end
 
 -- ReaHotkey's AddCustomPassThrough, as what it actually is there: a CONTROL in the
@@ -1898,6 +1916,9 @@ function Overlay:_unregisterHotkeys()
       self[field] = false
     end
   end
+  -- Forget what was last reported, not "report nothing": the next sync must be free to say
+  -- whatever it takes, and a stale record here would let it stay silent about it.
+  self._nativeKeyReport = nil
 end
 
 -- Keeps the two keys that ACTIVATE a control — Space and Return — in sync with what is
@@ -1912,6 +1933,9 @@ end
 -- Idempotent; called on every focus move and at registration. No-op unless active.
 function Overlay:_syncNativeKeys()
   if not self.active then return end
+  -- Nil while the ring has not been entered (focus 0, the state an overlay arrives in): every
+  -- `want` below is then false and every branch releases, which is exactly right. The plug-in
+  -- keeps its keyboard until a Tab says otherwise.
   local c = self.controls[self.focus]
   local passthrough = c ~= nil and c.kind == "passthrough"
   -- Only where pressing actually DOES something. A static text has no activation, and taking
@@ -1968,6 +1992,23 @@ function Overlay:_syncNativeKeys()
   elseif not wantVertical and self._verticalTokens then
     for _, t in ipairs(self._verticalTokens) do host.keys.release(t) end
     self._verticalTokens = false
+  end
+  -- Said out loud, like the hotkey report and for the same reason: a key this overlay holds is
+  -- a key the plug-in does not get, and from the outside that is indistinguishable from the
+  -- plug-in ignoring the key. The defect this report was added for — the tool bar holding all
+  -- four arrows from the moment Melodyne came forward — would have been one line here instead
+  -- of an evening of hypotheses. Only when the set CHANGES, so Tab does not fill the log.
+  local held = {}
+  if self._spaceToken then held[#held + 1] = "Space" end
+  if self._returnToken then held[#held + 1] = "Return" end
+  if self._arrowTokens then held[#held + 1] = "Left Right" end
+  if self._verticalTokens then held[#held + 1] = "Up Down" end
+  local report = string.format("%s (on '%s')",
+    #held > 0 and table.concat(held, " ") or "none",
+    tostring(c and c.label or "nothing focused — the plug-in has the keyboard"))
+  if report ~= self._nativeKeyReport then
+    self._nativeKeyReport = report
+    host.log.info(string.format("[keys] '%s' focus keys: %s", tostring(self.label), report))
   end
 end
 
@@ -2074,16 +2115,23 @@ function Overlay:_activate()
     end
   end
   self._lastActiveId = id
-  -- Pick the first focusable control after a reset (or on the very first activation);
-  -- otherwise self.focus still holds the resumed position.
-  if self.focus == 0 then
-    for i = 1, #self.controls do
-      if isFocusable(self, i) then
-        self.focus = i
-        break
-      end
-    end
-  end
+  -- And after a reset the focus STAYS at 0, which is the state "the user is not in the ring".
+  --
+  -- It used to be moved onto the first focusable control here, and that is how the overlay
+  -- came to swallow keys the user had not asked it for. A focused control takes the keys it
+  -- needs — a tab control takes all four arrows, any non-inert control takes Space — so
+  -- landing on Melodyne's tool bar the instant the plug-in came forward took Left, Right, Up,
+  -- Down and Space away from Melodyne before the user had pressed anything. The report was
+  -- that the arrow keys were no longer reaching Melodyne, and that one Tab away and back
+  -- fixed it: the Tab moved focus off the tool bar and the release ran.
+  --
+  -- 0 is not a lesser state; it is the true one. On arrival the keyboard belongs to the
+  -- plug-in, and Tab is how a user enters a toolbar in any application. So the first Tab
+  -- lands ON the control the arrival announcement named, rather than one past it — the same
+  -- words, now meaning "you are here" instead of "this is what is here".
+  --
+  -- A RESUMED activation (Alt+Tab out and back to the same window) keeps whatever focus the
+  -- user had, so the ring stays entered and its keys come back with it.
   self:_registerHotkeys()
   -- Scope key suppression to this (now-foreground) window: when a control opens a menu
   -- (another window comes forward), Tab/Enter pass to it natively, and resume here once
@@ -2099,9 +2147,12 @@ function Overlay:_activate()
       host.log.info(("[overlay] %s: onActivate failed: %s"):format(tostring(self.label), tostring(err)))
     end
   end
-  -- Announce the focused control shortly after the window gains focus, once the
-  -- screen reader's window-title announcement has passed (so it isn't clobbered).
-  if host.timer and self.focus > 0 then
+  -- Announce shortly after the window gains focus, once the screen reader's window-title
+  -- announcement has passed (so it isn't clobbered): the control the user is on if they are
+  -- in the ring, and otherwise the one the ring starts at — reading it without standing on
+  -- it, which is the whole point of the paragraph above.
+  local arrival = self.focus > 0 and self.focus or firstFocusable(self)
+  if host.timer and arrival > 0 then
     -- How LATE the announcement actually is, which is a different question from how long it
     -- was asked to wait. Timer callbacks, speech and hotkeys share one thread with the
     -- landmark poll, and the poll currently asks for more time than a tick contains — so a
@@ -2118,7 +2169,7 @@ function Overlay:_activate()
           ))
         end
       end
-      if self.active then speakControl(self, self.focus, false) end
+      if self.active then speakControl(self, arrival, false) end
     end)
   end
 end

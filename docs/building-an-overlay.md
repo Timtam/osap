@@ -55,6 +55,7 @@ Three things happened implicitly, and they are worth knowing:
 - **Tab is captured** while the overlay is active, and released when it is not. Your overlay owns navigation; the application does not see those keys.
 - **Every control is a focus stop**, including static text. Nothing is decorative.
 - **The overlay announces the control you land on** as `"label, type"` — `"Say hello, button"`.
+- **The ring is not entered until Tab.** On arrival the overlay announces *where the ring starts* without standing on it, and the first Tab lands **on** that control — the same words, now meaning "you are here" rather than "this is what is here". This is not a nicety: a focused control takes the keys it needs (Space, Enter, a slider's or tab control's arrows), and until the user has asked for the overlay those keys belong to the application. An overlay whose first control was a tab control used to take all four arrows and Space the instant the plug-in came forward — in Melodyne, that is the transport and the note editing. Alt-Tabbing out and back to the *same* window resumes where the user was, keys included.
 
 ### Order matters
 
