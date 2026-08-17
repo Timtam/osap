@@ -919,8 +919,9 @@ ov:addStaticText({ label = "Position", text = readPosition })
 local NOTE_AREA = { 48, 118, 935, 640 }
 local NOTE_AREA_MS = 400
 local lastAreaSize = nil
-local CHANGE_THRESHOLD = 6 -- of 255; below this is recogniser and compositor noise
-local lastArea = nil
+local CHANGE_THRESHOLD = 6 -- mean, of 255; below this is recogniser and compositor noise
+local MIN_THRESHOLD = 24 -- minimum, of 255; higher because a minimum is one pixel and noisier
+local lastArea, lastAreaMin = nil, nil
 
 local function measureNoteArea(o)
   if not host.calibrating then return end
@@ -929,7 +930,7 @@ local function measureNoteArea(o)
     -- frame from before an excursion is not a fact about the Melodyne we come back to, and this
     -- instrument's whole premise is that only ONE thing changed between two frames. Diffing
     -- across a trip to another window would report that trip as a note move.
-    lastArea, lastAreaSize = nil, nil
+    lastArea, lastAreaMin, lastAreaSize = nil, nil, nil
     return
   end
   if host.keys.nativeMenuOpen and host.keys.nativeMenuOpen() then return end
@@ -945,7 +946,7 @@ local function measureNoteArea(o)
   -- clamped to the same numbers for every window at least this wide — so the size is kept.
   local size = cw .. "x" .. ch
   if lastAreaSize ~= size then
-    lastArea, lastAreaSize = nil, size
+    lastArea, lastAreaMin, lastAreaSize = nil, nil, size
   end
   local p = host.screen.profile({
     region = {
@@ -956,10 +957,11 @@ local function measureNoteArea(o)
     -- would double the reduction for something nothing reads.
     axes = "columns",
   })
-  if not (p and p.columns and p.columns.mean) then return end
-  local mean, prev = p.columns.mean, lastArea
-  lastArea = mean
-  if not prev or #prev ~= #mean then
+  if not (p and p.columns and p.columns.mean and p.columns.min) then return end
+  local mean, minv = p.columns.mean, p.columns.min
+  local prev, prevMin = lastArea, lastAreaMin
+  lastArea, lastAreaMin = mean, minv
+  if not (prev and prevMin) or #prev ~= #mean then
     -- The region is in the line because it is a GUESS clamped to this window, and a wrong one
     -- is otherwise invisible: a profile of the wrong pixels looks exactly like a profile of the
     -- right ones.
@@ -970,17 +972,35 @@ local function measureNoteArea(o)
   -- Contiguous runs of changed columns, so the log names REGIONS rather than a list of
   -- hundreds of indices. A gap of one column does not end a run: a blob's outline can leave a
   -- column untouched in the middle of a shape that plainly moved.
-  local runs, from, peak, gap = {}, nil, 0, 0
+  -- TWO channels, because they see different things and the first evening proved it.
+  --
+  -- The column MEAN sees a full-height feature enormously — the position cursor moved it by 130
+  -- to 180 of 255 — and a note blob hardly at all: fifteen dark rows out of five hundred and
+  -- twenty-two shift a mean by about four, which is under any threshold worth having. That is
+  -- exactly what a Ctrl+Right under the Time tool produced: deltas of six to nine, scattered,
+  -- indistinguishable from noise, while the cursor and the transport both stood still.
+  --
+  -- The column MINIMUM is the opposite instrument. It ignores how TALL something is and reports
+  -- only how dark the darkest pixel got, so a blob arriving in a column swings it hard while a
+  -- one-pixel line among many dark pixels barely registers. Its own threshold is higher because
+  -- a minimum is a single pixel and therefore noisy where a mean is not.
+  --
+  -- A column counts as changed when EITHER fires, and both peaks are logged, so the log says
+  -- which channel saw it — which is the difference between "the note moved" and "the cursor
+  -- moved" without anybody having to look.
+  local runs, from, peak, peakMin, gap = {}, nil, 0, 0, 0
   for i = 1, #mean do
     local d = math.abs(mean[i] - prev[i])
-    if d >= CHANGE_THRESHOLD then
-      if not from then from, peak = i, 0 end
+    local dm = math.abs((minv[i] or 0) - (prevMin[i] or 0))
+    if d >= CHANGE_THRESHOLD or dm >= MIN_THRESHOLD then
+      if not from then from, peak, peakMin = i, 0, 0 end
       if d > peak then peak = d end
+      if dm > peakMin then peakMin = dm end
       gap = 0
     elseif from then
       gap = gap + 1
       if gap > 1 then
-        runs[#runs + 1] = { from = from, to = i - gap, peak = peak }
+        runs[#runs + 1] = { from = from, to = i - gap, peak = peak, peakMin = peakMin }
         from = nil
       end
     end
@@ -989,7 +1009,7 @@ local function measureNoteArea(o)
   -- the unchanged columns already walked past, and charging them to the run reports it wider
   -- than it is — by one column in the ordinary case, which is the whole width of the feature
   -- these runs turned out to be.
-  if from then runs[#runs + 1] = { from = from, to = #mean - gap, peak = peak } end
+  if from then runs[#runs + 1] = { from = from, to = #mean - gap, peak = peak, peakMin = peakMin } end
   -- Silence when nothing moved: this runs on a timer now, and a line every 400 ms saying that
   -- an idle screen is still idle would bury the ones that matter.
   if #runs == 0 then return end
@@ -1000,10 +1020,13 @@ local function measureNoteArea(o)
   -- different stretch of music, so the baseline is thrown away rather than believed.
   if #runs > 12 then
     host.log.info(("[melodyne] note area: %d run(s) — the view moved, re-baselining"):format(#runs))
-    lastArea = nil
+    lastArea, lastAreaMin = nil, nil
     return
   end
-  table.sort(runs, function(a, b) return a.peak > b.peak end)
+  -- Ranked by whichever channel saw the most, so a blob move is not buried under a cursor move.
+  table.sort(runs, function(a, b)
+    return math.max(a.peak, a.peakMin) > math.max(b.peak, b.peakMin)
+  end)
   -- WHAT the moving feature is, settled by correlation rather than by argument.
   --
   -- It is two pixels wide, very nearly full height, and 130 to 180 units of column mean darker
