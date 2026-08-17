@@ -681,13 +681,38 @@ impl Shared {
             .collect();
         set.sort_unstable();
         set.dedup();
-        if appcfg::calibrate() {
+        // Under TRACE, not only under calibration. The trace switch promises in its own help
+        // text to record "every decision the key handling made", and this is the decision:
+        // which keys the application will not see. It sat behind the calibration switch, which
+        // is about measuring coordinates inside an overlay and needs a module reload to arm —
+        // so the one line that answers "who is holding my arrow keys" was unavailable to the
+        // person asking. An evening went into guessing at it instead.
+        //
+        // WHO holds each key, not just which: a key is suppressed for the whole process while
+        // any enabled module captures it, so the module names are the actionable half.
+        if appcfg::trace() || appcfg::calibrate() {
+            let ids = self.ids.borrow();
+            let keys = self.keys.borrow();
             logging::line(
                 "keys",
                 &format!(
                     "captured set: {}",
                     set.iter()
-                        .map(|(vk, m)| format!("vk 0x{vk:02X}/m{m}"))
+                        .map(|(vk, m)| {
+                            let mut owners: Vec<&str> = keys
+                                .iter()
+                                .filter(|(k, mm, idx, ..)| {
+                                    *k == *vk
+                                        && *mm == *m
+                                        && enabled.get(*idx).copied().unwrap_or(false)
+                                })
+                                .map(|(_, _, idx, ..)| {
+                                    ids.get(*idx).map(String::as_str).unwrap_or("?")
+                                })
+                                .collect();
+                            owners.dedup();
+                            format!("vk 0x{vk:02X}/m{m}[{}]", owners.join(","))
+                        })
                         .collect::<Vec<_>>()
                         .join(" ")
                 ),
@@ -2475,7 +2500,12 @@ impl HostEvents for Dispatcher<'_> {
 
     fn on_key(&mut self, vk: u32, mods: u8) {
         self.shared.bump_epoch();
-        if appcfg::calibrate() {
+        // The hook only calls this for keys in the captured set, so the presence of this line
+        // IS the answer to "did the overlay swallow that keystroke, or did the application
+        // simply do nothing with it" — the two are indistinguishable from the outside, and for
+        // a user who cannot see the screen they are indistinguishable from each other twice
+        // over. Behind trace, for the reasons written at refresh_captured.
+        if appcfg::trace() || appcfg::calibrate() {
             logging::line("keys", &format!("dispatch vk 0x{vk:02X}/m{mods}"));
         }
         let found = {

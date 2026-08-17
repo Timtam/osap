@@ -2148,23 +2148,21 @@ function Overlay:_activate()
     end
   end
   self._lastActiveId = id
-  -- And after a reset the focus STAYS at 0, which is the state "the user is not in the ring".
+  -- THE FIRST FOCUSABLE CONTROL IS WHERE THE USER ARRIVES, and it is focused for real —
+  -- spoken, and holding whatever keys it needs. A resumed activation (Alt+Tab out and back to
+  -- the same window) keeps wherever the user was instead.
   --
-  -- It used to be moved onto the first focusable control here, and that is how the overlay
-  -- came to swallow keys the user had not asked it for. A focused control takes the keys it
-  -- needs — a tab control takes all four arrows, any non-inert control takes Space — so
-  -- landing on Melodyne's tool bar the instant the plug-in came forward took Left, Right, Up,
-  -- Down and Space away from Melodyne before the user had pressed anything. The report was
-  -- that the arrow keys were no longer reaching Melodyne, and that one Tab away and back
-  -- fixed it: the Tab moved focus off the tool bar and the release ran.
-  --
-  -- 0 is not a lesser state; it is the true one. On arrival the keyboard belongs to the
-  -- plug-in, and Tab is how a user enters a toolbar in any application. So the first Tab
-  -- lands ON the control the arrival announcement named, rather than one past it — the same
-  -- words, now meaning "you are here" instead of "this is what is here".
-  --
-  -- A RESUMED activation (Alt+Tab out and back to the same window) keeps whatever focus the
-  -- user had, so the ring stays entered and its keys come back with it.
+  -- This was briefly not so, for half a day. Arriving left the focus at 0 — "not in the ring" —
+  -- on the theory that a first control which claims Space and all four arrows must not claim
+  -- them before the user has asked for the overlay at all. Two things were wrong with it. The
+  -- behaviour was rubbish: you came into the plug-in, heard the overlay name a control, pressed
+  -- the key that control had just described, and nothing happened — being told where you are
+  -- and not being there is worse than either alone. And the premise was wrong too. It came from
+  -- a report of arrow keys not reaching Melodyne, which I read as the focused tab control
+  -- holding them; the user then established that the arrows were dead with the focus on a
+  -- STATIC TEXT three stops away, which no focus-scoped capture can explain. Whatever holds
+  -- them is elsewhere, and moving the arrival position only hid the question.
+  if self.focus == 0 then self.focus = firstFocusable(self) end
   self:_registerHotkeys()
   -- Scope key suppression to this (now-foreground) window: when a control opens a menu
   -- (another window comes forward), Tab/Enter pass to it natively, and resume here once
@@ -2180,12 +2178,9 @@ function Overlay:_activate()
       host.log.info(("[overlay] %s: onActivate failed: %s"):format(tostring(self.label), tostring(err)))
     end
   end
-  -- Announce shortly after the window gains focus, once the screen reader's window-title
-  -- announcement has passed (so it isn't clobbered): the control the user is on if they are
-  -- in the ring, and otherwise the one the ring starts at — reading it without standing on
-  -- it, which is the whole point of the paragraph above.
-  local arrival = self.focus > 0 and self.focus or firstFocusable(self)
-  if host.timer and arrival > 0 then
+  -- Announce the focused control shortly after the window gains focus, once the
+  -- screen reader's window-title announcement has passed (so it isn't clobbered).
+  if host.timer and self.focus > 0 then
     -- How LATE the announcement actually is, which is a different question from how long it
     -- was asked to wait. Timer callbacks, speech and hotkeys share one thread with the
     -- landmark poll, and the poll currently asks for more time than a tick contains — so a
@@ -2202,7 +2197,7 @@ function Overlay:_activate()
           ))
         end
       end
-      if self.active then speakControl(self, arrival, false) end
+      if self.active then speakControl(self, self.focus, false) end
     end)
   end
 end
