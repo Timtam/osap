@@ -31,6 +31,7 @@
 | **[LÜCKE]** | Nirgends gefunden — steht in Teil 2 als konkrete Frage |
 | **[≠]** | Quellen widersprechen sich — beide Seiten genannt |
 | **[KAL]** | Auf dieser Maschine aus einer Kalibrieraufnahme gemessen — echtes Melodyne unter Windows |
+| **[LOG]** | Aus dem Log dieser Plattform gemessen, während jemand Melodyne wirklich benutzt hat |
 
 **Grundwarnung zu allen Pixelangaben:** Sämtliche Abbildungen von Celemony sind **macOS-Screenshots** [FIG]. Es gibt in keiner autoritativen Quelle ein Windows-Bild von Melodyne 5. Alle Pixelmaße unten sind **Verhältnisse innerhalb der Abbildung**, keine bestätigten nativen Windows-Pixel. Drei Quellen liefern drei Skalen (Celemony ~31 px Buttonraster @1×, protoolstraining 26 px, altes Melodyne 22 px) — **keine davon ist Grundwahrheit für die Zielmaschine.**
 
@@ -227,10 +228,54 @@ Fadenkreuz mittig in beide Kästchen, also sind es genau diese zwei Regionen.
 zwei Felder haben. Das Main Tool bearbeitet Tonhöhe, also zeigt es die Tonhöhen-Felder. Das Overlay
 hatte das zweite Feld eine Zeit lang auf das Pitch Tool eingeschränkt — die Sperre ist entfernt.
 
-→ **[LÜCKE bleibt]** Was Time, Note Separation und die Sub-Werkzeuge in den beiden Kästchen zeigen,
-ist weiter ungemessen. Das Overlay schreibt seit 17.08.2026 pro Änderung eine Zeile
-`[melodyne] selection: tool=… left=… right=…` ins Log, sammelt das also im Betrieb ein, ohne dass
-jemand auf einen Bildschirm sehen muss.
+**[LOG, gemessen am 13.08.2026 — die bislang einzige Messung an echtem Melodyne unter Windows]**
+
+Alles oben in diesem Abschnitt stammt aus **macOS-Abbildungen**. Diese Zahlen nicht: sie kommen
+aus `target/release/automation-platform.log.1`, aus einer Sitzung, in der jemand Melodyne
+tatsächlich benutzt hat. Sie sind **unvoreingenommen**, weil der damalige Modulstand (`03824cf`)
+beide Regionen **bedingungslos** las — ohne jede Werkzeugprüfung. Ein leeres rechtes Feld heißt
+dort also: auf dem Bildschirm stand nichts.
+
+**178 Messwerte. In 167 davon steht rechts ein Cent-Wert.** Die elf Ausnahmen sind genau die
+Ein-Feld-Werkzeuge, erkennbar am linken Feld: `0 ct` (Formant, 4×), `0.00 dB` (Amplitude, 3×),
+`100.0 %` (Pitch Modulation, 3×), `0.0 %` (ein Time-Sub-Werkzeug, 1×).
+
+**Das Main Tool zeigt beide Felder — dreimal unabhängig nachgewiesen.** Die Werkzeugleiste
+schaltet mit Rechts/Links um eins weiter und läuft um (`switchTab`, Reihenfolge Main, Pitch,
+Formant, Amplitude, Time, Note Separation), und die Tastendrücke stehen als
+`[keys] dispatch vk 0x27` im selben Log. Von einer Lesung „Note + Cent" führen zwei Rechts auf
+Formant (`0 ct`, rechts leer), eines weiter auf Amplitude (`0.00 dB`, rechts leer), drei weitere
+laufen über Time und Note Separation zurück auf Main — **und dort steht wieder Note *und* Cent**
+(`Db 5` / `-12 ct`). Ein Links vom Pitch-Werkzeug landet ebenso auf Main und liest `B3` / `-1 ct`.
+
+**Die Pitch-Sub-Werkzeuge sind dagegen wirklich einfeldrig**, wie §6.1 sagt: Pitch Modulation
+liest `100.0 %` bei leerem rechten Feld, und ein Schritt zurück auf das Basiswerkzeug bringt das
+zweite Feld in derselben Sekunde wieder. Die Sperre im Overlay war also zur Hälfte richtig — für
+die Sub-Werkzeuge — und für das Main Tool falsch.
+
+**[Q] Celemony bestätigt das Modell**, ohne die Frage zu entscheiden: das Pitch-Kapitel nennt
+ausdrücklich zwei Werte — *„die Note und die Cent-Abweichung auch im Inspektor neben dem
+Werkzeugkasten"* (DE S. 154; EN S. 152 *„the deviation in cents from equal temperament"*) — und
+das Main-Tool-Kapitel erwähnt den Inspector mit keinem Wort. **[≠]** Genau dieses Schweigen ist
+aber kein Beleg: Attack Speed und Sibilant Balance haben ebenfalls keinen dokumentierten
+Inspector-Abschnitt, obwohl ihre Parameter im Note Inspector aufgezählt sind. Und Celemony sagt
+über das Main Tool: *„It has no unique functions but simply offers a different mode of access"*
+(EN S. 147), während das Pitch-Kapitel den *pitch center* als *„note parameter that can also be
+edited using Melodyne's Main Tool"* beschreibt (EN S. 150) — dasselbe Parameter, dieselben Felder.
+
+**[FORUM] Und die Vorarbeit sagt es auch:** SIBIACs eigenes Modell ist *„Depending from the
+tool, zero, one or two parameter controls"* (§13) — pro Werkzeug verschieden, **null** ausdrücklich
+eingeschlossen, und ohne Werkzeugnamen. Der AutoHotkey-Entwurf des Nutzers, aus dem die beiden
+Regionen stammen, legt beide Anzeigen **bedingungslos** an und fängt ein leeres Feld mit dem
+Ersatztext `"No value"` ab — also gerade nicht mit einer Werkzeugbedingung.
+
+→ **[LÜCKE bleibt]** Was **Time** und **Note Separation** in den Kästchen zeigen, ist weiter
+unbekannt: bei beiden waren im Log *beide* Felder leer, und das Modul schrieb damals nur eine
+Zeile, wenn wenigstens eines etwas enthielt — sie erscheinen also gar nicht. Seit 17.08.2026
+schreibt das Overlay bei **jedem Werkzeugwechsel** eine Zeile
+`[melodyne] fields under tool=… left=… right=…`, gemessen kurz nach dem Umschalten und
+ausdrücklich auch dann, wenn beides leer ist. Die Lücke schließt sich damit beim bloßen Benutzen,
+ohne dass jemand auf einen Bildschirm sehen muss.
 
 **Geometrie Pitch-Tool [FIG]:** Feld 1 außen x**284–380** (96 px), Feld 2 außen x**392–488** (96 px) — **gleich breit**, Abstand **12 px**, Höhe außen 24 px (Rahmen y14/y37), innen 21 px. Text horizontal zentriert (Tinte-Mitte 331,0 vs. Feldmitte 332,0 / 441,0 vs. 440,0). Feldinnenfläche Luminanz ≈ 209, Toolbar-Panel 191, Tinte ≤ 130.
 **[FIG]** Rechts vom Inspector stehen **weitere Toolbar-Buttons** (~x500–620) — der Inspector ist nicht das rechteste Element.

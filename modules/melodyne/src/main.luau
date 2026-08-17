@@ -142,6 +142,11 @@ local function holdReadouts(ms)
   holdUntil = host.now() + (ms or READOUT_HOLD_MS)
 end
 
+-- Assigned further down, once the field reader it needs exists. The tool bar is declared before
+-- that reader and has to be able to call it, and a forward local is a smaller price than moving
+-- either of them somewhere it does not belong.
+local reportFieldsAfterSwitch = nil
+
 -- What we last DELIBERATELY selected, for the log line only.
 --
 -- The runtime hands the tab index to `onSelect`, which is better than any probe: we did not
@@ -291,6 +296,10 @@ do
   end
   ov:addTabControl({
     tabs = tabs,
+    -- Not spoken — a tab control announces its current TAB and its `typeLabel`, never this — but
+    -- every log line that names a control prints it, and an unnamed control logs as ''. Two
+    -- separate investigations have had to work out which control that was.
+    label = "Toolbox",
     -- Not "tab control": mechanically that is exactly what it is, and saying so tells the user
     -- the wrong thing about what they are looking at. Celemony calls it the Toolbox;
     -- "horizontal tool bar" names it and says which way the arrows go.
@@ -308,6 +317,15 @@ do
     onSelect = function(_, i)
       selectedToolName = TOOLS[i] and TOOLS[i].name or nil
       holdReadouts()
+      -- And every tool switch is a MEASUREMENT of what that tool puts in the two boxes.
+      --
+      -- The watcher cannot supply this on its own: it reports what CHANGED, and a tool whose
+      -- boxes are both empty changes nothing, so it never appears in the log at all. That is
+      -- precisely how Time and Note Separation stayed unmeasured through a whole session of
+      -- evidence. Here we know the tool by name because we just chose it, so one deliberate
+      -- reading afterwards fills the gap — two OCRs, once per switch, off the note-stepping
+      -- path entirely, and it needs nobody to look at a screen.
+      if reportFieldsAfterSwitch then reportFieldsAfterSwitch(selectedToolName) end
     end,
     current = function(o)
       local i = activeTool(o)
@@ -447,9 +465,16 @@ ov:addOCRButton({
 -- lie than one that reads the dash out: the user would learn that the field exists only
 -- sometimes, which is not true of anything on that tool bar.
 --
--- What the box holds under the tools that are not about pitch is still unmeasured — the watcher
--- below now records it per tool, so the log answers that by itself the next time Melodyne is
--- used, instead of someone having to look at a screen.
+-- The gate was half right, and the log from the day this overlay was written says which half:
+-- 178 readings taken when the code read both regions unconditionally, 167 of them with a cents
+-- value on the right. The eleven without are exactly the single-field tools — Formant, Amplitude,
+-- Pitch Modulation, one Time sub-tool — and the Main tool appears three separate times with BOTH
+-- fields. So the Pitch SUB-tools really are single-field, and the Main tool never was.
+--
+-- None of which needs to be in the code. A tool with one field leaves the second region bare, the
+-- recogniser reads nothing there, and nothing is announced — the measurement does the work a
+-- table of tool names would do worse, and it cannot go stale when Celemony moves something.
+-- Time and Note Separation are still unmeasured; see the tool bar's `onSelect`.
 ov:addOCRButton({
   label = "Pitch deviation",
   region = PITCH_REGION,
@@ -547,6 +572,25 @@ local function readSelection(o)
   local note = field(NOTE_REGION)
   local pitch = field(PITCH_REGION)
   return note .. "|" .. pitch, note, pitch
+end
+
+-- One reading per tool switch, written down and not spoken. See the tool bar's `onSelect`.
+--
+-- Timed to land after the strip has repainted and before the hold lifts, so it measures the new
+-- tool rather than the old one and cannot itself become an announcement. It says nothing to the
+-- user; it is here so that the question "what does THIS tool show in those two boxes" is
+-- answered by using Melodyne, by whoever is already using it, rather than by anybody
+-- describing a screen.
+reportFieldsAfterSwitch = function(toolName)
+  if not host.timer then return end
+  host.timer.after(READOUT_HOLD_MS - 150, function()
+    if not ov.active then return end
+    if host.keys.nativeMenuOpen and host.keys.nativeMenuOpen() then return end
+    local _, note, pitch = readSelection(ov)
+    if note == nil then return end
+    host.log.info(("[melodyne] fields under tool=%s: left=%q right=%q")
+      :format(tostring(toolName or "?"), trimmed(note), trimmed(pitch)))
+  end)
 end
 
 host.timer.every(WATCH_MS, function()
