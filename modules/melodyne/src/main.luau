@@ -1054,8 +1054,11 @@ local function measureNoteArea(o)
     local r = runs[i]
     -- Client coordinates, not indices into the capture, so the numbers can be compared with
     -- every other coordinate in this file.
-    parts[#parts + 1] = string.format("x%d-%d(d%d)",
-      NOTE_AREA[1] + r.from - 1, NOTE_AREA[1] + r.to - 1, r.peak)
+    -- BOTH peaks, because which channel saw it is the finding. A run with mean 0 and a large
+    -- minimum is a note blob; a run with a large mean is something nearly full height, which so
+    -- far has only ever been the position cursor.
+    parts[#parts + 1] = string.format("x%d-%d(mean%d min%d)",
+      NOTE_AREA[1] + r.from - 1, NOTE_AREA[1] + r.to - 1, math.floor(r.peak + 0.5), r.peakMin)
   end
   host.log.info(("[melodyne] note area: %d run(s) moved, strongest %s  transport=%q")
     :format(#runs, table.concat(parts, " "), transport))
