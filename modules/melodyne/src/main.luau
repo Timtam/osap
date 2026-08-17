@@ -835,6 +835,11 @@ end
 -- whatever is BEHIND it — another application's pixels, reported as Melodyne's note editor and
 -- indistinguishable from it in the log. So the right edge and the bottom are trimmed to the
 -- content the overlay actually has, and the log line says which columns it covered.
+-- The transport's position read-out in the top bar, measured in our own calibration capture:
+-- field interior x408-530, y12-34, ink x451-488, glyphs 14 px tall — a third taller than the
+-- tool-bar boxes, on a clear background with no neighbouring text. The easiest OCR target in
+-- the whole window, and the only place the application prints a musical position at all.
+local TRANSPORT_REGION = { 408, 12, 530, 34 }
 local NOTE_AREA = { 48, 118, 935, 640 }
 local NOTE_AREA_MS = 400
 local lastAreaSize = nil
@@ -913,6 +918,28 @@ local function measureNoteArea(o)
   -- an idle screen is still idle would bury the ones that matter.
   if #runs == 0 then return end
   table.sort(runs, function(a, b) return a.peak > b.peak end)
+  -- WHAT the moving feature is, settled by correlation rather than by argument.
+  --
+  -- It is two pixels wide, very nearly full height, and 130 to 180 units of column mean darker
+  -- than its surroundings — far darker than the bar lines, which the same profile shows at
+  -- about 55. A line like that which jumps to the selected note is most likely Melodyne's
+  -- playback position cursor, and "most likely" is not something to build a read-out on.
+  --
+  -- The transport read-out in the top bar prints that position as bar.beat.sixteenth. If it
+  -- changes in lockstep with these runs, the line IS the cursor and its x is the cursor's
+  -- position; if it sits still while the runs march, the line belongs to the selection instead.
+  -- Either answer is worth having and neither requires anybody to look at a screen. One OCR per
+  -- moved frame, only while calibrating.
+  local transport = ""
+  if origin.client then
+    local tr = host.ocr.recognize({
+      region = {
+        origin.client.x + TRANSPORT_REGION[1], origin.client.y + TRANSPORT_REGION[2],
+        origin.client.x + TRANSPORT_REGION[3], origin.client.y + TRANSPORT_REGION[4],
+      },
+    })
+    transport = trimmed(tr and tr.text)
+  end
   local parts = {}
   for i = 1, math.min(#runs, 6) do
     local r = runs[i]
