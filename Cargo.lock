@@ -1565,6 +1565,7 @@ name = "module-manifest"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "mlua",
  "serde",
  "toml",
  "zip 8.6.0",
