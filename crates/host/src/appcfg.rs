@@ -9,11 +9,11 @@
 //!
 //! So the store is the source of truth and this module is its live face: a handful of atomics
 //! that any part of the process can read without borrowing anything, written once at startup
-//! from `settings.toml` and again whenever the settings dialog changes one.
+//! from `settings.toml` and again whenever the Application settings tab changes one.
 //!
 //! **The variables still work**, and deliberately: a CI job runs headless, `bootstrap-macos.sh`
-//! tells a tester to launch with tracing on, and neither has a dialog to click. A variable
-//! that is set FORCES the setting on for that run, and the dialog says so rather than
+//! tells a tester to launch with tracing on, and neither has a window to click in. A variable
+//! that is set FORCES the setting on for that run, and the tab says so rather than
 //! pretending it can turn it off. New settings, though, go here and not there.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub struct Switch {
     /// Key in the `[app]` table of `settings.toml`, and the suffix of its variable.
     pub key: &'static str,
-    /// What the dialog calls it. Carries the "when does this take effect" note, because a
+    /// What the tab calls it. Carries the "when does this take effect" note, because a
     /// setting that appears to do nothing is worse than one that says it needs a restart.
     pub label: &'static str,
     /// What it is for, in one sentence.
@@ -36,7 +36,7 @@ static OCR_DEBUG: AtomicBool = AtomicBool::new(false);
 static IGNORE_SUPPORTED_OS: AtomicBool = AtomicBool::new(false);
 static HEADLESS: AtomicBool = AtomicBool::new(false);
 
-/// Every application setting, in the order the dialog shows them: the ones that take effect
+/// Every application setting, in the order the tab shows them: the ones that take effect
 /// immediately first, so the two that need a restart are not the first thing read out.
 pub const SWITCHES: &[Switch] = &[
     Switch {
@@ -75,19 +75,19 @@ pub const SWITCHES: &[Switch] = &[
         label: "Run without a window — restart to apply",
         help: "No tray icon and no manager window; modules with hotkeys, captured keys or \
                window triggers still run. For testing and automation. Turning this on means \
-               this dialog will not be reachable next time.",
+               this tab will not be reachable next time.",
         state: &HEADLESS,
     },
 ];
 
-/// The environment variable that forces a switch on, for the launches that have no dialog.
+/// The environment variable that forces a switch on, for the launches that have no window.
 pub fn env_name(key: &str) -> String {
     format!("AUTOMATION_PLATFORM_{}", key.to_ascii_uppercase())
 }
 
 /// Is a variable forcing this switch on for this run?
 ///
-/// Reported by the dialog, which must not offer to turn off something it cannot: the
+/// Reported by the tab, which must not offer to turn off something it cannot: the
 /// variable wins until the process is restarted without it, and saying so is the difference
 /// between a control that lies and one that explains.
 pub fn forced_by_env(key: &str) -> bool {

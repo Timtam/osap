@@ -183,7 +183,7 @@ pub fn run_gui(
         updates.set_sizer(us, true);
         notebook.add_page(&updates, "Updates", false, None);
 
-        // ===== "Application" tab: the platform's own settings =====
+        // ===== "Application settings" tab: the platform's own =====
         //
         // A tab rather than a dialog, and each change applies as it is made. A modal would
         // mean opening it, changing something, confirming, and only then finding out what it
@@ -263,7 +263,7 @@ pub fn run_gui(
             });
         }
         app_tab.set_sizer(as_, true);
-        notebook.add_page(&app_tab, "Application", false, None);
+        notebook.add_page(&app_tab, "Application settings", false, None);
 
         sizer.add(&notebook, 1, SizerFlag::All | SizerFlag::Expand, 0);
         let hint = StaticText::builder(&panel)
