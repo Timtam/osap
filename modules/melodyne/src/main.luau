@@ -461,6 +461,44 @@ local PITCH_REGION = { 300, 61, 367, 74 }
 -- verdict cannot.
 local BOX_EDGES = { { 218, 67 }, { 289, 67 }, { 298, 67 }, { 369, 67 } }
 
+-- Two of those four, used as a live test rather than a log entry: the right box's left border,
+-- and a point in the GAP between the boxes that is bare tool bar whether or not the right box
+-- exists (x290-297 lies past the left box's own border at 289).
+--
+-- Compared against each other, never against a fixed number. The same border read 157 on one
+-- capture and 146 on another, the box fill 194 against 209 — Melodyne's greys move with its
+-- appearance setting and with what the application draws over itself. What does not move is the
+-- CONTRAST: 45 units apart when the box is there, 0 when the strip runs straight through. A
+-- threshold would have been wrong within four days; a comparison cannot be.
+local BOX_EDGE, BOX_GAP = { 298, 67 }, { 294, 67 }
+local BOX_EDGE_CONTRAST = 20
+
+-- Is the right box drawn RIGHT NOW?
+--
+-- This is the same question the removed `when` predicate answered by asking which tool was
+-- selected — from a table of tool names taken out of five documentation figures, which left out
+-- the Main tool and cost the user his cents read-out. The question was never wrong; the
+-- instrument was. One pixel against another says what Melodyne is drawing, needs no list of
+-- tools, and cannot go stale when Celemony adds one.
+--
+-- Memoised per input epoch, like the tool probe: the box changes only when something ACTS, and
+-- that is exactly what turns the counter over. So a whole Tab walk pays two screen reads at
+-- most, and an idle watcher pays none.
+--
+-- Defaults to DRAWN when the pixels cannot be read. A control that quietly vanishes tells a
+-- user who cannot see the screen nothing about why, and "there is a stop here that says no
+-- value" is a far smaller failure than "the stop you were looking for is gone".
+local boxMemo = { gen = -1, drawn = true }
+local function rightBoxDrawn(o)
+  local gen = host.inputEpoch and host.inputEpoch() or (host.epoch and host.epoch() or 0)
+  if boxMemo.gen ~= gen then
+    boxMemo.gen = gen
+    local edge, gap = at(o, BOX_EDGE[1], BOX_EDGE[2]), at(o, BOX_GAP[1], BOX_GAP[2])
+    boxMemo.drawn = (edge == nil or gap == nil) or (gap.r - edge.r) > BOX_EDGE_CONTRAST
+  end
+  return boxMemo.drawn
+end
+
 -- What the left field is showing, in the words of the tool that owns it. Nil when no tool
 -- reads as lit, in which case the label alone is the honest answer.
 local function inspectorOwner(o)
@@ -526,9 +564,15 @@ ov:addOCRButton({
   -- reads bare tool bar. SIBIAC's "zero, one or two parameter controls" was right, and so was
   -- the reference document's mechanism — only its list of which tools left the Main tool out.
   --
-  -- So a Tab landing here under Formant is landing on something Melodyne is not drawing, and
-  -- "no value" is the honest thing to say: not silence, which would be indistinguishable from
-  -- a broken overlay, and not a sentence about optical character recognition.
+  -- So there is no stop here when there is no box. The control is gated on the MEASUREMENT
+  -- above, and that is the whole difference from the gate this file used to carry: that one
+  -- asked which tool was selected and answered from a list; this one asks what Melodyne has
+  -- drawn. A Tab stop for a field the application has taken away is a promise of something to
+  -- read that is not there — and the user said so plainly, twice.
+  when = rightBoxDrawn,
+  -- Still needed with the gate in place: the box can be present and EMPTY. Nothing selected
+  -- shows Melodyne's dash, which the recogniser drops, and "no value" is then the honest
+  -- answer — not silence, and not a sentence about optical character recognition.
   fallback = "no value",
 })
 

@@ -225,8 +225,13 @@ gezeichnet, in beiden steht ein Strich. Die Kalibrieraufnahme daneben (`Melodyne
 Fadenkreuz mittig in beide Kästchen, also sind es genau diese zwei Regionen.
 
 → „Nur beim Pitch Tool" beschreibt damit, **welche Abbildungen vorlagen**, nicht welche Werkzeuge
-zwei Felder haben. Das Main Tool bearbeitet Tonhöhe, also zeigt es die Tonhöhen-Felder. Das Overlay
-hatte das zweite Feld eine Zeit lang auf das Pitch Tool eingeschränkt — die Sperre ist entfernt.
+zwei Felder haben. Das Main Tool bearbeitet Tonhöhe, also zeigt es die Tonhöhen-Felder.
+
+→ Das Overlay hatte das zweite Feld eine Zeit lang auf das Pitch-Werkzeug eingeschränkt, und
+zwar anhand **dieser Liste** — das war der Fehler. Es blendet den Tab-Stopp weiterhin aus, wenn
+das Kästchen fehlt, aber jetzt anhand der **gemessenen Randpixel** (siehe unten): dieselbe Frage,
+ein anderes Instrument. Eine Liste von Werkzeugnamen veraltet, sobald Celemony eines hinzufügt;
+eine Messung des tatsächlich Gezeichneten nicht.
 
 **[LOG, gemessen am 13.08.2026 — die bislang einzige Messung an echtem Melodyne unter Windows]**
 
