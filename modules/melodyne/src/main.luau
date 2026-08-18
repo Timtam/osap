@@ -962,6 +962,40 @@ local FRACTIONS = {
   { 1 / 2, "half a bar" }, { 2 / 3, "two thirds of a bar" },
   { 3 / 4, "three quarters of a bar" }, { 1, "a bar" },
 }
+-- The TIME SIGNATURE, read from the top bar, and it is what turns a measurement into a sentence.
+--
+-- "One step" says nothing a person can act on, and the user said so. The missing piece was in
+-- the window all along, two fields right of the transport: Melodyne prints the key, the time
+-- signature and the tempo up there — "Eb Major", "3/4", "~ 88.09". Three four. Which means the
+-- third of a bar that this channel has been measuring all evening, over and over, at 0.30 to
+-- 0.34, IS ONE BEAT. A quarter note. The measurement was right and the unit was mine.
+--
+-- Read at most once per input epoch: it changes when the document changes, not while somebody
+-- is nudging notes.
+local TIMESIG_REGION = { 622, 12, 668, 34 }
+local sigMemo = { gen = -1, beats = nil }
+local function beatsPerBar(o)
+  local gen = host.inputEpoch and host.inputEpoch() or (host.epoch and host.epoch() or 0)
+  if sigMemo.gen ~= gen then
+    sigMemo.gen = gen
+    sigMemo.beats = nil
+    local origin = o:origin()
+    if origin and origin.client then
+      local r = host.ocr.recognize({
+        region = {
+          origin.client.x + TIMESIG_REGION[1], origin.client.y + TIMESIG_REGION[2],
+          origin.client.x + TIMESIG_REGION[3], origin.client.y + TIMESIG_REGION[4],
+        },
+      })
+      local top = trimmed(r and r.text):match("^(%d+)%s*[/l|]%s*%d+$")
+      local n = tonumber(top)
+      -- A bar of one to sixteen beats, or we did not read a time signature.
+      if n and n >= 1 and n <= 16 then sigMemo.beats = n end
+    end
+  end
+  return sigMemo.beats
+end
+
 -- The STEP the user is actually making, learned from what he has been making.
 --
 -- Dividing by a bar looked principled and is not, live: the detector that found eight lines
@@ -974,16 +1008,37 @@ local FRACTIONS = {
 -- median of the recent displacements IS that unit, whatever the zoom and whatever the grid is
 -- set to, and the announcement becomes a count of steps: what he did, not what I inferred about
 -- the ruler behind it. His own run bears it out — 33, 34, 35, 44 and then a 90, which is two.
-local stepHistory = {}
-local function stepsFor(px)
-  stepHistory[#stepHistory + 1] = px
-  if #stepHistory > 12 then table.remove(stepHistory, 1) end
-  local sorted = table.clone(stepHistory)
-  table.sort(sorted)
-  local unit = sorted[math.floor(#sorted / 2) + 1]
-  if not unit or unit < 4 then return nil end
-  local n = math.floor(px / unit + 0.5)
-  return math.max(1, n)
+local stepHistory, barHistory = {}, {}
+local function median(t)
+  if #t == 0 then return nil end
+  local s = table.clone(t)
+  table.sort(s)
+  return s[math.floor(#s / 2) + 1]
+end
+local function remember(t, v)
+  t[#t + 1] = v
+  if #t > 12 then table.remove(t, 1) end
+end
+
+-- How big one press is, and in what: beats when the numbers agree on it, steps otherwise.
+--
+-- Both ingredients are noisy on their own — the displacement carries about two pixels, the bar
+-- detector wandered between 35 and 136 in one session — so both are taken as MEDIANS of the
+-- last dozen, where the noise cancels and a zoom change washes through within a few presses.
+-- Then: how many steps fit in a bar, against how many beats the time signature says a bar
+-- holds. When those agree, one step IS one beat, and the announcement can say so.
+local function stepsFor(px, barW, beats)
+  remember(stepHistory, px)
+  if barW and barW > 0 then remember(barHistory, barW) end
+  local unit = median(stepHistory)
+  if not unit or unit < 4 then return nil, nil end
+  local n = math.max(1, math.floor(px / unit + 0.5))
+  local bar = median(barHistory)
+  if beats and bar and bar > unit then
+    local perBar = bar / unit
+    if math.abs(perBar - beats) <= 0.6 then return n, "beat" end
+  end
+  return n, "step"
 end
 
 local function asFraction(ratio)
@@ -1405,14 +1460,15 @@ local function measureNoteArea(o)
       -- evenly spaced.
       local barW = barWidthAt(lines, math.floor(arrivalX or 1))
       local dir = moved > 0 and "right" or "left"
-      local n = stepsFor(math.abs(moved))
+      local beats = beatsPerBar(o)
+      local n, unit = stepsFor(math.abs(moved), barW, beats)
       if n then
         if host.calibrating then
-          host.log.info(("[melodyne] spoke %d step(s): %d px, bar detector said %s px")
-            :format(n, math.abs(moved), tostring(barW)))
+          host.log.info(("[melodyne] spoke %d %s(s): %d px, bar %s px, time signature %s")
+            :format(n, unit, math.abs(moved), tostring(barW), tostring(beats)))
         end
-        host.speech.output(
-          dir .. ", " .. (n == 1 and "one step" or (n .. " steps")), { interrupt = true })
+        local word = n == 1 and ("one " .. unit) or (n .. " " .. unit .. "s")
+        host.speech.output(dir .. ", " .. word, { interrupt = true })
       elseif barW and barW > 0 then
         local ratio = math.abs(moved) / barW
         local pct = math.floor(ratio * 100 + 0.5)
