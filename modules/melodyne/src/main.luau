@@ -962,6 +962,30 @@ local FRACTIONS = {
   { 1 / 2, "half a bar" }, { 2 / 3, "two thirds of a bar" },
   { 3 / 4, "three quarters of a bar" }, { 1, "a bar" },
 }
+-- The STEP the user is actually making, learned from what he has been making.
+--
+-- Dividing by a bar looked principled and is not, live: the detector that found eight lines
+-- cleanly on a still capture returns widths of 36, 47, 57, 110 and 136 pixels within one
+-- session, so the divisor wanders. And the ratio it produces sits at about 0.30 — exactly
+-- between a quarter and a third — so two hundredths of noise flip the name. A stable
+-- measurement was being read out as "a quarter, a third, two thirds".
+--
+-- Melodyne moves a note by whole grid units, so the honest unit is the one he keeps using. The
+-- median of the recent displacements IS that unit, whatever the zoom and whatever the grid is
+-- set to, and the announcement becomes a count of steps: what he did, not what I inferred about
+-- the ruler behind it. His own run bears it out — 33, 34, 35, 44 and then a 90, which is two.
+local stepHistory = {}
+local function stepsFor(px)
+  stepHistory[#stepHistory + 1] = px
+  if #stepHistory > 12 then table.remove(stepHistory, 1) end
+  local sorted = table.clone(stepHistory)
+  table.sort(sorted)
+  local unit = sorted[math.floor(#sorted / 2) + 1]
+  if not unit or unit < 4 then return nil end
+  local n = math.floor(px / unit + 0.5)
+  return math.max(1, n)
+end
+
 local function asFraction(ratio)
   for _, f in ipairs(FRACTIONS) do
     if math.abs(ratio - f[1]) <= 0.05 then return f[2] end
@@ -1381,7 +1405,15 @@ local function measureNoteArea(o)
       -- evenly spaced.
       local barW = barWidthAt(lines, math.floor(arrivalX or 1))
       local dir = moved > 0 and "right" or "left"
-      if barW and barW > 0 then
+      local n = stepsFor(math.abs(moved))
+      if n then
+        if host.calibrating then
+          host.log.info(("[melodyne] spoke %d step(s): %d px, bar detector said %s px")
+            :format(n, math.abs(moved), tostring(barW)))
+        end
+        host.speech.output(
+          dir .. ", " .. (n == 1 and "one step" or (n .. " steps")), { interrupt = true })
+      elseif barW and barW > 0 then
         local ratio = math.abs(moved) / barW
         local pct = math.floor(ratio * 100 + 0.5)
         local named = asFraction(ratio)
@@ -1399,7 +1431,7 @@ local function measureNoteArea(o)
         host.speech.output(named and (dir .. ", " .. named) or ("%s, %d%% of a bar"):format(dir, pct),
           { interrupt = true })
       else
-        -- No two bar lines in view: the direction is still true, and a pixel count is not.
+        -- Nothing to scale by at all: the direction is still true, and a pixel count is not.
         host.speech.output(dir, { interrupt = true })
       end
     end
