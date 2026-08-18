@@ -934,6 +934,8 @@ local MIN_THRESHOLD = 8 -- INK: rows of a column, against a floor of about 19 an
 -- yes for ever, and the note-area measurement, which only runs when the answer is no, went
 -- silent for a whole session without a line to say why.
 local readOutsSilent = true
+-- The note's last known position, as the centre of the columns ink arrived in.
+local lastArrival = nil
 local lastArea, lastAreaMin = nil, nil
 -- The bar lines of the previous frame, so a scroll can be told from an edit.
 local prevLines = nil
@@ -1078,7 +1080,7 @@ local function measureNoteArea(o)
     -- frame from before an excursion is not a fact about the Melodyne we come back to, and this
     -- instrument's whole premise is that only ONE thing changed between two frames. Diffing
     -- across a trip to another window would report that trip as a note move.
-    lastArea, lastAreaMin, lastAreaSize = nil, nil, nil
+    lastArea, lastAreaMin, lastAreaSize, lastArrival = nil, nil, nil, nil
     return
   end
   if host.keys.nativeMenuOpen and host.keys.nativeMenuOpen() then return end
@@ -1094,7 +1096,7 @@ local function measureNoteArea(o)
   -- clamped to the same numbers for every window at least this wide — so the size is kept.
   local size = cw .. "x" .. ch
   if lastAreaSize ~= size then
-    lastArea, lastAreaMin, lastAreaSize = nil, nil, size
+    lastArea, lastAreaMin, lastAreaSize, lastArrival = nil, nil, size, nil
   end
   local p = host.screen.profile({
     region = {
@@ -1263,7 +1265,21 @@ local function measureNoteArea(o)
       if now >= was + ARRIVED then aSum, aN = aSum + i, aN + 1
       elseif was >= now + ARRIVED then dSum, dN = dSum + i, dN + 1 end
     end
-    local centroid = (aN > 0 and dN > 0) and (aSum / aN - dSum / dN) or nil
+    -- WHERE THE NOTE IS NOW, tracked from frame to frame — not where it is against where it was
+    -- within one frame.
+    --
+    -- Requiring both halves in the same 200 ms picture cost twenty frames out of forty-nine, and
+    -- every one of those silences reads "0 arrived, 1 left" or "1 arrived, 0 left". A frame lands
+    -- mid-redraw: the note is already gone from the old place and not yet drawn in the new one,
+    -- or the reverse. Half the answer is there and I threw it away.
+    --
+    -- The arrival columns ARE the note's new position, so successive arrivals are successive
+    -- positions and their difference is the step. The user's own run says it plainly — arrivals
+    -- at 379, 345, 311, 276, 242, 208, 174, 139, 105, 70, a difference of 34 every time. The
+    -- departure side is kept only for the log, where it is a second witness.
+    local arrivalX = aN > 0 and (aSum / aN) or nil
+    local centroid = (arrivalX and lastArrival) and (arrivalX - lastArrival) or nil
+    if arrivalX then lastArrival = arrivalX end
     if host.calibrating then
       host.log.info(("[melodyne] centroid says %s by %s px (%d arrived, %d left)")
         :format(
@@ -1339,7 +1355,9 @@ local function measureNoteArea(o)
     -- of these eleven correct measurements and reproduced exactly the disconnected feel the user
     -- reported. Both sides must be present, since a centroid needs two, and the move must be
     -- worth mentioning.
-    local confident = real ~= nil and aN >= 1 and dN >= 1 and math.abs(real) >= 8
+    -- No departure requirement any more: a step is the distance between two positions, and both
+    -- of those come from the arrival side alone.
+    local confident = real ~= nil and aN >= 1 and math.abs(real) >= 8
     local moved = real or 0
     if host.calibrating then
       host.log.info(("[melodyne] correlation says %d px (fit %.1f against %.1f standing still)")
@@ -1348,7 +1366,7 @@ local function measureNoteArea(o)
     if confident then
       -- Scaled where the note ARRIVED, since that is where it now is and the bars are not
       -- evenly spaced.
-      local barW = barWidthAt(lines, math.floor(aSum / aN))
+      local barW = barWidthAt(lines, math.floor(arrivalX or 1))
       local dir = moved > 0 and "right" or "left"
       if barW and barW > 0 then
         local ratio = math.abs(moved) / barW
@@ -1363,7 +1381,7 @@ local function measureNoteArea(o)
         if host.calibrating then
           host.log.info(("[melodyne] spoke %s: %d px against a bar of %d px (ratio %.3f) at x%d")
             :format(named or (pct .. "%"), math.abs(moved), barW, ratio,
-              math.floor(aSum / aN) + NOTE_AREA[1] - 1))
+              math.floor(arrivalX or 1) + NOTE_AREA[1] - 1))
         end
         host.speech.output(named and (dir .. ", " .. named) or ("%s, %d%% of a bar"):format(dir, pct),
           { interrupt = true })
