@@ -1028,10 +1028,19 @@ end
 -- Then: how many steps fit in a bar, against how many beats the time signature says a bar
 -- holds. When those agree, one step IS one beat, and the announcement can say so.
 local function stepsFor(px, barW, beats)
-  remember(stepHistory, px)
+  -- A nudge must not teach the step size: the median is what a PRESS OF THE GRID KEY does, and
+  -- feeding it one-pixel moves would drag it down until a real step counted as several.
+  if px >= 8 then remember(stepHistory, px) end
   if barW and barW > 0 then remember(barHistory, barW) end
   local unit = median(stepHistory)
   if not unit or unit < 4 then return nil, nil end
+  -- A move well under one unit is Melodyne's NUDGE: Ctrl+Alt is the same gesture with the grid
+  -- switched off, and it moves one to four pixels where a grid step moves thirty-four. Rounding
+  -- that to the nearest number of steps gives zero, and the old code then reported it as one —
+  -- a fine nudge announced as a whole beat. It gets its own word instead, and no quantity: at
+  -- one to four pixels the measurement carries a quarter of its own size in noise, and a number
+  -- built on that would be decoration.
+  if px < unit * 0.5 then return 1, "fine step" end
   local n = math.max(1, math.floor(px / unit + 0.5))
   local bar = median(barHistory)
   if beats and bar and bar > unit then
@@ -1449,7 +1458,10 @@ local function measureNoteArea(o)
     -- worth mentioning.
     -- No departure requirement any more: a step is the distance between two positions, and both
     -- of those come from the arrival side alone.
-    local confident = real ~= nil and aN >= 1 and math.abs(real) >= 8
+    -- Two pixels, not eight: the fine nudge lives between one and four, and eight was silencing
+    -- the whole of Ctrl+Alt. The run detection above is what keeps noise out — an idle picture
+    -- produces no changed columns at all, so there is nothing here to be jittery about.
+    local confident = real ~= nil and aN >= 1 and math.abs(real) >= 2
     local moved = real or 0
     if host.calibrating then
       host.log.info(("[melodyne] correlation says %d px (fit %.1f against %.1f standing still)")
