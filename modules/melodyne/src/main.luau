@@ -1157,6 +1157,20 @@ end
 
 -- The NUDGE pass, at a third of the coarse threshold, saying only that and which way.
 --
+-- AND IT HAS A FLOOR THAT NO THRESHOLD CAN LOWER. Asked to report a Ctrl+Alt nudge it answered
+-- "nothing (0 arrived, 0 left)" four times running: not one column of the note area changed by
+-- as much as three rows of ink between frames. The picture did not carry the edit at all.
+--
+-- The arithmetic says why. At the zoom in that session a beat was 34 pixels wide, so a nudge of
+-- a hundredth of a beat is a third of a pixel and does not exist on screen; even a tenth of a
+-- beat is 3.4 pixels, which is about where the one successful fine reading of the evening sat.
+-- Lowering the threshold further would not find the movement, it would start reporting
+-- anti-aliasing as motion.
+--
+-- The remedy is not sensitivity but magnification: at twice the zoom the same nudge is twice
+-- the pixels. This channel measures what the picture holds, and the user sets that with the
+-- zoom.
+--
 -- Called from two places, and that is the point: it was written for "the coarse pass found
 -- nothing at all", but a frame can carry runs that came from the MEAN channel while the ink
 -- shows no arrival at the coarse threshold — and then the coarse pass falls silent and the fine
