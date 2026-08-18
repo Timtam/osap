@@ -1232,7 +1232,10 @@ local function measureNoteArea(o)
       for i = r.from, r.to do
         -- MORE ink than before. The comparison points the other way from the luminance one it
         -- replaces, and getting that backwards would invert every direction this speaks.
-        if (minv[i] or 0) >= (prevMin[i] or 0) + ARRIVED then cols[#cols + 1] = i end
+        -- Same exclusion as the centroid below: a full-height column is the playback cursor,
+        -- not a note, and it must not enter the comparison either.
+        local now, was = minv[i] or 0, prevMin[i] or 0
+        if now < 150 and was < 150 and now >= was + ARRIVED then cols[#cols + 1] = i end
       end
     end
     -- Kept as a SECOND OPINION in the log and nothing more. It is the estimate that aliased,
@@ -1260,10 +1263,20 @@ local function measureNoteArea(o)
     -- and this estimate exists precisely because the last one was believed too early. Every
     -- column that changed enough counts here; it costs one pass over 887 numbers.
     local aSum, aN, dSum, dN = 0, 0, 0, 0
+    -- FULL-HEIGHT COLUMNS ARE NOT NOTES, and skipping them is what the ink channel was for.
+    --
+    -- Melodyne's playback cursor is a line spanning the whole editor, measured at 470 to 516
+    -- dark rows against 29 to 57 for a note blob. While the transport runs it crosses the area
+    -- several times a second, arriving in a new column each frame — so the user pressed Play and
+    -- was read a sentence every 200 ms. I measured that separation on his own capture hours ago
+    -- and then wrote an arrival test that could not tell the two apart.
+    local FULL_HEIGHT = 150
     for i = 1, #minv do
       local now, was = minv[i] or 0, prevMin[i] or 0
-      if now >= was + ARRIVED then aSum, aN = aSum + i, aN + 1
-      elseif was >= now + ARRIVED then dSum, dN = dSum + i, dN + 1 end
+      if now < FULL_HEIGHT and was < FULL_HEIGHT then
+        if now >= was + ARRIVED then aSum, aN = aSum + i, aN + 1
+        elseif was >= now + ARRIVED then dSum, dN = dSum + i, dN + 1 end
+      end
     end
     -- WHERE THE NOTE IS NOW, tracked from frame to frame — not where it is against where it was
     -- within one frame.
