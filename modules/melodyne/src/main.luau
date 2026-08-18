@@ -1155,6 +1155,35 @@ local function bestShift(prevMin, minv, cols)
   return best, bestScore, score(0)
 end
 
+-- The NUDGE pass, at a third of the coarse threshold, saying only that and which way.
+--
+-- Called from two places, and that is the point: it was written for "the coarse pass found
+-- nothing at all", but a frame can carry runs that came from the MEAN channel while the ink
+-- shows no arrival at the coarse threshold — and then the coarse pass falls silent and the fine
+-- one was never reached. The user pressed Ctrl+Alt into that gap twice.
+local function sayFineMove(minv, prevMin)
+  local fa, faN, fd, fdN = 0, 0, 0, 0
+  for i = 1, #minv do
+    local now, was = minv[i] or 0, prevMin[i] or 0
+    if now < 150 and was < 150 then
+      if now >= was + 3 then fa, faN = fa + i, faN + 1
+      elseif was >= now + 3 then fd, fdN = fd + i, fdN + 1 end
+    end
+  end
+  if faN == 0 or fdN == 0 then
+    if host.calibrating then
+      host.log.info(("[melodyne] fine pass: nothing (%d arrived, %d left)"):format(faN, fdN))
+    end
+    return
+  end
+  local d = fa / faN - fd / fdN
+  if host.calibrating then
+    host.log.info(("[melodyne] fine pass: %.1f px (%d arrived, %d left)"):format(d, faN, fdN))
+  end
+  if math.abs(d) < 1 or math.abs(d) > 12 then return end
+  host.speech.output((d > 0 and "right" or "left") .. ", one fine step", { interrupt = true })
+end
+
 local function measureNoteArea(o)
   -- Runs for TWO reasons, and neither of them is "always". While calibrating it is an
   -- instrument and writes to the log. The rest of the time it runs only when the read-outs are
@@ -1270,24 +1299,7 @@ local function measureNoteArea(o)
   -- something small happened and which way. At this size the measurement carries a quarter of
   -- itself in noise, and any number built on it would be decoration.
   if #runs == 0 then
-    if not readOutsSilent then return end
-    local fa, faN, fd, fdN = 0, 0, 0, 0
-    for i = 1, #minv do
-      local now, was = minv[i] or 0, prevMin[i] or 0
-      if now < 150 and was < 150 then
-        if now >= was + 3 then fa, faN = fa + i, faN + 1
-        elseif was >= now + 3 then fd, fdN = fd + i, fdN + 1 end
-      end
-    end
-    if faN > 0 and fdN > 0 then
-      local d = fa / faN - fd / fdN
-      if math.abs(d) >= 1 and math.abs(d) <= 12 then
-        if host.calibrating then
-          host.log.info(("[melodyne] fine pass: %.1f px (%d arrived, %d left)"):format(d, faN, fdN))
-        end
-        host.speech.output((d > 0 and "right" or "left") .. ", one fine step", { interrupt = true })
-      end
-    end
+    if readOutsSilent then sayFineMove(minv, prevMin) end
     return
   end
   -- A MASS change is the view moving, not a note moving, and it is the one case where the
@@ -1531,6 +1543,11 @@ local function measureNoteArea(o)
         -- Nothing to scale by at all: the direction is still true, and a pixel count is not.
         host.speech.output(dir, { interrupt = true })
       end
+    else
+      -- The coarse pass had runs but nothing it would say: no ink arrival at its threshold, or a
+      -- move under two pixels. That is exactly where a nudge lives, so ask the fine pass rather
+      -- than falling silent — the gap the user kept pressing Ctrl+Alt into.
+      sayFineMove(minv, prevMin)
     end
   end
   -- WHAT the moving feature is, settled by correlation rather than by argument.
