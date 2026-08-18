@@ -1258,9 +1258,38 @@ local function measureNoteArea(o)
   -- than it is — by one column in the ordinary case, which is the whole width of the feature
   -- these runs turned out to be.
   if from then runs[#runs + 1] = { from = from, to = #mean - gap, peak = peak, peakMin = peakMin } end
-  -- Silence when nothing moved: this runs on a timer now, and a line every 400 ms saying that
-  -- an idle screen is still idle would bury the ones that matter.
-  if #runs == 0 then return end
+  -- NOTHING AT THE COARSE SETTING? Look again, more finely, for a nudge.
+  --
+  -- Ctrl+Alt is Melodyne's Nudge — the same gesture with the grid off — and it moves one to four
+  -- pixels where a grid step moves thirty-four. The ink it displaces scales with it: a grid step
+  -- shows up as nine to sixteen changed rows in a column, so a nudge shows two to four, and the
+  -- run detector needs eight. It was not being announced because it was never being SEEN.
+  --
+  -- Lowering the main threshold instead would let anti-aliasing flicker into every measurement,
+  -- so the fine pass runs only when the coarse one found nothing, and it may only ever say that
+  -- something small happened and which way. At this size the measurement carries a quarter of
+  -- itself in noise, and any number built on it would be decoration.
+  if #runs == 0 then
+    if not readOutsSilent then return end
+    local fa, faN, fd, fdN = 0, 0, 0, 0
+    for i = 1, #minv do
+      local now, was = minv[i] or 0, prevMin[i] or 0
+      if now < 150 and was < 150 then
+        if now >= was + 3 then fa, faN = fa + i, faN + 1
+        elseif was >= now + 3 then fd, fdN = fd + i, fdN + 1 end
+      end
+    end
+    if faN > 0 and fdN > 0 then
+      local d = fa / faN - fd / fdN
+      if math.abs(d) >= 1 and math.abs(d) <= 12 then
+        if host.calibrating then
+          host.log.info(("[melodyne] fine pass: %.1f px (%d arrived, %d left)"):format(d, faN, fdN))
+        end
+        host.speech.output((d > 0 and "right" or "left") .. ", one fine step", { interrupt = true })
+      end
+    end
+    return
+  end
   -- A MASS change is the view moving, not a note moving, and it is the one case where the
   -- differential premise fails outright. It showed up the first evening: walking past the right
   -- edge made Melodyne scroll, and two frames reported 48 and 53 runs while the position jumped
