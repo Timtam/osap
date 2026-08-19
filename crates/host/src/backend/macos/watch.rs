@@ -84,11 +84,29 @@ struct Refusal {
     permanent: bool,
 }
 
+/// What we know about one application's focus notifications.
+enum Watched {
+    /// Subscribed, and the subscription is alive as long as this is.
+    Live(Live),
+    /// Turned us down, this many times.
+    Refused(u8),
+}
+
+/// How often an application that refused everything is asked again.
+///
+/// Not once, and not forever. An application asked while it is still starting up can refuse
+/// every notification and then work perfectly a second later — sforzando loads a sample
+/// engine before its window is worth anything — so writing it off on the first answer means
+/// a session-long blindness caused by nothing but timing. Asking on every switch instead
+/// would spend a cross-process round trip per notification, every time, on an application
+/// that genuinely has no accessibility to offer.
+const REFUSAL_RETRIES: u8 = 3;
+
 thread_local! {
-    /// pid to observer. A `None` entry is an application that refused and will not be asked
-    /// again, kept so a DAW that cannot be observed costs one attempt rather than one per
-    /// window switch for the rest of the session.
-    static OBSERVERS: RefCell<HashMap<i32, Option<Live>>> = RefCell::new(HashMap::new());
+    /// pid to what we know about it. A `Refused` entry that has used up its retries is an
+    /// application that will not be asked again, kept so a DAW that cannot be observed costs
+    /// a few attempts rather than one per window switch for the rest of the session.
+    static OBSERVERS: RefCell<HashMap<i32, Watched>> = RefCell::new(HashMap::new());
 
     /// The two menu-tracking notification names.
     ///
@@ -252,8 +270,6 @@ fn on_app_activated(notification: &NSNotification) {
         });
     }
 
-    ensure_observer(pid, &name);
-
     // The window, not the application, is what the host activates on. Resolving it here
     // rather than in the callback-to-pump handoff costs one accessibility read on a path
     // that runs when the user switches applications — rare, and the alternative is the pump
@@ -279,6 +295,14 @@ fn on_app_activated(notification: &NSNotification) {
     // Pushed even when it is 0: the drain resolves it, fails to match, and arms the delayed
     // re-check ladder — which is exactly what a window that is not titled yet needs.
     super::queue::push_activated(window);
+
+    // Subscribing LAST, and the order is the whole point. It is six synchronous calls into
+    // an application that has this instant been brought to the front and is therefore at its
+    // busiest — each capped at a quarter second, so up to a second and a half — and it buys
+    // nothing for the switch that is happening now. It is about noticing the NEXT change.
+    // Ahead of the window read it simply delayed the answer the user is waiting for, on
+    // exactly the path where an application slow to answer is the reported complaint.
+    ensure_observer(pid, &name);
 }
 
 /// Makes sure we are listening to this application, at most once per pid.
@@ -293,9 +317,15 @@ fn ensure_observer(pid: i32, app: &str) {
         crate::logging::trace("macos", || "not observing our own process".to_string());
         return;
     }
-    if OBSERVERS.with(|o| o.borrow().contains_key(&pid)) {
-        return;
-    }
+    let already_refused = match OBSERVERS.with(|o| match o.borrow().get(&pid) {
+        Some(Watched::Live(_)) => None,
+        Some(Watched::Refused(n)) => Some(*n),
+        None => Some(0),
+    }) {
+        None => return,
+        Some(n) if n >= REFUSAL_RETRIES => return,
+        Some(n) => n,
+    };
 
     // Only on a miss, so the cost is paid once per newly seen application rather than on
     // every switch, and a long session cannot accumulate observers for processes that have
@@ -305,7 +335,7 @@ fn ensure_observer(pid: i32, app: &str) {
     match create_observer(pid, app) {
         Ok(live) => {
             crate::logging::line("macos", &format!("observing focus in {app} (pid {pid})"));
-            OBSERVERS.with(|o| o.borrow_mut().insert(pid, Some(live)));
+            OBSERVERS.with(|o| o.borrow_mut().insert(pid, Watched::Live(live)));
         }
         Err(refusal) => {
             crate::logging::line(
@@ -317,7 +347,7 @@ fn ensure_observer(pid: i32, app: &str) {
                 ),
             );
             if refusal.permanent {
-                OBSERVERS.with(|o| o.borrow_mut().insert(pid, None));
+                OBSERVERS.with(|o| o.borrow_mut().insert(pid, Watched::Refused(already_refused + 1)));
             }
         }
     }
@@ -456,7 +486,7 @@ fn reap_dead() {
             if alive {
                 return true;
             }
-            if let (Some(run_loop), Some(live)) = (run_loop.as_ref(), live.as_ref()) {
+            if let (Some(run_loop), Watched::Live(live)) = (run_loop.as_ref(), &*live) {
                 run_loop.remove_source(Some(&live.source), unsafe { kCFRunLoopCommonModes });
                 crate::logging::line(
                     "macos",
