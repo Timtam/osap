@@ -48,8 +48,18 @@ fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
+# The SYSTEM openssl, when it is there, in preference to whatever is first in PATH.
+#
+# macOS ships LibreSSL at /usr/bin/openssl, and LibreSSL writes a PKCS#12 container the
+# Security framework can read. A Homebrew OpenSSL 3 earlier in PATH writes one with a SHA-256
+# MAC, which the framework rejects as "MAC verification failed during PKCS12 import (wrong
+# password?)" — a message about the password, for a fault that has nothing to do with it.
+# Scott hit exactly that. Choosing the reader's own implementation avoids the argument.
+OPENSSL=openssl
+[ -x /usr/bin/openssl ] && OPENSSL=/usr/bin/openssl
+
 echo "==> Creating a self-signed code-signing certificate"
-echo "    openssl: $(openssl version 2>&1 | head -1)"
+echo "    openssl: $OPENSSL — $("$OPENSSL" version 2>&1 | head -1)"
 
 # A CONFIG FILE rather than -addext, because macOS does not ship OpenSSL.
 #
@@ -75,7 +85,7 @@ keyUsage               = critical,digitalSignature
 extendedKeyUsage       = critical,codeSigning
 CNF
 
-if ! openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+if ! "$OPENSSL" req -x509 -newkey rsa:2048 -nodes -days 3650 \
       -keyout "$tmp/key.pem" -out "$tmp/cert.pem" -config "$tmp/openssl.cnf"; then
   echo ""
   echo "    Creating the certificate failed, and the error is just above this line."
@@ -84,18 +94,44 @@ if ! openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
   exit 1
 fi
 
-if ! openssl pkcs12 -export -out "$tmp/identity.p12" \
-      -inkey "$tmp/key.pem" -in "$tmp/cert.pem" -passout pass:; then
-  echo ""
-  echo "    Packing the certificate for the keychain failed; the error is above."
-  exit 1
+# A REAL PASSWORD and a SHA-1 MAC, because macOS is the reader and it is the older one.
+#
+# Scott's run got "SecKeychainItemImport: MAC verification failed during PKCS12 import (wrong
+# password?)". The password is a red herring — that message is what the Security framework
+# says when it cannot verify the container's MAC, and OpenSSL 3 writes one with SHA-256 by
+# default while the framework expects SHA-1. LibreSSL, which is what /usr/bin/openssl is,
+# already defaults to SHA-1; a Homebrew OpenSSL earlier in PATH does not, which is why this
+# failed on his machine and not in the version I reasoned about.
+#
+# So the MAC and the encryption are named rather than left to a default that varies by
+# implementation, and the whole thing is retried without them if an implementation rejects
+# the flags — LibreSSL's pkcs12 does not take every one of them.
+#
+# The empty password goes too. "" is handled differently on either side of this exchange, and
+# it makes the one error message you get ambiguous exactly when you can least afford it. A
+# throwaway password lives in this shell for two commands and dies with the temporary
+# directory.
+P12PASS="osap-$$-$(date +%s)"
+if ! "$OPENSSL" pkcs12 -export -out "$tmp/identity.p12" \
+      -inkey "$tmp/key.pem" -in "$tmp/cert.pem" -passout "pass:$P12PASS" \
+      -macalg sha1 -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES 2>"$tmp/p12.err"; then
+  echo "    (this openssl would not take the compatibility options; trying without them)"
+  if ! "$OPENSSL" pkcs12 -export -out "$tmp/identity.p12" \
+        -inkey "$tmp/key.pem" -in "$tmp/cert.pem" -passout "pass:$P12PASS"; then
+    echo ""
+    echo "    Packing the certificate for the keychain failed. First attempt said:"
+    sed 's/^/      /' "$tmp/p12.err"
+    exit 1
+  fi
 fi
 
 echo "==> Adding it to your login keychain"
-echo "    macOS may ask you to unlock the keychain. That is expected."
+echo "    If macOS asks to unlock the keychain or to allow access to the key, say yes."
+echo "    It often asks for neither. Nothing is wrong when it does not — the earlier wording"
+echo "    promised a prompt, and a tester then went looking for the fault in the wrong place."
 # -T lets codesign use the private key without asking every time. macOS may still show a
 # "wants to sign using a key in your keychain" dialog the first time; choose Always Allow.
-security import "$tmp/identity.p12" -k "$KEYCHAIN" -P "" -T /usr/bin/codesign
+security import "$tmp/identity.p12" -k "$KEYCHAIN" -P "$P12PASS" -T /usr/bin/codesign
 
 # Trust it for code signing, so that tools which ask for VALID identities can see it too.
 # Not strictly needed for codesign itself, which will use an untrusted certificate from the
