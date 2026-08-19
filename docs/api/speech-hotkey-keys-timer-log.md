@@ -34,7 +34,11 @@ host.speech.output("loading...", { interrupt = false })  -- queue, don't cut off
 **Where it comes out**, which the caller does not choose and does not need to know:
 
 - **Windows** — the running screen reader if there is one (NVDA, JAWS and Narrator all go through Tolk), otherwise SAPI.
-- **macOS** — VoiceOver, by default, so it arrives in the user's voice, at their rate, and **on their braille display**, which nothing else can do. If VoiceOver refuses — not running, or AppleScript control not allowed — the line is said by the platform's own voice instead and the reason is written to the log **once**; it does not go missing and it does not repeat the complaint. The **Speak through VoiceOver** switch in the Application settings tab turns this off for anyone who prefers a second, distinct voice, and ticking it again re-tries a path that had failed.
+- **macOS** — VoiceOver, by default, so it arrives in the user's voice, at their rate, and **on their braille display**, which nothing else can do. Two things can send a line to the platform's own voice instead:
+  - **VoiceOver is not running.** Checked before every line, and deliberately not remembered: VoiceOver started later in the session simply starts being used. The check is also why the overlay cannot *start* VoiceOver — `tell application "VoiceOver"` would launch it, and a tool that switches on a screen reader nobody asked for is not acceptable behaviour.
+  - **VoiceOver refuses**, most often because AppleScript control is not allowed. The line comes back and is said by the fallback, the reason is logged **once**, and the path is parked for the session so no further line pays for a process launch that will fail. Ticking the setting again re-arms it.
+
+  Either way the line is said. The **Speak through VoiceOver** switch in the Application settings tab turns the whole path off for anyone who prefers a second, distinct voice.
 
 `interrupt` governs the platform's own queue. On the VoiceOver path, whether an announcement also cuts off what VoiceOver is saying for its own reasons is VoiceOver's decision, not one this API can make.
 

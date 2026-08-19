@@ -54,7 +54,12 @@ impl Speech {
             } else {
                 self.last_switch.set(on);
             }
-            if on && self.vo.say(text, interrupt) {
+            // Asked here rather than on the worker, and asked EVERY time. `tell application
+            // "VoiceOver"` starts VoiceOver if it is not running, and this setting is on by
+            // default — so without this the first thing the overlay ever said would switch a
+            // screen reader on for somebody who had not asked for one. Not a failure either:
+            // VoiceOver can be started later in the session and this simply starts working.
+            if on && voiceover::is_running() && self.vo.say(text, interrupt) {
                 return;
             }
         }

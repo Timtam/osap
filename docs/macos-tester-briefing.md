@@ -118,7 +118,30 @@ If it says nothing at all, the overlay did not activate — send the log. If it 
 value is wrong or empty, that is a coordinate a few points out, which is worth knowing
 precisely: say which of the three, and the log will have the OCR to go with it.
 
-### 4. Control-Option-Right in the sforzando window — one question we cannot answer here
+### 4. Does it reach your braille display — ask this early
+
+Everything the overlay says is handed to VoiceOver rather than spoken by a second voice, and
+the reason that is worth doing at all is braille: nothing else can put a line on your
+display. Nobody here has been able to check that it actually arrives.
+
+So, with the sforzando overlay speaking (step 3), please say whether the read-outs — 
+"Instrument", "Polyphony", "Pitchbend range" and their values — **appear on the braille
+display**, not only in speech.
+
+If they do not, that changes what gets built next far more than any of the questions below,
+so it is better asked now than at the end.
+
+**And one command, ten seconds, that unblocks a rewrite we cannot otherwise attempt:**
+
+```bash
+sdef /System/Library/CoreServices/VoiceOver.app > voiceover.sdef
+```
+
+That writes out VoiceOver's scripting dictionary. It contains the four-character codes for
+the `output` command, and with those the overlay could talk to VoiceOver directly instead of
+launching a small program for every line it says. Send the file with the log; it is text.
+
+### 5. Control-Option-Right in the sforzando window — one question we cannot answer here
 
 With the sforzando window in front, press **Control-Option-Right**, then **Control-Option-Left**.
 
@@ -148,7 +171,7 @@ Outside the sforzando window the keys are VoiceOver's again, immediately — tha
 half of the claim, and it is worth a moment to check: Command-Tab to any other application
 and confirm Control-Option-Right does what it always did.
 
-### 5. Record a plugin window — still the important one
+### 6. Record a plugin window — still the important one
 
 Open a music plugin (in a DAW or standalone; either is useful, both is better), put its
 window in front, and press **Command-Shift-F9**.
@@ -170,7 +193,7 @@ of the plugin, **Screen Recording was not granted** (or the application was not 
 after granting it). macOS does not report that as an error — it just hands back the
 wallpaper.
 
-### 6. Does anything block
+### 7. Does anything block
 
 If the machine feels sluggish, or a keystroke goes missing, say when it happened. The log
 records anything that took too long, and "around the time I opened the browser" is enough to
@@ -181,7 +204,8 @@ find it.
 The whole folder next to the application:
 
 - `automation-platform.log` — the main thing
-- `probe-*.png` — the pictures from step 5
+- `probe-*.png` — the pictures from step 6
+- `voiceover.sdef` — from step 4, if you got to it
 
 Both sit beside `AutomationPlatform.app`, in `dist/AutomationPlatform/`. If that folder was
 not writable, the log went to `~/Library/Application Support/AutomationPlatform/` instead —

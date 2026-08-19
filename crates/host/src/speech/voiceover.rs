@@ -5,10 +5,33 @@
 //! without a Mac: `crates/macos-check` borrows it by path and asks the compiler whether it
 //! is true, which a module nested inside a file that needs `tts` could not be.
 
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+use objc2_app_kit::NSRunningApplication;
+use objc2_foundation::NSString;
+
+/// Is VoiceOver up?
+///
+/// Asked before every line, and not as an optimisation. `tell application "VoiceOver"` goes
+/// through Launch Services, and Launch Services **starts an application that is not
+/// running**. Speaking through VoiceOver is on by default on macOS, so without this check
+/// the first thing the overlay ever says would turn the screen reader on for somebody who
+/// had not asked for one.
+///
+/// By bundle id, the same way `backend::macos::perm` asks it — one lookup against the
+/// workspace index rather than a scan of every running application.
+///
+/// Called from the thread that hands the line over, not from the worker: whether these
+/// queries are safe off the main thread is something this project cannot check, and the
+/// caller is already on the main thread.
+pub fn is_running() -> bool {
+    let id = NSString::from_str("com.apple.VoiceOver");
+    !NSRunningApplication::runningApplicationsWithBundleIdentifier(&id).is_empty()
+}
 
 /// A line for VoiceOver, and whether it displaces what is already waiting.
 struct Utterance {
@@ -18,9 +41,11 @@ struct Utterance {
 
 /// VoiceOver, spoken to through `osascript` on a thread of its own.
 ///
-/// Not inline: each line costs a process launch plus an AppleScript compile — tens of
-/// milliseconds — and this event loop also carries the keyboard. A screen reader that
-/// stalls the keys it is describing is not usable, so the wait happens elsewhere.
+/// Not inline: each line costs a process launch and whatever `osascript` then has to do
+/// before VoiceOver answers, and this event loop also carries the keyboard. A screen reader
+/// that stalls the keys it is describing is not usable, so the wait happens elsewhere — and
+/// the thing being waited on is a child process, whose hangs and crashes are contained in
+/// somebody else's address space.
 pub struct VoiceOver {
     to_vo: Sender<Utterance>,
     refused_rx: Receiver<String>,
@@ -75,10 +100,7 @@ impl VoiceOver {
     /// Try VoiceOver again after a failure — what ticking the setting means.
     pub fn rearm(&self) {
         if !self.healthy.swap(true, Ordering::Relaxed) {
-            crate::logging::line(
-                "speech",
-                "trying VoiceOver again, because its setting was ticked",
-            );
+            crate::logging::line("speech", "trying VoiceOver again, because its setting was ticked");
         }
     }
 }
@@ -109,8 +131,9 @@ fn run(
         }
         let started = Instant::now();
         let outcome = output(&u.text);
-        cost.record(started.elapsed().as_millis() as u64);
-        pending.fetch_sub(1 + dropped, Ordering::Relaxed);
+        let took = started.elapsed().as_millis() as u64;
+        let left = pending.fetch_sub(1 + dropped, Ordering::Relaxed) - (1 + dropped);
+        cost.record(took, u.text.chars().count(), left == 0);
         if let Err(why) = outcome {
             healthy.store(false, Ordering::Relaxed);
             if !reported {
@@ -133,23 +156,32 @@ fn run(
 
 /// What a spoken line costs, because nobody here can measure it.
 ///
-/// This path launches a process per line, and that process then has to resolve VoiceOver's
-/// scripting terminology before it can compile a one-line script. Both are avoidable — an
-/// `NSAppleScript` compiled once, or the Apple Event built directly — and neither is worth
-/// writing blind against a number nobody has. The alternative is a rewrite justified by a
-/// guess, which is how this project has lost days before.
+/// This path launches a process per line, and that process has work to do before VoiceOver
+/// hears anything. How that time divides — process launch, resolving VoiceOver's scripting
+/// terminology, compiling the one-line script, the event round trip — is **not known**, and
+/// neither is the question underneath it: whether `output` returns as soon as VoiceOver has
+/// the text, or blocks until the phrase has been spoken. If it blocks, the time is speech
+/// duration and no change of transport is worth writing; the alternatives (an
+/// `NSAppleScript` kept compiled, the Apple Event built directly) would each buy nothing.
 ///
-/// So: the first line is reported whatever it cost, because it is the cold one and it is the
-/// worst case anybody will hear; after that a summary every [`REPORT_EVERY`] lines, and any
-/// single line over [`SLOW_LINE_MS`] on its own. Not behind tracing — this is the number the
-/// next remote session has to come back with, and it must not depend on somebody having
-/// ticked something first.
+/// So the numbers logged here are shaped to tell those two apart rather than to look
+/// impressive. **The character count is the point:** if the milliseconds track the length of
+/// the line, `output` blocks on speech and the question is closed. If they are flat across a
+/// three-word line and a forty-word one, it is fixed overhead and worth attacking. The
+/// one-off bare-spawn baseline separates the launch from everything after it.
+///
+/// The first line is reported whatever it cost, because it is the cold one and the worst
+/// case anybody will hear; after that a summary every [`REPORT_EVERY`] lines, and any single
+/// line over [`SLOW_LINE_MS`] on its own. Not behind tracing — this is the number the next
+/// remote session has to come back with, and it must not depend on somebody having ticked
+/// something first.
 #[derive(Default)]
 struct Cost {
     n: u64,
     total_ms: u64,
     min_ms: u64,
     max_ms: u64,
+    baseline_done: bool,
 }
 
 /// A line slower than this is worth naming on its own: it is past the point where an
@@ -158,7 +190,9 @@ const SLOW_LINE_MS: u64 = 150;
 const REPORT_EVERY: u64 = 50;
 
 impl Cost {
-    fn record(&mut self, ms: u64) {
+    /// `idle` says the queue is empty — the only moment the baseline may be taken, because
+    /// it is a whole process launch and nothing is allowed to delay a real announcement.
+    fn record(&mut self, ms: u64, chars: usize, idle: bool) {
         self.n += 1;
         self.total_ms += ms;
         self.max_ms = self.max_ms.max(ms);
@@ -167,11 +201,15 @@ impl Cost {
             crate::logging::line(
                 "speech",
                 &format!(
-                    "the first line through VoiceOver took {ms} ms — that one pays for a                      process launch AND for resolving VoiceOver's scripting terminology, so                      it is the worst case, not the usual one"
+                    "the first line through VoiceOver took {ms} ms for {chars} characters \
+                     — the cold one, and the worst case anybody will hear"
                 ),
             );
         } else if ms >= SLOW_LINE_MS {
-            crate::logging::line("speech", &format!("a line through VoiceOver took {ms} ms"));
+            crate::logging::line(
+                "speech",
+                &format!("a line through VoiceOver took {ms} ms for {chars} characters"),
+            );
         }
         if self.n % REPORT_EVERY == 0 {
             crate::logging::line(
@@ -185,8 +223,53 @@ impl Cost {
                 ),
             );
         }
+        if idle && !self.baseline_done {
+            self.baseline_done = true;
+            baseline();
+        }
     }
 }
+
+/// One `osascript` that talks to nobody, timed once per session.
+///
+/// It runs a script with no `tell application` in it: no target to resolve, no scripting
+/// terminology to read, no Apple Event. What it costs is therefore the launch and the
+/// interpreter coming up, and nothing else. Subtracting it from a real line is the only way
+/// anyone gets to say which half of the cost is which — and the difference decides whether
+/// there is anything worth rewriting.
+///
+/// Taken only when the queue has run dry, so it never sits in front of something to say.
+fn baseline() {
+    let started = Instant::now();
+    let ran = Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg("return 1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let ms = started.elapsed().as_millis();
+    match ran {
+        Ok(_) => crate::logging::line(
+            "speech",
+            &format!(
+                "an osascript that talks to nobody took {ms} ms — that is the launch alone, \
+                 so a real line minus this is what going to VoiceOver costs"
+            ),
+        ),
+        Err(e) => crate::logging::line("speech", &format!("could not time a bare osascript: {e}")),
+    }
+}
+
+/// How long a single line is given before the child is killed.
+///
+/// Not a latency control — it is an un-wedge. `output` may legitimately take a while, and
+/// until somebody has measured it nobody knows how long is legitimate. What this rules out
+/// is the failure with no bottom: a child that never exits parks the worker forever, so
+/// `pending` never drains, `is_speaking` stays true for the rest of the session, no refusal
+/// is ever sent, the fallback never speaks, and the overlay goes silent with nothing in the
+/// log. A consent dialog waiting for an answer a blind user cannot see does exactly that.
+const CHILD_LIMIT: Duration = Duration::from_secs(5);
 
 /// `tell application "VoiceOver" to output "…"` — VoiceOver's own voice, its rate, and
 /// its braille display, which is the entire point of going through it.
@@ -196,17 +279,52 @@ impl Cost {
 fn output(text: &str) -> Result<(), String> {
     let script =
         format!("tell application \"VoiceOver\" to output \"{}\"", applescript_string(text));
-    let out = std::process::Command::new("/usr/bin/osascript")
+    let mut child = Command::new("/usr/bin/osascript")
         .arg("-e")
         .arg(&script)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("osascript could not be started ({e})"))?;
-    if out.status.success() {
+
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(e) => return Err(format!("lost track of osascript ({e})")),
+        }
+        let waited = started.elapsed();
+        if waited >= CHILD_LIMIT {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "osascript did not come back within {} s and was stopped — VoiceOver is \
+                 wedged, or something is waiting for an answer on screen",
+                CHILD_LIMIT.as_secs()
+            ));
+        }
+        // Fine-grained at first and coarse afterwards, because this poll is inside the
+        // number being measured: a flat 5 ms tick would put a 5 ms floor under every
+        // reading and the measurement would be of the sleep.
+        std::thread::sleep(if waited < Duration::from_millis(50) {
+            Duration::from_millis(1)
+        } else {
+            Duration::from_millis(10)
+        });
+    };
+
+    if status.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        use std::io::Read;
+        let _ = pipe.read_to_string(&mut stderr);
+    }
     let why = stderr.trim();
-    Err(if why.is_empty() { format!("exit {}", out.status) } else { why.to_string() })
+    Err(if why.is_empty() { format!("exit {status}") } else { why.to_string() })
 }
 
 /// The body of an AppleScript string literal.

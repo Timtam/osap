@@ -25,7 +25,15 @@ on:
   push:
     branches: [main, master]
     paths:
+      # Everything `crates/macos-check` borrows by #[path], and nothing else. That list is
+      # the definition of "macOS code" in this repo, and it is easy to extend the borrow
+      # and forget this — which is exactly what happened to the speech path: it shipped and
+      # was never linked on a Mac, because the only job that links lives behind this list.
       - 'crates/host/src/backend/macos/**'
+      - 'crates/host/src/speech/**'
+      - 'crates/host/src/appcfg.rs'
+      - 'crates/host/src/portable.rs'
+      - 'crates/host/src/logging.rs'
       - 'crates/host/Cargo.toml'
       - 'crates/macos-check/**'
       - 'package-macos.sh'

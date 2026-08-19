@@ -111,6 +111,27 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
      fine a second later — sforzando loads a sample engine before its window is worth
      anything — so a refusal is now retried `REFUSAL_RETRIES` times, on later activations,
      before it becomes final. The log line says which of the two it is.
+- [ ] **The VoiceOver transport is unmeasured, and the measurement has to answer one thing
+      first** (2026-08-19): does `output` return when VoiceOver has the text, or block until
+      the phrase has been spoken? If it blocks, per-line time is speech duration and NO
+      change of transport buys anything — not a kept-compiled `NSAppleScript`, not a raw
+      Apple Event, not a helper process. The log now carries the character count next to the
+      milliseconds precisely to tell those apart, plus a one-off bare-`osascript` baseline
+      that separates the launch from everything after it. Decision rule, set before the
+      numbers arrive so it is not argued afterwards: **ms tracks length → close the
+      question. Length-independent and under ~50 ms on a 2015 Air → close the question.
+      Length-independent and over ~100 ms → build the direct Apple Event**, with the codes
+      read from the `sdef` the tester is being asked for, on the existing worker thread,
+      sent with `sendEventWithOptions:timeout:`.
+  - Ruled out on evidence, not taste: **`NSAppleScript` is not usable here.** objc2 binds
+    `executeAndReturnError` / `executeAppleEvent:error:` as returning a NON-optional
+    `Retained<…>`, while the real API returns nil on script error — objc2 0.6.4 panics on a
+    nil return, so the expected first-run case (AppleScript control not enabled) would take
+    the process down instead of falling back. It is also conventionally main-thread-only,
+    and this main thread carries the keyboard.
+  - Also unverified and worth one question: whether VoiceOver's `output` reaches the
+    **braille display** at all. That is the entire justification for the module; step 4 of
+    the tester briefing now asks it first rather than last.
 - [x] **Speech now goes through VoiceOver** (2026-08-19). `crates/host/src/speech/` — one
       place decides where an announcement comes out, so no call site had to learn about it.
       On macOS the default is `tell application "VoiceOver" to output …` through `osascript`,
