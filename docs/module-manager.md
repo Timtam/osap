@@ -114,6 +114,20 @@ transition, e.g. `v0.1.0 → v0.2.0`. **Update selected** re-fetches and reinsta
 modules that inherit an updated module's code pick up the change on the next start
 (the message names them — *restart to apply*).
 
+## The Installed list is a different control on each platform
+
+Windows uses a native tree with real OS checkboxes (`wxTreeCtrl` + `TVS_CHECKBOXES`); macOS
+uses a `wxCheckListBox`, which there is a real `NSTableView` with a checkbox column.
+
+Not a whim. Off Windows, wxWidgets compiles its whole accessibility layer out
+(`include/wx/chkconf.h`) and its tree control is a scrolled window that paints its own rows —
+so VoiceOver did not read that list badly, it skipped the control entirely. One control for
+both platforms was built and tried first: `wxCheckListBox` on Windows is an owner-drawn
+listbox, and the accessible wxWidgets supplies for it reports the checkbox correctly but no
+item positions and no selected state. With NVDA that was worse than the tree. Giving up the
+platform that works to fix the one that does not is the wrong trade, so both stay, behind one
+seam that shows the rest of the window nothing but a row index.
+
 ## Application settings tab
 
 The platform's own settings — the ones about the application rather than about any module:

@@ -31,6 +31,9 @@ on:
       # was never linked on a Mac, because the only job that links lives behind this list.
       - 'crates/host/src/backend/macos/**'
       - 'crates/host/src/speech/**'
+      # Not borrowed by macos-check (it cannot be — wxdragon), but it carries a macOS
+      # branch of its own now, and this job is the only place that ever compiles it.
+      - 'crates/host/src/gui.rs'
       - 'crates/host/src/appcfg.rs'
       - 'crates/host/src/portable.rs'
       - 'crates/host/src/logging.rs'

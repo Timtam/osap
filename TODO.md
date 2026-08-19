@@ -145,10 +145,25 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       file is `#[path]`-borrowed by `crates/macos-check`, so the compiler checks it from
       Windows. What is still unmeasured: whether VoiceOver's `output` interrupts its own
       speech or queues behind it. Only a Mac can say.
-- [ ] **The module list has no checkboxes on macOS.** wxWidgets draws its tree control
-      itself there, so there is nothing native underneath to tick and VoiceOver sees one
-      opaque element. `sync_checks` is disarmed so a click cannot silently disable
-      everything; the real fix is `wxCheckListBox` (native, and wxdragon already binds it).
+- [x] **The module list was unreachable on macOS** (2026-08-19). Worse than the note here
+      said: VoiceOver did not see one opaque element, it skipped the control. Cause read
+      out of the wxWidgets 3.3.2 tree this repo builds — `include/wx/chkconf.h:1499` makes
+      `wxUSE_ACCESSIBILITY` MSW-only and hard-sets it to 0 everywhere else, and
+      `wxTreeCtrl` off MSW is `wxGenericTreeCtrl`, a scrolled window that paints its rows.
+      Nothing to land on.
+  - Fixed with a **platform split** behind `InstalledList` (crates/host/src/gui.rs): the
+    native tree with `TVS_CHECKBOXES` stays on Windows, `wxCheckListBox` on macOS, and
+    every caller sees an index.
+  - One control for both was built first and tried with NVDA. `wxCheckListBox` on Windows
+    is an owner-drawn listbox; wxWidgets 3.3.2 added a `wxCheckListBoxAccessible` that
+    reports the checkbox role and state correctly but no child count, no item locations and
+    no selected state. Measurably worse than the tree, and the user said so, so both stay.
+  - Falls out of it: `sync_checks` and its shadow vector are gone, so the failure it
+    guarded against — one unanswerable reading disabling every module — cannot happen; and
+    macOS gets working Settings/Reload/Uninstall buttons, which were inert there because
+    `native_checkboxes::same()` always answered `false`.
+  - Still to confirm on a Mac: the six questions U1–U6 (per-row state, whether one utterance
+    carries name AND checkbox, whether Space actually toggles).
 - [ ] **Left standing after the adversarial review** (2026-08-13), each because the fix
       wants a measurement more than it wants a decision:
   - `focus_step` can in the worst case cost thousands of cross-process round trips per Tab

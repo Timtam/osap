@@ -8,7 +8,6 @@
 //! tray "Quit" actually exits. Double-clicking the tray icon reopens it.
 
 use std::cell::{Cell, RefCell};
-use std::ffi::c_void;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
@@ -46,28 +45,318 @@ pub struct ModuleInfo {
     pub settings: Vec<SettingDesc>,
 }
 
-/// One built row in the Installed list: its tree item plus what the handlers
-/// need — the module index (toggle/settings callbacks), id + name (messages),
-/// its settings, and the ids it depends on (to block removing a needed module).
+/// One built row in the Installed list: what the handlers need — the module index
+/// (toggle/settings callbacks), id + name (messages), its settings, and the ids it depends
+/// on (to block removing a needed module).
+///
+/// A row's identity is its POSITION: `rows[i]` is list item `i`, always. That is all a
+/// `wxCheckListBox` offers, and it is enough as long as every change to the list goes
+/// through `rebuild_list`, so the two cannot drift apart.
 struct Row {
-    item: TreeItemId,
     module_idx: usize,
     id: String,
     name: String,
+    /// What the list shows. Held because the control can neither rename one item nor
+    /// delete one — the list is rebuilt from these.
+    label: String,
+    /// The checkbox, as we last set it.
+    ///
+    /// Not a shadow copy to be diffed against the control — that was the old design, and
+    /// one unanswerable reading of it read as "the user just unticked everything". This is
+    /// written when the user toggles and read only when the list is rebuilt.
+    enabled: bool,
     settings: Vec<SettingDesc>,
     dependencies: Vec<String>,
 }
 
 impl Row {
-    fn new(item: TreeItemId, info: &ModuleInfo) -> Self {
+    fn new(info: &ModuleInfo) -> Self {
         Row {
-            item,
             module_idx: info.module_idx,
             id: info.id.clone(),
             name: info.name.clone(),
+            label: row_label(&info.name, &info.version, &info.id),
+            enabled: info.enabled,
             settings: info.settings.clone(),
             dependencies: info.dependencies.clone(),
         }
+    }
+}
+
+/// How a module reads in the list. One place: it is written at first fill, at install and
+/// at update, and three copies of a format string drift.
+fn row_label(name: &str, version: &str, id: &str) -> String {
+    format!("{name}  v{version}   ({id})")
+}
+
+
+/// The Installed list, which is a different control on each platform.
+///
+/// Not a preference. On Windows a `wxTreeCtrl` is a real `SysTreeView32`, and with
+/// `TVS_CHECKBOXES` its checkboxes come from the OS and are described by comctl32's own
+/// accessibility server. On macOS the same class is `wxGenericTreeCtrl`: a scrolled window
+/// that paints its rows itself, and wxWidgets compiles its whole accessibility layer out for
+/// anything but MSW (`include/wx/chkconf.h`). VoiceOver therefore does not read that list
+/// badly — it skips the control entirely. There a `wxCheckListBox` is a real `NSTableView`
+/// with an `NSButtonCell` switch column.
+///
+/// Tried and rejected: one `wxCheckListBox` everywhere. It is native on macOS, but on
+/// Windows it is an owner-drawn listbox whose checkbox wxWidgets draws and describes itself
+/// (`wxCheckListBoxAccessible`, new in 3.3.2), and that shim reports no child count, no item
+/// locations and no selected state. Built and tried with NVDA: worse than what was already
+/// there. Giving up the platform that works to fix the one that does not is the wrong trade,
+/// so both stay.
+///
+/// What the rest of the window sees is an index. Item `i` is `rows[i]` on both platforms —
+/// the one invariant every caller depends on, and the only thing this type must keep true.
+#[derive(Clone)]
+struct InstalledList {
+    inner: Rc<ListInner>,
+}
+
+impl InstalledList {
+    fn new(parent: &Panel) -> Self {
+        InstalledList { inner: Rc::new(ListInner::new(parent)) }
+    }
+
+    /// Puts the control in a sizer. Here rather than at the call site, so the widget type
+    /// stays inside.
+    fn add_to(&self, sizer: &BoxSizer) {
+        self.inner.add_to(sizer);
+    }
+
+    /// Redraws the list from `rows`, keeping the selection on the same index where it can.
+    ///
+    /// Wholesale on both platforms. The macOS control can neither rename an item nor delete
+    /// one — wxdragon binds append, insert and clear and nothing else — and doing it the
+    /// same way on Windows leaves one behaviour to reason about instead of two. A dozen rows
+    /// cost nothing.
+    ///
+    /// Losing your place in a list you cannot see is not a small thing, so the selection
+    /// comes back, clamped if the list got shorter; and a freshly built list lands on the
+    /// first row rather than on nothing, so there is something to arrow from.
+    fn rebuild(&self, rows: &[Row]) {
+        self.inner.rebuild(rows);
+    }
+
+    fn selection(&self) -> Option<usize> {
+        self.inner.selection()
+    }
+
+    fn checked(&self, i: usize) -> bool {
+        self.inner.checked(i)
+    }
+
+    /// Fires when a checkbox may have changed; the handler re-reads every row.
+    ///
+    /// "May", and every row, because the two platforms know different amounts. The macOS
+    /// control raises a real toggle event naming the row; the Windows tree raises nothing at
+    /// all, so there the only honest signal is "a key or a button came up, look again".
+    /// `apply_toggle` reports only rows that really changed, so both arrive at the same
+    /// place and neither can announce a change that did not happen.
+    fn on_maybe_toggled(&self, f: impl FnMut() + 'static) {
+        self.inner.on_maybe_toggled(Box::new(f));
+    }
+
+    fn on_select(&self, f: impl FnMut() + 'static) {
+        self.inner.on_select(Box::new(f));
+    }
+}
+
+type ListCallback = Rc<RefCell<Option<Box<dyn FnMut()>>>>;
+
+#[cfg(windows)]
+struct ListInner {
+    ctrl: TreeCtrl,
+    /// The tree needs a root to hang rows from, even though it is hidden.
+    root: Option<TreeItemId>,
+    /// Item `i` of the tree, so an index becomes a node and a node becomes an index.
+    items: RefCell<Vec<TreeItemId>>,
+    hwnd: *mut std::ffi::c_void,
+    toggled: ListCallback,
+    selected: ListCallback,
+}
+
+#[cfg(windows)]
+impl ListInner {
+    fn new(parent: &Panel) -> Self {
+        let ctrl = TreeCtrl::builder(parent)
+            .with_style(TreeCtrlStyle::HideRoot | TreeCtrlStyle::Single | TreeCtrlStyle::NoLines)
+            .build();
+        let hwnd = ctrl.get_handle();
+        // Must be on before the first item is inserted.
+        native_checkboxes::enable(hwnd);
+        let root = ctrl.add_root("Modules", None, None);
+
+        // The tree offers no toggle and no selection event, so both answers come off the
+        // same two up-events — and they are bound ONCE here, with the callbacks stored,
+        // rather than bound again per registration. The native control flips its box on the
+        // DOWN event, so by the up event the new state is already there to be read.
+        let toggled: ListCallback = Rc::new(RefCell::new(None));
+        let selected: ListCallback = Rc::new(RefCell::new(None));
+        let fire = {
+            let (t, s) = (toggled.clone(), selected.clone());
+            move || {
+                if let Some(f) = t.borrow_mut().as_mut() {
+                    f();
+                }
+                if let Some(f) = s.borrow_mut().as_mut() {
+                    f();
+                }
+            }
+        };
+        let fire = Rc::new(RefCell::new(fire));
+        {
+            let fire = fire.clone();
+            ctrl.on_mouse_left_up(move |e| {
+                (fire.borrow_mut())();
+                e.skip(true);
+            });
+        }
+        {
+            let fire = fire.clone();
+            ctrl.on_key_up(move |e| {
+                (fire.borrow_mut())();
+                e.skip(true);
+            });
+        }
+        ListInner { ctrl, root, items: RefCell::new(Vec::new()), hwnd, toggled, selected }
+    }
+
+    fn add_to(&self, sizer: &BoxSizer) {
+        sizer.add(&self.ctrl, 1, SizerFlag::All | SizerFlag::Expand, 12);
+    }
+
+    fn rebuild(&self, rows: &[Row]) {
+        let previous = self.selection();
+        {
+            let mut items = self.items.borrow_mut();
+            for it in items.iter() {
+                self.ctrl.delete(it);
+            }
+            items.clear();
+            let Some(root) = &self.root else {
+                return;
+            };
+            for r in rows {
+                if let Some(item) = self.ctrl.append_item(root, &r.label, None, None) {
+                    native_checkboxes::set(self.hwnd, &item, r.enabled);
+                    items.push(item);
+                }
+            }
+        }
+        if !rows.is_empty() {
+            let i = previous.unwrap_or(0).min(rows.len() - 1);
+            if let Some(item) = self.items.borrow().get(i) {
+                self.ctrl.select_item(item);
+            }
+        }
+    }
+
+    fn selection(&self) -> Option<usize> {
+        let sel = self.ctrl.get_selection()?;
+        self.items.borrow().iter().position(|it| native_checkboxes::same(it, &sel))
+    }
+
+    fn checked(&self, i: usize) -> bool {
+        self.items.borrow().get(i).is_some_and(|it| native_checkboxes::get(self.hwnd, it))
+    }
+
+    fn on_maybe_toggled(&self, f: Box<dyn FnMut()>) {
+        *self.toggled.borrow_mut() = Some(f);
+    }
+
+    fn on_select(&self, f: Box<dyn FnMut()>) {
+        *self.selected.borrow_mut() = Some(f);
+    }
+}
+
+#[cfg(not(windows))]
+struct ListInner {
+    ctrl: CheckListBox,
+    toggled: ListCallback,
+}
+
+#[cfg(not(windows))]
+impl ListInner {
+    fn new(parent: &Panel) -> Self {
+        // `Single` explicitly: this widget's `Default` style is literally 0, unlike
+        // ListBox's. Never `Sort` — it would reorder items behind us, and a row's position
+        // is its identity.
+        let ctrl = CheckListBox::builder(parent).with_style(CheckListBoxStyle::Single).build();
+        ctrl.set_name("Installed modules");
+        let toggled: ListCallback = Rc::new(RefCell::new(None));
+
+        // Space, which this control does not handle itself: wxOSX's wxCheckListBox has an
+        // empty event table, where the MSW one maps Space, plus and minus. Without this a
+        // VoiceOver user could reach the list, read it, and change nothing. `check()` does
+        // not raise the toggle event — wx sends that only from its own input handling — so
+        // the handler flips the box and then says so.
+        {
+            let (t, c) = (toggled.clone(), ctrl);
+            ctrl.on_key_down(move |e| {
+                const SPACE: i32 = 32;
+                if let WindowEventData::Keyboard(k) = &e {
+                    if k.get_key_code() == Some(SPACE) {
+                        if let Some(i) = c.get_selection() {
+                            c.check(i, !c.is_checked(i));
+                            if let Some(f) = t.borrow_mut().as_mut() {
+                                f();
+                            }
+                            return;
+                        }
+                    }
+                }
+                e.skip(true);
+            });
+        }
+        {
+            // A real toggle event: edge-triggered, only on genuine user action, and
+            // `check()` cannot re-enter it.
+            let t = toggled.clone();
+            ctrl.on_toggled(move |_| {
+                if let Some(f) = t.borrow_mut().as_mut() {
+                    f();
+                }
+            });
+        }
+        ListInner { ctrl, toggled }
+    }
+
+    fn add_to(&self, sizer: &BoxSizer) {
+        sizer.add(&self.ctrl, 1, SizerFlag::All | SizerFlag::Expand, 12);
+    }
+
+    fn rebuild(&self, rows: &[Row]) {
+        let previous = self.ctrl.get_selection();
+        self.ctrl.clear();
+        for (i, r) in rows.iter().enumerate() {
+            self.ctrl.append(&r.label);
+            self.ctrl.check(i as u32, r.enabled);
+        }
+        if !rows.is_empty() {
+            let last = rows.len() as u32 - 1;
+            self.ctrl.set_selection(previous.unwrap_or(0).min(last), true);
+        }
+    }
+
+    fn selection(&self) -> Option<usize> {
+        self.ctrl.get_selection().map(|i| i as usize)
+    }
+
+    fn checked(&self, i: usize) -> bool {
+        self.ctrl.is_checked(i as u32)
+    }
+
+    fn on_maybe_toggled(&self, f: Box<dyn FnMut()>) {
+        *self.toggled.borrow_mut() = Some(f);
+    }
+
+    fn on_select(&self, f: Box<dyn FnMut()>) {
+        // Fires on arrow keys too, which the Windows side catches only because a key-up
+        // happens to follow.
+        let f = RefCell::new(f);
+        self.ctrl.on_selected(move |_| (f.borrow_mut())());
     }
 }
 
@@ -111,28 +400,13 @@ pub fn run_gui(
             .build();
         is.add(&heading, 0, SizerFlag::All, 12);
 
-        // A native tree control with TVS_CHECKBOXES: real OS checkboxes that
-        // expose the proper toggle state to the screen reader (UIA). Must be
-        // enabled *before* items are inserted. Every module is listed (libraries
-        // too — they just can't be removed while something needs them). The root
-        // is kept so a row can be appended live when a module is hot-loaded.
-        let list = TreeCtrl::builder(&installed)
-            .with_style(TreeCtrlStyle::HideRoot | TreeCtrlStyle::Single | TreeCtrlStyle::NoLines)
-            .build();
-        let hwnd = list.get_handle();
-        native_checkboxes::enable(hwnd);
-        let root = list.add_root("Modules", None, None);
-        let mut rows: Vec<Row> = Vec::new();
-        if let Some(root) = &root {
-            for m in modules.iter() {
-                let label = format!("{}  v{}   ({})", m.name, m.version, m.id);
-                if let Some(item) = list.append_item(root, &label, None, None) {
-                    native_checkboxes::set(hwnd, &item, m.enabled);
-                    rows.push(Row::new(item, m));
-                }
-            }
-        }
-        is.add(&list, 1, SizerFlag::All | SizerFlag::Expand, 12);
+        // See `InstalledList` for why this is one control on Windows and another on macOS.
+        // Every module is listed, libraries too — they just cannot be removed while
+        // something still needs them.
+        let list = InstalledList::new(&installed);
+        let rows: Vec<Row> = modules.iter().map(Row::new).collect();
+        list.rebuild(&rows);
+        list.add_to(&is);
 
         let inst_buttons = BoxSizer::builder(Orientation::Horizontal).build();
         let settings_btn = Button::builder(&installed).with_label("Settings…").build();
@@ -273,34 +547,28 @@ pub fn run_gui(
         sizer.add(&hint, 0, SizerFlag::All, 12);
         panel.set_sizer(sizer, true);
 
-        // Detect native checkbox toggles (mouse click on the box, or Space on the
-        // focused row). The native control flips state on the *down* event, so by
-        // the *up* event the new state is in place; diff each row against the
-        // last-known and report via the real module index.
-        let states = Rc::new(RefCell::new(
-            rows.iter().map(|r| modules[r.module_idx].enabled).collect::<Vec<bool>>(),
-        ));
+        // The list arrives with its first row selected (see InstalledList::rebuild), so the
+        // buttons start from what is actually selected rather than from "nothing".
+        refresh_settings_btn(&list, &rows, &settings_btn);
+        reload_btn.enable(list.selection().is_some());
         let rows = Rc::new(RefCell::new(rows));
         let on_toggle: Rc<RefCell<Box<dyn FnMut(usize, bool)>>> =
             Rc::new(RefCell::new(Box::new(on_toggle)));
-        settings_btn.enable(false); // refreshed on selection (mouse-up / key-up)
-        reload_btn.enable(false); // any selected module can be reloaded
+
         {
-            let (rows, states, on_toggle) = (rows.clone(), states.clone(), on_toggle.clone());
-            list.on_mouse_left_up(move |e| {
-                sync_checks(hwnd, &rows.borrow(), &states, &on_toggle);
-                refresh_settings_btn(&list, &rows.borrow(), &settings_btn);
-                reload_btn.enable(list.get_selection().is_some());
-                e.skip(true);
+            let (rows, on_toggle, l) = (rows.clone(), on_toggle.clone(), list.clone());
+            list.on_maybe_toggled(move || {
+                let n = rows.borrow().len();
+                for i in 0..n {
+                    apply_toggle(&l, &rows, i, &on_toggle);
+                }
             });
         }
         {
-            let (rows, states, on_toggle) = (rows.clone(), states.clone(), on_toggle.clone());
-            list.on_key_up(move |e| {
-                sync_checks(hwnd, &rows.borrow(), &states, &on_toggle);
-                refresh_settings_btn(&list, &rows.borrow(), &settings_btn);
-                reload_btn.enable(list.get_selection().is_some());
-                e.skip(true);
+            let (rows, l) = (rows.clone(), list.clone());
+            list.on_select(move || {
+                refresh_settings_btn(&l, &rows.borrow(), &settings_btn);
+                reload_btn.enable(l.selection().is_some());
             });
         }
 
@@ -308,16 +576,14 @@ pub fn run_gui(
         let on_set: Rc<RefCell<Box<dyn FnMut(usize, String, settings::Value)>>> =
             Rc::new(RefCell::new(Box::new(on_set)));
         {
-            let (rows, on_set) = (rows.clone(), on_set.clone());
+            let (rows, on_set, list) = (rows.clone(), on_set.clone(), list.clone());
             settings_btn.on_click(move |_| {
-                let Some(sel) = list.get_selection() else {
+                let Some(sel) = list.selection() else {
                     return;
                 };
                 let found = {
                     let rb = rows.borrow();
-                    rb.iter()
-                        .find(|r| native_checkboxes::same(&r.item, &sel))
-                        .map(|r| (r.module_idx, r.settings.clone()))
+                    rb.get(sel).map(|r| (r.module_idx, r.settings.clone()))
                 };
                 let Some((module_idx, settings)) = found else {
                     return;
@@ -340,18 +606,13 @@ pub fn run_gui(
         // (edit a dev module + reload without restarting the app). Dependents that
         // hold its code keep the old copy until restarted.
         {
-            let rows = rows.clone();
-        let reload_cb = on_reload.clone();
+            let (rows, list) = (rows.clone(), list.clone());
+            let reload_cb = on_reload.clone();
             reload_btn.on_click(move |_| {
-                let Some(sel) = list.get_selection() else {
+                let Some(sel) = list.selection() else {
                     return;
                 };
-                let idx = {
-                    let rb = rows.borrow();
-                    rb.iter()
-                        .find(|r| native_checkboxes::same(&r.item, &sel))
-                        .map(|r| r.module_idx)
-                };
+                let idx = { rows.borrow().get(sel).map(|r| r.module_idx) };
                 let Some(idx) = idx else {
                     return;
                 };
@@ -367,12 +628,10 @@ pub fn run_gui(
                                 r.settings = info.settings.clone();
                                 r.dependencies = info.dependencies.clone();
                                 r.name = info.name.clone();
-                                list.set_item_text(
-                                    &r.item,
-                                    &format!("{}  v{}   ({})", info.name, info.version, info.id),
-                                );
+                                r.label = row_label(&info.name, &info.version, &info.id);
                             }
                         }
+                        list.rebuild(&rows.borrow());
                         // The cascade is the point: a module that depends on this one
                         // carries a COPY of its code, so it was rebuilt too. Name them,
                         // and name any that could not be rebuilt -- those are now
@@ -420,16 +679,16 @@ pub fn run_gui(
         // row — no restart needed. A module another currently-loaded module
         // depends on can't be removed.
         {
-            let (rows, states, settings_btn) = (rows.clone(), states.clone(), settings_btn);
+            let (rows, list) = (rows.clone(), list.clone());
             uninstall_btn.on_click(move |_| {
-                let Some(sel) = list.get_selection() else {
+                let Some(sel) = list.selection() else {
                     return;
                 };
                 let found = {
                     let rb = rows.borrow();
                     let graph: Vec<(String, Vec<String>)> =
                         rb.iter().map(|x| (x.id.clone(), x.dependencies.clone())).collect();
-                    rb.iter().find(|r| native_checkboxes::same(&r.item, &sel)).map(|r| {
+                    rb.get(sel).map(|r| {
                         // Block if any loaded module *transitively* depends on this one —
                         // removing it would break them (not just its direct dependents).
                         let needed_by: Vec<String> =
@@ -485,9 +744,8 @@ pub fn run_gui(
                         };
                         let pos = rows.borrow().iter().position(|r| r.id == id);
                         if let Some(pos) = pos {
-                            let removed = rows.borrow_mut().remove(pos);
-                            states.borrow_mut().remove(pos);
-                            list.delete(&removed.item);
+                            rows.borrow_mut().remove(pos);
+                            list.rebuild(&rows.borrow());
                         }
                         settings_btn.enable(false);
                         if !orphan_ids.is_empty()
@@ -507,9 +765,8 @@ pub fn run_gui(
                                 let pos = rows.borrow().iter().position(|r| &r.id == oid);
                                 if let Some(p) = pos {
                                     let removed = rows.borrow_mut().remove(p);
-                                    states.borrow_mut().remove(p);
                                     on_remove(removed.module_idx);
-                                    list.delete(&removed.item);
+                                    list.rebuild(&rows.borrow());
                                 }
                             }
                             format!(
@@ -835,7 +1092,7 @@ pub fn run_gui(
         let timer = Timer::new(&frame);
         {
             let inbox = inbox.clone();
-            let (rows, states, busy) = (rows.clone(), states.clone(), busy.clone());
+            let (rows, busy, list) = (rows.clone(), busy.clone(), list.clone());
             // Re-entrancy guard: the modal dialogs below run a NESTED wx event loop,
             // during which this continuous timer keeps firing and re-enters on_tick.
             // Bail on re-entry so we don't pump module callbacks — or stack further
@@ -920,21 +1177,10 @@ pub fn run_gui(
                                     // List every newly loaded module (a hot-load can
                                     // pull in not-yet-loaded dependencies), so each
                                     // is immediately toggleable / removable.
-                                    if let Some(root) = &root {
-                                        for info in &infos {
-                                            let label = format!(
-                                                "{}  v{}   ({})",
-                                                info.name, info.version, info.id
-                                            );
-                                            if let Some(item) =
-                                                list.append_item(root, &label, None, None)
-                                            {
-                                                native_checkboxes::set(hwnd, &item, info.enabled);
-                                                states.borrow_mut().push(info.enabled);
-                                                rows.borrow_mut().push(Row::new(item, info));
-                                            }
-                                        }
+                                    for info in &infos {
+                                        rows.borrow_mut().push(Row::new(info));
                                     }
+                                    list.rebuild(&rows.borrow());
                                     format!(
                                         "Installed and loaded \u{201c}{id}\u{201d} — it's running \
                                          now and listed below."
@@ -974,12 +1220,10 @@ pub fn run_gui(
                                                 r.settings = info.settings.clone();
                                                 r.dependencies = info.dependencies.clone();
                                                 r.name = info.name.clone();
-                                                list.set_item_text(
-                                                    &r.item,
-                                                    &format!(
-                                                        "{}  v{}   ({})",
-                                                        info.name, info.version, info.id
-                                                    ),
+                                                r.label = row_label(
+                                                    &info.name,
+                                                    &info.version,
+                                                    &info.id,
                                                 );
                                             }
                                         }
@@ -1293,40 +1537,39 @@ fn refresh_install_btn(
 /// Enables the Settings button only when the selected row's module actually has
 /// settings (and a row is selected at all) — so the user can't open an empty
 /// settings dialog.
-fn refresh_settings_btn(list: &TreeCtrl, rows: &[Row], settings_btn: &Button) {
+fn refresh_settings_btn(list: &InstalledList, rows: &[Row], settings_btn: &Button) {
     let has_settings = list
-        .get_selection()
-        .and_then(|sel| rows.iter().find(|r| native_checkboxes::same(&r.item, &sel)))
+        .selection()
+        .and_then(|sel| rows.get(sel))
         .map(|r| !r.settings.is_empty())
         .unwrap_or(false);
     settings_btn.enable(has_settings);
 }
 
-/// Reads each row's native check state, reporting any that changed since the
-/// last call via `on_toggle`. Called after every mouse-up / key-up on the tree.
-fn sync_checks(
-    hwnd: *mut c_void,
-    rows: &[Row],
-    states: &RefCell<Vec<bool>>,
+/// One row's checkbox changed: record it and tell the host.
+///
+/// Reads the control rather than assuming, so the Space handler and the platform's own
+/// toggle both end up here saying the same thing. Reporting only a real change makes it
+/// safe to call twice for one keystroke.
+fn apply_toggle(
+    list: &InstalledList,
+    rows: &RefCell<Vec<Row>>,
+    i: usize,
     on_toggle: &RefCell<Box<dyn FnMut(usize, bool)>>,
 ) {
-    // Without real checkboxes underneath, `get` cannot answer and returns false for every
-    // row — which reads as "the user just unticked everything", and this function would
-    // dutifully disable every module and persist it. One click, every module off, no
-    // message. Until a platform has a checkbox backend, this does nothing at all.
-    if !native_checkboxes::supported() {
-        return;
-    }
-    let mut states = states.borrow_mut();
-    let mut cb = on_toggle.borrow_mut();
-    for (i, row) in rows.iter().enumerate() {
-        let now = native_checkboxes::get(hwnd, &row.item);
-        if states.get(i).copied() != Some(now) {
-            if let Some(slot) = states.get_mut(i) {
-                *slot = now;
+    let now = list.checked(i);
+    let changed = {
+        let mut rb = rows.borrow_mut();
+        match rb.get_mut(i) {
+            Some(r) if r.enabled != now => {
+                r.enabled = now;
+                Some(r.module_idx)
             }
-            cb(row.module_idx, now); // report the real module index
+            _ => None,
         }
+    };
+    if let Some(module_idx) = changed {
+        on_toggle.borrow_mut()(module_idx, now);
     }
 }
 
@@ -1334,16 +1577,16 @@ fn sync_checks(
 /// doesn't expose it, so we drive the underlying `SysTreeView32` directly — this
 /// gives real, UIA-exposed checkboxes (screen-reader-correct) rather than the
 /// generic/owner-drawn lists wxWidgets offers cross-platform.
+///
+/// Windows only, and there is no stub for anywhere else: this module used to carry one,
+/// along with a `supported()` that answered `false` so that callers would not act on a
+/// fabricated reading. Nothing needs that any more — the platforms now use different
+/// controls (see `InstalledList`), and each side reads a real one.
 #[cfg(windows)]
 mod native_checkboxes {
     use std::ffi::c_void;
 
     use windows_sys::Win32::Foundation::{HWND, LPARAM, WPARAM};
-
-    /// Real checkboxes, driven by the OS. See the module comment.
-    pub fn supported() -> bool {
-        true
-    }
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetWindowLongPtrW, SendMessageW, SetWindowLongPtrW, GWL_STYLE,
     };
@@ -1452,30 +1695,5 @@ mod native_checkboxes {
     pub fn same(a: &TreeItemId, b: &TreeItemId) -> bool {
         let ha = htreeitem(a);
         !ha.is_null() && ha == htreeitem(b)
-    }
-}
-
-/// Non-Windows stub: a native TVS_CHECKBOXES equivalent (macOS/GTK) comes later.
-///
-/// The honest answer to `supported()` is what keeps this from being worse than useless.
-/// On macOS `wxTreeCtrl` is the generic, custom-drawn one — it has no native controls
-/// underneath, so there is nothing to ask and nothing to tick, and callers that assume a
-/// reading means something would act on a fabricated one.
-#[cfg(not(windows))]
-mod native_checkboxes {
-    use std::ffi::c_void;
-    use wxdragon::widgets::treectrl::TreeItemId;
-
-    pub fn supported() -> bool {
-        false
-    }
-
-    pub fn enable(_hwnd: *mut c_void) {}
-    pub fn set(_hwnd: *mut c_void, _item: &TreeItemId, _checked: bool) {}
-    pub fn get(_hwnd: *mut c_void, _item: &TreeItemId) -> bool {
-        false
-    }
-    pub fn same(_a: &TreeItemId, _b: &TreeItemId) -> bool {
-        false
     }
 }
