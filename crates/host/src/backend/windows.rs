@@ -16,7 +16,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     GetDC, GetDIBits, GetPixel, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
     DIB_RGB_COLORS, SRCCOPY,
 };
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
 use windows_sys::Win32::System::Threading::{
     GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -198,6 +198,61 @@ fn module_running(name: &str) -> bool {
     !unsafe { GetModuleHandleW(wide.as_ptr()) }.is_null()
 }
 
+/// What `DllGetVersion` fills in. Declared here because `windows-sys` does not carry it:
+/// the function is not exported for linking, it is fetched by name at run time.
+#[repr(C)]
+#[derive(Default)]
+struct DllVersionInfo {
+    cb_size: u32,
+    major: u32,
+    minor: u32,
+    build: u32,
+    platform_id: u32,
+}
+
+/// Which common controls this process actually got, which is not a cosmetic question.
+///
+/// The application manifest asks for Common Controls **6**, and wxWidgets checks: below
+/// that it warns and falls back to the pre-XP controls. Those are not merely uglier — the
+/// v5 tree has no checkbox support at all, so the module list would lose the very thing it
+/// exists for, and the older controls answer accessibility questions worse across the
+/// board. For a screen-reader user that is the difference between a usable window and one
+/// that reads as a blank.
+///
+/// `LoadLibraryW` rather than a version resource read, because it resolves through the
+/// same activation context wxWidgets goes through: this answers "what will this process
+/// get", not "what is installed".
+fn common_controls() -> String {
+    let dll: Vec<u16> = "comctl32.dll".encode_utf16().chain(std::iter::once(0)).collect();
+    let h = unsafe { LoadLibraryW(dll.as_ptr()) };
+    if h.is_null() {
+        return "comctl32.dll could not be loaded at all".to_string();
+    }
+    // SAFETY: the name is a NUL-terminated ASCII literal, and the signature is the
+    // documented one for DllGetVersion.
+    let f = unsafe { GetProcAddress(h, c"DllGetVersion".as_ptr() as *const u8) };
+    let Some(f) = f else {
+        return "version unknown (comctl32.dll has no DllGetVersion, so it predates v4.71)"
+            .to_string();
+    };
+    let get: unsafe extern "system" fn(*mut DllVersionInfo) -> i32 =
+        unsafe { std::mem::transmute(f) };
+    let mut info =
+        DllVersionInfo { cb_size: std::mem::size_of::<DllVersionInfo>() as u32, ..Default::default() };
+    let hr = unsafe { get(&mut info) };
+    if hr < 0 {
+        return format!("version unknown (DllGetVersion failed, 0x{hr:08x})");
+    }
+    let v = format!("{}.{} (build {})", info.major, info.minor, info.build);
+    if info.major >= 6 {
+        format!("{v} — the manifest took")
+    } else {
+        format!(
+            "{v} — THE MANIFEST DID NOT TAKE. wxWidgets will say so and fall back to the              pre-XP controls: no checkboxes in the module list, and everything reads worse              to a screen reader"
+        )
+    }
+}
+
 impl Backend for WindowsBackend {
     fn environment(&self) -> Vec<(String, String)> {
         let mut out = Vec::new();
@@ -211,6 +266,7 @@ impl Backend for WindowsBackend {
             "system dpi".to_string(),
             format!("{dpi} ({}%)", (dpi as f32 / 96.0 * 100.0).round() as i32),
         ));
+        out.push(("common controls".to_string(), common_controls()));
         out.push((
             "screen reader".to_string(),
             match (module_running("nvdaControllerClient64"), module_running("SAAPI64")) {

@@ -454,7 +454,9 @@ fn capture_rgba(x: i32, y: i32, w: i32, h: i32) -> Option<Vec<u8>> {
         crate::logging::line(
             "macos",
             &format!(
-                "a {w}x{h} capture at {x},{y} reaches past the edge of the desktop; the                  {vw}x{vh} part that exists was placed at its true offset and the rest is black"
+                "a {w}x{h} capture at {x},{y} reaches past the edge of the desktop; the \
+                 {vw}x{vh} part that exists was placed at its true offset and the rest \
+                 is black"
             ),
         );
     }

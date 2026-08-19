@@ -198,7 +198,8 @@ pub fn run_gui(
         as_.add(
             &StaticText::builder(&app_tab)
                 .with_label(
-                    "Settings for the application itself. Each takes effect when its label                      says, and is remembered.",
+                    "Settings for the application itself. Each takes effect when its \
+                     label says, and is remembered.",
                 )
                 .build(),
             0,

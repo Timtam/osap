@@ -492,7 +492,9 @@ impl Shared {
                 logging::line(
                     "observe",
                     &format!(
-                        "epoch served {} of {} OS question(s) from cache ({} actually asked),                          {:.1} ms inside the bindings, plus {} screen pixel read(s) costing                          {:.1} ms",
+                        "epoch served {} of {} OS question(s) from cache ({} actually \
+                         asked), {:.1} ms inside the bindings, plus {} screen pixel \
+                         read(s) costing {:.1} ms",
                         obs.served,
                         obs.asked,
                         obs.asked - obs.served,
@@ -1669,7 +1671,8 @@ fn load_module(
             if !modules.borrow().iter().any(|m| m.id == dep) {
                 let dep_dir = find_module_dir(&parent, dep).ok_or_else(|| {
                     anyhow::anyhow!(
-                        "module '{id}' depends on '{dep}', not found beside {}                          or in a sibling modules/ dir",
+                        "module '{id}' depends on '{dep}', not found beside {} or in a \
+                         sibling modules/ dir",
                         parent.display()
                     )
                 })?;
