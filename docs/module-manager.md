@@ -118,7 +118,12 @@ modules that inherit an updated module's code pick up the change on the next sta
 
 The platform's own settings — the ones about the application rather than about any module:
 detailed (trace) logging, saving the images OCR was given, the calibration keys inside
-overlays, loading modules not meant for this system, and running without a window.
+overlays, loading modules not meant for this system, running without a window, and on macOS
+whether what the overlays say goes through VoiceOver.
+
+**A setting that does not exist on this system is not shown.** The VoiceOver one appears on a
+Mac and nowhere else, because a checkbox somebody can tick and that then changes nothing is
+the same broken promise as a control announcing an action it cannot perform.
 
 A tab rather than a dialog, and **each change applies as it is made**. There is no OK button,
 for the same reason the module checkboxes in the Installed list have none: the change is the

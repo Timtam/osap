@@ -205,7 +205,7 @@ pub fn run_gui(
             SizerFlag::All,
             12,
         );
-        for sw in crate::appcfg::SWITCHES {
+        for sw in crate::appcfg::SWITCHES.iter().filter(|s| s.applies_here()) {
             // A variable set in the environment forces its setting on and nothing here can
             // undo that until the application is started without it. So the box is shown
             // ticked and disabled, with the reason in its name — rather than a control that

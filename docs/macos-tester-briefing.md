@@ -79,7 +79,7 @@ if the application is broken**:
    to a process that started *after* it was granted. This is the single most common reason
    a permission appears not to have worked.
 
-## The four things worth doing, in order
+## The things worth doing, in order
 
 Each one produces evidence in the log. None of them needs you to describe anything.
 
@@ -118,7 +118,37 @@ If it says nothing at all, the overlay did not activate — send the log. If it 
 value is wrong or empty, that is a coordinate a few points out, which is worth knowing
 precisely: say which of the three, and the log will have the OCR to go with it.
 
-### 4. Record a plugin window — still the important one
+### 4. Control-Option-Right in the sforzando window — one question we cannot answer here
+
+With the sforzando window in front, press **Control-Option-Right**, then **Control-Option-Left**.
+
+You should hear a short tone — rising for right, falling for left — and then one of the
+overlay's three read-outs, the same ones Tab moves between.
+
+The question underneath is whether an application can take Control-Option-arrow away from
+VoiceOver for as long as one of its own windows is in front. If it can, then on macOS the
+overlays should be steered with the keys you already use, instead of asking you to learn
+Tab and Shift-Tab for these windows in particular. Nothing here can test that; only a Mac
+with VoiceOver running can.
+
+So the useful report is one line, and it is about **both** halves:
+
+| What happened | What it means |
+| --- | --- |
+| Tone, then one of our read-outs, and the VoiceOver cursor stayed where it was | It works. This becomes how the overlays are navigated on macOS. |
+| Tone **and** the VoiceOver cursor also moved | We can see the key but not claim it — two things would happen at once, so this idea is out. |
+| No tone, the VoiceOver cursor moved | The key never reaches us at all. |
+| Nothing at all | Something else has the key. Worth knowing too. |
+
+The tones are only there for this question and go away once it is answered. They are
+deliberately not speech: whatever the answer is, it has to be tellable apart from VoiceOver
+talking, and speech competing with speech is the one signal that cannot be.
+
+Outside the sforzando window the keys are VoiceOver's again, immediately — that is the other
+half of the claim, and it is worth a moment to check: Command-Tab to any other application
+and confirm Control-Option-Right does what it always did.
+
+### 5. Record a plugin window — still the important one
 
 Open a music plugin (in a DAW or standalone; either is useful, both is better), put its
 window in front, and press **Command-Shift-F9**.
@@ -140,7 +170,7 @@ of the plugin, **Screen Recording was not granted** (or the application was not 
 after granting it). macOS does not report that as an error — it just hands back the
 wallpaper.
 
-### 5. Does anything block
+### 6. Does anything block
 
 If the machine feels sluggish, or a keystroke goes missing, say when it happened. The log
 records anything that took too long, and "around the time I opened the browser" is enough to
@@ -151,7 +181,7 @@ find it.
 The whole folder next to the application:
 
 - `automation-platform.log` — the main thing
-- `probe-*.png` — the pictures from step 3
+- `probe-*.png` — the pictures from step 5
 
 Both sit beside `AutomationPlatform.app`, in `dist/AutomationPlatform/`. If that folder was
 not writable, the log went to `~/Library/Application Support/AutomationPlatform/` instead —
@@ -179,5 +209,13 @@ the log large, so use it for a targeted run rather than all day.
 - **The first build after creating the identity still asks once.** The identity is new, so
   the old grants do not carry over. It is the last time.
 - **No Dock icon, no entry in the app switcher.** It is a menu-bar application by design.
-- **Control-Option shortcuts do nothing.** That is VoiceOver's own modifier; the overlays'
-  Windows key choices have not been adapted for macOS yet.
+- **Control-Option shortcuts do nothing** — outside the sforzando window. That is
+  VoiceOver's own modifier, and apart from the probe in step 4 the overlays' Windows key
+  choices have not been adapted for macOS yet.
+- **The overlay speaks in your VoiceOver voice, not a second one.** That is deliberate: what
+  the overlay says is handed to VoiceOver, so it arrives in your voice, at your rate, and on
+  your braille display. If VoiceOver will not take it — most often because "Allow VoiceOver
+  to be controlled with AppleScript" is off in VoiceOver Utility's General pane — it falls
+  back to its own voice and writes the reason in the log rather than going quiet. There is a
+  switch for it in the **Application settings** tab if you would rather have two distinct
+  voices.

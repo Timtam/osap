@@ -27,6 +27,18 @@ pub struct Switch {
     pub label: &'static str,
     /// What it is for, in one sentence.
     pub help: &'static str,
+    /// The platform this setting exists on, or `None` for all of them.
+    ///
+    /// A switch that can do nothing here must not be offered here: a checkbox that a person
+    /// can tick and that then changes nothing is the same broken promise as a control that
+    /// announces an action it cannot perform, and this project has already paid for that once.
+    pub os: Option<&'static str>,
+    /// What it is before anyone has ever touched it.
+    ///
+    /// Held here as well as in the static, so `load` can tell "stored off" from "never
+    /// stored" — the difference between a person having turned something off and a fresh
+    /// installation, which for the speech path is the difference between silence and sound.
+    pub default_on: bool,
     state: &'static AtomicBool,
 }
 
@@ -35,6 +47,7 @@ static CALIBRATE: AtomicBool = AtomicBool::new(false);
 static OCR_DEBUG: AtomicBool = AtomicBool::new(false);
 static IGNORE_SUPPORTED_OS: AtomicBool = AtomicBool::new(false);
 static HEADLESS: AtomicBool = AtomicBool::new(false);
+static SPEAK_VIA_VOICEOVER: AtomicBool = AtomicBool::new(true);
 
 /// Every application setting, in the order the tab shows them: the ones that take effect
 /// immediately first, so the two that need a restart are not the first thing read out.
@@ -45,6 +58,8 @@ pub const SWITCHES: &[Switch] = &[
         help: "Records every OS call that failed and every decision the key handling made. \
                Makes the log large, so it is meant for chasing one problem rather than for \
                leaving on.",
+        os: None,
+        default_on: false,
         state: &TRACE,
     },
     Switch {
@@ -52,6 +67,8 @@ pub const SWITCHES: &[Switch] = &[
         label: "Save the images OCR was given — takes effect immediately",
         help: "Writes what the recogniser actually saw next to the application, which is the \
                only way to tell 'the text was unreadable' from 'the region was wrong'.",
+        os: None,
+        default_on: false,
         state: &OCR_DEBUG,
     },
     Switch {
@@ -60,6 +77,8 @@ pub const SWITCHES: &[Switch] = &[
         help: "Arms the measuring keys inside whichever overlay is active: a screenshot with \
                a crosshair on every control, cropping a template around the focused one, and \
                counting that template's matches. For authoring an overlay, not for using one.",
+        os: None,
+        default_on: false,
         state: &CALIBRATE,
     },
     Switch {
@@ -68,6 +87,8 @@ pub const SWITCHES: &[Switch] = &[
         help: "A module may declare which systems it is written for, and one that excludes \
                this system is normally skipped. Turn this on when the module works here and \
                its manifest is simply behind the code.",
+        os: None,
+        default_on: false,
         state: &IGNORE_SUPPORTED_OS,
     },
     Switch {
@@ -76,7 +97,17 @@ pub const SWITCHES: &[Switch] = &[
         help: "No tray icon and no manager window; modules with hotkeys, captured keys or \
                window triggers still run. For testing and automation. Turning this on means \
                this tab will not be reachable next time.",
+        os: None,
+        default_on: false,
         state: &HEADLESS,
+    },
+    Switch {
+        key: "voiceover_speech",
+        label: "Speak through VoiceOver, in its voice and on its braille display — takes effect immediately",
+        help: "Hands what the overlay says to VoiceOver instead of speaking it with a                separate voice. Two synthesisers talk over each other; VoiceOver's own queue                does not, and braille is available no other way. Turning it off gives the                overlay a distinct voice, which some people prefer for telling the two apart.                Needs VoiceOver running, and \"Allow VoiceOver to be controlled with                AppleScript\" ticked in VoiceOver Utility's General pane.",
+        os: Some("macos"),
+        default_on: true,
+        state: &SPEAK_VIA_VOICEOVER,
     },
 ];
 
@@ -94,6 +125,16 @@ pub fn forced_by_env(key: &str) -> bool {
     std::env::var_os(env_name(key)).is_some_and(|v| v != "0")
 }
 
+impl Switch {
+    /// Whether this setting means anything on the system it is running on.
+    ///
+    /// A switch for another platform is not shown, not stored and not reported: it would be
+    /// a checkbox that changes nothing, which is the one thing a control must never be.
+    pub fn applies_here(&self) -> bool {
+        self.os.is_none_or(|o| o == std::env::consts::OS)
+    }
+}
+
 fn switch(key: &str) -> Option<&'static Switch> {
     SWITCHES.iter().find(|s| s.key == key)
 }
@@ -109,7 +150,7 @@ pub fn get(key: &str) -> bool {
 /// then be undone by the next read of an environment nobody can see.
 pub fn set(key: &str, on: bool) {
     if let Some(s) = switch(key) {
-        s.state.store(on || forced_by_env(key), Ordering::Relaxed);
+        s.state.store(s.applies_here() && (on || forced_by_env(key)), Ordering::Relaxed);
     }
 }
 
@@ -120,8 +161,8 @@ pub fn set(key: &str, on: bool) {
 /// configured.
 pub fn load(stored: impl Fn(&str) -> Option<bool>) {
     for s in SWITCHES {
-        let on = stored(s.key).unwrap_or(false) || forced_by_env(s.key);
-        s.state.store(on, Ordering::Relaxed);
+        let on = stored(s.key).unwrap_or(s.default_on) || forced_by_env(s.key);
+        s.state.store(s.applies_here() && on, Ordering::Relaxed);
     }
 }
 
@@ -154,6 +195,11 @@ pub fn ignore_supported_os() -> bool {
 }
 pub fn headless() -> bool {
     HEADLESS.load(Ordering::Relaxed)
+}
+/// Only asked on macOS — everywhere else `applies_here` has already pinned it off.
+#[cfg(target_os = "macos")]
+pub fn voiceover_speech() -> bool {
+    SPEAK_VIA_VOICEOVER.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]

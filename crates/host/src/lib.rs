@@ -12,6 +12,7 @@ mod appcfg;
 mod portable;
 pub mod registry;
 mod settings;
+mod speech;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -23,7 +24,6 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use mlua::{Function, Lua, LuaSerdeExt, RegistryKey, Table};
-use tts::Tts;
 
 use backend::{Backend, CapturedImage, ControlInfo, HostEvents, MouseButton, WinInfo};
 use module_manifest::LoadedModule;
@@ -74,7 +74,7 @@ struct ArbiterSlot {
 /// output, the global hotkey-id counter, and the central event routing.
 struct Shared {
     backend: Rc<dyn Backend>,
-    tts: RefCell<Tts>,
+    speech: speech::Speech,
     /// The app's OWN hotkey id, taken from `alloc_id` before any module is loaded so that
     /// no module can ever be handed the same one. A fixed number would not do: the counter
     /// never resets, and re-registering the same id at the same window silently REPLACES
@@ -1998,7 +1998,7 @@ pub struct Manager {
 impl Manager {
     pub fn new() -> Result<Self> {
         let backend = backend::platform();
-        let tts = Tts::default().context("failed to initialize TTS engine")?;
+        let speech = speech::Speech::new()?;
         // What the backend sees of this machine, before anything else can fail. On a
         // machine we cannot touch — and increasingly that is the case — this block is the
         // difference between "it does not work" and a cause.
@@ -2015,7 +2015,7 @@ impl Manager {
         spawn_image_worker(backend.capture_fn(), image_task_rx, image_result_tx);
         let shared = Rc::new(Shared {
             backend,
-            tts: RefCell::new(tts),
+            speech,
             reload_hotkey_id: Cell::new(0),
             reload_all: Cell::new(false),
             audio: RefCell::new(None),
@@ -2253,6 +2253,10 @@ impl Manager {
                             dispatcher.on_focus_change();
                         }
                         shared.flush_if_dirty();
+                        // Anything the screen reader turned down, said by the fallback —
+                        // here rather than at the call site, because the answer arrives from
+                        // another thread a moment after the line was handed over.
+                        shared.speech.pump();
                         // The reload key only ASKED (see Shared::reload_all). Answering it
                         // means replacing entries in the very list the dispatch above holds
                         // borrowed, so it happens here, once that borrow is gone.
@@ -2262,20 +2266,14 @@ impl Manager {
                             // Said first: rebuilding every VM takes long enough that silence
                             // would read as "the key did nothing", and the user is working in
                             // another application with no window to look at.
-                            let _ = shared
-                                .tts
-                                .borrow_mut()
-                                .speak("Reloading modules".to_string(), true);
+                            shared.speech.say("Reloading modules", true);
                             let (done, failed) = reload_everything(&shared, &modules);
-                            let _ = shared
-                                .tts
-                                .borrow_mut()
-                                .speak(reload_report_text(&done, &failed), true);
+                            shared.speech.say(&reload_report_text(&done, &failed), true);
                         }
                     },
                     move || errors_shared.drain_errors(),
                     move |text: &str| {
-                        let _ = speak_shared.tts.borrow_mut().speak(text.to_string(), false);
+                        speak_shared.speech.say(text, false);
                     },
                 )
                 .map_err(|e| anyhow::anyhow!("{e}"))
@@ -2292,7 +2290,8 @@ impl Manager {
     fn wait_for_speech(&self) {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
-            let speaking = self.shared.tts.borrow().is_speaking().unwrap_or(false);
+            self.shared.speech.pump();
+            let speaking = self.shared.speech.is_speaking();
             if !speaking || Instant::now() > deadline {
                 break;
             }
@@ -2663,10 +2662,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 Some(t) => t.get::<bool>("interrupt").unwrap_or(true),
                 None => true,
             };
-            sh.tts
-                .borrow_mut()
-                .speak(text, interrupt)
-                .map_err(mlua::Error::external)?;
+            sh.speech.say(&text, interrupt);
             Ok(())
         })?,
     )?;

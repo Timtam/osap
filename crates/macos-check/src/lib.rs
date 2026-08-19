@@ -19,6 +19,11 @@ pub mod logging;
 #[path = "../../host/src/backend/mod.rs"]
 pub mod backend;
 
+/// The VoiceOver speech path, borrowed for the same reason — it talks to an application
+/// that does not exist on this machine, through a binary that does not either.
+#[path = "../../host/src/speech/voiceover.rs"]
+pub mod voiceover;
+
 /// Names the backend so the check cannot pass by leaving it out of the build: without a
 /// use, an unreferenced `mod` still compiles, but a typo'd `platform()` would not be caught.
 pub fn checked() -> std::rc::Rc<dyn backend::Backend> {

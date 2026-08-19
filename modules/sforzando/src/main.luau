@@ -92,3 +92,53 @@ ov:attachEmbedded({
     return string.find(string.lower(r.text or ""), "sforzando", 1, true) ~= nil
   end,
 }, { menus = true })
+
+-- ===== VoiceOver-key probe (macOS only, temporary) ==========================================
+--
+-- The question this exists to answer, and which nothing on this machine can: on macOS,
+-- VoiceOver owns Control+Option+arrow. If our overlay can take that combination while it is
+-- active — and give it back on the way out — then the whole Mac navigation story changes:
+-- instead of asking a VoiceOver user to learn Tab and Shift+Tab for our windows, the keys
+-- they already use would step through our controls, in the one place where VoiceOver alone
+-- gets them nothing.
+--
+-- Four things can happen when the tester presses Control+Option+Right in the sforzando
+-- window, and each means something different:
+--
+--   marker sounds, we announce a control, VoiceOver stays put  → the mechanism works;
+--                                                                this becomes the binding.
+--   marker sounds AND VoiceOver also moves                     → we see the key but cannot
+--                                                                take it; double navigation.
+--   no marker, VoiceOver moves                                 → the key never reaches us
+--                                                                (VoiceOver is ahead of the
+--                                                                event tap).
+--   neither                                                    → something else has it.
+--
+-- Hence a SOUND rather than speech: whatever answer we get has to be distinguishable from
+-- VoiceOver talking, and speech competing with speech is the one signal that cannot be.
+-- Rising for next, falling for previous, so a mixed-up direction is audible too.
+--
+-- Armed only while this overlay is active, and released when it is not, which is the whole
+-- claim being tested. Windows never sees it: there the same physical keys are Ctrl+Alt, they
+-- belong to nobody in particular, and stealing them would be a regression for no answer.
+if host.os.is("macos") then
+  local probe = {}
+  local function step(dir, sound)
+    return function()
+      host.sound.play(sound)
+      host.log.info(("[vo-probe] Control+Option+%s arrived"):format(dir > 0 and "Right" or "Left"))
+      if dir > 0 then ov:focusNext() else ov:focusPrev() end
+    end
+  end
+  ov:onActivate(function()
+    if #probe > 0 then return end
+    probe[1] = host.keys.capture("Ctrl+Alt+Right", step(1, "assets/vo-key-next.wav"))
+    probe[2] = host.keys.capture("Ctrl+Alt+Left", step(-1, "assets/vo-key-prev.wav"))
+    host.log.info("[vo-probe] armed — Control+Option+Left/Right belong to the overlay now")
+  end)
+  ov:onDeactivate(function()
+    for _, token in ipairs(probe) do host.keys.release(token) end
+    probe = {}
+    host.log.info("[vo-probe] released — VoiceOver has its keys back")
+  end)
+end

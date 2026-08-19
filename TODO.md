@@ -84,7 +84,14 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       Windows through Qt's Windows accessibility provider; the macOS bridge is a different
       one. If they do not survive, those modules need a different anchor on macOS. The
       accessibility dump answers it.
-- [ ] **Decide the macOS key vocabulary.** Not a VoiceOver collision — no shipped overlay
+- [ ] **Decide the macOS key vocabulary.** A probe is out with the tester (2026-08-19):
+      the sforzando overlay claims **Control-Option-Left/Right** while its window is in front
+      and gives them back on the way out, sounding a tone and stepping its own controls. If a
+      VoiceOver user can lend us their own navigation keys for the one window VoiceOver alone
+      gets them nothing in, that is the answer for all of macOS and Tab stops being something
+      to learn per window. If both fire, the idea is dead and this stays a key-choice
+      question. Step 4 in docs/macos-tester-briefing.md has the four outcomes.
+      Not a VoiceOver collision — no shipped overlay
       binds `Ctrl+Alt`; they use `Alt+<key>`, `Ctrl+<key>` and `Ctrl+Shift+<key>`. The two
       things that do sit on VoiceOver's Control-Option modifier are the calibrator (dev-only,
       behind `AUTOMATION_PLATFORM_CALIBRATE=1`) and the reload key, which also needs `fn` or
@@ -92,10 +99,31 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       accented-character layer, and `Ctrl+<letter>` is macOS's emacs text-editing layer where
       the platform convention would be `Command+<letter>`. The mechanism for a per-platform
       choice already exists (`host.os.is("macos")`); the choice does not.
-- [ ] **Speech goes around VoiceOver, not through it.** `tts` picks AVFoundation on macOS, a
-      separate voice talking over VoiceOver, with no braille. The VoiceOver-via-AppleScript
-      path that [docs/prior-art-vocr.md](docs/prior-art-vocr.md) documents needs an
-      entitlement and a consent prompt — a distribution question more than a code one.
+- [x] **sforzando needed up to three application switches to be recognised** — three causes,
+      all now addressed (2026-08-19), none yet confirmed on hardware:
+  1. the accessibility messaging timeout was 0.25 s against a measured 293 ms answer, so the
+     first ask reliably lost the race. Now 1 s.
+  2. every rung of the delayed re-check ladder fell inside the 5 s penalty box that a slow
+     application had just been put in, so every retry was discarded. The late rungs are now
+     derived from `BUSY_PENALTY` instead of being written next to it.
+  3. an application that refused every focus notification was written off **for the session**.
+     An application asked while it is still starting up refuses everything and then works
+     fine a second later — sforzando loads a sample engine before its window is worth
+     anything — so a refusal is now retried `REFUSAL_RETRIES` times, on later activations,
+     before it becomes final. The log line says which of the two it is.
+- [x] **Speech now goes through VoiceOver** (2026-08-19). `crates/host/src/speech/` — one
+      place decides where an announcement comes out, so no call site had to learn about it.
+      On macOS the default is `tell application "VoiceOver" to output …` through `osascript`,
+      which gets the user's own voice, their rate and **their braille display**; on a worker
+      thread, because each line costs a process launch plus an AppleScript compile and this
+      event loop also carries the keyboard. A refusal — VoiceOver not running, AppleScript
+      control not allowed — is not silence: the line comes back and the platform's own voice
+      says it, the reason is logged once, and everything after goes straight to the fallback
+      without paying for another launch. **Speak through VoiceOver** in the Application
+      settings tab turns it off, and ticking it again re-tries a path that had failed. The
+      file is `#[path]`-borrowed by `crates/macos-check`, so the compiler checks it from
+      Windows. What is still unmeasured: whether VoiceOver's `output` interrupts its own
+      speech or queues behind it. Only a Mac can say.
 - [ ] **The module list has no checkboxes on macOS.** wxWidgets draws its tree control
       itself there, so there is nothing native underneath to tick and VoiceOver sees one
       opaque element. `sync_checks` is disarmed so a click cannot silently disable
@@ -111,9 +139,12 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
   - The content-view probe caps the top inset at 64 pt and looks at the first eight children
     only, so a window with a toolbar above its content derives the wrong client rect. It
     logs the inset it found, which is how the first session can check it.
-  - Creating an `AXObserver` for an application on its first activation is six synchronous
-    round trips on the pump thread. Once per application, and there is no off-thread way to
-    do it — but if a DAW's first activation stutters, this is why.
+  - ~~Creating an `AXObserver` for an application on its first activation is six synchronous
+    round trips on the pump thread.~~ Addressed (2026-08-19): it now happens **after** the
+    frontmost window has been resolved and queued, so up to a second and a half of
+    subscribing no longer sits in front of the answer the user is waiting for. It buys
+    nothing for the switch happening now — it is about noticing the next change. Still six
+    round trips, still once per application, but off the critical path.
 - [ ] **Developer ID + notarisation.** Ad-hoc signatures change on every rebuild, so every
       test build a tester receives asks for its permissions again. Survivable for testing,
       not for release.
