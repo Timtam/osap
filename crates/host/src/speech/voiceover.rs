@@ -8,6 +8,7 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
+use std::time::Instant;
 
 /// A line for VoiceOver, and whether it displaces what is already waiting.
 struct Utterance {
@@ -89,6 +90,7 @@ fn run(
     pending: Arc<AtomicUsize>,
 ) {
     let mut reported = false;
+    let mut cost = Cost::default();
     while let Ok(mut u) = rx.recv() {
         let mut dropped = 0usize;
         // An interrupting line makes everything still waiting stale. Saying those anyway
@@ -105,7 +107,9 @@ fn run(
                 }
             }
         }
+        let started = Instant::now();
         let outcome = output(&u.text);
+        cost.record(started.elapsed().as_millis() as u64);
         pending.fetch_sub(1 + dropped, Ordering::Relaxed);
         if let Err(why) = outcome {
             healthy.store(false, Ordering::Relaxed);
@@ -123,6 +127,63 @@ fn run(
                 );
             }
             let _ = refused.send(u.text);
+        }
+    }
+}
+
+/// What a spoken line costs, because nobody here can measure it.
+///
+/// This path launches a process per line, and that process then has to resolve VoiceOver's
+/// scripting terminology before it can compile a one-line script. Both are avoidable — an
+/// `NSAppleScript` compiled once, or the Apple Event built directly — and neither is worth
+/// writing blind against a number nobody has. The alternative is a rewrite justified by a
+/// guess, which is how this project has lost days before.
+///
+/// So: the first line is reported whatever it cost, because it is the cold one and it is the
+/// worst case anybody will hear; after that a summary every [`REPORT_EVERY`] lines, and any
+/// single line over [`SLOW_LINE_MS`] on its own. Not behind tracing — this is the number the
+/// next remote session has to come back with, and it must not depend on somebody having
+/// ticked something first.
+#[derive(Default)]
+struct Cost {
+    n: u64,
+    total_ms: u64,
+    min_ms: u64,
+    max_ms: u64,
+}
+
+/// A line slower than this is worth naming on its own: it is past the point where an
+/// announcement stops feeling like a response to the keystroke that caused it.
+const SLOW_LINE_MS: u64 = 150;
+const REPORT_EVERY: u64 = 50;
+
+impl Cost {
+    fn record(&mut self, ms: u64) {
+        self.n += 1;
+        self.total_ms += ms;
+        self.max_ms = self.max_ms.max(ms);
+        self.min_ms = if self.n == 1 { ms } else { self.min_ms.min(ms) };
+        if self.n == 1 {
+            crate::logging::line(
+                "speech",
+                &format!(
+                    "the first line through VoiceOver took {ms} ms — that one pays for a                      process launch AND for resolving VoiceOver's scripting terminology, so                      it is the worst case, not the usual one"
+                ),
+            );
+        } else if ms >= SLOW_LINE_MS {
+            crate::logging::line("speech", &format!("a line through VoiceOver took {ms} ms"));
+        }
+        if self.n % REPORT_EVERY == 0 {
+            crate::logging::line(
+                "speech",
+                &format!(
+                    "{} lines through VoiceOver: {} ms on average, {} at best, {} at worst",
+                    self.n,
+                    self.total_ms / self.n,
+                    self.min_ms,
+                    self.max_ms
+                ),
+            );
         }
     }
 }
