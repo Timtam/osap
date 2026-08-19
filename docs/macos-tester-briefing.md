@@ -36,7 +36,14 @@ cd osap
 ./bootstrap-macos.sh
 ```
 
-**Run `./macos-signing-identity.sh` before the first build.** macOS records permissions
+**Run `./macos-signing-identity.sh` before the first build.**
+
+It should print FOUR lines beginning `==>` — creating, adding to the keychain, checking, done —
+and finish with instructions to rebuild. **If it stops after the first one, it failed**: an
+early version suppressed the error output of the step that follows, so on Monterey it printed
+one line and died without saying why. It now prints the openssl version it found and the actual
+error. Send those two lines if it happens again.
+ macOS records permissions
 against an application's code identity, and without a signing certificate that identity is
 derived from the binary itself — so every rebuild is a different application to macOS, and
 all three permissions have to be granted again, every time. The script creates a local

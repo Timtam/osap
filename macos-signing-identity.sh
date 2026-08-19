@@ -49,17 +49,47 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 echo "==> Creating a self-signed code-signing certificate"
-# `extendedKeyUsage=codeSigning` is the part that makes `security find-identity -p
-# codesigning` list it; without it the certificate exists and codesign will not use it.
-openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-  -keyout "$tmp/key.pem" -out "$tmp/cert.pem" \
-  -subj "/CN=$NAME" \
-  -addext "basicConstraints=critical,CA:false" \
-  -addext "keyUsage=critical,digitalSignature" \
-  -addext "extendedKeyUsage=critical,codeSigning" 2>/dev/null
+echo "    openssl: $(openssl version 2>&1 | head -1)"
 
-openssl pkcs12 -export -out "$tmp/identity.p12" \
-  -inkey "$tmp/key.pem" -in "$tmp/cert.pem" -passout pass: 2>/dev/null
+# A CONFIG FILE rather than -addext, because macOS does not ship OpenSSL.
+#
+# /usr/bin/openssl on macOS is LibreSSL, and LibreSSL's `req` has no -addext — that flag
+# arrived with OpenSSL 1.1.1. The first version of this script used it and redirected stderr
+# to /dev/null, so on Monterey it printed the line above, died on the next command, and left
+# the tester with one line of output and an ad-hoc signature he had been told was fixed.
+# `set -e` did the killing; the redirect did the hiding.
+#
+# Extensions in a config file work in both, and every failure below now shows its own error.
+cat > "$tmp/openssl.cnf" <<CNF
+[ req ]
+distinguished_name = dn
+x509_extensions    = v3
+prompt             = no
+
+[ dn ]
+CN = $NAME
+
+[ v3 ]
+basicConstraints       = critical,CA:false
+keyUsage               = critical,digitalSignature
+extendedKeyUsage       = critical,codeSigning
+CNF
+
+if ! openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+      -keyout "$tmp/key.pem" -out "$tmp/cert.pem" -config "$tmp/openssl.cnf"; then
+  echo ""
+  echo "    Creating the certificate failed, and the error is just above this line."
+  echo "    Please send it along — this step is the one that decides whether permissions"
+  echo "    survive a rebuild, and it has failed silently once already."
+  exit 1
+fi
+
+if ! openssl pkcs12 -export -out "$tmp/identity.p12" \
+      -inkey "$tmp/key.pem" -in "$tmp/cert.pem" -passout pass:; then
+  echo ""
+  echo "    Packing the certificate for the keychain failed; the error is above."
+  exit 1
+fi
 
 echo "==> Adding it to your login keychain"
 echo "    macOS may ask you to unlock the keychain. That is expected."
