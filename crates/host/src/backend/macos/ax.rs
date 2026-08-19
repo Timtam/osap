@@ -69,7 +69,18 @@ use crate::backend::{ControlInfo, DumpNode, WinInfo};
 /// switches off if it stops responding. A quarter of a second is far longer than a healthy
 /// answer takes (single-digit milliseconds) and short enough that even a whole walk of dead
 /// elements stays inside the pump's budget.
-const MESSAGING_TIMEOUT: f32 = 0.25;
+///
+/// It was a quarter of a second, on the reasoning that a healthy answer takes single-digit
+/// milliseconds. True of a healthy answer, and the wrong budget. A tester's log showed
+/// sforzando on a 2015 MacBook Air with VoiceOver running never once answering inside it:
+/// every read timed out, the application went into the penalty box, the next read was skipped
+/// outright, and the overlay never saw a window it could plainly read — the manual probe in the
+/// same session dumped sixteen elements out of it without trouble.
+///
+/// A second is generous for a healthy application and still a bounded stall for a dead one,
+/// because the penalty box below is what stops a wedged plugin charging it repeatedly. The two
+/// have to be read together: a longer budget needs a longer quarantine.
+const MESSAGING_TIMEOUT: f32 = 1.0;
 
 /// Node and depth ceilings. Every walk in this file passes through [`walk`] and every one of
 /// them is bounded: the trees these run against are written by plugin vendors, and one that
@@ -186,7 +197,13 @@ thread_local! {
 /// Long enough that a wedged plugin cannot dominate the pump, short enough that one that
 /// was merely busy redrawing is back in the conversation before the user notices. A guess,
 /// and one the log can correct: every skipped question is traced.
-const BUSY_PENALTY: Duration = Duration::from_millis(1500);
+///
+/// Raised from 1.5s together with the messaging timeout. With a one-second budget a genuinely
+/// wedged application would otherwise cost a second of pump every 1.5 — two thirds of the
+/// thread that carries speech. Five seconds keeps it to a fifth, while an application that is
+/// merely slow now answers on its first attempt instead of being quarantined for missing a
+/// deadline it could never have met.
+const BUSY_PENALTY: Duration = Duration::from_millis(5000);
 
 /// Note that an application is not answering.
 fn note_busy(pid: i32) {
@@ -1145,6 +1162,13 @@ pub(super) fn frontmost_window_element() -> Option<(CFRetained<AXUIElement>, i32
         });
         return None;
     }
+    // How long the answer actually took, when it came at all.
+    //
+    // The timeout above was set from an assumption about healthy applications and cost a tester
+    // his whole session; the replacement is a guess too, and this is what turns the next one into
+    // a measurement. Only slow successes are reported — a fast answer is not news, and a failure
+    // already writes its own line.
+    let started = Instant::now();
     let app_el = app_element(pid);
     let el = attribute_element(&app_el, a_focused_window())
         .or_else(|| attribute_element(&app_el, a_main_window()))
@@ -1155,6 +1179,13 @@ pub(super) fn frontmost_window_element() -> Option<(CFRetained<AXUIElement>, i32
             let typed: &CFArray<AXUIElement> = unsafe { arr.cast_unchecked::<AXUIElement>() };
             typed.get(0)
         })?;
+    let ms = started.elapsed().as_millis();
+    if ms >= 100 {
+        crate::logging::line(
+            "macos",
+            &format!("pid {pid} answered the frontmost-window question after {ms} ms"),
+        );
+    }
     Some((el, pid))
 }
 
