@@ -203,7 +203,7 @@ thread_local! {
 /// thread that carries speech. Five seconds keeps it to a fifth, while an application that is
 /// merely slow now answers on its first attempt instead of being quarantined for missing a
 /// deadline it could never have met.
-const BUSY_PENALTY: Duration = Duration::from_millis(5000);
+pub(super) const BUSY_PENALTY: Duration = Duration::from_millis(5000);
 
 /// Note that an application is not answering.
 fn note_busy(pid: i32) {

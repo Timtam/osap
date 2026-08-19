@@ -46,11 +46,24 @@ pub fn mark_focus_dirty() {
     FOCUS_DIRTY.with(|f| f.set(true));
 }
 
-/// Arms the 200 / 500 / 1000 ms re-check ladder.
+/// Arms the re-check ladder that follows a foreground change.
 ///
 /// For a window that becomes foreground before it has a title — Komplete Kontrol's
 /// Preferences dialog does exactly this, and sets its title a beat later with no further
 /// event. Armed only when nothing is pending, so window churn cannot pile ladders up.
+///
+/// The ladder has to OUTLAST THE PENALTY BOX, and that is not a detail.
+///
+/// An application that does not answer an accessibility question is quarantined for
+/// [`super::ax::BUSY_PENALTY`]. If every rung falls inside that window then every rung is
+/// skipped without asking anything, the ladder is exhausted, and nothing tries again until the
+/// user switches applications by hand — which is exactly what the tester reported: sforzando
+/// needed up to three Alt+Tabs before it was noticed. The rungs were 200, 500 and 1000 ms
+/// against a 1.5-second quarantine, and I then raised the quarantine to five seconds to fix a
+/// different fault, which made this one worse without touching its code.
+///
+/// So the last rungs are placed past the quarantine and DERIVED from the same constant rather
+/// than copied from it. The two can no longer drift apart.
 fn arm_recheck_ladder() {
     RECHECKS.with(|r| {
         let mut r = r.borrow_mut();
@@ -58,8 +71,17 @@ fn arm_recheck_ladder() {
             return;
         }
         let now = Instant::now();
-        for ms in [200u64, 500, 1000] {
-            r.push(now + Duration::from_millis(ms));
+        let penalty = super::ax::BUSY_PENALTY;
+        for d in [
+            Duration::from_millis(200),
+            Duration::from_millis(500),
+            Duration::from_millis(1000),
+            Duration::from_millis(2000),
+            penalty + Duration::from_millis(300),
+            penalty + Duration::from_millis(1500),
+            penalty * 2 + Duration::from_millis(500),
+        ] {
+            r.push(now + d);
         }
     });
 }
