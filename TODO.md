@@ -145,9 +145,18 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
     nil return, so the expected first-run case (AppleScript control not enabled) would take
     the process down instead of falling back. It is also conventionally main-thread-only,
     and this main thread carries the keyboard.
-  - Also unverified and worth one question: whether VoiceOver's `output` reaches the
-    **braille display** at all. That is the entire justification for the module; step 4 of
-    the tester briefing now asks it first rather than last.
+  - **Braille is unverifiable with the tester we have** (2026-08-20): he has no display.
+    Whether VoiceOver's `output` reaches braille at all is the strongest single argument for
+    the whole module, and nobody has observed it. Not a gap in the software — a gap in what
+    anyone has seen. Step 4 of the briefing now says so rather than asking a question that
+    cannot be answered, and asks the two things that CAN be: is it his own voice, and does an
+    announcement cut VoiceOver off or queue behind it.
+  - **The `sdef` route is parked, not dead** (2026-08-20): VoiceOver does not ship its
+    scripting definition as a file — `find` across the bundle comes back empty — so the
+    terminology is an `aete` resource in the binary and only `sdef` can extract it. `sdef`
+    comes with the Xcode command line tools, a large download the tester should not make for
+    a probe. Ask again only if the timings say the direct Apple Event is worth building, or
+    if he installs those tools anyway.
 - [x] **Speech now goes through VoiceOver** (2026-08-19). `crates/host/src/speech/` — one
       place decides where an announcement comes out, so no call site had to learn about it.
       On macOS the default is `tell application "VoiceOver" to output …` through `osascript`,

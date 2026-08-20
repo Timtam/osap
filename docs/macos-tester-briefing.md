@@ -118,28 +118,35 @@ If it says nothing at all, the overlay did not activate — send the log. If it 
 value is wrong or empty, that is a coordinate a few points out, which is worth knowing
 precisely: say which of the three, and the log will have the OCR to go with it.
 
-### 4. Does it reach your braille display — ask this early
+### 4. Is it your voice, and does it get in the way — ask this early
 
-Everything the overlay says is handed to VoiceOver rather than spoken by a second voice, and
-the reason that is worth doing at all is braille: nothing else can put a line on your
-display. Nobody here has been able to check that it actually arrives.
+Everything the overlay says is handed to VoiceOver rather than spoken by a second voice. So,
+with the sforzando overlay speaking (step 3), two things are worth a sentence each:
 
-So, with the sforzando overlay speaking (step 3), please say whether the read-outs — 
-"Instrument", "Polyphony", "Pitchbend range" and their values — **appear on the braille
-display**, not only in speech.
+- Do the read-outs come out in **your** VoiceOver voice, at your rate — or in a second,
+  different voice? A second voice means the hand-off failed and the fallback took over, and
+  the log says why, in a line starting `[speech]`.
+- When the overlay says something while VoiceOver is already talking, what happens — does it
+  **cut VoiceOver off**, or wait its turn? Either can be right; we need to know which it
+  does, and it is not settleable anywhere but on a Mac.
 
-If they do not, that changes what gets built next far more than any of the questions below,
-so it is better asked now than at the end.
+There is a third thing we would like to know and cannot ask you: whether what the overlay
+says also reaches a **braille display**. That is the strongest single reason for going
+through VoiceOver at all, and it stays unverified until somebody with a display tries it.
+Not a gap in the software — a gap in what anyone has observed.
 
-**And one command, ten seconds, that unblocks a rewrite we cannot otherwise attempt:**
+**Parked for a later session, when it is convenient:** one command would let the overlay talk
+to VoiceOver directly instead of launching a small program for every line it says.
 
 ```bash
-sdef /System/Library/CoreServices/VoiceOver.app > voiceover.sdef
+sdef /System/Library/CoreServices/VoiceOver.app > ~/Desktop/voiceover.sdef
 ```
 
-That writes out VoiceOver's scripting dictionary. It contains the four-character codes for
-the `output` command, and with those the overlay could talk to VoiceOver directly instead of
-launching a small program for every line it says. Send the file with the log; it is text.
+`sdef` comes with the Xcode command line tools, which are a large download, so this is not
+worth doing on its own — VoiceOver does not ship its scripting definition as a file, which is
+why it cannot simply be copied. Do it only if you are installing those tools anyway, or if we
+come back and ask, which we will only do once the timings in the log say the change is worth
+making.
 
 ### 5. Control-Option-Right in the sforzando window — one question we cannot answer here
 
@@ -205,7 +212,7 @@ The whole folder next to the application:
 
 - `automation-platform.log` — the main thing
 - `probe-*.png` — the pictures from step 6
-- `voiceover.sdef` — from step 4, if you got to it
+- `voiceover.sdef` — only if you got to the parked command in step 4
 
 Both sit beside `AutomationPlatform.app`, in `dist/AutomationPlatform/`. If that folder was
 not writable, the log went to `~/Library/Application Support/AutomationPlatform/` instead —
