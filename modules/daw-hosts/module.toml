@@ -1,4 +1,13 @@
 id = "com.platform.daw-hosts"
 name = "DAW host definitions"
-version = "0.1.0"
+version = "0.2.0"
 license = "GPL-3.0-or-later"
+
+# A code module: its source is evaluated inside every VM that depends on it, so the matchers
+# arrive as real Lua tables rather than through a JSON round trip — and, unlike data, it can
+# carry a function. The one it carries is `activate`, which the host runs in this module's own
+# VM only, so the global shortcut it registers exists once instead of once per dependent.
+code_module = true
+
+[capabilities]
+require = ["window", "hotkey", "speech", "log"]
