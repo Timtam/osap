@@ -145,12 +145,23 @@ says also reaches a **braille display**. That is the strongest single reason for
 through VoiceOver at all, and it stays unverified until somebody with a display tries it.
 Not a gap in the software — a gap in what anyone has observed.
 
-**One thing we are NOT asking you to run.** There is a command, `sdef`, that would let the
-overlay talk to VoiceOver directly instead of launching a small program for every line it
-says. On a Mac without the Xcode command line tools `/usr/bin/sdef` is only a stub, and
-running it opens a modal window offering to install them — a window you cannot see, one
-Return away from a download of about a gigabyte. It is not worth that. If you ever install
-those tools for your own reasons, tell us and we will ask then.
+**One command, if you have the Xcode command line tools.** It writes out VoiceOver's
+scripting dictionary, which would let the overlay talk to VoiceOver directly instead of
+launching a small program for every line it says:
+
+```bash
+sdef /System/Library/CoreServices/VoiceOver.app > ~/Dropbox/osap/voiceover.sdef 2>&1
+```
+
+If you do **not** have those tools, skip it and say so. On a Mac without them
+`/usr/bin/sdef` is only a stub that opens a modal window offering to install them — a window
+you cannot see, standing one Return away from a download of about a gigabyte. Not worth it
+for a nice-to-have.
+
+The `2>&1` matters here more than usual. If that path is wrong on your macOS version, or the
+command refuses for some other reason, its complaint is the useful part and it lands in the
+file. An empty file tells us nothing, and we have already once concluded the wrong thing
+from one.
 
 ### 5. The module list — three things only you can hear
 

@@ -50,6 +50,7 @@ static OCR_DEBUG: AtomicBool = AtomicBool::new(false);
 static IGNORE_SUPPORTED_OS: AtomicBool = AtomicBool::new(false);
 static HEADLESS: AtomicBool = AtomicBool::new(false);
 static SPEAK_VIA_VOICEOVER: AtomicBool = AtomicBool::new(false);
+static DOCK_WHILE_OPEN: AtomicBool = AtomicBool::new(false);
 
 /// Every application setting, in the order the tab shows them: the ones that take effect
 /// immediately first, so the two that need a restart are not the first thing read out.
@@ -124,6 +125,20 @@ pub const SWITCHES: &[Switch] = &[
         // and that is the moment to ask.
         default_on: false,
         state: &SPEAK_VIA_VOICEOVER,
+    },
+    Switch {
+        key: "dock_while_open",
+        label: "Show a Dock icon while the module manager is open, so Command-Tab can \
+                reach it — takes effect the next time the window is opened",
+        help: "A Dock icon and an entry in the application switcher are one and the same \
+               bit, so a window that Command-Tab can return to is a window with a Dock \
+               icon while it is open. Without this, the way back is the menu-bar icon: \
+               VO-M twice reaches the menu-bar extras. Off by default because promoting an \
+               application this way has a reported side effect nobody here can reproduce — \
+               its menu bar can stay unresponsive until you switch away and back.",
+        os: Some("macos"),
+        default_on: false,
+        state: &DOCK_WHILE_OPEN,
     },
 ];
 
@@ -217,6 +232,10 @@ pub fn headless() -> bool {
 pub fn voiceover_speech() -> bool {
     SPEAK_VIA_VOICEOVER.load(Ordering::Relaxed)
 }
+#[cfg(target_os = "macos")]
+pub fn dock_while_open() -> bool {
+    DOCK_WHILE_OPEN.load(Ordering::Relaxed)
+}
 
 #[cfg(test)]
 mod tests {
@@ -247,12 +266,17 @@ mod tests {
 
     #[test]
     fn the_label_says_when_a_switch_takes_effect() {
-        // Every switch has to tell the reader whether pressing OK is enough, because two of
-        // them are read once at startup and a control that appears inert is a bug report.
+        // Every switch has to tell the reader whether ticking it is enough, because some are
+        // read once at startup and a control that appears inert is a bug report.
+        //
+        // The list of accepted phrases is deliberately short and deliberately grows: a
+        // setting whose moment is none of these has invented a fourth kind of "later", and
+        // adding it here should be a decision rather than something that slips through.
+        const MOMENTS: [&str; 4] = ["immediately", "reload", "restart", "next time"];
         for s in SWITCHES {
             let l = s.label.to_ascii_lowercase();
             assert!(
-                l.contains("immediately") || l.contains("reload") || l.contains("restart"),
+                MOMENTS.iter().any(|m| l.contains(m)),
                 "{} does not say when it applies",
                 s.key
             );

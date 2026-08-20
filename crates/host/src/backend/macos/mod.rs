@@ -27,6 +27,7 @@ use super::{
     Backend, CapturedImage, ControlInfo, DumpNode, HostEvents, MouseButton, OcrText, WinInfo,
 };
 
+pub(super) mod app;
 mod ax;
 mod capture;
 mod ffi;

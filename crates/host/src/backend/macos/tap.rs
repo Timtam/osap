@@ -401,6 +401,14 @@ unsafe extern "C-unwind" fn tap_callback(
     };
     let mask = mask_of(flags);
     if !captured(vk, mask) {
+        // Traced, because the alternative is a whole class of question nobody can answer.
+        // "The overlay did not react to that key" has two causes that look identical from
+        // outside: the event never reached this tap, or it reached it and no module had
+        // claimed that exact combination. Silence here made them indistinguishable, and the
+        // Control-Option experiment turned on precisely that difference.
+        logging::trace("macos", || {
+            format!("tap: saw vk {vk:#04x} mask {mask}, nothing had claimed it")
+        });
         return pass;
     }
     // Only now, with a match in hand, is it worth asking the questions that cost something.

@@ -29,3 +29,12 @@ pub mod voiceover;
 pub fn checked() -> std::rc::Rc<dyn backend::Backend> {
     backend::platform()
 }
+
+/// Names the two application-level calls for the same reason `checked` names the backend.
+///
+/// They are called from `gui.rs`, which this crate cannot borrow (wxdragon), so without
+/// this the re-export is unreferenced here — and an unreferenced re-export warns instead of
+/// proving that the path resolves and the signatures are what the caller expects.
+pub fn app_calls() -> (fn(), fn(bool) -> bool) {
+    (backend::activate_self, backend::set_regular)
+}

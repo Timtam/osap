@@ -90,6 +90,32 @@ fn row_label(name: &str, version: &str, id: &str) -> String {
 }
 
 
+/// Puts the manager window in front, from the tray menu or a double-click.
+///
+/// `show(true)` alone is not enough, and the reason is worth writing down because it looks
+/// like it should be. `wxWindowBase::Show` returns early when the window already believes it
+/// is shown, and after the user switches to another application with Command-Tab, nothing
+/// syncs that belief back from the window system — the frame is still "shown", merely behind
+/// everything. So the menu item ran, the window did not move, and for somebody who cannot
+/// see the screen the application had simply disappeared. `raise()` is what actually orders
+/// it in, and it has to come after `show(true)` because it does nothing to a hidden window.
+///
+/// On macOS one more thing is needed: ordering a window in does not bring the PROCESS
+/// forward, and an agent application that is not frontmost puts its window up behind
+/// whatever is. The Dock-icon promotion is separate and optional — see the setting.
+fn show_manager(frame: &Frame) {
+    #[cfg(target_os = "macos")]
+    {
+        if crate::appcfg::dock_while_open() {
+            crate::backend::set_regular(true);
+        }
+        crate::backend::activate_self();
+    }
+    frame.show(true);
+    frame.centre();
+    frame.raise();
+}
+
 /// The Installed list, which is a different control on each platform.
 ///
 /// Not a preference. On Windows a `wxTreeCtrl` is a real `SysTreeView32`, and with
@@ -495,16 +521,18 @@ pub fn run_gui(
             } else {
                 sw.label.to_string()
             };
-            // A leading StaticText carries the name, because a checkbox's own label is not
-            // what the screen reader announces here — the same arrangement as the module
-            // settings dialog, for the same reason.
-            as_.add(
-                &StaticText::builder(&app_tab).with_label(&label).build(),
-                0,
-                SizerFlag::Left | SizerFlag::Top,
-                10,
-            );
-            let cb = CheckBox::builder(&app_tab).build();
+            // The checkbox carries its own label, and there is no StaticText in front of it.
+            //
+            // There used to be, and the comment said a checkbox's own label is not what the
+            // screen reader announces. That was half right and it produced the wrong shape.
+            // On WINDOWS the name comes from `set_name`: wxCheckBox installs an accessible
+            // that returns the window name, whose default is the literal string "check", and
+            // the StaticText never contributed to it. On macOS `set_name` does nothing at all
+            // — wxWidgets compiles its accessibility layer out for every port but MSW — and
+            // the name of an NSButton is its title, which was empty. So the arrangement gave
+            // Windows a label twice over and macOS a labelled paragraph sitting next to a
+            // nameless control. Label plus name is one announcement on both.
+            let cb = CheckBox::builder(&app_tab).with_label(&label).build();
             cb.set_name(&label);
             cb.set_value(crate::appcfg::get(sw.key));
             if forced {
@@ -1031,6 +1059,12 @@ pub fn run_gui(
                 e.veto();
             }
             frame.show(false);
+            // Demoted after hiding, never before: the window has to be gone from the screen
+            // before the application stops being one that has windows.
+            #[cfg(target_os = "macos")]
+            if crate::appcfg::dock_while_open() {
+                crate::backend::set_regular(false);
+            }
         });
 
         // System tray icon + right-click menu (Show / Quit).
@@ -1056,19 +1090,13 @@ pub fn run_gui(
         std::mem::forget(menu); // the tray icon owns it for the app's lifetime
 
         taskbar.on_menu(move |event| match event.get_id() {
-            MENU_SHOW => {
-                frame.show(true);
-                frame.centre();
-            }
+            MENU_SHOW => show_manager(&frame),
             MENU_QUIT => app.exit_main_loop(),
             _ => {}
         });
 
         #[cfg(any(target_os = "windows", target_os = "linux"))]
-        taskbar.on_left_double_click(move |_| {
-            frame.show(true);
-            frame.centre();
-        });
+        taskbar.on_left_double_click(move |_| show_manager(&frame));
 
         // The one signal that the application actually started. `show_balloon` is
         // Windows-only — it returns false everywhere else without doing anything — and on
@@ -1405,12 +1433,10 @@ fn open_settings_dialog(
     for d in descs {
         match d.kind {
             settings::Kind::Bool => {
-                // Label it exactly like the other rows: a leading StaticText is
-                // what the screen reader reliably reads as the control's name here
-                // (the checkbox's own label was not announced).
-                let lbl = StaticText::builder(&panel).with_label(&d.label).build();
-                sizer.add(&lbl, 0, SizerFlag::Left | SizerFlag::Top, 8);
-                let cb = CheckBox::builder(&panel).build();
+                // Label AND name, and no StaticText in front — see the Application
+                // settings tab for why the leading StaticText was the wrong shape. The
+                // fields below keep theirs: a text field cannot carry a label at all.
+                let cb = CheckBox::builder(&panel).with_label(&d.label).build();
                 cb.set_name(&d.label);
                 cb.set_value(matches!(d.value, settings::Value::Bool(true)));
                 sizer.add(&cb, 0, SizerFlag::All, 8);
