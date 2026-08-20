@@ -256,8 +256,36 @@ pub fn set_captured_keys(keys: &[(u32, u8)]) {
 /// Which window suppression applies to; 0 means everywhere. The value is a SNAPSHOT taken
 /// when the caller asked, which is what lets a menu opened by a control receive keys
 /// natively — the menu is a different window, so the comparison stops matching.
+///
+/// It also settles a disagreement, and that is the interesting half. The gate compares this
+/// against [`FOREGROUND`], which is told to us by two notifications: the frontmost
+/// application changing, and the focused window changing inside an application we already
+/// observe. Neither is guaranteed when a window merely *opens* — the application was already
+/// frontmost, and the observer for it may be a moment younger than the window. The overlay
+/// gets there by another route (the re-check ladder resolves the window itself), so it can
+/// pin a scope while the tap still believes something else is in front — and the gate then
+/// declines to claim a single key. Tab does nothing, and switching out and back fixes it,
+/// because that finally raises the notification.
+///
+/// So a pin that disagrees asks once, here, on the activation path where an accessibility
+/// round trip is already the going rate, rather than in the callback where it would be paid
+/// per keystroke. And it says so in the log: this was diagnosed from a tester's description,
+/// not from evidence, and the line is what turns the next occurrence into evidence.
 pub fn set_key_scope(window: isize) {
     KEY_SCOPE.store(window, Ordering::Relaxed);
+    if window != 0 && FOREGROUND.load(Ordering::Relaxed) != window {
+        let stale = FOREGROUND.load(Ordering::Relaxed);
+        let now = super::ax::foreground_window_id();
+        FOREGROUND.store(now, Ordering::Relaxed);
+        logging::line(
+            "macos",
+            &format!(
+                "key scope pinned to window {window} while the tap still thought {stale} was \
+                 in front; asked again and it is {now}{}",
+                if now == window { "" } else { " — which still does not match, so keys stay unclaimed" }
+            ),
+        );
+    }
     logging::trace("macos", || match window {
         0 => "tap: key scope is global".to_string(),
         w => format!("tap: key scope pinned to window {w}"),
