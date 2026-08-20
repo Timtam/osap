@@ -328,9 +328,10 @@ the log large, so use it for a targeted run rather than all day.
   We tried to borrow Control-Option-arrow inside our own window; the keystroke never reached
   us at all, and it turns out no application can take it — VoiceOver handles keys above the
   layer any application can tap, which is also why VO-arrow still works inside a password
-  field. The overlays' key choices are being moved to `Command-Shift-Control-<letter>` and
-  `Command-Control-<arrow>`, which is what VOCR uses, so it should already be in your
-  fingers.
+  field. The overlays keep the keys the Windows version uses — `Alt+<letter>` and
+  `Ctrl+<letter>` — and they are claimed only while that plugin's overlay is actually in
+  front. If one of them turns out to be taken on your Mac, the log says so by name and we
+  will move that one.
 - **The overlay speaks in a second voice, not yours.** That is what it does until you tick
   **Speak through VoiceOver** in the Application settings tab. It is off to begin with
   because the first line through that path makes macOS ask your permission, and an

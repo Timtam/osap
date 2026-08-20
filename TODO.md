@@ -84,14 +84,29 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       Windows through Qt's Windows accessibility provider; the macOS bridge is a different
       one. If they do not survive, those modules need a different anchor on macOS. The
       accessibility dump answers it.
-- [x] **The macOS key vocabulary is decided** (2026-08-20): `Cmd+Shift+Ctrl+<letter>` for
-      global commands, `Cmd+Ctrl+<arrow>` for stepping through overlay controls. That is
-      VOCR's vocabulary, which this tester's ecosystem has already taught him, and it avoids
-      the two layers that made the Windows choices wrong here — Option is the
-      accented-character layer (on a German layout `@` is Option-L) and bare `Ctrl+<letter>`
-      is the emacs editing layer. `host.os.pick` already exists to express it; only the
-      choice was missing. **Still to do: apply it to the shipped overlays**, which currently
-      bind `Alt+<letter>` and `Ctrl+<letter>` on both platforms.
+- [x] **The macOS key vocabulary: keep the Windows one** (2026-08-20). The proposal was to
+      translate everything to VOCR's `Cmd+Shift+Ctrl+<letter>` / `Cmd+Ctrl+<arrow>`. It was
+      built on an assumption that did not survive being checked: a control's hotkey is
+      registered in `_registerHotkeys` from `_activate` and dropped in `_unregisterHotkeys`
+      from `_deactivate`, so it is claimed **only while that plugin's overlay is in front**,
+      never all day. Most of the case went with that.
+  - What is left is real but narrow. On macOS `Option` is part of generating characters, not
+      only a modifier, and two bound keys sit on the two most-used dead keys — `Alt+E` is
+      acute, `Alt+N` is tilde. `Ctrl+N` and `Ctrl+P` are the emacs next/previous-line
+      bindings every text field honours. Both matter in exactly one place: a plugin's own
+      search box, with the overlay active.
+  - And it is not asymmetric. On Windows those same keys are just as unavailable while the
+      overlay is active — `Alt+<letter>` is the menu-accelerator layer, `Ctrl+N`/`Ctrl+P` are
+      New and Print. Nothing on macOS *takes* them from us either: `Ctrl+<letter>` and
+      `Option+<letter>` alone are not VoiceOver's (its modifier is both together), and Carbon
+      accepts them.
+  - Against changing: one vocabulary, one set of documentation, and parity with ReaHotkey —
+      which is where these users and these fingers come from. Per-platform keys fork every
+      spoken announcement as well as every doc.
+  - **So it stays, and the log decides rather than the argument.** A refused registration is
+      already reported by name (`backend/macos/hotkey.rs:98`, "macOS refused the shortcut
+      ..."). If a specific combination actually fails on a Mac, that one moves, with
+      `host.os.pick`, which already exists. Nothing moves on a prediction.
   - **Borrowing VoiceOver's own keys is closed, permanently.** The probe came back with no
     tone at all, and four independent lines of evidence say no application can do better.
     Our tap is already `HIDEventTap` + `HeadInsertEventTap` + suppressing — the earliest
