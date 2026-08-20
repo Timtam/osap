@@ -17,6 +17,7 @@ use crate::settings;
 
 const MENU_SHOW: i32 = 1001;
 const MENU_QUIT: i32 = 1002;
+const MENU_HIDE: i32 = 1003;
 
 /// One module setting, as the manager window needs it to render + edit a control.
 #[derive(Clone)]
@@ -103,6 +104,23 @@ fn row_label(name: &str, version: &str, id: &str) -> String {
 /// On macOS one more thing is needed: ordering a window in does not bring the PROCESS
 /// forward, and an agent application that is not frontmost puts its window up behind
 /// whatever is. The Dock-icon promotion is separate and optional — see the setting.
+/// Puts the manager window away again — the counterpart to `show_manager`.
+///
+/// It exists because on macOS there was no way to do this at all. An application with no
+/// Dock icon has no menu bar, and without a menu bar macOS has no Command-W and no
+/// Command-Q: those are menu items, not built-in keystrokes. So a window that opened could
+/// not be closed, and for somebody who cannot see the title bar's close button that is a
+/// room with no door.
+fn hide_manager(frame: &Frame) {
+    frame.show(false);
+    // Demoted after hiding, never before: the window has to be off the screen before the
+    // application stops being one that has windows.
+    #[cfg(target_os = "macos")]
+    if crate::appcfg::dock_while_open() {
+        crate::backend::set_regular(false);
+    }
+}
+
 fn show_manager(frame: &Frame) {
     #[cfg(target_os = "macos")]
     {
@@ -493,7 +511,20 @@ pub fn run_gui(
         //
         // Built from `appcfg::SWITCHES`, so a setting added there appears here without anyone
         // remembering to come back.
-        let app_tab = Panel::builder(&notebook).build();
+        // A ScrolledWindow, not a Panel, and the reason is a control that existed and could
+        // not be reached. The window is 560x470; each setting is a label, a checkbox and a
+        // paragraph of explanation, so five of them already fill the page and the sixth and
+        // seventh — the two that only exist on macOS — were simply cut off the bottom. Not
+        // greyed, not announced, not there: the tester could find "Speak through VoiceOver"
+        // and no trace of the setting under it.
+        //
+        // A fixed page that silently truncates is the worst shape for this list, because the
+        // list grows. Scrolling also means the screen reader's own focus movement brings a
+        // control into view instead of stopping at the edge of what happens to fit.
+        let app_tab = ScrolledWindow::builder(&notebook).build();
+        // Vertical only: nothing here is wider than the page, and a horizontal scrollbar
+        // would be one more thing to land on for no reason.
+        app_tab.set_scroll_rate(0, 10);
         let as_ = BoxSizer::builder(Orientation::Vertical).build();
         as_.add(
             &StaticText::builder(&app_tab)
@@ -565,7 +596,10 @@ pub fn run_gui(
                 );
             });
         }
-        app_tab.set_sizer(as_, true);
+        // `false`: fitting would resize the page to its contents, which is exactly what a
+        // scrolled window must not do — the sizer's size becomes the virtual size and the
+        // scrollbar covers the difference.
+        app_tab.set_sizer(as_, false);
         notebook.add_page(&app_tab, "Application settings", false, None);
 
         sizer.add(&notebook, 1, SizerFlag::All | SizerFlag::Expand, 0);
@@ -1058,13 +1092,31 @@ pub fn run_gui(
             if let WindowEventData::General(e) = &event {
                 e.veto();
             }
-            frame.show(false);
-            // Demoted after hiding, never before: the window has to be gone from the screen
-            // before the application stops being one that has windows.
-            #[cfg(target_os = "macos")]
-            if crate::appcfg::dock_while_open() {
-                crate::backend::set_regular(false);
+            hide_manager(&frame);
+        });
+
+        // Escape, and Command-W where there is a Command key.
+        //
+        // Bound on the frame, which is where wxWidgets sends a key event that the focused
+        // control did not handle. On Windows this is a convenience next to Alt+F4; on macOS
+        // it is the only keystroke that closes this window at all, because an application
+        // without a Dock icon has no menu bar to put Command-W in. The tray menu carries the
+        // same action for the case where this does not reach us.
+        frame.on_key_down(move |event| {
+            const ESCAPE: i32 = 27;
+            const W: i32 = 87;
+            if let WindowEventData::Keyboard(k) = &event {
+                let code = k.get_key_code();
+                // `control_down` is Command on macOS and Control on Windows — wxWidgets maps
+                // the two by position, and `RawControlDown` is the one that means the
+                // literal Control key. So this is Command-W there and Ctrl+W here, each
+                // being the convention of its own platform, from one line.
+                if code == Some(ESCAPE) || (code == Some(W) && k.control_down()) {
+                    hide_manager(&frame);
+                    return;
+                }
             }
+            event.skip(true);
         });
 
         // System tray icon + right-click menu (Show / Quit).
@@ -1081,8 +1133,13 @@ pub fn run_gui(
         if let Some(icon) = make_icon() {
             taskbar.set_icon(&icon, "Automation Platform");
         }
+        // Three items rather than two. "Close the module window" is here because the
+        // keyboard route to it is not guaranteed: on macOS this application has no menu bar,
+        // so it has no Command-W, and a menu item is the one way out that cannot depend on
+        // a keystroke reaching the right window.
         let mut menu = Menu::builder()
             .append_item(MENU_SHOW, "Show module manager", "Show the module window")
+            .append_item(MENU_HIDE, "Close the module window", "Put the module window away")
             .append_separator()
             .append_item(MENU_QUIT, "Quit", "Quit Automation Platform")
             .build();
@@ -1091,6 +1148,7 @@ pub fn run_gui(
 
         taskbar.on_menu(move |event| match event.get_id() {
             MENU_SHOW => show_manager(&frame),
+            MENU_HIDE => hide_manager(&frame),
             MENU_QUIT => app.exit_main_loop(),
             _ => {}
         });
