@@ -2925,8 +2925,27 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     )?;
     host.set("os", os)?;
 
-    // host.window.list() / host.window.active()  (find/findAll/onTrigger via prelude)
+    // host.window.list() / host.window.active() / host.window.focus(id)
+    // (find/findAll/onTrigger via prelude)
     let win = lua.create_table()?;
+
+    // host.window.focus(id) -> boolean
+    //
+    // Brings a window to the front. It exists because of a gap a tester named: on Windows a
+    // screen-reader user returns to a plugin's window with OSARA's F6, and macOS offers no
+    // such command from VoiceOver or from anywhere else — a plugin window opened inside a
+    // DAW can be genuinely hard to get back to. Nothing here could offer one either, because
+    // nothing here could focus a window.
+    //
+    // Returns whether the system accepted it, and a module must believe that answer: both
+    // platforms can decline, and a module that announces "back in the plugin" when the focus
+    // did not move has told somebody who cannot check that they are somewhere they are not.
+    let sh = shared.clone();
+    win.set(
+        "focus",
+        lua.create_function(move |_, id: isize| Ok(sh.backend.focus_window(id)))?,
+    )?;
+
     let sh = shared.clone();
     win.set(
         "list",

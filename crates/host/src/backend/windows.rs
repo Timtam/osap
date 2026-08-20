@@ -17,6 +17,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     DIB_RGB_COLORS, SRCCOPY,
 };
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
+use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE};
 use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
 use windows_sys::Win32::System::Threading::{
     GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -292,6 +293,21 @@ impl Backend for WindowsBackend {
             return None;
         }
         window_info(hwnd as isize, false)
+    }
+
+    fn focus_window(&self, id: isize) -> bool {
+        let hwnd = id as HWND;
+        if hwnd.is_null() {
+            return false;
+        }
+        unsafe {
+            // Restored first: a minimised window can be made foreground and stay invisible,
+            // which for somebody who cannot see the screen is the worst of both answers.
+            if IsIconic(hwnd) != 0 {
+                ShowWindow(hwnd, SW_RESTORE);
+            }
+            SetForegroundWindow(hwnd) != 0
+        }
     }
 
     fn window_controls(&self, hwnd_val: isize) -> Vec<ControlInfo> {

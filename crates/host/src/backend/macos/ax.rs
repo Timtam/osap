@@ -39,7 +39,8 @@ use objc2_app_kit::{
     NSAccessibilityMainWindowAttribute, NSAccessibilityMinimizedAttribute,
     NSAccessibilityParentAttribute, NSAccessibilityPositionAttribute, NSAccessibilityRoleAttribute,
     NSAccessibilitySizeAttribute, NSAccessibilitySubroleAttribute, NSAccessibilityTitleAttribute,
-    NSAccessibilityValueAttribute, NSAccessibilityWindowsAttribute, NSRunningApplication,
+    NSAccessibilityValueAttribute, NSAccessibilityWindowsAttribute, NSApplicationActivationOptions,
+    NSRunningApplication,
     NSWorkspace,
 };
 use objc2_application_services::{
@@ -1226,6 +1227,53 @@ pub fn foreground_window_id() -> isize {
         Some((el, pid)) => handles::intern(el, pid, 0),
         None => 0,
     }
+}
+
+/// Brings a window to the front and gives it the keyboard.
+///
+/// Two calls, and both are needed. Raising a window inside an application that is not
+/// frontmost leaves it exactly where it was, behind whatever is; activating an application
+/// without raising the window brings its *other* windows forward instead. Window managers on
+/// this platform all do both, in this order.
+///
+/// The action name is written out rather than taken from a constant: `kAXRaiseAction` is not
+/// among the bound accessibility constants, and it is a documented string. The same is true
+/// of the two menu notifications this backend already listens for.
+///
+/// Reports what happened rather than assuming. macOS can decline either half — an
+/// application that is not scriptable by us, a window that has gone away between being
+/// listed and being asked — and a caller that believes it moved the focus when it did not
+/// would tell a blind user they are somewhere they are not.
+pub fn focus_window(handle: isize) -> bool {
+    let Some(entry) = handles::get(handle) else {
+        crate::logging::line("macos", &format!("cannot focus window {handle}: no such handle"));
+        return false;
+    };
+    let raise = CFString::from_static_str("AXRaise");
+    // SAFETY: the element is alive for the duration of the call and the action name is a
+    // static string; `perform_action` is a plain cross-process call.
+    let raised = unsafe { entry.element.perform_action(&raise) } == AXError::Success;
+
+    let activated = NSRunningApplication::runningApplicationWithProcessIdentifier(entry.pid)
+        .is_some_and(|app| {
+            #[allow(deprecated)]
+            let opts = NSApplicationActivationOptions::ActivateAllWindows
+                | NSApplicationActivationOptions::ActivateIgnoringOtherApps;
+            app.activateWithOptions(opts)
+        });
+
+    if !(raised && activated) {
+        crate::logging::line(
+            "macos",
+            &format!(
+                "focusing window {handle} (pid {}): raise {}, application activation {}",
+                entry.pid,
+                if raised { "accepted" } else { "REFUSED" },
+                if activated { "accepted" } else { "REFUSED" }
+            ),
+        );
+    }
+    raised || activated
 }
 
 /// The `CGWindowID` behind a window handle, or 0 if it could not be paired.

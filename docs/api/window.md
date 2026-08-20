@@ -114,6 +114,38 @@ local w = host.window.active()
 if w then host.log.info("front: " .. w.title) end
 ```
 
+## host.window.focus(id)
+
+**Signature:** `host.window.focus(id: number) -> boolean`
+
+Brings the window with that handle to the front and gives it the keyboard. Returns whether
+the system accepted it.
+
+**Believe the answer.** Both platforms can decline — Windows refuses a foreground change
+under conditions it does not explain, and on macOS the window's own application has to be
+activated as well as the window raised, either of which can fail. A module that announces
+"back in the plugin" when the focus did not move has told somebody who cannot check that
+they are somewhere they are not, which is the one failure this project treats as worse than
+doing nothing.
+
+```lua
+local w = host.window.find({ title = { contains = "sforzando" } })
+if w and host.window.focus(w.id) then
+    host.speech.output("sforzando")
+else
+    host.speech.output("could not get back to sforzando")
+end
+```
+
+**Why it exists.** On Windows a screen-reader user gets back to a plugin's window with
+OSARA's F6. macOS has no equivalent: VoiceOver offers no command for it, so a plugin window
+opened inside a DAW can be genuinely hard to return to. Building that command needs this
+call, and until now the platform had nothing that could focus a window at all.
+
+On Windows a minimised window is restored first — a window that is made foreground while
+still minimised stays invisible, which is the worst of both answers for somebody who cannot
+see it happen.
+
 ## host.window.controls(win?)
 
 `host.window.controls(win: Window?) -> { Control }`

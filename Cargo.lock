@@ -1945,6 +1945,7 @@ dependencies = [
  "libc",
  "objc2",
  "objc2-core-foundation",
+ "objc2-core-services",
 ]
 
 [[package]]

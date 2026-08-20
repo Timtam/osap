@@ -75,6 +75,10 @@ impl Backend for MacBackend {
         ax::active_window()
     }
 
+    fn focus_window(&self, id: isize) -> bool {
+        ax::focus_window(id)
+    }
+
     fn window_controls(&self, hwnd: isize) -> Vec<ControlInfo> {
         ax::window_controls(hwnd)
     }

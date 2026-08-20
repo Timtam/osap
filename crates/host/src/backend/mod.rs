@@ -152,6 +152,23 @@ pub trait Backend {
     fn enumerate_windows(&self) -> Vec<WinInfo>;
     fn active_window(&self) -> Option<WinInfo>;
 
+    /// Brings a window to the front and gives it the keyboard.
+    ///
+    /// Missing until now, and its absence had a name: on Windows a screen-reader user gets
+    /// back to a plugin's window with OSARA's F6, and macOS has no equivalent — VoiceOver
+    /// offers no command for it, so a plugin window opened inside a DAW can be genuinely
+    /// hard to return to. Nothing in this platform could offer one either, because nothing
+    /// here could focus a window.
+    ///
+    /// Returns whether the system accepted it. Both platforms can refuse — Windows will not
+    /// let an application steal the foreground under some conditions, and on macOS the
+    /// window's own application has to be activated as well as the window raised — so the
+    /// answer is reported rather than assumed.
+    fn focus_window(&self, id: isize) -> bool {
+        let _ = id;
+        false
+    }
+
     /// Child controls (descendant windows) of a top-level window, for detecting
     /// embedded plugins by control class + locating their coordinate origin.
     fn window_controls(&self, hwnd: isize) -> Vec<ControlInfo>;

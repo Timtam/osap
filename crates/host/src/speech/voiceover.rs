@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use objc2_app_kit::NSRunningApplication;
-use objc2_foundation::NSString;
+use objc2_foundation::{NSAppleEventDescriptor, NSAppleEventSendOptions, NSString};
 
 /// Is VoiceOver up?
 ///
@@ -270,12 +270,100 @@ fn baseline() {
 /// log. A consent dialog waiting for an answer a blind user cannot see does exactly that.
 const CHILD_LIMIT: Duration = Duration::from_secs(5);
 
-/// `tell application "VoiceOver" to output "…"` — VoiceOver's own voice, its rate, and
-/// its braille display, which is the entire point of going through it.
+/// Has the Apple Event ever failed? Then stop paying for it and use the child process.
 ///
-/// Whether that interrupts what VoiceOver is already saying is VoiceOver's decision, not
-/// ours; `interrupt` above governs only our own queue, which is all we can honour.
+/// One flag rather than a per-call decision: the failures this guards against — a wrong
+/// four-character code, an Apple Event layer that will not send from this thread — are
+/// properties of the build and the machine, not of the line being spoken. If it goes wrong
+/// once it will go wrong every time, and the fallback is right there.
+static EVENT_WORKS: AtomicBool = AtomicBool::new(true);
+
+/// VoiceOver's `output` command, sent as an Apple Event from this process.
+///
+/// The codes come from VoiceOver's own scripting dictionary, which the macOS tester
+/// extracted with `sdef` — see docs/voiceover-scripting-codes.md. They cannot be derived
+/// from anywhere but a Mac, which is why they are written down rather than looked up.
+///
+/// **Why this instead of `osascript`,** measured rather than assumed: on the tester's 2015
+/// MacBook Air a spoken line through the child process took 195 ms, of which 69 ms was the
+/// bare launch of a script that talks to nobody. The remaining 126 ms is mostly resolving
+/// VoiceOver's terminology, which a fresh process pays again every single time. And 195 ms
+/// is nowhere near how long 25 characters take to say out loud, which is what settles the
+/// question underneath: `output` returns as soon as VoiceOver has the text, so this is fixed
+/// overhead and not the sound of speech.
+///
+/// **No reply is asked for**, and that is deliberate twice over. There is nothing in the
+/// answer worth having, and waiting for one would mean an Apple Event reply arriving on a
+/// worker thread that has no run loop to deliver it — the one part of this whose behaviour
+/// nobody here could establish. Failures that matter still surface: a target that is not
+/// authorised is refused at send time, which is how every application discovers it needs
+/// permission.
+fn send_event(text: &str) -> Result<(), String> {
+    // 'VOAS' / 'outp', and '----' is keyDirectObject — the parameter every command's direct
+    // argument travels in.
+    const VOAS: u32 = 0x564F_4153;
+    const OUTP: u32 = 0x6F75_7470;
+    const KEY_DIRECT_OBJECT: u32 = 0x2D2D_2D2D;
+    // kAutoGenerateReturnID and kAnyTransactionID: we are not correlating replies or
+    // grouping this into a transaction, and the constants for "do neither" are these.
+    const AUTO_RETURN_ID: i16 = -1;
+    const ANY_TRANSACTION: i32 = 0;
+
+    let target = NSAppleEventDescriptor::descriptorWithBundleIdentifier(&NSString::from_str(
+        "com.apple.VoiceOver",
+    ));
+    let event =
+        NSAppleEventDescriptor::appleEventWithEventClass_eventID_targetDescriptor_returnID_transactionID(
+            VOAS,
+            OUTP,
+            Some(&target),
+            AUTO_RETURN_ID,
+            ANY_TRANSACTION,
+        );
+    let arg = NSAppleEventDescriptor::descriptorWithString(&NSString::from_str(text));
+    event.setParamDescriptor_forKeyword(&arg, KEY_DIRECT_OBJECT);
+
+    // NeverInteract because nothing about saying a line should ever put a window on screen;
+    // DontRecord because this is not a user action worth a script recorder's attention.
+    let options = NSAppleEventSendOptions::NoReply
+        | NSAppleEventSendOptions::NeverInteract
+        | NSAppleEventSendOptions::DontRecord;
+    match event.sendEventWithOptions_timeout_error(options, CHILD_LIMIT.as_secs_f64()) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("{e}")),
+    }
+}
+
+/// Says one line, by the cheapest route that still works.
+///
+/// The Apple Event first; the child process if that has ever failed. Two rungs rather than
+/// one because the fast path is written blind — the codes came off a machine nobody here can
+/// run, and a wrong one must degrade to what already worked instead of taking the speech
+/// with it.
+///
+/// Whether any of this interrupts what VoiceOver is already saying is VoiceOver's decision,
+/// not ours; `interrupt` above governs only our own queue, which is all we can honour.
 fn output(text: &str) -> Result<(), String> {
+    if EVENT_WORKS.load(Ordering::Relaxed) {
+        match send_event(text) {
+            Ok(()) => return Ok(()),
+            Err(why) => {
+                EVENT_WORKS.store(false, Ordering::Relaxed);
+                crate::logging::line(
+                    "speech",
+                    &format!(
+                        "the Apple Event to VoiceOver was refused ({why}), so speech falls \
+                         back to launching osascript per line for the rest of this session"
+                    ),
+                );
+            }
+        }
+    }
+    run_osascript(text)
+}
+
+/// `tell application "VoiceOver" to output "…"`, through a child process — the rung below.
+fn run_osascript(text: &str) -> Result<(), String> {
     let script =
         format!("tell application \"VoiceOver\" to output \"{}\"", applescript_string(text));
     let mut child = Command::new("/usr/bin/osascript")

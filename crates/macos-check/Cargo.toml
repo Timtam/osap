@@ -36,7 +36,7 @@ dispatch2 = "0.3"
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-foundation]
 version = "0.3"
-features = ["NSString", "NSArray", "NSValue", "NSGeometry", "NSDictionary", "NSError", "NSData", "NSRunLoop", "NSThread", "NSObjCRuntime", "NSEnumerator", "NSURL", "NSProcessInfo", "NSNotification", "NSOperation", "NSAppleScript", "NSDate", "NSRange", "block2"]
+features = ["NSString", "NSArray", "NSValue", "NSGeometry", "NSDictionary", "NSError", "NSData", "NSRunLoop", "NSThread", "NSObjCRuntime", "NSEnumerator", "NSURL", "NSProcessInfo", "NSNotification", "NSOperation", "NSAppleScript", "NSAppleEventDescriptor", "objc2-core-services", "NSDate", "NSRange", "block2"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-app-kit]
 version = "0.3"
