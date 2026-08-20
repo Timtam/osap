@@ -178,12 +178,18 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
     anyone has seen. Step 4 of the briefing now says so rather than asking a question that
     cannot be answered, and asks the two things that CAN be: is it his own voice, and does an
     announcement cut VoiceOver off or queue behind it.
-  - **The `sdef` route is parked, not dead** (2026-08-20): VoiceOver does not ship its
-    scripting definition as a file — `find` across the bundle comes back empty — so the
-    terminology is an `aete` resource in the binary and only `sdef` can extract it. `sdef`
-    comes with the Xcode command line tools, a large download the tester should not make for
-    a probe. Ask again only if the timings say the direct Apple Event is worth building, or
-    if he installs those tools anyway.
+  - **The `sdef` is in** (2026-08-20). The tester installed the command line tools for his
+    own reasons and ran it: `output` is event class `VOAS`, event ID `outp`, the text as the
+    direct parameter, targeting bundle id `com.apple.VoiceOver`. Written up in
+    docs/voiceover-scripting-codes.md along with the rest of the suite, because obtaining it
+    cost a session. **It is not a decision to build the direct event** — the rule stands that
+    the milliseconds decide, and those still have not been measured because the speech switch
+    has never been ticked on a Mac.
+  - Found in the same dictionary and worth its own line: `output` takes an optional `with`
+    parameter of enumeration `spel`, whose values are **alphabetic** (`alpS`) and **phonetic**
+    (`phoS`) spelling. A control could offer "spell this back to me" as a second key — which
+    matters most exactly where OCR is least trustworthy, on preset names and file names, and
+    which the platform's own voice cannot do at all.
 - [x] **Speech now goes through VoiceOver** (2026-08-19). `crates/host/src/speech/` — one
       place decides where an announcement comes out, so no call site had to learn about it.
       On macOS the default is `tell application "VoiceOver" to output …` through `osascript`,
