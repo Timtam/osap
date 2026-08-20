@@ -128,7 +128,7 @@ fn recognize_inner(
                 debug_dump("ocr-debug.bmp", &rgba, dw, dh);
             }
         }
-        run_vision(&native, lang, &|bb| map_box(&plan, scale, bb))
+        run_vision(&native, lang, ACCURATE, &|bb| map_box(&plan, scale, bb))
     } else {
         let Some((rgba, px_w, px_h)) = cgimage_to_rgba(&native) else {
             warn_once(
@@ -157,7 +157,7 @@ fn recognize_inner(
                 let (pw, ph) = plan.out_size();
                 debug_dump("ocr-debug.bmp", &buf, pw, ph);
             }
-            let r = run_vision(&img, lang, &|bb| map_box(&plan, scale, bb));
+            let r = run_vision(&img, lang, ACCURATE, &|bb| map_box(&plan, scale, bb));
             // `buf` is the bitmap context's backing store and the image created from it is
             // a copy-on-write of that memory. Dropping it before Vision has read the image
             // would be a use-after-free that only shows up on the machine nobody here owns.
@@ -173,16 +173,23 @@ fn recognize_inner(
                 crate::logging::trace("macos", || {
                     "ocr: tightened pass read nothing, trying the whole region".to_string()
                 });
-                let plan = Plan::whole(&rgba, px_w, px_h);
-                render(&native, &plan).and_then(|(img, buf)| {
+                let whole = Plan::whole(&rgba, px_w, px_h);
+                let second = render(&native, &whole).and_then(|(img, buf)| {
                     if debug {
-                        let (pw, ph) = plan.out_size();
+                        let (pw, ph) = whole.out_size();
                         debug_dump("ocr-debug-retry.bmp", &buf, pw, ph);
                     }
-                    let r = run_vision(&img, lang, &|bb| map_box(&plan, scale, bb));
+                    let r = run_vision(&img, lang, ACCURATE, &|bb| map_box(&whole, scale, bb));
                     drop(buf);
                     r
-                })
+                });
+                match second {
+                    Some((ref t, _)) if t.trim().is_empty() => {
+                        bigger_then_faster(&native, &plan, &rgba, px_w, px_h, scale, lang, debug)
+                    }
+                    None => bigger_then_faster(&native, &plan, &rgba, px_w, px_h, scale, lang, debug),
+                    other => other,
+                }
             }
             other => other,
         }
@@ -238,7 +245,7 @@ fn warm_up_in_pool() {
         );
         return;
     };
-    let read = run_vision(&image, None, &|_| (0, 0, 1, 1));
+    let read = run_vision(&image, None, ACCURATE, &|_| (0, 0, 1, 1));
     drop(buf);
     crate::logging::line(
         "macos",
@@ -395,13 +402,77 @@ fn note_cost(ms: f64, w: i32, h: i32) {
 /// knows about the preprocessing, so this function stays honest about what it was handed.
 /// `None` means the pass failed and has already said so; an empty string means it ran and
 /// found nothing, which is an ordinary answer here.
+const ACCURATE: VNRequestTextRecognitionLevel = VNRequestTextRecognitionLevel::Accurate;
+const FAST: VNRequestTextRecognitionLevel = VNRequestTextRecognitionLevel::Fast;
+
+/// The last two passes, tried only where the answer would otherwise be nothing at all.
+///
+/// A single small glyph is the case both system recognisers give up on — Windows'
+/// outright, which is why that platform carries a second engine, and Vision's
+/// conditionally. Two things are still untried at the point this runs, and both are free of
+/// any new dependency:
+///
+/// **Bigger.** The ladder above already upscales, but only to the target; doubling it puts a
+/// lone digit well clear of the floor rather than near it, and widens the quiet space around
+/// it, which some recognisers need in order to see a glyph as a glyph at all.
+///
+/// **Faster.** `Fast` is a different model — character-level rather than the accurate path's
+/// language-aware one — and a value with no linguistic context is exactly where that trade
+/// runs the right way. It goes LAST on purpose. A character model reading an unvalidated
+/// number aloud to somebody who cannot check it is worse than saying nothing, so it is only
+/// ever asked once everything better has already declined.
+#[allow(clippy::too_many_arguments)]
+fn bigger_then_faster(
+    native: &CGImage,
+    tight: &Plan,
+    _rgba: &[u8],
+    _px_w: usize,
+    _px_h: usize,
+    scale: f64,
+    lang: Option<&str>,
+    debug: bool,
+) -> Option<(String, Vec<OcrWord>)> {
+    let big = Plan {
+        x0: tight.x0,
+        y0: tight.y0,
+        cw: tight.cw,
+        ch: tight.ch,
+        up: (tight.up * 2).min(10),
+        pad: OCR_PAD * 2,
+        bg: tight.bg,
+        cropped: tight.cropped,
+    };
+    let (img, buf) = render(native, &big)?;
+    if debug {
+        let (pw, ph) = big.out_size();
+        debug_dump("ocr-debug-big.bmp", &buf, pw, ph);
+    }
+    // Both passes share one blit: rendering is the expensive part, and the only thing that
+    // differs between them is which model reads it.
+    let mut out = run_vision(&img, lang, ACCURATE, &|bb| map_box(&big, scale, bb));
+    if out.as_ref().is_none_or(|(t, _)| t.trim().is_empty()) {
+        crate::logging::trace("macos", || {
+            format!("ocr: {}x enlarged accurate pass read nothing, trying the fast model", big.up)
+        });
+        out = run_vision(&img, lang, FAST, &|bb| map_box(&big, scale, bb));
+        if let Some((t, _)) = out.as_ref().filter(|(t, _)| !t.trim().is_empty()) {
+            // Named, because it is the one answer in this file that did not come from the
+            // recogniser we trust most, and a reader of the log should know which read it.
+            crate::logging::line("macos", &format!("ocr: only the fast model read this: '{t}'"));
+        }
+    }
+    drop(buf);
+    out
+}
+
 fn run_vision(
     image: &CGImage,
     lang: Option<&str>,
+    level: VNRequestTextRecognitionLevel,
     map: &dyn Fn(CGRect) -> (i32, i32, i32, i32),
 ) -> Option<(String, Vec<OcrWord>)> {
     let request = VNRecognizeTextRequest::new();
-    request.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
+    request.setRecognitionLevel(level);
     // Language correction is a dictionary pass over the result, and every string this
     // platform reads is a value: a note name, a cent offset, a lone digit. Correction is
     // what turns those into words that were never on the screen.
@@ -677,6 +748,15 @@ impl Plan {
             return Plan::whole(rgba, nw, nh);
         }
 
+        // The height of the INK, before the margin is added to it. This is what the upscale
+        // has to be computed from, and computing it from the padded crop instead was a real
+        // defect with a measurable cost: for sforzando's polyphony field on a non-Retina
+        // Mac — a 40x20 px capture whose digit is about 11 px tall — the margin makes the
+        // crop 17 px, so the factor came out as 64/17 = 3 and the glyph reached Vision at
+        // roughly 33 px. This file's own header promises about 64, and Apple's floor for
+        // reliable recognition is around 32. Every lone digit was being handed over sitting
+        // exactly on that floor. From the ink it is 64/11 = 5, and the glyph arrives at 55.
+        let ink_h = y1 - y0 + 1;
         let x0 = x0.saturating_sub(margin);
         let y0 = y0.saturating_sub(margin);
         let x1 = (x1 + margin).min(nw - 1);
@@ -687,7 +767,7 @@ impl Plan {
             y0,
             cw,
             ch,
-            up: upscale_for(ch),
+            up: upscale_for(ink_h),
             pad: OCR_PAD,
             bg,
             cropped: cw < nw || ch < nh,
@@ -706,6 +786,11 @@ impl Plan {
 /// right answer: the upscale exists to rescue small glyphs, and doubling text that Vision
 /// can read as it stands only costs time. The ceiling stops a one-pixel-tall artefact from
 /// asking for a sixty-fold blit.
+///
+/// **Pass it the height of the ink, not of the crop.** The crop carries a margin on both
+/// sides, and giving that away turns a factor of five into a factor of three — which for a
+/// single small glyph is the difference between comfortably above Apple's recognition floor
+/// and sitting on it.
 fn upscale_for(content_px: usize) -> usize {
     (TARGET_CONTENT_PX / content_px.max(1)).clamp(1, 10)
 }
