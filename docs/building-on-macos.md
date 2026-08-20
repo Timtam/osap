@@ -16,9 +16,11 @@ Be a little suspicious of a first run. As of this writing:
   window class (`NINormalWindow`, `Vst3PlugWindow`, `#32770`), and a module whose matcher
   has no `macos = { … }` block correctly never matches. So the application runs, sees
   windows, and does nothing — that is expected, not a fault.
-- Speech goes through the **system voice**, not through VoiceOver. It talks over VoiceOver
-  rather than through it, and there is no braille. Routing through VoiceOver is a known,
-  separate piece of work.
+- Speech goes through the platform's **own voice** unless **Speak through VoiceOver** is
+  ticked in the Application settings tab. Ticked, it is handed to VoiceOver and comes out
+  the way VoiceOver says everything else. It is off until asked for: the first line through
+  that path raises a macOS Automation consent dialog, and that should follow a request
+  rather than a launch.
 
 What is worth reporting is anything the log cannot explain.
 

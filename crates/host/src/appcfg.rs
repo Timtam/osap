@@ -105,14 +105,16 @@ pub const SWITCHES: &[Switch] = &[
     },
     Switch {
         key: "voiceover_speech",
-        label: "Speak through VoiceOver, in its voice and on its braille display — takes \
-                effect immediately, and asks macOS for permission the first time",
+        label: "Speak through VoiceOver, so it comes out the way VoiceOver says everything \
+                else — takes effect immediately, and asks macOS for permission the first time",
         help: "Hands what the overlay says to VoiceOver instead of speaking it with a \
-               separate voice. Two synthesisers talk over each other; VoiceOver's own \
-               queue does not, and braille is available no other way. Turning it off \
-               gives the overlay a distinct voice, which some people prefer for telling \
-               the two apart. Needs VoiceOver running, and \"Allow VoiceOver to be \
-               controlled with AppleScript\" ticked in VoiceOver Utility's General pane.",
+               separate voice, so it arrives in your voice, at your rate, and through \
+               whatever VoiceOver already outputs to — including a braille display, which \
+               nothing else here can reach. Two synthesisers talk over each other; \
+               VoiceOver's own queue does not. Turning it off gives the overlay a distinct \
+               voice, which some people prefer for telling the two apart. Needs VoiceOver \
+               running, and \"Allow VoiceOver to be controlled with AppleScript\" ticked in \
+               VoiceOver Utility's General pane.",
         os: Some("macos"),
         // Off until somebody asks for it, and the reason is the permission rather than the
         // feature. Speaking through VoiceOver means an Apple Event, and the first Apple Event

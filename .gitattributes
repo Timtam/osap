@@ -1,0 +1,4 @@
+# Shell scripts must reach macOS with LF endings. A CRLF script makes zsh report
+# "command not found" for commands that plainly exist, and the tester cannot see that the
+# error is about the file rather than the command.
+*.sh text eol=lf

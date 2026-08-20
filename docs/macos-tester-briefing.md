@@ -20,8 +20,10 @@ Two things are expected to be true on the first day, and neither is a fault to r
   and the coordinates your first probes recorded, and it is the thing to try first — see
   step 3. Every *other* plugin is still identified by a Windows-only detail, so nothing else
   will activate; making them identifiable is what the probe is for.
-- **Speech comes out in the system voice, not VoiceOver's**, and there is no braille. That
-  is a known, separate piece of work.
+- **Speech comes out in a voice of its own**, until you tick **Speak through VoiceOver** in
+  the Application settings tab — see step 4. Off to begin with, because the first line
+  through that path makes macOS ask your permission, and an application should not open a
+  dialog before it has been asked to do anything.
 
 ## Getting it running
 
@@ -43,7 +45,8 @@ and finish with instructions to rebuild. **If it stops after the first one, it f
 early version suppressed the error output of the step that follows, so on Monterey it printed
 one line and died without saying why. It now prints the openssl version it found and the actual
 error. Send those two lines if it happens again.
- macOS records permissions
+
+**Why it is worth the minute.** macOS records permissions
 against an application's code identity, and without a signing certificate that identity is
 derived from the binary itself — so every rebuild is a different application to macOS, and
 all three permissions have to be granted again, every time. The script creates a local
@@ -142,18 +145,12 @@ says also reaches a **braille display**. That is the strongest single reason for
 through VoiceOver at all, and it stays unverified until somebody with a display tries it.
 Not a gap in the software — a gap in what anyone has observed.
 
-**Parked for a later session, when it is convenient:** one command would let the overlay talk
-to VoiceOver directly instead of launching a small program for every line it says.
-
-```bash
-sdef /System/Library/CoreServices/VoiceOver.app > ~/Desktop/voiceover.sdef
-```
-
-`sdef` comes with the Xcode command line tools, which are a large download, so this is not
-worth doing on its own — VoiceOver does not ship its scripting definition as a file, which is
-why it cannot simply be copied. Do it only if you are installing those tools anyway, or if we
-come back and ask, which we will only do once the timings in the log say the change is worth
-making.
+**One thing we are NOT asking you to run.** There is a command, `sdef`, that would let the
+overlay talk to VoiceOver directly instead of launching a small program for every line it
+says. On a Mac without the Xcode command line tools `/usr/bin/sdef` is only a stub, and
+running it opens a modal window offering to install them — a window you cannot see, one
+Return away from a download of about a gigabyte. It is not worth that. If you ever install
+those tools for your own reasons, tell us and we will ask then.
 
 ### 5. Control-Option-Right in the sforzando window — one question we cannot answer here
 
@@ -213,13 +210,94 @@ If the machine feels sluggish, or a keystroke goes missing, say when it happened
 records anything that took too long, and "around the time I opened the browser" is enough to
 find it.
 
+## Sending back what a command printed
+
+Sometimes the answer is the exact text a command printed, word for word. Reading it back is
+the part that goes wrong: a missing line sounds the same as no line, and neither of us can
+see that it is missing. So nothing here asks you to read anything. The command writes a file
+straight into the folder we share, and it turns up on our side.
+
+Every path below is written as `~/Dropbox/osap`. If the folder we share is called something
+else on your Mac, use that instead — the first command here is how we find out what it is.
+
+**Once, so we know what that folder is called on your machine.** This one is the exception —
+its answer goes on your clipboard and you paste it into a message to us:
+
+```bash
+{ cat ~/.dropbox/info.json; echo; find ~ -maxdepth 2 -iname "Dropbox*"; } 2>&1 | pbcopy
+```
+
+Then Command-V into a message. Nothing is spoken and nothing appears; that is normal.
+`pbcopy` is silent whether it worked or not, which is why the paste is the proof.
+
+**After that it is one line, and it is the same line every time:**
+
+```bash
+zsh ~/Dropbox/osap/run.sh
+```
+
+We put `run.sh` in that folder, it does whatever we needed and writes its answer next to
+itself, and you send the file back. From the second time it is Up-arrow and Return. If we
+have asked for something and there is no `run.sh` yet, it has not synced — wait a minute.
+
+**When we send one command instead of a script**, add the last part of this to it:
+
+```bash
+some-command > ~/Dropbox/osap/out.txt 2>&1
+```
+
+The `2>&1` goes at the very end, after the file name. That is the part that puts *error*
+messages in the file as well as ordinary output, and the errors are usually the interesting
+half. In the other order it silently keeps only half of what you wanted.
+
+To hear that something landed:
+
+```bash
+wc -c ~/Dropbox/osap/out.txt
+```
+
+It answers with a number and the file name. Any number but 0 means there is something to
+send — and **0 is also an answer**, it means the command ran and printed nothing. Send it
+either way.
+
+### When the command fails, or does not exist
+
+Send the file anyway. That is not a wasted round trip, it *is* the answer: a command that is
+missing or refuses prints its complaint as an error, the `2>&1` puts that complaint in the
+file, and one line saying it was not found tells us exactly what we needed to know.
+
+Two things worth knowing while it happens:
+
+- **If a window appears offering to install "command line developer tools", say no** — Not
+  Now, or Escape. A few commands on a Mac are only a stub that asks for a large download, and
+  we do not want you to make it. The refusal is already in the file, so declining costs
+  nothing.
+- **If no file appears at all**, the path was mistyped and the command never ran. Run
+  `mkdir -p ~/Dropbox/osap` once, then try the line again.
+
+### Two things not to reach for
+
+- **Not VO-Shift-C.** It copies VoiceOver's last spoken phrase and nothing before it, so what
+  arrives is one fragment of what you meant to send — and it looks complete from both ends,
+  which is the worst property a thing like this can have.
+- **If you already ran the command and forgot the file part**, you do not have to type it
+  again:
+
+  ```bash
+  !! > ~/Dropbox/osap/out.txt 2>&1
+  ```
+
+  That runs the previous line a second time with the output going to the file.
+
+If the terminal ever goes completely quiet — you type and nothing comes back — press
+**Control-Q**. Control-S sits next to it and pauses the display until Control-Q releases it.
+
 ## What to send
 
 The whole folder next to the application:
 
 - `automation-platform.log` — the main thing
 - `probe-*.png` — the pictures from step 6
-- `voiceover.sdef` — only if you got to the parked command in step 4
 
 Both sit beside `AutomationPlatform.app`, in `dist/AutomationPlatform/`. If that folder was
 not writable, the log went to `~/Library/Application Support/AutomationPlatform/` instead —
