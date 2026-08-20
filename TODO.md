@@ -166,7 +166,10 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       control not allowed — is not silence: the line comes back and the platform's own voice
       says it, the reason is logged once, and everything after goes straight to the fallback
       without paying for another launch. **Speak through VoiceOver** in the Application
-      settings tab turns it off, and ticking it again re-tries a path that had failed. The
+      settings tab turns it on — off until asked for, because the first line through it makes
+      macOS raise an Automation consent dialog, and a dialog nobody asked for in front of
+      somebody who cannot see it is not how an application should introduce itself. Ticking
+      it again also re-tries a path that had failed (2026-08-20). The
       file is `#[path]`-borrowed by `crates/macos-check`, so the compiler checks it from
       Windows. What is still unmeasured: whether VoiceOver's `output` interrupts its own
       speech or queues behind it. Only a Mac can say.

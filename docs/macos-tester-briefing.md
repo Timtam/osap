@@ -120,8 +120,15 @@ precisely: say which of the three, and the log will have the OCR to go with it.
 
 ### 4. Is it your voice, and does it get in the way — ask this early
 
-Everything the overlay says is handed to VoiceOver rather than spoken by a second voice. So,
-with the sforzando overlay speaking (step 3), two things are worth a sentence each:
+The overlay can hand what it says to VoiceOver instead of speaking it with a voice of its
+own. **That is off until you turn it on**, because the first line through it makes macOS ask
+your permission, and a dialog you did not ask for is not a good way for an application to
+introduce itself.
+
+So: open the manager from the menu-bar icon, go to the **Application settings** tab, and tick
+**Speak through VoiceOver**. macOS will ask once whether this application may control
+VoiceOver — say yes. Then, with the sforzando overlay speaking (step 3), two things are worth
+a sentence each:
 
 - Do the read-outs come out in **your** VoiceOver voice, at your rate — or in a second,
   different voice? A second voice means the hand-off failed and the fallback took over, and
@@ -243,10 +250,12 @@ the log large, so use it for a targeted run rather than all day.
 - **Control-Option shortcuts do nothing** — outside the sforzando window. That is
   VoiceOver's own modifier, and apart from the probe in step 4 the overlays' Windows key
   choices have not been adapted for macOS yet.
-- **The overlay speaks in your VoiceOver voice, not a second one.** That is deliberate: what
-  the overlay says is handed to VoiceOver, so it arrives in your voice, at your rate, and on
-  your braille display. If VoiceOver will not take it — most often because "Allow VoiceOver
-  to be controlled with AppleScript" is off in VoiceOver Utility's General pane — it falls
-  back to its own voice and writes the reason in the log rather than going quiet. There is a
-  switch for it in the **Application settings** tab if you would rather have two distinct
-  voices.
+- **The overlay speaks in a second voice, not yours.** That is what it does until you tick
+  **Speak through VoiceOver** in the Application settings tab. It is off to begin with
+  because the first line through that path makes macOS ask your permission, and an
+  application that opens a dialog you did not ask for, before you have asked it to do
+  anything, is behaving badly — particularly towards someone who cannot see the dialog.
+  Ticked, what the overlay says arrives in your voice, at your rate, and on your braille
+  display. If VoiceOver then will not take it — most often because "Allow VoiceOver to be
+  controlled with AppleScript" is off in VoiceOver Utility's General pane — it falls back to
+  its own voice and writes the reason in the log rather than going quiet.

@@ -37,7 +37,9 @@ pub struct Switch {
     ///
     /// Held here as well as in the static, so `load` can tell "stored off" from "never
     /// stored" — the difference between a person having turned something off and a fresh
-    /// installation, which for the speech path is the difference between silence and sound.
+    /// installation. Every switch is off today; the field exists because that is a fact
+    /// about the switches, not a rule, and a default hidden in a `static` is a default
+    /// nobody reading this list would find.
     pub default_on: bool,
     state: &'static AtomicBool,
 }
@@ -47,7 +49,7 @@ static CALIBRATE: AtomicBool = AtomicBool::new(false);
 static OCR_DEBUG: AtomicBool = AtomicBool::new(false);
 static IGNORE_SUPPORTED_OS: AtomicBool = AtomicBool::new(false);
 static HEADLESS: AtomicBool = AtomicBool::new(false);
-static SPEAK_VIA_VOICEOVER: AtomicBool = AtomicBool::new(true);
+static SPEAK_VIA_VOICEOVER: AtomicBool = AtomicBool::new(false);
 
 /// Every application setting, in the order the tab shows them: the ones that take effect
 /// immediately first, so the two that need a restart are not the first thing read out.
@@ -103,7 +105,8 @@ pub const SWITCHES: &[Switch] = &[
     },
     Switch {
         key: "voiceover_speech",
-        label: "Speak through VoiceOver, in its voice and on its braille display — takes effect immediately",
+        label: "Speak through VoiceOver, in its voice and on its braille display — takes \
+                effect immediately, and asks macOS for permission the first time",
         help: "Hands what the overlay says to VoiceOver instead of speaking it with a \
                separate voice. Two synthesisers talk over each other; VoiceOver's own \
                queue does not, and braille is available no other way. Turning it off \
@@ -111,7 +114,13 @@ pub const SWITCHES: &[Switch] = &[
                the two apart. Needs VoiceOver running, and \"Allow VoiceOver to be \
                controlled with AppleScript\" ticked in VoiceOver Utility's General pane.",
         os: Some("macos"),
-        default_on: true,
+        // Off until somebody asks for it, and the reason is the permission rather than the
+        // feature. Speaking through VoiceOver means an Apple Event, and the first Apple Event
+        // makes macOS put a consent dialog on screen. On by default, that dialog appears at
+        // startup — before the user has asked for anything, about a thing they may not want,
+        // in front of a person who cannot see it to dismiss it. Ticking the box is a request,
+        // and that is the moment to ask.
+        default_on: false,
         state: &SPEAK_VIA_VOICEOVER,
     },
 ];

@@ -18,9 +18,8 @@ use objc2_foundation::NSString;
 ///
 /// Asked before every line, and not as an optimisation. `tell application "VoiceOver"` goes
 /// through Launch Services, and Launch Services **starts an application that is not
-/// running**. Speaking through VoiceOver is on by default on macOS, so without this check
-/// the first thing the overlay ever says would turn the screen reader on for somebody who
-/// had not asked for one.
+/// running**. Turn the setting on with VoiceOver not running and the first thing the overlay
+/// said would start the screen reader for somebody who had not asked for one.
 ///
 /// By bundle id, the same way `backend::macos::perm` asks it — one lookup against the
 /// workspace index rather than a scan of every running application.
