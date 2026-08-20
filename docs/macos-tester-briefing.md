@@ -152,35 +152,23 @@ running it opens a modal window offering to install them — a window you cannot
 Return away from a download of about a gigabyte. It is not worth that. If you ever install
 those tools for your own reasons, tell us and we will ask then.
 
-### 5. Control-Option-Right in the sforzando window — one question we cannot answer here
+### 5. The module list — three things only you can hear
 
-With the sforzando window in front, press **Control-Option-Right**, then **Control-Option-Left**.
+You already found that VoiceOver reads it now. What we cannot tell from here is whether it
+reads it *correctly*, and three questions settle that. Open the manager from the menu-bar
+icon (VO-M twice reaches the menu-bar extras) and go to the **Installed** tab.
 
-You should hear a short tone — rising for right, falling for left — and then one of the
-overlay's three read-outs, the same ones Tab moves between.
-
-The question underneath is whether an application can take Control-Option-arrow away from
-VoiceOver for as long as one of its own windows is in front. If it can, then on macOS the
-overlays should be steered with the keys you already use, instead of asking you to learn
-Tab and Shift-Tab for these windows in particular. Nothing here can test that; only a Mac
-with VoiceOver running can.
-
-So the useful report is one line, and it is about **both** halves:
-
-| What happened | What it means |
-| --- | --- |
-| Tone, then one of our read-outs, and the VoiceOver cursor stayed where it was | It works. This becomes how the overlays are navigated on macOS. |
-| Tone **and** the VoiceOver cursor also moved | We can see the key but not claim it — two things would happen at once, so this idea is out. |
-| No tone, the VoiceOver cursor moved | The key never reaches us at all. |
-| Nothing at all | Something else has the key. Worth knowing too. |
-
-The tones are only there for this question and go away once it is answered. They are
-deliberately not speech: whatever the answer is, it has to be tellable apart from VoiceOver
-talking, and speech competing with speech is the one signal that cannot be.
-
-Outside the sforzando window the keys are VoiceOver's again, immediately — that is the other
-half of the claim, and it is worth a moment to check: Command-Tab to any other application
-and confirm Control-Option-Right does what it always did.
+1. Arrowing down the list, does **one** press give you **one** row — and does that single
+   announcement carry both the module's name and whether it is ticked? Or do you have to
+   interact with the row to hear the checkbox?
+2. Tick exactly one module somewhere in the middle, then arrow through every row. Does each
+   row report **its own** state — or do several rows claim the state of the one you just
+   changed? This is the failure we most expect and least want: the list is drawn from a
+   single template cell, and if the accessibility side reads the template rather than the
+   row, every row lies.
+3. Does **Space** actually change a module's enabled state? Judge that by what the module
+   does, or by the log — **never** by what VoiceOver said. The whole point of the question is
+   that the announcement might be the thing that is wrong.
 
 ### 6. Record a plugin window — still the important one
 
@@ -325,9 +313,10 @@ the log large, so use it for a targeted run rather than all day.
 - **The first build after creating the identity still asks once.** The identity is new, so
   the old grants do not carry over. It is the last time.
 - **No Dock icon, no entry in the app switcher.** It is a menu-bar application by design.
-- **Control-Option shortcuts do nothing** — outside the sforzando window. That is
-  VoiceOver's own modifier, and apart from the probe in step 4 the overlays' Windows key
-  choices have not been adapted for macOS yet.
+- **Control-Option shortcuts do nothing.** That is VoiceOver's own modifier, and it keeps
+  it: we tried to borrow Control-Option-arrow inside our own window and the keystroke never
+  reached us at all. The overlays' Windows key choices have not been adapted for macOS yet,
+  and now they will have to be adapted to something else.
 - **The overlay speaks in a second voice, not yours.** That is what it does until you tick
   **Speak through VoiceOver** in the Application settings tab. It is off to begin with
   because the first line through that path makes macOS ask your permission, and an

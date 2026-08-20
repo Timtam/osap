@@ -84,13 +84,13 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       Windows through Qt's Windows accessibility provider; the macOS bridge is a different
       one. If they do not survive, those modules need a different anchor on macOS. The
       accessibility dump answers it.
-- [ ] **Decide the macOS key vocabulary.** A probe is out with the tester (2026-08-19):
-      the sforzando overlay claims **Control-Option-Left/Right** while its window is in front
-      and gives them back on the way out, sounding a tone and stepping its own controls. If a
-      VoiceOver user can lend us their own navigation keys for the one window VoiceOver alone
-      gets them nothing in, that is the answer for all of macOS and Tab stops being something
-      to learn per window. If both fire, the idea is dead and this stays a key-choice
-      question. Step 4 in docs/macos-tester-briefing.md has the four outcomes.
+- [ ] **Decide the macOS key vocabulary.** The probe came back (2026-08-20) and the answer
+      is the hard one: **no tone at all.** Control-Option-arrow never reached our CGEventTap
+      — VoiceOver takes it first — so we cannot claim those keys and cannot even observe
+      them. Borrowing a VoiceOver user's own navigation keys inside our window is dead, and
+      the probe is removed from modules/sforzando. Whether any mechanism sits ahead of
+      VoiceOver at all (tap placement, a Karabiner-style driver, Carbon RegisterEventHotKey,
+      or VoiceOver's own Commanders inviting us in) is under investigation.
       Not a VoiceOver collision — no shipped overlay
       binds `Ctrl+Alt`; they use `Alt+<key>`, `Ctrl+<key>` and `Ctrl+Shift+<key>`. The two
       things that do sit on VoiceOver's Control-Option modifier are the calibrator (dev-only,
