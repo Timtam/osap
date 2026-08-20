@@ -84,33 +84,45 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       Windows through Qt's Windows accessibility provider; the macOS bridge is a different
       one. If they do not survive, those modules need a different anchor on macOS. The
       accessibility dump answers it.
-- [ ] **Decide the macOS key vocabulary.** The probe came back (2026-08-20) and the answer
-      is the hard one: **no tone at all.** Control-Option-arrow never reached our CGEventTap
-      — VoiceOver takes it first — so we cannot claim those keys and cannot even observe
-      them. Borrowing a VoiceOver user's own navigation keys inside our window is dead, and
-      the probe is removed from modules/sforzando. Whether any mechanism sits ahead of
-      VoiceOver at all (tap placement, a Karabiner-style driver, Carbon RegisterEventHotKey,
-      or VoiceOver's own Commanders inviting us in) is under investigation.
-      Not a VoiceOver collision — no shipped overlay
-      binds `Ctrl+Alt`; they use `Alt+<key>`, `Ctrl+<key>` and `Ctrl+Shift+<key>`. The two
-      things that do sit on VoiceOver's Control-Option modifier are the calibrator (dev-only,
-      behind `AUTOMATION_PLATFORM_CALIBRATE=1`) and the reload key, which also needs `fn` or
-      the standard-function-keys setting. The real question is that `Alt` is Option, the
-      accented-character layer, and `Ctrl+<letter>` is macOS's emacs text-editing layer where
-      the platform convention would be `Command+<letter>`. The mechanism for a per-platform
-      choice already exists (`host.os.is("macos")`); the choice does not.
-- [x] **sforzando needed up to three application switches to be recognised** — three causes,
-      all now addressed (2026-08-19), none yet confirmed on hardware:
-  1. the accessibility messaging timeout was 0.25 s against a measured 293 ms answer, so the
-     first ask reliably lost the race. Now 1 s.
-  2. every rung of the delayed re-check ladder fell inside the 5 s penalty box that a slow
-     application had just been put in, so every retry was discarded. The late rungs are now
-     derived from `BUSY_PENALTY` instead of being written next to it.
-  3. an application that refused every focus notification was written off **for the session**.
-     An application asked while it is still starting up refuses everything and then works
-     fine a second later — sforzando loads a sample engine before its window is worth
-     anything — so a refusal is now retried `REFUSAL_RETRIES` times, on later activations,
-     before it becomes final. The log line says which of the two it is.
+- [x] **The macOS key vocabulary is decided** (2026-08-20): `Cmd+Shift+Ctrl+<letter>` for
+      global commands, `Cmd+Ctrl+<arrow>` for stepping through overlay controls. That is
+      VOCR's vocabulary, which this tester's ecosystem has already taught him, and it avoids
+      the two layers that made the Windows choices wrong here — Option is the
+      accented-character layer (on a German layout `@` is Option-L) and bare `Ctrl+<letter>`
+      is the emacs editing layer. `host.os.pick` already exists to express it; only the
+      choice was missing. **Still to do: apply it to the shipped overlays**, which currently
+      bind `Alt+<letter>` and `Ctrl+<letter>` on both platforms.
+  - **Borrowing VoiceOver's own keys is closed, permanently.** The probe came back with no
+    tone at all, and four independent lines of evidence say no application can do better.
+    Our tap is already `HIDEventTap` + `HeadInsertEventTap` + suppressing — the earliest
+    point CoreGraphics offers; session taps, per-pid taps and Carbon `RegisterEventHotKey`
+    are all strictly downstream, and root does not move a tap (the root rule is an access
+    check at creation, not a priority). VoiceOver is not in the tap chain at all: head
+    insertion would have put us ahead of any pre-existing tap, and VO-arrow keeps working
+    inside secure password fields where TN2150 says no tap receives keys — so its handling
+    lives in the window server, above the whole Quartz layer. Apple says so twice
+    (developer.apple.com/forums/thread/727085, /776129), and **VOCR — same users, same
+    problem — binds no Control-Option chord anywhere**: its shipped `Shortcuts.json` uses
+    Carbon masks 4864 and 4352, and the Option bit 2048 never appears.
+  - Ruled out with reasons, so nobody re-derives them: a **DriverKit virtual HID device**
+    (the Karabiner architecture) is the only layer genuinely below VoiceOver, and it is
+    disqualified three times over — Apple-granted entitlements plus notarisation plus a root
+    daemon, macOS 13+ against a tester on 12.7.6, and it remaps globally rather than while
+    one window is in front, which is the opposite of the requirement. Karabiner issue #1058
+    is that experiment shipped: VoiceOver "almost unusable". **IOHIDManager** can observe
+    without root but can only suppress a whole device, and observing without suppressing
+    gives double navigation — worse than today. **hidutil** is usage-to-usage only: no
+    chords, no window scoping, and a crash leaves a blind user with dead arrow keys.
+  - **VoiceOver's own extension points do not help either.** VO-Tab ("ignore the next
+    keypress") is one combination, user-initiated, with no API for an app to request it —
+    six keystrokes per navigation step. The **Keyboard Commander** can run an AppleScript,
+    but its modifier is Option (not Control-Option), it is global rather than window-scoped,
+    and it eats the Option character layer system-wide. Worth documenting as an optional
+    "summon the overlay" key for somebody who asks; never as navigation, never as a default.
+  - Still open, and cheap: whether the probe's silence was VoiceOver or our own matcher.
+    The conclusion does not rest on it, and it must not cost a tester session. The tap now
+    traces keys it saw and nobody claimed, and lists every event tap on the session at
+    startup — both arrive in a log the tester was sending anyway.
 - [x] **A module that would not load took the whole application with it** (2026-08-20).
       Found by the tester crashing on launch: my own sforzando probe registered
       `onActivate` after the overlay was bound, the runtime rejects that, and the startup

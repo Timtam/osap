@@ -324,10 +324,13 @@ the log large, so use it for a targeted run rather than all day.
 - **The first build after creating the identity still asks once.** The identity is new, so
   the old grants do not carry over. It is the last time.
 - **No Dock icon, no entry in the app switcher.** It is a menu-bar application by design.
-- **Control-Option shortcuts do nothing.** That is VoiceOver's own modifier, and it keeps
-  it: we tried to borrow Control-Option-arrow inside our own window and the keystroke never
-  reached us at all. The overlays' Windows key choices have not been adapted for macOS yet,
-  and now they will have to be adapted to something else.
+- **Control-Option shortcuts do nothing.** That is VoiceOver's own modifier and it keeps it.
+  We tried to borrow Control-Option-arrow inside our own window; the keystroke never reached
+  us at all, and it turns out no application can take it — VoiceOver handles keys above the
+  layer any application can tap, which is also why VO-arrow still works inside a password
+  field. The overlays' key choices are being moved to `Command-Shift-Control-<letter>` and
+  `Command-Control-<arrow>`, which is what VOCR uses, so it should already be in your
+  fingers.
 - **The overlay speaks in a second voice, not yours.** That is what it does until you tick
   **Speak through VoiceOver** in the Application settings tab. It is off to begin with
   because the first line through that path makes macOS ask your permission, and an

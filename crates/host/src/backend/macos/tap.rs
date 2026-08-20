@@ -27,8 +27,9 @@ use objc2_core_foundation::{
     CFRunLoopObserver,
 };
 use objc2_core_graphics::{
-    CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventTapLocation, CGEventTapOptions,
-    CGEventTapPlacement, CGEventTapProxy, CGEventType,
+    CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventTapInformation, CGEventTapLocation,
+    CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy, CGEventType, CGError,
+    CGGetEventTapList,
 };
 
 use super::{keys, queue, watch};
@@ -181,6 +182,8 @@ pub fn install() -> Result<(), String> {
         logging::line("macos", &msg);
         return Err(msg);
     };
+
+    report_tap_list();
 
     let Some(source) = CFMachPort::new_run_loop_source(None, Some(&port), 0) else {
         INSTALLED.store(false, Ordering::SeqCst);
@@ -605,4 +608,57 @@ fn take_suppressed(keycode: u16) -> bool {
     let bit = 1u64 << (keycode % 64);
     let bank = if keycode < 64 { &SUPPRESSED_LO } else { &SUPPRESSED_HI };
     bank.fetch_and(!bit, Ordering::Relaxed) & bit != 0
+}
+
+/// Every event tap on this login session, once, at startup.
+///
+/// It exists because of a question this project could not answer for a day: an overlay did
+/// not react to a key, and from outside there is no way to tell "the event never arrived"
+/// from "it arrived and nobody had claimed it" from "somebody upstream took it". The first
+/// two are now separated by a trace line in the callback. This separates the third: it names
+/// every process holding a tap, where it sits, and whether it is enabled and suppressing.
+///
+/// It also settles, by proof rather than by inference, the specific case that prompted it.
+/// Control-Option-arrow never reached this tap. If VoiceOver appears in this list at the HID
+/// location, it is a tap and something is wrong with our placement; if it does not appear —
+/// which is what all the evidence says, since VoiceOver's key handling lives in the window
+/// server, above the whole Quartz tap layer — then no tap of ours could ever have won those
+/// keys and that idea is closed for good.
+///
+/// Not behind tracing. It is a handful of lines, once, and it is the sort of thing a remote
+/// log has to already contain, because the moment somebody thinks to ask for it is the moment
+/// the session is over.
+fn report_tap_list() {
+    let mut count: u32 = 0;
+    // SAFETY: null list with a valid count pointer is the documented way to ask how many
+    // there are before allocating for them.
+    let err = unsafe { CGGetEventTapList(0, std::ptr::null_mut(), &mut count) };
+    if err != CGError::Success || count == 0 {
+        logging::line("macos", &format!("event taps: none reported (CGGetEventTapList = {err:?})"));
+        return;
+    }
+    let mut taps: Vec<CGEventTapInformation> = Vec::with_capacity(count as usize);
+    let mut filled: u32 = 0;
+    // SAFETY: the buffer has room for `count` entries and the call fills at most that many;
+    // `filled` is set to how many it wrote, and nothing reads past it.
+    let err = unsafe { CGGetEventTapList(count, taps.as_mut_ptr(), &mut filled) };
+    if err != CGError::Success {
+        logging::line("macos", &format!("event taps: could not be listed ({err:?})"));
+        return;
+    }
+    // SAFETY: `filled` entries were written by the call above.
+    unsafe { taps.set_len(filled.min(count) as usize) };
+
+    let me = std::process::id() as i32;
+    logging::line("macos", &format!("event taps on this session: {}", taps.len()));
+    for t in &taps {
+        let who = if t.tappingProcess == me { " (this application)" } else { "" };
+        logging::line(
+            "macos",
+            &format!(
+                "  pid {}{who} at {:?}, {:?}, enabled {}",
+                t.tappingProcess, t.tapPoint, t.options, t.enabled
+            ),
+        );
+    }
 }
