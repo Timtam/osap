@@ -39,6 +39,9 @@ on:
       - 'crates/host/src/logging.rs'
       - 'crates/host/Cargo.toml'
       - 'crates/macos-check/**'
+      # The Luau too, now that a Mac actually loads it: a module's macOS-only branch is
+      # never executed anywhere else, so this job is its only gate.
+      - 'modules/**'
       - 'package-macos.sh'
       - '.github/workflows/macos-build.yml'
   workflow_dispatch:
@@ -96,6 +99,43 @@ jobs:
 
       - name: Package
         run: ./package-macos.sh --no-build
+
+      # Load every shipped module once, on a Mac, because nothing else ever does.
+      #
+      # `cargo check` compiles the macOS Rust; it cannot execute a line of Luau. And a
+      # module's macOS-only branch — anything inside `host.os.is("macos")` — never runs on
+      # the Windows machine this is written on, so a module can load cleanly there for weeks
+      # and then fail on a tester's first launch. That is exactly what happened: the
+      # sforzando VoiceOver probe called `onActivate` after the overlay was bound, which the
+      # runtime rejects, and the first anyone knew of it was a remote crash log.
+      #
+      # Headless, so no window and no tray. Accessibility is not granted on a CI runner, so
+      # the event loop will refuse to start afterwards — that is expected, and not what this
+      # step is about. It asks one question: did every module load.
+      - name: Load the modules once, on a Mac
+        run: |
+          cd dist/AutomationPlatform
+          AUTOMATION_PLATFORM_HEADLESS=1 \
+            ./AutomationPlatform.app/Contents/MacOS/automation-platform &
+          pid=$!
+          for _ in $(seq 1 40); do
+            if grep -q "listening for events\|fatal:\|did not load" automation-platform.log 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          kill "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          echo "----- automation-platform.log -----"
+          cat automation-platform.log || true
+          if grep -q "did not load" automation-platform.log; then
+            echo "::error::a module failed to load on macOS"
+            exit 1
+          fi
+          if ! grep -q "loading module:" automation-platform.log; then
+            echo "::error::no module was even attempted — the smoke run proved nothing"
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v4
         with:

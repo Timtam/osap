@@ -111,6 +111,22 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
      fine a second later — sforzando loads a sample engine before its window is worth
      anything — so a refusal is now retried `REFUSAL_RETRIES` times, on later activations,
      before it becomes final. The log line says which of the two it is.
+- [x] **A module that would not load took the whole application with it** (2026-08-20).
+      Found by the tester crashing on launch: my own sforzando probe registered
+      `onActivate` after the overlay was bound, the runtime rejects that, and the startup
+      loop propagated it. `load_module` already rolls back every registration a partial load
+      made — the comment there called startup different "by design", and the design was
+      wrong. A blind user whose application vanishes is left with a process that is gone and
+      a log somebody has to talk them through finding, while the one place that could
+      disable the offending module is the window that never opened. Now: a log line, an
+      accessible modal from the same queue the module-error dialog drains, and the rest of
+      the modules load.
+- [x] **A module's Luau now gets loaded on a Mac before a tester sees it** (2026-08-20).
+      `cargo check` compiles macOS Rust; it cannot execute a line of Luau, and a module
+      branch inside `host.os.is("macos")` never runs on the machine this is written on — so
+      a module can load cleanly on Windows for weeks and fail on the first real launch. The
+      macOS job now runs the packaged app headless once and fails on "did not load", and
+      `modules/**` is in its trigger list.
 - [ ] **The VoiceOver transport is unmeasured, and the measurement has to answer one thing
       first** (2026-08-19): does `output` return when VoiceOver has the text, or block until
       the phrase has been spoken? If it blocks, per-line time is speech duration and NO

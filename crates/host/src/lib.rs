@@ -1735,10 +1735,11 @@ fn load_module(
     shared.schemas.borrow_mut().push(HashMap::new());
 
     // Everything past the four parallel-vector pushes above is fallible
-    // (install, prelude, reading + running the entry, exports conversion). At
-    // startup a failure aborts the process, but a runtime hot-load must never
-    // leave the shared vectors longer than `modules` — that would mis-index
-    // every later module. Run the fallible work in a scope and, on any error,
+    // (install, prelude, reading + running the entry, exports conversion). A failure must
+    // never leave the shared vectors longer than `modules` — that would mis-index every
+    // later module — and that is as true at startup as on a hot-load: startup used to abort
+    // the process instead, which is why this rollback was described as being for hot-loads.
+    // It is not. See Manager::report_load_failure. Run the fallible work in a scope and, on any error,
     // roll the pushes (and any side effects the partial entry registered) back.
     // Snapshot this module's persisted settings before the fallible load so a
     // partial load's store writes (host.settings.define/set) roll back too —
@@ -2078,6 +2079,36 @@ impl Manager {
         Ok(())
     }
 
+    /// Says that a module did not load, and lets the rest of the application carry on.
+    ///
+    /// A module that will not load must not take the application with it. That was always
+    /// the rule for a hot-load — `load_module` rolls back every registration a partial load
+    /// made, and the comment there calls startup different "by design" — but the design was
+    /// wrong. A blind user whose application vanishes at launch is left with a process that
+    /// is simply gone and a log somebody has to talk them through finding, while the one
+    /// place that could disable or remove the offending module is the window that never
+    /// opened.
+    ///
+    /// So: a log line, and the same queue the module-error dialog drains, which puts it in
+    /// front of the user as an accessible modal as soon as there is a window.
+    fn report_load_failure(&self, dir: &str, e: &anyhow::Error) {
+        let name = std::path::Path::new(dir)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| dir.to_string());
+        logging::line(
+            "manager",
+            &format!("module '{name}' did not load; the others carry on without it: {e:#}"),
+        );
+        self.shared.errors.borrow_mut().push((
+            "A module did not load".to_string(),
+            format!(
+                "\u{201c}{name}\u{201d} is not running. Everything else loaded, and you can \
+                 disable or remove it from the module manager.\n\n{e:#}"
+            ),
+        ));
+    }
+
     /// Runs the shared event loop if any module registered hotkeys, keys, or
     /// window triggers; otherwise waits for pending speech and returns.
     pub fn run(&mut self) -> Result<()> {
@@ -2324,7 +2355,9 @@ pub fn run(dirs: &[String]) -> Result<()> {
     let result = (|| -> Result<()> {
         let mut manager = Manager::new()?;
         for dir in dirs {
-            manager.load(dir)?;
+            if let Err(e) = manager.load(dir) {
+                manager.report_load_failure(dir, &e);
+            }
         }
         manager.run()
     })();
