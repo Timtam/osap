@@ -41,6 +41,10 @@ O.layer = { chrome = 10, base = 20, content = 30, dialog = 40 }
 -- self-drawn one at full rate. Declared here rather than beside the watch because
 -- _menuOpening (far above it) is what sets the deadline.
 local MENU_PLAUSIBLE_MS = 8000
+-- How long a control's own claim that it opened a menu is believed without confirmation.
+-- Long enough to read a short menu and choose from it; short enough that a claim which was
+-- wrong does not leave the overlay deaf for the rest of the session.
+local MENU_HOLD_MS = 2500
 local menuPlausibleUntil = 0
 
 -- The width and height of an origin's CONTENT, which is what coordinates are measured
@@ -1811,6 +1815,15 @@ function Overlay:_menuOpening()
   -- accessibility walk is worth running at full rate for a while. Outside that window the
   -- walk drops to a backstop cadence — see watchMenus for what it costs.
   menuPlausibleUntil = host.now() + MENU_PLAUSIBLE_MS
+  -- And a FLOOR, not only a hint. The watch lowers the flag on the first tick that sees no
+  -- menu, so on a platform where nothing can see this plugin's menu the eager suspension
+  -- lasts 150 ms and the menu is unusable — which is exactly what the macOS tester met:
+  -- arrows moved through the menu, Enter re-fired the control underneath and reopened it,
+  -- and no choice ever stuck. A control that says it opens a menu is a better witness than
+  -- a detector that cannot see one, so its word holds for a few seconds unless a detector
+  -- positively says otherwise.
+  self._menuHoldUntil = host.now() + MENU_HOLD_MS
+  self._menuHoldConfirmed = false
   -- The watch is what LOWERS the flag again, by seeing that no menu is there. An overlay
   -- that isn't watched has nothing to lower it — and a stranded suspension is an overlay
   -- whose every hotkey has silently stopped working, with nothing to tell the user why. So
@@ -2208,6 +2221,9 @@ function Overlay:_deactivate()
   host.keys.scope(false)
   host.keys.menuOpen(false)
   self:_unregisterHotkeys()
+  -- A hold belongs to the moment a control opened a menu, not to the overlay's whole life.
+  self._menuHoldUntil = nil
+  self._menuHoldConfirmed = false
   if self._onDeactivate then self._onDeactivate(self) end
 end
 
@@ -2999,6 +3015,36 @@ function Overlay:watchMenus()
               open = true
               break
             end
+          end
+        end
+      end
+    end
+    -- A control's own word that it opened a menu, honoured until it expires. Detection wins
+    -- when it finds something — it is the more specific answer — but never overrules the
+    -- hold by finding nothing, because "found nothing" is the failure mode being covered.
+    if open then
+      for _, o in ipairs(menuWatched) do
+        if o._menuHoldUntil and not o._menuHoldConfirmed then
+          o._menuHoldConfirmed = true
+        end
+      end
+    else
+      for _, o in ipairs(menuWatched) do
+        if o.active and o._menuHoldUntil then
+          if host.now() < o._menuHoldUntil then
+            open = true
+          elseif not o._menuHoldConfirmed then
+            -- Logged, not spoken, and once: this line is the answer to "is this plugin's
+            -- menu something the accessibility layer can see at all", which nobody here can
+            -- ask any other way.
+            host.log.info(
+              ("[overlay] '%s': a control opened a menu and no detector ever saw one"):format(
+                tostring(o.label)
+              )
+            )
+            o._menuHoldUntil = nil
+          else
+            o._menuHoldUntil = nil
           end
         end
       end

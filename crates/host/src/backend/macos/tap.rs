@@ -444,9 +444,17 @@ unsafe extern "C-unwind" fn tap_callback(
     }
     // Only now, with a match in hand, is it worth asking the questions that cost something.
     if let Some(why) = gate_closed() {
-        logging::trace("macos", || {
-            format!("tap: vk {vk:#04x} mask {mask} matched but passed through ({why})")
-        });
+        // Said out loud, not traced, because this is the one event that explains a whole
+        // class of report. "The overlay did not react to that key" has three causes that
+        // sound identical from outside — the event never arrived, nothing had claimed it, or
+        // something HAD claimed it and this gate let it through anyway — and only the third
+        // means a key reached the application underneath and moved its focus. The tester met
+        // exactly that and could only describe it as "VoiceOver said dimmed button".
+        //
+        // Rate-limited on the reason rather than on the key, because a gate that is closed
+        // stays closed for as long as a menu is open or a window is not frontmost, and one
+        // line per keystroke would bury the log it is meant to explain.
+        report_gate_pass(vk, mask, why);
         return pass;
     }
     queue::push_key(vk, mask);
@@ -571,6 +579,34 @@ fn mask_of(flags: CGEventFlags) -> u8 {
 ///
 /// Every one of them is an atomic read. Nothing in here reaches into another process, and
 /// that is a requirement rather than an optimisation — see the scope comparison.
+/// One line per reason, at most every few seconds. See the call site for why it exists.
+fn report_gate_pass(vk: u32, mask: u8, why: &'static str) {
+    const QUIET: std::time::Duration = std::time::Duration::from_secs(3);
+    thread_local! {
+        static LAST: std::cell::RefCell<Option<(&'static str, Instant)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    let say = LAST.with(|last| {
+        let mut last = last.borrow_mut();
+        match *last {
+            Some((reason, at)) if reason == why && at.elapsed() < QUIET => false,
+            _ => {
+                *last = Some((why, Instant::now()));
+                true
+            }
+        }
+    });
+    if say {
+        logging::line(
+            "macos",
+            &format!(
+                "a key the overlay had claimed reached the application instead: vk {vk:#04x} \
+                 mask {mask}, because {why}"
+            ),
+        );
+    }
+}
+
 fn gate_closed() -> Option<&'static str> {
     if MENU_OPEN.load(Ordering::Relaxed) {
         return Some("a plugin menu is open");

@@ -379,7 +379,14 @@ fn create_observer(pid: i32, app: &str) -> Result<Live, Refusal> {
     // timeout is seconds. Against a DAW rendering audio or a plugin mid-repaint that is
     // long enough to lose keystrokes on the way past, so cap it before the first use of
     // this element rather than after.
-    let _ = unsafe { element.set_messaging_timeout(0.25) };
+    // The same budget as everything else, and the reason is measured rather than tidy. A
+    // quarter of a second was chosen to keep subscription off the critical path; but this
+    // application is asked for on the very tick it comes to the front, when it is at its
+    // busiest, and sforzando on the tester's 2015 machine has been timed needing close to
+    // seven hundred milliseconds to answer a single read. Six subscriptions at a quarter
+    // second each therefore all failed, the refusal was recorded as final, and the menu
+    // notifications this backend needs never arrived for the one plugin being tested.
+    let _ = unsafe { element.set_messaging_timeout(super::ax::MESSAGING_TIMEOUT) };
 
     // The pid travels in the refcon rather than in a boxed context: it is the only thing
     // the callback needs, it fits in the pointer, and there is then nothing to keep alive
@@ -416,31 +423,51 @@ fn create_observer(pid: i32, app: &str) -> Result<Live, Refusal> {
 
     let mut registered = 0usize;
     let mut disabled = false;
+    let mut busy = false;
     for (label, name) in wanted {
         // SAFETY: both arguments outlive the call; the refcon is an integer we never read
         // back as a pointer.
         let err = unsafe { observer.add_notification(&element, name, refcon) };
         if err == AXError::Success || err == AXError::NotificationAlreadyRegistered {
             registered += 1;
-        } else {
-            disabled |= err == AXError::APIDisabled;
-            crate::logging::trace("macos", || {
-                format!("{app} (pid {pid}) refused {label}: {}", ax_err(err))
-            });
+            continue;
+        }
+        disabled |= err == AXError::APIDisabled;
+        // Not traced. This used to be behind the trace switch, with the summary below
+        // telling the reader to turn it on and try again — advice that only works for
+        // somebody who can reproduce the problem on demand, which is nobody here. At most
+        // six lines per application per attempt is a price worth paying to never ask a
+        // remote tester for another session over it.
+        crate::logging::line(
+            "macos",
+            &format!("{app} (pid {pid}) refused {label}: {}", ax_err(err)),
+        );
+        // An application that is merely busy is not an application that cannot be observed,
+        // and asking it five more times while it is still busy answers nothing. Stop at the
+        // first such refusal and let the retry counter come back when it has settled: the
+        // remaining five subscriptions would each cost the full messaging timeout, which is
+        // the difference between one second and six on the tick a window comes forward.
+        if matches!(err, AXError::CannotComplete | AXError::Failure) {
+            busy = true;
+            break;
         }
     }
     if registered == 0 {
         return Err(Refusal {
-            reason: "it accepted no notifications at all".into(),
-            permanent: !disabled,
+            reason: if busy {
+                "it was too busy to answer — it may have been starting up".into()
+            } else {
+                "it accepted no notifications at all".into()
+            },
+            permanent: !disabled && !busy,
         });
     }
     if registered < wanted.len() {
         crate::logging::line(
             "macos",
             &format!(
-                "{app} (pid {pid}) accepted {registered} of {} notifications; \
-                 run with tracing on to see which",
+                "{app} (pid {pid}) accepted {registered} of {} notifications; the refusals \
+                 are named above",
                 wanted.len()
             ),
         );

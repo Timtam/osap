@@ -67,6 +67,15 @@ const OCR_PAD: usize = 24;
 /// room for the crop being a little loose.
 const TARGET_CONTENT_PX: usize = 64;
 
+/// How long the whole ladder may take before the last rungs are abandoned.
+///
+/// The ladder exists for the read that nearly works; the cost falls entirely on the read
+/// that never will. Every rung is a Vision pass, they run on the thread that also carries
+/// the keyboard event tap, and macOS switches a tap off when its thread stops answering —
+/// which is exactly how the tester lost a Shift+Tab into a plugin that then moved its own
+/// focus. Better a field that says nothing promptly than a keystroke that goes missing.
+const LADDER_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Above this size, in points, the region is passed through untouched.
 ///
 /// Identical to the Windows thresholds on purpose: whether a region gets the small-text
@@ -173,7 +182,7 @@ fn recognize_inner(
                 crate::logging::trace("macos", || {
                     "ocr: tightened pass read nothing, trying the whole region".to_string()
                 });
-                let whole = Plan::whole(&rgba, px_w, px_h);
+                let whole = Plan::whole_with_ink(&rgba, px_w, px_h, plan.ink_h);
                 let second = render(&native, &whole).and_then(|(img, buf)| {
                     if debug {
                         let (pw, ph) = whole.out_size();
@@ -183,12 +192,26 @@ fn recognize_inner(
                     drop(buf);
                     r
                 });
-                match second {
-                    Some((ref t, _)) if t.trim().is_empty() => {
-                        bigger_then_faster(&native, &plan, &rgba, px_w, px_h, scale, lang, debug)
-                    }
-                    None => bigger_then_faster(&native, &plan, &rgba, px_w, px_h, scale, lang, debug),
-                    other => other,
+                let exhausted = second.as_ref().is_none_or(|(t, _)| t.trim().is_empty());
+                if exhausted && started.elapsed() < LADDER_BUDGET {
+                    bigger_then_faster(&native, &plan, &rgba, px_w, px_h, scale, lang, debug)
+                } else if exhausted {
+                    // Out of budget with nothing to show. Said out loud rather than traced,
+                    // because this is the shape of a real failure the tester met: a read
+                    // that returns nothing is also the most expensive read there is, and
+                    // this thread carries the keyboard. Four passes over a field that will
+                    // never resolve is how a keystroke goes missing.
+                    crate::logging::line(
+                        "macos",
+                        &format!(
+                            "ocr: gave up on a {w}x{h} pt region after {} ms rather than \
+                             keep the event loop waiting",
+                            started.elapsed().as_millis()
+                        ),
+                    );
+                    second
+                } else {
+                    second
                 }
             }
             other => other,
@@ -439,6 +462,7 @@ fn bigger_then_faster(
         ch: tight.ch,
         up: (tight.up * 2).min(10),
         pad: OCR_PAD * 2,
+        ink_h: tight.ink_h,
         bg: tight.bg,
         cropped: tight.cropped,
     };
@@ -666,6 +690,9 @@ struct Plan {
     up: usize,
     /// Background border around the upscaled crop, in processed pixels.
     pad: usize,
+    /// How tall the ink was, before any margin. Carried so a later rung can upscale for the
+    /// glyph rather than for the rectangle it was found in.
+    ink_h: usize,
     /// Fill colour for that border, 0..1 per channel.
     bg: [f64; 3],
     /// Whether the crop actually narrowed anything — the retry hinges on this.
@@ -683,6 +710,7 @@ impl Plan {
             ch: nh,
             up: 1,
             pad: 0,
+            ink_h: nh,
             bg: [0.0; 3],
             cropped: false,
         }
@@ -690,13 +718,26 @@ impl Plan {
 
     /// The whole capture, upscaled and framed but not cropped.
     fn whole(rgba: &[u8], nw: usize, nh: usize) -> Plan {
+        Plan::whole_with_ink(rgba, nw, nh, nh)
+    }
+
+    /// The whole region, but upscaled for ink of a known height rather than for the region's.
+    ///
+    /// The retry rung reaches here having already had a tightened plan in hand, so it knows
+    /// how tall the ink actually was — and handing that over is the difference between a
+    /// second attempt and a weaker one. Measured on the two fields this was chased through:
+    /// a 22-point region got `64/22 = 2` where its 20-point neighbour got 3, so the safety
+    /// net was thinnest exactly where it was needed. `nh` remains the answer for the only
+    /// other caller, the flat-colour fallback, where no ink was found to measure.
+    fn whole_with_ink(rgba: &[u8], nw: usize, nh: usize, ink_h: usize) -> Plan {
         Plan {
             x0: 0,
             y0: 0,
             cw: nw,
             ch: nh,
-            up: upscale_for(nh),
+            up: upscale_for(ink_h),
             pad: OCR_PAD,
+            ink_h,
             bg: corner_background(rgba, nw, nh),
             cropped: false,
         }
@@ -748,6 +789,44 @@ impl Plan {
             return Plan::whole(rgba, nw, nh);
         }
 
+        // A well, not a word.
+        //
+        // The regions these overlays author are slices of a plugin's chrome, and a value is
+        // very often painted inside a sunken box of its own — sforzando draws both of the
+        // fields this was chased through as pure black wells set into grey. The crop above
+        // then finds the WELL, because the well is what differs from the region's corners,
+        // and everything downstream treats a 15-row box as though it were a 15-row glyph:
+        // the upscale comes out far too small, and the recogniser is handed a black
+        // rectangle floating in a grey field instead of a digit.
+        //
+        // So if what was found is itself one flat colour at its own corners, and that colour
+        // is far from the outer background, measure again inside it against that colour. Only
+        // a strictly shorter result is taken, and the background becomes the well's own, so
+        // the padding frames the glyph in the colour it was drawn on rather than in chrome
+        // from outside the box. A region that really is just text is untouched: its corners
+        // will not agree, and nothing changes.
+        let mut bg = bg;
+        if let Some((ix0, iy0, ix1, iy1, inner_bg)) =
+            ink_inside_panel(rgba, nw, x0, y0, x1, y1, bg)
+        {
+            if iy1 - iy0 < y1 - y0 {
+                crate::logging::trace("macos", || {
+                    format!(
+                        "ocr: the crop was a filled panel {}x{}; the ink inside it is {}x{}",
+                        x1 - x0 + 1,
+                        y1 - y0 + 1,
+                        ix1 - ix0 + 1,
+                        iy1 - iy0 + 1
+                    )
+                });
+                bg = inner_bg;
+                x0 = ix0;
+                y0 = iy0;
+                x1 = ix1;
+                y1 = iy1;
+            }
+        }
+
         // The height of the INK, before the margin is added to it. This is what the upscale
         // has to be computed from, and computing it from the padded crop instead was a real
         // defect with a measurable cost: for sforzando's polyphony field on a non-Retina
@@ -769,6 +848,7 @@ impl Plan {
             ch,
             up: upscale_for(ink_h),
             pad: OCR_PAD,
+            ink_h,
             bg,
             cropped: cw < nw || ch < nh,
         }
@@ -778,6 +858,71 @@ impl Plan {
     fn out_size(&self) -> (usize, usize) {
         (self.cw * self.up + self.pad * 2, self.ch * self.up + self.pad * 2)
     }
+}
+
+/// Is this crop a filled panel with something drawn on it, and if so where is that something?
+///
+/// Answers by asking the crop's own four corners. If they agree with each other and differ
+/// from the colour the region as a whole was measured against, the crop is a box rather than
+/// a word — and the interesting content is whatever inside it differs from the box.
+///
+/// Returns the inner bounds and the panel's colour, or `None` when the corners disagree
+/// (a real glyph cluster, whose corners are background on some sides and ink on others) or
+/// when nothing inside the panel stands out from it.
+#[allow(clippy::too_many_arguments)]
+fn ink_inside_panel(
+    rgba: &[u8],
+    nw: usize,
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+    outer_bg: [f64; 3],
+) -> Option<(usize, usize, usize, usize, [f64; 3])> {
+    if x1 <= x0 + 2 || y1 <= y0 + 2 {
+        return None;
+    }
+    let at = |x: usize, y: usize| -> [f64; 3] {
+        let i = (y * nw + x) * 4;
+        [rgba[i] as f64, rgba[i + 1] as f64, rgba[i + 2] as f64]
+    };
+    let corners = [at(x0, y0), at(x1, y0), at(x0, y1), at(x1, y1)];
+    let far = |a: [f64; 3], b: [f64; 3]| {
+        let (dr, dg, db) = (a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+        dr * dr + dg * dg + db * db
+    };
+    // The corners have to agree closely — a panel is one colour — and the panel has to be
+    // clearly distinct from what surrounds it, or there is no panel, only noise.
+    const SAME_SQ: f64 = 12.0 * 12.0;
+    const DIFFERENT_SQ: f64 = 55.0 * 55.0;
+    for c in &corners[1..] {
+        if far(corners[0], *c) > SAME_SQ {
+            return None;
+        }
+    }
+    let outer = [outer_bg[0] * 255.0, outer_bg[1] * 255.0, outer_bg[2] * 255.0];
+    if far(corners[0], outer) <= DIFFERENT_SQ {
+        return None;
+    }
+
+    let panel = corners[0];
+    let (mut ix0, mut iy0, mut ix1, mut iy1) = (x1, y1, x0, y0);
+    let mut found = false;
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            if far(at(x, y), panel) > DIFFERENT_SQ {
+                found = true;
+                ix0 = ix0.min(x);
+                iy0 = iy0.min(y);
+                ix1 = ix1.max(x);
+                iy1 = iy1.max(y);
+            }
+        }
+    }
+    if !found {
+        return None;
+    }
+    Some((ix0, iy0, ix1, iy1, [panel[0] / 255.0, panel[1] / 255.0, panel[2] / 255.0]))
 }
 
 /// The integer upscale that brings content of this height to roughly the target.

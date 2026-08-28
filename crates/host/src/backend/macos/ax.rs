@@ -81,7 +81,7 @@ use crate::backend::{ControlInfo, DumpNode, WinInfo};
 /// A second is generous for a healthy application and still a bounded stall for a dead one,
 /// because the penalty box below is what stops a wedged plugin charging it repeatedly. The two
 /// have to be read together: a longer budget needs a longer quarantine.
-const MESSAGING_TIMEOUT: f32 = 1.0;
+pub(super) const MESSAGING_TIMEOUT: f32 = 1.0;
 
 /// Node and depth ceilings. Every walk in this file passes through [`walk`] and every one of
 /// them is bounded: the trees these run against are written by plugin vendors, and one that

@@ -45,16 +45,21 @@ local ov = O.new("sforzando")
 -- points, so the pitchbend region is the one most likely to want a nudge.
 -- Built fresh each time rather than shared, because two overlays now want them and a
 -- control table is not something to alias between them.
+-- `opensMenu` on all three because all three do: Enter on any of them opens sforzando's own
+-- pop-up list. It is not decoration — it is what tells the runtime to stop owning the
+-- navigation keys the moment the menu appears, so arrows and Enter reach the menu instead of
+-- re-firing the control underneath and reopening it. Without it the macOS tester could move
+-- through a menu and never commit a choice.
 local function addReadOuts(o)
-  o:addOCRButton({ label = "Instrument", region = host.os.pick {
+  o:addOCRButton({ label = "Instrument", opensMenu = true, region = host.os.pick {
     windows = { 90, 22, 200, 36 },
     macos = { 82, 20, 205, 43 },
   } })
-  o:addOCRButton({ label = "Polyphony", region = host.os.pick {
+  o:addOCRButton({ label = "Polyphony", opensMenu = true, region = host.os.pick {
     windows = { 486, 40, 516, 70 },
     macos = { 490, 38, 530, 58 },
   } })
-  o:addOCRButton({ label = "Pitchbend range", region = host.os.pick {
+  o:addOCRButton({ label = "Pitchbend range", opensMenu = true, region = host.os.pick {
     windows = { 576, 40, 602, 60 },
     macos = { 576, 38, 607, 60 },
   } })

@@ -117,7 +117,7 @@ fn hide_manager(frame: &Frame) {
     // application stops being one that has windows.
     #[cfg(target_os = "macos")]
     if crate::appcfg::dock_while_open() {
-        crate::backend::set_regular(false);
+        crate::backend::set_regular(false, "hiding the module window");
     }
 }
 
@@ -125,7 +125,7 @@ fn show_manager(frame: &Frame) {
     #[cfg(target_os = "macos")]
     {
         if crate::appcfg::dock_while_open() {
-            crate::backend::set_regular(true);
+            crate::backend::set_regular(true, "showing the module window");
         }
         crate::backend::activate_self();
     }
@@ -423,6 +423,11 @@ pub fn run_gui(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let on_reload = std::rc::Rc::new(on_reload);
     wxdragon::main(move |app| {
+        // First, before anything else touches the screen: wxWidgets has just taken the front
+        // from whatever the user was in, and this gives it straight back. See
+        // backend::macos::app for why it cannot simply be prevented.
+        #[cfg(target_os = "macos")]
+        crate::backend::restore_frontmost_after_gui_start();
         // The window is a background manager: hiding/closing it must not quit the
         // app — only the tray "Quit" does.
         app.set_exit_on_frame_delete(false);

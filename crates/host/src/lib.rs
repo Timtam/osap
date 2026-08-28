@@ -2184,6 +2184,11 @@ impl Manager {
                 let reload_shared = self.shared.clone();
                 let reload_modules = self.modules.clone();
                 let errors_shared = self.shared.clone();
+                // Before the window system starts: wxWidgets activates an agent application
+                // at launch on purpose, and this is the last moment at which we can still
+                // see who it is about to take the front from.
+                #[cfg(target_os = "macos")]
+                crate::backend::note_frontmost_before_gui();
                 gui::run_gui(
                     module_infos,
                     move |idx, enabled| toggle_shared.set_enabled(idx, enabled),

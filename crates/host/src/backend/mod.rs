@@ -16,7 +16,9 @@ mod macos;
 /// Bringing this process to the front, and whether it has a Dock icon — see
 /// `macos::app`. Re-exported so `gui.rs` can reach it without a macOS-only `use`.
 #[cfg(target_os = "macos")]
-pub(crate) use macos::app::{activate_self, set_regular};
+pub(crate) use macos::app::{
+    activate_self, note_frontmost_before_gui, restore_frontmost_after_gui_start, set_regular,
+};
 #[cfg(not(any(windows, target_os = "macos")))]
 mod stub;
 
