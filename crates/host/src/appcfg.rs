@@ -37,9 +37,8 @@ pub struct Switch {
     ///
     /// Held here as well as in the static, so `load` can tell "stored off" from "never
     /// stored" — the difference between a person having turned something off and a fresh
-    /// installation. Every switch is off today; the field exists because that is a fact
-    /// about the switches, not a rule, and a default hidden in a `static` is a default
-    /// nobody reading this list would find.
+    /// installation. Held here rather than only in the `static` because a default hidden in
+    /// a static is a default nobody reading this list would find — and one of them is on.
     pub default_on: bool,
     state: &'static AtomicBool,
 }
@@ -50,7 +49,7 @@ static OCR_DEBUG: AtomicBool = AtomicBool::new(false);
 static IGNORE_SUPPORTED_OS: AtomicBool = AtomicBool::new(false);
 static HEADLESS: AtomicBool = AtomicBool::new(false);
 static SPEAK_VIA_VOICEOVER: AtomicBool = AtomicBool::new(false);
-static DOCK_WHILE_OPEN: AtomicBool = AtomicBool::new(false);
+static DOCK_WHILE_OPEN: AtomicBool = AtomicBool::new(true);
 
 /// Every application setting, in the order the tab shows them: the ones that take effect
 /// immediately first, so the two that need a restart are not the first thing read out.
@@ -132,12 +131,13 @@ pub const SWITCHES: &[Switch] = &[
                 reach it — takes effect the next time the window is opened",
         help: "A Dock icon and an entry in the application switcher are one and the same \
                bit, so a window that Command-Tab can return to is a window with a Dock \
-               icon while it is open. Without this, the way back is the menu-bar icon: \
-               VO-M twice reaches the menu-bar extras. Off by default because promoting an \
-               application this way has a reported side effect nobody here can reproduce — \
-               its menu bar can stay unresponsive until you switch away and back.",
+               icon while it is open. Turn it off and the only way back is the menu-bar \
+               icon, which VO-M twice reaches. On by default since the tester asked for it: \
+               it was held back over a reported side effect — a promoted application's menu \
+               bar staying unresponsive until you switch away and back — which did not \
+               happen on his machine.",
         os: Some("macos"),
-        default_on: false,
+        default_on: true,
         state: &DOCK_WHILE_OPEN,
     },
 ];

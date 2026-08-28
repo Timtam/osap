@@ -1262,17 +1262,40 @@ pub fn focus_window(handle: isize) -> bool {
             app.activateWithOptions(opts)
         });
 
-    if !(raised && activated) {
-        crate::logging::line(
-            "macos",
-            &format!(
-                "focusing window {handle} (pid {}): raise {}, application activation {}",
-                entry.pid,
-                if raised { "accepted" } else { "REFUSED" },
-                if activated { "accepted" } else { "REFUSED" }
-            ),
-        );
-    }
+    // A third thing, and the tester's session is why it is here. Raising the window and
+    // activating the application both reported success every single time — the log has no
+    // refusal in it — and yet Tab still went to the host's own controls. Bringing a window
+    // forward is not the same as moving the KEYBOARD into it: the application's focus stays
+    // wherever it was, which in REAPER is its FX list, and an overlay that gates on "the
+    // keyboard is in the plugin" then correctly declines to do anything. He found the
+    // workaround himself: press Shift+Tab once and it starts working.
+    //
+    // Asking the window to be the focused one is the polite way to say the same thing. It
+    // may not be enough — whether an application moves its internal focus in response is the
+    // application's business — which is why the chain depth is measured afterwards and
+    // reported either way. That number is the difference between "we asked and it worked"
+    // and "we asked and this host ignores it", and nobody here can produce it.
+    let focused =
+        unsafe { entry.element.set_attribute_value(a_focused(), CFBoolean::new(true).as_ref()) }
+            == AXError::Success;
+
+    let depth = window_focus_chain().len();
+    crate::logging::line(
+        "macos",
+        &format!(
+            "focusing window {handle} (pid {}): raise {}, activation {}, focused-attribute \
+             {} — the focus chain is now {depth} deep{}",
+            entry.pid,
+            if raised { "yes" } else { "REFUSED" },
+            if activated { "yes" } else { "REFUSED" },
+            if focused { "yes" } else { "REFUSED" },
+            if depth <= 1 {
+                ", which means the keyboard is in the window itself"
+            } else {
+                ", so the keyboard is still on one of the host's own controls"
+            }
+        ),
+    );
     raised || activated
 }
 

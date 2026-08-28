@@ -1095,29 +1095,34 @@ pub fn run_gui(
             hide_manager(&frame);
         });
 
-        // Escape, and Command-W where there is a Command key.
+        // A real menu bar, because the hand-rolled version did not work and could not have.
         //
-        // Bound on the frame, which is where wxWidgets sends a key event that the focused
-        // control did not handle. On Windows this is a convenience next to Alt+F4; on macOS
-        // it is the only keystroke that closes this window at all, because an application
-        // without a Dock icon has no menu bar to put Command-W in. The tray menu carries the
-        // same action for the case where this does not reach us.
-        frame.on_key_down(move |event| {
-            const ESCAPE: i32 = 27;
-            const W: i32 = 87;
-            if let WindowEventData::Keyboard(k) = &event {
-                let code = k.get_key_code();
-                // `control_down` is Command on macOS and Control on Windows — wxWidgets maps
-                // the two by position, and `RawControlDown` is the one that means the
-                // literal Control key. So this is Command-W there and Ctrl+W here, each
-                // being the convention of its own platform, from one line.
-                if code == Some(ESCAPE) || (code == Some(W) && k.control_down()) {
-                    hide_manager(&frame);
-                    return;
-                }
-            }
-            event.skip(true);
-        });
+        // The first attempt bound Escape and Command-W on the frame, on the assumption that
+        // wxWidgets sends a key the focused control did not handle up to its parent. It does
+        // not: `wxKeyEvent` derives from `wxEvent`, not `wxCommandEvent`, so its propagation
+        // level is `wxEVENT_PROPAGATE_NONE` and `TryAfter` never carries it up (wxWidgets
+        // src/common/wincmn.cpp:3499, include/wx/event.h:2243). The handler fired only while
+        // the frame itself had focus, which is never — and the tester found exactly that:
+        // only the menu-bar item closed the window.
+        //
+        // A menu bar solves it where the platform intends. Accelerators are matched before
+        // the focused control sees the key, macOS puts Quit where a Mac user reaches for it,
+        // and — the part that matters most here — a menu bar is somewhere a screen-reader
+        // user can go and READ what this window can do, rather than having to be told.
+        let file_menu = Menu::builder()
+            .append_item(MENU_HIDE, "&Close window	Ctrl+W", "Put the module window away")
+            .append_separator()
+            .append_item(MENU_QUIT, "&Quit	Ctrl+Q", "Quit Automation Platform")
+            .build();
+        frame.set_menu_bar(MenuBar::builder().append(file_menu, "&File").build());
+        {
+            let (frame, app) = (frame, app);
+            frame.on_menu_selected(move |event| match event.get_id() {
+                MENU_HIDE => hide_manager(&frame),
+                MENU_QUIT => app.exit_main_loop(),
+                _ => {}
+            });
+        }
 
         // System tray icon + right-click menu (Show / Quit).
         // A status item in the menu bar, not a Dock icon. The default type maps to the
