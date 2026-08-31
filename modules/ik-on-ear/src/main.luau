@@ -464,6 +464,16 @@ ov:addStepper({
   label = "Tone",
   when = function() return element("Tone") ~= nil end,
   text = function() return valueBelow("Tone") or "not shown" end,
+  settle = 400,
+  -- A double-click puts it back to its default, which is what a press on a slider ought to
+  -- mean when the control offers it and nothing at all when it does not.
+  onActivate = function()
+    local x, y = screenPoint(290, 780)
+    if not x then return end
+    host.log.info(("[on-ear] Tone: double-clicking (%d,%d) to reset it"):format(x, y))
+    host.input.click(x, y)
+    host.input.click(x, y)
+  end,
   -- Half a notch. One whole one moves this knob five of its own units, which is a big step to
   -- take blind when the value is the tone of everything you are about to listen to. If the
   -- application rounds the half away it will simply not move, and the control will say the
@@ -474,35 +484,167 @@ ov:addStepper({
   end,
 })
 
--- Width READS. It does not adjust, and that is a statement about this control rather than a
--- gap somebody forgot to fill.
+-- Width, dragged — and the reason five attempts failed is worth more than the control.
 --
--- Five mechanisms were tried against it, and the geometry behind them is measured rather than
--- supposed — three captures of the bar, at ten, forty-eight and a hundred per cent, agreeing
--- on where the handles sit to within a third of a pixel:
+-- Every one of them was built on the same two unchecked beliefs. The first was that the scale
+-- runs to a hundred per cent; it runs to TWO hundred, so a pixel of handle is worth about two
+-- per cent and the "impossible" eighteen per cent for two pixels was simply correct
+-- arithmetic. The second was that only one handle moves; both do, always symmetrically, so
+-- which one a press catches never mattered — and a great deal of care went into avoiding an
+-- ambiguity that does not exist.
 --
---   the wheel                 moves the Tone knob beside it perfectly; this one ignores it
---   an instant drag           moved it eighteen per cent for two pixels, then not at all
---   a paced drag from Lua     the timers proved far coarser than the pacing asked for
---   a paced drag from Rust    injected movement, real duration, three pixels of travel: nothing
---   click to focus, then      the arrow key posted straight to the window, past our own
---   an arrow key              hook: nothing
+-- What settled it was somebody looking at the screen. This is an ordinary drag by distance.
 --
--- Everything checkable from outside is right, and it does not move. What this control wants
--- from a mouse is not discoverable by trying another variation of the same gesture, and every
--- variation costs a person a test round to find out.
+-- Four captures now, and they agree to within a pixel:
 --
--- So it says what it says, honestly, and the mouse is how it gets changed. A control that
--- announces itself as a slider and then ignores every key is a promise this project does not
--- make; static text is what this is, and static text is what it now claims to be. Should
--- somebody ever learn what it responds to, `addStepper` is still there and this becomes four
--- lines again.
-ov:addStaticText({
+--     10%   both handles merged at 623-625 — this is the slider's minimum
+--     48%   607 and 644
+--    100%   580 and 670
+--    200%   528 and 722
+--
+--     offset from the middle = 0.513 x per cent - 5.63
+--
+-- The old code clamped its press to at least one pixel RIGHT of the middle, to keep away from
+-- the other handle. At the minimum the handles sit AT the middle, so that clamp put every
+-- press one pixel off the only thing there was to grab. That is the whole of why nothing
+-- happened, and it was a guard against a problem that was never real.
+-- WHERE TO CLICK FOR A VALUE, fitted across the whole range rather than a corner of it.
+--
+-- Thirteen clicks and what the window said to each:
+--
+--     670->85   673->91   675->94   677->97   679->101  684->112  687->119
+--     693->131  698->142  704->155  712->172  721->191  732->200
+--
+--     x = 629.1 + 0.4812 x per cent      (200% at about 725, and it saturates there)
+--
+-- This slope has now been wrong three times, and each time for the same reason: the baseline
+-- was too short. The handles gave 0.51 over four captures — the wrong quantity entirely, since
+-- the handles' travel is not where a click lands. Two clicks gave 0.42. Five clicks spanning
+-- nine pixels and sixteen points gave 0.5625, which fits those five and misses everything
+-- else, because both the pixel and the per cent are whole numbers and over nine pixels the
+-- rounding IS the signal. Over fifty pixels it is not.
+--
+-- What that last error cost is worth naming: 0.5625 puts 195% at x=732, and 732 is already
+-- past the end of the travel, so the value saturated at 200 and would not come back down.
+--
+-- Clamped to the top of the range for the same reason. Only the right half is ever used; the
+-- handles meet in the middle and each side drives one of them.
+local WIDTH_MID = 625
+local WIDTH_PX_PER_PCT, WIDTH_X_AT_ZERO = 0.4812, 629.1
+local WIDTH_MIN, WIDTH_MAX = 10, 200
+local WIDTH_STEP = 5
+
+-- Deliberately PAST the end, at either end.
+--
+-- Two hundred per cent computes to x=725.3, a screen coordinate is a whole number, and 725 is
+-- worth 199. Half a pixel is the difference between reaching the top of the range and stopping
+-- just short of it for ever. The control clamps to its own limits, so a click beyond the end
+-- lands exactly on the end — which is also what somebody with a mouse does: they drag it until
+-- it stops.
+--
+-- Never left of the middle, though. That is where the two handles meet, and the left half
+-- drives the other one.
+local WIDTH_OVERSHOOT = 8
+
+local function widthHandleX(pct)
+  local x = WIDTH_X_AT_ZERO + WIDTH_PX_PER_PCT * pct
+  -- THE TOP IS A WALL AND THE BOTTOM IS A FOLD, which is why only one of them is overshot.
+  --
+  -- Past two hundred the control clamps, so aiming beyond the end lands on the end — the same
+  -- thing somebody with a mouse does when they drag until it stops.
+  --
+  -- The bottom has nothing to clamp against. The handles stop about ten per cent apart rather
+  -- than meeting, so left of that point the click belongs to the OTHER handle and the value
+  -- comes back UP, mirrored. Every attempt to reach the floor by aiming below it therefore
+  -- overshot into its reflection and landed at twelve. It has to be hit, not passed — so this
+  -- is the scale's own answer for the minimum, which is the one position that was never tried:
+  -- the earlier versions subtracted an overshoot from it, or replaced it with the middle.
+  if pct >= WIDTH_MAX then x = x + WIDTH_OVERSHOOT end
+  return x
+end
+
+local function widthClickAt(dx, pct, want, why)
+  local x, y = screenPoint(dx, 869)
+  if not x then return nil end
+  host.log.info(("[on-ear] Width %d%% -> %d%% (%s): clicking (%d,%d)")
+    :format(pct, want, why, x, y))
+  host.input.click(x, y)
+  return dx
+end
+
+-- How long the arrows have to stop before the click goes out, and where a burst of them has
+-- got to so far.
+local WIDTH_IDLE = 260
+local widthPending, widthGen = nil, 0
+
+local function widthNow()
+  local shown = valueBelow("Width")
+  return shown and tonumber(string.match(shown, "(%d+)"))
+end
+
+-- Twice in quick succession at the same point, which the system reports to the application as
+-- a double-click. On both of these controls that means "back to the default", and it is the
+-- only way to reach an exact value without counting steps.
+local function doubleClick(x, y)
+  host.input.click(x, y)
+  host.input.click(x, y)
+end
+
+ov:addStepper({
   label = "Width",
+  -- Long enough for the click, the correction, and the window's own redraw.
+  settle = 500,
   when = function() return element("Width") ~= nil end,
-  text = function()
-    local v = valueBelow("Width")
-    return v and (v .. ", adjust with the mouse") or "not shown"
+  text = function() return valueBelow("Width") or "not shown" end,
+  onActivate = function()
+    local x, y = screenPoint(WIDTH_MID, 869)
+    if not x then return end
+    host.log.info(("[on-ear] Width: double-clicking (%d,%d) to reset it"):format(x, y))
+    doubleClick(x, y)
+  end,
+  onStep = function(dir)
+    local pct = widthPending or widthNow()
+    if not pct then
+      host.speech.output("width is not readable, so it will not be moved", { interrupt = true })
+      return
+    end
+    -- Round numbers, so stepping down from two hundred passes through a hundred exactly rather
+    -- than through whatever the clicks happened to accumulate.
+    local want = math.floor((pct + dir * WIDTH_STEP) / WIDTH_STEP + 0.5) * WIDTH_STEP
+    want = math.max(WIDTH_MIN, math.min(WIDTH_MAX, want))
+    if want == pct then
+      host.speech.output(dir < 0 and "already at its narrowest" or "already at its widest",
+        { interrupt = true })
+      return
+    end
+    -- ONE CLICK PER BURST OF PRESSES, not one per press.
+    --
+    -- Two clicks close together in time and space are a double-click, and on this control a
+    -- double-click resets it. That already cost a correcting pass, which undid every step it
+    -- corrected; then the tester found the same thing from the other side — arrow keys pressed
+    -- quickly enough are two clicks two pixels apart, and the slider jumped back to its
+    -- default mid-adjustment.
+    --
+    -- Waiting out the double-click time between presses would make holding an arrow useless.
+    -- So the presses accumulate instead: each one moves a pending target, and the click goes
+    -- out once they stop. Five quick presses become one click twenty-five per cent along,
+    -- which is both what was asked for and faster than five clicks would have been.
+    --
+    -- There is no correcting pass and there must not be, for the same reason.
+    widthPending = want
+    widthGen += 1
+    local mine = widthGen
+    if not host.timer then
+      widthClickAt(widthHandleX(want), pct, want, "step")
+      widthPending = nil
+      return
+    end
+    host.timer.after(WIDTH_IDLE, function()
+      if mine ~= widthGen or not widthPending then return end
+      local target = widthPending
+      widthPending = nil
+      widthClickAt(widthHandleX(target), widthNow() or pct, target, "step")
+    end)
   end,
 })
 

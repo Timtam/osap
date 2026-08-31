@@ -339,6 +339,9 @@ function Overlay:addStepper(opts)
     label = opts.label,
     text = opts.text,
     onStep = opts.onStep,
+    -- What a PRESS means, where the control has something. Optional: a stepper without one is
+    -- a value you change with the arrows and nothing else.
+    onActivate = opts.onActivate,
     settle = opts.settle,
     typeLabel = opts.typeLabel,
     hotkey = opts.hotkey,
@@ -1643,7 +1646,14 @@ function Overlay:activate(index)
       tostring(self.label), tostring(c.label), px, py))
     host.input.click(px, py)
     host.speech.output((c.label or "") .. ", activated", { interrupt = true })
-  elseif c.kind == "custom" and c.onActivate then
+  elseif (c.kind == "custom" or c.kind == "stepper") and c.onActivate then
+    -- A stepper can be ACTIVATED as well as stepped, where the control it stands for has
+    -- something a press means. ON:EAR's two are the case that asked for it: a double-click
+    -- puts either of them back to its default, which is a thing worth one keystroke and was
+    -- otherwise twenty. Without this, Space and Return were captured on a stepper — it is not
+    -- an inert control — and then did nothing at all, which is the promise-without-an-action
+    -- this runtime refuses everywhere else.
+    --
     -- The module's own code, so it is called guarded. A control whose action throws was
     -- silent before this: the host caught the error at the key dispatch and wrote a line, and
     -- the person who pressed it heard nothing at all and had no way to tell that from a
@@ -1655,6 +1665,15 @@ function Overlay:activate(index)
         tostring(self.label), tostring(c.label), tostring(err)))
       host.speech.output((c.label or "That control") .. " could not be used",
         { interrupt = true })
+    elseif c.kind == "stepper" then
+      -- Activating a stepper changes its value, so the value is read again and announced —
+      -- from the control, not from what the activation intended.
+      if host.timer then
+        local at = i
+        host.timer.after(c.settle or 150, function()
+          if self.active and self.focus == at then speakControl(self, at, false, true) end
+        end)
+      end
     end
   elseif (c.kind == "ocr" or c.kind == "ocredit") and c.region then
     -- An OCR control re-reads its label on activate. An OCRButton then clicks the region
