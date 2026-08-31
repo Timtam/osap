@@ -1172,6 +1172,17 @@ local function chooser(spec)
     return don < doff
   end
 
+  -- How far the tile lattice has slid from where it was measured, and where a row's middle
+  -- is because of it. Declared here rather than beside the reading that works it out, because
+  -- everything that positions a tile is below this line and a value used before its own
+  -- declaration is not a value at all — which took the whole ring down: one nil call inside a
+  -- control's visibility test, and Tab stopped doing anything at all.
+  local gridShift = 0
+
+  local function rowY(r)
+    return spec.tiles.rows[r] + gridShift
+  end
+
   -- HOW MANY positions hold anything, asked once per epoch and in as few screen touches as
   -- possible.
   --
@@ -1292,7 +1303,7 @@ local function chooser(spec)
   -- simply contributes no words.
   local NAME_HALF = 54
   local NAME_ABOVE = 70 -- a name's middle sits this far below its tile's middle
-  local gridShift, gridNames, gridDirty, gridAtCount = 0, {}, true, -1
+  local gridNames, gridDirty, gridAtCount = {}, true, -1
 
   local function relearnGrid()
     gridDirty = false
@@ -1371,11 +1382,6 @@ local function chooser(spec)
     for _ in pairs(gridNames) do named = named + 1 end
     host.log.info(("[on-ear] %s: read the grid in %d ms — %d named tile(s), rows offset by %d")
       :format(spec.name, host.now() - started, named, math.floor(gridShift + 0.5)))
-  end
-
-  -- Where a row's middle is right now.
-  local function rowY(r)
-    return spec.tiles.rows[r] + gridShift
   end
 
   -- A name, re-reading the grid only when something could have changed it.

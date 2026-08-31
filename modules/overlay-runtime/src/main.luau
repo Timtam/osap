@@ -152,7 +152,29 @@ end
 -- (activate), and which control owns a shared hotkey (_visibleClaimant). Disagreeing
 -- would make a control silently unreachable while its key still fired something else.
 local function isVisible(self, c)
-  return c ~= nil and (c.when == nil or c.when(self) == true)
+  if c == nil then return false end
+  if c.when == nil then return true end
+  -- A broken predicate hides ONE control, not the overlay.
+  --
+  -- This ran unprotected, and a module with a value used above its own declaration — a nil
+  -- where a function should be — took the entire ring down with it: Tab stopped doing
+  -- anything at all, in every control, with no announcement. For somebody who cannot see the
+  -- screen that is indistinguishable from the application having died, and the actual mistake
+  -- was one line in one control's `when`.
+  --
+  -- Hidden rather than shown, because a control whose visibility cannot be determined cannot
+  -- promise anything either. Said once per control, so a predicate that fails on every scan
+  -- does not bury the log it is trying to explain itself in.
+  local ok, v = pcall(c.when, self)
+  if not ok then
+    if not c._whenBroke then
+      c._whenBroke = true
+      host.log.info(string.format("%s: '%s' — its `when` failed (%s); hiding just this control",
+        tostring(self.label), tostring(c.label), tostring(v)))
+    end
+    return false
+  end
+  return v == true
 end
 
 -- Adds everything `build` adds under a shared condition: `pred` is ANDed onto each
