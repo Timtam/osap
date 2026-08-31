@@ -3,13 +3,23 @@ name = "IK Multimedia ARC ON:EAR"
 version = "0.1.0"
 license = "GPL-3.0-or-later"
 dependencies = ["com.platform.overlay"]
-# Windows only, and said so rather than discovered.
+# Windows only, and for a narrower reason than "the calls do not exist there".
 #
-# Everything this module knows about ON:EAR it learns from the Windows accessibility tree —
-# the panels, the browsers, the row lists, the read-outs. macOS exposes none of that through
-# the same calls, so on a Mac it would load, attach to the window and then find nothing at
-# all: a ring of controls that each announce "not shown". Declared, so the manager can say
-# "declares windows, this is macos" instead of leaving somebody to work that out.
+# They do. Every uia_* call this module uses is implemented on macOS as well, on the
+# Accessibility API — find, locate, rawDump and the rest all reach AXUIElement, and the control
+# types translate (a Window is an AXWindow, a Text an AXStaticText). The abstraction is whole.
+#
+# What has never been checked is whether ON:EAR looks the same through it. Every name this
+# module matches on — SpeakerBrowserWindow, Row 1, MODEL, Battery Level — comes from JUCE's own
+# accessibility handlers rather than from Windows, so they may well be identical; but "may well
+# be" is not a measurement, and nobody has had this application in front of a Mac. One part is
+# certainly wrong there: the window is matched on the class JUCE_1a05739a091, which is a Win32
+# window class and has no counterpart. The pixel work would carry over unchanged; the OCR work
+# would meet a different engine with different habits.
+#
+# So: declared, so the manager can say "declares windows, this is macos" rather than leaving
+# somebody to work it out from a ring of controls that all answer "not shown". It is a
+# statement about what has been tested, not about what is possible.
 supported_os = ["windows"]
 
 [capabilities]
