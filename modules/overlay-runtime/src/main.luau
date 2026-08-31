@@ -284,6 +284,7 @@ function Overlay:addHotspotButton(opts)
     kind = "hotspot",
     label = opts.label,
     ocrLabel = opts.ocrLabel,
+    text = opts.text,
     at = opts.at,
     points = opts.points,
     settle = opts.settle,
@@ -467,6 +468,11 @@ function Overlay:addHotspotToggle(opts)
     kind = "hotspottoggle",
     label = opts.label,
     ocrLabel = opts.ocrLabel,
+    -- `text = function(overlay) -> string`: announced between the label and "toggle button".
+    -- A state and an AVAILABILITY are different questions, and the pixel that answers one
+    -- often answers the other: a greyed switch still has an on/off state, and saying only
+    -- that state invites the user to press something the application will ignore.
+    text = opts.text,
     at = opts.at,
     onColor = opts.onColor,
     offColor = opts.offColor,
@@ -1566,6 +1572,14 @@ function Overlay:activate(index)
     local px, py = hotspotPoint(self, c)
     if not px then return end
     if refuseOutside(self, c, px, py) then return end
+    -- WHERE it clicked, in the log. A hotspot that presses nothing and a hotspot that presses
+    -- the wrong thing are the same experience for someone who cannot see the screen — the
+    -- control says "activated" either way — and telling them apart cost a whole test round
+    -- because this line was not here. The image-searching button next door has always logged
+    -- its outcome; these two, the ones with authored coordinates and therefore the ones most
+    -- likely to be aimed wrong, did not.
+    host.log.info(string.format("%s: '%s' activated, clicking (%d,%d)",
+      tostring(self.label), tostring(c.label), px, py))
     host.input.click(px, py)
     host.speech.output((c.label or "") .. ", activated", { interrupt = true })
   elseif c.kind == "custom" and c.onActivate then
@@ -1653,9 +1667,33 @@ function Overlay:activate(index)
   elseif c.kind == "hotspottoggle" and c.at then
     local px, py = hotspotPoint(self, c)
     if not px then return end
+    -- The pixel BEFORE and the pixel AFTER, either side of the click.
+    --
+    -- This is the difference between a diagnosis and a guess. A toggle that reports the same
+    -- state after being pressed has two completely different explanations — the click missed,
+    -- or the control is one of a radio group and pressing the selected member is meant to do
+    -- nothing — and from the outside they sound identical. Two pixel readings separate them:
+    -- unchanged means nothing happened where we clicked, changed means the application
+    -- responded and the announcement is simply telling the truth.
+    --
+    -- The reads cost a compositor frame each, which is affordable here and nowhere near the
+    -- keystroke path: this runs when somebody deliberately pressed something.
+    local before = host.screen.pixel(px, py)
     host.input.click(px, py)
     -- Re-read the new state (announced with the label) once the UI redraws.
-    if host.timer then host.timer.after(150, function() speakControl(self, i, false, true) end) end
+    if host.timer then
+      host.timer.after(150, function()
+        local after = host.screen.pixel(px, py)
+        local function name(q) return q and string.format("%d,%d,%d", q.r, q.g, q.b) or "?" end
+        host.log.info(string.format(
+          "%s: '%s' pressed at (%d,%d) — pixel %s -> %s%s",
+          tostring(self.label), tostring(c.label), px, py, name(before), name(after),
+          (before and after and before.r == after.r and before.g == after.g
+            and before.b == after.b) and " (unchanged: the click changed nothing there)" or ""
+        ))
+        speakControl(self, i, false, true)
+      end)
+    end
   end
 end
 

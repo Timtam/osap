@@ -5,4 +5,4 @@ license = "GPL-3.0-or-later"
 dependencies = ["com.platform.overlay"]
 
 [capabilities]
-require = ["window", "uia", "input", "speech", "log"]
+require = ["window", "uia", "screen", "ocr", "input", "speech", "timer", "log"]
