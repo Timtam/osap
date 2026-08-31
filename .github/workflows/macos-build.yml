@@ -59,6 +59,12 @@ concurrency:
   group: macos-build-${{ github.ref }}
   cancel-in-progress: true
 
+# `actions: read` is for looking up the last successful run and downloading its build; see
+# "Reuse the last build" below.
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   build:
     # Intel by default, because the machine the build has to RUN on is Intel and an arm64
@@ -70,9 +76,78 @@ jobs:
     # package-macos.sh --universal. Not worth it for a test build that one person installs.
     runs-on: ${{ inputs.runner || 'macos-15-intel' }}
     steps:
+      # Full history, because the reuse check below asks git what has changed since the commit
+      # the last build was made from, and a shallow clone does not have that commit.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Skip the build when the Rust has not moved since the last one.
+      #
+      # Most pushes to this repository are Luau. They trigger this job — deliberately, because
+      # a module's macOS-only branch runs nowhere else — and the job then compiles the whole
+      # application to produce a binary that is byte-for-byte the one it produced last time.
+      # On a warm cargo cache that is a couple of minutes; on a cold one it is wxWidgets from
+      # source, which is the better part of a month's included macOS allowance.
+      #
+      # The question is deliberately NOT "did this push touch crates/". A push's own diff says
+      # nothing about the Rust that changed in the pushes before it which did not trigger this
+      # job at all — this workflow only fires on a narrow set of paths, so `lib.rs` can move
+      # several times without ever being compiled here. What matters is whether anything under
+      # `crates/` differs from the commit the reusable build was actually made from, and git
+      # can answer exactly that.
+      #
+      # Every failure here falls through to building. A missing run, an expired artifact, an
+      # unfamiliar layout: none of them are worth a red mark, and all of them are worth a
+      # build.
+      - name: Reuse the last build when the Rust has not moved
+        id: reuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          run_id=$(gh run list --workflow macos-build.yml --status success \
+            --branch "${{ github.ref_name }}" --limit 1 --json databaseId \
+            -q '.[0].databaseId' 2>/dev/null || true)
+          if [ -z "${run_id:-}" ]; then echo "no earlier successful run"; exit 0; fi
+          prev=$(gh run view "$run_id" --json headSha -q .headSha 2>/dev/null || true)
+          if [ -z "${prev:-}" ]; then echo "cannot read that run's commit"; exit 0; fi
+          if ! git cat-file -e "$prev^{commit}" 2>/dev/null; then
+            echo "commit $prev is not in this clone"; exit 0
+          fi
+          if ! git diff --quiet "$prev" HEAD -- crates Cargo.toml Cargo.lock package-macos.sh; then
+            echo "the Rust has moved since $prev — building"
+            git diff --name-only "$prev" HEAD -- crates Cargo.toml Cargo.lock package-macos.sh
+            exit 0
+          fi
+          echo "no Rust change since $prev; trying to reuse its build"
+          mkdir -p reuse
+          gh run download "$run_id" --dir reuse 2>/dev/null || { echo "nothing to download"; exit 0; }
+          zip=$(find reuse -name '*.zip' | head -n1)
+          if [ -z "${zip:-}" ]; then echo "no zip in that artifact"; exit 0; fi
+          mkdir -p dist
+          ditto -x -k "$zip" dist || { echo "could not unpack it"; exit 0; }
+          if [ ! -d dist/AutomationPlatform ]; then echo "unfamiliar layout"; exit 0; fi
+          # The binary is the old one; the MODULES are this commit's, which is the whole point
+          # of the run. Staged the same way package-macos.sh stages them.
+          rm -rf dist/AutomationPlatform/modules
+          mkdir -p dist/AutomationPlatform/modules
+          for dir in modules/*/; do
+            name=$(basename "$dir")
+            [ -f "$dir/module.toml" ] || continue
+            cp -R "$dir" "dist/AutomationPlatform/modules/$name"
+            rm -rf "dist/AutomationPlatform/modules/$name/calibration"
+          done
+          # Re-zipped so the artifact a tester downloads carries today's modules rather than
+          # the ones the binary happened to ship with.
+          rm -f dist/*.zip
+          (cd dist && ditto -c -k --sequesterRsrc --keepParent AutomationPlatform \
+            "AutomationPlatform-macos-$(date +%Y-%m-%d)-modules.zip")
+          echo "reused=true" >> "$GITHUB_OUTPUT"
+          echo "reused the build from $prev"
 
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.reuse.outputs.reused != 'true' 
 
       # wxWidgets is compiled from source by wxdragon's build script; it is by far the
       # longest part of the job, and it only changes when the dependency does.
@@ -82,23 +157,29 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: macos-wx-${{ inputs.runner || 'macos-15-intel' }}
+        if: steps.reuse.outputs.reused != 'true'
 
       - name: Install build tools
         run: brew install ninja cmake
+        if: steps.reuse.outputs.reused != 'true'
 
       - name: Point bindgen at the Xcode toolchain's libclang
         run: echo "LIBCLANG_PATH=$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib" >> "$GITHUB_ENV"
+        if: steps.reuse.outputs.reused != 'true'
 
       - name: Build
         run: cargo build --release
+        if: steps.reuse.outputs.reused != 'true'
 
       # The platform-independent logic — dependency ordering, key parsing, the bundle-path
       # rule — on a machine where the bundle-path rule is not hypothetical.
       - name: Test
+        if: steps.reuse.outputs.reused != 'true'
         run: cargo test --release
 
       - name: Package
         run: ./package-macos.sh --no-build
+        if: steps.reuse.outputs.reused != 'true'
 
       # Load every shipped module once, on a Mac, because nothing else ever does.
       #

@@ -610,21 +610,49 @@ ov:addStepper({
 -- what was asked for — it just needs long enough to arrive.
 local DRAG_TICK = 16
 
+local dragging = false
+
 local function slowDrag(x1, y1, x2, y2)
-  host.input.mouseDown(x1, y1)
   local n = math.max(1, math.floor(math.max(math.abs(x2 - x1), math.abs(y2 - y1))))
+  host.log.info(("[on-ear] drag: down at (%d,%d), %d step(s) to (%d,%d)")
+    :format(x1, y1, n, x2, y2))
+  host.input.mouseDown(x1, y1)
+  dragging = true
+  -- A BUTTON THAT ALWAYS COMES BACK UP.
+  --
+  -- The steps below are a chain of timers, and a chain has a first link that might not fire.
+  -- If it does not, the left mouse button stays pressed — on the machine of somebody who
+  -- cannot see that it is, with every subsequent click becoming a drag. That is not a risk
+  -- worth taking for a slider, so the release is scheduled once, outright, on a clock that
+  -- does not depend on the chain reaching its end.
+  host.timer.after(DRAG_TICK * (n + 4), function()
+    if dragging then
+      dragging = false
+      host.input.mouseUp(x2, y2)
+      host.log.info("[on-ear] drag: up (by the safety net)")
+    end
+  end)
   local i = 0
   local function step()
+    if not dragging then return end
     i += 1
     local t = i / n
-    host.input.move(
-      math.floor(x1 + (x2 - x1) * t + 0.5),
-      math.floor(y1 + (y2 - y1) * t + 0.5)
-    )
+    local mx = math.floor(x1 + (x2 - x1) * t + 0.5)
+    local my = math.floor(y1 + (y2 - y1) * t + 0.5)
+    host.input.move(mx, my)
+    -- Every step, because "the drag did nothing" and "the drag never happened" look the same
+    -- from outside and have completely different answers.
+    host.log.info(("[on-ear] drag: step %d/%d at (%d,%d), cursor now %s")
+      :format(i, n, mx, my, (function()
+        local c = host.input.cursorPos and host.input.cursorPos()
+        return c and ("(%d,%d)"):format(c.x, c.y) or "unknown"
+      end)()))
     if i < n then
       host.timer.after(DRAG_TICK, step)
-    else
-      host.timer.after(DRAG_TICK, function() host.input.mouseUp(x2, y2) end)
+    elseif dragging then
+      dragging = false
+      host.input.mouseUp(mx, my)
+      host.log.info("[on-ear] drag: up")
     end
   end
   host.timer.after(DRAG_TICK, step)
