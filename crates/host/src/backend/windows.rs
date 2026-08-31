@@ -27,7 +27,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, RegisterHotKey, SendInput, UnregisterHotKey, INPUT, INPUT_KEYBOARD,
     INPUT_MOUSE,
     KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
-    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+    MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
     MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, VK_CONTROL, VK_LWIN,
     VK_MENU, VK_RWIN, VK_SHIFT,
 };
@@ -539,12 +540,40 @@ impl Backend for WindowsBackend {
         }
     }
 
+    /// A drag with actual MOVEMENT in it, spread over time.
+    ///
+    /// What this used to be — press here, warp there, release — is not a drag as far as a lot
+    /// of controls are concerned, and ON:EAR's width slider proved both halves of that.
+    ///
+    /// It is not movement. `SetCursorPos` puts the pointer somewhere; it does not say the
+    /// pointer moved. The button events carry their own position, so for a CLICK the two are
+    /// indistinguishable — which is why every click in this project has always worked — but a
+    /// control watching for motion while its button is held can miss a warp entirely. The log
+    /// showed the cursor arriving at each requested position and the slider sitting still.
+    ///
+    /// And it has no duration. A control that reads the SPEED of a drag rather than its
+    /// distance answers an instantaneous jump with an enormous change: that same slider moved
+    /// eighteen per cent for two pixels, where its own geometry says four.
+    ///
+    /// So: injected moves, interpolated, with a pause between them. The pauses block this
+    /// thread for about sixty milliseconds, which is the cost of the gesture being believable
+    /// and is only ever paid when somebody deliberately adjusts something. macOS has posted a
+    /// real drag event between its press and release all along; this brings Windows level.
     fn mouse_drag(&self, x1: i32, y1: i32, x2: i32, y2: i32, button: MouseButton) {
         let (down, up) = button_flags(button);
         unsafe {
             SetCursorPos(x1, y1);
+            move_injected(x1, y1);
             send_mouse_event(down, 0);
-            SetCursorPos(x2, y2);
+            const STEPS: i32 = 16;
+            for i in 1..=STEPS {
+                let t = f64::from(i) / f64::from(STEPS);
+                move_injected(
+                    (f64::from(x1) + f64::from(x2 - x1) * t).round() as i32,
+                    (f64::from(y1) + f64::from(y2 - y1) * t).round() as i32,
+                );
+                std::thread::sleep(std::time::Duration::from_millis(4));
+            }
             send_mouse_event(up, 0);
         }
     }
@@ -1459,6 +1488,22 @@ fn button_flags(button: MouseButton) -> (u32, u32) {
         MouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
         MouseButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
     }
+}
+
+/// A pointer move the system reports AS a move, in absolute screen coordinates.
+///
+/// SendInput wants 0..65535 across the primary screen rather than pixels, so this is the
+/// conversion. Scaled against the primary display only, like `screen_size` elsewhere in this
+/// file — a drag on a second monitor is a thing to fix when somebody has one to fix it on.
+unsafe fn move_injected(x: i32, y: i32) {
+    let w = GetSystemMetrics(SM_CXSCREEN).max(2);
+    let h = GetSystemMetrics(SM_CYSCREEN).max(2);
+    let mut input: INPUT = std::mem::zeroed();
+    input.r#type = INPUT_MOUSE;
+    input.Anonymous.mi.dx = (i64::from(x) * 65535 / i64::from(w - 1)) as i32;
+    input.Anonymous.mi.dy = (i64::from(y) * 65535 / i64::from(h - 1)) as i32;
+    input.Anonymous.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+    SendInput(1, &input, std::mem::size_of::<INPUT>() as i32);
 }
 
 unsafe fn send_mouse_event(flags: u32, data: i32) {
