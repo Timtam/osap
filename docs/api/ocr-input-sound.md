@@ -17,7 +17,7 @@ The returned table always has:
 - `text` — the full recognized string for the region.
 - `words` — an array; each entry is `{ text, x, y, w, h }` where `x`/`y` are the word's top-left in **absolute screen coordinates** (the region origin `x1,y1` is added back to the per-word offset), and `w`/`h` are the box size.
 
-On a backend OCR failure the call raises a Lua error.
+On a backend OCR failure the call raises a Lua error **on Windows**; see the platform sections below, because macOS never raises here and a failure is indistinguishable from an empty region.
 
 ```luau
 local res = host.ocr.recognize({ region = { x1 = 100, y1 = 200, x2 = 500, y2 = 240 }, lang = "en" })
@@ -27,9 +27,23 @@ for _, word in ipairs(res.words) do
 end
 ```
 
+### Windows
+
+A failed capture and an unavailable OCR language both come back as errors and are **raised into Lua**, so `pcall` is a meaningful guard.
+
+For a region of 400x200 or less a second recogniser runs alongside the system one and its answer is used when the system engine returns nothing — which is the lone-digit case, the thing `Windows.Media.Ocr` refuses. That fallback recognises without locating, so when it answers it sets `text` and leaves **`words` empty**.
+
+### macOS
+
+**Nothing in this path returns an error.** A failed capture, a refused recognition request and an unknown language code all log and return `{ text = "", words = {} }`. A `pcall` guard around this call is dead code here, and a broken Screen Recording permission is indistinguishable from a genuinely empty region — the only symptom is a read-out that is permanently blank.
+
+There is no second engine: the dependency is compiled for Windows only. Small text is carried by a retry ladder — tightened crop, then the whole region, then bigger and faster — abandoned after 250 ms, and `text` and `words` always agree with each other.
+
+So the same call fails in **opposite shapes**: empty `words` with real `text` on Windows for a lone digit, and empty `text` with real `words` here when the ladder runs out of budget.
+
 ## host.ocr.recognizeMany(opts)
 
-Recognizes several regions from **one** screen capture.
+Recognizes several regions from **one** screen capture — on Windows. macOS does not implement it and falls back to one capture per region; the platform sections below say what that costs.
 
 **Signature:** `host.ocr.recognizeMany(opts: { regions: { x1, y1, x2, y2 }[], lang?: string }) -> { { text: string, words: {…}, error?: string } }[]`
 
@@ -46,6 +60,14 @@ local r = host.ocr.recognizeMany({ regions = {
 } })
 host.log.info(r[1].text .. " / " .. r[2].text)
 ```
+
+### Windows
+
+As documented: one capture of the bounding box of every region, cropped per region — falling back to one capture each when a region is degenerate or the capture came back clipped.
+
+### macOS
+
+**Not implemented — the shared default applies, which is one full capture per region**, each a separate round trip at a separate instant. The promise this call exists to make is therefore not kept here: two read-outs that must agree with each other, a note name and its cent offset say, can come from different moments and contradict each other.
 
 ## host.input.cursorPos()
 
@@ -71,6 +93,16 @@ Both arguments are integers. Returns `nil`.
 ```luau
 host.input.move(960, 540)
 ```
+
+### Windows
+
+The pointer is placed, and nothing is told that it moved. A control watching for motion while its button is held can miss the move entirely.
+
+### macOS
+
+A real move event is posted — or a **drag** event when a button is currently held, which is also what the implicit move inside `mouseDown` and `mouseUp` does.
+
+So the press-then-glide-then-release gesture, composed from `mouseDown`, a timer and `mouseUp`, is a genuine drag here and can be an invisible warp on Windows: a slider that follows the pointer on a Mac may not move at all there. Where the movement itself is the point, use `host.input.drag`, which paces it on both.
 
 ## host.input.click(x, y, opts?)
 
@@ -145,6 +177,16 @@ Sends a keyboard shortcut by pressing the modifiers, tapping the key, and releas
 host.input.send("Ctrl+S")
 host.input.send("Ctrl+Shift+Esc")
 ```
+
+### Windows
+
+The modifiers are synthesised as real key presses around the key, and whatever the user is **physically holding is inherited**. Called from a hotkey callback while Alt is still down, `host.input.send("Escape")` arrives as Alt+Escape — which is why `host.keys.modifiersDown()` exists and why modules defer a synthesised key until the user has let go.
+
+### macOS
+
+The modifiers are set as flags on the event, and setting them **replaces the whole set**, so anything the user is holding is stripped and the same call delivers a bare Escape. No modifier key event is posted at all, so an application that watches for physical modifier presses sees an unmodified key.
+
+The deferral dance is therefore unnecessary for *keys* here — but not for clicks: a synthesised click carries no flag-clearing of its own, so one posted while the user holds Alt is an Alt+click on both platforms.
 
 ## host.input.text(text)
 

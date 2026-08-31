@@ -20,7 +20,7 @@ Window detection **cannot** be solved as "one matcher equivalent across all OSes
 
 ## WindowMatcher (declarative)
 
-```lua
+```luau
 local matcher = host.match {
   -- Shared fields (host normalizes per OS where possible)
   title = { regex = "^Serum 2" },
@@ -50,7 +50,7 @@ The match modes (`exact`, `contains`, `prefix`, `suffix`, `pattern`, `regex`, `n
 platform names (`windows`, `macos`, `linux`) are different words, so one table can carry
 either and a matcher only reaches for the platform keys at the field that actually differs:
 
-```lua
+```luau
 { title = { contains = "Kontakt" },
   class = { windows = { prefix = "NINormalWindow" }, macos = "AXWindow/AXStandardWindow/" } }
 ```
@@ -79,7 +79,7 @@ in a matcher.
 
 ## API
 
-```lua
+```luau
 host.window.find(matcher)    -> Window?      -- first match
 host.window.findAll(matcher) -> Window[]
 host.window.active()         -> Window?
@@ -93,7 +93,7 @@ The values needed per OS (Win32 class, AX role/subrole/identifier, bundle ID, co
 
 ## Triggers ("trigger-like system")
 
-```lua
+```luau
 host.window.onTrigger(matcher, { on = "activate" }, function(win)
   -- e.g. auto-activate overlay / start automation
 end)

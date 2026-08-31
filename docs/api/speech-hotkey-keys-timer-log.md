@@ -20,13 +20,43 @@ Examples: `"Ctrl+Alt+P"`, `"Tab"`, `"Shift+Tab"`, `"Ctrl+Right"`, `"F5"`.
 
 ---
 
+There is a third form the prose above does not mention: **`"<modifier> tap"`** — a modifier pressed and released on its own, with no other key in between. It is a `host.keys` capture only, never a global hotkey; macOS refuses it outright with a message pointing at `host.keys`, because Carbon has no notion of it.
+
+```luau
+-- A global hotkey: modifiers first, the key last. Ctrl+Option belongs to VoiceOver on
+-- macOS, so the Mac gets a different combination.
+local KEY = host.os.pick { windows = "Ctrl+Shift+F9", macos = "Cmd+Shift+F9" }
+host.hotkey.register(KEY, writeProbeLog)
+
+-- host.keys matches the modifier state EXACTLY, so the two directions are two captures:
+-- "Tab" (mask 0) never fires for Shift+Tab, and never for Alt+Tab either.
+host.keys.capture("Tab", function() ov:focusNext() end)
+host.keys.capture("Shift+Tab", function() ov:focusPrev() end)
+
+-- The tap form -- macOS only, see below. Never suppressed: the modifier still reaches
+-- the application.
+host.keys.capture("Alt tap", function() ov:activate() end)
+```
+
+### Windows
+
+Modifier names are the Windows ones and mean what they say.
+
+**The `"<modifier> tap"` form parses and then never fires.** The spec is accepted — it is shared code — but the low-level hook composes its modifier mask from Shift, Ctrl, Alt and Win alone and matches it exactly, so a capture registered as a tap can never be matched by anything. It is a silently dead registration, not an error.
+
+### macOS
+
+Modifiers map **by position, not by name**: Ctrl is Control, Alt is Option, and Win/Cmd is Command. A spec written for one platform therefore names a different physical key here, which matters most for `Alt` — on macOS that key also composes characters, so claiming `Alt+E` or `Alt+N` takes the acute and tilde dead keys away from any text field while the overlay is up.
+
+The tap form is implemented here and only here.
+
 ## host.speech.output(text, opts?)
 
 **Signature:** `host.speech.output(text: string, opts: { interrupt: boolean? }?)` → `nil`
 
 Speaks `text`; `opts.interrupt` defaults to `true` (omitting `opts` also means interrupt). Output is **not** echoed to the console — a screen reader reading the terminal would double the speech.
 
-```lua
+```luau
 host.speech.output("Reverb enabled")
 host.speech.output("loading...", { interrupt = false })  -- queue, don't cut off
 ```
@@ -56,11 +86,21 @@ This call never raises: a failing speech engine must not take a module's key han
 
 Registers a **global** OS hotkey (active regardless of foreground window) for the [key spec](#key-spec-string-format) and returns an integer `id`. The callback is invoked with no arguments each time the hotkey fires (only while the owning module is enabled). Raises an error if the spec is invalid or the OS refuses the registration (e.g. already taken).
 
-```lua
+```luau
 local id = host.hotkey.register("Ctrl+Alt+P", function()
   host.speech.output("Hotkey pressed")
 end)
 ```
+
+### Windows
+
+`RegisterHotKey`, with auto-repeat suppressed. A combination already held by another application is refused, and the refusal is logged by name.
+
+### macOS
+
+A Carbon event hotkey — deliberately **not** an event tap, so this needs no Input Monitoring grant even though `host.keys` does.
+
+A `"<modifier> tap"` spec is **refused outright here**, with a message pointing at `host.keys`: Carbon has no notion of a bare modifier press, and registering something plausible instead would fire on the wrong key.
 
 ## host.hotkey.unregister(id)
 
@@ -68,7 +108,7 @@ end)
 
 Releases the OS hotkey and forgets the callback for the `id` returned by `register`. Unknown ids are ignored.
 
-```lua
+```luau
 host.hotkey.unregister(id)
 ```
 
@@ -82,7 +122,7 @@ The `host.keys` namespace is a low-level, modifier-aware keyboard hook that **in
 
 Begins intercepting the [key spec](#key-spec-string-format): the keypress is swallowed (not passed to the underlying app) and `callback` is invoked with a `mods` table describing the modifier state at press time. Re-capturing the same `(vk, mask)` for this module replaces the previous callback (and mints a new token). Installs the low-level keyboard hook on first use (idempotent). Raises an error for an unknown spec. **Returns a token** to pass to [`host.keys.release`](#hostkeysreleasetoken); keep it if you'll release this specific capture (two overlays in one module can each capture the same key, so releasing by spec would be ambiguous).
 
-```lua
+```luau
 host.keys.capture("Tab", function(mods)
   -- Tab is now swallowed app-wide (or in the scoped window); move overlay focus
   moveFocus(mods.shift and -1 or 1)
@@ -90,13 +130,25 @@ end)
 host.keys.capture("Shift+Tab", function() moveFocus(-1) end)
 ```
 
+### Windows
+
+A low-level keyboard hook. It needs no permission and installs essentially always.
+
+While a **screen reader's own modifier** is physically down — Insert, numpad zero or Caps Lock — a matched key is passed through instead of swallowed. None of those is a Windows modifier, so without that rule NVDA+Space would arrive as a bare Space and be eaten by any overlay claiming `"Space"`.
+
+### macOS
+
+This call **can raise**. Without the Accessibility grant the event tap is refused and the error reaches Lua. Worse is the case where only Input Monitoring is missing: the tap is created, reports itself as enabled, and never fires — `capture` returns a token, no key ever arrives, and nothing errors. A module that announces "overlay ready" on a successful return can be announcing it into a session where no key will ever reach it. (Only the first capture in a process can raise; later ones reuse the installed tap.)
+
+There is **no screen-reader pass-through rule**. Caps Lock contributes no modifier bit at all, so with VoiceOver's modifier set to Caps Lock, VO+Space arrives as a bare Space, mask 0, and an overlay claiming Space will capture and suppress it. With the default Ctrl+Option the mask is non-zero and a bare-key capture does not match, so this bites only on the Caps Lock setting.
+
 ## host.keys.release(token)
 
 **Signature:** `host.keys.release(token: number)` → `nil`
 
 Undoes the exact capture identified by the `token` [`host.keys.capture`](#hostkeyscapturespec-callback) returned, recomputing the global captured set so the key reaches apps normally again (unless another capture still holds it). Keying on the token — not `(vk, mask, module)` — means one overlay releasing a key cannot drop another overlay in the same module that has since re-captured it. An unknown/stale token (already superseded by a later capture of the same key) is a harmless no-op.
 
-```lua
+```luau
 local tok = host.keys.capture("Tab", onTab)
 -- later:
 host.keys.release(tok)
@@ -108,7 +160,7 @@ host.keys.release(tok)
 
 Removes **all** key captures owned by this module and refreshes the suppression set. Useful when tearing down an overlay.
 
-```lua
+```luau
 host.keys.releaseAll()
 ```
 
@@ -118,9 +170,17 @@ host.keys.releaseAll()
 
 Scopes captured-key suppression. `true` pins it to the **current foreground window** (captured via `GetForegroundWindow` at call time) — the hook then only intercepts keys while that window is foreground, so a menu/popup that brings another window forward receives keys natively (ReaHotkey's `HotIf WinActive` model). `false` makes capture global again.
 
-```lua
+```luau
 host.keys.scope(true)   -- only suppress while the plugin window is focused
 ```
+
+### Windows
+
+The scope is a window handle, and at press time the hook compares it against a **live** query for what is in front. It is always current.
+
+### macOS
+
+The comparison is against a value **cached from notifications** — application activated, focused window changed. A window that merely *opens* inside an already-frontmost application raises neither, so the pin can disagree with what the tap believes is in front. Setting the scope re-asks once and stores the fresh answer, which repairs the common case; it goes unresponsive only when that second resolve disagrees too, and then Tab does nothing until the user switches away and back.
 
 ## host.keys.menuOpen(open)
 
@@ -128,7 +188,7 @@ host.keys.scope(true)   -- only suppress while the plugin window is focused
 
 Tells the hook a plugin's own (Qt/UIA) menu is open (`true`) or closed (`false`). While open, captured navigation keys (e.g. `Tab`/`Enter`) **pass through** to that menu instead of being consumed by the overlay — covering plugin menus the Win32 menu-state check can't see.
 
-```lua
+```luau
 host.keys.menuOpen(true)
 -- ... user navigates the plugin's native menu ...
 host.keys.menuOpen(false)
@@ -142,7 +202,7 @@ host.keys.menuOpen(false)
 
 Schedules a **one-shot** callback to fire approximately `ms` milliseconds later, driven from the event-loop tick. The callback runs once with no arguments (only if the module is still enabled at fire time) and is then discarded. There is no returned handle and no way to cancel an individual timer.
 
-```lua
+```luau
 host.timer.after(500, function()
   host.speech.output("Half a second later")
 end)
@@ -156,7 +216,7 @@ end)
 
 Schedules a **recurring** callback to fire approximately every `ms` milliseconds, driven from the event-loop tick. Unlike a self-rescheduling `host.timer.after` chain, a recurring timer is **re-armed even while the owning module is disabled** (the callback is only *invoked* while enabled), so a poll resumes on re-enable instead of dying. There is no returned handle or per-timer cancel; it is released when the module is reloaded/unloaded. Use it for polling that must survive a disable/enable cycle — e.g. an overlay watching for a landmark to appear.
 
-```lua
+```luau
 host.timer.every(150, function()
   -- e.g. re-check whether a library landmark is on screen
 end)
@@ -191,7 +251,7 @@ Deliberately **not** time-based, and it does not advance on an idle tick. A stal
 
 Writes `msg` to the host log under the `module` channel. This is the **only** method on `host.log` — there is no `warn`/`error`/`debug`.
 
-```lua
+```luau
 host.log.info("module initialized")
 ```
 

@@ -26,16 +26,28 @@ Common UIA control-type ids:
 
 ```luau
 -- Is this window a Kontakt instance? (a Pane named "PlogueXMLGUI" exists)
-local hwnd = host.window.focused().hwnd
+local hwnd = host.window.active().id
 if host.uia.find(hwnd, "PlogueXMLGUI", 50033) then
-    host.log("Kontakt detected")
+    host.log.info("Kontakt detected")
 end
 
 -- Does the window contain *any* Edit control?
 if host.uia.find(hwnd, "", 50004) then
-    host.log("has at least one edit box")
+    host.log.info("has at least one edit box")
 end
 ```
+
+### Windows
+
+A subtree search performed by UIA itself, with no traversal budget of ours.
+
+The documented "is a menu open" idiom — an empty name with `host.uia.type.Menu` — is exactly that: an ordinary search for any element of that control type.
+
+### macOS
+
+A hand-rolled walk capped at **1500 nodes and depth 24**. Exhausting that budget returns the same "not found" a completed search returns, and only a once-per-session log line tells them apart — so a large or deep plug-in tree can make an identity check answer `false` permanently here while succeeding on Windows, with nothing to distinguish that from "this is not the plug-in".
+
+The menu idiom is special-cased rather than searched: it asks the *application* whether a menu is open, walking its children and one level into its other windows, and never descends the menu bar itself. `locate` has no such special case.
 
 ## host.uia.locate(hwnd, name, controlType)
 
@@ -44,12 +56,16 @@ end
 Finds the first UIA element in window `hwnd` matching `name` + `controlType` and returns the screen-pixel centre of its bounding rectangle as `{ x, y }`, suitable for clicking. Returns `nil` if no match. As with `find`, an empty `name` matches any element of the given control type. Same control-type ids as above.
 
 ```luau
-local hwnd = host.window.focused().hwnd
+local hwnd = host.window.active().id
 local pt = host.uia.locate(hwnd, "Play", 50000) -- Button named "Play"
 if pt then
     host.input.click(pt.x, pt.y)
 end
 ```
+
+### macOS
+
+Subject to the same **1500 node / depth 24** traversal budget as `host.uia.find` — a tree larger than that answers "not here" to every question, indistinguishably from an honest miss.
 
 ## host.uia.type
 
@@ -61,6 +77,16 @@ The UIA ControlType ids by name — `host.uia.type.Button` (50000), `.Edit`, `.M
 local U = host.uia.type
 if host.uia.find(hwnd, "Kontakt 8", U.Pane) then … end
 ```
+
+### Windows
+
+Every constant in the table is a real UIA property condition and can match.
+
+### macOS
+
+The ids are translated to accessibility roles, and **ten of them have no mapping at all**: `Calendar`, `StatusBar`, `Thumb`, `DataGrid`, `DataItem`, `Document`, `SplitButton`, `Header`, `HeaderItem` and `TitleBar`. A query whose control type is one of those is well-formed, can never succeed, and says so only in the log — which the module never sees.
+
+`findAny` behaves differently again: given several types it **drops the unmapped ones and searches the rest**, returning nothing only when every type it was given was unmapped. So the same unmapped id makes `find` impossible and makes `findAny` quietly narrower.
 
 ## host.uia.findAny(hwnd, names, types)
 
@@ -74,7 +100,7 @@ One tree traversal per name, with the types folded into the condition — where 
 local U = host.uia.type
 local VERSIONS = { "Kontakt 8", "Kontakt 7" }
 local i = host.uia.findAny(ctrl.id, VERSIONS, { U.Window, U.Pane })
-if i then host.log("this is " .. VERSIONS[i]) end
+if i then host.log.info("this is " .. VERSIONS[i]) end
 ```
 
 ## host.uia.pluginLocate(hwnd, containerName, name, controlType)
@@ -90,11 +116,35 @@ local pt = host.uia.pluginLocate(hwnd, "Kontakt 8", "Kontakt File Menu", 50000)
 if pt then host.input.click(pt.x, pt.y) end
 ```
 
+### Windows
+
+A hand-rolled walk of its own, bounded at 4000 nodes and depth 40 — deliberately larger than the ordinary search, because a hosted plug-in fragment is where the deep trees are.
+
+### macOS
+
+The general **1500 node / depth 24** budget applies here too; there is no larger allowance for this call. A plug-in tree that this reaches on Windows can be out of reach here, and the miss looks identical to a genuine one.
+
 ## host.uia.rawDump(hwnd)
 
 **Signature:** `host.uia.rawDump(hwnd: number) -> { { depth: number, name: string, class: string, ctype: number }, … }`
 
 Diagnostic counterpart to `host.uia.dump`, walking the **raw** tree instead of a condition-based search, so it crosses into hosted fragments the latter cannot see. Bounded by node budget and depth. Use it to find out whether a plugin exposes any accessible content at all before building on UIA.
+
+Each node also carries `bounds = { x, y, w, h }` in screen coordinates, which the signature above omits and which is usually the reason to reach for this: a rectangle measures things nothing else can — a window's own close button says how tall its title bar is, and that is the difference between an authored coordinate landing on a control and landing a title bar above it.
+
+```luau
+-- Does this plug-in publish anything at all? The probe dumps the whole tree, because on a
+-- machine nobody here can see, the log is the only way to find out.
+local win = host.window.active()
+local elements = win and host.uia.rawDump(win.id) or {}
+host.log.info(string.format("%d element(s) in '%s'", #elements, win and win.title or ""))
+for _, e in ipairs(elements) do
+  local b = e.bounds
+  host.log.info(string.format("  %sdepth=%d type=%d class='%s' name='%s' at %d,%d %dx%d",
+    string.rep(" ", math.min(e.depth, 12)), e.depth, e.ctype, e.class, e.name,
+    b.x, b.y, b.w, b.h))
+end
+```
 
 ## host.screen.pixel(x, y)
 
@@ -105,10 +155,18 @@ Reads the colour of the screen pixel at `(x, y)`. Returns the 8-bit channels `r`
 ```luau
 local c = host.screen.pixel(100, 200)
 if c.hex == "#FF0000" then
-    host.log("red pixel")
+    host.log.info("red pixel")
 end
 host.log(string.format("rgb(%d,%d,%d)", c.r, c.g, c.b))
 ```
+
+### Windows
+
+Reads the pixel straight from the screen. What you get is what is there.
+
+### macOS
+
+Captures a small area around the point and downsamples it, so the value is a **box average of the backing pixels** rather than one of them. On a Retina display an exact comparison — `c.hex == "#FF0000"` — can therefore fail on a colour that is genuinely there, at a boundary or on a thin line. Compare with a tolerance, or read a point well inside a flat area.
 
 ## host.screen.size()
 
@@ -118,8 +176,18 @@ Returns the primary screen dimensions in pixels as `{ w, h }`.
 
 ```luau
 local s = host.screen.size()
-host.log("screen is " .. s.w .. "x" .. s.h)
+host.log.info("screen is " .. s.w .. "x" .. s.h)
 ```
+
+### Windows
+
+**Device pixels.** The application declares per-monitor DPI awareness, so a 4K panel at 200% scaling reports 3840x2160 and every coordinate the platform takes or returns is one physical pixel.
+
+### macOS
+
+**Points.** The same panel reports 1920x1080 on a Retina Mac; a capture is downsampled so that one pixel of a captured image is one point, and no coordinate can address a single backing pixel.
+
+This is the difference most likely to waste a day. Coordinates and template images calibrated on a HiDPI Windows machine are exactly **twice** the numbers a Retina Mac needs, and nothing reports it — the click simply lands half a screen away.
 
 ## host.screen.profile(opts?)
 
@@ -170,6 +238,10 @@ local hit = host.screen.imageSearch("assets/icon.png", {
     tolerance = 16,
 })
 ```
+
+### macOS
+
+Without the Screen Recording permission, macOS does **not** fail a capture — it hands back a picture of the desktop wallpaper. So a missing grant does not show up as an error or an empty result; it shows up as a search that never matches, or worse, matches something that was never on the plug-in. If every image search suddenly stops matching on a Mac, check the grant before the template.
 
 ## host.screen.imageSearchAsync(template, opts?, cb)
 

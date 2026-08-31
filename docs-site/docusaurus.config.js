@@ -38,8 +38,18 @@ const config = {
           path: '../docs',
           routeBasePath: '/',
           sidebarPath: './sidebars.js',
-          // Keep the live (current) docs as the default version; 0.1.0 etc. are
-          // archived releases reachable via the version dropdown.
+          // ONE version, until there is a release worth freezing.
+          //
+          // A 0.1.0 snapshot was cut when this site was set up, before anything had been
+          // released and before `engine_api` had ever moved — so the dropdown offered two
+          // stands of the same version 0.1.0, and the archived one quietly stopped being
+          // true: fourteen overlay entries against the live twenty-five, six in the UIA
+          // reference against twelve, with whole components (`O:watch`, `O:addStepper`,
+          // `O:group`, `O.layer`) it had never heard of. A reader who picked it from the
+          // dropdown got half an API and no way to tell.
+          //
+          // The version to cut is the one somebody is actually running, so a snapshot goes in
+          // at an `engine_api` bump and not before. See TODO.md.
           lastVersion: 'current',
           versions: {current: {label: 'current'}},
         },
@@ -56,7 +66,6 @@ const config = {
       navbar: {
         title: 'OS Automation Platform',
         items: [
-          {type: 'docsVersionDropdown', position: 'right'},
           {
             href: 'https://github.com/Timtam/osap',
             label: 'GitHub',

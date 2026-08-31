@@ -62,7 +62,7 @@ The 6 interaction backends of the overlays map exactly onto capability combinati
 
 ### host.overlay — the overlay runtime (optional high-level layer)
 *One* optional high-level layer for accessible, self-voicing overlays (the ReaHotkey class) — builds on `input`/`screen`/`ocr`/`a11y`/`hotkey`. NOT required for general automation; the primitives are directly scriptable (design principle §1). Builds a tree of virtual, self-voicing controls on top of a foreign window.
-```lua
+```luau
 local ov = host.overlay.new("Serum 2")           -- OverlayBuilder
 ov:addStaticText("Serum 2")
 ov:addHotspotButton{ label="Next Preset", at={968,4}, hotkey="Alt+N" }
@@ -78,7 +78,7 @@ return ov
 Control types (from ReaHotkey's taxonomy): StaticText, Button/ToggleButton/Checkbox/Edit/ListBox, Tab/TabControl, plus the backend variants Hotspot*, Graphical*(+Slider H/V), Custom*, Native*, UIA*, OCRButton, PassThrough.
 
 ### host.speech — speech output (tts-rs)
-```lua
+```luau
 host.speech.output("Preset: Init", { interrupt = true })
 host.speech.stop()
 host.speech.setRate(n) ; host.speech.setVoice(id) ; host.speech.voices()
@@ -86,19 +86,19 @@ host.speech.setRate(n) ; host.speech.setVoice(id) ; host.speech.voices()
 Win: Tolk→NVDA/JAWS (+ Braille) or WinRT · macOS: AVFoundation (direct TTS). **macOS option (prior art [VOCR](prior-art-vocr.md)):** while VoiceOver is running, route output to VoiceOver via AppleScript (respects the VO voice + **Braille**; requires the `apple-events` entitlement + user opt-in), otherwise AVFoundation fallback — tiered behind `host.speech`.
 
 ### host.sound — audio feedback
-```lua
+```luau
 local h = host.sound.play("assets/sounds/focus.ogg", { volume = 0.8 })
 h:stop()
 ```
 
 ### host.resource — package resources
-```lua
+```luau
 local bytes = host.resource.read("assets/data/profiles.json")  -- bytes/string from the package
 local p     = host.path("assets/images/serum2/preset.png")     -- real path (escape hatch)
 ```
 
 ### host.settings — per-module settings (persisted)
-```lua
+```luau
 -- declare + read in one line; the type is pinned from the default. opts (optional):
 -- { label = "…", min = N, max = N, oneOf = { … } }. A persisted value wins over the default.
 local rate = host.settings.define("speechRate", 50, { label = "Speech rate", min = 0, max = 100 })
@@ -111,7 +111,7 @@ host.settings.onChange("speechRate", function(new, old) end)
 Each module sees only its own settings (keyed by module id; isolation is structural). Scalars only (boolean / number / string). Persisted in a portable `<exe_dir>/settings.toml` next to the executable — one record per module (a host-owned `enabled` flag + the `settings` map); supersedes the old `disabled-modules.txt` (auto-migrated). Auto-saved (coalesced to the event loop + on shutdown, atomic write). The tray manager renders a native, accessible settings form per module from the registered schema.
 
 ### host.hotkey — hotkeys with context
-```lua
+```luau
 host.hotkey.register("Ctrl+Alt+P", fn, { context = "overlay:Serum 2" })  -- contextual
 host.hotkey.register("F1", fn, { context = "global" })
 ```
@@ -119,7 +119,7 @@ macOS: **registered** hotkeys via Carbon `RegisterEventHotKey` (no Input Monitor
 
 ### host.window — find & read windows/controls
 Window matching is **platform-gated** (parameters are named differently per OS — there is no universal "class"). Details + trigger system: [window-matching.md](window-matching.md).
-```lua
+```luau
 local w = host.window.active()        -- { id, title, app={name,bundleId,exe,pid}, bounds }
 local w = host.window.find{           -- declarative, OS-gated matcher
   title   = { regex = "^Serum 2" },
@@ -135,7 +135,7 @@ host.os.current  -- "windows"|"macos"|"linux" for imperative OS gating
 Win: Win32/UIA + `SetWinEventHook` · macOS: AXUIElement/CGWindowList + `NSWorkspace`/`AXObserver` (Accessibility permission).
 
 ### host.input — mouse/keyboard
-```lua
+```luau
 host.input.click(x, y, { button="left", relativeTo="pluginControl" })
 host.input.move(x, y) ; host.input.drag(x1,y1, x2,y2) ; host.input.scroll(x,y, dy)
 host.input.send("^s") ; host.input.text("Hallo")
@@ -143,7 +143,7 @@ host.input.send("^s") ; host.input.text("Hallo")
 `drag` for GraphicalSlider (ReaHotkey `MouseClickDrag`), `scroll` for mouse-wheel-based plugins (Zampler). Win: SendInput · macOS: CGEvent (`…MouseEvent`/`…ScrollWheelEvent`, Accessibility permission).
 
 ### host.screen — capture / image search / pixel
-```lua
+```luau
 local m = host.screen.imageSearch("assets/images/serum2/preset.png", {region={x1,y1,x2,y2}})
 if m then host.input.click(m.x, m.y) end
 local col = host.screen.pixel(x, y)
@@ -152,35 +152,35 @@ local img = host.screen.capture({x1,y1,x2,y2})
 Win: Windows.Graphics.Capture + SIMD-NCC · macOS: ScreenCaptureKit (Screen Recording permission).
 
 ### host.ocr — text recognition
-```lua
+```luau
 local r = host.ocr.recognize({ region={540,13,608,23}, engine="best", lang="eng" })
 -- r = { text="Init", boxes={...} }
 ```
 Native by default (Windows.Media.Ocr / Apple Vision), ONNX fallback (study §2). Replaces ReaHotkey's Tesseract-exe invocation.
 
 ### host.a11y — accessibility elements of foreign apps
-```lua
+```luau
 local el = host.a11y.focused()        -- or host.a11y.fromWindow(w):path(1,3,2)
 el:role() ; el:name() ; el:value() ; el:focus() ; el:invoke()
 ```
 Win: IUIAutomation · macOS: AXUIElement. Replaces ReaHotkey's `UIA.ahk` passthrough.
 
 ### host.gui — own accessible windows (wxDragon)
-```lua
+```luau
 local win = host.gui.window{ title="Einstellungen" }
 win:button{ label="Speichern", accessibleLabel="Profil speichern", onClick=fn } -- label mandatory
 ```
 Accessibility enforced via the API (mandatory label, study §5).
 
 ### host.ffi — native libs (gated, high)
-```lua
+```luau
 local lib = host.ffi.load("foo")           -- from native/<platform>/, signature-required
 lib:call("bar", { "Int", 42 }, "Int")
 ```
 Out-of-process sandbox for untrusted modules (study §11.1). macOS: only own Team-ID-signed or in the helper.
 
 ### host.app / host.clipboard / host.log / host.timer
-```lua
+```luau
 host.app.running() ; host.app.focus(pid) ; host.app.launch(path)
 host.clipboard.read() ; host.clipboard.write(text)
 host.log.info(msg)  -- from the worker via IPC to the host

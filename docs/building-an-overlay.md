@@ -34,7 +34,7 @@ You will meet these words throughout. Read them once now; each is explained prop
 
 A module is a folder with a `module.toml` and a Luau file. Declare the overlay runtime as a dependency and pull it in:
 
-```lua
+```luau
 local O = host.require("com.platform.overlay")
 
 local ov = O.new("Notepad")
@@ -67,7 +67,7 @@ Everything that describes the overlay must come *before* the call that binds it.
 
 Most applications worth covering expose nothing to read. You work in coordinates.
 
-```lua
+```luau
 ov:addHotspotButton({ label = "Play", at = { 120, 40 }, hotkey = "Alt+P" })
 ```
 
@@ -104,7 +104,7 @@ Output goes to `modules/overlay-runtime/calibration/`, named after the overlay �
 
 A plugin has no window of its own. It is a child control inside a host's window, so instead of matching a window you match a control within one:
 
-```lua
+```luau
 local daw = host.require("com.platform.daw-hosts")
 
 ov:attachEmbedded({
@@ -134,7 +134,7 @@ The reason is not aesthetic. The arbiter decides *between overlays* once, when a
 
 A combination that is fixed for a window's lifetime is a **cell**. Kontakt has six: two versions × three places it can run (embedded in a DAW, wrapped inside another plugin, standalone). Rather than one overlay asking at runtime where it is, the module loops over a table:
 
-```lua
+```luau
 for _, cell in ipairs(cells.all) do
   local ov = O.new(cell.version)
   header.add(ov, cell)               -- a part; see below
@@ -149,7 +149,7 @@ Each cell carries its own binding (whose `identify` matches only that version, i
 
 Overlays that are **alternatives for the same situation** share a `slot` — a plain string, agreed between modules:
 
-```lua
+```luau
 ov:bind(binding, { specificity = O.layer.content })
 ```
 
@@ -170,7 +170,7 @@ Two overlays that can be live **at the same time** belong on *different* slots �
 
 A **part** is just a function that adds controls:
 
-```lua
+```luau
 local function addHeader(ov, cell)
   ov:addCustomButton({ label = "Load", hotkey = "Ctrl+L", onActivate = … })
 end
@@ -180,7 +180,7 @@ Call it from every overlay that should carry that header. There is no inheritanc
 
 Parts cross module boundaries too. A module marked `code_module = true` in its manifest has its exported functions available to modules that depend on it, so the module that *owns* a set of controls can hand them out instead of everyone reimplementing them:
 
-```lua
+```luau
 local kk = host.tryRequire("com.platform.komplete-kontrol")
 kk.chrome(ov)   -- Komplete Kontrol's own controls, defined once, by its own module
 ```
@@ -191,7 +191,7 @@ kk.chrome(ov)   -- Komplete Kontrol's own controls, defined once, by its own mod
 
 A sample library inside a plugin has no window and no class of its own. What it does have is a recognisable picture — a wordmark:
 
-```lua
+```luau
 ov:landmark(host.path("images/MyLibrary/wordmark.png"), { anchor = true })
 ```
 
@@ -204,7 +204,7 @@ Image paths must be **absolute** — always `host.path("…")`. A relative path 
 
 Because a library can load or unload with no window event, gate it on a poll:
 
-```lua
+```luau
 ov:bind(binding, { specificity = O.layer.content, pollMatch = 500 })
 ```
 
@@ -214,7 +214,7 @@ ov:bind(binding, { specificity = O.layer.content, pollMatch = 500 })
 
 Once a module has several overlays it stops fitting in one file. `host.include` loads another file *of the same module* and returns whatever it returns:
 
-```lua
+```luau
 -- src/geometry.luau
 return { BUTTONS = { play = { 120, 40 }, stop = { 160, 40 } } }
 
@@ -240,7 +240,7 @@ bundle identifier, and no abstraction can make `NINormalWindow` and `AXWindow` t
 string. So identity is the one thing a matcher spells twice, and the grammar keeps that
 confined to a single table per platform:
 
-```lua
+```luau
 local KONTAKT = {
   title = { contains = "Kontakt" },        -- shared, and often enough on its own
   windows = { class = { prefix = "NINormalWindow" },
@@ -270,7 +270,7 @@ Three more rules worth knowing:
 The embedded binding has one more of these, for the same reason — a host names its plugin
 surface with a window class on Windows and an accessibility role on macOS:
 
-```lua
+```luau
 O.embedded {
   hosts = daw.reaper,
   control = { windows = "^Plugin%x+$", macos = "^AXGroup/" },
@@ -279,7 +279,7 @@ O.embedded {
 
 And for the genuine one-off, `host.os.is("macos")` and `host.os.current` are always there:
 
-```lua
+```luau
 if host.os.is("macos") then ... end
 local step = host.os.pick { windows = 3, macos = 1 }
 ```

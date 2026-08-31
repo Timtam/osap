@@ -351,16 +351,69 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
 
 - [x] **API-version-specific, web-based documentation:** a versioned **Docusaurus** site in `docs-site/` renders `docs/` — the guides plus the `host.*` API reference in `docs/api/` — with a version switcher (first snapshot `versioned_docs/version-0.1.0`) and a GitHub Pages deploy workflow (`.github/workflows/deploy-docs.yml`). Includes the step-by-step **[Building an overlay](docs/building-an-overlay.md)** tutorial, written because the vocabulary (cell, overlay, layer, slot, landmark) had grown faster than anything explained it. ✓
   - [ ] **Single Source of Truth:** the API reference is still written by hand, so it can drift from the implementation. Generate what can be generated from the capability catalog / host-API surface.
-  - [ ] Cut a new docs version on each `engine_api` bump, so a module author reads the reference for *their* target version rather than the newest one.
-  - [ ] **Every API entry needs a worked example, the way AutoHotkey's reference does.** Not a
+  - [ ] Cut a new docs version on each `engine_api` bump, so a module author reads the reference for *their* target version rather than the newest one. **The premature 0.1.0 snapshot was removed** (2026-08-31): it had been cut when the site was set up, before any release and before `engine_api` had ever moved, so the dropdown offered two stands of the same version and the archived one had quietly stopped being true — 14 overlay entries against the live 25, 6 UIA entries against 12, missing `O:watch`, `O:addStepper`, `O:group` and `O.layer` entirely. A version gets frozen when somebody is actually running it.
+  - [x] **Every API entry has a worked example, the way AutoHotkey's reference does** (2026-08-31). Not a
         signature restated in prose but the call in use, in a `luau` block, taken from a real
         module where possible so it moves when the module does. Asked for on 2026-08-31, and it
         is a reading-order argument as much as a teaching one: a screen reader delivers a code
         block in one piece, while three paragraphs of prose leave the reader assembling the call
-        from memory. Counted the same day — `window.md`, `ocr-input-sound.md`,
-        `resource-settings-modules.md` and `uia-screen.md` are already there; the gap is
-        **`overlay.md` (5 examples across 25 entries)** and
-        **`speech-hotkey-keys-timer-log.md` (1 across 13)**.
+        from memory. Counted the same day, and the first count was wrong in a way
+        worth recording: it grepped for ```` ```luau ```` fences only, while over half the
+        reference was labelled ```` ```lua ````, so it reported a gap of 32 where the real one
+        — entries with **no code block at all** — is **8**: six in `overlay.md` (`O.layer`,
+        `O:frame`, `O.state`, `O:focusNext`, `O:focusPrev`, `O:gate`/`O:landmark`), plus
+        "Key spec string format" and `host.uia.rawDump`. Separately, entries whose only block
+        was a signature or a return shape rather than a use — an audit found ten more of those
+        in `overlay.md` alone, including one whose entire body was `--[[ ... ]]`. All 85 entries
+        across the six reference pages now carry one, taken from a real module wherever a real
+        module uses the call.
+  - [x] **Named per-OS sections wherever behaviour actually differs** (2026-08-31), the way the
+        BASS reference does it. Twenty-five candidate differences were collected from the two
+        backends and then adversarially checked; nineteen stood as written, four needed
+        rewriting and **two were wrong** — one claimed a Windows bound that only applies to half
+        the functions it named, and one described a failure the cited code already mitigates. A
+        platform note claiming a difference that does not exist is worse than a missing one,
+        because it teaches the reader to distrust the real ones. What shipped: 22 Windows
+        sections and 26 macOS ones. Three sentences of general prose contradicted them and were
+        reconciled — "all coordinates are screen pixels", "`id` fields are native window
+        handles", and "on a backend OCR failure the call raises a Lua error" were each true of
+        Windows only.
+  - [x] **Every code block is now labelled `luau`, and highlighted** (2026-08-31). Prism ships
+        no `luau` grammar, and an unregistered language is not an error there but SILENCE — 52
+        blocks rendered as plain grey text while the mislabelled `lua` ones were coloured, and
+        the two are indistinguishable in the source, so nothing ever reported it. A swizzled
+        `prism-include-languages` aliases `luau` onto the Lua grammar; all 111 blocks in
+        `docs/` now carry the language the platform actually runs. Verified against a file
+        that was not edited, so the highlighting is the alias's doing and not the relabelling.
+
+## Found while documenting (2026-08-31)
+
+Three defects that surfaced only because somebody wrote down what the code claims. None was
+reported by a test, because none of them fails loudly.
+
+- [ ] **`"<modifier> tap"` is a silently dead registration on Windows.** `key_spec` accepts it
+      — it is shared code in `backend/mod.rs` — and returns `MASK_TAP`. `windows.rs` never
+      mentions `MASK_TAP` anywhere: the low-level hook composes its mask from Shift, Ctrl, Alt
+      and Win alone and then matches it **exactly**, so a capture registered as a tap can never
+      be matched by any keystroke. `host.keys.capture("Alt tap", …)` hands back a token, and
+      nothing ever fires. Either implement it in the hook or refuse the spec there the way
+      macOS refuses it for hotkeys, with a message that names the platform — an accepted
+      registration that cannot fire is the worst of the three options.
+- [ ] **`recognizeMany` does not keep its promise on macOS.** The call exists to read several
+      regions from ONE capture so that values which must agree with each other come from the
+      same instant. `MacBackend` does not override `ocr_regions`, so the trait default applies:
+      one full capture per region, each a separate round trip at a separate moment. Two
+      read-outs that must be consistent — a note name and its cent offset — can disagree, which
+      is precisely the failure the call was added to prevent. Documented for now; the fix is an
+      override that crops from a single capture, as Windows does.
+- [x] **The reference contained examples that raise if you copy them** (2026-08-31). Seven
+      lines in one file: `host.window.focused()` twice, a binding that has never existed, and
+      `host.log("…")` five times, where `host.log` is a table carrying only `info`, so the call
+      raises "attempt to call a table value". Nothing had noticed, because prose and code rot in
+      the same silence. Fixed, and `check-docs.ps1` now checks every `host.*` name the
+      documentation calls against what the host actually registers — it passes on the reference
+      and fails with exit 1 on a reintroduced `host.window.focused`, which is how it was
+      verified. Worth wiring into CI.
 
 ## Further open points (from the feasibility study)
 

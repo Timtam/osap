@@ -3,7 +3,7 @@ title: "host.window & host.os — windows, controls, matchers, triggers"
 sidebar_position: 1
 ---
 
-All coordinates are screen pixels (i32 → Luau `number`) unless noted. `id` fields are native window handles (Win32 `HWND` as a Luau integer). The `host.window.list`/`active`/`controls`/`focusChain`/`ownsPoint` functions are native (Rust) bindings; `find`/`findAll`/`test`/`onTrigger`/`onFocus` are added by `window_prelude.luau` on top of them.
+All coordinates are screen pixels on Windows and **points** on macOS (i32 → Luau `number`) unless noted — see `host.screen.size()` for why that distinction costs a day when it is missed. `id` fields are native window handles on Windows (a Win32 `HWND` as a Luau integer) and interned counters on macOS; see the platform sections under **Table shapes**. The `host.window.list`/`active`/`controls`/`focusChain`/`ownsPoint` functions are native (Rust) bindings; `find`/`findAll`/`test`/`onTrigger`/`onFocus` are added by `window_prelude.luau` on top of them.
 
 ## Table shapes
 
@@ -42,6 +42,18 @@ Returned by `host.window.controls()` and `host.window.focusChain()`. Built by `c
 ```
 
 Note: a control table has no `title` / `app` fields — only `id`, `class`, `bounds`, `client`.
+
+### Windows
+
+`class` is the real Win32 class from `GetClassNameW` — `"REAPERwnd"`, `"Qt5152QWindowIcon"`, `"#32770"`. `app.exe` is the executable's file name (`"reaper.exe"`) and `app.name` its stem; `app.bundleId` is always `""`. `id` is a real `HWND`, which the operating system **reuses**, so a stale id can quietly come to mean a different window. `client` is `GetClientRect` translated to the screen.
+
+### macOS
+
+`class` is a synthesised triple, `AXRole/AXSubrole/AXIdentifier`, with both separators always present and missing parts left empty: `"AXWindow/AXStandardWindow/"`, `"AXGroup//NI.Kontakt.Main"`. It is never the empty string — an element with no role at all yields `"//"`. A Windows class pattern therefore cannot match here, and the overlay simply never activates with nothing to say why; `host.os.pick` is how a matcher carries both.
+
+`app.exe` is the binary *inside* the bundle, named by the vendor's build system — Ableton is `Ableton Live 11 Suite.exe` on Windows and `Live` here. With no extension to strip, `app.name` equals `app.exe`, and if the executable URL cannot be read it falls back to the **localised** application name, which changes with the user's system language. `app.bundleId` carries the stable identity (`"com.native-instruments.Kontakt8"`) and is the field to match on.
+
+`id` is a small interned counter, meaningful only to this platform and **never reused** — nothing outside it accepts one, and a handle whose process has exited stays permanently unmatched rather than silently matching something else. `client` is derived rather than read: a titled window's content rect is worked out from its own geometry, so on a borderless plug-in window it equals the frame.
 
 ## Matchers
 
@@ -128,7 +140,7 @@ activated as well as the window raised, either of which can fail. A module that 
 they are somewhere they are not, which is the one failure this project treats as worse than
 doing nothing.
 
-```lua
+```luau
 local w = host.window.find({ title = { contains = "sforzando" } })
 if w and host.window.focus(w.id) then
     host.speech.output("sforzando")
@@ -146,6 +158,16 @@ On Windows a minimised window is restored first — a window that is made foregr
 still minimised stays invisible, which is the worst of both answers for somebody who cannot
 see it happen.
 
+### Windows
+
+A minimised window is restored first, then brought to the foreground. `true` means it is foreground **and has the keyboard**.
+
+### macOS
+
+Three separate things are attempted — raising the window, activating its application, and setting the accessibility focus flag — and the return is true if **either of the first two** succeeded. That is weaker than it reads: a tester session had it return `true` while the keyboard stayed on the host application's own control, and one Shift+Tab was needed to get in. So `true` means "raised", not "the keyboard is in it", and an overlay gating on focus-being-inside-the-plug-in can still decline to act after this reported success.
+
+Minimised windows are additionally dropped from `list()` and `find()` here, so one cannot normally be reached to pass in.
+
 ## host.window.controls(win?)
 
 `host.window.controls(win: Window?) -> { Control }`
@@ -160,6 +182,16 @@ for _, c in ipairs(host.window.controls()) do
 end
 ```
 
+### Windows
+
+Every **visible child window**, from `EnumChildWindows`, with no node or depth cap. A Win32 dialog therefore yields its buttons, edit fields and labels as well as its containers.
+
+### macOS
+
+**Container roles only** — `AXGroup`, `AXScrollArea`, `AXSplitGroup`, `AXTabGroup`, `AXToolbar`, `AXWindow` and their like. Buttons, labels and text fields are deliberately excluded, and the walk stops at 600 nodes, depth 8, or 256 results.
+
+So a module that identifies a plug-in by scanning `controls()` for a *leaf* control class finds it on Windows and comes back empty-handed here. Identify by container, or by `host.uia.*`.
+
 ## host.window.focusChain()
 
 `host.window.focusChain() -> { Control }`
@@ -170,6 +202,14 @@ Returns [control tables](#control-table) from the currently focused element up t
 local chain = host.window.focusChain()
 local focused = chain[1]   -- innermost focused control, if any
 ```
+
+### Windows
+
+The chain's links are **windows**: it walks from the focused `HWND` up through its parents. A plug-in that draws its own interface is one link, because it is one window.
+
+### macOS
+
+The links are **accessibility elements**. Both platforms start at whatever has focus, but the units differ, so the same self-drawn plug-in can be many links deep here and one link there. A gate written as "the chain is at most one deep, therefore we are in the plug-in" is reading a granularity, not a fact about the plug-in — check what the chain actually contains rather than how long it is.
 
 ## host.window.ownsPoint(id, x, y)
 
@@ -246,6 +286,16 @@ host.window.onTrigger({ app = { name = "reaper" } }, { on = "activate" }, functi
 end)
 ```
 
+### Windows
+
+Three system-wide hooks — foreground change, focus change, and name change — registered for **every process**, whether or not it cooperates with accessibility.
+
+### macOS
+
+Only *application* activation is system-wide. Focus-within-an-application, window-created and title-changed exist solely as per-process accessibility observers, created lazily the first time that application comes to the front and abandoned after three permanent refusals.
+
+The consequence lands exactly on the embedded-plug-in case: a plug-in window opening inside a DAW that is **already** frontmost raises no application activation, so the event depends entirely on that per-process observer. In a host that refuses accessibility, the overlay never activates even though the same module works on Windows.
+
 ## host.window.onFocus(cb)
 
 `host.window.onFocus(cb: () -> ()) -> ()`
@@ -262,4 +312,8 @@ end)
 ### Internal prelude functions
 
 `window_prelude.luau` also defines `W._hasTriggers()`, `W._dispatchActivate(win)`, and `W._dispatchFocus()`. These are called by the host event loop to deliver foreground/focus changes into the registered `onTrigger`/`onFocus` callbacks; modules do not call them directly.
+
+### macOS
+
+Same caveat as `onTrigger` above: focus changes *within* an application are delivered by a per-process accessibility observer rather than by a system-wide hook, so an application that will not answer accessibility produces no focus events at all.
 

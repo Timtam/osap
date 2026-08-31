@@ -5,7 +5,7 @@ sidebar_position: 6
 
 The overlay API is a **code module**, not a host namespace: declare `com.platform.overlay` as a dependency and pull it in with `host.require` (aliased `O` throughout). `O.new` returns an `Overlay` object whose methods are called with `:`. Controls are added to a virtual tree, navigated by keyboard, and spoken as `"label, type[, value]"`. All control coordinates are **origin-relative**: the origin is the client-area top-left (in screen pixels) of the active context's coordinate window — the plugin window when standalone, or the embedded plugin's child control when hosted in a DAW — re-resolved per call so it tracks window moves; `(0, 0)` when unattached.
 
-```lua
+```luau
 local O = host.require("com.platform.overlay")
 ```
 
@@ -19,8 +19,15 @@ Creates a new overlay object. `label: string?` (defaults to `"Overlay"`).
 
 Returns an `Overlay` (metatable-backed table) with fields `label`, `controls = {}`, `focus = 0`, `active = false`, `hoverToRead = false`, `contexts = {}`, `activeCtx = false`, and internal registration/key/trigger state.
 
-```lua
-local ov = O.new("My Plugin")
+```luau
+-- sforzando's standalone overlay: the object, its controls, then where it lives.
+local O = host.require("com.platform.overlay")
+local ov = O.new("sforzando")   -- the name announced when the overlay comes up
+ov:addOCRButton({ label = "Instrument", region = { 90, 22, 200, 36 }, opensMenu = true })
+ov:addOCRButton({ label = "Polyphony", region = { 486, 40, 516, 70 }, opensMenu = true })
+-- `menus = true`: while sforzando's own pop-up list is open, the keys belong to it.
+ov:attach({ title = { contains = "sforzando" }, windows = { class = "PLGWindowClass" } },
+  { menus = true })
 ```
 
 ## O:addStaticText(label)
@@ -29,8 +36,17 @@ Appends a static text control: Tab-reachable and read aloud on focus, but with n
 
 Returns the control table `{ kind = "static", label = label }`.
 
-```lua
-ov:addStaticText("Mixer section")
+`labelOrOpts` may also be a **table** — `{ label, text, when }` — and that form is the one worth knowing. `text(overlay) -> string?` is appended to the label each time the control is announced, which turns a caption into a **read-out**: a value the user wants to check is then read by arriving at it, with nothing pressed and nothing changed. The alternative would be a button, and a button that only reports is a promise of an action it does not perform.
+
+```luau
+-- A caption...
+ov:addStaticText("Cinematic Studio Strings")
+
+-- ...and a read-out, re-read on every announcement.
+ov:addStaticText({
+  label = "Battery",
+  text = function() return valueRightOf("Battery Level") or "not shown" end,
+})
 ```
 
 ## O:addHotspotButton(opts)
@@ -49,7 +65,7 @@ Two checks come before the click. The point must fall inside the origin's own fr
 
 `at` may also be a **function** `(overlay) -> {x, y} | nil`, for a control whose position depends on what is focused right now — one overlay serving several versions of a plugin whose chrome moved between them. Returning `nil` (the version isn't known yet) skips the click rather than guessing. Also accepted by `addHotspotToggle`.
 
-```lua
+```luau
 ov:addHotspotButton({ label = "Play", at = { 120, 40 }, hotkey = "Alt+P" })
 -- 352 px in from the right edge, 87 px down — Kontakt's instrument arrows:
 ov:addHotspotButton({ label = "Previous instrument", at = { 352, 87 }, fromRight = true, rawOrigin = true })
@@ -100,6 +116,16 @@ One overlay object takes **one** binding: an object is pinned to a single slot a
 
 The specificity ladder within a slot, named: `chrome` (a host's own frame), `base` (the plugin's generic header), `content` (what is loaded inside it right now), `dialog` (a modal that must own the keyboard). Pass `specificity = O.layer.content` rather than a bare number.
 
+```luau
+-- One arbiter slot, four overlays, most specific match wins: Komplete Kontrol's own chrome
+-- yields to the Kontakt loaded inside it, that yields to the library loaded inside THAT,
+-- and all three yield to a modal while it is up.
+kk:bind(HOSTED, { specificity = O.layer.chrome })         -- the host's own frame
+kontakt:bind(HOSTED, { specificity = O.layer.base })      -- the plug-in's generic header
+library:bind(HOSTED, { specificity = O.layer.content })   -- what is loaded in it right now
+contentMissing:bind(DIALOG, { specificity = O.layer.dialog })
+```
+
 ## O.memoByOrigin(fn, opts?)
 
 **Signature:** `O.memoByOrigin(fn: (origin, ...) -> value, opts: { key: ((origin) -> any)? }?) -> (origin, ...) -> value`
@@ -124,10 +150,21 @@ end)
 The active context's coordinate window — the plugin control when embedded, the window when standalone — and its handle. `nil` while the overlay is not active. This is the module's handle on the thing it overlays; use it instead of reaching into `activeCtx`.
 
 ```luau
+-- `:hwnd()` -- the window handle, for asking the accessibility layer about it:
 onActivate = function(o)
-    local p = host.uia.locate(o:hwnd(), "", host.uia.type.Edit)
-    if p then host.input.click(p.x, p.y) end
+  local p = host.uia.locate(o:hwnd(), "", host.uia.type.Edit)
+  if p then host.input.click(p.x, p.y) end
 end,
+
+-- `:origin()` -- the context itself, whose `client` rect every authored coordinate is
+-- measured against. ON:EAR scales all of its to the size the window is really drawn at:
+local function screenPointOf(overlay, dx, dy)
+  local o = overlay:origin()
+  if not (o and o.client and o.client.h > 0) then return nil end  -- not active: no point
+  local k = o.client.h / DESIGN_H
+  return math.floor(o.client.x + o.client.w / 2 + k * (dx - DESIGN_W / 2) + 0.5),
+    math.floor(o.client.y + k * dy + 0.5)
+end
 ```
 
 ## O:frame(fn)
@@ -136,9 +173,39 @@ end,
 
 Shifts the overlay's whole coordinate frame: `fn` returns `dx, dy`, resolved per active control — a host version's content shift, or a nested plugin's inner origin. Controls marked `rawOrigin` opt out.
 
+```luau
+-- A Kontakt nested inside Komplete Kontrol: the origin is KK's container control, but every
+-- coordinate is authored against Kontakt's own client area. Shift the frame by the
+-- difference, and fall back to a measured constant while the nested control cannot be
+-- enumerated -- returning nothing here would leave every coordinate unresolvable.
+ov:frame(function(kkCtrl)
+  local k = findNestedKontakt(kkCtrl)
+  if not (k and k.client and kkCtrl.client) then
+    return 198, 222   -- KK's browser is covering it; measured offset
+  end
+  return k.client.x - kkCtrl.client.x, k.client.y - kkCtrl.client.y
+end)
+```
+
 ## O.state
 
 A free-form table on every overlay for the owning module's own state, so it does not have to squat in the runtime's reserved `_`-prefixed fields.
+
+```luau
+-- Where the Width handle was left, so the next step continues from there instead of
+-- re-reading a value the drag has not settled to yet. On the overlay rather than in a
+-- file-level local: one module can build more than one overlay from the same file -- ON:EAR
+-- builds its Settings window from this one -- and a shared upvalue would answer for the
+-- wrong window.
+ov:addStepper({
+  label = "Width",
+  text = function() return valueBelow("Width") or "not shown" end,
+  onStep = function(dir, o)
+    o.state.widthLastX = (o.state.widthLastX or widthHandleX(widthNow())) + dir * STEP_PX
+    dragWidthTo(o.state.widthLastX)
+  end,
+})
+```
 
 ## ocrLabel — reading a control's name off the screen
 
@@ -172,10 +239,17 @@ Appends a button that runs a Luau callback on activation. `opts: { label: string
 
 Returns `{ kind = "custom", label, onActivate, text, typeLabel, editable, opensMenu, hotkey, when }`.
 
-```lua
+```luau
+-- Komplete Kontrol's library browser hides the instrument loaded behind it, so the overlay
+-- offers a way to close it -- and offers it only while one is actually open.
 ov:addCustomButton({
-  label = "Next library",
-  onActivate = function(self) --[[ ... ]] end,
+  label = "Close library browser",
+  hotkey = "Alt+L",
+  when = function(o) return browserToggle(o:hwnd()) ~= nil end,
+  onActivate = function(o)
+    local p = browserToggle(o:hwnd())   -- a UIA point, re-resolved at press time
+    if p then host.input.click(p.x, p.y) end
+  end,
 })
 ```
 
@@ -193,7 +267,7 @@ Use it where `addSlider` cannot serve. That one finds its thumb by matching an i
 
 What is announced afterwards always comes from reading `text` again, never from what the step intended. A control that reports its own intention rather than the application's state is the failure this project keeps returning to.
 
-```lua
+```luau
 ov:addStepper({
   label = "Tone",
   when = function() return element("Tone") ~= nil end,
@@ -219,7 +293,7 @@ Almost every `host.timer.after` in a module is a guess about how long an applica
 
 Bound to the overlay. It stops the moment the overlay is no longer active or the window it was watching is no longer in front — a callback arriving after the world has moved is the mistake that pressing the key again cannot undo.
 
-```lua
+```luau
 self:watch({
   read = function() return valueBelow("Width") end,
   was = before,
@@ -235,8 +309,17 @@ Appends a button whose label/value is read live by OCR over a region; activating
 
 Returns `{ kind = "ocr", label, region, hotkey }`. When focused/spoken it appends the OCR text (or `"no text"`) as the value.
 
-```lua
-ov:addOCRButton({ label = "Patch", region = { 200, 12, 360, 32 } })
+```luau
+-- u-he draws its whole interface itself: the preset name exists nowhere but on screen.
+-- Focusing reads it; pressing opens u-he's own preset menu, which `opensMenu` hands the
+-- keys to.
+ov:addOCRButton({ label = "Preset menu", region = { 480, 20, 720, 48 },
+  hotkey = "Alt+M", opensMenu = true })
+
+-- `readOnly`: focusing re-reads the articulation, but a press would drop the user into a
+-- list no screen reader can follow -- so this one announces and never clicks.
+ov:addOCRButton({ label = "Articulation", region = { -115, 114, 165, 152 },
+  readOnly = true, hotkey = "Alt+B" })
 ```
 
 ## O:addGraphicalToggle(opts)
@@ -245,12 +328,16 @@ Appends a toggle whose on/off state is read by image-matching its region against
 
 Returns `{ kind = "gtoggle", label, region, onImage, offImage, hotkey }`. Spoken state is `"on"` / `"off"` (omitted when neither template matches).
 
-```lua
+```luau
+-- Soundiron's shared FX rack. The reverb bypass is a bar with a legend rather than a lit
+-- dot, so its state is matched against two captured templates instead of one pixel.
+-- Paths must be ABSOLUTE -- `host.path` resolves them under this module's own root.
 ov:addGraphicalToggle({
-  label = "Mix",
-  region = { 50, 50, 80, 70 },
-  onImage = "mix_on.png",
-  offImage = "mix_off.png",
+  label = "Reverb",
+  region = { -91, 108, -71, 148 },   -- anchored to the library wordmark, hence negative x
+  onImage = host.path("images/FxRack/ReverbOn.png"),
+  offImage = host.path("images/FxRack/ReverbOff.png"),
+  hotkey = "Alt+B",
 })
 ```
 
@@ -266,7 +353,7 @@ Like `addHotspotButton`, the click is refused if another window is drawn over th
 
 Returns `{ kind = "hotspottoggle", label, at, onColor, offColor, text, hotkey, rawOrigin }`. Spoken state is `"on"` / `"off"` (omitted when the pixel can't be read). Prefer this over `addGraphicalToggle` when the control has a distinct lit/unlit colour (an indicator LED, a lit ⏻ icon) — it needs no template images and is a fraction of the cost.
 
-```lua
+```luau
 ov:addHotspotToggle({
   label = "Spot 1 Mic",
   at = { -138, 366 },
@@ -279,17 +366,42 @@ ov:addHotspotToggle({
 
 Moves focus to the next control (wrapping) and speaks it, moving the mouse onto OCR controls if `hoverToRead` is set. No-op when there are no controls. Returns nothing.
 
+Tab is already bound to this by the runtime, so a module calls it only to give the ring a second, more natural key.
+
+```luau
+-- ON:EAR's five preset slots are a row, so Alt+Right should walk them too.
+host.hotkey.register("Alt+Right", function()
+  if ov.active then ov:focusNext() end   -- a global key: only steer an overlay that is up
+end)
+```
+
 ## O:focusPrev()
 
 Moves focus to the previous control (wrapping) and speaks it. No-op when empty. Returns nothing.
+
+```luau
+-- The mirror of the above, and worth having for the wrap: with nothing focused yet this
+-- lands on the LAST control, because the end of the ring is where you look when you suspect
+-- you missed something.
+host.hotkey.register("Alt+Left", function()
+  if ov.active then ov:focusPrev() end
+end)
+```
 
 ## O:activate(index)
 
 Activates the control at `index` (defaults to the focused control). `index: number?`. Behaviour by kind: `hotspot` clicks `at` and speaks `"label, activated"`; `custom` calls `onActivate(self)`; `ocr` re-reads then clicks the region centre; `gtoggle` clicks the region centre and re-reads state after ~150 ms. No-op for `static` or a missing control. Returns nothing.
 
-```lua
-ov:activate()      -- activate focused control
-ov:activate(3)     -- activate the 3rd control
+```luau
+-- Space and Return are bound to this by the runtime, so a module needs it only to press a
+-- control from somewhere else. Melodyne swallows the first key a freshly focused window
+-- receives, which makes a "do that again" key worth having.
+host.hotkey.register("Ctrl+Alt+Return", function()
+  if ov.active then ov:activate() end   -- no index: whatever is focused
+end)
+
+-- With an index, counted in `ov.controls`:
+-- ov:activate(1)
 ```
 
 ## O:attach(matcher, opts)
@@ -298,8 +410,21 @@ Binds the overlay as a **standalone** context: active while a window matching `m
 
 While active, the overlay captures and suppresses the navigation keys, scoped to its own window (so `Alt+Tab` and menus pass through natively): `Tab` / `Shift+Tab` move between controls, `Return` and `Space` activate the focused control, and — when the overlay has a tab control — `Left`/`Right`, `Ctrl+Tab`/`Ctrl+Shift+Tab` and `Ctrl+<n>` drive it. `Space` is released while an editable field (an `ocredit` control) is focused, so a literal space can be typed into it. On activation the overlay starts at its first control (and any tab control at its first tab) when a **genuinely new** window opened, but resumes the last-focused control when the *same* still-open window merely regained the foreground (`Alt+Tab` out and back); the two are told apart by the window's identity (its HWND). `hoverToRead` (default `false`) moves the mouse onto an OCR control on focus (some UIs only reveal values on hover). Registers the foreground/focus trigger once. Returns nothing.
 
-```lua
-ov:attach({ title = "MySynth" })
+```luau
+-- Melodyne's standalone window, by executable and window class.
+ov:attach({
+  app = { exe = { contains = "Melodyne" } },
+  windows = { class = "GNWindowDoc" },
+}, {
+  -- Melodyne has a native menu bar: while a menu is open the captured navigation keys
+  -- have to reach it rather than steer the overlay.
+  menus = true,
+})
+
+-- Sharing an arbiter slot with other overlays over the same window, and re-checking the
+-- gate on a timer because a panel can open and close with no window event at all:
+-- settings:attach(on_ear, { menus = true, slot = ON_EAR_SLOT,
+--                           specificity = O.layer.dialog, pollMatch = 500 })
 ```
 
 ## O:attachEmbedded(spec, opts)
@@ -310,13 +435,26 @@ Binds the overlay as an **embedded** context: active while keyboard focus is ins
 
 `opts: { hoverToRead?, slot: string?, specificity: number?, pollMatch: number? }` — `hoverToRead` and the navigation / focus-reset behaviour are as in `attach`. With `slot` the overlay joins the host **arbiter** for that slot at `specificity` (a base and the overlays inheriting it pass the same slot; the most-specific *matching* one is active — see `host.arbiter`); `pollMatch` (ms) additionally re-checks the match on a recurring timer, for matches that change with no window event (a library landmark appearing inside an already-focused plugin). Returns nothing.
 
-```lua
+```luau
+-- REAPER names every plug-in window "Plugin<pointer>", so the class alone matches ANY
+-- plug-in: `identify` is what confirms this one is sforzando (its GUI is a UIA pane).
+local daw = host.require("com.platform.daw-hosts")
 ov:attachEmbedded({
-  hosts = { { title = "REAPER" }, { title = "Cubase" } },
-  control = "Plugin",
-  identify = function(c) return host.uia.find(c.id, "MySynthGUI", 0) end,
-})
+  hosts = daw.all,
+  control = { windows = "^Plugin%x+$" },   -- OS-keyed; see below
+  identify = function(ctrl)
+    return host.uia.find(ctrl.id, "PlogueXMLGUI", host.uia.type.Pane) ~= nil
+  end,
+}, { slot = SLOT, specificity = O.layer.base, menus = true })
 ```
+
+### Windows
+
+`control` matches a child window class, and the example above is the whole mechanism: a DAW hosts a plug-in in a child window, and that window has a class name to match on.
+
+### macOS
+
+There is no equivalent child control to match. A binding whose `control` table carries no entry for the running platform is **inert rather than broken** -- it logs and does nothing, and the module keeps working through whatever other bindings it has. That is why sforzando ships a separate standalone binding for the Mac rather than relying on this one.
 
 ## O:gate(fn) / O:landmark(image)
 
@@ -330,14 +468,6 @@ overlay (chainable).
 
 **A gate whose condition can change without a window event needs `pollMatch`.** Gates are otherwise re-evaluated only when a window is activated or focused, which is enough for a dialog — opening and closing one *is* a window event — and not enough for anything that appears and disappears *inside* a window that never changes. ON:EAR's chooser panels are exactly that, and without the poll the overlay kept the arbiter slot after its panel had closed: a ring for a panel that was no longer on screen, which somebody who cannot see it has no way to escape. See `pollMatch` under `O:attach` below.
 
-## O:typingWhen(fn)
-
-`fn() -> boolean`. While it returns true, the overlay **holds no keys at all** — not the navigation keys, not Space, not Return.
-
-Letting named keys through one at a time patches a hole whose shape is not known: any key nobody thought of stays swallowed, and a swallowed key in a text box is indistinguishable, from the keyboard, from the application having frozen. The condition is supplied by the module because only the module can tell — ON:EAR's answer is that its accessibility tree goes dark exactly while the caret is in its search box, which its gate is measuring anyway.
-
-The way back is the application's own: Tab moves focus out of its editor, the condition goes false on the next check, and the keys come back. Nothing here can lock, because while it is on there is nothing left to lock with; the worst it can do is go inert, which announces itself the moment Tab does not move the ring.
-
 **Coordinate anchoring (opt-in):** pass `landmark(image, { anchor = true })` and, while
 the landmark is on screen, the overlay's control coordinates resolve **relative to the
 landmark's top-left** instead of the plugin's client area (a `rawOrigin` control still
@@ -349,8 +479,41 @@ negative if a control sits above/left of it). WITHOUT `anchor`, `landmark` is a 
 gate and controls stay client-relative — the right choice when the image is used only
 to tell the overlay apart from a sibling on a shared slot (a dialog's header image).
 
-```lua
-ov:landmark(host.path("images/MyLib/wordmark.png"))
+```luau
+-- A gate: sforzando inside REAPER is active only while the keyboard is in the PLUG-IN.
+-- REAPER's own chrome answers with a focus chain several elements deep; the plug-in
+-- exposes nothing, so focus reaches the window and stops. Depth is the discriminator.
+inDaw:gate(function()
+  local chain = host.window.focusChain()
+  return not chain or #chain <= 1
+end)
+
+-- A landmark, anchoring: this library's controls are authored relative to its wordmark,
+-- so they follow it wherever Kontakt draws the panel.
+ov:landmark(host.path("images/MimiPage/Wordmark.png"), { anchor = true })
+```
+
+## O:typingWhen(fn)
+
+`fn() -> boolean`. While it returns true, the overlay **holds no keys at all** — not the navigation keys, not Space, not Return.
+
+Letting named keys through one at a time patches a hole whose shape is not known: any key nobody thought of stays swallowed, and a swallowed key in a text box is indistinguishable, from the keyboard, from the application having frozen. The condition is supplied by the module because only the module can tell — ON:EAR's answer is that its accessibility tree goes dark exactly while the caret is in its search box, which its gate is measuring anyway.
+
+The way back is the application's own: Tab moves focus out of its editor, the condition goes false on the next check, and the keys come back. Nothing here can lock, because while it is on there is nothing left to lock with; the worst it can do is go inert, which announces itself the moment Tab does not move the ring.
+
+```luau
+-- ON:EAR's accessibility tree goes dark exactly while the caret is in a text field, and the
+-- gate is measuring that anyway -- so the same flag decides whether to hold any keys at all.
+local settingsDark = false
+settings:gate(function(origin)
+  if host.uia.locate(origin.id, "Global Settings", host.uia.type.Text) then
+    settingsDark = false
+    return true
+  end
+  settingsDark = true   -- nothing answers: the device-name field has the caret
+  return true           -- absence of an answer is not an answer, so the last one stands
+end)
+settings:typingWhen(function() return settingsDark end)
 ```
 
 ## Plugin base + library overlays (the cell model)
@@ -376,7 +539,7 @@ A sample-library module depends on `com.platform.kontakt` and calls
 each carrying that cell's header plus the library's own controls, gated on the landmark
 and anchored to it. `build(ov)` runs once per cell, so it must only add controls:
 
-```lua
+```luau
 local kontakt = host.require("com.platform.kontakt")
 kontakt.library("Cinematic Studio Strings", host.path("images/CSS/Product.png"), function(ov)
   ov:addStaticText("Cinematic Studio Strings")

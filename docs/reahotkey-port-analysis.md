@@ -103,7 +103,7 @@ Minimal set: `overlay + speech + sound + resource + hotkey + window + input + sc
 
 ## 5. What an Overlay Looks Like as a Luau Module (Serum2)
 
-```lua
+```luau
 -- module: overlays/serum2/init.luau
 -- module.toml: [capabilities].require = ["overlay","speech","sound",
 --   "window","input","screen","ocr","hotkey","resource"]
