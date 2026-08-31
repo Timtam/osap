@@ -70,6 +70,93 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       of the Windows ones. The three OCR regions are per-platform because sforzando's own two
       builds differ by a few points, not because the coordinate systems do. Untested on
       hardware; the pitchbend region is the one most likely to want a nudge.
+- [ ] **An OCR button clicks without the covered-point check.** `refuseOutside` guards
+      `hotspot`, `hotspottoggle`, the `points` sequence and an image-found handle, but the
+      `ocr`/`ocredit` branch clicks the region centre unguarded
+      (`modules/overlay-runtime/src/main.luau:1730`). No comment there claims it is deliberate,
+      so it reads as an omission rather than a decision — and it is the one control kind that
+      matters most here, because sforzando, the only overlay that activates on a Mac, is built
+      entirely from OCR read-outs and OCR buttons. Whatever the check is worth, that path does
+      not get it. The fix is not a one-liner to apply blind: `refuseOutside` also enforces
+      "inside the origin's frame", and an OCR region is authored against the origin but found
+      by recognition, so the frame half needs its own thought before either half is turned on
+      for a path every working overlay uses.
+
+- [x] **What has never run there is now asked by the probe, not by a person** (2026-08-31).
+      There was briefly a page in `docs/api/` listing every capability that compiles on macOS
+      and has never been seen to work. That was the wrong shape twice over: it is a to-do and
+      not API documentation, and most of it was work a tester should never have been handed.
+      The probe (`Cmd+Shift+F9`) now answers what a machine can answer, in the log the tester
+      was sending anyway — all of it read-only, because it runs over somebody's real plugin
+      and they cannot see what it did:
+  - **Do the two coordinate spaces agree** — the pointer's own position against the window's
+      accessibility frame. A factor of two here is the Retina bug, visible before any click.
+  - **`ownsPoint`** at the window centre and at a point provably outside its frame, plus every
+      window the enumeration says overlaps the centre. The negative control had to be earned:
+      the first version asked about the display's top-left corner and got `true` — correctly,
+      because the probed window began at `-8,-8`.
+  - **Whether the recogniser invents text.** Five 64-point strips are profiled for runs of
+      rows that are one flat luminance; two runs of *different* colour are re-read to prove the
+      rectangle is uniform, then recognised, and every string is logged verbatim. The same
+      string out of two unlike blanks is the exact fingerprint the Windows failure left. A
+      third region straddles a flat run's edge, because a perfectly flat rectangle short-cuts
+      before the retry ladder and would leave the worse case unmeasured.
+  - **What a 100 ms timer really costs**, ten hops against the clock — the number every
+      `watch` deadline is denominated in. Measured on Windows: 1098 ms for ten, longest hop
+      131 ms.
+  - Verified by running it: on Windows all three OCR regions return nothing, `ownsPoint`
+      answers `true` inside and `false` outside, and the strip search finds 26 flat regions
+      where the first version — searching the full window width — found none at all.
+- [ ] **`window_owns_point` on macOS: the obvious implementation is a trap.** Reaching for
+      `CGWindowListCopyWindowInfo` costs no new FFI, no new permission and no coordinate
+      conversion, and it answers **the wrong question**: what is *drawn* at a point, not what a
+      click would *hit*. Clicks are posted by location, so the window server's hit test decides
+      — and a click-through window over the control (a screen reader's cursor ring, a system
+      HUD, a notification banner) would make it answer a confident "somebody else owns this"
+      for a press that would have worked. On a machine whose user navigates by that very ring,
+      that is every control, refused, with a spoken excuse. Strictly worse than the `nil` it
+      returns today.
+      The API that answers the right question is
+      `NSWindow.windowNumberAtPoint:belowWindowWithWindowNumber:` — "the frontmost window that
+      would be hit by a mouseDown" — whose number is a `CGWindowID` directly comparable to
+      `handles::Entry.window_id`. Its costs are real but bounded: `NSWindow` is not in the
+      enabled `objc2-app-kit` features and would go into both manifests, it needs a
+      `MainThreadMarker`, and its `NSPoint` is **bottom-left** where everything else in that
+      backend is top-left.
+  - Two things any implementation must not do, both found by checking a draft rather than by
+      running it. It must never turn an entry it could not parse into a verdict about a
+      different window — skipping an unreadable window answers from whatever lies behind it,
+      and that is a `Some(...)` derived from a failure. And it must not fall back to walking
+      `AXParent` for the window: `MESSAGING_TIMEOUT` is a second per read and the walk is up to
+      twenty levels on the thread that carries the event tap, so the cure for "clicks land
+      wrong" would be "hotkeys stop working".
+  - Also blocked on this: `Entry.window_id` is **always 0** today — nothing interns a real one
+      — and `ffi::ax_window_id` and `ax::window_id` are both dead code with no callers. Either
+      would have to start being filled in first.
+- [ ] **Most of the untested list is not a testing job at all — it is blocked.** Scroll, drag,
+      `editable`, `typingWhen` and the stepper are used by exactly one module, `ik-on-ear`,
+      which declares `supported_os = ["windows"]`. No module that loads on a Mac can reach any
+      of those code paths, so nobody can exercise them there however willing. `Overlay:watch`
+      is the same in practice: its callers are `addHotspotToggle` and the stepper, and the only
+      overlay that activates on a Mac is sforzando, built entirely from OCR read-outs and OCR
+      buttons. These come off the list when a macOS-reachable overlay uses them, not before.
+- [ ] **The blank-region guard is Windows-only, and macOS escalates harder on the same input.**
+      `tighten()`'s `blank` marker lives in `backend/windows.rs` and stops a flat rectangle ever
+      reaching a recogniser. `macos/ocr.rs` notices the identical fact in `Plan::content`, logs
+      it at *trace*, asks TCC whether it is a permission problem — and hands the rectangle to
+      Vision anyway. Vision is likelier to decline than PaddleOCR was, because it runs a text
+      *detector* first, but `run_vision` applies **no confidence filter at all** and sets
+      `setMinimumTextHeight(0.0)`, which removes the size floor.
+  - The worse case is not the flat rectangle. An empty *well* — a dark value field set into
+      lighter chrome — is found by the crop, so `cropped` is true, the retry ladder opens, and
+      it ends at the `FAST` character model over an empty box: the exact analogue of the
+      Windows failure. That rung already writes "only the fast model read this" to the log, but
+      **nothing marks the string untrusted on the way back to Lua**, so a module cannot decline
+      it and the person hears it. Either discard that rung's result or carry the fact in
+      `OcrText`.
+  - The probe's third region exists to measure exactly this, so the next log says whether it is
+      theoretical.
+
 - [ ] **The seven first-session measurements** in docs/macos-port.md, in that order: does
       anything appear, are coordinates right on Retina, is a capture real, does the tap
       suppress, does OCR read plugin text, does `_AXUIElementGetWindow` work, what does the
@@ -265,6 +352,15 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
 - [x] **API-version-specific, web-based documentation:** a versioned **Docusaurus** site in `docs-site/` renders `docs/` — the guides plus the `host.*` API reference in `docs/api/` — with a version switcher (first snapshot `versioned_docs/version-0.1.0`) and a GitHub Pages deploy workflow (`.github/workflows/deploy-docs.yml`). Includes the step-by-step **[Building an overlay](docs/building-an-overlay.md)** tutorial, written because the vocabulary (cell, overlay, layer, slot, landmark) had grown faster than anything explained it. ✓
   - [ ] **Single Source of Truth:** the API reference is still written by hand, so it can drift from the implementation. Generate what can be generated from the capability catalog / host-API surface.
   - [ ] Cut a new docs version on each `engine_api` bump, so a module author reads the reference for *their* target version rather than the newest one.
+  - [ ] **Every API entry needs a worked example, the way AutoHotkey's reference does.** Not a
+        signature restated in prose but the call in use, in a `luau` block, taken from a real
+        module where possible so it moves when the module does. Asked for on 2026-08-31, and it
+        is a reading-order argument as much as a teaching one: a screen reader delivers a code
+        block in one piece, while three paragraphs of prose leave the reader assembling the call
+        from memory. Counted the same day — `window.md`, `ocr-input-sound.md`,
+        `resource-settings-modules.md` and `uia-screen.md` are already there; the gap is
+        **`overlay.md` (5 examples across 25 entries)** and
+        **`speech-hotkey-keys-timer-log.md` (1 across 13)**.
 
 ## Further open points (from the feasibility study)
 

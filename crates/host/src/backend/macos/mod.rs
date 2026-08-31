@@ -22,10 +22,15 @@
 //! tap disabled for being slow.
 
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{
     Backend, CapturedImage, ControlInfo, DumpNode, HostEvents, MouseButton, OcrText, WinInfo,
 };
+
+/// Whether a scroll has been sent yet in this run — so the first one is always recorded and
+/// the rest are not. A Mac has never sent one, so the first is worth a line on its own.
+static SCROLL_SEEN: AtomicBool = AtomicBool::new(false);
 
 pub(super) mod app;
 mod ax;
@@ -217,6 +222,33 @@ impl Backend for MacBackend {
         } else {
             0
         };
+
+        // Say what was ASKED FOR and what was SENT, on the two occasions where the difference
+        // between them is the whole question.
+        //
+        // The first scroll of a run is logged whatever it is, because until a Mac has run one
+        // nobody knows this path is reached at all. After that only requests that are not a
+        // whole notch are — those are rare, deliberate, and exactly the case nothing here can
+        // predict: a control finer than a line either follows a rounded-up whole line or
+        // ignores it and reports the same value back, and only a real one can say which.
+        // Whole-notch scrolling is left silent, because a list being scrolled writes a line
+        // per keypress and a flooded log is worse than none.
+        let remainder = delta % 120;
+        if remainder != 0 || !SCROLL_SEEN.swap(true, Ordering::Relaxed) {
+            crate::logging::line(
+                "macos",
+                &format!(
+                    "scroll at {x},{y}: asked {} notch(es) ({delta} units), sent {lines} Quartz line(s){}",
+                    delta as f64 / 120.0,
+                    if remainder != 0 {
+                        " — a fraction of a notch cannot be expressed in lines, so this was rounded"
+                    } else {
+                        ""
+                    }
+                ),
+            );
+        }
+
         input::mouse_scroll(x, y, lines);
     }
 

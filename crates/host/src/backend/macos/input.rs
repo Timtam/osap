@@ -291,23 +291,22 @@ pub fn mouse_up(x: i32, y: i32, button: MouseButton) {
     post_mouse(up, x, y, cg_button(&button), Some(1));
 }
 
-pub fn mouse_scroll(x: i32, y: i32, amount: i32) {
-    crate::logging::trace("macos", || format!("mouse_scroll {x},{y} by {amount}"));
+pub fn mouse_scroll(x: i32, y: i32, lines: i32) {
+    crate::logging::trace("macos", || format!("mouse_scroll {x},{y} by {lines} line(s)"));
     glide_to(x, y);
     let src = source();
-    // `amount` is in notches, and here that is the number itself. Windows multiplies by 120
-    // because `WHEEL_DELTA` is a raw resolution unit with no name of its own — a mouse
-    // reports 120 per detent so that finer wheels can report less. Quartz names the unit
-    // instead: asked in `Line` units, one is one line, and one detent of an ordinary wheel
-    // is exactly what macOS itself reports as one line. So there is nothing to multiply by,
-    // and inventing a factor here would only make a notch mean different things on the two
-    // platforms.
+    // `lines` arrives already converted — see the trait implementation, which is where the
+    // two units meet. The trait counts what Windows counts, 120 units to a detent, because
+    // `WHEEL_DELTA` is a raw resolution unit with no name of its own and a finer wheel
+    // reports less than one. Quartz names its unit instead, and one `Line` is one detent, so
+    // there is nothing left to multiply by here — and inventing a factor at this depth would
+    // only make a notch mean different things on the two platforms.
     //
     // Sign follows Windows too: positive is a wheel turned away from the user. Whether the
     // user's "natural scrolling" preference then inverts what the content does is a question
     // only a Mac can answer, and it is the first thing to check if scrolling goes the wrong
     // way — the flip is applied to hardware events below the point this one is injected.
-    match CGEvent::new_scroll_wheel_event2(src.as_deref(), CGScrollEventUnit::Line, 1, amount, 0, 0)
+    match CGEvent::new_scroll_wheel_event2(src.as_deref(), CGScrollEventUnit::Line, 1, lines, 0, 0)
     {
         Some(event) => {
             // A scroll event has no position of its own until it is given one, and it is

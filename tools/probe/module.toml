@@ -4,4 +4,6 @@ version = "0.1.0"
 license = "GPL-3.0-or-later"
 
 [capabilities]
-require = ["window", "screen", "ocr", "uia", "speech", "log", "hotkey"]
+# `input` is here for `cursorPos` ALONE — reading where the pointer is. The probe runs over
+# somebody's real plugin and never posts an event; see src/answers.luau.
+require = ["window", "screen", "ocr", "uia", "input", "timer", "speech", "log", "hotkey"]

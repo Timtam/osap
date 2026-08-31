@@ -26,6 +26,10 @@ local KEY = host.os.pick {
   linux = "Ctrl+Shift+F9",
 }
 
+-- The questions this platform can be ASKED rather than told — everything the log could settle
+-- on its own instead of a person working through a checklist. Read-only, all of it.
+local answers = host.include("src/answers.luau")
+
 -- A run counter, so pressing the key twice does not overwrite the first answer with the
 -- second — and so the log and the image can be matched up by eye.
 local run = 0
@@ -159,7 +163,11 @@ host.hotkey.register(KEY, function()
     line("ocr: failed (%s)", tostring(res))
   end
 
+  answers.all(line, win)
+
   line("===== end of probe %d =====", run)
+  line("(the timer line above arrives a second later, after this marker — its ABSENCE means "
+    .. "the timer never fired, which is itself the answer)")
   say(string.format(
     "Probe %d written. %d surfaces, %d accessibility elements, %d words.",
     run, #controls, total, (ok and res and #res.words) or 0

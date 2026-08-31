@@ -77,6 +77,11 @@ const MODIFIERS: [Modifier; 8] = [
     Modifier { keycode: 0x36, flag: CGEventFlags::MaskCommand, vk: 0x5B },
 ];
 
+/// Whether this run has ever suppressed a key. See the one-shot line in the tap callback:
+/// on macOS a tap that was never granted Input Monitoring is indistinguishable in the log
+/// from one that works, unless something says so when it first does work.
+static FIRST_SUPPRESSION: AtomicBool = AtomicBool::new(false);
+
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
 /// The tap's mach port, kept as a raw pointer so the callback and the watchdog can re-enable
@@ -459,6 +464,25 @@ unsafe extern "C-unwind" fn tap_callback(
     }
     queue::push_key(vk, mask);
     note_suppressed(keycode);
+
+    // The first suppression of a run, said out loud once.
+    //
+    // Everything else about this tap is diagnosed by lines that appear when something goes
+    // WRONG. The commonest first-day failure on a Mac has no such line: Input Monitoring not
+    // granted leaves a tap that was created successfully, reports `enabled`, and never fires.
+    // Its symptom is the absence of a trace line the tester does not have switched on, which
+    // means the log reads exactly the same as a working session. One positive statement is
+    // worth more than any number of negative ones — after it, this costs a relaxed swap per
+    // keystroke and no allocation.
+    if !FIRST_SUPPRESSION.swap(true, Ordering::Relaxed) {
+        logging::line(
+            "macos",
+            &format!(
+                "the event tap suppressed its first key (vk {vk:#04x} mask {mask}) — the tap                  is live and Input Monitoring is granted"
+            ),
+        );
+    }
+
     logging::trace("macos", || format!("tap: captured vk {vk:#04x} mask {mask}"));
     std::ptr::null_mut()
 }

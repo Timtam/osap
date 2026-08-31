@@ -181,7 +181,17 @@ Every hotspot in this project clicks a coordinate worked out from a window's own
 
 Compared at the **top level**. An overlay's origin is often a child — an embedded plug-in is a control inside its host's window — and the point resolves to whichever child is drawn there, usually a different one. So both sides are taken up to their root, and the question answered is "does this point belong to the same application window".
 
-**`nil` means the platform cannot say, and must be read as permission rather than refusal.** A check with no answer must not block what it cannot judge. Only a definite `false` should stop anything. macOS returns `nil` today (see [what has never run on a Mac](../macos-unverified)), so an overlay there behaves exactly as it did before this existed.
+**`nil` means the platform cannot say, and must be read as permission rather than refusal.** A check with no answer must not block what it cannot judge. Only a definite `false` should stop anything.
+
+### Windows
+
+Implemented with `WindowFromPoint` + `GetAncestor(GA_ROOT)` on both sides. `WindowFromPoint` is the window manager's own hit test, so a click-through window (`WS_EX_TRANSPARENT`) is correctly seen through rather than treated as a cover.
+
+### macOS
+
+Returns `nil` — not implemented. An overlay there behaves exactly as it did before this existed, and the probe records which answer it got, so a log says whether the check is live on that machine.
+
+It is unimplemented on purpose rather than by omission. The cheap route, `CGWindowListCopyWindowInfo`, answers *what is drawn* at a point, and a click is delivered by *what would be hit* — which is a different question wherever a window lets clicks through. A screen reader's cursor ring is exactly such a window, and it is drawn over the control being operated, so that implementation would refuse essentially every press with a spoken excuse, on the machines of the people this exists for. `NSWindow.windowNumberAtPoint:belowWindowWithWindowNumber:` asks the right question; it needs a Cargo feature, the main thread, and a bottom-left coordinate flip.
 
 `Overlay:addHotspotButton` and `addHotspotToggle` already ask this before every click; a module only needs it directly when it clicks a coordinate itself.
 

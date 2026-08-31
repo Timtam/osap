@@ -2221,11 +2221,20 @@ function Overlay:_syncNativeKeys()
     local typing = ok and v == true
     if typing ~= (self._typing == true) then
       self._typing = typing
+      -- Counted BEFORE, because suspending empties the list — and the count is the point.
+      -- The line used to state the intention only, which on a platform where the key layer is
+      -- a different mechanism entirely is not the same as the outcome: "the overlay let go and
+      -- the field still cannot take a space" and "it worked" wrote the identical line. A zero
+      -- here says the suspension had nothing to hand back and the swallowing comes from
+      -- somewhere else; a number followed by a still-dead Space puts it in the key layer.
+      local held = #(typing and (self.capturedKeys or {}) or (self.capturedSpecs or {}))
       self:_suspendCapturedKeys(typing)
-      host.log.info(string.format("%s: %s",
+      host.log.info(string.format("%s: %s (%d key(s) %s)",
         tostring(self.label),
         typing and "a text field has the keyboard — holding no keys until it gives it back"
-          or "the text field gave the keyboard back — navigation keys taken again"))
+          or "the text field gave the keyboard back — navigation keys taken again",
+        held,
+        typing and "handed back" or "taken again"))
     end
     if typing then
       if self._spaceToken then
@@ -2403,6 +2412,31 @@ function Overlay:watch(spec)
   local every = spec.every or 100
   local left = spec.within or 900
   local pinned = self:hwnd()
+  -- What this cost and how it ended, in one line at each exit.
+  --
+  -- Without it the two ways of ending are indistinguishable afterwards, and they mean opposite
+  -- things. "It changed" is the control answering; "it gave up" is either a control that was
+  -- already where it was asked to go — a radio button already chosen — or a reading that never
+  -- worked at all. The third is the one that matters on a platform nobody here can run: if
+  -- `read` returns nil every time, nothing is ever done, every watch burns to its deadline, and
+  -- the announcement is the value from BEFORE the key was pressed, said with full confidence.
+  -- Printing the last reading separates those, because a nil prints as nil.
+  --
+  -- The elapsed figure is wall clock rather than the deadline arithmetic, because those two are
+  -- not the same number: `left` counts in whole `every`s while the timer that drives it is
+  -- drained by the GUI toolkit's own tick, and on a platform where that tick is slower a "900
+  -- ms" watch is quietly something else.
+  local t0 = (host.now and host.now()) or 0
+  local function report(finished, now)
+    if not host.log then return end
+    host.log.info(string.format(
+      "[watch] %s: %s after %d ms — %s -> %s",
+      tostring(self.label),
+      finished and "changed" or "gave up",
+      ((host.now and host.now()) or 0) - t0,
+      tostring(was), tostring(now)
+    ))
+  end
   local function look()
     if not self.active or self:hwnd() ~= pinned then return end
     local ok, now = pcall(spec.read, self)
@@ -2413,11 +2447,13 @@ function Overlay:watch(spec)
       finished = okd and v == true
     end
     if finished then
+      report(true, now)
       if spec.onDone then pcall(spec.onDone, now, was) end
       return
     end
     left -= every
     if left <= 0 then
+      report(false, now)
       if spec.onGiveUp then pcall(spec.onGiveUp, now, was) end
       return
     end

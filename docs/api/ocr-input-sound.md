@@ -93,6 +93,14 @@ A drag is not a press, a warp and a release. On Windows the pointer is moved wit
 
 If a control needs a sustained press before it will react at all, use `mouseDown`/`mouseUp` with a timer instead — that is why those exist separately.
 
+### Windows
+
+The pointer is moved with injected move events rather than `SetCursorPos`, interpolated over sixteen steps a few milliseconds apart. The pacing blocks the calling thread for about sixty milliseconds, paid only when something is deliberately dragged.
+
+### macOS
+
+A single `Dragged` event is posted between press and release — no interpolation. That asymmetry is deliberate: a scrollbar needs one intermediate event and gets it. A control that only reacts to *continuous* movement would work on Windows and not here, and nothing has yet exercised the difference on a Mac.
+
 **Signature:** `host.input.drag(x1: number, y1: number, x2: number, y2: number, opts: { button?: "left" | "right" | "middle" }?) -> nil`
 
 All four coordinates are integers. `opts.button` behaves exactly as in `click` (defaults to left). Returns `nil`.
@@ -112,7 +120,13 @@ Moves to `(x, y)` and scrolls the mouse wheel by `notches`, which may be fractio
 
 A notch is 120 units to the operating system, and a control decides for itself what one is worth — ON:EAR's tone knob moves by five of its own units per notch, which is as fine as this could ask for while notches were whole. Half a notch is 60 units, and an application that scales its step by the delta moves by half as much. One that rounds to its own interval instead simply does not move and reports the same value back, which is the honest outcome and says to stop asking for halves.
 
-On macOS this is expressed in Quartz *lines*, which cannot be smaller than one: a caller asking for less than a line gets the smallest whole line rather than nothing. That is a real difference between the platforms rather than a rounding detail, and it has not been exercised there — see [what has never run on a Mac](../macos-unverified).
+### Windows
+
+The unit is native: 120 units to a notch is what `WHEEL_DELTA` counts, so a fractional request is expressed exactly.
+
+### macOS
+
+Expressed in Quartz **lines**, which cannot be smaller than one. A caller asking for less than a line gets the smallest whole line rather than nothing — a control that needs a half-step will not get one here until this asks Quartz in pixel units instead. The conversion logs the first scroll of a run, and after that every request that is not a whole notch, saying what was asked for and what was sent; the difference shows up as evidence rather than as a mystery.
 
 ```luau
 host.input.scroll(960, 540, -3)   -- down three notches
