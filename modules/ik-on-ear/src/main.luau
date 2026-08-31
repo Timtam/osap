@@ -1002,8 +1002,24 @@ local function chooser(spec)
   -- the slots read them; a slot with no row is skipped in navigation rather than announced
   -- as an empty thing to press.
   for i = 1, spec.rows do
+    -- Inside the panel, or it does not exist as far as this ring is concerned.
+    --
+    -- The tree reports rows the list has scrolled past: seventeen makers came back from a
+    -- panel with room for fifteen, and the last two sat below its bottom edge. Their state
+    -- probe read (4,4,4) — the dimmed main window showing through from behind — and refused,
+    -- which is how they were noticed, but refusing to name a state is not the point here.
+    -- Activating one would have clicked straight through the panel onto whatever the
+    -- application has at that spot, which in this window is the Studio Simulation section.
     local function row()
-      return bElement("Row " .. i)
+      local n = bElement("Row " .. i)
+      if not n then return nil end
+      local pane = bElement(spec.pane)
+      if pane and (n.bounds.y < pane.bounds.y
+        or (n.bounds.y + n.bounds.h) > (pane.bounds.y + pane.bounds.h))
+      then
+        return nil
+      end
+      return n
     end
     -- A row's own accessible name is "Row 1"; the words are in its children, which share its
     -- top edge — the label at the row's left edge and the count to the right of it.
@@ -1132,6 +1148,63 @@ local function chooser(spec)
     return lo
   end)
 
+  -- The printed names, read a WHOLE ROW at a time.
+  --
+  -- Reading them one tile at a time did not work, and the reason is worth keeping because it
+  -- is not about the region. The region was right — measured against the words the probe had
+  -- already found — but a crop of a hundred pixels by sixteen holding four characters gives
+  -- the recogniser almost nothing to work with, and what came back was punctuation and
+  -- symbols. The same words are read perfectly in a pass over the whole window, where they
+  -- sit among plenty of other text.
+  --
+  -- So the strip across all five tiles is read in one go and the words are handed out by
+  -- where they landed. That is more context for the recogniser AND fewer screen captures —
+  -- one per row rather than one per tile — and the two vertical tile borders the strip now
+  -- crosses fall between the columns, outside every tile's own half, so they are dropped
+  -- rather than read as a character.
+  local NAME_HALF = 54
+
+  local function readRowNames(r)
+    if not spec.tiles.name then return {} end
+    local o = b:origin()
+    local k = scaleOf(o)
+    if not k then return {} end
+    local ty = spec.tiles.rows[r]
+    local cols = spec.tiles.cols
+    local rect = screenRect(o, cols[1] - NAME_HALF, ty + spec.tiles.name[3],
+      cols[#cols] + NAME_HALF, ty + spec.tiles.name[4])
+    if not rect then return {} end
+    local got = host.ocr.recognize({ region = rect })
+    local bags = {}
+    for _, wd in ipairs((got and got.words) or {}) do
+      local wx = wd.x + wd.w / 2
+      for c, cx in ipairs(cols) do
+        local sx = screenPointOf(b, cx, ty)
+        if sx and math.abs(wx - sx) <= NAME_HALF * k then
+          bags[c] = bags[c] or {}
+          table.insert(bags[c], { x = wx, text = wd.text })
+        end
+      end
+    end
+    local out = {}
+    for c, bag in pairs(bags) do
+      -- Left to right, because a name can be more than one word ("K240 MKII") and the
+      -- recogniser does not promise to return them in reading order.
+      table.sort(bag, function(a, z) return a.x < z.x end)
+      local words = {}
+      for _, w in ipairs(bag) do words[#words + 1] = w.text end
+      out[c] = table.concat(words, " ")
+    end
+    return out
+  end
+
+  -- One memo per row, so a tile only pays for the strip it is in, once per epoch, however
+  -- many of its neighbours ask in the same breath.
+  local rowNames = {}
+  for r = 1, #spec.tiles.rows do
+    rowNames[r] = O.memoByEpoch(function() return readRowNames(r) end)
+  end
+
   -- The grid. Its tiles are pictures with no accessible element and no text of their own, so
   -- a tile can only be named by pressing it: the panel's MODEL line then says what was
   -- chosen, and this control says it out loud rather than making the user go and look.
@@ -1156,17 +1229,7 @@ local function chooser(spec)
           -- prints none. Where there is one it is read, so this grid can be BROWSED — the
           -- speaker grid can only be sampled, because there a tile has no name until it has
           -- been pressed, and pressing is selecting.
-          local name
-          if spec.tiles.name then
-            local o = b:origin()
-            local rect = screenRect(o, tx + spec.tiles.name[1], ty + spec.tiles.name[3],
-              tx + spec.tiles.name[2], ty + spec.tiles.name[4])
-            if rect then
-              local got = host.ocr.recognize({ region = rect })
-              local v = (got and got.text or ""):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
-              if v ~= "" then name = v end
-            end
-          end
+          local name = spec.tiles.name and rowNames[r]()[c] or nil
           local on = tileSelected(tx, ty)
           if name and on then return name .. ", selected" end
           return name or (on and "selected" or nil)
