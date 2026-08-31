@@ -1159,8 +1159,8 @@ local function chooser(spec)
           local name
           if spec.tiles.name then
             local o = b:origin()
-            local rect = screenRect(o, tx - 78, ty + spec.tiles.name[1],
-              tx + 78, ty + spec.tiles.name[2])
+            local rect = screenRect(o, tx + spec.tiles.name[1], ty + spec.tiles.name[3],
+              tx + spec.tiles.name[2], ty + spec.tiles.name[4])
             if rect then
               local got = host.ocr.recognize({ region = rect })
               local v = (got and got.text or ""):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
@@ -1279,8 +1279,22 @@ chooser({
   rows = 20,
   tileLabel = "Headphone",
   -- The same five columns as the speaker grid, to the pixel, pushed down by the row of filter
-  -- menus above it — and with a printed name under each tile, 63 to 76 below its centre.
-  tiles = { cols = GRID_COLUMNS, rows = { 314, 507, 701 }, name = { 58, 82 } },
+  -- menus above it.
+  --
+  -- `name` is the box the printed model name sits in, as offsets from the tile's centre, and
+  -- it is deliberately nowhere near the tile's edges. The first attempt reached to 82 below
+  -- centre and 78 either side, which is where the tile's own rounded frame is — and the OCR
+  -- step that trims a crop to its content then reads the FRAME as the content and squeezes
+  -- the words into an unreadable sliver. The tester's report was that it read "weird stuff",
+  -- which is exactly what that looks like from the outside. The runtime has carried a note
+  -- about this since Komplete Kontrol's save dialog: all four corners must land on flat
+  -- ground.
+  --
+  -- The text itself measured at 65 to 74 below centre in every one of the ten tiles that has
+  -- one, and never wider than 39 either side. The bottom row has no name at all — the grid's
+  -- viewport clips it before the strip — so those three tiles simply read nothing, which is
+  -- already what an empty read means here.
+  tiles = { cols = GRID_COLUMNS, rows = { 314, 507, 701 }, name = { -54, 54, 62, 78 } },
 })
 
 -- Navigation is Tab / Shift+Tab / Enter, captured while this window is in front, as
