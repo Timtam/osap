@@ -834,6 +834,33 @@ local function chooser(spec)
     }
   end
 
+  -- The rows the panel is actually showing, top to bottom.
+  --
+  -- This is the whole answer to a list that would not scroll past Creative, and the log spells
+  -- it out: seventeen rows offered, then fifteen, then eight, then two, then none, with the
+  -- last name always Creative. The count was falling because "Row 15" is not the fifteenth row
+  -- ON SCREEN — it is the fifteenth maker in the list, and it exists as an element only while
+  -- that maker is rendered. Twenty slots asking for "Row 1" to "Row 20" were therefore asking
+  -- for Adam Audio to Creative and nothing else, for ever, however far the list travelled.
+  --
+  -- So the slots are positions and the rows are looked up by where they are: everything named
+  -- "Row <n>" that the panel is showing, sorted down the screen. Slot one is whatever is at
+  -- the top now.
+  local visibleRows = O.memoByEpoch(function()
+    local pane = bElement(spec.pane)
+    local found = {}
+    for _, n in ipairs(btree() or {}) do
+      if string.match(n.name, "^Row %d+$") then
+        local mid = n.bounds.y + n.bounds.h // 2
+        if not pane or (mid >= pane.bounds.y and mid <= (pane.bounds.y + pane.bounds.h)) then
+          found[#found + 1] = n
+        end
+      end
+    end
+    table.sort(found, function(a, z) return a.bounds.y < z.bounds.y end)
+    return found
+  end)
+
   -- Scrolling, for the two things here that hold more than they show.
   --
   -- The manufacturer list runs to far more makers than the rows the panel renders, and the
@@ -1003,8 +1030,13 @@ local function chooser(spec)
       local sawRow = false
       local o = b:origin()
       if not (o and o.client) then return nil end
-      for i = 1, 8 do
-        local r = bElement("Row " .. i)
+      -- The rows on screen, not the first eight in the model — and at most four of them.
+      -- Each of these is a screen touch costing a compositor frame, and the question only
+      -- needs an answer, not a census: one row reading "selected" settles it, and a filter
+      -- that is in force is drawn at the top of the list where the first few are.
+      local rows = visibleRows()
+      for i = 1, math.min(#rows, 4) do
+        local r = rows[i]
         local pt = r and rowPoint(r)
         if pt then
           local q = host.screen.pixel(o.client.x + pt[1], o.client.y + pt[2])
@@ -1045,27 +1077,22 @@ local function chooser(spec)
     -- Activating one would have clicked straight through the panel onto whatever the
     -- application has at that spot, which in this window is the Studio Simulation section.
     local function row()
-      local n = bElement("Row " .. i)
-      if not n then return nil end
-      local pane = bElement(spec.pane)
-      if not pane then return n end
-      -- Its MIDDLE, not the whole of it. Requiring a row to fit entirely inside the panel
-      -- dropped the last one at each end even when most of it was on screen and its centre —
-      -- the point this module clicks and probes — was well inside. Three makers went missing
-      -- that way, and from the outside that is indistinguishable from the list not having
-      -- them: Beyerdynamic simply was not there between Behringer and the next page.
-      local mid = n.bounds.y + n.bounds.h // 2
-      if mid < pane.bounds.y or mid > (pane.bounds.y + pane.bounds.h) then return nil end
-      return n
+      return visibleRows()[i]
     end
     -- A row's own accessible name is "Row 1"; the words are in its children, which share its
     -- top edge — the label at the row's left edge and the count to the right of it.
+    -- The row's OWN children. Matching anything on the same line and to the right swept up
+    -- whatever else the panel happened to have at that height — a tile caption, a column of
+    -- the bar along the bottom — and read it out after the maker's name. Depth is the thing
+    -- that says "belongs to this row"; position only says "is near it".
     local function parts()
       local r = row()
       if not r then return nil end
       local label, count
       for _, n in ipairs(btree() or {}) do
-        if n.name ~= r.name and math.abs(n.bounds.y - r.bounds.y) <= 4 then
+        if n.depth == r.depth + 1 and n.name ~= r.name
+          and math.abs(n.bounds.y - r.bounds.y) <= 4
+        then
           if math.abs(n.bounds.x - r.bounds.x) <= 4 then
             label = n.name
           elseif n.bounds.x > r.bounds.x then
@@ -1191,7 +1218,7 @@ local function chooser(spec)
   -- the heading is, and reported it as a maker. Depth is what actually tells them apart: the
   -- heading is a sibling of the list, the name is a child of the row.
   local function rowNameAt(i)
-    local r = bElement("Row " .. i)
+    local r = visibleRows()[i]
     if not r then return nil end
     for _, n in ipairs(btree() or {}) do
       if n.depth == r.depth + 1 and n.name ~= r.name
@@ -1213,25 +1240,16 @@ local function chooser(spec)
     -- Counted as well as read. "The list stopped" and "the list moved somewhere this module
     -- will not look" are the same silence from the keyboard, and the difference is whether
     -- the tree offered rows that the filter then dropped.
-    local offered, kept = 0, 0
-    local pane = bElement(spec.pane)
-    for i = 1, spec.rows do
-      if bElement("Row " .. i) then offered = offered + 1 end
+    local rows = visibleRows()
+    for i = 1, #rows do
       local n = rowNameAt(i)
       if n then
-        local r = bElement("Row " .. i)
-        local mid = r and (r.bounds.y + r.bounds.h // 2) or nil
-        local inside = (not pane) or (mid and mid >= pane.bounds.y
-          and mid <= (pane.bounds.y + pane.bounds.h))
-        if inside then
-          kept = kept + 1
-          first = first or n
-          last = n
-        end
+        first = first or n
+        last = n
       end
     end
-    host.log.info(("[on-ear] %s: tree offered %d row(s), %d inside the panel"):format(
-      spec.name, offered, kept))
+    host.log.info(("[on-ear] %s: %d row(s) showing, %d named"):format(
+      spec.name, #rows, (first and 1 or 0) + (last ~= first and 1 or 0)))
     if not first then
       -- Which of the two silences this is. A list that has genuinely reached its end and a
       -- window that has stopped answering both leave this empty, and the tester saw the
