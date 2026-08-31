@@ -2,3 +2,21 @@
 # "command not found" for commands that plainly exist, and the tester cannot see that the
 # error is about the file rather than the command.
 *.sh text eol=lf
+
+# Luau, and everything else text, is stored with LF.
+#
+# The repository was already mostly LF — eighteen of twenty-two module sources — and the four
+# that were not made every edit to them look like a whole-file rewrite, because the tooling
+# here writes LF. That is not a cosmetic problem: a 3700-line file that appears entirely
+# changed hides the four lines that actually changed, in exactly the review where seeing them
+# matters.
+#
+# Normalised on commit rather than by a hook. A hook lives in .git/hooks, which is not cloned
+# and not pushed, so a second machine or the macOS runner would quietly not have it; this file
+# is committed and applies wherever the repository goes. It is also the mechanism already in
+# use directly above, for the same reason.
+*.luau text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.rs text eol=lf
+*.yml text eol=lf
