@@ -859,6 +859,13 @@ local function chooser(spec)
     -- pressing it puts a caret somewhere and that the next thing they type goes into the
     -- application.
     typeLabel = "edit",
+    -- Which also has to be true of the KEYS, or the word is just a label on the wrong thing.
+    -- Activating this leaves the caret in the application's text box, and the overlay was
+    -- still holding Space — so a search for "White 80s" lost its space to a control press.
+    -- `editable` is the statement the runtime already understood from an OCREdit, said by a
+    -- control that reaches its field by coordinate instead of by region. Return stays ours,
+    -- because it is the only way back into the field after tabbing away from it.
+    editable = true,
     -- READ FROM THE PICTURE, not from the tree.
     --
     -- Through the tree it worked, but only afterwards: the tester's typing was announced back

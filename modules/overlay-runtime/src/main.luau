@@ -300,6 +300,10 @@ function Overlay:addCustomButton(opts)
   return add(self, {
     kind = "custom", label = opts.label, onActivate = opts.onActivate,
     typeLabel = opts.typeLabel,
+    -- `editable`: activating this control leaves the caret in a text field, so Space belongs
+    -- to the application from then on — the same rule an OCREdit already gets, for controls
+    -- that reach their field some other way than by an OCR region.
+    editable = opts.editable,
     -- `text = function(overlay) -> string`: read-out, announced with the label. On a button
     -- it is how a control that ACTS can also say what it would act on — a panel toggle that
     -- announces only its name leaves the user to press it and find out, which for a collapse
@@ -2017,6 +2021,11 @@ end
 --
 --   ocredit       an editable field: Space must reach it, or the user cannot type a space
 --                 in a preset name. Return still activates.
+--   editable      the same statement made by a control of any kind — its activation puts the
+--                 caret in a text field. ON:EAR's speaker search is one: it has to be found
+--                 by coordinate rather than by an OCR region, because the panel it lives in
+--                 scales with the window, and being built as a custom button is no reason for
+--                 a space in "White 80s" to be swallowed by the overlay instead of typed.
 --   passthrough   the plugin's OWN control has the real keyboard focus, so both belong to
 --                 it — Space toggles its check box, Return opens its combo. Capturing
 --                 either here would swallow the interaction the pass-through exists for.
@@ -2035,7 +2044,7 @@ function Overlay:_syncNativeKeys()
   -- that gets used most.
   local inert = c == nil or passthrough or c.kind == "static"
     or (c.kind == "ocr" and c.readOnly)
-  local wantSpace = not inert and c.kind ~= "ocredit"
+  local wantSpace = not inert and c.kind ~= "ocredit" and not c.editable
   local wantReturn = not inert
   if wantSpace and not self._spaceToken then
     self._spaceToken = host.keys.capture("Space", function() self:activate() end)
