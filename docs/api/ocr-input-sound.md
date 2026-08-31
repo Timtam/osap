@@ -87,7 +87,11 @@ host.input.click(300, 200, { button = "right" }) -- right click
 
 ## host.input.drag(x1, y1, x2, y2, opts?)
 
-Presses the mouse button at `(x1, y1)`, drags to `(x2, y2)`, and releases.
+Presses the mouse button at `(x1, y1)`, drags to `(x2, y2)`, and releases — with real, paced movement in between.
+
+A drag is not a press, a warp and a release. On Windows the pointer is moved with injected move events rather than `SetCursorPos`, interpolated over sixteen steps with a few milliseconds between them, because two kinds of control tell the difference: one that watches for motion while its button is held sees injected events and can miss a warp entirely, and one that reads the *speed* of a drag answers an instantaneous jump with an enormous change. macOS posts a drag event between press and release, which it has always done. The pacing blocks the calling thread for about sixty milliseconds, which is only ever paid when somebody deliberately drags something.
+
+If a control needs a sustained press before it will react at all, use `mouseDown`/`mouseUp` with a timer instead — that is why those exist separately.
 
 **Signature:** `host.input.drag(x1: number, y1: number, x2: number, y2: number, opts: { button?: "left" | "right" | "middle" }?) -> nil`
 
@@ -100,14 +104,19 @@ host.input.drag(100, 100, 400, 300, { button = "middle" })
 
 ## host.input.scroll(x, y, amount)
 
-Moves to `(x, y)` and scrolls the mouse wheel by `amount` notches.
+Moves to `(x, y)` and scrolls the mouse wheel by `notches`, which may be fractional.
 
-**Signature:** `host.input.scroll(x: number, y: number, amount: number) -> nil`
+**Signature:** `host.input.scroll(x: number, y: number, notches: number) -> nil`
 
-All three arguments are integers. `amount` is in wheel notches (each notch is one `WHEEL_DELTA` of 120); positive scrolls up, negative scrolls down. Returns `nil`.
+`x` and `y` are integers. `notches` is in wheel notches and **need not be a whole number**; positive scrolls up, negative scrolls down. Returns `nil`.
+
+A notch is 120 units to the operating system, and a control decides for itself what one is worth — ON:EAR's tone knob moves by five of its own units per notch, which is as fine as this could ask for while notches were whole. Half a notch is 60 units, and an application that scales its step by the delta moves by half as much. One that rounds to its own interval instead simply does not move and reports the same value back, which is the honest outcome and says to stop asking for halves.
+
+On macOS this is expressed in Quartz *lines*, which cannot be smaller than one: a caller asking for less than a line gets the smallest whole line rather than nothing. That is a real difference between the platforms rather than a rounding detail, and it has not been exercised there — see [what has never run on a Mac](../macos-unverified).
 
 ```luau
-host.input.scroll(960, 540, -3) -- scroll down three notches
+host.input.scroll(960, 540, -3)   -- down three notches
+host.input.scroll(960, 540, 0.5)  -- half a notch up, where the control is finer than a notch
 ```
 
 ## host.input.send(combo)

@@ -3,7 +3,7 @@ title: "host.window & host.os — windows, controls, matchers, triggers"
 sidebar_position: 1
 ---
 
-All coordinates are screen pixels (i32 → Luau `number`) unless noted. `id` fields are native window handles (Win32 `HWND` as a Luau integer). The `host.window.list`/`active`/`controls`/`focusChain` functions are native (Rust) bindings; `find`/`findAll`/`test`/`onTrigger`/`onFocus` are added by `window_prelude.luau` on top of them.
+All coordinates are screen pixels (i32 → Luau `number`) unless noted. `id` fields are native window handles (Win32 `HWND` as a Luau integer). The `host.window.list`/`active`/`controls`/`focusChain`/`ownsPoint` functions are native (Rust) bindings; `find`/`findAll`/`test`/`onTrigger`/`onFocus` are added by `window_prelude.luau` on top of them.
 
 ## Table shapes
 
@@ -169,6 +169,28 @@ Returns [control tables](#control-table) from the currently focused element up t
 ```luau
 local chain = host.window.focusChain()
 local focused = chain[1]   -- innermost focused control, if any
+```
+
+## host.window.ownsPoint(id, x, y)
+
+`host.window.ownsPoint(id: number, x: number, y: number) -> boolean?`
+
+Whether the window `id` belongs to is the one drawn at that screen point.
+
+Every hotspot in this project clicks a coordinate worked out from a window's own frame, and knowing the point falls *inside* that frame says nothing about what is drawn there. A notification, a tooltip, another application raised over it: the click goes to whichever window owns the pixel. This is how an overlay finds that out before clicking rather than after.
+
+Compared at the **top level**. An overlay's origin is often a child — an embedded plug-in is a control inside its host's window — and the point resolves to whichever child is drawn there, usually a different one. So both sides are taken up to their root, and the question answered is "does this point belong to the same application window".
+
+**`nil` means the platform cannot say, and must be read as permission rather than refusal.** A check with no answer must not block what it cannot judge. Only a definite `false` should stop anything. macOS returns `nil` today (see [what has never run on a Mac](../macos-unverified)), so an overlay there behaves exactly as it did before this existed.
+
+`Overlay:addHotspotButton` and `addHotspotToggle` already ask this before every click; a module only needs it directly when it clicks a coordinate itself.
+
+```luau
+local o = ov:origin()
+if host.window.ownsPoint(o.id, x, y) == false then
+  return -- something else is covering it
+end
+host.input.click(x, y)
 ```
 
 ## host.window.find(matcher)
