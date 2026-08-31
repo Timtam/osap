@@ -609,8 +609,18 @@ local WIDTH_MID = 625
 local WIDTH_SLOPE, WIDTH_AT_MIN = 0.4944, -4.44
 -- Ten is the slider's own floor; below it there is nothing left to narrow.
 local WIDTH_FLOOR = 10
--- Two per cent is about one pixel on this bar, which is as fine as dragging can express.
-local WIDTH_STEP = 2
+-- STEPPED IN PIXELS, not in per cent, because per cent does not survive the rounding.
+--
+-- A step of two per cent asked the handle to move half a pixel, and half a pixel rounds to a
+-- drag from a point to itself: the log read "dragging the right handle (626,880) to
+-- (626,880)", which is a perfectly executed drag of no length at all. The whole range of this
+-- slider is forty-five pixels of handle travel, so one per cent IS half a pixel and nothing
+-- expressed in per cent can be finer.
+--
+-- So the step is three pixels — about six per cent — and it is always a real movement. What
+-- the value becomes is read back from the window afterwards, as it always was, so nothing here
+-- has to be right about the arithmetic for the announcement to be right about the value.
+local WIDTH_STEP_PX = 3
 
 local function widthRightHandleX(pct)
   -- Never left of the middle: at the minimum the two handles have merged, and a press even a
@@ -631,17 +641,23 @@ ov:addStepper({
       host.speech.output("width is not readable, so it will not be moved", { interrupt = true })
       return
     end
-    local want = math.max(WIDTH_FLOOR, math.min(100, pct + dir * WIDTH_STEP))
-    if want == pct then
+    local from = widthRightHandleX(pct)
+    local to = math.max(widthRightHandleX(WIDTH_FLOOR),
+      math.min(widthRightHandleX(100), from + dir * WIDTH_STEP_PX))
+    if math.abs(to - from) < 1 then
       host.speech.output(dir < 0 and "already at its narrowest" or "already at its widest",
         { interrupt = true })
       return
     end
-    local x1, y = screenPoint(widthRightHandleX(pct), 869)
-    local x2 = screenPoint(widthRightHandleX(want), 869)
-    if not (x1 and x2) then return end
-    host.log.info(("[on-ear] Width %d%% -> %d%%: dragging the right handle (%d,%d) to (%d,%d)")
-      :format(pct, want, x1, y, x2, y))
+    local x1, y = screenPoint(from, 869)
+    local x2 = screenPoint(to, 869)
+    if not (x1 and x2) or x1 == x2 then
+      host.log.info(("[on-ear] Width %d%%: the drag would have no length; not dragging")
+        :format(pct))
+      return
+    end
+    host.log.info(("[on-ear] Width %d%%: dragging the right handle (%d,%d) to (%d,%d)")
+      :format(pct, x1, y, x2, y))
     host.input.drag(x1, y, x2, y)
   end,
 })
