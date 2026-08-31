@@ -619,40 +619,55 @@ local function chooser(spec)
   -- is re-evaluated on every recheck, whether or not anybody pressed anything, and a tree
   -- walk on that path would be a cost this window pays continuously for a panel that is
   -- almost never open.
-  -- VISIBLE, not merely present — and the difference is the whole bug this replaces.
+  -- VISIBLE, not merely present — and never guessed from silence.
   --
-  -- The first version asked whether an element named SpeakerBrowserWindow EXISTED, and it kept
-  -- answering yes long after the panel had closed: three "still on screen after Close" lines
-  -- in the log, against probes of the very same window listing no such element at all. Then it
-  -- claimed the window on every launch, so the application opened into a ring for a panel that
-  -- was never there. A UIA provider is entitled to keep a hidden component in its tree, and
-  -- this one evidently does.
+  -- Two bugs are answered here, found one after the other, and the second is the interesting
+  -- one.
   --
-  -- `locate` is the call that already knows the difference: it refuses a rectangle that has
-  -- collapsed or gone off-screen, which is exactly what a hidden panel has. Nothing else about
-  -- the gate changes.
+  -- The first version asked whether an element named SpeakerBrowserWindow EXISTED. It kept
+  -- answering yes long after the panel had closed — three "still on screen after Close" lines
+  -- against probes of the same window listing no such element — and then claimed the window on
+  -- every launch, so the application opened into a ring for a panel that was never there. A UIA
+  -- provider may keep a hidden component in its tree, and this one does. `locate` is the call
+  -- that knows the difference: it refuses a rectangle that has collapsed or gone off-screen.
+  --
+  -- Then clicking into the search field made the panel "disappear" while it was plainly still
+  -- on screen. It had not: putting the keyboard focus in that text box makes ON:EAR drop its
+  -- ENTIRE accessibility tree. The probe is unambiguous — 77 elements with the panel open, and
+  -- 6 a moment later with the same panel open and the caret in Search, those 6 being the window
+  -- and the Windows title bar. Nothing of the application's own is left to find.
+  --
+  -- Reading that as "the panel closed" is what did the damage: this overlay stood down and the
+  -- window overlay took over, with all 31 of its controls underneath a panel that covers them.
+  -- Pressing "FN Mute" would then have clicked a speaker tile.
+  --
+  -- So absence of an answer is not an answer. When the panel cannot be found, a second question
+  -- decides which kind of silence it is: something that is in this window's tree whenever the
+  -- tree works at all. If that is missing too, the application has stopped answering, nothing
+  -- has been learned, and the previous belief stands. The extra question is asked only when it
+  -- can change something — the panel was believed open and has just gone missing — so the
+  -- steady state still costs one lookup.
+  local TREE_SENTINEL = "Battery Level"
+
   local paneWasThere = nil
-  b:gate(function(origin)
-    if not (origin and origin.id) then return false end
+
+  local function readPane(origin)
+    if not (origin and origin.id) then return false, "no window" end
     local at = host.uia.locate(origin.id, spec.pane, host.uia.type.Window)
-    local there = at ~= nil
+    if at then return true, ("visible at (%d,%d)"):format(at.x, at.y) end
+    if not paneWasThere then return false, "not there" end
+    if host.uia.locate(origin.id, TREE_SENTINEL, host.uia.type.Text) then
+      return false, "gone, and the rest of the tree is still readable"
+    end
+    return true, "unknown: the window is answering nothing at all, so the last answer stands"
+  end
+
+  b:gate(function(origin)
+    local there, why = readPane(origin)
     if there ~= paneWasThere then
       paneWasThere = there
-      -- On a TRANSITION only, which is rare, say what each way of asking answered. If the two
-      -- ever disagree again this is the line that names which one lied, instead of another
-      -- round of the tester opening and closing a panel to find out.
-      local inTree = false
-      for _, n in ipairs(dumpFor(b) or {}) do
-        if n.name == spec.pane then
-          inTree = true
-          break
-        end
-      end
-      host.log.info(("[on-ear] %s: '%s' %s — locate %s, find %s, in the tree %s")
-        :format(spec.name, spec.pane, there and "is on screen" or "is gone",
-          at and ("(%d,%d)"):format(at.x, at.y) or "nil",
-          tostring(host.uia.find(origin.id, spec.pane, host.uia.type.Window)),
-          tostring(inTree)))
+      host.log.info(("[on-ear] %s: '%s' %s — %s")
+        :format(spec.name, spec.pane, there and "is on screen" or "is gone", why))
     end
     return there
   end)
@@ -668,12 +683,10 @@ local function chooser(spec)
 
   -- Whether the panel is on screen at all — the same question the gate asks, asked again
   -- here because a control that closes something should be able to check that it did.
+  -- Literally the gate's own question. Asking it a different way was how the two came to
+  -- disagree in the first place.
   local function paneThere()
-    local o = b:origin()
-    if not (o and o.id) then return false end
-    -- Same question, same call as the gate. Asking it a different way was how the two came
-    -- to disagree in the first place.
-    return host.uia.locate(o.id, spec.pane, host.uia.type.Window) ~= nil
+    return (readPane(b:origin()))
   end
 
   -- Bring the window forward, then click.
