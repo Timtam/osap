@@ -641,24 +641,38 @@ ov:addStepper({
       host.speech.output("width is not readable, so it will not be moved", { interrupt = true })
       return
     end
-    local from = widthRightHandleX(pct)
-    local to = math.max(widthRightHandleX(WIDTH_FLOOR),
-      math.min(widthRightHandleX(100), from + dir * WIDTH_STEP_PX))
-    if math.abs(to - from) < 1 then
-      host.speech.output(dir < 0 and "already at its narrowest" or "already at its widest",
-        { interrupt = true })
-      return
+    -- ASKED WITH THE KEYBOARD, after four versions of asking with the mouse.
+    --
+    -- The drag is now provably correct in every respect that can be checked from outside: the
+    -- press lands on the handle (measured), it carries injected movement rather than a cursor
+    -- warp (fixed in the backend), it takes time rather than jumping (also fixed), and the log
+    -- shows a real three-pixel travel. The slider does not move. Whatever this control wants
+    -- from a mouse, it is not something that can be worked out by trying another variation of
+    -- the same gesture, and continuing to guess costs somebody else a test round each time.
+    --
+    -- So: a click to put the keyboard focus on it — clicks are the one thing that has always
+    -- worked here — and then the arrow key the application itself would act on, posted
+    -- straight to the window. Posted rather than synthesised, because a synthesised Left is a
+    -- key this overlay is holding while a stepper is focused and would come straight back to
+    -- us; PostMessage goes to the window and past our own hook entirely.
+    --
+    -- It also sidesteps the geometry completely. The step becomes the application's own, which
+    -- is finer than the two per cent a pixel of this bar is worth, and there is nothing left to
+    -- model. If this does not move it either, the honest answer is that Width is a read-out
+    -- and the mouse is how you change it.
+    local o = ov:origin()
+    if not (o and o.id) then return end
+    local x, y = screenPoint(widthRightHandleX(pct), 869)
+    if not x then return end
+    local key = dir < 0 and "Left" or "Right"
+    host.log.info(("[on-ear] Width %d%%: focusing the handle at (%d,%d), then posting %s")
+      :format(pct, x, y, key))
+    host.input.click(x, y)
+    if host.timer then
+      host.timer.after(90, function() host.input.post(o.id, key) end)
+    else
+      host.input.post(o.id, key)
     end
-    local x1, y = screenPoint(from, 869)
-    local x2 = screenPoint(to, 869)
-    if not (x1 and x2) or x1 == x2 then
-      host.log.info(("[on-ear] Width %d%%: the drag would have no length; not dragging")
-        :format(pct))
-      return
-    end
-    host.log.info(("[on-ear] Width %d%%: dragging the right handle (%d,%d) to (%d,%d)")
-      :format(pct, x1, y, x2, y))
-    host.input.drag(x1, y, x2, y)
   end,
 })
 
