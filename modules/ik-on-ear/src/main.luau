@@ -447,6 +447,25 @@ for _, sw in ipairs(switches) do
   })
 end
 
+-- Two clicks with a GAP between them, which is what makes them two clicks.
+--
+-- Sent back to back they go out in the same instant, and an application deciding whether it
+-- has seen a double-click is looking at the interval between two presses — an interval of zero
+-- is as easy to read as one press with a stutter as it is as two. Ninety milliseconds is
+-- plainly two, and plainly inside any double-click time a system would use.
+--
+-- The irony is not lost: the correcting pass had to be removed because two clicks two hundred
+-- milliseconds apart WERE a double-click. The same fact, needed on purpose here and avoided
+-- there.
+local function doubleClick(x, y)
+  host.input.click(x, y)
+  if host.timer then
+    host.timer.after(90, function() host.input.click(x, y) end)
+  else
+    host.input.click(x, y)
+  end
+end
+
 -- ── The two things that shape the sound ──────────────────────────────────────
 --
 -- Steppers, driven by the wheel over the control itself. Neither is a control this overlay can
@@ -471,8 +490,7 @@ ov:addStepper({
     local x, y = screenPoint(290, 780)
     if not x then return end
     host.log.info(("[on-ear] Tone: double-clicking (%d,%d) to reset it"):format(x, y))
-    host.input.click(x, y)
-    host.input.click(x, y)
+    doubleClick(x, y)
   end,
   -- Half a notch. One whole one moves this knob five of its own units, which is a big step to
   -- take blind when the value is the tone of everything you are about to listen to. If the
@@ -532,7 +550,6 @@ ov:addStepper({
 local WIDTH_MID = 625
 local WIDTH_PX_PER_PCT, WIDTH_X_AT_ZERO = 0.4812, 629.1
 local WIDTH_MIN, WIDTH_MAX = 10, 200
-local WIDTH_STEP = 5
 
 -- Deliberately PAST the end, at either end.
 --
@@ -563,31 +580,35 @@ local function widthHandleX(pct)
   return x
 end
 
-local function widthClickAt(dx, pct, want, why)
-  local x, y = screenPoint(dx, 869)
-  if not x then return nil end
-  host.log.info(("[on-ear] Width %d%% -> %d%% (%s): clicking (%d,%d)")
-    :format(pct, want, why, x, y))
-  host.input.click(x, y)
-  return dx
-end
+
+-- STEPPED IN PIXELS, because per cent is not a unit this control has.
+--
+-- A pixel of this bar is worth about two per cent, so a target named in per cent has to be
+-- rounded to a pixel before it can be clicked — and rounding twice, once to a round percentage
+-- and once to a whole pixel, is what produced both of the last two faults.
+--
+-- It stuck at ninety-seven: clicking the place computed for a hundred lands on ninety-seven,
+-- and from ninety-seven the next step computes a hundred again, clicks the same pixel and gets
+-- ninety-seven. A fixed point, and a five per cent step is small enough to make several of
+-- them. And the jumps were uneven — three per cent one press and seven the next — because
+-- travelling from a value that is not a multiple of five to one that is covers a different
+-- distance each time.
+--
+-- The click position is the real state of this control, so that is what is stepped. Two pixels
+-- a press, about four per cent, the same every time and never nothing. Where it lands is still
+-- read back from the window rather than assumed.
+local WIDTH_STEP_PX = 2
+local WIDTH_X_MIN = WIDTH_X_AT_ZERO + WIDTH_PX_PER_PCT * WIDTH_MIN
+local WIDTH_X_MAX = WIDTH_X_AT_ZERO + WIDTH_PX_PER_PCT * WIDTH_MAX + WIDTH_OVERSHOOT
 
 -- How long the arrows have to stop before the click goes out, and where a burst of them has
--- got to so far.
+-- got to so far — in pixels, like everything else here.
 local WIDTH_IDLE = 260
-local widthPending, widthGen = nil, 0
+local widthPendingX, widthGen = nil, 0
 
 local function widthNow()
   local shown = valueBelow("Width")
   return shown and tonumber(string.match(shown, "(%d+)"))
-end
-
--- Twice in quick succession at the same point, which the system reports to the application as
--- a double-click. On both of these controls that means "back to the default", and it is the
--- only way to reach an exact value without counting steps.
-local function doubleClick(x, y)
-  host.input.click(x, y)
-  host.input.click(x, y)
 end
 
 ov:addStepper({
@@ -597,22 +618,28 @@ ov:addStepper({
   when = function() return element("Width") ~= nil end,
   text = function() return valueBelow("Width") or "not shown" end,
   onActivate = function()
-    local x, y = screenPoint(WIDTH_MID, 869)
+    -- Where the handle IS, not the middle. The middle is on the far side of the fold — the
+    -- handles stop about ten per cent apart — so a click there is a click on the other one's
+    -- half, which is a poor place to aim a gesture meant for this control.
+    local pct = widthNow()
+    local x, y = screenPoint(pct and widthHandleX(pct) or WIDTH_MID, 869)
     if not x then return end
     host.log.info(("[on-ear] Width: double-clicking (%d,%d) to reset it"):format(x, y))
     doubleClick(x, y)
   end,
   onStep = function(dir)
-    local pct = widthPending or widthNow()
-    if not pct then
-      host.speech.output("width is not readable, so it will not be moved", { interrupt = true })
-      return
+    local base = widthPendingX
+    if not base then
+      local pct = widthNow()
+      if not pct then
+        host.speech.output("width is not readable, so it will not be moved",
+          { interrupt = true })
+        return
+      end
+      base = math.floor(widthHandleX(pct) + 0.5)
     end
-    -- Round numbers, so stepping down from two hundred passes through a hundred exactly rather
-    -- than through whatever the clicks happened to accumulate.
-    local want = math.floor((pct + dir * WIDTH_STEP) / WIDTH_STEP + 0.5) * WIDTH_STEP
-    want = math.max(WIDTH_MIN, math.min(WIDTH_MAX, want))
-    if want == pct then
+    local target = math.max(WIDTH_X_MIN, math.min(WIDTH_X_MAX, base + dir * WIDTH_STEP_PX))
+    if target == base then
       host.speech.output(dir < 0 and "already at its narrowest" or "already at its widest",
         { interrupt = true })
       return
@@ -626,24 +653,27 @@ ov:addStepper({
     -- default mid-adjustment.
     --
     -- Waiting out the double-click time between presses would make holding an arrow useless.
-    -- So the presses accumulate instead: each one moves a pending target, and the click goes
-    -- out once they stop. Five quick presses become one click twenty-five per cent along,
-    -- which is both what was asked for and faster than five clicks would have been.
-    --
-    -- There is no correcting pass and there must not be, for the same reason.
-    widthPending = want
+    -- So the presses accumulate instead: each moves a pending position, and the click goes out
+    -- once they stop.
+    widthPendingX = target
     widthGen += 1
     local mine = widthGen
+    local function fire()
+      local at = widthPendingX
+      widthPendingX = nil
+      if not at then return end
+      local x, y = screenPoint(at, 869)
+      if not x then return end
+      host.log.info(("[on-ear] Width: clicking (%d,%d), was %s%%")
+        :format(x, y, tostring(widthNow())))
+      host.input.click(x, y)
+    end
     if not host.timer then
-      widthClickAt(widthHandleX(want), pct, want, "step")
-      widthPending = nil
+      fire()
       return
     end
     host.timer.after(WIDTH_IDLE, function()
-      if mine ~= widthGen or not widthPending then return end
-      local target = widthPending
-      widthPending = nil
-      widthClickAt(widthHandleX(target), widthNow() or pct, target, "step")
+      if mine == widthGen then fire() end
     end)
   end,
 })

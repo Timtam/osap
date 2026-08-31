@@ -56,9 +56,6 @@ local function sValueRightOf(labelName)
   return best
 end
 
-local function sPoint(dx, dy)
-  return screenPointOf(settings, dx, dy)
-end
 
 local settingsWasThere = nil
 local settingsDark = false
