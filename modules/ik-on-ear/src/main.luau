@@ -1183,92 +1183,76 @@ local function chooser(spec)
   end)
 
   -- What the list shows now, for the scroller to report: the name in its first row.
-  local function firstRowName()
-    for i = 1, spec.rows do
-      local r = bElement("Row " .. i)
-      if r then
-        for _, n in ipairs(btree() or {}) do
-          if n.name ~= r.name and math.abs(n.bounds.y - r.bounds.y) <= 4
-            and math.abs(n.bounds.x - r.bounds.x) <= 4
-          then
-            return "now starting at " .. n.name
-          end
-        end
+  local function rowNameAt(i)
+    local r = bElement("Row " .. i)
+    if not r then return nil end
+    for _, n in ipairs(btree() or {}) do
+      if n.name ~= r.name and math.abs(n.bounds.y - r.bounds.y) <= 4
+        and math.abs(n.bounds.x - r.bounds.x) <= 4
+      then
+        return n.name
       end
     end
     return nil
   end
 
-  scroller(spec.rowLabel .. " list down", 466, 600, -3, firstRowName)
-  scroller(spec.rowLabel .. " list up", 466, 600, 3, firstRowName)
-
-  -- The printed names, read a WHOLE ROW at a time.
-  --
-  -- Reading them one tile at a time did not work, and the reason is worth keeping because it
-  -- is not about the region. The region was right — measured against the words the probe had
-  -- already found — but a crop of a hundred pixels by sixteen holding four characters gives
-  -- the recogniser almost nothing to work with, and what came back was punctuation and
-  -- symbols. The same words are read perfectly in a pass over the whole window, where they
-  -- sit among plenty of other text.
-  --
-  -- So the strip across all five tiles is read in one go and the words are handed out by
-  -- where they landed. That is more context for the recogniser AND fewer screen captures —
-  -- one per row rather than one per tile — and the two vertical tile borders the strip now
-  -- crosses fall between the columns, outside every tile's own half, so they are dropped
-  -- rather than read as a character.
-  local NAME_HALF = 54
-  local lastRaw = {}
-
-  local function readRowNames(r)
-    if not spec.tiles.name then return {} end
-    local o = b:origin()
-    local k = scaleOf(o)
-    if not k then return {} end
-    local ty = spec.tiles.rows[r]
-    local cols = spec.tiles.cols
-    local rect = screenRect(o, cols[1] - NAME_HALF, ty + spec.tiles.name[3],
-      cols[#cols] + NAME_HALF, ty + spec.tiles.name[4])
-    if not rect then return {} end
-    local got = host.ocr.recognize({ region = rect })
-    -- Logged, because this has been wrong twice on two different theories and neither was
-    -- ever checked against what the recogniser actually said. A tile with no name and a tile
-    -- whose name came back as punctuation sound the same from the keyboard, and both sound
-    -- like the region being in the wrong place — which it was not, either time.
-    local raw = (got and got.text or ""):gsub("%s+", " ")
-    if raw ~= lastRaw[r] then
-      lastRaw[r] = raw
-      host.log.info(("[on-ear] %s row %d names: region (%d,%d)-(%d,%d) gave %d word(s): %s")
-        :format(spec.name, r, rect[1], rect[2], rect[3], rect[4],
-          #((got and got.words) or {}), raw == "" and "<nothing>" or raw))
-    end
-    local bags = {}
-    for _, wd in ipairs((got and got.words) or {}) do
-      local wx = wd.x + wd.w / 2
-      for c, cx in ipairs(cols) do
-        local sx = screenPointOf(b, cx, ty)
-        if sx and math.abs(wx - sx) <= NAME_HALF * k then
-          bags[c] = bags[c] or {}
-          table.insert(bags[c], { x = wx, text = wd.text })
-        end
+  -- BOTH ends, and logged. The tester reported the list moving by two or three makers and
+  -- then stopping, and "now starting at X" alone cannot tell a list that has stopped scrolling
+  -- from one that is scrolling by a smaller step than expected — the first name is the same
+  -- either way if the step is small. The span says which.
+  local function listSpan()
+    local first, last
+    for i = 1, spec.rows do
+      local n = rowNameAt(i)
+      if n then
+        first = first or n
+        last = n
       end
     end
-    local out = {}
-    for c, bag in pairs(bags) do
-      -- Left to right, because a name can be more than one word ("K240 MKII") and the
-      -- recogniser does not promise to return them in reading order.
-      table.sort(bag, function(a, z) return a.x < z.x end)
-      local words = {}
-      for _, w in ipairs(bag) do words[#words + 1] = w.text end
-      out[c] = table.concat(words, " ")
-    end
-    return out
+    if not first then return nil end
+    host.log.info(("[on-ear] %s list now shows %s .. %s"):format(spec.name, first, last))
+    if first == last then return "showing " .. first end
+    return ("%s to %s"):format(first, last)
   end
 
-  -- One memo per row, so a tile only pays for the strip it is in, once per epoch, however
-  -- many of its neighbours ask in the same breath.
-  local rowNames = {}
-  for r = 1, #spec.tiles.rows do
-    rowNames[r] = O.memoByEpoch(function() return readRowNames(r) end)
+  scroller(spec.rowLabel .. " list down", 466, 600, -3, listSpan)
+  scroller(spec.rowLabel .. " list up", 466, 600, 3, listSpan)
+
+  -- The printed names, one tile at a time — and the row strip that replaced it is gone.
+  --
+  -- Three attempts, and the log settles which of them was which. The first region reached to
+  -- the tile's own rounded frame, and the OCR step that trims a crop to its content read the
+  -- FRAME as the content and squeezed the words to nothing legible: that is where the
+  -- punctuation came from. The second was the same region pulled well clear of the frame —
+  -- and it was never tried, because the strip across all five tiles went in during the same
+  -- round on a theory about crop size. The strip returns literally nothing: "region
+  -- (693,387)-(1575,403) gave 0 word(s)". Eight hundred and eighty two pixels by sixteen is
+  -- not an image this recogniser will work on at all, and upscaling it by the factor a
+  -- ten-pixel letter asks for takes it past what the engine accepts.
+  --
+  -- So: the corrected single-tile region, which is the one measurement in this story that has
+  -- never been given a chance. One capture per focused tile, which the log had already timed
+  -- at around fifty milliseconds when the first version ran.
+  local lastRaw = {}
+
+  local function readTileName(n, tx, ty)
+    if not spec.tiles.name then return nil end
+    local o = b:origin()
+    local rect = screenRect(o, tx + spec.tiles.name[1], ty + spec.tiles.name[3],
+      tx + spec.tiles.name[2], ty + spec.tiles.name[4])
+    if not rect then return nil end
+    local got = host.ocr.recognize({ region = rect })
+    local raw = (got and got.text or ""):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
+    -- Kept, and kept per tile: the difference between "no name here" and "a name nobody can
+    -- read" is invisible from the keyboard, and guessing at it has cost two rounds already.
+    if raw ~= lastRaw[n] then
+      lastRaw[n] = raw
+      host.log.info(("[on-ear] %s tile %d name: region (%d,%d)-(%d,%d) gave %s")
+        :format(spec.name, n, rect[1], rect[2], rect[3], rect[4],
+          raw == "" and "<nothing>" or ("'" .. raw .. "'")))
+    end
+    if raw == "" then return nil end
+    return raw
   end
 
   -- The grid. Its tiles are pictures with no accessible element and no text of their own, so
@@ -1295,7 +1279,7 @@ local function chooser(spec)
           -- prints none. Where there is one it is read, so this grid can be BROWSED — the
           -- speaker grid can only be sampled, because there a tile has no name until it has
           -- been pressed, and pressing is selecting.
-          local name = spec.tiles.name and rowNames[r]()[c] or nil
+          local name = readTileName(n, tx, ty)
           local on = tileSelected(tx, ty)
           if name and on then return name .. ", selected" end
           return name or (on and "selected" or nil)
@@ -1344,8 +1328,7 @@ local function chooser(spec)
     local mid = spec.tiles.cols[(#spec.tiles.cols + 1) // 2]
     local midRow = spec.tiles.rows[(#spec.tiles.rows + 1) // 2]
     local function firstTile()
-      local names = spec.tiles.name and rowNames[1]() or nil
-      local n = names and names[1]
+      local n = readTileName(1, spec.tiles.cols[1], spec.tiles.rows[1])
       if n then return "now starting at " .. n end
       return ("%d position(s) hold something"):format(filledCount())
     end
