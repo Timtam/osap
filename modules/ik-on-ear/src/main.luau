@@ -1235,8 +1235,32 @@ local function chooser(spec)
   -- at around fifty milliseconds when the first version ran.
   local lastRaw = {}
 
+  -- A K comes back as "1<".
+  --
+  -- Repaired rather than accepted, and this is a correction of a GLYPH, not a guess about the
+  -- word. The recogniser is splitting one letter into two shapes it knows — the same K reads
+  -- correctly in a pass over the whole window, and did in the probe for every one of these
+  -- names — and no product name contains a "<" at all, so there is nothing this can turn into
+  -- something it was not. The raw reading is logged either way, so a name that really did
+  -- contain those characters would be visible rather than silently rewritten.
+  local function repairGlyphs(v)
+    return (v:gsub("[1Il]<", "K"))
+  end
+
   local function readTileName(n, tx, ty)
     if not spec.tiles.name then return nil end
+    -- A row whose names the panel does not draw is not a row to go looking in.
+    --
+    -- The bottom row's name strip is clipped away by the grid's viewport, and asking anyway
+    -- produced five identical readings of "cYanmaGtaYellowb" from five different places —
+    -- which is what this recogniser does with a blank crop: the step that trims to content
+    -- finds none, hands the flat rectangle over whole, and something comes back regardless.
+    -- Nothing is a perfectly good answer here, and it is now the one given.
+    local rows = spec.tiles.name[5]
+    if rows then
+      local r = (n - 1) // #spec.tiles.cols + 1
+      if not table.find(rows, r) then return nil end
+    end
     local o = b:origin()
     local rect = screenRect(o, tx + spec.tiles.name[1], ty + spec.tiles.name[3],
       tx + spec.tiles.name[2], ty + spec.tiles.name[4])
@@ -1245,14 +1269,16 @@ local function chooser(spec)
     local raw = (got and got.text or ""):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
     -- Kept, and kept per tile: the difference between "no name here" and "a name nobody can
     -- read" is invisible from the keyboard, and guessing at it has cost two rounds already.
+    local fixed = repairGlyphs(raw)
     if raw ~= lastRaw[n] then
       lastRaw[n] = raw
-      host.log.info(("[on-ear] %s tile %d name: region (%d,%d)-(%d,%d) gave %s")
+      host.log.info(("[on-ear] %s tile %d name: region (%d,%d)-(%d,%d) gave %s%s")
         :format(spec.name, n, rect[1], rect[2], rect[3], rect[4],
-          raw == "" and "<nothing>" or ("'" .. raw .. "'")))
+          raw == "" and "<nothing>" or ("'" .. raw .. "'"),
+          fixed ~= raw and (" -> '" .. fixed .. "'") or ""))
     end
-    if raw == "" then return nil end
-    return raw
+    if fixed == "" then return nil end
+    return fixed
   end
 
   -- The grid. Its tiles are pictures with no accessible element and no text of their own, so
@@ -1419,7 +1445,16 @@ chooser({
   -- one, and never wider than 39 either side. The bottom row has no name at all — the grid's
   -- viewport clips it before the strip — so those three tiles simply read nothing, which is
   -- already what an empty read means here.
-  tiles = { cols = GRID_COLUMNS, rows = { 314, 507, 701 }, name = { -54, 54, 62, 78 } },
+  -- `name` is the box the printed model name sits in, as offsets from the tile's centre, and
+  -- the fifth entry is which ROWS actually print one. Both are measurements, not choices: the
+  -- text sits 65 to 74 below centre in every tile that has one and is never wider than 39
+  -- either side, and the bottom row's strip is clipped away by the grid's viewport, so there
+  -- is nothing there to read.
+  tiles = {
+    cols = GRID_COLUMNS,
+    rows = { 314, 507, 701 },
+    name = { -54, 54, 62, 78, { 1, 2 } },
+  },
 })
 
 -- Navigation is Tab / Shift+Tab / Enter, captured while this window is in front, as
