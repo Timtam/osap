@@ -577,102 +577,35 @@ ov:addStepper({
   end,
 })
 
--- Width is DRAGGED, because the wheel does not reach it — and the RIGHT handle is dragged.
+-- Width READS. It does not adjust, and that is a statement about this control rather than a
+-- gap somebody forgot to fill.
 --
--- The same wheel moves Tone perfectly well, so the difference is the control rather than the
--- method: this is a range with two handles, and a slider of that shape commonly declines wheel
--- input outright, there being no single value for a notch to mean.
+-- Five mechanisms were tried against it, and the geometry behind them is measured rather than
+-- supposed — three captures of the bar, at ten, forty-eight and a hundred per cent, agreeing
+-- on where the handles sit to within a third of a pixel:
 --
--- Three captures, and the third is the one that mattered:
+--   the wheel                 moves the Tone knob beside it perfectly; this one ignores it
+--   an instant drag           moved it eighteen per cent for two pixels, then not at all
+--   a paced drag from Lua     the timers proved far coarser than the pacing asked for
+--   a paced drag from Rust    injected movement, real duration, three pixels of travel: nothing
+--   click to focus, then      the arrow key posted straight to the window, past our own
+--   an arrow key              hook: nothing
 --
---     100%   handles at 580 and 670, the orange fill between them
---      48%   handles at 607 and 644
---      10%   NO fill at all, and one white blob at 623-625 where both handles have met
+-- Everything checkable from outside is right, and it does not move. What this control wants
+-- from a mouse is not discoverable by trying another variation of the same gesture, and every
+-- variation costs a person a test round to find out.
 --
--- Ten per cent is this slider's minimum, and there the two handles are a pixel apart. Two
--- earlier versions of this drove the LEFT handle and pulled it left to widen, which from the
--- minimum meant asking a control already at its stop to go further — and it did nothing at
--- all, exactly as it should. Before that, a model fitted to only the first two captures put
--- the left handle at 625.9 at ten per cent, to the RIGHT of the middle, which a left handle
--- cannot be. Both failures were the same mistake: extrapolating past the last thing measured.
---
--- The right handle is never ambiguous. It sits at the middle or to the right of it at every
--- value, so a press aimed at it can only be nearer to it, and pulling it right always widens
--- whatever the other handle is doing. Its distance from the middle is a straight line through
--- all three captures — 0.5, 19 and 45 for 10, 48 and 100 — which they fit to within a third of
--- a pixel.
---
--- Everything is recomputed from the printed value at each step, so it stays right after
--- somebody moves the slider with a mouse, and a value it cannot read is one it will not move.
-local WIDTH_MID = 625
--- offset(percent) = WIDTH_SLOPE * percent + WIDTH_AT_MIN, fitted to the three captures.
-local WIDTH_SLOPE, WIDTH_AT_MIN = 0.4944, -4.44
--- Ten is the slider's own floor; below it there is nothing left to narrow.
-local WIDTH_FLOOR = 10
--- STEPPED IN PIXELS, not in per cent, because per cent does not survive the rounding.
---
--- A step of two per cent asked the handle to move half a pixel, and half a pixel rounds to a
--- drag from a point to itself: the log read "dragging the right handle (626,880) to
--- (626,880)", which is a perfectly executed drag of no length at all. The whole range of this
--- slider is forty-five pixels of handle travel, so one per cent IS half a pixel and nothing
--- expressed in per cent can be finer.
---
--- So the step is three pixels — about six per cent — and it is always a real movement. What
--- the value becomes is read back from the window afterwards, as it always was, so nothing here
--- has to be right about the arithmetic for the announcement to be right about the value.
-local WIDTH_STEP_PX = 3
-
-local function widthRightHandleX(pct)
-  -- Never left of the middle: at the minimum the two handles have merged, and a press even a
-  -- pixel to the left of the meeting point is a press on the other one.
-  return math.max(WIDTH_MID + 1, WIDTH_MID + WIDTH_SLOPE * pct + WIDTH_AT_MIN)
-end
-
-ov:addStepper({
+-- So it says what it says, honestly, and the mouse is how it gets changed. A control that
+-- announces itself as a slider and then ignores every key is a promise this project does not
+-- make; static text is what this is, and static text is what it now claims to be. Should
+-- somebody ever learn what it responds to, `addStepper` is still there and this becomes four
+-- lines again.
+ov:addStaticText({
   label = "Width",
-  -- Long enough for a drag that deliberately takes its time, plus the window's own redraw.
-  settle = 400,
   when = function() return element("Width") ~= nil end,
-  text = function() return valueBelow("Width") or "not shown" end,
-  onStep = function(dir)
-    local shown = valueBelow("Width")
-    local pct = shown and tonumber(string.match(shown, "(%d+)"))
-    if not pct then
-      host.speech.output("width is not readable, so it will not be moved", { interrupt = true })
-      return
-    end
-    -- ASKED WITH THE KEYBOARD, after four versions of asking with the mouse.
-    --
-    -- The drag is now provably correct in every respect that can be checked from outside: the
-    -- press lands on the handle (measured), it carries injected movement rather than a cursor
-    -- warp (fixed in the backend), it takes time rather than jumping (also fixed), and the log
-    -- shows a real three-pixel travel. The slider does not move. Whatever this control wants
-    -- from a mouse, it is not something that can be worked out by trying another variation of
-    -- the same gesture, and continuing to guess costs somebody else a test round each time.
-    --
-    -- So: a click to put the keyboard focus on it — clicks are the one thing that has always
-    -- worked here — and then the arrow key the application itself would act on, posted
-    -- straight to the window. Posted rather than synthesised, because a synthesised Left is a
-    -- key this overlay is holding while a stepper is focused and would come straight back to
-    -- us; PostMessage goes to the window and past our own hook entirely.
-    --
-    -- It also sidesteps the geometry completely. The step becomes the application's own, which
-    -- is finer than the two per cent a pixel of this bar is worth, and there is nothing left to
-    -- model. If this does not move it either, the honest answer is that Width is a read-out
-    -- and the mouse is how you change it.
-    local o = ov:origin()
-    if not (o and o.id) then return end
-    local x, y = screenPoint(widthRightHandleX(pct), 869)
-    if not x then return end
-    local key = dir < 0 and "Left" or "Right"
-    host.log.info(("[on-ear] Width %d%%: focusing the handle at (%d,%d), then posting %s")
-      :format(pct, x, y, key))
-    host.input.click(x, y)
-    if host.timer then
-      host.timer.after(90, function() host.input.post(o.id, key) end)
-    else
-      host.input.post(o.id, key)
-    end
+  text = function()
+    local v = valueBelow("Width")
+    return v and (v .. ", adjust with the mouse") or "not shown"
   end,
 })
 
