@@ -653,18 +653,34 @@ ov:addStepper({
       host.speech.output("width is not readable, so it will not be moved", { interrupt = true })
       return
     end
-    local want = math.max(0, math.min(100, pct + dir * WIDTH_STEP))
+    -- The handles meet at about twelve per cent, and below that a press is not clearly nearer
+    -- one than the other. The first version of this guard refused BOTH directions there, and
+    -- that was a trap rather than a safeguard: the slider was already sitting at ten per cent,
+    -- so every press was refused and there was no way back out of it at all. A guard that can
+    -- only be entered is worse than the thing it guards against.
+    --
+    -- Widening is always allowed, because it is the way out — and from inside the crowded zone
+    -- it goes straight to a width where the handles are clearly apart, rather than nudging by
+    -- two per cent and asking the application to distinguish half a pixel. Whichever handle it
+    -- takes hold of, the value moves and the read-back says where it landed.
+    --
+    -- Narrowing from inside the zone is refused, because there is nothing to gain by it and
+    -- the handle it would seize is a coin toss.
+    local WIDTH_CLEAR = 25
+    local crowded = math.abs(widthHandleX(pct) - WIDTH_MID) < 4
+    local want
+    if crowded and dir > 0 then
+      want = WIDTH_CLEAR
+    elseif crowded then
+      host.log.info(("[on-ear] Width %d%%: the handles are on top of each other; only widening "
+        .. "from here"):format(pct))
+      host.speech.output("too narrow to make narrower", { interrupt = true })
+      return
+    else
+      want = math.max(0, math.min(100, pct + dir * WIDTH_STEP))
+    end
     local fromX = widthHandleX(pct)
     local toX = widthHandleX(want)
-    -- Still refuses where the handles are too close together to aim between, but now at a
-    -- distance the measurements justify rather than one picked to be safe: they meet at about
-    -- twelve per cent, and four units apart is already a press that could take either.
-    if math.abs(fromX - WIDTH_MID) < 4 or math.abs(toX - WIDTH_MID) < 4 then
-      host.log.info(("[on-ear] Width %d%% -> %d%%: handles at %d and %d are too close to aim "
-        .. "between; not dragging"):format(pct, want, fromX, 2 * WIDTH_MID - fromX))
-      host.speech.output("width is too narrow to adjust from here", { interrupt = true })
-      return
-    end
     local x1, y = screenPoint(fromX, 869)
     local x2 = screenPoint(toX, 869)
     if not (x1 and x2) then return end
