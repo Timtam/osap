@@ -581,28 +581,38 @@ local function widthHandleX(pct)
 end
 
 
--- STEPPED IN PIXELS, because per cent is not a unit this control has.
+-- STEPPED IN PIXELS, and the steps are uneven because the control's are.
 --
--- A pixel of this bar is worth about two per cent, so a target named in per cent has to be
--- rounded to a pixel before it can be clicked — and rounding twice, once to a round percentage
--- and once to a whole pixel, is what produced both of the last two faults.
+-- This slider does not hold every percentage. Its values sit on a ladder three per cent apart,
+-- which the tester's readings show plainly: down 100, 94, 91, 85, 82, 76 and back up 76, 79,
+-- 85, 88, 91, 97 — every one of them the same modulo three.
 --
--- It stuck at ninety-seven: clicking the place computed for a hundred lands on ninety-seven,
--- and from ninety-seven the next step computes a hundred again, clicks the same pixel and gets
--- ninety-seven. A fixed point, and a five per cent step is small enough to make several of
--- them. And the jumps were uneven — three per cent one press and seven the next — because
--- travelling from a value that is not a multiple of five to one that is covers a different
--- distance each time.
+-- A screen coordinate is a whole number and a pixel of this bar is worth about two per cent,
+-- so a rung is 1.4 pixels: the control is quantised more finely than the screen can address.
+-- Aiming at a particular rung therefore needs accuracy the screen does not have, and when it
+-- misses, the press does NOTHING — which was tried, and is the worse failure. Somebody who
+-- cannot see the slider has no way to tell a key that did nothing from a key that is broken.
 --
--- The click position is the real state of this control, so that is what is stepped. Two pixels
--- a press, about four per cent, the same every time and never nothing. Where it lands is still
--- read back from the window rather than assumed.
+-- Two pixels always cross at least one rung, so every press moves. It lands one rung along or
+-- two, which reads as three per cent or six. That is not arithmetic that can be improved; it
+-- is a ladder that no whole number of pixels divides evenly. The value is announced after each
+-- press, so where it has got to is never in doubt — only the size of the last hop is.
 local WIDTH_STEP_PX = 2
 local WIDTH_X_MIN = WIDTH_X_AT_ZERO + WIDTH_PX_PER_PCT * WIDTH_MIN
 local WIDTH_X_MAX = WIDTH_X_AT_ZERO + WIDTH_PX_PER_PCT * WIDTH_MAX + WIDTH_OVERSHOOT
 
--- How long the arrows have to stop before the click goes out, and where a burst of them has
--- got to so far — in pixels, like everything else here.
+-- WHERE WE PUT IT LAST, so a run of presses never round-trips through the reading.
+--
+-- Converting a printed percentage back into a position can only ever pick one of the pixels
+-- that print it, and the leftover counted against one direction and in favour of the other.
+-- A run of presses carries the position forward instead; the reading is consulted to check
+-- this is still where the slider is, in case a mouse has moved it, not to work out where.
+local widthLastX = nil
+
+local function widthValueAt(x)
+  return (x - WIDTH_X_AT_ZERO) / WIDTH_PX_PER_PCT
+end
+
 local WIDTH_IDLE = 260
 local widthPendingX, widthGen = nil, 0
 
@@ -625,6 +635,7 @@ ov:addStepper({
     local x, y = screenPoint(pct and widthHandleX(pct) or WIDTH_MID, 869)
     if not x then return end
     host.log.info(("[on-ear] Width: double-clicking (%d,%d) to reset it"):format(x, y))
+    widthLastX = nil -- the reset puts it somewhere this module did not choose
     doubleClick(x, y)
   end,
   onStep = function(dir)
@@ -636,7 +647,11 @@ ov:addStepper({
           { interrupt = true })
         return
       end
-      base = math.floor(widthHandleX(pct) + 0.5)
+      if widthLastX and math.abs(widthValueAt(widthLastX) - pct) <= 4 then
+        base = widthLastX
+      else
+        base = widthHandleX(pct)
+      end
     end
     local target = math.max(WIDTH_X_MIN, math.min(WIDTH_X_MAX, base + dir * WIDTH_STEP_PX))
     if target == base then
@@ -644,6 +659,7 @@ ov:addStepper({
         { interrupt = true })
       return
     end
+    widthPendingX = target
     -- ONE CLICK PER BURST OF PRESSES, not one per press.
     --
     -- Two clicks close together in time and space are a double-click, and on this control a
@@ -667,6 +683,7 @@ ov:addStepper({
       host.log.info(("[on-ear] Width: clicking (%d,%d), was %s%%")
         :format(x, y, tostring(widthNow())))
       host.input.click(x, y)
+      widthLastX = at
     end
     if not host.timer then
       fire()

@@ -1659,6 +1659,8 @@ function Overlay:activate(index)
     -- the person who pressed it heard nothing at all and had no way to tell that from a
     -- control that had simply done its job quietly. Reported as "the overlay crashed", which
     -- from the keyboard is exactly what it looks like.
+    -- Read BEFORE the action, because afterwards is too late to know what it was.
+    local was = c.text and select(2, pcall(c.text, self)) or nil
     local ok, err = pcall(c.onActivate, self) -- the overlay, so a header control can reach it
     if not ok then
       host.log.info(string.format("%s: '%s' failed while activating: %s",
@@ -1668,12 +1670,25 @@ function Overlay:activate(index)
     elseif c.kind == "stepper" then
       -- Activating a stepper changes its value, so the value is read again and announced —
       -- from the control, not from what the activation intended.
-      if host.timer then
-        local at = i
-        host.timer.after(c.settle or 150, function()
-          if self.active and self.focus == at then speakControl(self, at, false, true) end
-        end)
+      --
+      -- A stepper's value is what it PRINTS, so that is what is watched: the announcement waits
+      -- until the printed text is not the one that was there before the key, and gives up at the
+      -- control's own settle time. A stepper that was already at its limit does not change, and is
+      -- announced then — which is the truth about it.
+      --
+      -- `settle` stops meaning "wait this long" and starts meaning "wait at most this long", which
+      -- is the only version of it that can be right.
+      local at = i
+      local say = function()
+        if self.active and self.focus == at then speakControl(self, at, false, true) end
       end
+      self:watch({
+        read = function() return c.text and select(2, pcall(c.text, self)) or nil end,
+        was = was,
+        within = c.settle or 600,
+        onDone = say,
+        onGiveUp = say,
+      })
     end
   elseif (c.kind == "ocr" or c.kind == "ocredit") and c.region then
     -- An OCR control re-reads its label on activate. An OCRButton then clicks the region
@@ -1771,9 +1786,13 @@ function Overlay:activate(index)
     -- keystroke path: this runs when somebody deliberately pressed something.
     local before = host.screen.pixel(px, py)
     host.input.click(px, py)
-    -- Re-read the new state (announced with the label) once the UI redraws.
+    -- Announced when the state has actually CHANGED, not a fixed moment later. A control that
+    -- redraws in thirty milliseconds is announced in thirty; one that takes half a second is
+    -- announced correctly instead of early. A control that does not change at all — the
+    -- already-chosen member of a radio group — is announced at the deadline, which is the
+    -- truth about it.
     if host.timer then
-      host.timer.after(150, function()
+      local say = function()
         local after = host.screen.pixel(px, py)
         local function name(q) return q and string.format("%d,%d,%d", q.r, q.g, q.b) or "?" end
         host.log.info(string.format(
@@ -1783,7 +1802,14 @@ function Overlay:activate(index)
             and before.b == after.b) and " (unchanged: the click changed nothing there)" or ""
         ))
         speakControl(self, i, false, true)
-      end)
+      end
+      self:watch({
+        read = function() return hotspotToggleState(self, c) end,
+        every = 120,
+        within = 900,
+        onDone = say,
+        onGiveUp = say,
+      })
     end
   end
 end
@@ -2269,6 +2295,7 @@ function Overlay:adjust(dir)
     sliderStep(self, c, dir)
   elseif c.kind == "stepper" and c.onStep then
     local i = self.focus
+    local was = c.text and select(2, pcall(c.text, self)) or nil
     local ok, err = pcall(c.onStep, dir, self)
     if not ok then
       host.log.info(string.format("%s: '%s' failed while stepping: %s",
@@ -2277,20 +2304,95 @@ function Overlay:adjust(dir)
         { interrupt = true })
       return
     end
-    -- Read back, after however long the module says its control takes to settle. What the
-    -- value became is the only honest thing to announce; what we asked it to become is a
-    -- guess that sounds exactly as confident.
-    if host.timer then
-      host.timer.after(c.settle or 150, function()
-        if self.active and self.focus == i then speakControl(self, i, false, true) end
-      end)
+    -- What the value BECAME is the only honest thing to announce; what we asked it to become
+    -- is a guess that sounds exactly as confident.
+    --
+    -- A stepper's value is what it PRINTS, so that is what is watched: the announcement waits
+    -- until the printed text is not the one that was there before the key, and gives up at the
+    -- control's own settle time. A stepper that was already at its limit does not change, and is
+    -- announced then — which is the truth about it.
+    --
+    -- `settle` stops meaning "wait this long" and starts meaning "wait at most this long", which
+    -- is the only version of it that can be right.
+    local say = function()
+      if self.active and self.focus == i then speakControl(self, i, false, true) end
     end
+    self:watch({
+      read = function() return c.text and select(2, pcall(c.text, self)) or nil end,
+      was = was,
+      within = c.settle or 600,
+      onDone = say,
+      onGiveUp = say,
+    })
   end
 end
 
 -- Deprecated name; the capture covers Return as well now.
 function Overlay:_syncSpaceCapture()
   return self:_syncNativeKeys()
+end
+
+-- WAIT FOR SOMETHING TO CHANGE, rather than for a length of time.
+--
+-- Almost every `host.timer.after` in this project is a guess about how long an application
+-- takes to do something, and a guess is wrong in both directions. Too short and the value read
+-- back is the one from before the action — which is the worst answer an overlay can give,
+-- because it is a real value announced with confidence for the wrong moment; ON:EAR's speaker
+-- grid did exactly that, naming the previously loaded speaker each time a tile was pressed.
+-- Too long and every action feels slow. Komplete Kontrol says the quiet part out loud: it
+-- schedules the same recheck at 250, 600 and 1000 milliseconds, because nobody knows which.
+--
+-- So: read what matters, do the thing, then look again until the reading is different — or
+-- until a deadline says the application is not going to change it. What comes back is what the
+-- window actually says, and it comes back as soon as it is true rather than when a number
+-- guessed it would be.
+--
+--   read      what to look at. Called with the overlay. nil means "cannot read right now",
+--             which is not the same as "unchanged" and never counts as done.
+--   was       the reading from before the action. Omitted, `read` is called once to get it —
+--             which is only correct if nothing has happened yet.
+--   done      (now, was) -> boolean. Default: it changed.
+--   every     how often to look. Each look costs whatever `read` costs, and a screen pixel is
+--             a compositor frame, so this is not free.
+--   within    give up after this long and call `onGiveUp` with the last reading. Not an error:
+--             a radio button that was already chosen is meant not to change.
+--
+-- Bound to the overlay, so it stops the moment the overlay is no longer active or the window
+-- it was watching is no longer the one in front. A callback arriving after the world moved is
+-- the mistake that cannot be undone by pressing the key again.
+function Overlay:watch(spec)
+  if type(spec.read) ~= "function" or not host.timer then return end
+  local was = spec.was
+  if was == nil then
+    local ok, v = pcall(spec.read, self)
+    was = ok and v or nil
+  end
+  local done = spec.done or function(now) return now ~= nil and now ~= was end
+  local every = spec.every or 100
+  local left = spec.within or 900
+  local pinned = self:hwnd()
+  local function look()
+    if not self.active or self:hwnd() ~= pinned then return end
+    local ok, now = pcall(spec.read, self)
+    if not ok then now = nil end
+    local finished = false
+    if now ~= nil then
+      local okd, v = pcall(done, now, was)
+      finished = okd and v == true
+    end
+    if finished then
+      if spec.onDone then pcall(spec.onDone, now, was) end
+      return
+    end
+    left -= every
+    if left <= 0 then
+      if spec.onGiveUp then pcall(spec.onGiveUp, now, was) end
+      return
+    end
+    host.timer.after(every, look)
+  end
+  host.timer.after(every, look)
+  return was
 end
 
 -- A module hook fired (with the overlay) each time it becomes the ACTIVE overlay —
