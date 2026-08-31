@@ -11,8 +11,8 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationCondition, IUIAutomationElement,
     IUIAutomationLegacyIAccessiblePattern, IUIAutomationTogglePattern, IUIAutomationTreeWalker,
-    TreeScope_Descendants, TreeScope_Subtree, UIA_ControlTypePropertyId, UIA_NamePropertyId,
-    UIA_PATTERN_ID,
+    TreeScope_Descendants, TreeScope_Subtree, UIA_BoundingRectanglePropertyId,
+    UIA_ClassNamePropertyId, UIA_ControlTypePropertyId, UIA_NamePropertyId, UIA_PATTERN_ID,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
@@ -350,6 +350,43 @@ unsafe fn raw_walk(
 /// condition-based FindAll, so it crosses into a hosted Qt fragment (a DAW-embedded
 /// Kontakt's real UI, which FindAll cannot see). Returns (depth, Name, ClassName,
 /// ControlType); bounded by node budget and depth.
+/// Walks a subtree that has already been fetched, reading only cached properties.
+///
+/// Every call in here is local. `GetCachedChildren` returns what the one round trip already
+/// brought back, and each `Cached…` accessor reads a property out of that snapshot — which is
+/// the entire point, and the difference between a walk that costs milliseconds and one that
+/// costs a fifth of a second.
+unsafe fn cached_walk(
+    el: &IUIAutomationElement,
+    depth: i32,
+    budget: &mut i32,
+    out: &mut Vec<DumpNode>,
+) {
+    if depth > 40 || *budget <= 0 {
+        return;
+    }
+    *budget -= 1;
+    let name = el.CachedName().map(|b| b.to_string()).unwrap_or_default();
+    let class = el.CachedClassName().map(|b| b.to_string()).unwrap_or_default();
+    let ctype = el.CachedControlType().map(|t| t.0).unwrap_or(0);
+    if !name.is_empty() || !class.is_empty() {
+        let (x, y, w, h) = match el.CachedBoundingRectangle() {
+            Ok(r) => (r.left, r.top, r.right - r.left, r.bottom - r.top),
+            Err(_) => (0, 0, 0, 0),
+        };
+        out.push(DumpNode { depth, name, class, ctype, x, y, w, h });
+    }
+    let Ok(children) = el.GetCachedChildren() else {
+        return;
+    };
+    let n = children.Length().unwrap_or(0);
+    for i in 0..n {
+        if let Ok(child) = children.GetElement(i) {
+            cached_walk(&child, depth + 1, budget, out);
+        }
+    }
+}
+
 pub fn uia_raw_dump(hwnd: isize) -> Vec<DumpNode> {
     let mut out: Vec<DumpNode> = Vec::new();
     AUTOMATION.with(|cell| unsafe {
@@ -368,6 +405,48 @@ pub fn uia_raw_dump(hwnd: isize) -> Vec<DumpNode> {
             Ok(e) => e,
             Err(_) => return,
         };
+
+        // ONE crossing of the process boundary, instead of six per element.
+        //
+        // This was measured rather than suspected: a module reading a 53-element JUCE window
+        // saw 211 ms per walk, and every keystroke that wanted a value paid it. The old path
+        // below asks the target process for a name, a class, a control type and a rectangle
+        // one property at a time, and the walker asks for each child and each sibling on top
+        // — about six round trips per element, at roughly four milliseconds each, which is
+        // simply what cross-process UIA costs.
+        //
+        // A cache request says up front which properties are wanted and over what scope, and
+        // `BuildUpdatedCache` fetches the lot in a single call. The tree filter is the RAW
+        // view, deliberately: this function exists to see into hosted fragments that the
+        // condition-based views stop at — an embedded Kontakt looked like it had no content
+        // at all until this walked raw — and a cache request that filtered to the control
+        // view would quietly undo that.
+        let cached = automation.CreateCacheRequest().ok().and_then(|req| {
+            req.AddProperty(UIA_NamePropertyId).ok()?;
+            req.AddProperty(UIA_ClassNamePropertyId).ok()?;
+            req.AddProperty(UIA_ControlTypePropertyId).ok()?;
+            req.AddProperty(UIA_BoundingRectanglePropertyId).ok()?;
+            req.SetTreeScope(TreeScope_Subtree).ok()?;
+            req.SetTreeFilter(&automation.RawViewCondition().ok()?).ok()?;
+            root.BuildUpdatedCache(&req).ok()
+        });
+
+        if let Some(cached_root) = cached {
+            let mut budget = 4000;
+            cached_walk(&cached_root, 0, &mut budget, &mut out);
+            if !out.is_empty() {
+                return;
+            }
+            // An empty result from a cache that reported success is not proof of an empty
+            // window — some providers answer a subtree request with only the root — so it
+            // falls through rather than reporting nothing, and the old path settles it.
+            crate::logging::trace("uia", || {
+                "cached subtree came back empty; walking the raw tree instead".to_string()
+            });
+        }
+
+        // The way it was done before, kept as the answer for whatever the cache cannot do.
+        // Slow, and correct on every provider this project has ever met.
         let walker = match automation.RawViewWalker() {
             Ok(w) => w,
             Err(_) => return,

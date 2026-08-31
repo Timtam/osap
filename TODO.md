@@ -246,6 +246,20 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       test build a tester receives asks for its permissions again. Survivable for testing,
       not for release.
 
+- [x] **The UIA tree walk was six process crossings per element** (2026-08-31). Measured on a
+      53-element JUCE window: `uia_raw_dump` cost **211 ms**, because it asked the target for
+      a name, a class, a control type and a rectangle one property at a time, and the walker
+      asked for each child and sibling on top. A UIA **cache request** names the properties
+      and the scope once and `BuildUpdatedCache` fetches the lot in a single call; the walk
+      is then local. Same window, same output: **about 30 ms**. The raw view is kept as the
+      tree filter — this function exists to see into hosted fragments the condition-based
+      views stop at — and the old walk stays as the fallback for a provider that answers a
+      subtree request with only its root.
+  - Worth knowing for the next module: this made a whole layer of compensation in
+    modules/ik-on-ear disappear — a snapshot, a staleness rule and an exception for the two
+    read-outs that change on their own. All of it existed to work around the defect, and
+    removing it left the module simpler AND less able to be stale.
+
 ## Documentation
 
 - [x] **API-version-specific, web-based documentation:** a versioned **Docusaurus** site in `docs-site/` renders `docs/` — the guides plus the `host.*` API reference in `docs/api/` — with a version switcher (first snapshot `versioned_docs/version-0.1.0`) and a GitHub Pages deploy workflow (`.github/workflows/deploy-docs.yml`). Includes the step-by-step **[Building an overlay](docs/building-an-overlay.md)** tutorial, written because the vocabulary (cell, overlay, layer, slot, landmark) had grown faster than anything explained it. ✓

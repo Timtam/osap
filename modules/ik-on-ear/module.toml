@@ -1,0 +1,8 @@
+id = "com.platform.ik-on-ear"
+name = "IK Multimedia ARC ON:EAR"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
+dependencies = ["com.platform.overlay"]
+
+[capabilities]
+require = ["window", "uia", "input", "speech", "log"]
