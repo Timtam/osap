@@ -117,6 +117,32 @@ local function valueRightOf(labelName)
   return best and best.name or nil
 end
 
+-- Whatever is printed UNDER a label, sharing its middle.
+--
+-- The window puts a caption over its value in three places — Tone, Width, and the headphone
+-- panel — and in all three the value is centred on the caption rather than aligned with its
+-- left edge, which is why they are matched on their middles. The headphone panel stacks three
+-- of them (maker, model, impedance) and they come back in the order they are printed.
+local function valuesBelow(labelName, tol)
+  local l = element(labelName)
+  if not l then return {} end
+  local mid = l.bounds.x + l.bounds.w / 2
+  local out = {}
+  for _, n in ipairs(tree() or {}) do
+    if n.name ~= labelName and n.bounds.y > l.bounds.y then
+      local m = n.bounds.x + n.bounds.w / 2
+      if math.abs(m - mid) <= (tol or 12) then out[#out + 1] = n end
+    end
+  end
+  table.sort(out, function(a, z) return a.bounds.y < z.bounds.y end)
+  return out
+end
+
+local function valueBelow(labelName, tol)
+  local v = valuesBelow(labelName, tol)[1]
+  return v and v.name or nil
+end
+
 -- A read-out that speaks a label and whatever stands beside it.
 --
 -- Static text rather than a button, deliberately. There is nothing to press here, and a
@@ -200,6 +226,23 @@ local function screenPoint(dx, dy)
   return screenPointOf(ov, dx, dy)
 end
 
+-- ── Which curve view is showing ──────────────────────────────────────────────
+--
+-- Two dots at the top left, one filled. Measured with both states on screen at once, which is
+-- the only reason this can be claimed: the chosen one is (237,237,237) and the other
+-- (82,82,82), at the same x, sixteen apart in y.
+for _, view in ipairs({
+  { label = "Space view", y = 28 },
+  { label = "Frequency response view", y = 50 },
+}) do
+  ov:addHotspotToggle({
+    label = view.label,
+    at = scaled(232, view.y),
+    onColor = { 237, 237, 237 },
+    offColor = { 82, 82, 82 },
+  })
+end
+
 -- ── What the window says about the device ────────────────────────────────────
 readOut("Battery Level", "Battery")
 readOut("SR: ", "Sample rate")
@@ -228,6 +271,33 @@ for _, band in ipairs({ "Freq", "Gain", "Q" }) do
     end,
   })
 end
+
+-- ── The header ───────────────────────────────────────────────────────────────
+--
+-- Both open something over the window, which they have to declare: the moment a menu is up
+-- this overlay must stop owning Tab and Return, or the thing it just opened cannot be used.
+--
+-- The device chooser is clicked on its own name rather than on the small chevron beside it —
+-- the name is an element with a rectangle, the chevron is nine pixels of painted glyph.
+ov:addCustomButton({
+  label = "Device",
+  typeLabel = "combo box",
+  opensMenu = true,
+  text = function()
+    local n = element("ARC ON EAR")
+    return n and n.name or nil
+  end,
+  onActivate = function()
+    local n = element("ARC ON EAR")
+    if not n then
+      host.speech.output("the device name is not where it should be", { interrupt = true })
+      return
+    end
+    host.input.click(n.bounds.x + n.bounds.w // 2, n.bounds.y + n.bounds.h // 2)
+  end,
+})
+
+ov:addHotspotButton({ label = "Settings", at = scaled(1753, 42), opensMenu = true })
 
 -- ── The five preset slots ────────────────────────────────────────────────────
 --
@@ -480,6 +550,39 @@ for _, sw in ipairs(switches) do
   })
 end
 
+-- ── The two things that shape the sound ──────────────────────────────────────
+--
+-- Steppers, driven by the wheel over the control itself. Neither is a control this overlay can
+-- read a position out of — Tone is an arc and Width a bar with two handles — but both print
+-- their value beside them, and what a stepper announces is that printed value read again
+-- after the change, never the change that was asked for.
+--
+-- The wheel is a guess about how the application takes input, and the honest kind: if it is
+-- wrong, the value simply does not move and the control says the same number back, which is
+-- the truth. Nothing is claimed that was not read.
+--
+-- Both appear only while the panel above them is switched on, which is also when their labels
+-- appear in the tree at all — so the same test serves for both.
+ov:addStepper({
+  label = "Tone",
+  when = function() return element("Tone") ~= nil end,
+  text = function() return valueBelow("Tone") or "not shown" end,
+  onStep = function(dir)
+    local x, y = screenPoint(290, 780)
+    if x then host.input.scroll(x, y, dir) end
+  end,
+})
+
+ov:addStepper({
+  label = "Width",
+  when = function() return element("Width") ~= nil end,
+  text = function() return valueBelow("Width") or "not shown" end,
+  onStep = function(dir)
+    local x, y = screenPoint(626, 869)
+    if x then host.input.scroll(x, y, dir) end
+  end,
+})
+
 -- -- Choosing the speakers being simulated --------------------------------------
 --
 -- The name and its description are painted text with no element behind them, so they are read
@@ -565,6 +668,21 @@ panelButton("Next virtual speaker", 1072, 891)
 -- because choosing the speakers is how you decide what to switch on. Gating it with the arrows
 -- would have taken away the step that comes first.
 ov:addHotspotButton({ label = "Select speakers", at = scaled(965, 970) })
+
+-- What is loaded, in the three lines the panel prints: maker, model, impedance. Read from the
+-- tree rather than from the picture, because once a headphone is chosen they are all there as
+-- elements — "AKG", "K812", "36 Ohm" — and a reading that costs nothing is better than one
+-- that costs a screen capture.
+ov:addStaticText({
+  label = "Headphone",
+  text = function()
+    local vs = valuesBelow("Headphone Model", 20)
+    if #vs == 0 then return "none selected" end
+    local parts = {}
+    for _, v in ipairs(vs) do parts[#parts + 1] = v.name end
+    return table.concat(parts, ", ")
+  end,
+})
 
 ov:addHotspotButton({ label = "Select headphone", at = scaled(1306, 970) })
 
