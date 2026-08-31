@@ -886,6 +886,7 @@ local function chooser(spec)
         host.log.info(("[on-ear] %s: %s at (%d,%d)"):format(spec.name, label, x, y))
         local o = b:origin()
         if o and o.id and host.window and host.window.focus then host.window.focus(o.id) end
+        gridDirty = true
         host.input.scroll(x, y, amount)
         if not host.timer then return end
         host.timer.after(250, function()
@@ -1187,7 +1188,7 @@ local function chooser(spec)
   local function tileAt(i)
     local r = (i - 1) // #spec.tiles.cols + 1
     local c = (i - 1) % #spec.tiles.cols + 1
-    return spec.tiles.cols[c], spec.tiles.rows[r]
+    return spec.tiles.cols[c], rowY(r)
   end
 
   local lastFilled = nil
@@ -1270,67 +1271,127 @@ local function chooser(spec)
   scroller(spec.rowLabel .. " list down", 466, 600, -1, listSpan)
   scroller(spec.rowLabel .. " list up", 466, 600, 1, listSpan)
 
-  -- The printed names, one tile at a time — and the row strip that replaced it is gone.
+  -- The printed names, and where the grid currently sits, from ONE reading of all of it.
   --
-  -- Three attempts, and the log settles which of them was which. The first region reached to
-  -- the tile's own rounded frame, and the OCR step that trims a crop to its content read the
-  -- FRAME as the content and squeezed the words to nothing legible: that is where the
-  -- punctuation came from. The second was the same region pulled well clear of the frame —
-  -- and it was never tried, because the strip across all five tiles went in during the same
-  -- round on a theory about crop size. The strip returns literally nothing: "region
-  -- (693,387)-(1575,403) gave 0 word(s)". Eight hundred and eighty two pixels by sixteen is
-  -- not an image this recogniser will work on at all, and upscaling it by the factor a
-  -- ten-pixel letter asks for takes it past what the engine accepts.
+  -- Grid down broke both at once, and for the same reason: this grid scrolls by fractions of a
+  -- row, so afterwards every measured coordinate in it is out of alignment. The names were
+  -- looked for above where they now are, and the tint that reports which tile is loaded was
+  -- read at a point still inside the tile that used to hold it — which is why a stale
+  -- selection stayed lit.
   --
-  -- So: the corrected single-tile region, which is the one measurement in this story that has
-  -- never been given a chance. One capture per focused tile, which the log had already timed
-  -- at around fifty milliseconds when the first version ran.
-  local lastRaw = {}
+  -- Both are answered by finding out where the lattice actually is, and the recogniser can
+  -- say: a region bigger than 400 by 200 skips the crop-and-upscale step entirely and goes
+  -- straight to the primary engine at native resolution, which is the path that read every one
+  -- of these names correctly in the probe. So the whole grid is read at once, and each word's
+  -- POSITION says which tile it belongs to and how far the rows have moved.
+  --
+  -- It costs more than a per-tile crop and is asked far less often — once when the panel
+  -- opens, and once after anything that can move or refill the grid — instead of once per Tab.
+  -- It also does away with two workarounds: no glyph repair is needed, because at this size the
+  -- K is read as a K, and no list of which rows print a name, because a row that prints none
+  -- simply contributes no words.
+  local NAME_HALF = 54
+  local NAME_ABOVE = 70 -- a name's middle sits this far below its tile's middle
+  local gridShift, gridNames, gridDirty, gridAtCount = 0, {}, true, -1
 
-  -- A K comes back as "1<".
-  --
-  -- Repaired rather than accepted, and this is a correction of a GLYPH, not a guess about the
-  -- word. The recogniser is splitting one letter into two shapes it knows — the same K reads
-  -- correctly in a pass over the whole window, and did in the probe for every one of these
-  -- names — and no product name contains a "<" at all, so there is nothing this can turn into
-  -- something it was not. The raw reading is logged either way, so a name that really did
-  -- contain those characters would be visible rather than silently rewritten.
-  local function repairGlyphs(v)
-    return (v:gsub("[1Il]<", "K"))
+  local function relearnGrid()
+    gridDirty = false
+    gridNames = {}
+    if not spec.tiles.name then return end
+    local o = b:origin()
+    local k = scaleOf(o)
+    if not k then
+      gridDirty = true
+      return
+    end
+    local cols, rows = spec.tiles.cols, spec.tiles.rows
+    local rect = screenRect(o, cols[1] - 95, rows[1] - 100, cols[#cols] + 95, rows[#rows] + 100)
+    if not rect then
+      gridDirty = true
+      return
+    end
+    local started = host.now()
+    local got = host.ocr.recognize({ region = rect })
+    -- Words that sit under a column, gathered with where they sat.
+    local hits = {}
+    for _, wd in ipairs((got and got.words) or {}) do
+      local wx, wy = wd.x + wd.w / 2, wd.y + wd.h / 2
+      for c, cx in ipairs(cols) do
+        local sx = screenPointOf(b, cx, rows[1])
+        if sx and math.abs(wx - sx) <= NAME_HALF * k then
+          hits[#hits + 1] = { c = c, x = wx, y = wy, text = wd.text }
+        end
+      end
+    end
+    -- Rows, by grouping those words down the screen. A caption is one line, so anything
+    -- within half a line of another belongs with it.
+    table.sort(hits, function(a, z) return a.y < z.y end)
+    local bands = {}
+    for _, h in ipairs(hits) do
+      local band = bands[#bands]
+      if band and math.abs(h.y - band.y) <= 12 * k then
+        band.items[#band.items + 1] = h
+      else
+        bands[#bands + 1] = { y = h.y, items = { h } }
+      end
+    end
+    -- How far the lattice has moved. Every row shifts together, so one band settles it, and
+    -- the answer is folded into a single row's spacing because a scroll of two rows and a bit
+    -- leaves the grid looking exactly like a scroll of the bit.
+    local spacing = (#rows > 1) and (rows[2] - rows[1]) or 1
+    local oy = o.client.y
+    if bands[1] then
+      local designY = (bands[1].y - oy) / k -- back into the frame the coordinates are in
+      local centre = designY - NAME_ABOVE
+      local off = (centre - rows[1]) % spacing
+      if off > spacing / 2 then off = off - spacing end
+      gridShift = off
+    else
+      gridShift = 0
+    end
+    -- Each band to the row it now lines up with, and each word to its tile.
+    for _, band in ipairs(bands) do
+      local designY = (band.y - oy) / k - NAME_ABOVE
+      local r = math.floor((designY - rows[1] - gridShift) / spacing + 0.5) + 1
+      if r >= 1 and r <= #rows then
+        local bag = {}
+        for _, h in ipairs(band.items) do
+          bag[h.c] = bag[h.c] or {}
+          table.insert(bag[h.c], h)
+        end
+        for c, items in pairs(bag) do
+          table.sort(items, function(a, z) return a.x < z.x end)
+          local words = {}
+          for _, it in ipairs(items) do words[#words + 1] = it.text end
+          gridNames[(r - 1) * #cols + c] = table.concat(words, " ")
+        end
+      end
+    end
+    local named = 0
+    for _ in pairs(gridNames) do named = named + 1 end
+    host.log.info(("[on-ear] %s: read the grid in %d ms — %d named tile(s), rows offset by %d")
+      :format(spec.name, host.now() - started, named, math.floor(gridShift + 0.5)))
   end
 
-  local function readTileName(n, tx, ty)
-    if not spec.tiles.name then return nil end
-    -- A row whose names the panel does not draw is not a row to go looking in.
-    --
-    -- The bottom row's name strip is clipped away by the grid's viewport, and asking anyway
-    -- produced five identical readings of "cYanmaGtaYellowb" from five different places —
-    -- which is what this recogniser does with a blank crop: the step that trims to content
-    -- finds none, hands the flat rectangle over whole, and something comes back regardless.
-    -- Nothing is a perfectly good answer here, and it is now the one given.
-    local rows = spec.tiles.name[5]
-    if rows then
-      local r = (n - 1) // #spec.tiles.cols + 1
-      if not table.find(rows, r) then return nil end
+  -- Where a row's middle is right now.
+  local function rowY(r)
+    return spec.tiles.rows[r] + gridShift
+  end
+
+  -- A name, re-reading the grid only when something could have changed it.
+  --
+  -- `gridDirty` is set by everything this module does that moves or refills the grid — a
+  -- scroll, a tile press, a filter. The count of occupied positions is checked as well,
+  -- because a category chosen from the list changes the grid without going through any of
+  -- those, and a filter almost always changes how many tiles are filled. It is already
+  -- measured and costs nothing to compare.
+  local function tileNameOf(n)
+    local count = filledCount()
+    if gridDirty or count ~= gridAtCount then
+      gridAtCount = count
+      relearnGrid()
     end
-    local o = b:origin()
-    local rect = screenRect(o, tx + spec.tiles.name[1], ty + spec.tiles.name[3],
-      tx + spec.tiles.name[2], ty + spec.tiles.name[4])
-    if not rect then return nil end
-    local got = host.ocr.recognize({ region = rect })
-    local raw = (got and got.text or ""):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
-    -- Kept, and kept per tile: the difference between "no name here" and "a name nobody can
-    -- read" is invisible from the keyboard, and guessing at it has cost two rounds already.
-    local fixed = repairGlyphs(raw)
-    if raw ~= lastRaw[n] then
-      lastRaw[n] = raw
-      host.log.info(("[on-ear] %s tile %d name: region (%d,%d)-(%d,%d) gave %s%s")
-        :format(spec.name, n, rect[1], rect[2], rect[3], rect[4],
-          raw == "" and "<nothing>" or ("'" .. raw .. "'"),
-          fixed ~= raw and (" -> '" .. fixed .. "'") or ""))
-    end
-    if fixed == "" then return nil end
-    return fixed
+    return gridNames[n]
   end
 
   -- The grid. Its tiles are pictures with no accessible element and no text of their own, so
@@ -1357,13 +1418,14 @@ local function chooser(spec)
           -- prints none. Where there is one it is read, so this grid can be BROWSED — the
           -- speaker grid can only be sampled, because there a tile has no name until it has
           -- been pressed, and pressing is selecting.
-          local name = readTileName(n, tx, ty)
-          local on = tileSelected(tx, ty)
+          local name = tileNameOf(n)
+          local on = tileSelected(tx, rowY(r))
           if name and on then return name .. ", selected" end
           return name or (on and "selected" or nil)
         end,
         onActivate = function()
-          local x, y = screenPointOf(b, tx, ty)
+          local ry = rowY(r)
+          local x, y = screenPointOf(b, tx, ry)
           if not x then return end
           -- Waits for THIS TILE to become the selected one, then reads the name.
           --
@@ -1380,9 +1442,10 @@ local function chooser(spec)
           host.log.info(("[on-ear] '%s %d' clicking (%d,%d)"):format(spec.tileLabel, n, x, y))
           clickAt(x, y)
           if not host.timer then return end
+          gridDirty = true
           local tries = 18
           local function look()
-            if tileSelected(tx, ty) then
+            if tileSelected(tx, ry) then
               host.speech.output(selectionNow() or "not shown", { interrupt = true })
               return
             end
@@ -1406,7 +1469,8 @@ local function chooser(spec)
     local mid = spec.tiles.cols[(#spec.tiles.cols + 1) // 2]
     local midRow = spec.tiles.rows[(#spec.tiles.rows + 1) // 2]
     local function firstTile()
-      local n = readTileName(1, spec.tiles.cols[1], spec.tiles.rows[1])
+      gridDirty = true
+      local n = tileNameOf(1)
       if n then return "now starting at " .. n end
       return ("%d position(s) hold something"):format(filledCount())
     end
@@ -1505,7 +1569,7 @@ chooser({
   tiles = {
     cols = GRID_COLUMNS,
     rows = { 314, 507, 701 },
-    name = { -54, 54, 62, 78, { 1, 2 } },
+    name = true,
   },
 })
 
