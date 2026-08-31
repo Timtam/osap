@@ -1087,28 +1087,56 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
             if vk == 0x2D || vk == 0x60 || vk == 0x14 {
                 SCREEN_READER_MOD_DOWN.store(is_down, Ordering::Relaxed);
             }
-            let is_modifier = vk == 0x12 || vk == 0xA4 || vk == 0xA5;
-            if is_down && !is_modifier {
+            // Which modifier is this, as `key_spec` names it? The hook reports the SIDE that
+            // was pressed — left Alt is 0xA4, right Alt 0xA5 — while a spec says "Alt tap"
+            // and resolves to the generic 0x12, so a capture has to catch either side without
+            // the caller having to say which.
+            //
+            // All four modifiers, not only Alt. Alt was the one this was built for (it is the
+            // key that opens a menu bar on its own, so an application already treats a bare
+            // one as meaningful), and the other three were left unarmed — which made
+            // `host.keys.capture("Ctrl tap", …)` a registration that parses, returns a token
+            // and can never fire. Silence is the worst of the three possible answers.
+            let generic = match vk {
+                0x10 | 0xA0 | 0xA1 => Some(0x10u32), // Shift
+                0x11 | 0xA2 | 0xA3 => Some(0x11),    // Ctrl
+                0x12 | 0xA4 | 0xA5 => Some(0x12),    // Alt
+                0x5B | 0x5C => Some(0x5B),           // Win
+                _ => None,
+            };
+            if is_down && generic.is_none() {
+                // Any ordinary key ends a pending tap: "pressed and released with nothing in
+                // between" is the whole definition, and this is the "in between". CapsLock
+                // arrives here too, which is right — it is a screen reader's modifier, not a
+                // tap.
                 TAP_ARMED.store(0, Ordering::Relaxed);
-            } else if is_down && is_modifier {
-                // Only a FRESH press arms it; auto-repeat while held must not re-arm, or a
-                // long hold followed by a release would read as a tap.
-                if TAP_ARMED.load(Ordering::Relaxed) == 0 {
+            } else if is_down {
+                // Arm only FROM REST, and only for this key.
+                //
+                // Auto-repeat while held must not re-arm, or a long hold followed by a release
+                // would read as a tap. And a second, different modifier pressed on top means
+                // the user is building a combination — Alt held, then Ctrl — so the arm is
+                // dropped rather than handed over. Without that, releasing Alt while Ctrl was
+                // still down fired a tap the user never made.
+                let armed = TAP_ARMED.load(Ordering::Relaxed);
+                if armed == 0 {
                     TAP_ARMED.store(vk as i32, Ordering::Relaxed);
+                } else if armed != vk as i32 {
+                    TAP_ARMED.store(0, Ordering::Relaxed);
                 }
-            } else if !is_down && is_modifier {
+            } else if let Some(generic) = generic {
                 let armed = TAP_ARMED.swap(0, Ordering::Relaxed);
                 if armed == vk as i32 {
-                    // Left and right Alt both report as the generic VK_MENU, so a capture of
-                    // "Alt tap" catches either without the caller having to say which.
-                    let generic = if vk == 0xA4 || vk == 0xA5 { 0x12 } else { vk };
-                    let wanted = CAPTURED_KEYS
-                        .with(|c| c.borrow().iter().any(|&(v, m)| v == generic && m == 0x10));
+                    let wanted = CAPTURED_KEYS.with(|c| {
+                        c.borrow()
+                            .iter()
+                            .any(|&(v, m)| v == generic && m == crate::backend::MASK_TAP)
+                    });
                     let scope = KEY_SCOPE.load(Ordering::Relaxed);
                     let in_scope = scope == 0 || GetForegroundWindow() as isize == scope;
                     if wanted && in_scope && !popup_menu_open() && !MENU_OPEN.load(Ordering::Relaxed)
                     {
-                        KEY_QUEUE.with(|q| q.borrow_mut().push((generic, 0x10)));
+                        KEY_QUEUE.with(|q| q.borrow_mut().push((generic, crate::backend::MASK_TAP)));
                         let tid = HOOK_THREAD.load(Ordering::Relaxed);
                         if tid != 0 {
                             PostThreadMessageW(tid, WM_NULL, 0, 0);

@@ -33,8 +33,7 @@ host.hotkey.register(KEY, writeProbeLog)
 host.keys.capture("Tab", function() ov:focusNext() end)
 host.keys.capture("Shift+Tab", function() ov:focusPrev() end)
 
--- The tap form -- macOS only, see below. Never suppressed: the modifier still reaches
--- the application.
+-- The tap form. Never suppressed: the modifier still reaches the application.
 host.keys.capture("Alt tap", function() ov:activate() end)
 ```
 
@@ -42,13 +41,15 @@ host.keys.capture("Alt tap", function() ov:activate() end)
 
 Modifier names are the Windows ones and mean what they say.
 
-**The `"<modifier> tap"` form parses and then never fires.** The spec is accepted — it is shared code — but the low-level hook composes its modifier mask from Shift, Ctrl, Alt and Win alone and matches it exactly, so a capture registered as a tap can never be matched by anything. It is a silently dead registration, not an error.
-
 ### macOS
 
 Modifiers map **by position, not by name**: Ctrl is Control, Alt is Option, and Win/Cmd is Command. A spec written for one platform therefore names a different physical key here, which matters most for `Alt` — on macOS that key also composes characters, so claiming `Alt+E` or `Alt+N` takes the acute and tilde dead keys away from any text field while the overlay is up.
 
-The tap form is implemented here and only here.
+### Both
+
+The tap form behaves the same on either platform: armed when a modifier goes down from rest, dropped by anything at all in between — an ordinary key, a second modifier, Caps Lock — and fired on the release. It is never suppressed, so the modifier keeps working as a modifier.
+
+Until recently only `"Alt tap"` was armed on Windows, and `"Ctrl tap"`, `"Shift tap"` and `"Cmd tap"` were accepted, returned a token and could never fire. All four work now.
 
 ## host.speech.output(text, opts?)
 
@@ -100,7 +101,7 @@ end)
 
 A Carbon event hotkey — deliberately **not** an event tap, so this needs no Input Monitoring grant even though `host.keys` does.
 
-A `"<modifier> tap"` spec is **refused outright here**, with a message pointing at `host.keys`: Carbon has no notion of a bare modifier press, and registering something plausible instead would fire on the wrong key.
+A `"<modifier> tap"` spec is **refused outright here**, with a message pointing at `host.keys`: Carbon has no notion of a bare modifier press, and registering something plausible instead would fire on the wrong key. Windows rejects it too, but only incidentally — its hotkey parser has no tap branch at all, so the refusal reads as an unknown key rather than as an explanation.
 
 ## host.hotkey.unregister(id)
 

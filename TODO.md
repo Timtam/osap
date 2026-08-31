@@ -423,14 +423,20 @@ built for themselves.
 Three defects that surfaced only because somebody wrote down what the code claims. None was
 reported by a test, because none of them fails loudly.
 
-- [ ] **`"<modifier> tap"` is a silently dead registration on Windows.** `key_spec` accepts it
-      — it is shared code in `backend/mod.rs` — and returns `MASK_TAP`. `windows.rs` never
-      mentions `MASK_TAP` anywhere: the low-level hook composes its mask from Shift, Ctrl, Alt
-      and Win alone and then matches it **exactly**, so a capture registered as a tap can never
-      be matched by any keystroke. `host.keys.capture("Alt tap", …)` hands back a token, and
-      nothing ever fires. Either implement it in the hook or refuse the spec there the way
-      macOS refuses it for hotkeys, with a message that names the platform — an accepted
-      registration that cannot fire is the worst of the three options.
+- [x] **Three of the four modifier taps were dead on Windows** (2026-08-31), and the way this
+      was nearly recorded is the more useful half. An audit reported that `MASK_TAP` "is
+      implemented only in the macOS tap", and a grep for `MASK_TAP` in `windows.rs` agreed —
+      no hits. Both were wrong: the Windows hook implements taps, it just spelled the mask
+      `0x10` instead of naming the constant, so neither a reader nor a search could find it.
+      The claim went into a platform note and into this file as fact before the code was
+      opened, which is the exact failure the platform notes were adversarially checked to
+      avoid.
+  - The real defect, once the code was read, is narrower and real: only Alt was armed
+      (`vk == 0x12 || 0xA4 || 0xA5`), so `"Ctrl tap"`, `"Shift tap"` and `"Cmd tap"` parsed,
+      returned a token, and could never fire. All four are armed now, the mask is named rather
+      than spelled, and a second modifier pressed on top drops the arm the way macOS already
+      did — without that, releasing Alt while Ctrl was still held fired a tap the user never
+      made.
 - [ ] **`recognizeMany` does not keep its promise on macOS.** The call exists to read several
       regions from ONE capture so that values which must agree with each other come from the
       same instant. `MacBackend` does not override `ocr_regions`, so the trait default applies:
