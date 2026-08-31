@@ -66,10 +66,6 @@ local function screenPointOf(overlay, dx, dy)
     math.floor(o.client.y + k * dy + 0.5)
 end
 
-local function screenPoint(dx, dy)
-  return screenPointOf(ov, dx, dy)
-end
-
 return {
   DESIGN_W = DESIGN_W,
   DESIGN_H = DESIGN_H,

@@ -411,7 +411,11 @@ local function chooser(spec)
     -- ON:EAR drop its accessibility tree — so while there is anything to read, there is
     -- nothing to read it with. The pixels do not care.
     text = function()
-      local o = ov:origin() or b:origin()
+      -- This panel's own origin, and only it. It used to try the window overlay's first, which
+      -- worked while everything lived in one file and `ov` was in scope; here it is a nil to
+      -- call a method on. The window overlay is stood down whenever this one is up anyway, so
+      -- the fallback was never the one being used.
+      local o = b:origin()
       local rect = screenRect(o, 330, 186, 565, 214)
       if not rect then return nil end
       local got = host.ocr.recognize({ region = rect })

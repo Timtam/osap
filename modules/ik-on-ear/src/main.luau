@@ -28,6 +28,14 @@ local scaleOf, scaled, screenRect, screenPointOf =
   geo.scaleOf, geo.scaled, geo.screenRect, geo.screenPointOf
 local dumpFor = read.dumpFor
 
+-- The shorthand for this window's own overlay. It lives here rather than in geometry.luau
+-- because it is bound to `ov`, and geometry.luau has no window of its own — which is exactly
+-- how it broke: the split carried it across with the other coordinate helpers, where `ov` is
+-- nothing, and Tone died on a nil the moment somebody pressed an arrow at it.
+local function screenPoint(dx, dy)
+  return screenPointOf(ov, dx, dy)
+end
+
 local tree = O.memoByEpoch(function() return dumpFor(ov) end)
 
 -- Everything named exactly `name`, in the order the tree reports it.

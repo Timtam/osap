@@ -1644,7 +1644,18 @@ function Overlay:activate(index)
     host.input.click(px, py)
     host.speech.output((c.label or "") .. ", activated", { interrupt = true })
   elseif c.kind == "custom" and c.onActivate then
-    c.onActivate(self) -- the overlay, so a header control can reach the active context
+    -- The module's own code, so it is called guarded. A control whose action throws was
+    -- silent before this: the host caught the error at the key dispatch and wrote a line, and
+    -- the person who pressed it heard nothing at all and had no way to tell that from a
+    -- control that had simply done its job quietly. Reported as "the overlay crashed", which
+    -- from the keyboard is exactly what it looks like.
+    local ok, err = pcall(c.onActivate, self) -- the overlay, so a header control can reach it
+    if not ok then
+      host.log.info(string.format("%s: '%s' failed while activating: %s",
+        tostring(self.label), tostring(c.label), tostring(err)))
+      host.speech.output((c.label or "That control") .. " could not be used",
+        { interrupt = true })
+    end
   elseif (c.kind == "ocr" or c.kind == "ocredit") and c.region then
     -- An OCR control re-reads its label on activate. An OCRButton then clicks the region
     -- centre (it sits over a clickable element), like ReaHotkey — unless it is `readOnly`
@@ -2239,7 +2250,14 @@ function Overlay:adjust(dir)
     sliderStep(self, c, dir)
   elseif c.kind == "stepper" and c.onStep then
     local i = self.focus
-    c.onStep(dir, self)
+    local ok, err = pcall(c.onStep, dir, self)
+    if not ok then
+      host.log.info(string.format("%s: '%s' failed while stepping: %s",
+        tostring(self.label), tostring(c.label), tostring(err)))
+      host.speech.output((c.label or "That control") .. " could not be moved",
+        { interrupt = true })
+      return
+    end
     -- Read back, after however long the module says its control takes to settle. What the
     -- value became is the only honest thing to announce; what we asked it to become is a
     -- guess that sounds exactly as confident.
