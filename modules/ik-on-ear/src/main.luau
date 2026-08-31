@@ -602,6 +602,24 @@ ov:addStepper({
     local want = math.max(0, math.min(100, pct + dir * WIDTH_STEP))
     local fromX = WIDTH_MID - WIDTH_REACH * pct / 100
     local toX = WIDTH_MID - WIDTH_REACH * want / 100
+    -- Refuses near the middle, where the two handles are too close together to aim between.
+    --
+    -- Below about a third of full width this model puts them within a few units of each other,
+    -- and a press there is not clearly nearer one than the other — which is exactly what the
+    -- test found: the value stuck at 10%, then jumped to 100%, then walked back down. Moving
+    -- the wrong handle is a change the user did not ask for and cannot see, so it does not
+    -- happen; the reason is said instead.
+    --
+    -- The narrowness is in the model, not in the control: one point of it was measured (both
+    -- handles at 100%) and the other assumed (both meeting at the centre at zero). One capture
+    -- of this slider at a middle value replaces the assumption with a second measurement, and
+    -- then this guard can go.
+    if math.abs(fromX - WIDTH_MID) < 16 or math.abs(toX - WIDTH_MID) < 16 then
+      host.log.info(("[on-ear] Width %d%% -> %d%%: handles at %d and %d are too close to aim "
+        .. "between; not dragging"):format(pct, want, fromX, 2 * WIDTH_MID - fromX))
+      host.speech.output("width is too narrow to adjust from here", { interrupt = true })
+      return
+    end
     local x1, y = screenPoint(fromX, 869)
     local x2 = screenPoint(toX, 869)
     if not (x1 and x2) then return end
