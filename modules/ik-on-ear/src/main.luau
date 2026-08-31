@@ -597,6 +597,39 @@ ov:addStepper({
 --
 -- Everything is recomputed from the printed value at each step, so it stays right after
 -- somebody moves the slider with a mouse, and a value it cannot read is one it will not move.
+-- A drag the application can BELIEVE: pressed, moved a pixel at a time, then released.
+--
+-- The one-shot drag — press here, jump there, release — moved this slider eighteen per cent
+-- for two pixels, where its own geometry says four. A control that answers a two-pixel move
+-- with nine times the value is not reading the distance; it is reading the SPEED, and a jump
+-- with nothing in between is as fast as a movement can possibly be. So this one takes the same
+-- path a hand would: down, a pixel every frame, up.
+--
+-- Asynchronous, necessarily, because the pauses are the point. The stepper reads the value
+-- back after its own settle, so the announcement still comes from the window rather than from
+-- what was asked for — it just needs long enough to arrive.
+local DRAG_TICK = 16
+
+local function slowDrag(x1, y1, x2, y2)
+  host.input.mouseDown(x1, y1)
+  local n = math.max(1, math.floor(math.max(math.abs(x2 - x1), math.abs(y2 - y1))))
+  local i = 0
+  local function step()
+    i += 1
+    local t = i / n
+    host.input.move(
+      math.floor(x1 + (x2 - x1) * t + 0.5),
+      math.floor(y1 + (y2 - y1) * t + 0.5)
+    )
+    if i < n then
+      host.timer.after(DRAG_TICK, step)
+    else
+      host.timer.after(DRAG_TICK, function() host.input.mouseUp(x2, y2) end)
+    end
+  end
+  host.timer.after(DRAG_TICK, step)
+end
+
 local WIDTH_MID = 625
 -- offset(percent) = WIDTH_SLOPE * percent + WIDTH_AT_ZERO, from the two captures above.
 local WIDTH_SLOPE, WIDTH_AT_ZERO = 0.5096, -5.96
@@ -609,6 +642,8 @@ end
 
 ov:addStepper({
   label = "Width",
+  -- Long enough for a drag that deliberately takes its time, plus the window's own redraw.
+  settle = 400,
   when = function() return element("Width") ~= nil end,
   text = function() return valueBelow("Width") or "not shown" end,
   onStep = function(dir)
@@ -635,7 +670,7 @@ ov:addStepper({
     if not (x1 and x2) then return end
     host.log.info(("[on-ear] Width %d%% -> %d%%: dragging (%d,%d) to (%d,%d)")
       :format(pct, want, x1, y, x2, y))
-    host.input.drag(x1, y, x2, y)
+    slowDrag(x1, y, x2, y)
   end,
 })
 
