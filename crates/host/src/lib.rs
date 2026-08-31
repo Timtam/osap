@@ -3034,6 +3034,18 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     )?;
     // host.window.focusChain() — controls from the focused element up to its
     // top-level window, for detecting focus inside an embedded plugin.
+    // host.window.ownsPoint(id, x, y) -> true | false | nil.
+    //
+    // nil means "this platform cannot say", and a caller must read that as permission rather
+    // than refusal: a check with no answer must not block what it cannot judge.
+    let sh = shared.clone();
+    win.set(
+        "ownsPoint",
+        lua.create_function(move |_, (id, x, y): (isize, i32, i32)| {
+            Ok(sh.backend.window_owns_point(id, x, y))
+        })?,
+    )?;
+
     let sh = shared.clone();
     win.set(
         "focusChain",

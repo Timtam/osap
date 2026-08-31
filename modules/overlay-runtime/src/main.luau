@@ -889,16 +889,45 @@ end
 -- The refusal names the control: one that is present and silently inert is the harder thing
 -- to make sense of without seeing the screen.
 local function refuseOutside(self, c, x, y)
-  if pointInOrigin(self, x, y) then return false end
   local o = self:origin()
-  local b = o and o.bounds
-  host.log.info(string.format(
-    "%s: '%s' resolves to (%d,%d), outside its origin's window (%d,%d) %dx%d — not clicking",
-    tostring(self.label), tostring(c.label), x, y,
-    b and b.x or 0, b and b.y or 0, b and b.w or 0, b and b.h or 0
-  ))
-  host.speech.output((c.label or "Control") .. " is not where it should be", { interrupt = true })
-  return true
+  if not pointInOrigin(self, x, y) then
+    local b = o and o.bounds
+    host.log.info(string.format(
+      "%s: '%s' resolves to (%d,%d), outside its origin's window (%d,%d) %dx%d — not clicking",
+      tostring(self.label), tostring(c.label), x, y,
+      b and b.x or 0, b and b.y or 0, b and b.w or 0, b and b.h or 0
+    ))
+    host.speech.output((c.label or "Control") .. " is not where it should be",
+      { interrupt = true })
+    return true
+  end
+  -- INSIDE THE RECTANGLE IS NOT THE SAME AS ON TOP OF IT.
+  --
+  -- Everything this project clicks is a screen coordinate worked out from a window's own
+  -- frame, and the check above only asks whether the point falls within that frame. It says
+  -- nothing about what is DRAWN there. A notification, a tooltip, another application raised
+  -- over ours: the click goes to whichever window owns the pixel, and the overlay announces
+  -- "activated" either way. For somebody who cannot see the screen that is a press that went
+  -- somewhere unknown and reported success.
+  --
+  -- Asked of the platform rather than guessed, and a platform with no answer is taken as
+  -- permission. Only a definite "that pixel belongs to another window" refuses — a check that
+  -- cannot judge must not block what it cannot judge, which is also why macOS, where this is
+  -- not implemented yet, behaves exactly as it did before.
+  if o and o.id and host.window and host.window.ownsPoint then
+    local ok, mine = pcall(host.window.ownsPoint, o.id, x, y)
+    if ok and mine == false then
+      host.log.info(string.format(
+        "%s: '%s' at (%d,%d) is inside our window's frame but another window is drawn there "
+          .. "— not clicking",
+        tostring(self.label), tostring(c.label), x, y
+      ))
+      host.speech.output("something else is covering " .. (c.label or "that control"),
+        { interrupt = true })
+      return true
+    end
+  end
+  return false
 end
 
 -- A state may be drawn MORE THAN ONE WAY, so `onImage`/`offImage` take either one path or
@@ -1773,6 +1802,9 @@ function Overlay:activate(index)
   elseif c.kind == "hotspottoggle" and c.at then
     local px, py = hotspotPoint(self, c)
     if not px then return end
+    -- The same check the plain hotspot has had. A toggle clicks a coordinate too, and there is
+    -- no reason its click should be the one allowed to land on somebody else's window.
+    if refuseOutside(self, c, px, py) then return end
     -- The pixel BEFORE and the pixel AFTER, either side of the click.
     --
     -- This is the difference between a diagnosis and a guess. A toggle that reports the same

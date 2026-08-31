@@ -39,10 +39,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow,
     GetGUIThreadInfo, GetMessageW, GetSystemMetrics, GetWindowRect,
     GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+    WindowFromPoint,
     GUI_INMENUMODE, GUI_POPUPMENUMODE, GUI_SYSTEMMENUMODE,
     PostMessageW, PostThreadMessageW, RegisterClassW, SetCursorPos, SetWindowsHookExW,
     TranslateMessage,
-    EVENT_OBJECT_FOCUS, EVENT_OBJECT_NAMECHANGE, EVENT_SYSTEM_FOREGROUND, GA_PARENT, GUITHREADINFO,
+    EVENT_OBJECT_FOCUS, EVENT_OBJECT_NAMECHANGE, EVENT_SYSTEM_FOREGROUND, GA_PARENT, GA_ROOT,
+    GUITHREADINFO,
     HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, SM_CXSCREEN, SM_CYSCREEN,
     WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_NULL, WM_SYSKEYDOWN,
     WM_SYSKEYUP, WNDCLASSW,
@@ -326,6 +328,27 @@ impl Backend for WindowsBackend {
                 ShowWindow(hwnd, SW_RESTORE);
             }
             SetForegroundWindow(hwnd) != 0
+        }
+    }
+
+    /// Compared at the TOP LEVEL, because an overlay's origin is often a child.
+    ///
+    /// An embedded plug-in is a control inside its host's window, and the point under the
+    /// pointer resolves to whichever child is drawn there — usually a different one. The
+    /// question worth asking is not "is this the same window" but "does this point belong to
+    /// the same application window", so both sides go up to their root first.
+    fn window_owns_point(&self, hwnd: isize, x: i32, y: i32) -> Option<bool> {
+        unsafe {
+            let at = WindowFromPoint(POINT { x, y });
+            if at.is_null() {
+                return None; // nothing there to compare against, which is not an accusation
+            }
+            let theirs = GetAncestor(at, GA_ROOT);
+            let ours = GetAncestor(hwnd as HWND, GA_ROOT);
+            if theirs.is_null() || ours.is_null() {
+                return None;
+            }
+            Some(theirs == ours)
         }
     }
 

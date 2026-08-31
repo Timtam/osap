@@ -171,6 +171,22 @@ pub trait Backend {
         false
     }
 
+    /// Is `hwnd`'s window the one lying under this screen point?
+    ///
+    /// Every hotspot in this project clicks a screen coordinate that was worked out from a
+    /// window's own frame, and until now nothing checked that the window was still the thing
+    /// on top there. A notification, a tooltip, another application raised over ours: the
+    /// click goes to whichever window owns the pixel, and the overlay says "activated"
+    /// regardless. For somebody who cannot see the screen that is a press with no way to tell
+    /// where it landed.
+    ///
+    /// `None` means the platform cannot say, and is deliberately not `false`: a backend that
+    /// has no answer must not stop a click that would have worked. Only a definite "that
+    /// belongs to somebody else" refuses.
+    fn window_owns_point(&self, _hwnd: isize, _x: i32, _y: i32) -> Option<bool> {
+        None
+    }
+
     /// Child controls (descendant windows) of a top-level window, for detecting
     /// embedded plugins by control class + locating their coordinate origin.
     fn window_controls(&self, hwnd: isize) -> Vec<ControlInfo>;
