@@ -619,14 +619,40 @@ local function chooser(spec)
   -- is re-evaluated on every recheck, whether or not anybody pressed anything, and a tree
   -- walk on that path would be a cost this window pays continuously for a panel that is
   -- almost never open.
+  -- VISIBLE, not merely present — and the difference is the whole bug this replaces.
+  --
+  -- The first version asked whether an element named SpeakerBrowserWindow EXISTED, and it kept
+  -- answering yes long after the panel had closed: three "still on screen after Close" lines
+  -- in the log, against probes of the very same window listing no such element at all. Then it
+  -- claimed the window on every launch, so the application opened into a ring for a panel that
+  -- was never there. A UIA provider is entitled to keep a hidden component in its tree, and
+  -- this one evidently does.
+  --
+  -- `locate` is the call that already knows the difference: it refuses a rectangle that has
+  -- collapsed or gone off-screen, which is exactly what a hidden panel has. Nothing else about
+  -- the gate changes.
   local paneWasThere = nil
   b:gate(function(origin)
     if not (origin and origin.id) then return false end
-    local there = host.uia.find(origin.id, spec.pane, host.uia.type.Window) ~= nil
+    local at = host.uia.locate(origin.id, spec.pane, host.uia.type.Window)
+    local there = at ~= nil
     if there ~= paneWasThere then
       paneWasThere = there
-      host.log.info(("[on-ear] %s: '%s' is %s")
-        :format(spec.name, spec.pane, there and "on screen" or "gone"))
+      -- On a TRANSITION only, which is rare, say what each way of asking answered. If the two
+      -- ever disagree again this is the line that names which one lied, instead of another
+      -- round of the tester opening and closing a panel to find out.
+      local inTree = false
+      for _, n in ipairs(dumpFor(b) or {}) do
+        if n.name == spec.pane then
+          inTree = true
+          break
+        end
+      end
+      host.log.info(("[on-ear] %s: '%s' %s — locate %s, find %s, in the tree %s")
+        :format(spec.name, spec.pane, there and "is on screen" or "is gone",
+          at and ("(%d,%d)"):format(at.x, at.y) or "nil",
+          tostring(host.uia.find(origin.id, spec.pane, host.uia.type.Window)),
+          tostring(inTree)))
     end
     return there
   end)
@@ -645,7 +671,9 @@ local function chooser(spec)
   local function paneThere()
     local o = b:origin()
     if not (o and o.id) then return false end
-    return host.uia.find(o.id, spec.pane, host.uia.type.Window) ~= nil
+    -- Same question, same call as the gate. Asking it a different way was how the two came
+    -- to disagree in the first place.
+    return host.uia.locate(o.id, spec.pane, host.uia.type.Window) ~= nil
   end
 
   -- Bring the window forward, then click.
@@ -980,7 +1008,12 @@ local function chooser(spec)
     menus = true,
     slot = ON_EAR_SLOT,
     specificity = O.layer.dialog,
-    pollMatch = 300,
+    -- 500, not less: the log times each of these gate evaluations at 26 to 53 ms, because a
+    -- UIA search of a whole window's subtree is what it costs. Every other arbiter overlay in
+    -- this project polls at 500 for the same reason. Making the search itself cheap — it is
+    -- looking for a DIRECT CHILD of the window and walks the entire subtree to find it — is a
+    -- backend job, noted with the rest of the centralisation work.
+    pollMatch = 500,
   })
   host.log.info(("[on-ear] %s overlay ready."):format(spec.name))
   return b
