@@ -78,6 +78,10 @@ thread_local! {
     static CAPTURED_KEYS: RefCell<Vec<(u32, u8)>> = RefCell::new(Vec::new());
     /// Captured key-downs (vk, modifier-mask) queued for the event loop.
     static KEY_QUEUE: RefCell<Vec<(u32, u8)>> = RefCell::new(Vec::new());
+    /// Keys whose DOWN was let through because a screen reader's modifier was held, so
+    /// that their UP is let through as well even if the modifier has since been released.
+    /// A down without its up leaves the application holding a key nobody is pressing.
+    static SCREEN_READER_PASSED: RefCell<Vec<u32>> = RefCell::new(Vec::new());
 }
 
 static KEY_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -1044,6 +1048,40 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
             let matched =
                 CAPTURED_KEYS.with(|c| c.borrow().iter().any(|&(v, m)| v == vk && m == mask));
             if matched {
+                // A keystroke made with a SCREEN READER'S own modifier held is addressed to
+                // the screen reader, whatever this overlay has claimed.
+                //
+                // NVDA's modifier is Insert on the desktop layout and CapsLock on the laptop
+                // one; JAWS uses Insert too. Not one of them is a Windows modifier, so none
+                // reaches the mask above — and this hook saw NVDA+Space as a bare Space with
+                // an empty mask, an exact match for any overlay that had claimed "Space".
+                // Every overlay in this project claims Space. So we ate it.
+                //
+                // What that does to the person at the keyboard is out of all proportion to the
+                // size of this check. NVDA+Space is what leaves focus mode; with it swallowed,
+                // the reported experience was "NVDA hung, and every letter seemed to be
+                // typed" — which is exactly what focus mode you cannot leave feels like. The
+                // same applied to NVDA+Tab, NVDA+Enter and the arrows: the commands for
+                // asking a screen reader what is going on were the commands we were deaf to.
+                //
+                // Only ever passes MORE through, and only while one of those keys is
+                // physically down, so it cannot take a key away from an overlay: nobody
+                // navigates one holding Insert.
+                let screen_reader_held = down(0x2D) || down(0x60) || down(0x14);
+                let owes_up = !is_down && SCREEN_READER_PASSED.with(|s| s.borrow().contains(&vk));
+                if screen_reader_held || owes_up {
+                    SCREEN_READER_PASSED.with(|s| {
+                        let mut v = s.borrow_mut();
+                        if is_down {
+                            if !v.contains(&vk) {
+                                v.push(vk);
+                            }
+                        } else {
+                            v.retain(|&k| k != vk);
+                        }
+                    });
+                    return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+                }
                 // Intercept a captured nav key only while the overlay should own
                 // it (ReaHotkey's GetContext): the scoped window is foreground AND
                 // no popup menu is open. A control that opened a #32768 menu must

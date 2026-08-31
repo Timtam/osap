@@ -640,20 +640,51 @@ local function chooser(spec)
     return nil
   end
 
+  -- Whether the panel is on screen at all — the same question the gate asks, asked again
+  -- here because a control that closes something should be able to check that it did.
+  local function paneThere()
+    local o = b:origin()
+    if not (o and o.id) then return false end
+    return host.uia.find(o.id, spec.pane, host.uia.type.Window) ~= nil
+  end
+
+  -- Bring the window forward, then click.
+  --
+  -- Insurance, not a fix for anything observed: every click this project makes is a blind one
+  -- at a screen coordinate, and nothing anywhere checks that our window is the one lying under
+  -- that point — `refuseOutside` only asks whether the point falls inside our window's
+  -- RECTANGLE, which says nothing about what is drawn on top of it. Focusing first costs
+  -- nothing when we are already in front, which is the normal case.
+  --
+  -- It is not the whole answer either, since a window can sit on top without holding focus.
+  -- That answer is to ask the OS which window owns the point, and it belongs in the runtime
+  -- where every module's clicks would get it, not bolted onto this one.
+  local function clickAt(x, y)
+    local o = b:origin()
+    if o and o.id and host.window and host.window.focus then host.window.focus(o.id) end
+    host.input.click(x, y)
+  end
+
   local function clickElement(n)
     if not n then return false end
-    host.input.click(n.bounds.x + n.bounds.w // 2, n.bounds.y + n.bounds.h // 2)
+    clickAt(n.bounds.x + n.bounds.w // 2, n.bounds.y + n.bounds.h // 2)
     return true
   end
 
   -- The value under a column heading. MODEL and DESCRIPTION are headings with their text
   -- directly beneath, sharing the heading's left edge — which is how they are found, rather
   -- than by a coordinate, because that survives the panel being laid out differently.
-  local function underLabel(name)
-    local head = bElement(name)
+  local function underLabel(nodes, name)
+    local head
+    for _, n in ipairs(nodes) do
+      if n.name == name then
+        head = n
+        break
+      end
+    end
     if not head then return nil end
     local best
-    for _, n in ipairs(btree() or {}) do
+    for _, n in ipairs(nodes) do
       if n.name ~= name and math.abs(n.bounds.x - head.bounds.x) <= 6
         and n.bounds.y > head.bounds.y
       then
@@ -663,16 +694,83 @@ local function chooser(spec)
     return best and best.name or nil
   end
 
-  local function selection()
-    local model = underLabel("MODEL")
+  local function selectionFrom(nodes)
+    if not nodes then return nil end
+    local model = underLabel(nodes, "MODEL")
     if not model then return nil end
-    local desc = underLabel("DESCRIPTION")
+    local desc = underLabel(nodes, "DESCRIPTION")
     return desc and (model .. ", " .. desc) or model
+  end
+
+  -- Shared within an announcement.
+  local function selection()
+    return selectionFrom(btree())
+  end
+
+  -- Deliberately NOT shared. A watch that waits for a value to change cannot be served from
+  -- a memo of what the value was, and an epoch may not turn over between two ticks of a
+  -- timer — so this one always crosses the boundary and always sees now.
+  local function selectionNow()
+    return selectionFrom(dumpFor(b))
+  end
+
+  -- A row's own fill says whether it is the filter in force: (46,46,46) when it is against
+  -- (26,26,26) when it is not. Both measured, from two captures of this panel taken in the
+  -- two states — which is the only reason this can be claimed at all, and why it was not
+  -- claimed an hour ago when only one of them existed.
+  --
+  -- Probed 170 into the row, in the gap between the name and its count, where the fill runs
+  -- flat for seventy-five pixels in both states. Anywhere over the text would have been a
+  -- reading of a glyph stroke, which is neither state.
+  local ROW_ON, ROW_OFF = { 46, 46, 46 }, { 26, 26, 26 }
+  local ROW_PROBE_DX = 170
+
+  local function rowPoint(r)
+    local o = b:origin()
+    if not (o and o.client and r) then return nil end
+    return {
+      r.bounds.x - o.client.x + ROW_PROBE_DX,
+      r.bounds.y - o.client.y + r.bounds.h // 2,
+    }
   end
 
   -- Out, first, and deliberately first. Someone who cannot see this panel and did not expect
   -- it needs the exit to be one keystroke away, not at the end of twenty-five stops.
-  b:addHotspotButton({ label = "Close", at = scaled(spec.close[1], spec.close[2]) })
+  -- Says what HAPPENED, not what was attempted.
+  --
+  -- As a plain hotspot this said "Close, activated" the moment it clicked, which is a claim
+  -- about the future. Being stuck in a panel is exactly the situation where the difference
+  -- matters, and where somebody who cannot see the screen has nothing else to go on: a tool
+  -- that reports success makes the next thing they doubt themselves. So it watches the panel
+  -- for a second, and says so if it is still there.
+  --
+  -- It checks the pane directly rather than trusting this overlay to have noticed. The two are
+  -- not the same question — the panel really did close once while this overlay carried on as
+  -- though it had not — and this one is about the click.
+  b:addCustomButton({
+    label = "Close",
+    onActivate = function()
+      local x, y = screenPointOf(b, spec.close[1], spec.close[2])
+      if not x then return end
+      local q = host.screen.pixel(x, y)
+      host.log.info(("[on-ear] '%s' Close clicking (%d,%d), pixel there %s")
+        :format(spec.name, x, y, q and ("%d,%d,%d"):format(q.r, q.g, q.b) or "unreadable"))
+      clickAt(x, y)
+      if not host.timer then return end
+      local tries = 12
+      local function look()
+        if not paneThere() then return end -- gone; the window overlay announces itself
+        tries -= 1
+        if tries <= 0 then
+          host.log.info(("[on-ear] '%s' is still on screen after Close"):format(spec.pane))
+          host.speech.output("the panel did not close", { interrupt = true })
+          return
+        end
+        host.timer.after(100, look)
+      end
+      host.timer.after(100, look)
+    end,
+  })
 
   b:addStaticText({
     label = "Selected",
@@ -682,16 +780,96 @@ local function chooser(spec)
   -- The search field. Activating drops the caret into it, so the next thing typed goes to the
   -- application and filters the grid — which is the one way to reach a named item here
   -- without pressing every tile to find out what it is.
+  -- Found as "the edit box inside this panel", not by its name.
+  --
+  -- Its name was "Search" in the first capture and gone from the tree in the second, because
+  -- that name is the PLACEHOLDER: once the field has content of its own, the placeholder is
+  -- what it no longer says. A lookup by name therefore worked exactly until somebody used it.
+  -- Its identity is that it is the one edit control in this pane, and the main window's three
+  -- band edits are outside the pane's rectangle.
+  -- The field is CLICKED at a measured coordinate and only READ through the tree, because
+  -- the element is not reliably there.
+  --
+  -- Three captures of this panel: the first had `Search`, an Edit at (328,179) 242x44; the
+  -- second and third had no edit control inside the pane at all. So it appears — most likely
+  -- while it holds the keyboard focus it takes when the panel opens — and otherwise is simply
+  -- absent. A lookup that finds it by name broke as soon as it was used, and a lookup that
+  -- finds "the edit in this pane" breaks whenever it is not focused, which is most of the
+  -- time. The coordinate is from the one capture that had it, and scales like everything else.
+  local function searchField()
+    local pane = bElement(spec.pane)
+    if not pane then return nil end
+    for _, n in ipairs(btree() or {}) do
+      if n.ctype == host.uia.type.Edit
+        and n.bounds.x >= pane.bounds.x and n.bounds.y >= pane.bounds.y
+        and (n.bounds.x + n.bounds.w) <= (pane.bounds.x + pane.bounds.w)
+        and (n.bounds.y + n.bounds.h) <= (pane.bounds.y + pane.bounds.h)
+      then
+        return n
+      end
+    end
+    return nil
+  end
+
   b:addCustomButton({
     label = "Search",
+    -- What is in it, when it holds anything. An empty field answers with its placeholder or
+    -- with nothing, and either way there is no text to report.
+    text = function()
+      local f = searchField()
+      local v = f and f.name or nil
+      if v == nil or v == "" or v == "Search" then return nil end
+      return v
+    end,
     onActivate = function()
-      if not clickElement(bElement("Search")) then
-        host.speech.output("search field is not where it should be", { interrupt = true })
-      end
+      -- The element when it is there (it is exact), the measured coordinate when it is not.
+      if clickElement(searchField()) then return end
+      local x, y = screenPointOf(b, spec.search[1], spec.search[2])
+      if not x then return end
+      host.log.info(("[on-ear] '%s' search clicking (%d,%d)"):format(spec.name, x, y))
+      clickAt(x, y)
     end,
   })
 
-  b:addHotspotButton({ label = "Show all", at = scaled(spec.showAll[1], spec.showAll[2]) })
+  -- A button, not a toggle, and the distinction was measured rather than assumed. Its glyphs
+  -- top out at exactly 163 — the same as SELECT SPEAKERS and SELECT HEADPHONE — while the
+  -- category rows beside it reach 225. Those are two roles in this application's palette, a
+  -- button and a list item, not two states of one control.
+  --
+  -- It is one end of a radio group though — Show All or one category, never both — and the
+  -- second capture settled how to say so. Two captures in opposite states show this control
+  -- looking identical in both, so it has no appearance of its own to read. What it does have
+  -- is a complement: it is in force exactly when no category is. So the answer is derived from
+  -- the rows, which do carry a measured state, rather than invented for this one.
+  b:addHotspotButton({
+    label = "Show all",
+    at = scaled(spec.showAll[1], spec.showAll[2]),
+    text = function()
+      local sawRow = false
+      local o = b:origin()
+      if not (o and o.client) then return nil end
+      for i = 1, 8 do
+        local r = bElement("Row " .. i)
+        local pt = r and rowPoint(r)
+        if pt then
+          local q = host.screen.pixel(o.client.x + pt[1], o.client.y + pt[2])
+          if q then
+            sawRow = true
+            local don = math.abs(q.r - ROW_ON[1]) + math.abs(q.g - ROW_ON[2])
+              + math.abs(q.b - ROW_ON[3])
+            local doff = math.abs(q.r - ROW_OFF[1]) + math.abs(q.g - ROW_OFF[2])
+              + math.abs(q.b - ROW_OFF[3])
+            -- A category is in force, so this is not.
+            if don < doff then return nil end
+          end
+        end
+      end
+      -- Silent when no row could be read at all: "in force" would then be a guess dressed as
+      -- a reading, and the categories above will have said nothing either.
+      if not sawRow then return nil end
+      return "in force"
+    end,
+  })
 
   -- The category list, by slot rather than by name. The three in the capture are Studio
   -- Monitors, Hi-Fi and Multimedia, and hard-coding those three would be a module that
@@ -719,18 +897,20 @@ local function chooser(spec)
       end
       return label, count
     end
-    b:addCustomButton({
+    -- A toggle rather than a button, now that the selected look has been measured. These are
+    -- a radio group — one filter at a time — and a radio group read aloud is a set of things
+    -- of which exactly one says "on". Activating clicks the same point that reports the
+    -- state, which is what selects the row.
+    b:addHotspotToggle({
       label = "Category",
       when = function() return row() ~= nil end,
+      at = function() return rowPoint(row()) end,
+      onColor = ROW_ON,
+      offColor = ROW_OFF,
       text = function()
         local label, count = parts()
         if not label then return nil end
         return count and (label .. " " .. count) or label
-      end,
-      onActivate = function()
-        if not clickElement(row()) then
-          host.speech.output("that category is no longer there", { interrupt = true })
-        end
       end,
     })
   end
@@ -753,15 +933,30 @@ local function chooser(spec)
         onActivate = function()
           local x, y = screenPointOf(b, tx, ty)
           if not x then return end
+          -- WATCHED, not timed. The first version waited a quarter of a second and then read,
+          -- which is a guess about somebody else's redraw — and the test caught it announcing
+          -- the PREVIOUS speaker's name. That is the worst answer this control could give: a
+          -- real name, said with full confidence, for the wrong tile, to somebody who has no
+          -- way to check it against the screen.
+          --
+          -- So it reads before the click and then looks again until the value differs. If it
+          -- never differs the tile was already the selected one, which is not a failure — the
+          -- name it then says is still exactly what is loaded.
+          local before = selectionNow()
           host.log.info(("[on-ear] '%s %d' clicking (%d,%d)"):format(spec.tileLabel, n, x, y))
-          host.input.click(x, y)
-          -- Said after the panel has had time to redraw, because the name of the thing just
-          -- chosen is the entire result of pressing it.
-          if host.timer then
-            host.timer.after(250, function()
-              host.speech.output(selection() or "nothing there", { interrupt = true })
-            end)
+          clickAt(x, y)
+          if not host.timer then return end
+          local tries = 18
+          local function look()
+            local now = selectionNow()
+            if (now and now ~= before) or tries <= 0 then
+              host.speech.output(now or "not shown", { interrupt = true })
+              return
+            end
+            tries -= 1
+            host.timer.after(80, look)
           end
+          host.timer.after(80, look)
         end,
       })
     end
@@ -769,7 +964,24 @@ local function chooser(spec)
 
   -- A dialog outranks the window overlay underneath it, which is what makes the main ring
   -- stand down while this is up.
-  b:attach(on_ear, { menus = true, slot = ON_EAR_SLOT, specificity = O.layer.dialog })
+  --
+  -- `pollMatch` is not optional here, and leaving it out cost a test round. An overlay's gate
+  -- is normally re-evaluated when a window is activated or focused — which is enough for a
+  -- dialog, because opening and closing one IS a window event. This panel is not a window. It
+  -- appears and disappears inside a window that never changes, so closing it produced no event
+  -- at all: the gate was never asked again, this overlay kept the slot, and the tester was
+  -- left holding a ring for a panel that was no longer on screen. He could tell only because
+  -- "Selected" started saying it could not read anything.
+  --
+  -- Which is the whole reason the option exists — "for matches that change with no window
+  -- event" — and the failure it prevents is worse than a missed activation: an overlay that
+  -- will not let go is one a person who cannot see the screen has no way to escape.
+  b:attach(on_ear, {
+    menus = true,
+    slot = ON_EAR_SLOT,
+    specificity = O.layer.dialog,
+    pollMatch = 300,
+  })
   host.log.info(("[on-ear] %s overlay ready."):format(spec.name))
   return b
 end
@@ -777,7 +989,11 @@ end
 chooser({
   name = "Speaker Browser",
   pane = "SpeakerBrowserWindow",
-  close = { 1539, 150 },
+  -- The centre of the Close button's outline (x 1481-1598, y 128-174), not the centre of the
+  -- word inside it: the word's middle happens to fall in the gap between two letters, which
+  -- is a fine place for a button and a poor place to describe one from.
+  close = { 1539, 151 },
+  search = { 449, 201 },
   showAll = { 331, 277 },
   tileLabel = "Speaker",
   tiles = {
