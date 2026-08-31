@@ -834,6 +834,40 @@ local function chooser(spec)
     }
   end
 
+  -- Scrolling, for the two things here that hold more than they show.
+  --
+  -- The manufacturer list runs to far more makers than the rows the panel renders, and the
+  -- tile grid to more headphones than its fifteen positions — and the bottom row of tiles has
+  -- its printed name clipped away by the viewport, so even what IS shown cannot be read there.
+  -- Neither is reachable by tabbing, because tabbing walks what is drawn.
+  --
+  -- Done with the wheel over the area itself, which is what a mouse would do, and each control
+  -- says where the list has ARRIVED rather than only that it moved: after a scroll the rows
+  -- and tiles hold different things, and "scrolled" on its own tells you nothing about what is
+  -- now in front of you.
+  --
+  -- Deliberately not automatic, for now. Tabbing off the end and having the panel move
+  -- underneath is a nicer thing to describe than to use without seeing it, and the runtime has
+  -- no notion of "bring this control into view" to build it on honestly. That belongs in the
+  -- runtime, where every module with a list longer than its window would get it.
+  local function scroller(label, atx, aty, amount, after)
+    b:addCustomButton({
+      label = label,
+      onActivate = function()
+        local x, y = screenPointOf(b, atx, aty)
+        if not x then return end
+        host.log.info(("[on-ear] %s: %s at (%d,%d)"):format(spec.name, label, x, y))
+        local o = b:origin()
+        if o and o.id and host.window and host.window.focus then host.window.focus(o.id) end
+        host.input.scroll(x, y, amount)
+        if not host.timer then return end
+        host.timer.after(250, function()
+          host.speech.output(after() or "no further", { interrupt = true })
+        end)
+      end,
+    })
+  end
+
   -- Out, first, and deliberately first. Someone who cannot see this panel and did not expect
   -- it needs the exit to be one keystroke away, not at the end of twenty-five stops.
   -- Says what HAPPENED, not what was attempted.
@@ -1148,6 +1182,26 @@ local function chooser(spec)
     return lo
   end)
 
+  -- What the list shows now, for the scroller to report: the name in its first row.
+  local function firstRowName()
+    for i = 1, spec.rows do
+      local r = bElement("Row " .. i)
+      if r then
+        for _, n in ipairs(btree() or {}) do
+          if n.name ~= r.name and math.abs(n.bounds.y - r.bounds.y) <= 4
+            and math.abs(n.bounds.x - r.bounds.x) <= 4
+          then
+            return "now starting at " .. n.name
+          end
+        end
+      end
+    end
+    return nil
+  end
+
+  scroller(spec.rowLabel .. " list down", 466, 600, -3, firstRowName)
+  scroller(spec.rowLabel .. " list up", 466, 600, 3, firstRowName)
+
   -- The printed names, read a WHOLE ROW at a time.
   --
   -- Reading them one tile at a time did not work, and the reason is worth keeping because it
@@ -1163,6 +1217,7 @@ local function chooser(spec)
   -- crosses fall between the columns, outside every tile's own half, so they are dropped
   -- rather than read as a character.
   local NAME_HALF = 54
+  local lastRaw = {}
 
   local function readRowNames(r)
     if not spec.tiles.name then return {} end
@@ -1175,6 +1230,17 @@ local function chooser(spec)
       cols[#cols] + NAME_HALF, ty + spec.tiles.name[4])
     if not rect then return {} end
     local got = host.ocr.recognize({ region = rect })
+    -- Logged, because this has been wrong twice on two different theories and neither was
+    -- ever checked against what the recogniser actually said. A tile with no name and a tile
+    -- whose name came back as punctuation sound the same from the keyboard, and both sound
+    -- like the region being in the wrong place — which it was not, either time.
+    local raw = (got and got.text or ""):gsub("%s+", " ")
+    if raw ~= lastRaw[r] then
+      lastRaw[r] = raw
+      host.log.info(("[on-ear] %s row %d names: region (%d,%d)-(%d,%d) gave %d word(s): %s")
+        :format(spec.name, r, rect[1], rect[2], rect[3], rect[4],
+          #((got and got.words) or {}), raw == "" and "<nothing>" or raw))
+    end
     local bags = {}
     for _, wd in ipairs((got and got.words) or {}) do
       local wx = wd.x + wd.w / 2
@@ -1272,6 +1338,19 @@ local function chooser(spec)
         end,
       })
     end
+  end
+
+  do
+    local mid = spec.tiles.cols[(#spec.tiles.cols + 1) // 2]
+    local midRow = spec.tiles.rows[(#spec.tiles.rows + 1) // 2]
+    local function firstTile()
+      local names = spec.tiles.name and rowNames[1]() or nil
+      local n = names and names[1]
+      if n then return "now starting at " .. n end
+      return ("%d position(s) hold something"):format(filledCount())
+    end
+    scroller("Grid down", mid, midRow, -3, firstTile)
+    scroller("Grid up", mid, midRow, 3, firstTile)
   end
 
   -- A dialog outranks the window overlay underneath it, which is what makes the main ring
