@@ -1290,6 +1290,9 @@ struct Tightened {
     off_y: u32,
     scale: u32, // integer upscale applied to the crop
     pad: u32,   // background border added around the upscaled crop
+    /// Nothing in the region differs from its own background — there is no content here at
+    /// all, as opposed to content this step chose not to crop to.
+    blank: bool,
 }
 
 /// Crops a captured region to its content bounding box (pixels differing from
@@ -1306,6 +1309,7 @@ fn tighten(cap: &CapturedImage) -> Tightened {
         off_y: 0,
         scale: 3,
         pad: OCR_PAD,
+        blank: false,
     };
     if cap.w < 3 || cap.h < 3 {
         return whole();
@@ -1351,7 +1355,14 @@ fn tighten(cap: &CapturedImage) -> Tightened {
         }
     }
     if !found {
-        return whole();
+        // Every pixel is its own background. Said out loud rather than handed on, because
+        // what happens downstream to a flat rectangle is that a recogniser answers anyway:
+        // an empty search box and five tiles whose captions are clipped away all came back
+        // as "cYanmaGtaYellowb", the same string from six different places. A module cannot
+        // tell that from a reading, and neither can the person listening to it.
+        let mut w = whole();
+        w.blank = true;
+        return w;
     }
 
     let m = 3i32;
@@ -1360,6 +1371,7 @@ fn tighten(cap: &CapturedImage) -> Tightened {
     let x1 = (x1 as i32 + m).min(cap.w as i32 - 1) as u32;
     let y1 = (y1 as i32 + m).min(cap.h as i32 - 1) as u32;
     let (cw, ch) = (x1 - x0 + 1, y1 - y0 + 1);
+    // Content found, so this is not the blank case whatever else happens below.
     let cropped = imageops::crop_imm(&img, x0, y0, cw, ch).to_image();
 
     // Upscale so the content is ~64px tall (Windows.Media.Ocr likes big glyphs).
@@ -1380,6 +1392,7 @@ fn tighten(cap: &CapturedImage) -> Tightened {
         off_y: y0,
         scale,
         pad: OCR_PAD,
+        blank: false,
     }
 }
 
@@ -1522,6 +1535,15 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
         let img: &CapturedImage = tight.as_ref().map(|t| &t.img).unwrap_or(cap);
         if debug {
             save_debug(img, "ocr-debug.png");
+        }
+        // An empty region reads as empty. Nothing else can honestly come out of it, and
+        // something else was: the neural fallback, given a rectangle with no content in it,
+        // returns a plausible-looking string rather than nothing, and both the primary and
+        // the fallback were being asked. Answering here also saves both recognitions on a
+        // region there was never anything to read in.
+        if tight.as_ref().is_some_and(|t| t.blank) {
+            drop(paddle);
+            return Ok(OcrText { text: String::new(), words: Vec::new() });
         }
         let t_win = std::time::Instant::now();
         let (mut text, mut words) = run_ocr(img, lang).map_err(|e| format!("OCR failed: {e}"))?;

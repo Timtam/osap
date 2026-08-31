@@ -1183,11 +1183,16 @@ local function chooser(spec)
   end)
 
   -- What the list shows now, for the scroller to report: the name in its first row.
+  -- A row's own child, and only that. Matching on position alone picked up the list's
+  -- "MANUFACTURER" heading once the list had been scrolled far enough for a row to sit where
+  -- the heading is, and reported it as a maker. Depth is what actually tells them apart: the
+  -- heading is a sibling of the list, the name is a child of the row.
   local function rowNameAt(i)
     local r = bElement("Row " .. i)
     if not r then return nil end
     for _, n in ipairs(btree() or {}) do
-      if n.name ~= r.name and math.abs(n.bounds.y - r.bounds.y) <= 4
+      if n.depth == r.depth + 1 and n.name ~= r.name
+        and math.abs(n.bounds.y - r.bounds.y) <= 4
         and math.abs(n.bounds.x - r.bounds.x) <= 4
       then
         return n.name
@@ -1209,7 +1214,14 @@ local function chooser(spec)
         last = n
       end
     end
-    if not first then return nil end
+    if not first then
+      -- Which of the two silences this is. A list that has genuinely reached its end and a
+      -- window that has stopped answering both leave this empty, and the tester saw the
+      -- scrolling stop after two steps with no way to tell which had happened.
+      host.log.info(("[on-ear] %s: no rows to read after scrolling — the tree has %d element(s)")
+        :format(spec.name, #(btree() or {})))
+      return nil
+    end
     host.log.info(("[on-ear] %s list now shows %s .. %s"):format(spec.name, first, last))
     if first == last then return "showing " .. first end
     return ("%s to %s"):format(first, last)
