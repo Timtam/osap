@@ -854,12 +854,25 @@ local function chooser(spec)
 
   b:addCustomButton({
     label = "Search",
-    -- What is in it, when it holds anything. An empty field answers with its placeholder or
-    -- with nothing, and either way there is no text to report.
+    -- An EDIT, and it must say so. It was announced as a button, which describes how it is
+    -- built rather than what it is: someone hearing "button" has no reason to expect that
+    -- pressing it puts a caret somewhere and that the next thing they type goes into the
+    -- application.
+    typeLabel = "edit",
+    -- READ FROM THE PICTURE, not from the tree.
+    --
+    -- Through the tree it worked, but only afterwards: the tester's typing was announced back
+    -- to him one speaker later, because putting the caret in this field is exactly what makes
+    -- ON:EAR drop its accessibility tree — so while there is anything to read, there is
+    -- nothing to read it with. The pixels do not care.
     text = function()
-      local f = searchField()
-      local v = f and f.name or nil
-      if v == nil or v == "" or v == "Search" then return nil end
+      local o = ov:origin() or b:origin()
+      local rect = screenRect(o, 330, 186, 565, 214)
+      if not rect then return nil end
+      local got = host.ocr.recognize({ region = rect })
+      local v = (got and got.text or ""):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
+      -- The placeholder is the word "Search" itself, which means empty, not content.
+      if v == "" or v == "Search" then return nil end
       return v
     end,
     onActivate = function()
@@ -956,6 +969,31 @@ local function chooser(spec)
     })
   end
 
+  -- A tile says whether it is the one that is loaded, out of its own pixels.
+  --
+  -- Measured: the selected tile is drawn with an orange border and a warm tint inside it,
+  -- (67,39,26), flat for more than twenty pixels in from its left edge; every other tile has
+  -- the panel's own ground, (24,24,24), at the same place. Ten pixels inside the border and
+  -- halfway down is inside both, comfortably.
+  --
+  -- This is the only thing in this panel that can be checked without the accessibility tree,
+  -- which is what makes it worth having: the tree goes dark whenever the caret is in the
+  -- search field, and that is precisely when somebody is about to press a tile.
+  local TILE_ON, TILE_OFF = { 67, 39, 26 }, { 24, 24, 24 }
+  local TILE_PROBE_DX = -72
+  local TILE_LIMIT = 30 -- half the distance between the two, as everywhere else here
+
+  local function tileSelected(tx, ty)
+    local x, y = screenPointOf(b, tx + TILE_PROBE_DX, ty)
+    if not x then return nil end
+    local q = host.screen.pixel(x, y)
+    if not q then return nil end
+    local don = math.abs(q.r - TILE_ON[1]) + math.abs(q.g - TILE_ON[2]) + math.abs(q.b - TILE_ON[3])
+    local doff = math.abs(q.r - TILE_OFF[1]) + math.abs(q.g - TILE_OFF[2]) + math.abs(q.b - TILE_OFF[3])
+    if math.min(don, doff) > TILE_LIMIT then return nil end
+    return don < doff
+  end
+
   -- The grid. Its tiles are pictures with no accessible element and no text of their own, so
   -- a tile can only be named by pressing it: the panel's MODEL line then says what was
   -- chosen, and this control says it out loud rather than making the user go and look.
@@ -971,30 +1009,41 @@ local function chooser(spec)
       local n = (r - 1) * #spec.tiles.cols + c
       b:addCustomButton({
         label = spec.tileLabel .. " " .. n,
+        text = function()
+          return tileSelected(tx, ty) and "selected" or nil
+        end,
         onActivate = function()
           local x, y = screenPointOf(b, tx, ty)
           if not x then return end
-          -- WATCHED, not timed. The first version waited a quarter of a second and then read,
-          -- which is a guess about somebody else's redraw — and the test caught it announcing
-          -- the PREVIOUS speaker's name. That is the worst answer this control could give: a
-          -- real name, said with full confidence, for the wrong tile, to somebody who has no
-          -- way to check it against the screen.
+          -- Waits for THIS TILE to become the selected one, then reads the name.
           --
-          -- So it reads before the click and then looks again until the value differs. If it
-          -- never differs the tile was already the selected one, which is not a failure — the
-          -- name it then says is still exactly what is loaded.
-          local before = selectionNow()
+          -- Two earlier versions got this wrong in the same direction. The first waited a
+          -- quarter of a second and read whatever was there, and announced the previous
+          -- speaker. The second compared the name before and after the click — better, until
+          -- the caret was in the search field, because then the tree is dark, "before" is
+          -- nothing at all, and the first name that becomes readable counts as a change even
+          -- when it is the stale one. Which is exactly what the tester heard.
+          --
+          -- The tile's own tint is not subject to any of that. It is the click's result, it
+          -- cannot be stale, and it does not depend on the application answering questions.
+          -- Only once it says this tile is loaded is the name worth reading.
           host.log.info(("[on-ear] '%s %d' clicking (%d,%d)"):format(spec.tileLabel, n, x, y))
           clickAt(x, y)
           if not host.timer then return end
           local tries = 18
           local function look()
-            local now = selectionNow()
-            if (now and now ~= before) or tries <= 0 then
-              host.speech.output(now or "not shown", { interrupt = true })
+            if tileSelected(tx, ty) then
+              host.speech.output(selectionNow() or "not shown", { interrupt = true })
               return
             end
             tries -= 1
+            if tries <= 0 then
+              -- Never became selected. After a search the grid holds fewer speakers than it
+              -- has positions, so this is the ordinary answer for a position with nothing in
+              -- it — and it is the only report of a search result this panel gives us.
+              host.speech.output("nothing at that position", { interrupt = true })
+              return
+            end
             host.timer.after(80, look)
           end
           host.timer.after(80, look)

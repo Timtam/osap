@@ -299,6 +299,7 @@ end
 function Overlay:addCustomButton(opts)
   return add(self, {
     kind = "custom", label = opts.label, onActivate = opts.onActivate,
+    typeLabel = opts.typeLabel,
     -- `text = function(overlay) -> string`: read-out, announced with the label. On a button
     -- it is how a control that ACTS can also say what it would act on — a panel toggle that
     -- announces only its name leaves the user to press it and find out, which for a collapse
@@ -1314,7 +1315,13 @@ local function speakControl(self, index, moveMouse, withHint)
   -- there. A screen-reader user hears "button", presses it, and nothing happens; the only
   -- honest reading of that is that the tool is broken. Announced like a static text instead
   -- (no type word at all), because that is what it is: a value you can read and not press.
-  local tl = TYPE_LABEL[c.kind]
+  -- `typeLabel` overrides the word for what this control is, because the KIND a control is
+  -- built from and the THING it stands for are not always the same. A custom button that puts
+  -- the caret into a text field is an edit box to everyone using it; announcing "button"
+  -- describes our implementation to somebody who cannot see the screen and has no interest in
+  -- it — and worse, it says the wrong thing about what typing will do next. The tab control
+  -- has had this for the same reason (a row of tool icons is not "a tab control").
+  local tl = c.typeLabel or TYPE_LABEL[c.kind]
   if c.kind == "ocr" and c.readOnly then tl = "" end
   if tl ~= "" then parts[#parts + 1] = tl end
   -- The KEY, spoken on arrival. Without it a hotkey is only discoverable by being told, and
