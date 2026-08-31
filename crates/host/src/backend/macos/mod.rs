@@ -199,8 +199,25 @@ impl Backend for MacBackend {
         input::mouse_up(x, y, button);
     }
 
-    fn mouse_scroll(&self, x: i32, y: i32, amount: i32) {
-        input::mouse_scroll(x, y, amount);
+    fn mouse_scroll(&self, x: i32, y: i32, delta: i32) {
+        // The trait counts what Windows counts — 120 units to a notch — and Quartz counts
+        // lines, so this is where the two meet. Kept on the Windows unit because that is the
+        // finer of the two: a fraction of a notch is expressible there and not here, and a
+        // caller asking for less than a line gets the smallest whole line rather than nothing
+        // at all. That is a real difference between the platforms and not a rounding detail —
+        // a control that needs a half-step will not get one on a Mac until this asks Quartz in
+        // pixel units instead, which is a change nobody can test from here.
+        let lines = (delta as f64 / 120.0).round() as i32;
+        let lines = if lines != 0 {
+            lines
+        } else if delta > 0 {
+            1
+        } else if delta < 0 {
+            -1
+        } else {
+            0
+        };
+        input::mouse_scroll(x, y, lines);
     }
 
     fn key_post(&self, hwnd: isize, key: &str) -> Result<(), String> {

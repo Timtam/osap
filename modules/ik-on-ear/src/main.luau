@@ -567,9 +567,13 @@ ov:addStepper({
   label = "Tone",
   when = function() return element("Tone") ~= nil end,
   text = function() return valueBelow("Tone") or "not shown" end,
+  -- Half a notch. One whole one moves this knob five of its own units, which is a big step to
+  -- take blind when the value is the tone of everything you are about to listen to. If the
+  -- application rounds the half away it will simply not move, and the control will say the
+  -- same number back — which is the truth, and tells us to stop asking for halves.
   onStep = function(dir)
     local x, y = screenPoint(290, 780)
-    if x then host.input.scroll(x, y, dir) end
+    if x then host.input.scroll(x, y, dir * 0.5) end
   end,
 })
 
@@ -579,14 +583,29 @@ ov:addStepper({
 -- method: this one is a range with two handles, and a slider of that shape commonly declines
 -- wheel input outright — there is no single value for a notch to mean.
 --
--- Which leaves dragging a handle, and a handle that moves as the value does. Measured: the
--- track runs from 566 to 685 with its middle at 625, the two handles sit at 580 and 670 while
--- it reads 100%, and they are symmetric about that middle — so a handle is 45 of the frame's
--- units from the centre at full width and none at all at zero. That makes the handle's place
--- a function of the value, and the value is printed right below it. Nothing here is a
--- remembered position: it is worked out fresh from what the window currently says, which is
--- also why it stays right after somebody moves it with a mouse.
-local WIDTH_MID, WIDTH_REACH, WIDTH_STEP = 625, 45, 5
+-- Where its handles are is now MEASURED at both ends rather than measured at one and assumed
+-- at the other, and the assumption was wrong in a way the tester felt directly. Two captures:
+--
+--     100%   handles at 580 and 670, so 45 either side of the middle at 625
+--      48%   handles at 607 and 644, so 18.5
+--
+-- which is a straight line at about half a unit per percent, and it does NOT pass through zero
+-- — the handles meet at around twelve per cent and cannot be told apart below that. The old
+-- guess had them meeting at zero, so it aimed between two handles that were already on top of
+-- each other, and the value stuck at 10%, jumped to 100% and walked back down. That is exactly
+-- what one measured point and one imagined one buys.
+--
+-- Everything is recomputed from the printed value at each step, so it stays right after
+-- somebody moves the slider with a mouse, and a value it cannot read is one it will not move.
+local WIDTH_MID = 625
+-- offset(percent) = WIDTH_SLOPE * percent + WIDTH_AT_ZERO, from the two captures above.
+local WIDTH_SLOPE, WIDTH_AT_ZERO = 0.5096, -5.96
+-- Two per cent is one pixel on this bar, which is as fine as dragging can express here.
+local WIDTH_STEP = 2
+
+local function widthHandleX(pct)
+  return WIDTH_MID - (WIDTH_SLOPE * pct + WIDTH_AT_ZERO)
+end
 
 ov:addStepper({
   label = "Width",
@@ -600,21 +619,12 @@ ov:addStepper({
       return
     end
     local want = math.max(0, math.min(100, pct + dir * WIDTH_STEP))
-    local fromX = WIDTH_MID - WIDTH_REACH * pct / 100
-    local toX = WIDTH_MID - WIDTH_REACH * want / 100
-    -- Refuses near the middle, where the two handles are too close together to aim between.
-    --
-    -- Below about a third of full width this model puts them within a few units of each other,
-    -- and a press there is not clearly nearer one than the other — which is exactly what the
-    -- test found: the value stuck at 10%, then jumped to 100%, then walked back down. Moving
-    -- the wrong handle is a change the user did not ask for and cannot see, so it does not
-    -- happen; the reason is said instead.
-    --
-    -- The narrowness is in the model, not in the control: one point of it was measured (both
-    -- handles at 100%) and the other assumed (both meeting at the centre at zero). One capture
-    -- of this slider at a middle value replaces the assumption with a second measurement, and
-    -- then this guard can go.
-    if math.abs(fromX - WIDTH_MID) < 16 or math.abs(toX - WIDTH_MID) < 16 then
+    local fromX = widthHandleX(pct)
+    local toX = widthHandleX(want)
+    -- Still refuses where the handles are too close together to aim between, but now at a
+    -- distance the measurements justify rather than one picked to be safe: they meet at about
+    -- twelve per cent, and four units apart is already a press that could take either.
+    if math.abs(fromX - WIDTH_MID) < 4 or math.abs(toX - WIDTH_MID) < 4 then
       host.log.info(("[on-ear] Width %d%% -> %d%%: handles at %d and %d are too close to aim "
         .. "between; not dragging"):format(pct, want, fromX, 2 * WIDTH_MID - fromX))
       host.speech.output("width is too narrow to adjust from here", { interrupt = true })

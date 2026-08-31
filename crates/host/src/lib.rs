@@ -3969,11 +3969,21 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         })?,
     )?;
     let sh = shared.clone();
+    // host.input.scroll(x, y, notches) — FRACTIONAL, because one notch is not always a small
+    // enough step.
+    //
+    // A wheel notch is 120 units and a control decides for itself what that is worth; ON:EAR's
+    // Tone knob moves by five of its own units per notch, which is as fine as this could ever
+    // ask for while notches were whole numbers. They no longer are: half a notch is 60 units,
+    // and an application that scales its step by the delta — which is the ordinary way to
+    // handle a wheel — moves by half as much. One that rounds to its own interval instead
+    // simply does not move, and says the same value back, which is the honest outcome.
     input.set(
         "scroll",
-        lua.create_function(move |_, (x, y, amount): (i32, i32, i32)| {
+        lua.create_function(move |_, (x, y, notches): (i32, i32, f64)| {
             sh.bump_input_epoch();
-            sh.backend.mouse_scroll(x, y, amount);
+            let delta = (notches * 120.0).round() as i32;
+            sh.backend.mouse_scroll(x, y, delta);
             Ok(())
         })?,
     )?;

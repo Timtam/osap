@@ -565,10 +565,10 @@ impl Backend for WindowsBackend {
         }
     }
 
-    fn mouse_scroll(&self, x: i32, y: i32, amount: i32) {
+    fn mouse_scroll(&self, x: i32, y: i32, delta: i32) {
         unsafe {
             SetCursorPos(x, y);
-            send_mouse_event(MOUSEEVENTF_WHEEL, amount * 120); // 120 == WHEEL_DELTA
+            send_mouse_event(MOUSEEVENTF_WHEEL, delta); // already in WHEEL_DELTA units
         }
     }
 

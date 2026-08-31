@@ -321,7 +321,10 @@ pub trait Backend {
     /// gesture from timers and the pump keeps running between the parts.
     fn mouse_down(&self, x: i32, y: i32, button: MouseButton);
     fn mouse_up(&self, x: i32, y: i32, button: MouseButton);
-    fn mouse_scroll(&self, x: i32, y: i32, amount: i32);
+    /// `delta` is in WHEEL UNITS, where 120 is one notch — the unit the operating system
+    /// itself uses. Notches were the unit here until a control turned out to move too far for
+    /// one of them to be a usable step.
+    fn mouse_scroll(&self, x: i32, y: i32, delta: i32);
     /// Sends a key combo like "Ctrl+S".
     /// Deliver a key to a specific window as a MESSAGE, bypassing the input queue.
     ///

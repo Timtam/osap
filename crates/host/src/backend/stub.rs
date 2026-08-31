@@ -58,7 +58,7 @@ impl Backend for StubBackend {
 
     fn mouse_up(&self, _x: i32, _y: i32, _button: MouseButton) {}
 
-    fn mouse_scroll(&self, _x: i32, _y: i32, _amount: i32) {}
+    fn mouse_scroll(&self, _x: i32, _y: i32, _delta: i32) {}
     fn key_post(&self, _hwnd: isize, _key: &str) -> Result<(), String> {
         Ok(())
     }
