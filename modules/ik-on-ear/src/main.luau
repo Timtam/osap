@@ -990,6 +990,32 @@ local function chooser(spec)
   local TILE_PROBE_DX = -72
   local TILE_LIMIT = 30 -- half the distance between the two, as everywhere else here
 
+  -- Whether there is a speaker at a position at all, from its left border.
+  --
+  -- The tint above cannot answer this: an empty position and a tile that is merely not
+  -- selected are the same colour there. What only a real tile has is its outline — measured at
+  -- (50,50,50) on the middle row, (47,47,47) on the bottom one and the selected tile's orange
+  -- (241,101,35), against the panel's own (24,24,24) where there is nothing. Flat down the
+  -- tile's whole height, so the vertical placement has room; two pixels wide, so the
+  -- horizontal placement does not, which is why an unclear reading counts as PRESENT.
+  --
+  -- That direction is deliberate. Offering a position that turns out to be empty costs one
+  -- press and an honest "nothing at that position"; hiding one that exists makes a speaker
+  -- unreachable with no symptom at all.
+  local TILE_EDGE_DX = -81 -- one pixel inside the left border, from the tile's centre
+  local GROUND_NEAR, EDGE_FAR = 8, 30
+
+  local function tileFilled(tx, ty)
+    local x, y = screenPointOf(b, tx + TILE_EDGE_DX, ty)
+    if not x then return true end
+    local q = host.screen.pixel(x, y)
+    if not q then return true end
+    local d = math.abs(q.r - TILE_OFF[1]) + math.abs(q.g - TILE_OFF[2]) + math.abs(q.b - TILE_OFF[3])
+    if d > EDGE_FAR then return true end
+    if d < GROUND_NEAR then return false end
+    return true
+  end
+
   local function tileSelected(tx, ty)
     local x, y = screenPointOf(b, tx + TILE_PROBE_DX, ty)
     if not x then return nil end
@@ -1000,6 +1026,47 @@ local function chooser(spec)
     if math.min(don, doff) > TILE_LIMIT then return nil end
     return don < doff
   end
+
+  -- HOW MANY positions hold anything, asked once per epoch and in as few screen touches as
+  -- possible.
+  --
+  -- A pixel read is a GDI screen touch costing a fixed ~16.7 ms whatever it reads — one
+  -- compositor frame — and this project has measured that before. Fifteen of them, which is
+  -- what a per-tile `when` would cost, is a quarter of a second added to every Tab, and
+  -- getting a quarter of a second OFF each Tab was a whole afternoon earlier in this file.
+  --
+  -- A grid fills in order, so the answer is one number and it can be found by halving. The
+  -- last position is checked first because the ordinary case is a full grid, and that case
+  -- then costs a single read; only a filtered grid pays the four.
+  local tileCount = #spec.tiles.cols * #spec.tiles.rows
+
+  local function tileAt(i)
+    local r = (i - 1) // #spec.tiles.cols + 1
+    local c = (i - 1) % #spec.tiles.cols + 1
+    return spec.tiles.cols[c], spec.tiles.rows[r]
+  end
+
+  local lastFilled = nil
+  local filledCount = O.memoByEpoch(function()
+    if tileFilled(tileAt(tileCount)) then
+      return tileCount
+    end
+    local lo, hi = 0, tileCount -- lo is known filled (or none), hi known empty
+    while hi - lo > 1 do
+      local mid = (lo + hi) // 2
+      if tileFilled(tileAt(mid)) then
+        lo = mid
+      else
+        hi = mid
+      end
+    end
+    if lo ~= lastFilled then
+      lastFilled = lo
+      host.log.info(("[on-ear] %s: %d of %d positions hold a speaker")
+        :format(spec.name, lo, tileCount))
+    end
+    return lo
+  end)
 
   -- The grid. Its tiles are pictures with no accessible element and no text of their own, so
   -- a tile can only be named by pressing it: the panel's MODEL line then says what was
@@ -1016,6 +1083,10 @@ local function chooser(spec)
       local n = (r - 1) * #spec.tiles.cols + c
       b:addCustomButton({
         label = spec.tileLabel .. " " .. n,
+        -- A position with nothing in it is not offered. Searching narrows this grid to a
+        -- handful, and tabbing past a dozen buttons that do nothing to reach them is not a
+        -- list — it is an obstacle course.
+        when = function() return n <= filledCount() end,
         text = function()
           return tileSelected(tx, ty) and "selected" or nil
         end,
