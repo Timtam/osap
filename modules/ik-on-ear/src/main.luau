@@ -1048,11 +1048,14 @@ local function chooser(spec)
       local n = bElement("Row " .. i)
       if not n then return nil end
       local pane = bElement(spec.pane)
-      if pane and (n.bounds.y < pane.bounds.y
-        or (n.bounds.y + n.bounds.h) > (pane.bounds.y + pane.bounds.h))
-      then
-        return nil
-      end
+      if not pane then return n end
+      -- Its MIDDLE, not the whole of it. Requiring a row to fit entirely inside the panel
+      -- dropped the last one at each end even when most of it was on screen and its centre —
+      -- the point this module clicks and probes — was well inside. Three makers went missing
+      -- that way, and from the outside that is indistinguishable from the list not having
+      -- them: Beyerdynamic simply was not there between Behringer and the next page.
+      local mid = n.bounds.y + n.bounds.h // 2
+      if mid < pane.bounds.y or mid > (pane.bounds.y + pane.bounds.h) then return nil end
       return n
     end
     -- A row's own accessible name is "Row 1"; the words are in its children, which share its
@@ -1207,13 +1210,28 @@ local function chooser(spec)
   -- either way if the step is small. The span says which.
   local function listSpan()
     local first, last
+    -- Counted as well as read. "The list stopped" and "the list moved somewhere this module
+    -- will not look" are the same silence from the keyboard, and the difference is whether
+    -- the tree offered rows that the filter then dropped.
+    local offered, kept = 0, 0
+    local pane = bElement(spec.pane)
     for i = 1, spec.rows do
+      if bElement("Row " .. i) then offered = offered + 1 end
       local n = rowNameAt(i)
       if n then
-        first = first or n
-        last = n
+        local r = bElement("Row " .. i)
+        local mid = r and (r.bounds.y + r.bounds.h // 2) or nil
+        local inside = (not pane) or (mid and mid >= pane.bounds.y
+          and mid <= (pane.bounds.y + pane.bounds.h))
+        if inside then
+          kept = kept + 1
+          first = first or n
+          last = n
+        end
       end
     end
+    host.log.info(("[on-ear] %s: tree offered %d row(s), %d inside the panel"):format(
+      spec.name, offered, kept))
     if not first then
       -- Which of the two silences this is. A list that has genuinely reached its end and a
       -- window that has stopped answering both leave this empty, and the tester saw the
@@ -1227,8 +1245,12 @@ local function chooser(spec)
     return ("%s to %s"):format(first, last)
   end
 
-  scroller(spec.rowLabel .. " list down", 466, 600, -3, listSpan)
-  scroller(spec.rowLabel .. " list up", 466, 600, 3, listSpan)
+  -- ONE notch. Three of them took the list from Behringer past Beyerdynamic, Blue and Bose
+  -- to Clear Tune Monitors in a single press — this list moves by a large fraction of itself
+  -- per notch, and a step that jumps further than a screenful is not a way through a list,
+  -- it is a way past one. Pressing again is cheap; the makers skipped over are not.
+  scroller(spec.rowLabel .. " list down", 466, 600, -1, listSpan)
+  scroller(spec.rowLabel .. " list up", 466, 600, 1, listSpan)
 
   -- The printed names, one tile at a time — and the row strip that replaced it is gone.
   --
@@ -1370,8 +1392,8 @@ local function chooser(spec)
       if n then return "now starting at " .. n end
       return ("%d position(s) hold something"):format(filledCount())
     end
-    scroller("Grid down", mid, midRow, -3, firstTile)
-    scroller("Grid up", mid, midRow, 3, firstTile)
+    scroller("Grid down", mid, midRow, -1, firstTile)
+    scroller("Grid up", mid, midRow, 1, firstTile)
   end
 
   -- A dialog outranks the window overlay underneath it, which is what makes the main ring
