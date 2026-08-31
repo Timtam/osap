@@ -577,34 +577,45 @@ ov:addStepper({
   end,
 })
 
--- Width is DRAGGED, because the wheel does not reach it.
+-- Width is DRAGGED, because the wheel does not reach it — and the RIGHT handle is dragged.
 --
 -- The same wheel moves Tone perfectly well, so the difference is the control rather than the
--- method: this one is a range with two handles, and a slider of that shape commonly declines
--- wheel input outright — there is no single value for a notch to mean.
+-- method: this is a range with two handles, and a slider of that shape commonly declines wheel
+-- input outright, there being no single value for a notch to mean.
 --
--- Where its handles are is now MEASURED at both ends rather than measured at one and assumed
--- at the other, and the assumption was wrong in a way the tester felt directly. Two captures:
+-- Three captures, and the third is the one that mattered:
 --
---     100%   handles at 580 and 670, so 45 either side of the middle at 625
---      48%   handles at 607 and 644, so 18.5
+--     100%   handles at 580 and 670, the orange fill between them
+--      48%   handles at 607 and 644
+--      10%   NO fill at all, and one white blob at 623-625 where both handles have met
 --
--- which is a straight line at about half a unit per percent, and it does NOT pass through zero
--- — the handles meet at around twelve per cent and cannot be told apart below that. The old
--- guess had them meeting at zero, so it aimed between two handles that were already on top of
--- each other, and the value stuck at 10%, jumped to 100% and walked back down. That is exactly
--- what one measured point and one imagined one buys.
+-- Ten per cent is this slider's minimum, and there the two handles are a pixel apart. Two
+-- earlier versions of this drove the LEFT handle and pulled it left to widen, which from the
+-- minimum meant asking a control already at its stop to go further — and it did nothing at
+-- all, exactly as it should. Before that, a model fitted to only the first two captures put
+-- the left handle at 625.9 at ten per cent, to the RIGHT of the middle, which a left handle
+-- cannot be. Both failures were the same mistake: extrapolating past the last thing measured.
+--
+-- The right handle is never ambiguous. It sits at the middle or to the right of it at every
+-- value, so a press aimed at it can only be nearer to it, and pulling it right always widens
+-- whatever the other handle is doing. Its distance from the middle is a straight line through
+-- all three captures — 0.5, 19 and 45 for 10, 48 and 100 — which they fit to within a third of
+-- a pixel.
 --
 -- Everything is recomputed from the printed value at each step, so it stays right after
 -- somebody moves the slider with a mouse, and a value it cannot read is one it will not move.
 local WIDTH_MID = 625
--- offset(percent) = WIDTH_SLOPE * percent + WIDTH_AT_ZERO, from the two captures above.
-local WIDTH_SLOPE, WIDTH_AT_ZERO = 0.5096, -5.96
--- Two per cent is one pixel on this bar, which is as fine as dragging can express here.
+-- offset(percent) = WIDTH_SLOPE * percent + WIDTH_AT_MIN, fitted to the three captures.
+local WIDTH_SLOPE, WIDTH_AT_MIN = 0.4944, -4.44
+-- Ten is the slider's own floor; below it there is nothing left to narrow.
+local WIDTH_FLOOR = 10
+-- Two per cent is about one pixel on this bar, which is as fine as dragging can express.
 local WIDTH_STEP = 2
 
-local function widthHandleX(pct)
-  return WIDTH_MID - (WIDTH_SLOPE * pct + WIDTH_AT_ZERO)
+local function widthRightHandleX(pct)
+  -- Never left of the middle: at the minimum the two handles have merged, and a press even a
+  -- pixel to the left of the meeting point is a press on the other one.
+  return math.max(WIDTH_MID + 1, WIDTH_MID + WIDTH_SLOPE * pct + WIDTH_AT_MIN)
 end
 
 ov:addStepper({
@@ -620,38 +631,16 @@ ov:addStepper({
       host.speech.output("width is not readable, so it will not be moved", { interrupt = true })
       return
     end
-    -- The handles meet at about twelve per cent, and below that a press is not clearly nearer
-    -- one than the other. The first version of this guard refused BOTH directions there, and
-    -- that was a trap rather than a safeguard: the slider was already sitting at ten per cent,
-    -- so every press was refused and there was no way back out of it at all. A guard that can
-    -- only be entered is worse than the thing it guards against.
-    --
-    -- Widening is always allowed, because it is the way out — and from inside the crowded zone
-    -- it goes straight to a width where the handles are clearly apart, rather than nudging by
-    -- two per cent and asking the application to distinguish half a pixel. Whichever handle it
-    -- takes hold of, the value moves and the read-back says where it landed.
-    --
-    -- Narrowing from inside the zone is refused, because there is nothing to gain by it and
-    -- the handle it would seize is a coin toss.
-    local WIDTH_CLEAR = 25
-    local crowded = math.abs(widthHandleX(pct) - WIDTH_MID) < 4
-    local want
-    if crowded and dir > 0 then
-      want = WIDTH_CLEAR
-    elseif crowded then
-      host.log.info(("[on-ear] Width %d%%: the handles are on top of each other; only widening "
-        .. "from here"):format(pct))
-      host.speech.output("too narrow to make narrower", { interrupt = true })
+    local want = math.max(WIDTH_FLOOR, math.min(100, pct + dir * WIDTH_STEP))
+    if want == pct then
+      host.speech.output(dir < 0 and "already at its narrowest" or "already at its widest",
+        { interrupt = true })
       return
-    else
-      want = math.max(0, math.min(100, pct + dir * WIDTH_STEP))
     end
-    local fromX = widthHandleX(pct)
-    local toX = widthHandleX(want)
-    local x1, y = screenPoint(fromX, 869)
-    local x2 = screenPoint(toX, 869)
+    local x1, y = screenPoint(widthRightHandleX(pct), 869)
+    local x2 = screenPoint(widthRightHandleX(want), 869)
     if not (x1 and x2) then return end
-    host.log.info(("[on-ear] Width %d%% -> %d%%: dragging (%d,%d) to (%d,%d)")
+    host.log.info(("[on-ear] Width %d%% -> %d%%: dragging the right handle (%d,%d) to (%d,%d)")
       :format(pct, want, x1, y, x2, y))
     host.input.drag(x1, y, x2, y)
   end,
