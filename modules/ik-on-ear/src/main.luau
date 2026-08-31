@@ -573,13 +573,41 @@ ov:addStepper({
   end,
 })
 
+-- Width is DRAGGED, because the wheel does not reach it.
+--
+-- The same wheel moves Tone perfectly well, so the difference is the control rather than the
+-- method: this one is a range with two handles, and a slider of that shape commonly declines
+-- wheel input outright — there is no single value for a notch to mean.
+--
+-- Which leaves dragging a handle, and a handle that moves as the value does. Measured: the
+-- track runs from 566 to 685 with its middle at 625, the two handles sit at 580 and 670 while
+-- it reads 100%, and they are symmetric about that middle — so a handle is 45 of the frame's
+-- units from the centre at full width and none at all at zero. That makes the handle's place
+-- a function of the value, and the value is printed right below it. Nothing here is a
+-- remembered position: it is worked out fresh from what the window currently says, which is
+-- also why it stays right after somebody moves it with a mouse.
+local WIDTH_MID, WIDTH_REACH, WIDTH_STEP = 625, 45, 5
+
 ov:addStepper({
   label = "Width",
   when = function() return element("Width") ~= nil end,
   text = function() return valueBelow("Width") or "not shown" end,
   onStep = function(dir)
-    local x, y = screenPoint(626, 869)
-    if x then host.input.scroll(x, y, dir) end
+    local shown = valueBelow("Width")
+    local pct = shown and tonumber(string.match(shown, "(%d+)"))
+    if not pct then
+      host.speech.output("width is not readable, so it will not be moved", { interrupt = true })
+      return
+    end
+    local want = math.max(0, math.min(100, pct + dir * WIDTH_STEP))
+    local fromX = WIDTH_MID - WIDTH_REACH * pct / 100
+    local toX = WIDTH_MID - WIDTH_REACH * want / 100
+    local x1, y = screenPoint(fromX, 869)
+    local x2 = screenPoint(toX, 869)
+    if not (x1 and x2) then return end
+    host.log.info(("[on-ear] Width %d%% -> %d%%: dragging (%d,%d) to (%d,%d)")
+      :format(pct, want, x1, y, x2, y))
+    host.input.drag(x1, y, x2, y)
   end,
 })
 
