@@ -84,6 +84,20 @@ thread_local! {
     static SCREEN_READER_PASSED: RefCell<Vec<u32>> = RefCell::new(Vec::new());
 }
 
+/// Whether a screen reader's modifier key is held, as OUR OWN HOOK saw it go past.
+///
+/// The first version of this check asked `GetAsyncKeyState`, and the tester reported that
+/// NVDA+Space still did not get through. The reason is that a screen reader installs a
+/// low-level hook of its own and SUPPRESSES its modifier there — so by the time anybody asks
+/// the OS whether Insert is down, the key the user is holding is not there to be found. The
+/// check was asking the wrong witness.
+///
+/// This hook is a witness that cannot be fooled either way. If our hook runs before the screen
+/// reader's, we see the modifier go down and record it here before it is eaten. If the screen
+/// reader's runs first, it eats the whole combination and we never see the second key at all,
+/// which is the same outcome by a different route.
+static SCREEN_READER_MOD_DOWN: AtomicBool = AtomicBool::new(false);
+
 static KEY_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 static FG_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 
@@ -1015,6 +1029,12 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
             //
             // Never suppressed, and that is the whole difficulty: Alt has to keep working as a
             // modifier, so this dispatches on the way past rather than intercepting.
+            // Insert, numpad 0 and CapsLock: NVDA's modifier on the desktop and laptop
+            // layouts respectively, and JAWS's. Recorded on the way past, whatever anyone
+            // downstream does with it.
+            if vk == 0x2D || vk == 0x60 || vk == 0x14 {
+                SCREEN_READER_MOD_DOWN.store(is_down, Ordering::Relaxed);
+            }
             let is_modifier = vk == 0x12 || vk == 0xA4 || vk == 0xA5;
             if is_down && !is_modifier {
                 TAP_ARMED.store(0, Ordering::Relaxed);
@@ -1067,7 +1087,10 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                 // Only ever passes MORE through, and only while one of those keys is
                 // physically down, so it cannot take a key away from an overlay: nobody
                 // navigates one holding Insert.
-                let screen_reader_held = down(0x2D) || down(0x60) || down(0x14);
+                let screen_reader_held = SCREEN_READER_MOD_DOWN.load(Ordering::Relaxed)
+                    || down(0x2D)
+                    || down(0x60)
+                    || down(0x14);
                 let owes_up = !is_down && SCREEN_READER_PASSED.with(|s| s.borrow().contains(&vk));
                 if screen_reader_held || owes_up {
                     SCREEN_READER_PASSED.with(|s| {

@@ -1889,6 +1889,8 @@ end
 function Overlay:_registerHotkeys()
   self.registered = self.registered or {}
   self.capturedKeys = self.capturedKeys or {}
+  self.capturedSpecs = {}
+  self._typing = false
   self._hotkeysSuspended = false
   self:_syncControlHotkeys()
   for _, c in ipairs(self.controls) do
@@ -1915,6 +1917,9 @@ function Overlay:_registerHotkeys()
   -- this one deactivates. See host.keys.capture/release.
   local function cap(spec, fn)
     self.capturedKeys[#self.capturedKeys + 1] = host.keys.capture(spec, fn)
+    -- Kept alongside the token so the whole set can be handed back and taken again without
+    -- rebuilding the overlay's registration (see _suspendCapturedKeys).
+    self.capturedSpecs[#self.capturedSpecs + 1] = { spec = spec, fn = fn }
   end
   -- Calibration keys, only in a calibrating run (see the section above). Captured, so
   -- they act on the overlay that is active — the one that knows its own coordinates.
@@ -1992,6 +1997,8 @@ function Overlay:_unregisterHotkeys()
     host.keys.release(token)
   end
   self.capturedKeys = {}
+  self.capturedSpecs = {}
+  self._typing = false
   if self._spaceToken then
     host.keys.release(self._spaceToken)
     self._spaceToken = false
@@ -2016,6 +2023,42 @@ function Overlay:_unregisterHotkeys()
   self._nativeKeyReport = nil
 end
 
+-- Hands back EVERY key this overlay holds, or takes them all again.
+--
+-- Letting named keys through one at a time is a patch on a hole whose shape is not known: any
+-- key nobody thought of stays swallowed, and for a person who cannot see the screen a swallowed
+-- key in a text box is indistinguishable from the application having frozen. The tester put it
+-- exactly right — the fix is to recognise WHEN the field has the keyboard, and hold nothing at
+-- all for as long as it does, whatever the key.
+--
+-- The way back is the application's own: Tab moves the focus out of its text editor, the
+-- overlay's condition goes false on the next check, and the keys come back. Nothing here can
+-- lock, because while it is on there is nothing left to lock with. The worst it can do is go
+-- inert, which announces itself the moment Tab does not move the ring.
+function Overlay:_suspendCapturedKeys(on)
+  if on then
+    for _, token in ipairs(self.capturedKeys or {}) do
+      host.keys.release(token)
+    end
+    self.capturedKeys = {}
+  else
+    local specs = self.capturedSpecs or {}
+    self.capturedKeys = {}
+    for _, e in ipairs(specs) do
+      self.capturedKeys[#self.capturedKeys + 1] = host.keys.capture(e.spec, e.fn)
+    end
+  end
+end
+
+-- The condition under which this overlay holds nothing: `fn() -> boolean`, asked whenever
+-- focus moves and on every recheck. A module supplies it because only the module can tell —
+-- ON:EAR's answer is that its accessibility tree goes dark exactly while the caret is in its
+-- search box, which its chooser gate is measuring anyway.
+function Overlay:typingWhen(fn)
+  self._typingWhen = fn
+  return self
+end
+
 -- Keeps the two keys that ACTIVATE a control — Space and Return — in sync with what is
 -- focused, because for two kinds of control they belong to something else:
 --
@@ -2033,6 +2076,31 @@ end
 -- Idempotent; called on every focus move and at registration. No-op unless active.
 function Overlay:_syncNativeKeys()
   if not self.active then return end
+  -- Everything, or nothing at all: while the field has the keyboard this overlay is not
+  -- entitled to any key, and the question is asked before any of the per-control ones below.
+  if self._typingWhen then
+    local ok, v = pcall(self._typingWhen, self)
+    local typing = ok and v == true
+    if typing ~= (self._typing == true) then
+      self._typing = typing
+      self:_suspendCapturedKeys(typing)
+      host.log.info(string.format("%s: %s",
+        tostring(self.label),
+        typing and "a text field has the keyboard — holding no keys until it gives it back"
+          or "the text field gave the keyboard back — navigation keys taken again"))
+    end
+    if typing then
+      if self._spaceToken then
+        host.keys.release(self._spaceToken)
+        self._spaceToken = false
+      end
+      if self._returnToken then
+        host.keys.release(self._returnToken)
+        self._returnToken = false
+      end
+      return
+    end
+  end
   -- Nil while the ring has not been entered (focus 0, the state an overlay arrives in): every
   -- `want` below is then false and every branch releases, which is exactly right. The plug-in
   -- keeps its keyboard until a Tab says otherwise.
@@ -2343,6 +2411,9 @@ function Overlay:_recheck()
       ))
     end
   end
+  -- While a text field holds the keyboard nothing moves the focus, so this is the only thing
+  -- that ever asks again whether it still does.
+  if self.active and self._typingWhen then self:_syncNativeKeys() end
   if self._slot then
     host.arbiter.setMatching(self._slot, self._claim, matched)
   elseif matched then

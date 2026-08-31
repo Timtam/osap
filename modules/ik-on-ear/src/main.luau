@@ -650,17 +650,31 @@ local function chooser(spec)
   local TREE_SENTINEL = "Battery Level"
 
   local paneWasThere = nil
+  -- Set by the gate below, and it is the same measurement twice over: this application stops
+  -- answering questions about itself precisely while the caret is in its search box. The gate
+  -- needs to know so it does not read silence as "the panel closed"; the keyboard needs to
+  -- know so the overlay stops holding keys that belong to the typing.
+  local treeDark = false
 
   local function readPane(origin)
     if not (origin and origin.id) then return false, "no window" end
     local at = host.uia.locate(origin.id, spec.pane, host.uia.type.Window)
-    if at then return true, ("visible at (%d,%d)"):format(at.x, at.y) end
+    if at then
+      treeDark = false
+      return true, ("visible at (%d,%d)"):format(at.x, at.y)
+    end
     if not paneWasThere then return false, "not there" end
     if host.uia.locate(origin.id, TREE_SENTINEL, host.uia.type.Text) then
+      treeDark = false
       return false, "gone, and the rest of the tree is still readable"
     end
+    treeDark = true
     return true, "unknown: the window is answering nothing at all, so the last answer stands"
   end
+
+  -- Hold nothing while the search box has the keyboard. Naming individual keys — Space here,
+  -- something else next time — leaves every key nobody thought of still swallowed.
+  b:typingWhen(function() return treeDark end)
 
   b:gate(function(origin)
     local there, why = readPane(origin)
@@ -735,12 +749,19 @@ local function chooser(spec)
     return best and best.name or nil
   end
 
+  -- The bar along the bottom, read as whatever columns this panel happens to have. The
+  -- speaker chooser shows a model and a description; the headphone chooser shows a
+  -- manufacturer, a model, a type, an impedance and a safe headroom. Naming the headings in
+  -- the spec is the difference between one function and two.
   local function selectionFrom(nodes)
     if not nodes then return nil end
-    local model = underLabel(nodes, "MODEL")
-    if not model then return nil end
-    local desc = underLabel(nodes, "DESCRIPTION")
-    return desc and (model .. ", " .. desc) or model
+    local parts = {}
+    for _, heading in ipairs(spec.headings) do
+      local v = underLabel(nodes, heading)
+      if v then parts[#parts + 1] = v end
+    end
+    if #parts == 0 then return nil end
+    return table.concat(parts, ", ")
   end
 
   -- Shared within an announcement.
@@ -753,6 +774,44 @@ local function chooser(spec)
   -- timer — so this one always crosses the boundary and always sees now.
   local function selectionNow()
     return selectionFrom(dumpFor(b))
+  end
+
+  -- The value sitting to the right of a heading on the same line — how the headphone panel's
+  -- Type and Impedance menus report what they are set to. Both of their values are named
+  -- "All" when nothing is chosen, so they can only be told apart by which heading they sit
+  -- beside, never by their own name.
+  local function rightOf(labelName)
+    local head = bElement(labelName)
+    if not head then return nil end
+    local best
+    for _, n in ipairs(btree() or {}) do
+      if n.name ~= labelName and n.bounds.x > head.bounds.x
+        and math.abs((n.bounds.y + n.bounds.h / 2) - (head.bounds.y + head.bounds.h / 2)) < 20
+      then
+        if best == nil or n.bounds.x < best.bounds.x then best = n end
+      end
+    end
+    return best
+  end
+
+  for _, dd in ipairs(spec.dropdowns or {}) do
+    b:addCustomButton({
+      label = dd.label,
+      typeLabel = "combo box",
+      -- Declared, because the overlay cannot tell: the moment a menu is up it must stop
+      -- owning Tab and Return, or the menu it just opened cannot be used.
+      opensMenu = true,
+      when = function() return rightOf(dd.label) ~= nil end,
+      text = function()
+        local v = rightOf(dd.label)
+        return v and v.name or nil
+      end,
+      onActivate = function()
+        if not clickElement(rightOf(dd.label)) then
+          host.speech.output(dd.label .. " is not where it should be", { interrupt = true })
+        end
+      end,
+    })
   end
 
   -- A row's own fill says whether it is the filter in force: (46,46,46) when it is against
@@ -902,9 +961,10 @@ local function chooser(spec)
   -- looking identical in both, so it has no appearance of its own to read. What it does have
   -- is a complement: it is in force exactly when no category is. So the answer is derived from
   -- the rows, which do carry a measured state, rather than invented for this one.
+  for _, f in ipairs(spec.filters) do
   b:addHotspotButton({
-    label = "Show all",
-    at = scaled(spec.showAll[1], spec.showAll[2]),
+    label = f.label,
+    at = scaled(f.at[1], f.at[2]),
     text = function()
       local sawRow = false
       local o = b:origin()
@@ -928,16 +988,20 @@ local function chooser(spec)
       -- Silent when no row could be read at all: "in force" would then be a guess dressed as
       -- a reading, and the categories above will have said nothing either.
       if not sawRow then return nil end
+      -- Only the FIRST filter is the "everything" one. Favorites is a filter in its own
+      -- right, and no row being selected says nothing about whether it is the one in force.
+      if f.label ~= spec.filters[1].label then return nil end
       return "in force"
     end,
   })
+  end
 
   -- The category list, by slot rather than by name. The three in the capture are Studio
   -- Monitors, Hi-Fi and Multimedia, and hard-coding those three would be a module that
   -- quietly loses a category the next time IK ships one. The rows carry their own names, so
   -- the slots read them; a slot with no row is skipped in navigation rather than announced
   -- as an empty thing to press.
-  for i = 1, 8 do
+  for i = 1, spec.rows do
     local function row()
       return bElement("Row " .. i)
     end
@@ -963,7 +1027,7 @@ local function chooser(spec)
     -- of which exactly one says "on". Activating clicks the same point that reports the
     -- state, which is what selects the row.
     b:addHotspotToggle({
-      label = "Category",
+      label = spec.rowLabel,
       when = function() return row() ~= nil end,
       at = function() return rowPoint(row()) end,
       onColor = ROW_ON,
@@ -1088,7 +1152,24 @@ local function chooser(spec)
         -- list — it is an obstacle course.
         when = function() return n <= filledCount() end,
         text = function()
-          return tileSelected(tx, ty) and "selected" or nil
+          -- The headphone panel prints a model name under every tile; the speaker panel
+          -- prints none. Where there is one it is read, so this grid can be BROWSED — the
+          -- speaker grid can only be sampled, because there a tile has no name until it has
+          -- been pressed, and pressing is selecting.
+          local name
+          if spec.tiles.name then
+            local o = b:origin()
+            local rect = screenRect(o, tx - 78, ty + spec.tiles.name[1],
+              tx + 78, ty + spec.tiles.name[2])
+            if rect then
+              local got = host.ocr.recognize({ region = rect })
+              local v = (got and got.text or ""):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
+              if v ~= "" then name = v end
+            end
+          end
+          local on = tileSelected(tx, ty)
+          if name and on then return name .. ", selected" end
+          return name or (on and "selected" or nil)
         end,
         onActivate = function()
           local x, y = screenPointOf(b, tx, ty)
@@ -1159,6 +1240,10 @@ local function chooser(spec)
   return b
 end
 
+-- The two panels. Everything above is the same building; these are the measurements that
+-- differ, and the second one cost one capture rather than a second module.
+local GRID_COLUMNS = { 747, 941, 1134, 1328, 1521 }
+
 chooser({
   name = "Speaker Browser",
   pane = "SpeakerBrowserWindow",
@@ -1167,25 +1252,48 @@ chooser({
   -- is a fine place for a button and a poor place to describe one from.
   close = { 1539, 151 },
   search = { 449, 201 },
-  showAll = { 331, 277 },
+  filters = { { label = "Show all", at = { 331, 277 } } },
+  headings = { "MODEL", "DESCRIPTION" },
+  rowLabel = "Category",
+  rows = 8,
   tileLabel = "Speaker",
-  tiles = {
-    cols = { 747, 941, 1134, 1328, 1521 },
-    rows = { 264, 457, 650 },
+  tiles = { cols = GRID_COLUMNS, rows = { 264, 457, 650 } },
+})
+
+chooser({
+  name = "Headphone Browser",
+  -- Plural, and the application means it: the speaker one is SpeakerBrowserWindow.
+  pane = "HeadphonesBrowserWindow",
+  -- Same panel rectangle, same Close, same search box, to the pixel.
+  close = { 1539, 151 },
+  search = { 449, 201 },
+  filters = {
+    { label = "Show all", at = { 341, 260 } },
+    { label = "Favorites", at = { 343, 296 } },
   },
+  headings = { "MANUFACTURER", "MODEL", "TYPE", "IMPEDANCE", "SAFE HEADROOM" },
+  dropdowns = { { label = "Type" }, { label = "Impedance" } },
+  -- Seventeen makers were on screen at once and the list scrolls, so the slots are for what
+  -- is visible; the tree only offers the visible rows in any case.
+  rowLabel = "Manufacturer",
+  rows = 20,
+  tileLabel = "Headphone",
+  -- The same five columns as the speaker grid, to the pixel, pushed down by the row of filter
+  -- menus above it — and with a printed name under each tile, 63 to 76 below its centre.
+  tiles = { cols = GRID_COLUMNS, rows = { 314, 507, 701 }, name = { 58, 82 } },
 })
 
 -- Navigation is Tab / Shift+Tab / Enter, captured while this window is in front, as
 -- everywhere else in this platform.
 --
 -- On a SLOT, which it did not need until this window turned out to have chooser panels. They
--- are not separate windows — the speaker browser is a pane drawn inside this one, at
--- (270,128) and 1380x799 of it — so both overlays match the same window and would otherwise
--- both be active, with two Tab rings fighting over one key and 31 controls of this one
--- pointing at things the panel now covers. Pressing "FN Mute" would have clicked whatever
--- speaker tile happened to be at that point.
+-- are not separate windows — each browser is a pane drawn inside this one, at (270,105) and
+-- 1380x799 of it — so every overlay here matches the same window and they would otherwise all
+-- be active at once, with several Tab rings fighting over one key and the 31 controls of this
+-- one pointing at things a panel now covers. Pressing "FN Mute" would have clicked whatever
+-- tile happened to be at that point.
 --
--- The arbiter settles it instead: same slot, and the chooser is a `dialog` where this is
--- `content`, so while a chooser is up it owns the window and this overlay stands down —
--- which is also exactly what it means to the person using it.
+-- The arbiter settles it: same slot, and a chooser is a `dialog` where this is `content`, so
+-- while one is up it owns the window and this overlay stands down — which is also exactly
+-- what it means to the person using it.
 ov:attach(on_ear, { menus = true, slot = ON_EAR_SLOT, specificity = O.layer.content })
