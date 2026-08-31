@@ -3,6 +3,14 @@ name = "IK Multimedia ARC ON:EAR"
 version = "0.1.0"
 license = "GPL-3.0-or-later"
 dependencies = ["com.platform.overlay"]
+# Windows only, and said so rather than discovered.
+#
+# Everything this module knows about ON:EAR it learns from the Windows accessibility tree —
+# the panels, the browsers, the row lists, the read-outs. macOS exposes none of that through
+# the same calls, so on a Mac it would load, attach to the window and then find nothing at
+# all: a ring of controls that each announce "not shown". Declared, so the manager can say
+# "declares windows, this is macos" instead of leaving somebody to work that out.
+supported_os = ["windows"]
 
 [capabilities]
 require = ["window", "uia", "screen", "ocr", "input", "speech", "timer", "log"]

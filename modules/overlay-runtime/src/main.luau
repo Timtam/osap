@@ -318,6 +318,34 @@ function Overlay:addHotspotButton(opts)
   })
 end
 
+-- A VALUE, changed with Left and Right, where the module knows how to change it.
+--
+-- The runtime already had a slider, and it cannot serve here: it finds its thumb by matching
+-- an image, which needs a template captured for one plug-in at one size. ON:EAR's Tone knob is
+-- a rotary drawn as an arc, its Width a two-handled bar, and both live in a window the user
+-- can resize freely — there is no thumb template to hold still.
+--
+-- What they do have is a value printed beside them and something that moves them, and that is
+-- all a stepper is: `text` says where it stands, `onStep(dir)` moves it, and the announcement
+-- afterwards comes from reading it again rather than from counting what we asked for. A
+-- control that reports its own intention rather than the plug-in's state is the failure this
+-- project keeps returning to, so the value is always re-read.
+--
+-- Announced as a slider because that is what it is to the person using it; how it is driven
+-- underneath is our problem, not theirs.
+function Overlay:addStepper(opts)
+  return add(self, {
+    kind = "stepper",
+    label = opts.label,
+    text = opts.text,
+    onStep = opts.onStep,
+    settle = opts.settle,
+    typeLabel = opts.typeLabel,
+    hotkey = opts.hotkey,
+    when = opts.when,
+  })
+end
+
 function Overlay:addCustomButton(opts)
   return add(self, {
     kind = "custom", label = opts.label, onActivate = opts.onActivate,
@@ -674,7 +702,7 @@ end
 local TYPE_LABEL =
   { static = "", hotspot = "button", custom = "button", ocr = "button", ocredit = "edit",
     gtoggle = "toggle button", hotspottoggle = "toggle button", tabcontrol = "tab control",
-    gbutton = "button",
+    gbutton = "button", stepper = "slider",
     slider = "slider", passthrough = "" }
 
 -- Origin (top-left) of the overlay's coordinate space in screen pixels: the
@@ -2153,7 +2181,8 @@ function Overlay:_syncNativeKeys()
   -- has focus), which is exactly what this is — the overlay's slider IS that control.
   -- Skipped when the overlay also has a tab control, which claims Left/Right statically;
   -- the declaration report says so out loud rather than leaving a slider silently inert.
-  local wantArrows = c ~= nil and (c.kind == "slider" or c.kind == "tabcontrol")
+  local wantArrows = c ~= nil
+    and (c.kind == "slider" or c.kind == "tabcontrol" or c.kind == "stepper")
   if wantArrows and not self._arrowTokens then
     -- The same two keys mean different things to the two controls that want them, so which
     -- one is focused decides what they do.
@@ -2205,7 +2234,21 @@ end
 -- One step of the focused control's value, from Left/Right. Only a slider has one today.
 function Overlay:adjust(dir)
   local c = self.controls[self.focus]
-  if c and c.kind == "slider" and isVisible(self, c) then sliderStep(self, c, dir) end
+  if not (c and isVisible(self, c)) then return end
+  if c.kind == "slider" then
+    sliderStep(self, c, dir)
+  elseif c.kind == "stepper" and c.onStep then
+    local i = self.focus
+    c.onStep(dir, self)
+    -- Read back, after however long the module says its control takes to settle. What the
+    -- value became is the only honest thing to announce; what we asked it to become is a
+    -- guess that sounds exactly as confident.
+    if host.timer then
+      host.timer.after(c.settle or 150, function()
+        if self.active and self.focus == i then speakControl(self, i, false, true) end
+      end)
+    end
+  end
 end
 
 -- Deprecated name; the capture covers Return as well now.
