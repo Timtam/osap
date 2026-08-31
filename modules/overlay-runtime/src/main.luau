@@ -37,6 +37,36 @@ local MATCH_SCALES = { 1.0, 0.9, 1.1, 0.8, 1.2, 1.25, 0.75, 1.5, 0.67, 2.0 }
 -- introduced (verified: no bare specificity numbers remain outside the runtime).
 O.layer = { chrome = 10, base = 20, content = 30, dialog = 40 }
 
+-- How far apart the two halves of a DELIBERATE double-click are sent.
+--
+-- Not zero, which is the mistake worth naming. Two clicks sent back to back go out in the same
+-- instant, and an application deciding whether it has seen a double-click is looking at the
+-- interval between two presses — an interval of zero reads as easily as one press with a
+-- stutter as it does as two. Ninety milliseconds is plainly two, and plainly inside any
+-- double-click time a system would use: the Windows default is 500 ms and nothing sets it
+-- below about 200.
+local DOUBLE_CLICK_GAP = 90
+
+-- A double-click, on purpose.
+--
+-- Worth having in one place because the same fact is needed from both sides. A plug-in that
+-- resets a control to its default on a double-click is offering a genuinely useful gesture —
+-- one keystroke instead of twenty steps — and reaching it means sending two clicks close
+-- enough together. The same fact is a hazard everywhere else, which `Overlay:afterIdle` exists
+-- to avoid; keeping both here means neither can drift away from the other's timing.
+--
+-- Falls back to two immediate clicks with no timer, which is not a double-click and says so in
+-- the log rather than silently doing something else.
+function O.doubleClick(x, y)
+  host.input.click(x, y)
+  if host.timer then
+    host.timer.after(DOUBLE_CLICK_GAP, function() host.input.click(x, y) end)
+  else
+    host.log.info("overlay: no timer, so a double-click went out as two immediate clicks")
+    host.input.click(x, y)
+  end
+end
+
 -- How long after a control that OPENS a menu fires the menu watch keeps looking for a
 -- self-drawn one at full rate. Declared here rather than beside the watch because
 -- _menuOpening (far above it) is what sets the deadline.
@@ -1485,6 +1515,35 @@ local function speakControl(self, index, moveMouse, withHint)
   end
 end
 
+-- ANNOUNCE WHAT THE CONTROL BECAME, not what we asked it to become.
+--
+-- A stepper's value is what it PRINTS, so that is what is watched: the announcement waits
+-- until the printed text is no longer the one that was there before the key, and gives up at
+-- the control's own settle time. A stepper that was already at its limit does not change, and
+-- is announced then — which is the truth about it. `settle` therefore stops meaning "wait this
+-- long" and starts meaning "wait AT MOST this long", the only version of it that can be right.
+--
+-- One helper rather than one per caller, because there are two ways to move a stepper —
+-- pressing it and stepping it — and they must not drift apart. They were written separately
+-- and were identical for it; the next change to either would have been the moment one of them
+-- started announcing something the other did not.
+--
+-- `was` is the reading taken BEFORE the action, which the caller has and this cannot get.
+local function announceWhenChanged(self, index, c, was)
+  local say = function()
+    -- Guarded on the focus not having moved on: an answer that arrives after two fast Tabs
+    -- must not be read out against whichever control is focused by then.
+    if self.active and self.focus == index then speakControl(self, index, false, true) end
+  end
+  self:watch({
+    read = function() return c.text and select(2, pcall(c.text, self)) or nil end,
+    was = was,
+    within = c.settle or 600,
+    onDone = say,
+    onGiveUp = say,
+  })
+end
+
 local function isFocusable(self, index)
   -- All real controls are focus stops: static text is Tab-reachable and announced,
   -- it just has no activation (Enter does nothing on it). An UNFILLED slot is a
@@ -1699,25 +1758,7 @@ function Overlay:activate(index)
     elseif c.kind == "stepper" then
       -- Activating a stepper changes its value, so the value is read again and announced —
       -- from the control, not from what the activation intended.
-      --
-      -- A stepper's value is what it PRINTS, so that is what is watched: the announcement waits
-      -- until the printed text is not the one that was there before the key, and gives up at the
-      -- control's own settle time. A stepper that was already at its limit does not change, and is
-      -- announced then — which is the truth about it.
-      --
-      -- `settle` stops meaning "wait this long" and starts meaning "wait at most this long", which
-      -- is the only version of it that can be right.
-      local at = i
-      local say = function()
-        if self.active and self.focus == at then speakControl(self, at, false, true) end
-      end
-      self:watch({
-        read = function() return c.text and select(2, pcall(c.text, self)) or nil end,
-        was = was,
-        within = c.settle or 600,
-        onDone = say,
-        onGiveUp = say,
-      })
+      announceWhenChanged(self, i, c, was)
     end
   elseif (c.kind == "ocr" or c.kind == "ocredit") and c.region then
     -- An OCR control re-reads its label on activate. An OCRButton then clicks the region
@@ -2347,24 +2388,7 @@ function Overlay:adjust(dir)
     end
     -- What the value BECAME is the only honest thing to announce; what we asked it to become
     -- is a guess that sounds exactly as confident.
-    --
-    -- A stepper's value is what it PRINTS, so that is what is watched: the announcement waits
-    -- until the printed text is not the one that was there before the key, and gives up at the
-    -- control's own settle time. A stepper that was already at its limit does not change, and is
-    -- announced then — which is the truth about it.
-    --
-    -- `settle` stops meaning "wait this long" and starts meaning "wait at most this long", which
-    -- is the only version of it that can be right.
-    local say = function()
-      if self.active and self.focus == i then speakControl(self, i, false, true) end
-    end
-    self:watch({
-      read = function() return c.text and select(2, pcall(c.text, self)) or nil end,
-      was = was,
-      within = c.settle or 600,
-      onDone = say,
-      onGiveUp = say,
-    })
+    announceWhenChanged(self, i, c, was)
   end
 end
 
@@ -2401,6 +2425,47 @@ end
 -- Bound to the overlay, so it stops the moment the overlay is no longer active or the window
 -- it was watching is no longer the one in front. A callback arriving after the world moved is
 -- the mistake that cannot be undone by pressing the key again.
+-- ONE ACTION PER BURST OF KEYSTROKES, not one per keystroke.
+--
+-- `key` names the thing being coalesced, `ms` is how long a quiet spell has to be, and `fn`
+-- runs once when one arrives. Every call with the same key restarts the clock, so a run of
+-- presses produces exactly one call at the end of it.
+--
+-- The reason is a specific failure, found from both directions on one control. Two clicks
+-- close together in time and space are a DOUBLE-CLICK, and on ON:EAR's Width slider a
+-- double-click resets it — so arrow keys pressed quickly enough were two clicks two pixels
+-- apart, and the slider jumped back to its default in the middle of an adjustment. Waiting out
+-- the double-click time between presses instead would make holding an arrow useless. So the
+-- presses accumulate in the caller's own state and the gesture goes out once they stop.
+--
+-- Bound to the overlay: a pending action is dropped if the overlay is no longer active or the
+-- window it was aimed at is no longer in front. A click that lands after the world has moved
+-- is the mistake pressing the key again cannot undo, and it is the reason this is a method
+-- rather than a bare timer the caller sets up for itself.
+function Overlay:afterIdle(key, ms, fn)
+  if type(fn) ~= "function" then return end
+  if not host.timer then
+    -- No timer: there is nothing to coalesce WITH, so the alternative to acting now is never
+    -- acting at all.
+    pcall(fn, self)
+    return
+  end
+  self._idle = self._idle or {}
+  local gen = (self._idle[key] or 0) + 1
+  self._idle[key] = gen
+  local pinned = self:hwnd()
+  host.timer.after(ms, function()
+    if self._idle[key] ~= gen then return end       -- another press came after this one
+    if not self.active or self:hwnd() ~= pinned then return end
+    self._idle[key] = nil
+    local ok, err = pcall(fn, self)
+    if not ok then
+      host.log.info(string.format("%s: coalesced '%s' failed: %s",
+        tostring(self.label), tostring(key), tostring(err)))
+    end
+  end)
+end
+
 function Overlay:watch(spec)
   if type(spec.read) ~= "function" or not host.timer then return end
   local was = spec.was

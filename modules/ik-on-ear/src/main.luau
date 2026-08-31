@@ -447,24 +447,10 @@ for _, sw in ipairs(switches) do
   })
 end
 
--- Two clicks with a GAP between them, which is what makes them two clicks.
---
--- Sent back to back they go out in the same instant, and an application deciding whether it
--- has seen a double-click is looking at the interval between two presses — an interval of zero
--- is as easy to read as one press with a stutter as it is as two. Ninety milliseconds is
--- plainly two, and plainly inside any double-click time a system would use.
---
--- The irony is not lost: the correcting pass had to be removed because two clicks two hundred
--- milliseconds apart WERE a double-click. The same fact, needed on purpose here and avoided
--- there.
-local function doubleClick(x, y)
-  host.input.click(x, y)
-  if host.timer then
-    host.timer.after(90, function() host.input.click(x, y) end)
-  else
-    host.input.click(x, y)
-  end
-end
+-- Resetting a control to its default is `O.doubleClick`, and coalescing a burst of presses
+-- into one click is `ov:afterIdle` — both moved to the runtime, where their reasoning now
+-- lives. This module was where the two halves of that fact were learned, one on purpose and
+-- one the hard way, and it keeps neither implementation.
 
 -- ── The two things that shape the sound ──────────────────────────────────────
 --
@@ -490,7 +476,7 @@ ov:addStepper({
     local x, y = screenPoint(290, 780)
     if not x then return end
     host.log.info(("[on-ear] Tone: double-clicking (%d,%d) to reset it"):format(x, y))
-    doubleClick(x, y)
+    O.doubleClick(x, y)
   end,
   -- Half a notch. One whole one moves this knob five of its own units, which is a big step to
   -- take blind when the value is the tone of everything you are about to listen to. If the
@@ -614,7 +600,7 @@ local function widthValueAt(x)
 end
 
 local WIDTH_IDLE = 260
-local widthPendingX, widthGen = nil, 0
+local widthPendingX = nil
 
 local function widthNow()
   local shown = valueBelow("Width")
@@ -636,7 +622,7 @@ ov:addStepper({
     if not x then return end
     host.log.info(("[on-ear] Width: double-clicking (%d,%d) to reset it"):format(x, y))
     widthLastX = nil -- the reset puts it somewhere this module did not choose
-    doubleClick(x, y)
+    O.doubleClick(x, y)
   end,
   onStep = function(dir)
     local base = widthPendingX
@@ -659,21 +645,12 @@ ov:addStepper({
         { interrupt = true })
       return
     end
+    -- ONE CLICK PER BURST OF PRESSES, not one per press: `afterIdle` holds the click until
+    -- the presses stop, because two of them close together in time and space would be a
+    -- double-click, and on this control a double-click resets it. The runtime carries the
+    -- mechanism and the reasoning; what stays here is the only part that is ON:EAR's — where
+    -- the handle is being moved to.
     widthPendingX = target
-    -- ONE CLICK PER BURST OF PRESSES, not one per press.
-    --
-    -- Two clicks close together in time and space are a double-click, and on this control a
-    -- double-click resets it. That already cost a correcting pass, which undid every step it
-    -- corrected; then the tester found the same thing from the other side — arrow keys pressed
-    -- quickly enough are two clicks two pixels apart, and the slider jumped back to its
-    -- default mid-adjustment.
-    --
-    -- Waiting out the double-click time between presses would make holding an arrow useless.
-    -- So the presses accumulate instead: each moves a pending position, and the click goes out
-    -- once they stop.
-    widthPendingX = target
-    widthGen += 1
-    local mine = widthGen
     local function fire()
       local at = widthPendingX
       widthPendingX = nil
@@ -685,13 +662,7 @@ ov:addStepper({
       host.input.click(x, y)
       widthLastX = at
     end
-    if not host.timer then
-      fire()
-      return
-    end
-    host.timer.after(WIDTH_IDLE, function()
-      if mine == widthGen then fire() end
-    end)
+    ov:afterIdle("width", WIDTH_IDLE, fire)
   end,
 })
 

@@ -279,6 +279,47 @@ ov:addStepper({
 })
 ```
 
+## O:afterIdle(key, ms, fn) {#afteridle}
+
+Runs `fn` **once**, `ms` after the last call carrying the same `key`. Every call restarts the clock, so a run of keystrokes produces exactly one action at the end of it rather than one per press.
+
+The reason is a specific failure, and it was found from both directions on one control. Two clicks close together in time and space are a **double-click**, and on ON:EAR's Width slider a double-click resets it — so arrow keys pressed quickly enough were two clicks two pixels apart, and the slider jumped back to its default in the middle of an adjustment. Waiting out the double-click time between presses instead would make holding an arrow useless. So the presses accumulate in the module's own state, and the gesture goes out once they stop.
+
+`key` names the thing being coalesced, so one overlay can have several in flight without them interfering.
+
+Bound to the overlay: a pending action is dropped if the overlay is no longer active, or if the window it was aimed at is no longer in front. A click that lands after the world has moved is the mistake that pressing the key again cannot undo. Without a timer available there is nothing to coalesce with, so `fn` runs immediately — the alternative would be never running it at all.
+
+```luau
+-- Each press moves a pending position; the click goes out when the presses stop.
+onStep = function(dir, o)
+  widthPendingX = (widthPendingX or currentHandleX()) + dir * STEP_PX
+  o:afterIdle("width", 260, function()
+    local x, y = screenPoint(widthPendingX, 869)
+    widthPendingX = nil
+    if x then host.input.click(x, y) end
+  end)
+end,
+```
+
+## O.doubleClick(x, y)
+
+Two clicks at the same point, far enough apart in time to **be** a double-click. A module-level function rather than a method — it touches no overlay state.
+
+Worth having in one place because the same fact is needed from both sides. A plug-in that resets a control to its default on a double-click is offering a genuinely useful gesture — one keystroke instead of twenty steps — and reaching it means sending two clicks close enough together. That same fact is a hazard everywhere else, which [`O:afterIdle`](#afteridle) exists to avoid.
+
+The gap is ninety milliseconds, and the number that matters is that it is **not zero**. Two clicks sent back to back go out in the same instant, and an application deciding whether it has seen a double-click is looking at the interval between two presses — an interval of zero reads as easily as one press with a stutter as it does as two. Ninety is plainly two, and comfortably inside any double-click time a system uses.
+
+```luau
+-- ON:EAR's Tone and Width both reset to their default on a double-click, which is one
+-- keystroke against twenty steps. Aimed at where the handle IS, not at the middle of the
+-- track: the two handles stop about ten per cent apart, so the middle is on the far side
+-- of the fold and belongs to the other one.
+onActivate = function()
+  local x, y = screenPoint(widthHandleX(widthNow()), 869)
+  if x then O.doubleClick(x, y) end
+end,
+```
+
 ## O:watch(spec) {#watch}
 
 Waits for something to **change**, rather than for a length of time. `spec: { read: (overlay) -> any, was: any?, done: ((now: any, was: any) -> boolean)?, every: number?, within: number?, onDone: ((now, was) -> ())?, onGiveUp: ((now, was) -> ())? }`.

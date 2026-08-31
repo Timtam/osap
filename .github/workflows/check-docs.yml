@@ -1,0 +1,42 @@
+name: Documentation
+
+# Does the reference call anything the host does not provide?
+#
+# This runs on a push rather than manually, unlike the Pages deploy, because it needs nothing
+# from GitHub beyond a runner — no Pages, no plan, no repository setting. The deploy is manual
+# only because Pages will not serve a private repository, which is a different problem.
+#
+# The trigger is narrow on purpose. The check compares two things: the examples in `docs/` and
+# the bindings the host registers. Nothing else can change its answer, so nothing else should
+# spend a runner on it.
+
+on:
+  push:
+    paths:
+      - 'docs/**'
+      - 'crates/host/src/lib.rs'
+      - 'crates/host/src/window_prelude.luau'
+      - 'check-docs.ps1'
+      - '.github/workflows/check-docs.yml'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'crates/host/src/lib.rs'
+      - 'crates/host/src/window_prelude.luau'
+      - 'check-docs.ps1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  api-names:
+    name: Every documented host.* name exists
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # pwsh is preinstalled on the GitHub runners, so this needs no setup step. The script
+      # itself is written with forward slashes for exactly this reason.
+      - name: Check the API reference
+        shell: pwsh
+        run: ./check-docs.ps1

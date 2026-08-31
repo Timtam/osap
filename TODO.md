@@ -386,6 +386,38 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
         `docs/` now carry the language the platform actually runs. Verified against a file
         that was not edited, so the highlighting is the alias's doing and not the relabelling.
 
+## Shared components, pulled into the runtime (2026-08-31)
+
+Asked for after ON:EAR: go back over the modules and centralise what several of them had each
+built for themselves.
+
+- [x] **The stepper announcement was written twice.** There are two ways to move a stepper —
+      pressing it and stepping it with Left/Right — and each had its own copy of the same
+      fifteen lines: read the printed value, watch until it changes, give up at the control's
+      settle time, announce whichever happened. Identical, and therefore one edit away from
+      quietly disagreeing. Now `announceWhenChanged`, once.
+- [x] **`O.doubleClick(x, y)` and `Overlay:afterIdle(key, ms, fn)`.** Both were ON:EAR's, and
+      both are the same fact from opposite sides: two clicks close together in time and space
+      are a double-click. A plug-in that resets a control to its default on one is offering a
+      real gesture worth reaching — one keystroke against twenty steps — and everywhere else it
+      is a hazard, which is how the Width slider came to reset itself mid-adjustment when the
+      arrow keys were pressed quickly. `afterIdle` coalesces a burst of presses into one action
+      and, unlike the hand-rolled version it replaces, drops a pending action when the overlay
+      is no longer active or its window is no longer in front. ON:EAR now uses both and keeps
+      neither implementation. Verified that both cross into another module's VM as functions.
+- [x] **sforzando's `inDaw:gate` does not need `pollMatch`** — checked rather than assumed.
+      The concern was a gate whose condition can change with no window event, but this one asks
+      about the focus chain, and `_recheck` is driven by focus events as well as activation
+      (`modules/overlay-runtime/src/main.luau:3022-3023`). Closed, not fixed.
+- [ ] **The guessed settles in Kontakt, Komplete Kontrol and Melodyne** still wait a fixed
+      number of milliseconds where `Overlay:watch` would wait for the thing itself — Kontakt has
+      four (250/250/900), Komplete Kontrol a 250/600/1000 chain. Not migratable from here: each
+      one needs the plug-in running to see what it actually waits for, and a wait shortened
+      against a guess is a value announced from before the action.
+- [ ] **A coordinate-scaling helper is still deferred.** ON:EAR is the only module that scales
+      its authored coordinates to the window's drawn size, so there is one instance and nothing
+      to generalise from. It becomes worth doing when a second plug-in needs it.
+
 ## Found while documenting (2026-08-31)
 
 Three defects that surfaced only because somebody wrote down what the code claims. None was

@@ -24,9 +24,13 @@ $root = $PSScriptRoot
 # ---- What the host registers ------------------------------------------------------------
 # Four shapes, because the host uses four. Missing one produces a false alarm, and a checker
 # that cries wolf is turned off, which is worse than not having it.
+#
+# Forward slashes in the paths: this runs on a Linux CI runner as well as on Windows, and .NET
+# accepts them on both. A backslash passes locally and fails in CI, which is the worst order to
+# find that out in.
 $sources = @(
-  (Get-Content (Join-Path $root "crates\host\src\lib.rs") -Raw),
-  (Get-Content (Join-Path $root "crates\host\src\window_prelude.luau") -Raw)
+  (Get-Content (Join-Path $root "crates/host/src/lib.rs") -Raw),
+  (Get-Content (Join-Path $root "crates/host/src/window_prelude.luau") -Raw)
 ) -join "`n"
 
 $registered = [System.Collections.Generic.HashSet[string]]::new()
