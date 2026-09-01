@@ -6,4 +6,4 @@ version = "0.1.0"
 code_module = true
 
 [capabilities]
-require = ["window", "uia", "screen", "ocr", "input", "speech", "hotkey", "keys", "timer", "log", "path", "resource", "arbiter"]
+require = ["window", "element", "screen", "ocr", "input", "speech", "hotkey", "keys", "timer", "log", "path", "resource", "arbiter"]

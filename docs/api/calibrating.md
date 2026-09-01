@@ -1,6 +1,6 @@
 ---
-title: "host.calibrating — measuring, not behaving"
-sidebar_position: 18
+title: "host.calibrating — calibration mode"
+sidebar_position: 2
 toc_max_heading_level: 2
 ---
 

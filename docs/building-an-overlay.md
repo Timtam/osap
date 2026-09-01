@@ -111,7 +111,7 @@ ov:attachEmbedded({
   hosts = daw.all,                 -- the applications that can host it
   control = "^Plugin%x+$",         -- the child control's window class
   identify = function(ctrl)        -- ...but is it OUR plugin?
-    return host.uia.find(ctrl.id, "PlogueXMLGUI", host.uia.type.Pane)
+    return host.element.find(ctrl.id, "PlogueXMLGUI", host.element.type.Pane)
   end,
 })
 ```

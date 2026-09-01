@@ -75,13 +75,13 @@ local function chooser(spec)
 
   local function readPane(origin)
     if not (origin and origin.id) then return false, "no window" end
-    local at = host.uia.locate(origin.id, spec.pane, host.uia.type.Window)
+    local at = host.element.locate(origin.id, spec.pane, host.element.type.Window)
     if at then
       treeDark = false
       return true, ("visible at (%d,%d)"):format(at.x, at.y)
     end
     if not paneWasThere then return false, "not there" end
-    if host.uia.locate(origin.id, TREE_SENTINEL, host.uia.type.Text) then
+    if host.element.locate(origin.id, TREE_SENTINEL, host.element.type.Text) then
       treeDark = false
       return false, "gone, and the rest of the tree is still readable"
     end
@@ -379,7 +379,7 @@ local function chooser(spec)
     local pane = bElement(spec.pane)
     if not pane then return nil end
     for _, n in ipairs(btree() or {}) do
-      if n.ctype == host.uia.type.Edit
+      if n.ctype == host.element.type.Edit
         and n.bounds.x >= pane.bounds.x and n.bounds.y >= pane.bounds.y
         and (n.bounds.x + n.bounds.w) <= (pane.bounds.x + pane.bounds.w)
         and (n.bounds.y + n.bounds.h) <= (pane.bounds.y + pane.bounds.h)

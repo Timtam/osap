@@ -28,7 +28,7 @@ local function dumpFor(overlay)
   local o = overlay:origin()
   if not (o and o.id) then return nil end
   local started = host.now()
-  local dump = host.uia.rawDump(o.id)
+  local dump = host.element.rawDump(o.id)
   local took = host.now() - started
   if took > slowestTree then
     slowestTree = took

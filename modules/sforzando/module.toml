@@ -5,4 +5,4 @@ license = "GPL-3.0-or-later"
 dependencies = ["com.platform.overlay", "com.platform.daw-hosts"]
 
 [capabilities]
-require = ["window", "ocr", "log", "uia"]
+require = ["window", "ocr", "log", "element"]

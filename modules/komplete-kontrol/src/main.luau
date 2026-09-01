@@ -13,7 +13,7 @@ local O = host.require("com.platform.overlay")
 local daw = host.require("com.platform.daw-hosts")
 
 local SLOT = "com.platform.kontakt" -- shared with kontakt so the arbiter composes
-local U = host.uia.type
+local U = host.element.type
 local EDIT = U.Edit -- KK's browser search field
 
 -- The Komplete Kontrol STANDALONE application window (KK running on its own, not
@@ -81,7 +81,7 @@ local CLOSE_KK_BROWSER = "closeKKBrowser"
 -- A Komplete Kontrol Qt control (same Qt class as Kontakt; the UIA name is what
 -- distinguishes it). Non-relational, so the identity cache is safe here.
 local function isKK(c)
-  return host.uia.findAny(c.id, { "Komplete Kontrol" }, { U.Window, U.Pane }) ~= nil
+  return host.element.findAny(c.id, { "Komplete Kontrol" }, { U.Window, U.Pane }) ~= nil
 end
 
 -- Where KK can be: embedded in a DAW, or its own application window. Values, not
@@ -100,8 +100,8 @@ local HOSTED = O.embedded({
 -- open. Doubles as the "is the browser open?" probe (nil ⇒ closed).
 local function browserToggle(hwnd)
   if not hwnd then return nil end
-  return host.uia.classNavPoint(hwnd, "FileTypeSelector", U.Tab, 0, -1)
-    or host.uia.classNavPoint(hwnd, "TagCloudAccordionWithBrands", U.Pane, 0, -1)
+  return host.element.classNavPoint(hwnd, "FileTypeSelector", U.Tab, 0, -1)
+    or host.element.classNavPoint(hwnd, "TagCloudAccordionWithBrands", U.Pane, 0, -1)
 end
 
 -- `when` predicate for the manual close control + the auto-close: is a browser open?
@@ -161,7 +161,7 @@ local function addChrome(ov)
     onActivate = function(o)
       local hwnd = o:hwnd()
       if not hwnd then return end
-      local p = host.uia.locate(hwnd, "", EDIT)
+      local p = host.element.locate(hwnd, "", EDIT)
       if p then host.input.click(p.x, p.y) end
     end,
   })
@@ -246,7 +246,7 @@ return {
         opensMenu = true,
         onActivate = function(o)
           local hwnd = o:hwnd()
-          local p = hwnd and host.uia.locate(hwnd, item.name, U.MenuItem)
+          local p = hwnd and host.element.locate(hwnd, item.name, U.MenuItem)
           if p then
             host.input.click(p.x, p.y)
           else

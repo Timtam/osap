@@ -32,7 +32,7 @@ INDEX = os.path.join(API, 'index.md')
 # The order namespaces appear in. Named rather than sorted: this is the order somebody learns
 # them in, and it puts the two things every module touches first.
 NS_ORDER = [
-    'Overlay', 'host.window', 'host.screen', 'host.ocr', 'host.uia', 'host.input',
+    'Overlay', 'host.window', 'host.screen', 'host.ocr', 'host.element', 'host.input',
     'host.keys', 'host.hotkey', 'host.speech', 'host.sound', 'host.timer', 'host.settings',
     'host.config', 'host.os', 'host.log', 'host.path', 'host.resource', 'host.require',
     'host.tryRequire', 'host.include', 'host.epoch', 'host.now', 'host.inputEpoch',
@@ -40,20 +40,20 @@ NS_ORDER = [
 ]
 
 NS_BLURB = {
-    'Overlay': 'The self-voicing control tree: what a module builds, and how it is bound to a '
-               'window. `local O = host.require("com.platform.overlay")`.',
-    'host.window': 'Finding windows and their controls, and reacting when the focus moves.',
-    'host.screen': 'Reading pixels, and finding a picture within them.',
-    'host.ocr': 'Reading text that exists nowhere but on the screen.',
-    'host.uia': 'Asking the accessibility layer what a window contains.',
-    'host.input': 'Driving the mouse and keyboard.',
-    'host.keys': 'Claiming keys before the application sees them.',
+    'Overlay': 'A ring of controls laid over a plug-in a screen reader cannot read. A module, '
+              'not a host namespace: `local O = host.require("com.platform.overlay")`.',
+    'host.window': 'Finding windows and the surfaces inside them, and reacting when the focus '
+                   'moves.',
+    'host.screen': 'Reading pixels, profiling a region, and finding an image within one.',
+    'host.ocr': 'Recognising text in a screen region.',
+    'host.element': 'Querying the accessibility tree an application publishes.',
+    'host.input': 'Synthesising mouse and keyboard input.',
+    'host.keys': 'Claiming keys before the focused application sees them.',
     'host.hotkey': 'Claiming a combination system-wide.',
     'host.arbiter': 'Deciding which of several overlays owns a contested slot.',
     'host.timer': 'Waiting without blocking, and knowing when a cached reading went stale.',
-    'host.settings': 'The few choices a module should not make on the user\'s behalf.',
-    'host.log': 'The log is evidence: the tester is blind, remote, and often on the platform '
-                'none of us can run.',
+    'host.settings': 'Typed, per-module settings, edited by the user in the module manager.',
+    'host.log': 'Writing to the log file beside the application.',
     'Concepts': 'The shapes and grammars the calls above are written in.',
 }
 

@@ -1,10 +1,10 @@
 ---
-title: "host.window — where the user is"
-sidebar_position: 2
+title: "host.window — windows, controls and focus"
+sidebar_position: 16
 toc_max_heading_level: 2
 ---
 
-Everything a module needs to know about where the user is: which window is in front, what surfaces sit inside it, where the keyboard actually is, and whether a point on screen still belongs to the window you think it does.
+Finds windows and the surfaces inside them, reports where the keyboard is, and raises an event when either changes. In short: which window is in front, what surfaces sit inside it, where the keyboard actually is, and whether a point on screen still belongs to the window you think it does.
 
 Most modules never call any of it — an overlay's binding does the finding, and the overlay runtime registers `onTrigger` and `onFocus` once on everyone's behalf — so you come here for the question a binding cannot settle by itself: Kontakt walks `controls()` for the Qt container that says which Kontakt this is and whether a Komplete Kontrol wraps it, sforzando reads the depth of `focusChain()` to tell REAPER's own chrome from the plug-in inside it, and daw-hosts pairs `find` with `focus` to build the "put me back in the plug-in window" key that macOS otherwise has no command for.
 
@@ -192,7 +192,7 @@ Every **visible child window**, from `EnumChildWindows`, with no node or depth c
 
 **Container roles only** — `AXGroup`, `AXScrollArea`, `AXSplitGroup`, `AXTabGroup`, `AXToolbar`, `AXWindow` and their like. Buttons, labels and text fields are deliberately excluded, and the walk stops at 600 nodes, depth 8, or 256 results.
 
-So a module that identifies a plug-in by scanning `controls()` for a *leaf* control class finds it on Windows and comes back empty-handed here. Identify by container, or by `host.uia.*`.
+So a module that identifies a plug-in by scanning `controls()` for a *leaf* control class finds it on Windows and comes back empty-handed here. Identify by container, or by `host.element.*`.
 
 ## host.window.focusChain() {#host-window-focuschain}
 

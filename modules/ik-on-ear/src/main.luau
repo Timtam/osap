@@ -151,7 +151,7 @@ local function bandValue(label)
   if not l then return nil end
   local lb = l.bounds
   for _, n in ipairs(tree() or {}) do
-    if n.ctype == host.uia.type.Edit then
+    if n.ctype == host.element.type.Edit then
       local b = n.bounds
       local sameRow = (b.y + b.h / 2) >= lb.y and (b.y + b.h / 2) <= (lb.y + lb.h)
       if sameRow and b.x >= lb.x then return n.name end
@@ -222,7 +222,7 @@ local function presetSlots()
   if not (o and o.client) then return {} end
   local columns = {}
   for _, n in ipairs(tree() or {}) do
-    if n.ctype == host.uia.type.Text and n.name ~= ""
+    if n.ctype == host.element.type.Text and n.name ~= ""
       and (n.bounds.x - o.client.x) > 1000
     then
       local col = columns[n.bounds.x]

@@ -7,7 +7,7 @@
 -- here resolves a version at runtime.
 
 local O = host.require("com.platform.overlay")
-local U = host.uia.type
+local U = host.element.type
 local BUTTON, MENUITEM = U.Button, U.MenuItem
 local D = host.include("src/detect.luau")
 local geo = host.include("src/geometry.luau")
@@ -32,9 +32,9 @@ local function pluginLocate(name, ctype)
   -- identity resolved, because the condition-based lookup stopped at a Qt fragment
   -- boundary that the raw-walking pluginLocate can still cross.
   local via = kontaktPaneName(fg.id)
-  if via then return host.uia.pluginLocate(fg.id, via, name, ctype) end
+  if via then return host.element.pluginLocate(fg.id, via, name, ctype) end
   for _, v in ipairs(VARIANTS) do
-    local p = host.uia.pluginLocate(fg.id, v.name, name, ctype)
+    local p = host.element.pluginLocate(fg.id, v.name, name, ctype)
     if p then return p end
   end
   return nil
@@ -57,14 +57,14 @@ end
 -- the primary route.
 local function uiaChecked(name, ctype)
   local fg = host.window.active()
-  if not (fg and fg.id and host.uia.stateProbe) then return nil end
+  if not (fg and fg.id and host.element.stateProbe) then return nil end
   local st
   local via = kontaktPaneName(fg.id)
   if via then
-    st = host.uia.stateProbe(fg.id, via, name, ctype)
+    st = host.element.stateProbe(fg.id, via, name, ctype)
   else
     for _, v in ipairs(VARIANTS) do
-      st = host.uia.stateProbe(fg.id, v.name, name, ctype)
+      st = host.element.stateProbe(fg.id, v.name, name, ctype)
       if st then break end
     end
   end
@@ -128,7 +128,7 @@ local function closeWhatsNew(_)
   local function announce()
     host.speech.output("Update dialog closed", { interrupt = false })
   end
-  local p = host.uia.classNavPoint(kc.id, "WhatsNewScreen", U.Pane, 2, 0)
+  local p = host.element.classNavPoint(kc.id, "WhatsNewScreen", U.Pane, 2, 0)
   if p then
     host.input.click(p.x, p.y)
     host.log.info("Kontakt: dismissed update dialog (UIA)")
@@ -295,7 +295,7 @@ end
 -- never registered are the same event, so the dropdown reads back afterwards whether a
 -- menu actually appeared.
 --
--- Only where the plugin answers UIA at all. host.uia.find returns a bare boolean, so on a
+-- Only where the plugin answers UIA at all. host.element.find returns a bare boolean, so on a
 -- DAW-embedded Kontakt 8 — which exposes no accessible content whatsoever — "no menu" and
 -- "cannot see" are the same `false`, and this would announce a missing menu every single
 -- time. There the press acknowledgement is all we can honestly give.
@@ -309,7 +309,7 @@ local function verifyMenuOpened(o)
   if not (fg and fg.id and kontaktPaneName(fg.id)) then return end
   local ctrl = o:origin()
   if not (ctrl and ctrl.id) then return end
-  if host.uia.find(ctrl.id, "", U.Menu) then return end
+  if host.element.find(ctrl.id, "", U.Menu) then return end
   host.log.info("Kontakt: no menu present after the snapshot dropdown was clicked")
   host.speech.output("Snapshot menu did not open", { interrupt = true })
 end

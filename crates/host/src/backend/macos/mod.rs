@@ -92,19 +92,19 @@ impl Backend for MacBackend {
         ax::window_focus_chain()
     }
 
-    fn uia_find(&self, hwnd: isize, name: &str, control_type: i32) -> bool {
+    fn element_find(&self, hwnd: isize, name: &str, control_type: i32) -> bool {
         ax::find(hwnd, name, control_type)
     }
 
-    fn uia_find_any(&self, hwnd: isize, names: &[String], types: &[i32]) -> Option<usize> {
+    fn element_find_any(&self, hwnd: isize, names: &[String], types: &[i32]) -> Option<usize> {
         ax::find_any(hwnd, names, types)
     }
 
-    fn uia_locate(&self, hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i32)> {
+    fn element_locate(&self, hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i32)> {
         ax::locate(hwnd, name, control_type)
     }
 
-    fn uia_locate_via(
+    fn element_locate_via(
         &self,
         hwnd: isize,
         via_name: &str,
@@ -115,7 +115,7 @@ impl Backend for MacBackend {
         ax::locate_via(hwnd, via_name, via_type, name, control_type)
     }
 
-    fn uia_plugin_locate(
+    fn element_plugin_locate(
         &self,
         hwnd: isize,
         container_name: &str,
@@ -125,17 +125,17 @@ impl Backend for MacBackend {
         ax::plugin_locate(hwnd, container_name, name, control_type)
     }
 
-    fn uia_dump(&self, hwnd: isize) -> Vec<DumpNode> {
+    fn element_dump(&self, hwnd: isize) -> Vec<DumpNode> {
         ax::dump(hwnd)
     }
 
-    fn uia_raw_dump(&self, hwnd: isize) -> Vec<DumpNode> {
+    fn element_raw_dump(&self, hwnd: isize) -> Vec<DumpNode> {
         // No two views of the tree on this platform: AX has one. Both dumps answer the same
         // question, and the calibrator calls this one.
         ax::dump(hwnd)
     }
 
-    fn uia_state_probe(
+    fn element_state_probe(
         &self,
         hwnd: isize,
         container_name: &str,
@@ -145,7 +145,7 @@ impl Backend for MacBackend {
         ax::state_probe(hwnd, container_name, name, control_type)
     }
 
-    fn uia_class_nav_point(
+    fn element_class_nav_point(
         &self,
         hwnd: isize,
         class_substr: &str,
@@ -156,7 +156,7 @@ impl Backend for MacBackend {
         ax::class_nav_point(hwnd, class_substr, ctype, child, sibling)
     }
 
-    fn uia_focus_step(&self, hwnd: isize, direction: i32) -> Option<(String, i32, i32, i32)> {
+    fn element_focus_step(&self, hwnd: isize, direction: i32) -> Option<(String, i32, i32, i32)> {
         ax::focus_step(hwnd, direction)
     }
 

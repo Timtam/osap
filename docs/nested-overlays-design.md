@@ -71,7 +71,7 @@ Identity is **not** OCR-of-a-name. Each level uses a different primitive:
 
 ## Host APIs
 
-Have: `host.window.controls`, `host.window.focusChain`, `host.uia.find`,
+Have: `host.window.controls`, `host.window.focusChain`, `host.element.find`,
 `watch_foreground` + `EVENT_OBJECT_FOCUS`, OCR (WinRT + PaddleOCR),
 **`host.screen.imageSearch(template, {region, tolerance})`** (template match — the
 library-identity primitive, already implemented; honours the template's alpha as a

@@ -37,7 +37,7 @@ The overlay is the exception in shape rather than degree: it is a **module**, so
 
 ## Overlay
 
-The self-voicing control tree: what a module builds, and how it is bound to a window. `local O = host.require("com.platform.overlay")`.
+A ring of controls laid over a plug-in a screen reader cannot read. A module, not a host namespace: `local O = host.require("com.platform.overlay")`.
 
 | | |
 |---|---|
@@ -69,7 +69,7 @@ The self-voicing control tree: what a module builds, and how it is bound to a wi
 
 ## host.window
 
-Finding windows and their controls, and reacting when the focus moves.
+Finding windows and the surfaces inside them, and reacting when the focus moves.
 
 | | |
 |---|---|
@@ -88,7 +88,7 @@ Finding windows and their controls, and reacting when the focus moves.
 
 ## host.screen
 
-Reading pixels, and finding a picture within them.
+Reading pixels, profiling a region, and finding an image within one.
 
 | | |
 |---|---|
@@ -104,34 +104,34 @@ Reading pixels, and finding a picture within them.
 
 ## host.ocr
 
-Reading text that exists nowhere but on the screen.
+Recognising text in a screen region.
 
 | | |
 |---|---|
 | [`host.ocr.recognize(opts?)`](ocr#host-ocr-recognize) | Recognizes text inside a screen region and returns the full text plus per-word bounding boxes. |
 | [`host.ocr.recognizeMany(opts)`](ocr#host-ocr-recognizemany) | Recognizes several regions from **one** screen capture — on Windows. |
 
-## host.uia
+## host.element
 
-Asking the accessibility layer what a window contains.
+Querying the accessibility tree an application publishes.
 
 | | |
 |---|---|
-| [`host.uia.classNavPoint(hwnd, className, controlType, child, sibling)`](uia#host-uia-classnavpoint) | Finds the first element whose class contains `className` and whose control type is `controlType`, walks a fixed path from it,… |
-| [`host.uia.dump(hwnd)`](uia#host-uia-dump) | The condition-based counterpart to `host.uia.rawDump`, and the first thing to run against a window nobody here has seen |
-| [`host.uia.find(hwnd, name, controlType)`](uia#host-uia-find) | Returns `true` if the UI Automation subtree of the window `hwnd` contains at least one element whose Name equals `name`… |
-| [`host.uia.findAny(hwnd, names, types)`](uia#host-uia-findany) | Answers "is any of these names present as any of these control types?" |
-| [`host.uia.focusStep(hwnd, direction)`](uia#host-uia-focusstep) | **This one writes.** It enumerates the visible, keyboard-focusable descendants of `hwnd`'s content area and *moves keyboard… |
-| [`host.uia.locate(hwnd, name, controlType)`](uia#host-uia-locate) | Finds the first UIA element in window `hwnd` matching `name` + `controlType` and returns the screen-pixel centre of its… |
-| [`host.uia.locateVia(hwnd, viaName, viaType, name, controlType)`](uia#host-uia-locatevia) | Like `locate`, but in two levels |
-| [`host.uia.pluginLocate(hwnd, containerName, name, controlType)`](uia#host-uia-pluginlocate) | Like `locate`, but for a plugin hosted inside another application. |
-| [`host.uia.rawDump(hwnd)`](uia#host-uia-rawdump) | Diagnostic counterpart to `host.uia.dump`, walking the **raw** tree instead of a condition-based search, so it crosses into… |
-| [`host.uia.stateProbe(hwnd, containerName, name, controlType)`](uia#host-uia-stateprobe) | Asks a named element what it reports about its **own** state, rather than inferring one from its control type. |
-| [`host.uia.type`](uia#host-uia-type) | The UIA ControlType ids by name |
+| [`host.element.classNavPoint(hwnd, className, controlType, child, sibling)`](element#host-element-classnavpoint) | Finds the first element whose class contains `className` and whose control type is `controlType`, walks a fixed path from it,… |
+| [`host.element.dump(hwnd)`](element#host-element-dump) | The condition-based counterpart to `host.element.rawDump`, and the first thing to run against a window nobody here has seen |
+| [`host.element.find(hwnd, name, controlType)`](element#host-element-find) | Returns `true` if the UI Automation subtree of the window `hwnd` contains at least one element whose Name equals `name`… |
+| [`host.element.findAny(hwnd, names, types)`](element#host-element-findany) | Answers "is any of these names present as any of these control types?" |
+| [`host.element.focusStep(hwnd, direction)`](element#host-element-focusstep) | **This one writes.** It enumerates the visible, keyboard-focusable descendants of `hwnd`'s content area and *moves keyboard… |
+| [`host.element.locate(hwnd, name, controlType)`](element#host-element-locate) | Finds the first UIA element in window `hwnd` matching `name` + `controlType` and returns the screen-pixel centre of its… |
+| [`host.element.locateVia(hwnd, viaName, viaType, name, controlType)`](element#host-element-locatevia) | Like `locate`, but in two levels |
+| [`host.element.pluginLocate(hwnd, containerName, name, controlType)`](element#host-element-pluginlocate) | Like `locate`, but for a plugin hosted inside another application. |
+| [`host.element.rawDump(hwnd)`](element#host-element-rawdump) | Diagnostic counterpart to `host.element.dump`, walking the **raw** tree instead of a condition-based search, so it crosses… |
+| [`host.element.stateProbe(hwnd, containerName, name, controlType)`](element#host-element-stateprobe) | Asks a named element what it reports about its **own** state, rather than inferring one from its control type. |
+| [`host.element.type`](element#host-element-type) | The UIA ControlType ids by name |
 
 ## host.input
 
-Driving the mouse and keyboard.
+Synthesising mouse and keyboard input.
 
 | | |
 |---|---|
@@ -148,7 +148,7 @@ Driving the mouse and keyboard.
 
 ## host.keys
 
-Claiming keys before the application sees them.
+Claiming keys before the focused application sees them.
 
 | | |
 |---|---|
@@ -192,7 +192,7 @@ Waiting without blocking, and knowing when a cached reading went stale.
 
 ## host.settings
 
-The few choices a module should not make on the user's behalf.
+Typed, per-module settings, edited by the user in the module manager.
 
 | | |
 |---|---|
@@ -217,7 +217,7 @@ The few choices a module should not make on the user's behalf.
 
 ## host.log
 
-The log is evidence: the tester is blind, remote, and often on the platform none of us can run.
+Writing to the log file beside the application.
 
 | | |
 |---|---|

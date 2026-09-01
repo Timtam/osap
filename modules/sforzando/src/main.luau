@@ -96,7 +96,7 @@ ov:attachEmbedded({
   identify = function(ctrl)
     -- UIA (as ReaHotkey): sforzando's GUI is a Pane
     -- named "PlogueXMLGUI".
-    if host.uia and host.uia.find(ctrl.id, "PlogueXMLGUI", host.uia.type.Pane) then
+    if host.element and host.element.find(ctrl.id, "PlogueXMLGUI", host.element.type.Pane) then
       return true
     end
     -- Fallback: read the "sforzando" wordmark in the header.

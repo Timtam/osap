@@ -1,10 +1,10 @@
 ---
-title: "host.settings — the user's own choices"
+title: "host.settings — per-module settings"
 sidebar_position: 12
 toc_max_heading_level: 2
 ---
 
-The few choices a module should not make on the user's behalf — Komplete Kontrol has exactly one, an opt-out for automatically closing KK's library browser — held per module and persisted in `settings.toml` beside the executable, so they survive a restart.
+Typed, validated settings, declared by the module and edited by the user in the module manager. For the few choices a module should not make on somebody's behalf — Komplete Kontrol has exactly one, an opt-out for automatically closing KK's library browser. Held per module and persisted in `settings.toml` beside the executable, so they survive a restart.
 
 `define` is the load-bearing call: it fixes the setting's kind from its default and carries the label, the bounds and the permitted choices, and **the module manager builds the settings dialog out of precisely that** — one native checkbox, number field or dropdown per setting, for a screen reader to read. Everything else works only on what was defined: `get` raises for a key that never was, and `onChange` fires for the dialog as well as for `set`, so nothing has to poll its own settings.
 

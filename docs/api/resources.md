@@ -1,6 +1,6 @@
 ---
-title: "Module files — paths and bundled data"
-sidebar_position: 16
+title: "host.path & host.resource — module files"
+sidebar_position: 10
 toc_max_heading_level: 2
 ---
 

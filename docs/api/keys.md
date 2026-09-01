@@ -1,10 +1,10 @@
 ---
-title: "host.keys — taking a key from the application"
-sidebar_position: 7
+title: "host.keys — capturing keys from the application"
+sidebar_position: 6
 toc_max_heading_level: 2
 ---
 
-Where a hotkey is claimed system-wide and fires wherever the user happens to be, this **takes a key away from the application**: while a capture holds, the keystroke arrives at your callback and the focused plug-in never sees it.
+Claims a key so that the focused application does not receive it. Where a hotkey fires wherever the user happens to be, a capture **takes the key away**: while a capture holds, the keystroke arrives at your callback and the focused plug-in never sees it.
 
 That is what makes an overlay navigable — Tab and Shift+Tab walk the control ring, Space and Return activate what is focused, Left and Right belong to a focused slider or tab control — and it is why the discipline is to hold only what the control in focus actually needs and hand everything else straight back. A key held is a key the plug-in does not get, and from the outside that is indistinguishable from the plug-in ignoring it: a tab control that claimed the arrow keys statically cost Melodyne's editor its arrows entirely, and Space in Melodyne is transport play and stop.
 
@@ -176,7 +176,7 @@ end)
 
 **Signature:** `host.keys.nativeMenuOpen()` → `boolean`
 
-True while the application in front has a menu open that the operating system itself drew. This is the **cheap half** of "is a menu open": no accessibility traversal, no screen touch, cheap enough to ask from inside the key path and from a 150 ms timer. The expensive half — `host.uia.find(hwnd, "", host.uia.type.Menu)`, which walks a plug-in's entire accessibility tree across a process boundary — was measured at 50–194 ms per call, more than its own 150 ms interval, and was being spent almost entirely on answering "no". Ask this first and the common case is settled outright, because the menus these overlays open (u-he's preset menu, Komplete Kontrol's menu bar) turn out to be native ones. It is also the guard a module wants around anything that reads the screen on a timer: a menu is drawn *over* the region, so a read-out watcher that keeps going reports the menu's own text as a changed value, over and over, as the user moves through it.
+True while the application in front has a menu open that the operating system itself drew. This is the **cheap half** of "is a menu open": no accessibility traversal, no screen touch, cheap enough to ask from inside the key path and from a 150 ms timer. The expensive half — `host.element.find(hwnd, "", host.element.type.Menu)`, which walks a plug-in's entire accessibility tree across a process boundary — was measured at 50–194 ms per call, more than its own 150 ms interval, and was being spent almost entirely on answering "no". Ask this first and the common case is settled outright, because the menus these overlays open (u-he's preset menu, Komplete Kontrol's menu bar) turn out to be native ones. It is also the guard a module wants around anything that reads the screen on a timer: a menu is drawn *over* the region, so a read-out watcher that keeps going reports the menu's own text as a changed value, over and over, as the user moves through it.
 
 A false answer means "no menu the OS drew", not "no menu". A plug-in that paints its own menu inside its window — a Qt menu, typically — is invisible here; that case is what [`host.keys.menuOpen`](#host-keys-menuopen) is for, and the runtime's `Overlay:watchMenus` already drives it for you if you attach with `menus = true`. Note also that you do not need this call to get key pass-through while a native menu is up: the key hook consults the same answer itself on both platforms and stops suppressing captured keys for the duration. Modules call it to quiet their *own* polling and reading.
 
@@ -191,7 +191,7 @@ host.timer.every(150, function()
   tick += 1
   if not open and tick % 8 == 0 then
     local hwnd = ov:hwnd()
-    open = hwnd ~= nil and host.uia.find(hwnd, "", host.uia.type.Menu) == true
+    open = hwnd ~= nil and host.element.find(hwnd, "", host.element.type.Menu) == true
   end
   host.keys.menuOpen(open)
 end)

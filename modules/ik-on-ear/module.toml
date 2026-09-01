@@ -23,4 +23,4 @@ dependencies = ["com.platform.overlay"]
 supported_os = ["windows"]
 
 [capabilities]
-require = ["window", "uia", "screen", "ocr", "input", "speech", "timer", "log"]
+require = ["window", "element", "screen", "ocr", "input", "speech", "timer", "log"]

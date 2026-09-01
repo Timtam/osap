@@ -198,22 +198,22 @@ pub trait Backend {
 
     /// Whether `hwnd`'s UI Automation subtree contains an element with the given
     /// Name + ControlType — for confirming a plugin's identity.
-    fn uia_find(&self, hwnd: isize, name: &str, control_type: i32) -> bool;
+    fn element_find(&self, hwnd: isize, name: &str, control_type: i32) -> bool;
 
     /// "Is any of these names present as any of these control types?" — one traversal
     /// per name instead of one per name×type pair. Returns the 1-based index of the
     /// matching name (so the caller learns which), or None.
-    fn uia_find_any(&self, hwnd: isize, names: &[String], types: &[i32]) -> Option<usize>;
+    fn element_find_any(&self, hwnd: isize, names: &[String], types: &[i32]) -> Option<usize>;
 
     /// Screen-pixel centre of that UIA element (to click it), or None if not
     /// found / it has no on-screen rect.
-    fn uia_locate(&self, hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i32)>;
+    fn element_locate(&self, hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i32)>;
 
-    /// Like `uia_locate`, but first descends into a container element
+    /// Like `element_locate`, but first descends into a container element
     /// (`via_name`/`via_type`) and searches for the target within it — crosses a
     /// hosted-fragment boundary a search from `hwnd` does not (a DAW-embedded plugin
     /// whose UI hangs off an identity pane). Click-centre, or None.
-    fn uia_locate_via(
+    fn element_locate_via(
         &self,
         hwnd: isize,
         via_name: &str,
@@ -227,7 +227,7 @@ pub trait Backend {
     /// class preferred over the `…QWindowIcon` host) and find the target within it, over
     /// the RAW tree walker — the only view that crosses into a DAW-embedded plugin's
     /// hosted Qt fragment. Empty `name` = any element of that type. Click-centre, or None.
-    fn uia_plugin_locate(
+    fn element_plugin_locate(
         &self,
         hwnd: isize,
         container_name: &str,
@@ -238,15 +238,15 @@ pub trait Backend {
     /// Dev/diagnostic: the "interesting" elements of `hwnd`'s UIA subtree (raw
     /// view), as (depth, Name, ClassName, ControlType). For discovering plugin
     /// identity properties.
-    fn uia_dump(&self, hwnd: isize) -> Vec<DumpNode>;
+    fn element_dump(&self, hwnd: isize) -> Vec<DumpNode>;
 
-    /// Like `uia_dump`, but over the RAW TreeWalker, which crosses into a hosted Qt
+    /// Like `element_dump`, but over the RAW TreeWalker, which crosses into a hosted Qt
     /// fragment that the condition-based dump cannot see.
-    fn uia_raw_dump(&self, hwnd: isize) -> Vec<DumpNode>;
+    fn element_raw_dump(&self, hwnd: isize) -> Vec<DumpNode>;
 
     /// What a named element reports about its own state (Toggle pattern, then
     /// LegacyIAccessible state bits), as a diagnostic string. None when not found.
-    fn uia_state_probe(
+    fn element_state_probe(
         &self,
         hwnd: isize,
         container_name: &str,
@@ -258,7 +258,7 @@ pub trait Backend {
     /// whose ClassName contains `class_substr` + ControlType == `ctype` by walking
     /// `child` (nth child, 0 = none) then `sibling` raw-view siblings. Ports
     /// ReaHotkey FindElement(ClassName) + WalkTree (KK browser, Kontakt What's-New).
-    fn uia_class_nav_point(
+    fn element_class_nav_point(
         &self,
         hwnd: isize,
         class_substr: &str,
@@ -271,7 +271,7 @@ pub trait Backend {
     /// (`direction` >= 0) / previous keyboard-focusable descendant relative to the one
     /// focused now, wrapping at the ends, and return its (Name, ControlType, 1-based
     /// index, count) to announce. None if the window has no focusable descendants.
-    fn uia_focus_step(&self, hwnd: isize, direction: i32) -> Option<(String, i32, i32, i32)>;
+    fn element_focus_step(&self, hwnd: isize, direction: i32) -> Option<(String, i32, i32, i32)>;
 
     /// Size of the primary display in pixels.
     fn screen_size(&self) -> (i32, i32);

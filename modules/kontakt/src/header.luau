@@ -140,7 +140,7 @@ local function panelState(ov, t, cell)
   -- pluginLocate, 60-300 ms against a pixel's 17, and far too slow to put on every focus step.
   -- Only the Keyboard toggle answers (measured); the other two carry no state at all.
   if t.uiaState then
-    local checked = A.uiaChecked(t.name, host.uia.type.Button)
+    local checked = A.uiaChecked(t.name, host.element.type.Button)
     if checked == true then return "expanded", "collapse" end
     if checked == false then return "collapsed", "expand" end
   end
@@ -162,7 +162,7 @@ local function addStatusToggles(ov, cell)
       onActivate = function(o)
         -- Says so when the name does not resolve, rather than going quiet: these live in
         -- Kontakt's own chrome, which a DAW-embedded instance does not always expose.
-        if not A.uiaClick(nil, t.name, host.uia.type.Button) then
+        if not A.uiaClick(nil, t.name, host.element.type.Button) then
           host.speech.output(t.label .. " not found", { interrupt = true })
           return
         end

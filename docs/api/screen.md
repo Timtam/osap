@@ -1,10 +1,12 @@
 ---
-title: "host.screen — what the plug-in looks like"
-sidebar_position: 3
+title: "host.screen — pixels, profiles and image search"
+sidebar_position: 11
 toc_max_heading_level: 2
 ---
 
-What the plug-in looks like, for everything it will not say. This is where a module goes when there is no element to ask: state that exists only as colour — Kontakt reads whether its snapshot bar is open from one pixel on the camera icon, and ON:EAR classifies each of its switches from a single pixel — and anything whose position moves, which is what image search is for, since Kontakt's five instrument-editor sections are found by their captions because opening one pushes the rest down the window.
+Reads what is on screen: the colour of a point, a per-column and per-row profile of a region, and a search for a template image within one.
+
+Use it where there is no element to ask. State that exists only as colour — Kontakt reads whether its snapshot bar is open from one pixel on the camera icon, and ON:EAR classifies each of its switches from a single pixel — and anything whose position moves, which is what image search is for, since Kontakt's five instrument-editor sections are found by their captions because opening one pushes the rest down the window.
 
 **Every touch of the screen costs a compositor frame**, measured at about 16.7 ms whether it reads one pixel or a whole window. So `pixel` is not the cheap call it looks like: read a point once per pump and let everything that asks about it share the answer. When the question is *where* something is rather than what colour a known point has, `profile` reduces one capture to a value per column and row — the way Melodyne finds a selected note by diffing two column profiles.
 

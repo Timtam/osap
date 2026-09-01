@@ -1,10 +1,12 @@
 ---
-title: "host.input — pressing things"
-sidebar_position: 6
+title: "host.input — mouse and keyboard"
+sidebar_position: 5
 toc_max_heading_level: 2
 ---
 
-How a module actually presses the thing it has just described: the synthetic mouse and keyboard behind every activation an overlay performs. Most modules never touch it, because the overlay's own control kinds click their coordinates for them, so you come here for the gesture that is not one of those — Kontakt's instrument-editor wrench at a fixed offset from the right edge of the window, ON:EAR's tone knob nudged half a wheel notch because a whole one moves it five of its own units, Melodyne's menu bar opened a few pixels above the client origin.
+Synthesises mouse and keyboard input: moving and clicking at screen coordinates, dragging, scrolling, sending a key combination, and typing text.
+
+It is what performs every activation an overlay makes. Most modules never touch it, because the overlay's own control kinds click their coordinates for them, so you come here for the gesture that is not one of those — Kontakt's instrument-editor wrench at a fixed offset from the right edge of the window, ON:EAR's tone knob nudged half a wheel notch because a whole one moves it five of its own units, Melodyne's menu bar opened a few pixels above the client origin.
 
 All of it is blind clicking at screen coordinates, and **nothing here asks what is drawn under the point** — which is why modules bring their window forward first, and why the overlay runtime refuses a point falling outside its own window.
 

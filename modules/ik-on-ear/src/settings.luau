@@ -62,12 +62,12 @@ local settingsDark = false
 
 settings:gate(function(origin)
   if not (origin and origin.id) then return false end
-  if host.uia.locate(origin.id, "Global Settings", host.uia.type.Text) then
+  if host.element.locate(origin.id, "Global Settings", host.element.type.Text) then
     settingsDark = false
     return true
   end
   if not settingsWasThere then return false end
-  if host.uia.locate(origin.id, TREE_SENTINEL, host.uia.type.Text) then
+  if host.element.locate(origin.id, TREE_SENTINEL, host.element.type.Text) then
     settingsDark = false
     return false
   end

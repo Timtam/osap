@@ -1,10 +1,12 @@
 ---
-title: "host.arbiter — one control, one owner"
-sidebar_position: 17
+title: "host.arbiter — which overlay owns a slot"
+sidebar_position: 1
 toc_max_heading_level: 2
 ---
 
-One control, one owner. Several overlays can match the same window at the same moment — Komplete Kontrol's chrome, the Kontakt inside it, the library loaded in that, and a modal over all three — and only one of them may hold the keyboard. A **slot** is the contested thing, named by a plain string; a **claim** is one overlay's standing bid for it, ranked by specificity; and the arbiter elects the most specific claim that currently matches, activating it and deactivating whoever held it before.
+Registering a claim on a **slot**, and finding out who currently holds it. A slot is a contested context named by a plain string; a claim is one module's standing bid for it, ranked by specificity; the arbiter elects the most specific claim that currently matches and drives the activate and deactivate callbacks on every change of winner.
+
+Several overlays can match the same window at the same moment — Komplete Kontrol's chrome, the Kontakt inside it, the library loaded in that, and a modal over all three — and only one of them may hold the keyboard. A **slot** is the contested thing, named by a plain string; a **claim** is one overlay's standing bid for it, ranked by specificity; and the arbiter elects the most specific claim that currently matches, activating it and deactivating whoever held it before.
 
 Almost every module gets this without touching the API: `O:attach` and `O:attachEmbedded` take `slot` and `specificity`, and the overlay runtime does the registering, the reporting and the tearing down. You come here to build something that competes for a slot without being an overlay, or to inspect one.
 

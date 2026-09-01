@@ -662,7 +662,7 @@ pub(super) fn role(el: &AXUIElement) -> String {
 /// of the three is ever localised, which the title and role *description* both are.
 ///
 /// A module matches it with the same `string.match` it already uses — `"^AXWindow/"`,
-/// `"/NI%.Kontakt"` — and `uia_dump` prints exactly this string, so an author reading a dump
+/// `"/NI%.Kontakt"` — and `element_dump` prints exactly this string, so an author reading a dump
 /// can paste what they see. Never empty: an element with no role at all still yields `"//"`,
 /// which is a pattern that can be written and matched rather than a nil that cannot.
 pub(super) fn join_class(s: &Snap) -> String {
@@ -739,7 +739,7 @@ enum WalkStep {
 
 /// The AX roles that mean what a UIA ControlType id means.
 ///
-/// The ids stay UIA ids on every platform — they are what `host.uia.type` hands modules and
+/// The ids stay UIA ids on every platform — they are what `host.element.type` hands modules and
 /// what every shipped module already passes — so the translation happens here, at the edge,
 /// and one id maps to a SET because AX splits distinctions UIA does not (a Windows "Button"
 /// is an `AXButton`, an `AXMenuButton` or an `AXPopUpButton` depending on what it opens).
@@ -1668,7 +1668,7 @@ pub fn find(hwnd: isize, name: &str, control_type: i32) -> bool {
 /// It looks one level inside the application's other windows, because a toolkit that draws
 /// its own popups (Qt does) puts them in a borderless window rather than in a real menu. If
 /// a plugin's menu turns out to sit somewhere else again, this returns false and the overlay
-/// keeps the keys — the safe direction — and a `uia_dump` of the plugin while its menu is
+/// keeps the keys — the safe direction — and a `element_dump` of the plugin while its menu is
 /// open will show where it actually lives.
 fn menu_open_in_app(el: &AXUIElement) -> bool {
     let pid = element_pid(el);

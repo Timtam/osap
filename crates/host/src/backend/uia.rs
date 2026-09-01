@@ -63,7 +63,7 @@ fn find_element(hwnd: isize, name: &str, control_type: i32) -> Option<IUIAutomat
 }
 
 /// True if `hwnd`'s UIA subtree contains an element with that Name + ControlType.
-pub fn uia_find(hwnd: isize, name: &str, control_type: i32) -> bool {
+pub fn element_find(hwnd: isize, name: &str, control_type: i32) -> bool {
     find_element(hwnd, name, control_type).is_some()
 }
 
@@ -75,7 +75,7 @@ pub fn uia_find(hwnd: isize, name: &str, control_type: i32) -> bool {
 /// WHICH one matched, e.g. the plugin's version), or None.
 ///
 /// An empty name matches any element of the given types.
-pub fn uia_find_any(hwnd: isize, names: &[String], types: &[i32]) -> Option<usize> {
+pub fn element_find_any(hwnd: isize, names: &[String], types: &[i32]) -> Option<usize> {
     if names.is_empty() || types.is_empty() {
         return None;
     }
@@ -128,7 +128,7 @@ pub fn uia_find_any(hwnd: isize, names: &[String], types: &[i32]) -> Option<usiz
 
 /// The screen-pixel centre of that element's bounding rectangle (to click it), or
 /// None if not found / it has no on-screen rect.
-pub fn uia_locate(hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i32)> {
+pub fn element_locate(hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i32)> {
     let element = find_element(hwnd, name, control_type)?;
     unsafe {
         let r = element.CurrentBoundingRectangle().ok()?;
@@ -139,14 +139,14 @@ pub fn uia_locate(hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i3
     }
 }
 
-/// Like `uia_locate`, but first descends into a CONTAINER element (`via_name` /
+/// Like `element_locate`, but first descends into a CONTAINER element (`via_name` /
 /// `via_type`, e.g. the "Kontakt 8" QuickWindow pane) reachable from `hwnd`, then
 /// searches for the target WITHIN that container. A DAW-embedded plugin exposes the
 /// container element but hosts its real UI as a nested UIA fragment that a search from
 /// the outer `hwnd` does NOT cross — searching from the container element itself does.
 /// Ports ReaHotkey's GetPluginUIAElement + `MainElement.FindElement(...)`. Returns the
 /// target's on-screen click centre, or None (container or target not found / off-screen).
-pub fn uia_locate_via(
+pub fn element_locate_via(
     hwnd: isize,
     via_name: &str,
     via_type: i32,
@@ -211,7 +211,7 @@ fn rect_of(el: &IUIAutomationElement) -> (i32, i32, i32, i32) {
 /// as (depth, Name, ClassName, ControlType). Bounded (≤600 nodes, ≤16 deep). Used
 /// to discover the Name/ClassName/ControlType to key a plugin's identity on, e.g.
 /// a Kontakt rendered inside Komplete Kontrol's own Qt window.
-pub fn uia_dump(hwnd: isize) -> Vec<DumpNode> {
+pub fn element_dump(hwnd: isize) -> Vec<DumpNode> {
     let mut out: Vec<DumpNode> = Vec::new();
     AUTOMATION.with(|cell| unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -264,7 +264,7 @@ pub fn uia_dump(hwnd: isize) -> Vec<DumpNode> {
 /// bounding-rect centre (to click it), or None if not found / off-screen. Closes
 /// KK's library browser (FileTypeSelector, child=0 sibling=-1) and Kontakt's
 /// What's-New dialog (WhatsNewScreen, child=2 sibling=0).
-pub fn uia_class_nav_point(
+pub fn element_class_nav_point(
     hwnd: isize,
     class_substr: &str,
     ctype: i32,
@@ -346,7 +346,7 @@ unsafe fn raw_walk(
     }
 }
 
-/// Dev/diagnostic counterpart to `uia_dump` that uses the RAW TreeWalker instead of a
+/// Dev/diagnostic counterpart to `element_dump` that uses the RAW TreeWalker instead of a
 /// condition-based FindAll, so it crosses into a hosted Qt fragment (a DAW-embedded
 /// Kontakt's real UI, which FindAll cannot see). Returns (depth, Name, ClassName,
 /// ControlType); bounded by node budget and depth.
@@ -387,7 +387,7 @@ unsafe fn cached_walk(
     }
 }
 
-pub fn uia_raw_dump(hwnd: isize) -> Vec<DumpNode> {
+pub fn element_raw_dump(hwnd: isize) -> Vec<DumpNode> {
     let mut out: Vec<DumpNode> = Vec::new();
     AUTOMATION.with(|cell| unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -479,7 +479,7 @@ pub fn uia_raw_dump(hwnd: isize) -> Vec<DumpNode> {
 ///
 /// `name` empty means "any element of this ControlType" (e.g. an open Menu, 50009).
 /// Returns the target's on-screen click centre, or None.
-pub fn uia_plugin_locate(
+pub fn element_plugin_locate(
     hwnd: isize,
     container_name: &str,
     name: &str,
@@ -558,7 +558,7 @@ pub fn uia_plugin_locate(
 ///
 /// Returns None when the element cannot be found at all, so "not found" and "found, says
 /// nothing" stay distinguishable.
-pub fn uia_state_probe(
+pub fn element_state_probe(
     hwnd: isize,
     container_name: &str,
     name: &str,
@@ -679,7 +679,7 @@ unsafe fn find_by_class(
 /// enumerated every step, so it tracks a tree that shifts as the user navigates. Returns
 /// the newly focused element's (Name, ControlType, 1-based index, count) to announce, or
 /// None if the scope has no focusable descendant that accepts focus.
-pub fn uia_focus_step(hwnd: isize, direction: i32) -> Option<(String, i32, i32, i32)> {
+pub fn element_focus_step(hwnd: isize, direction: i32) -> Option<(String, i32, i32, i32)> {
     AUTOMATION.with(|cell| unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let mut borrow = cell.borrow_mut();
@@ -703,7 +703,7 @@ pub fn uia_focus_step(hwnd: isize, direction: i32) -> Option<(String, i32, i32, 
 
         // The scope's VISIBLE, keyboard-focusable descendants in control-view order — the
         // same set NVDA would Tab through. TrueCondition + Rust-side filter avoids a bool
-        // VARIANT and matches uia_dump's proven path.
+        // VARIANT and matches element_dump's proven path.
         let cond = automation.CreateTrueCondition().ok()?;
         let arr = scope.FindAll(TreeScope_Descendants, &cond).ok()?;
         let len = arr.Length().unwrap_or(0);

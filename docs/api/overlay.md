@@ -1,10 +1,10 @@
 ---
-title: "Overlay — the control ring"
-sidebar_position: 1
+title: "Overlay — the self-voicing control ring"
+sidebar_position: 18
 toc_max_heading_level: 2
 ---
 
-An overlay is the thing this platform exists to produce: a ring of controls laid over a plug-in no screen reader can read, which the user reaches with Tab and which speaks each control as label, type and value. It is **not a host capability but a module** — declare `com.platform.overlay` under `dependencies` in `module.toml`, never under `[capabilities] require`, and pull it in with `host.require`.
+An overlay is a ring of controls laid over a plug-in that a screen reader cannot read. The user walks it with Tab, and each control is spoken as label, type and value. It is **not a host capability but a module** — declare `com.platform.overlay` under `dependencies` in `module.toml`, never under `[capabilities] require`, and pull it in with `host.require`.
 
 What comes back is very nearly the whole of most modules: Impact Soundworks' Juggernaut is a table of measured coordinates and two library overlays of a caption and one `addOCRButton` each. How a control reads its value is the cost you are choosing — a hotspot toggle samples a single pixel, which is one compositor frame (~16.7 ms on Windows); a graphical toggle image-matches templates over a region; OCR is slower than either, which is why `ocrLabel` belongs on controls whose name really does change with the loaded patch and not on every control.
 
@@ -157,7 +157,7 @@ One rule: a **non-nil** result is cached; **`nil` means "cannot tell yet" and is
 
 ```luau
 local variantOf = O.memoByOrigin(function(ctrl)
-    local i = host.uia.findAny(ctrl.id, VERSIONS, { U.Window, U.Pane })
+    local i = host.element.findAny(ctrl.id, VERSIONS, { U.Window, U.Pane })
     return i and VERSIONS[i] or nil   -- nil: UIA not ready, ask again next time
 end)
 ```
@@ -171,7 +171,7 @@ The active context's coordinate window — the plugin control when embedded, the
 ```luau
 -- `:hwnd()` -- the window handle, for asking the accessibility layer about it:
 onActivate = function(o)
-  local p = host.uia.locate(o:hwnd(), "", host.uia.type.Edit)
+  local p = host.element.locate(o:hwnd(), "", host.element.type.Edit)
   if p then host.input.click(p.x, p.y) end
 end,
 
@@ -503,7 +503,7 @@ ov:attachEmbedded({
   hosts = daw.all,
   control = { windows = "^Plugin%x+$" },   -- OS-keyed; see below
   identify = function(ctrl)
-    return host.uia.find(ctrl.id, "PlogueXMLGUI", host.uia.type.Pane) ~= nil
+    return host.element.find(ctrl.id, "PlogueXMLGUI", host.element.type.Pane) ~= nil
   end,
 }, { slot = SLOT, specificity = O.layer.base, menus = true })
 ```
@@ -566,7 +566,7 @@ The way back is the application's own: Tab moves focus out of its editor, the co
 -- gate is measuring that anyway -- so the same flag decides whether to hold any keys at all.
 local settingsDark = false
 settings:gate(function(origin)
-  if host.uia.locate(origin.id, "Global Settings", host.uia.type.Text) then
+  if host.element.locate(origin.id, "Global Settings", host.element.type.Text) then
     settingsDark = false
     return true
   end

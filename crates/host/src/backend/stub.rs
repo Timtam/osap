@@ -86,16 +86,16 @@ impl Backend for StubBackend {
     fn window_focus_chain(&self) -> Vec<ControlInfo> {
         Vec::new()
     }
-    fn uia_find(&self, _hwnd: isize, _name: &str, _control_type: i32) -> bool {
+    fn element_find(&self, _hwnd: isize, _name: &str, _control_type: i32) -> bool {
         false
     }
-    fn uia_find_any(&self, _hwnd: isize, _names: &[String], _types: &[i32]) -> Option<usize> {
+    fn element_find_any(&self, _hwnd: isize, _names: &[String], _types: &[i32]) -> Option<usize> {
         None
     }
-    fn uia_locate(&self, _hwnd: isize, _name: &str, _control_type: i32) -> Option<(i32, i32)> {
+    fn element_locate(&self, _hwnd: isize, _name: &str, _control_type: i32) -> Option<(i32, i32)> {
         None
     }
-    fn uia_locate_via(
+    fn element_locate_via(
         &self,
         _hwnd: isize,
         _via_name: &str,
@@ -105,7 +105,7 @@ impl Backend for StubBackend {
     ) -> Option<(i32, i32)> {
         None
     }
-    fn uia_plugin_locate(
+    fn element_plugin_locate(
         &self,
         _hwnd: isize,
         _container_name: &str,
@@ -114,14 +114,14 @@ impl Backend for StubBackend {
     ) -> Option<(i32, i32)> {
         None
     }
-    fn uia_dump(&self, _hwnd: isize) -> Vec<DumpNode> {
+    fn element_dump(&self, _hwnd: isize) -> Vec<DumpNode> {
         Vec::new()
     }
-    fn uia_raw_dump(&self, _hwnd: isize) -> Vec<DumpNode> {
+    fn element_raw_dump(&self, _hwnd: isize) -> Vec<DumpNode> {
         Vec::new()
     }
 
-    fn uia_state_probe(
+    fn element_state_probe(
         &self,
         _hwnd: isize,
         _container_name: &str,
@@ -130,7 +130,7 @@ impl Backend for StubBackend {
     ) -> Option<(i32, i32)> {
         None
     }
-    fn uia_class_nav_point(
+    fn element_class_nav_point(
         &self,
         _hwnd: isize,
         _class_substr: &str,
@@ -140,7 +140,7 @@ impl Backend for StubBackend {
     ) -> Option<(i32, i32)> {
         None
     }
-    fn uia_focus_step(&self, _hwnd: isize, _direction: i32) -> Option<(String, i32, i32, i32)> {
+    fn element_focus_step(&self, _hwnd: isize, _direction: i32) -> Option<(String, i32, i32, i32)> {
         None
     }
     fn set_captured_keys(&self, _keys: &[(u32, u8)]) {}

@@ -22,12 +22,12 @@ Four namespaces are planned rather than present: `host.gui`, `host.clipboard`, `
 and `host.ffi`. The **Built** column below says which is which.
 
 Two rows that used to be here have been removed, because both named something that does not
-exist under that name. The accessibility namespace shipped as **`host.uia`** — see the
-[reference](api/uia) — and **the overlay is not a host namespace at all** but a module,
+exist under that name. The accessibility namespace shipped as **`host.element`** — see the
+[reference](api/element) — and **the overlay is not a host namespace at all** but a module,
 `com.platform.overlay`, declared under `dependencies`. Its own entry in the reference is
 [Overlay](api/overlay).
 
-`host.uia` is a placeholder rather than a settled name: UIA is what Windows calls its tree and
+`host.element` is a placeholder rather than a settled name: UIA is what Windows calls its tree and
 macOS calls the same thing something else, so the name states one platform's vendor term for
 an API that abstracts over both.
 
@@ -189,10 +189,10 @@ local r = host.ocr.recognize({ region={540,13,608,23}, engine="best", lang="eng"
 ```
 Native by default (Windows.Media.Ocr / Apple Vision), ONNX fallback (study §2). Replaces ReaHotkey's Tesseract-exe invocation.
 
-### Accessibility elements of foreign apps — shipped as `host.uia`
+### Accessibility elements of foreign apps — shipped as `host.element`
 
 Windows: `IUIAutomationElement`. macOS: `AXUIElement`. Replaces ReaHotkey's `UIA.ahk`
-passthrough, and is built: see the [reference](api/uia).
+passthrough, and is built: see the [reference](api/element).
 
 The shipped surface is not the element-handle model sketched here — there are no element
 objects with `:role()` / `:name()` / `:invoke()`. It answers questions about a window instead:
@@ -246,7 +246,7 @@ Later: `a11y` (for Native/UIA overlays), `gui`, `ffi`, `clipboard`, `app`.
 The deep-dive analysis ([reahotkey-port-analysis.md](reahotkey-port-analysis.md)) **confirmed** the MVP cut against the real source code and produced three refinements:
 
 - **`host.input` extended with `drag` + `scroll`** (incorporated above) — GraphicalSlider uses `MouseClickDrag`, Zampler the mouse wheel.
-- **The accessibility namespace moved up:** not needed in the MVP (4 of the 6 backends — Custom/Hotspot/Graphical/OCR — manage without it), but as the **next** capability right after the vertical slice rather than at the end. Reason: macOS audio plugins sometimes deliver real AX values, and where they do, the tree is more robust, faster and lower-permission than OCR, with no Retina problem. *It shipped as `host.uia`, and this call was right: it is now how every plug-in in the project is identified.*
+- **The accessibility namespace moved up:** not needed in the MVP (4 of the 6 backends — Custom/Hotspot/Graphical/OCR — manage without it), but as the **next** capability right after the vertical slice rather than at the end. Reason: macOS audio plugins sometimes deliver real AX values, and where they do, the tree is more robust, faster and lower-permission than OCR, with no Retina problem. *It shipped as `host.element`, and this call was right: it is now how every plug-in in the project is identified.*
 - **Detection order is platform-specific:** under macOS, AX is often empty for audio plugins (JUCE/u-he → empty `AXGroup`), which makes Vision OCR and template matching relatively more important than under Windows. The detection strategy stays portable, its prioritization does not.
 
 Confirmed: the `host.speech` model switch on macOS (tts-rs/AVFoundation, study §11.7) and `host.sound` deliberately in the core (instead of per-plugin as in ReaHotkey).

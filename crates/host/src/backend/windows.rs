@@ -396,18 +396,18 @@ impl Backend for WindowsBackend {
         }
     }
 
-    fn uia_find(&self, hwnd: isize, name: &str, control_type: i32) -> bool {
-        super::uia::uia_find(hwnd, name, control_type)
+    fn element_find(&self, hwnd: isize, name: &str, control_type: i32) -> bool {
+        super::uia::element_find(hwnd, name, control_type)
     }
 
-    fn uia_find_any(&self, hwnd: isize, names: &[String], types: &[i32]) -> Option<usize> {
-        super::uia::uia_find_any(hwnd, names, types)
+    fn element_find_any(&self, hwnd: isize, names: &[String], types: &[i32]) -> Option<usize> {
+        super::uia::element_find_any(hwnd, names, types)
     }
 
-    fn uia_locate(&self, hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i32)> {
-        super::uia::uia_locate(hwnd, name, control_type)
+    fn element_locate(&self, hwnd: isize, name: &str, control_type: i32) -> Option<(i32, i32)> {
+        super::uia::element_locate(hwnd, name, control_type)
     }
-    fn uia_locate_via(
+    fn element_locate_via(
         &self,
         hwnd: isize,
         via_name: &str,
@@ -415,38 +415,38 @@ impl Backend for WindowsBackend {
         name: &str,
         control_type: i32,
     ) -> Option<(i32, i32)> {
-        super::uia::uia_locate_via(hwnd, via_name, via_type, name, control_type)
+        super::uia::element_locate_via(hwnd, via_name, via_type, name, control_type)
     }
 
-    fn uia_plugin_locate(
+    fn element_plugin_locate(
         &self,
         hwnd: isize,
         container_name: &str,
         name: &str,
         control_type: i32,
     ) -> Option<(i32, i32)> {
-        super::uia::uia_plugin_locate(hwnd, container_name, name, control_type)
+        super::uia::element_plugin_locate(hwnd, container_name, name, control_type)
     }
 
-    fn uia_dump(&self, hwnd: isize) -> Vec<DumpNode> {
-        super::uia::uia_dump(hwnd)
+    fn element_dump(&self, hwnd: isize) -> Vec<DumpNode> {
+        super::uia::element_dump(hwnd)
     }
 
-    fn uia_raw_dump(&self, hwnd: isize) -> Vec<DumpNode> {
-        super::uia::uia_raw_dump(hwnd)
+    fn element_raw_dump(&self, hwnd: isize) -> Vec<DumpNode> {
+        super::uia::element_raw_dump(hwnd)
     }
 
-    fn uia_state_probe(
+    fn element_state_probe(
         &self,
         hwnd: isize,
         container_name: &str,
         name: &str,
         control_type: i32,
     ) -> Option<(i32, i32)> {
-        super::uia::uia_state_probe(hwnd, container_name, name, control_type)
+        super::uia::element_state_probe(hwnd, container_name, name, control_type)
     }
 
-    fn uia_class_nav_point(
+    fn element_class_nav_point(
         &self,
         hwnd: isize,
         class_substr: &str,
@@ -454,11 +454,11 @@ impl Backend for WindowsBackend {
         child: i32,
         sibling: i32,
     ) -> Option<(i32, i32)> {
-        super::uia::uia_class_nav_point(hwnd, class_substr, ctype, child, sibling)
+        super::uia::element_class_nav_point(hwnd, class_substr, ctype, child, sibling)
     }
 
-    fn uia_focus_step(&self, hwnd: isize, direction: i32) -> Option<(String, i32, i32, i32)> {
-        super::uia::uia_focus_step(hwnd, direction)
+    fn element_focus_step(&self, hwnd: isize, direction: i32) -> Option<(String, i32, i32, i32)> {
+        super::uia::element_focus_step(hwnd, direction)
     }
 
     fn screen_size(&self) -> (i32, i32) {

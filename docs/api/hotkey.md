@@ -1,6 +1,6 @@
 ---
-title: "host.hotkey — a key claimed system-wide"
-sidebar_position: 8
+title: "host.hotkey — system-wide hotkeys"
+sidebar_position: 4
 toc_max_heading_level: 2
 ---
 

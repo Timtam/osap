@@ -7,7 +7,7 @@
 -- at declaration time and never asks at runtime. See cells.luau.
 
 local O = host.require("com.platform.overlay")
-local U = host.uia.type
+local U = host.element.type
 
 -- A plugin identifies itself through a UIA element named after it, which NI exposes as a
 -- Window on some hosts and a Pane on others — so every identity question here asks about
@@ -23,7 +23,7 @@ local QT_PLUGIN = "Qt%d+.-QWindowIcon"
 -- module: an open browser hides the nested Kontakt, so the KK overlay — not this one — is
 -- the overlay active then, and is where the close belongs.)
 
--- The Kontakt versions, in the order host.uia.findAny reports them. `offset` is the
+-- The Kontakt versions, in the order host.element.findAny reports them. `offset` is the
 -- content shift a library needs: libraries are authored in the Kontakt 7 frame and
 -- Kontakt 8 renders content 29 px lower, so EVERY host path adds this on top of its own
 -- chrome offset.
@@ -39,7 +39,7 @@ for i, v in ipairs(VARIANTS) do VARIANT_NAMES[i] = v.name end
 -- "is this a Kontakt?" and "which one?" costs the same as the old "is this a Kontakt 8?"
 -- alone did — and this runs on every detection pass, per candidate control.
 local function variantIndex(c)
-  return c and c.id and host.uia.findAny(c.id, VARIANT_NAMES, IDENTITY_TYPES) or nil
+  return c and c.id and host.element.findAny(c.id, VARIANT_NAMES, IDENTITY_TYPES) or nil
 end
 local function anyKontakt(c)
   return variantIndex(c) ~= nil
@@ -54,7 +54,7 @@ end
 -- correctly without the library knowing anything about KK.
 local KK_NAME = { "Komplete Kontrol" }
 local function isKK(c)
-  return c ~= nil and c.id ~= nil and host.uia.findAny(c.id, KK_NAME, IDENTITY_TYPES) ~= nil
+  return c ~= nil and c.id ~= nil and host.element.findAny(c.id, KK_NAME, IDENTITY_TYPES) ~= nil
 end
 -- KK chrome offset, from KK's control top-left to where Kontakt's content begins.
 -- Computed DYNAMICALLY at runtime (= nested Kontakt.client − KK.client, the exact inner
@@ -393,7 +393,7 @@ end
 -- The "Kontakt N" identity element's name under `hwnd`, or nil. Used to scope a
 -- two-level UIA search into the plugin's real UI (see actions.luau's pluginLocate).
 local function kontaktPaneName(hwnd)
-  local i = hwnd and host.uia.findAny(hwnd, VARIANT_NAMES, IDENTITY_TYPES)
+  local i = hwnd and host.element.findAny(hwnd, VARIANT_NAMES, IDENTITY_TYPES)
   return i and VARIANTS[i].name or nil
 end
 
@@ -417,7 +417,7 @@ local function isRackView()
   if not (fg and fg.id) then return true end
   local via = kontaktPaneName(fg.id)
   if not via then return true end -- cannot tell: keep the controls
-  return host.uia.pluginLocate(fg.id, via, "VIEW", U.Button) ~= nil
+  return host.element.pluginLocate(fg.id, via, "VIEW", U.Button) ~= nil
 end
 
 return {

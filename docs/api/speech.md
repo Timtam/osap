@@ -1,10 +1,12 @@
 ---
-title: "host.speech — the only way out"
-sidebar_position: 9
+title: "host.speech — spoken output"
+sidebar_position: 14
 toc_max_heading_level: 2
 ---
 
-This is the whole of a module's output. A self-voicing overlay has no window and no visible state, so everything the user is meant to learn — the label of the control Tab just landed on, the state a toggle came back with, the fact that a menu item was not found — leaves through here.
+Speaks a string, through whichever screen reader or voice the platform is configured to use.
+
+It is the whole of a module's output. A self-voicing overlay has no window and no visible state, so everything the user is meant to learn — the label of the control Tab just landed on, the state a toggle came back with, the fact that a menu item was not found — leaves through here.
 
 `interrupt` is the choice between cutting off what is being said and queueing behind it, and it defaults to cutting off, which is right when the user has just moved and the previous sentence is now about the wrong control. Queueing is for the second half of one announcement: the overlay runtime speaks a control's name at once and appends an image-read value when it arrives, because reading that value costs a screen capture — measured at 20–42 ms per focus step — and nothing is gained by the user waiting in silence for it.
 

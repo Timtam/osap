@@ -1,6 +1,6 @@
 ---
-title: "host.os — which platform this is"
-sidebar_position: 13
+title: "host.os — platform detection"
+sidebar_position: 9
 toc_max_heading_level: 2
 ---
 

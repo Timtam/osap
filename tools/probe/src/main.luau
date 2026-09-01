@@ -45,7 +45,7 @@ end
 -- The accessibility tree of one element, bounded by what a log is worth reading.
 local function dumpTree(label, id)
   local ok, elements = pcall(function()
-    return host.uia.rawDump(id)
+    return host.element.rawDump(id)
   end)
   if not ok or not elements then
     line("  tree %s: unavailable (%s)", label, tostring(elements))

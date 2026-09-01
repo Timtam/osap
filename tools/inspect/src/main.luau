@@ -66,7 +66,7 @@ host.hotkey.register("Ctrl+Alt+U", function()
   end
   local function dumpOne(label, id)
     host.log.info(string.format("UIA DUMP %s id=%d", label, id))
-    for _, e in ipairs(host.uia.dump(id)) do
+    for _, e in ipairs(host.element.dump(id)) do
       host.log.info(string.format("  type=%-5d class='%s' name='%s'", e.ctype, e.class, e.name))
     end
   end

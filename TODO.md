@@ -499,19 +499,26 @@ what the platform offers. Both true, and underneath them a defect nobody could h
   - Seven manifests under-declared and broke, which was the point: `melodyne` (keys, log,
       timer), `sforzando` (uia), `kontakt` (path), `overlay-runtime` (path, resource, arbiter),
       `examples/hello` (path), `tools/inspect` (uia). Over-declaration stays legal.
-- [ ] **2. Rename `host.uia` to `host.element`.** Both platforms already use the word —
-      `IUIAutomationElement`, `AXUIElement` — so it is the shared vocabulary rather than a
-      neutral invention, and it drops a vendor name from an API whose purpose is to abstract
-      over both. Measured: 9 manifests, 39 call sites across 12 module files, 63 mentions in
-      the Rust host, 16 in the docs. Cheaper in the same pass as (1), which touches every
-      manifest anyway.
-- [ ] **3. The reference reads like a loose collection of leaflets.** Two things, both mine:
-  - **Sort the pages alphabetically.** They currently sit in the order I happened to think of
-      them, which is no order at all to somebody looking for one.
-  - **The page titles and introductions are too pleased with themselves.** `host.speech — the
-      only way out` and `host.sound — a noise instead of a sentence` are essay titles, not
-      reference titles. A reference entry should say what the thing does and stop. Rewrite them
-      plainly, keeping the measured facts and dropping the flourishes.
+- [x] **2. Renamed `host.uia` to `host.element`** (2026-08-31). Both platforms already use
+      the word — `IUIAutomationElement`, `AXUIElement` — so it is the shared vocabulary rather
+      than a neutral invention, and it drops a vendor name from an API whose purpose is to
+      abstract over both.
+  - Renamed: the Luau name (113 uses across 21 files), the capability string in 7 manifests,
+      and the ten `Backend` trait methods that carry it. **Not** renamed: the word UIA in prose,
+      where it means Microsoft's API and is correct, and `crates/host/src/backend/uia.rs`,
+      which is the Windows implementation and is named after what it implements.
+- [x] **3. The reference read like a loose collection of leaflets** (2026-08-31). Two things,
+      both mine:
+  - **The pages are sorted alphabetically now**, by the title the navigation actually shows —
+      every `host.*` page in order, then the two that are not namespaces. They had sat in the
+      order I happened to think of them, which is no order at all to somebody looking for one.
+  - **The titles and introductions were too pleased with themselves.** `host.speech — the only
+      way out` and `host.sound — a noise instead of a sentence` are essay titles. Every page now
+      opens by saying what the namespace covers — `host.speech — spoken output`, "Recognises
+      text in a screen region" — with the measurements and the reasoning following, which is
+      the order somebody arriving at a reference needs them in. Eleven openings said what their
+      subject MEANT before saying what it did; a reader at `host.ocr` already knows they want
+      text off the screen.
 
 ## One page per feature (2026-08-31)
 

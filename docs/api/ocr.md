@@ -1,10 +1,12 @@
 ---
-title: "host.ocr — text that is only paint"
-sidebar_position: 4
+title: "host.ocr — text recognition"
+sidebar_position: 8
 toc_max_heading_level: 2
 ---
 
-Text that exists nowhere but as paint: a menu row, a live read-out, a field whose element the plug-in takes away exactly when you need it. It is the last of the three ways of reading a plug-in to reach for, and the right one more often than that suggests — an embedded Kontakt's file menu carries no accessibility information whatsoever, so its rows are read and matched by name rather than clicked at a measured offset (an offset slipped by one row once and overwrote the user's default multi), and ON:EAR drops its accessibility tree the moment the caret enters its search box.
+Recognises text in a screen region. Use it for what a plug-in paints rather than publishes: a menu row, a live read-out, a field whose accessibility element disappears exactly when it is needed.
+
+It is the last of the three ways of reading a plug-in to reach for, and the right one more often than that suggests — an embedded Kontakt's file menu carries no accessibility information whatsoever, so its rows are read and matched by name rather than clicked at a measured offset (an offset slipped by one row once and overwrote the user's default multi), and ON:EAR drops its accessibility tree the moment the caret enters its search box.
 
 It is also the most expensive of the three, and the cost is nearly all capture rather than recognition: a 67x13 read-out recognises in 4–6 ms while the capture under it is the same fixed ~17 ms frame as any other. That is why two values which have to agree with each other are read with one `recognizeMany` — measured at 27 ms a tick against 44 for two separate calls.
 

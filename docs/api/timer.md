@@ -1,6 +1,6 @@
 ---
-title: "host.timer — waiting without blocking"
-sidebar_position: 11
+title: "host.timer — timers and change counters"
+sidebar_position: 15
 toc_max_heading_level: 2
 ---
 

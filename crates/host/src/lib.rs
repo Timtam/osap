@@ -424,7 +424,7 @@ fn slow_observation(what: &str, detail: &str, started: Instant) {
 /// modules, one shared epoch, the same handful of distinct questions, ~100 times over.
 ///
 /// The layer above this already memoizes (`originMemo`, per spec and epoch), but it caches
-/// the COMPOSITE verdict — the duplication is one level down, where `host.uia.findAny` and
+/// the COMPOSITE verdict — the duplication is one level down, where `host.element.findAny` and
 /// `host.window.controls` go straight to the backend on every single call. UIA traversal is
 /// the expensive part of a poll tick, and it is being paid for answers we already have.
 ///
@@ -444,7 +444,7 @@ struct Observations {
     /// (hwnd, names, control types) → 1-based index of the matching name, or None.
     uia_any: HashMap<(isize, Vec<String>, Vec<i32>), Option<usize>>,
     /// (hwnd, name, control type) → present?
-    uia_find: HashMap<(isize, String, i32), bool>,
+    element_find: HashMap<(isize, String, i32), bool>,
     /// hwnd → its child controls. Rc so handing it out does not copy the vector.
     controls: HashMap<isize, Rc<Vec<backend::ControlInfo>>>,
     /// The foreground window. Outer Option = not asked yet; inner = there isn't one.
@@ -457,7 +457,7 @@ struct Observations {
     served: u32,
     asked: u32,
     /// UIA element LOOKUPS: "where is the element called X?", keyed by a rendering of the
-    /// arguments. These are the expensive ones — uia_plugin_locate walks the RAW tree, the
+    /// arguments. These are the expensive ones — element_plugin_locate walks the RAW tree, the
     /// only view that reaches into a DAW-embedded plugin's hosted fragment — and one of them
     /// sits in `isRackView`, which every Kontakt cell consults on every recheck.
     points: HashMap<String, Option<(i32, i32)>>,
@@ -513,7 +513,7 @@ impl Shared {
             obs.input_epoch = now_input;
             obs.points.clear();
             obs.uia_any.clear();
-            obs.uia_find.clear();
+            obs.element_find.clear();
             obs.controls.clear();
             obs.active = None;
             obs.focus_chain = None;
@@ -2693,7 +2693,7 @@ const GATED: &[(&str, &str)] = &[
     ("window", "window"),
     ("screen", "screen"),
     ("ocr", "ocr"),
-    ("uia", "uia"),
+    ("element", "element"),
     ("input", "input"),
     ("keys", "keys"),
     ("hotkey", "hotkey"),
@@ -3233,7 +3233,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     )?;
     host.set("window", win)?;
 
-    // host.uia.find(hwnd, name, controlType) — does the window's UI Automation
+    // host.element.find(hwnd, name, controlType) — does the window's UI Automation
     // subtree contain an element with that Name + ControlType? (Plugin identity.)
     let uia = lua.create_table()?;
     let sh = shared.clone();
@@ -3243,21 +3243,21 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             let key = (hwnd, name, ctype);
             let mut obs = sh.observations();
             obs.asked += 1;
-            if let Some(cached) = obs.uia_find.get(&key).copied() {
+            if let Some(cached) = obs.element_find.get(&key).copied() {
                 obs.served += 1;
                 return Ok(cached);
             }
             drop(obs);
             let t = Instant::now();
-            let answer = sh.backend.uia_find(key.0, &key.1, key.2);
+            let answer = sh.backend.element_find(key.0, &key.1, key.2);
             slow_observation("uia.find", &key.1, t);
-            sh.observations().uia_find.insert(key, answer);
+            sh.observations().element_find.insert(key, answer);
             Ok(answer)
         })?,
     )?;
-    // host.uia.type — the UIA ControlType ids, by name. Modules were declaring these as
+    // host.element.type — the UIA ControlType ids, by name. Modules were declaring these as
     // local constants (and writing bare integers where they hadn't), which reads as a
-    // magic number at every call site: `host.uia.find(id, "Kontakt 8", 50033)`.
+    // magic number at every call site: `host.element.find(id, "Kontakt 8", 50033)`.
     let types = lua.create_table()?;
     for (name, id) in [
         ("Button", 50000),
@@ -3303,7 +3303,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         types.set(name, id)?;
     }
     uia.set("type", types)?;
-    // host.uia.findAny(hwnd, names, types) -> index | nil — "is any of these names
+    // host.element.findAny(hwnd, names, types) -> index | nil — "is any of these names
     // present as any of these control types?", the shape a plugin-identity check takes
     // ("Kontakt 8" as Window OR Pane). One tree traversal per NAME rather than one per
     // name×type pair, and it returns WHICH name matched (1-based), so a caller can read
@@ -3323,19 +3323,19 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             // across that would panic on the next observation from inside a callback.
             drop(obs);
             let t = Instant::now();
-            let answer = sh.backend.uia_find_any(key.0, &key.1, &key.2);
+            let answer = sh.backend.element_find_any(key.0, &key.1, &key.2);
             slow_observation("uia.findAny", &key.1.join("/"), t);
             sh.observations().uia_any.insert(key, answer);
             Ok(answer)
         })?,
     )?;
-    // host.uia.locate(hwnd, name, controlType) -> { x, y } (screen centre of the
+    // host.element.locate(hwnd, name, controlType) -> { x, y } (screen centre of the
     // matching element, to click it) or nil. For driving plugin UI via UIA.
     let sh = shared.clone();
     uia.set(
         "locate",
         lua.create_function(move |lua, (hwnd, name, ctype): (isize, String, i32)| {
-            match sh.backend.uia_locate(hwnd, &name, ctype) {
+            match sh.backend.element_locate(hwnd, &name, ctype) {
                 Some((x, y)) => {
                     let t = lua.create_table()?;
                     t.set("x", x)?;
@@ -3346,7 +3346,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             }
         })?,
     )?;
-    // host.uia.locateVia(hwnd, viaName, viaType, name, controlType) -> { x, y } | nil.
+    // host.element.locateVia(hwnd, viaName, viaType, name, controlType) -> { x, y } | nil.
     // Like locate, but descends into a container element (viaName/viaType) first and
     // searches within it — reaches a plugin's UI that hangs off an identity pane as a
     // nested UIA fragment (a DAW-embedded Kontakt). Ports ReaHotkey's two-level find.
@@ -3355,7 +3355,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "locateVia",
         lua.create_function(
             move |lua, (hwnd, via_name, via_type, name, ctype): (isize, String, i32, String, i32)| {
-                match sh.backend.uia_locate_via(hwnd, &via_name, via_type, &name, ctype) {
+                match sh.backend.element_locate_via(hwnd, &via_name, via_type, &name, ctype) {
                     Some((x, y)) => {
                         let t = lua.create_table()?;
                         t.set("x", x)?;
@@ -3367,7 +3367,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             },
         )?,
     )?;
-    // host.uia.pluginLocate(hwnd, containerName, name, controlType) -> { x, y } | nil.
+    // host.element.pluginLocate(hwnd, containerName, name, controlType) -> { x, y } | nil.
     // ReaHotkey's GetPluginUIAElement + FindElement: find the element that IS the plugin
     // (containerName, Window/Pane, QuickWindow class preferred) and search within it over
     // the RAW tree — the only view that reaches a DAW-embedded plugin's hosted Qt UI.
@@ -3378,7 +3378,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             move |lua, (hwnd, container, name, ctype): (isize, String, String, i32)| {
                 let key = format!("pluginLocate {hwnd} {container} {name} {ctype}");
                 match located(&sh, "uia.pluginLocate", key, || {
-                    sh.backend.uia_plugin_locate(hwnd, &container, &name, ctype)
+                    sh.backend.element_plugin_locate(hwnd, &container, &name, ctype)
                 }) {
                     Some((x, y)) => {
                         let t = lua.create_table()?;
@@ -3391,14 +3391,14 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             },
         )?,
     )?;
-    // host.uia.stateProbe(hwnd, container, name, ctype) -> string | nil — what a named
+    // host.element.stateProbe(hwnd, container, name, ctype) -> string | nil — what a named
     // element says about its OWN state, rather than what its control type implies.
     let sh = shared.clone();
     uia.set(
         "stateProbe",
         lua.create_function(
             move |lua, (hwnd, container, name, ctype): (isize, String, String, i32)| {
-                match sh.backend.uia_state_probe(hwnd, &container, &name, ctype) {
+                match sh.backend.element_state_probe(hwnd, &container, &name, ctype) {
                     None => Ok(None),
                     Some((toggle, legacy)) => {
                         let t = lua.create_table()?;
@@ -3413,33 +3413,33 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             },
         )?,
     )?;
-    // host.uia.dump(hwnd) -> { {depth, name, class, ctype}, … } — diagnostic UIA
+    // host.element.dump(hwnd) -> { {depth, name, class, ctype}, … } — diagnostic UIA
     // tree walk (raw view) for discovering plugin identity properties.
     let sh = shared.clone();
     uia.set(
         "dump",
         lua.create_function(move |lua, hwnd: isize| {
             let arr = lua.create_table()?;
-            for (i, n) in sh.backend.uia_dump(hwnd).into_iter().enumerate() {
+            for (i, n) in sh.backend.element_dump(hwnd).into_iter().enumerate() {
                 arr.set(i + 1, dump_node_to_table(lua, n)?)?;
             }
             Ok(arr)
         })?,
     )?;
-    // host.uia.rawDump(hwnd) — like dump, but over the RAW TreeWalker, which crosses
+    // host.element.rawDump(hwnd) — like dump, but over the RAW TreeWalker, which crosses
     // into a hosted Qt fragment (a DAW-embedded plugin's real UI).
     let sh = shared.clone();
     uia.set(
         "rawDump",
         lua.create_function(move |lua, hwnd: isize| {
             let arr = lua.create_table()?;
-            for (i, n) in sh.backend.uia_raw_dump(hwnd).into_iter().enumerate() {
+            for (i, n) in sh.backend.element_raw_dump(hwnd).into_iter().enumerate() {
                 arr.set(i + 1, dump_node_to_table(lua, n)?)?;
             }
             Ok(arr)
         })?,
     )?;
-    // host.uia.classNavPoint(hwnd, className, ctype, child, sibling) -> {x,y} | nil —
+    // host.element.classNavPoint(hwnd, className, ctype, child, sibling) -> {x,y} | nil —
     // click-point of the element reached from the first ClassName-contains +
     // ControlType match by walking `child` (nth child) then `sibling` siblings. Ports
     // ReaHotkey's FindElement(ClassName) + WalkTree(path).Click.
@@ -3448,7 +3448,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "classNavPoint",
         lua.create_function(
             move |lua, (hwnd, class, ctype, child, sibling): (isize, String, i32, i32, i32)| {
-                match sh.backend.uia_class_nav_point(hwnd, &class, ctype, child, sibling) {
+                match sh.backend.element_class_nav_point(hwnd, &class, ctype, child, sibling) {
                     Some((x, y)) => {
                         let t = lua.create_table()?;
                         t.set("x", x)?;
@@ -3460,7 +3460,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             },
         )?,
     )?;
-    // host.uia.focusStep(hwnd, direction) -> { name, ctype, index, count } | nil —
+    // host.element.focusStep(hwnd, direction) -> { name, ctype, index, count } | nil —
     // Tab pass-through for a standalone plugin window: SetFocus the next (direction>=0)
     // / previous keyboard-focusable descendant relative to the current focus, wrapping
     // at the ends, and return the newly focused element so the overlay can announce it.
@@ -3468,7 +3468,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     uia.set(
         "focusStep",
         lua.create_function(move |lua, (hwnd, direction): (isize, i32)| {
-            match sh.backend.uia_focus_step(hwnd, direction) {
+            match sh.backend.element_focus_step(hwnd, direction) {
                 Some((name, ctype, index, count)) => {
                     let t = lua.create_table()?;
                     t.set("name", name)?;
@@ -3481,7 +3481,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             }
         })?,
     )?;
-    host.set("uia", uia)?;
+    host.set("element", uia)?;
 
     // host.screen.pixel / .size / .imageSearch
     let screen = lua.create_table()?;

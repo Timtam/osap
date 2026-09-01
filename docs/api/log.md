@@ -1,6 +1,6 @@
 ---
-title: "host.log — the log is evidence"
-sidebar_position: 14
+title: "host.log — logging"
+sidebar_position: 7
 toc_max_heading_level: 2
 ---
 

@@ -1637,7 +1637,7 @@ end
 -- A control you cannot find is a control you do not have.
 --
 -- As a control: Tab reaches it like any other and announces it; Tab again enters the
--- plugin's OWN focus ring and walks it (host.uia.focusStep, which raises a real UIA focus
+-- plugin's OWN focus ring and walks it (host.element.focusStep, which raises a real UIA focus
 -- event, so the screen reader announces each element and we deliberately do not); and
 -- when that ring returns to where it was entered, Tab carries on through the rest of the
 -- overlay's controls. For a plugin window that does not move focus on Tab by itself
@@ -1669,7 +1669,7 @@ function Overlay:_stepPassThrough(dir)
   if not (c and c.kind == "passthrough" and isVisible(self, c)) then return false end
   local ctrl = self:origin()
   if not (ctrl and ctrl.id) then return false end
-  local r = host.uia.focusStep(ctrl.id, dir)
+  local r = host.element.focusStep(ctrl.id, dir)
   if not r then return false end -- nothing focusable in there: just move on
   if c._entry == nil then
     c._entry = r.index
@@ -3453,7 +3453,7 @@ function Overlay:watchMenus()
     -- menu (verified live), Komplete Kontrol's menu bar, and the plug-in menus generally —
     -- so this answers the common case outright.
     open = host.keys.nativeMenuOpen() == true
-    -- THE EXPENSIVE ONE only when it can still pay. `host.uia.find(hwnd, "", Menu)` means
+    -- THE EXPENSIVE ONE only when it can still pay. `host.element.find(hwnd, "", Menu)` means
     -- "any menu element anywhere in this tree" and therefore walks the plug-in's ENTIRE
     -- accessibility tree, across a process boundary: measured at 50-194 ms per call, on a
     -- 150 ms timer — more than its own interval, permanently, on the thread that owns the
@@ -3472,7 +3472,7 @@ function Overlay:watchMenus()
           if o.active then
             local ctrl = o:origin()
             if ctrl ~= nil and ctrl.id ~= nil
-              and host.uia.find(ctrl.id, "", host.uia.type.Menu) == true
+              and host.element.find(ctrl.id, "", host.element.type.Menu) == true
             then
               open = true
               break
@@ -3680,7 +3680,7 @@ end
 local UIA_DUMP_MAX = 60
 local function calibrationUia(origin)
   local lines, n = {}, 0
-  for _, e in ipairs(host.uia.rawDump(origin.id) or {}) do
+  for _, e in ipairs(host.element.rawDump(origin.id) or {}) do
     if e.name ~= nil and e.name ~= "" then
       n += 1
       if n > UIA_DUMP_MAX then
