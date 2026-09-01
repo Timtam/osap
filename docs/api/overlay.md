@@ -13,7 +13,7 @@ Source: `modules/overlay-runtime/src/main.luau`.
 
 Control **kinds**: `static`, `hotspot`, `custom`, `ocr`, `gtoggle`. The spoken type label is `""` (static), `"button"` (hotspot/custom/ocr), `"toggle button"` (gtoggle). **Every kind is a focus stop** — `static` text is Tab-reachable and read aloud, it just has no activation (Enter does nothing on it).
 
-## O.new(label)
+## O.new(label) {#o-new}
 
 Creates a new overlay object. `label: string?` (defaults to `"Overlay"`).
 
@@ -30,7 +30,7 @@ ov:attach({ title = { contains = "sforzando" }, windows = { class = "PLGWindowCl
   { menus = true })
 ```
 
-## O:addStaticText(label)
+## O:addStaticText(label) {#o-addstatictext}
 
 Appends a static text control: Tab-reachable and read aloud on focus, but with no activation (Enter does nothing). `label: string`.
 
@@ -49,17 +49,17 @@ ov:addStaticText({
 })
 ```
 
-## O:addHotspotButton(opts)
+## O:addHotspotButton(opts) {#o-addhotspotbutton}
 
 Appends a button that, when activated, clicks a fixed origin-relative point. `opts: { label: string, at: {number, number}, hotkey: string?, rawOrigin: boolean?, fromRight: boolean? }` — `at` is `{x, y}` relative to the origin; `hotkey` is an optional global activation hotkey spec (e.g. `"Alt+P"`).
 
 Returns `{ kind = "hotspot", label, at, text, hotkey, rawOrigin, fromRight, opensMenu, when }`. On activate it clicks `(origin.x + at[1], origin.y + at[2])` and speaks `"label, activated"`.
 
-Two checks come before the click. The point must fall inside the origin's own frame, and — where the platform can say — the window it belongs to must be the one actually **drawn** at that point; see [`host.window.ownsPoint`](window#hostwindowownspointid-x-y). A coordinate inside our rectangle can still be covered by a notification or another application, and a click that lands somewhere unknown while the overlay announces "activated" is a press with no way to tell where it went.
+Two checks come before the click. The point must fall inside the origin's own frame, and — where the platform can say — the window it belongs to must be the one actually **drawn** at that point; see [`host.window.ownsPoint`](window#host-window-ownspoint). A coordinate inside our rectangle can still be covered by a notification or another application, and a click that lands somewhere unknown while the overlay announces "activated" is a press with no way to tell where it went.
 
 `text` is announced between the label and the word "button", and is how a control that acts can also say something about itself — whether it is available, or what it would act on.
 
-`fromRight` measures `at[1]` from the coordinate window's **right edge** instead of its left — the click lands at `origin.x + width − at[1]` (ReaHotkey's `ControlX + ControlWidth − N`). Use it for plugin UI laid out from the right, so the target stays correct whatever the plugin's width is. Also accepted by [`addHotspotToggle`](#addhotspottoggle).
+`fromRight` measures `at[1]` from the coordinate window's **right edge** instead of its left — the click lands at `origin.x + width − at[1]` (ReaHotkey's `ControlX + ControlWidth − N`). Use it for plugin UI laid out from the right, so the target stays correct whatever the plugin's width is. Also accepted by [`addHotspotToggle`](#o-addhotspottoggle).
 
 `points` replaces `at` with a **click sequence** — `points = {{x1,y1},{x2,y2},…}`, with `settle` ms between each (default 400) — for UI where reaching a control means getting there first: switch to its tab, then its sub-tab, then click it. Each step re-resolves the origin and goes through the overlay's own coordinate resolution, so a frame offset, `rawOrigin` or landmark anchoring applies exactly as for a single point. Making that one control keeps every action self-contained, so a user who cannot see a tab structure never has to navigate it.
 
@@ -71,7 +71,7 @@ ov:addHotspotButton({ label = "Play", at = { 120, 40 }, hotkey = "Alt+P" })
 ov:addHotspotButton({ label = "Previous instrument", at = { 352, 87 }, fromRight = true, rawOrigin = true })
 ```
 
-## O:group(pred, build)
+## O:group(pred, build) {#o-group}
 
 **Signature:** `O:group(pred: (overlay) -> boolean, build: (overlay) -> ()) -> Overlay`
 
@@ -88,7 +88,7 @@ end)
 
 A `when` predicate must return exactly `true`; anything else counts as hidden. A hidden control is not Tab-reachable, its hotkey does nothing, and it does not claim a key combination that a visible sibling wants.
 
-## Bindings — O.window / O.embedded / :with / O.hosts / O:bind
+## Bindings — O.window / O.embedded / :with / O.hosts / O:bind {#bindings}
 
 **Signatures:**
 `O.window(matcher, opts?) -> Binding` · `O.embedded(spec, opts?) -> Binding` · `Binding:with(over) -> Binding` · `O.hosts(...) -> {matcher}` · `O:bind(binding, opts?) -> Overlay`
@@ -112,7 +112,7 @@ dialog:bind(HOSTED:with({ control = "^NIChildWindow%x+$", identify = present,
 
 One overlay object takes **one** binding: an object is pinned to a single slot and its match poll belongs to that join. Two places to live means two overlay objects sharing a build function.
 
-## O.layer
+## O.layer {#o-layer}
 
 The specificity ladder within a slot, named: `chrome` (a host's own frame), `base` (the plugin's generic header), `content` (what is loaded inside it right now), `dialog` (a modal that must own the keyboard). Pass `specificity = O.layer.content` rather than a bare number.
 
@@ -126,7 +126,7 @@ library:bind(HOSTED, { specificity = O.layer.content })   -- what is loaded in i
 contentMissing:bind(DIALOG, { specificity = O.layer.dialog })
 ```
 
-## O.memoByOrigin(fn, opts?)
+## O.memoByOrigin(fn, opts?) {#o-memobyorigin}
 
 **Signature:** `O.memoByOrigin(fn: (origin, ...) -> value, opts: { key: ((origin) -> any)? }?) -> (origin, ...) -> value`
 
@@ -143,7 +143,7 @@ local variantOf = O.memoByOrigin(function(ctrl)
 end)
 ```
 
-## O:origin() / O:hwnd()
+## O:origin() / O:hwnd() {#o-origin}
 
 **Signature:** `O:origin() -> Control | Window | nil` · `O:hwnd() -> number | nil`
 
@@ -167,7 +167,7 @@ local function screenPointOf(overlay, dx, dy)
 end
 ```
 
-## O:frame(fn)
+## O:frame(fn) {#o-frame}
 
 **Signature:** `O:frame(fn: (origin) -> (number, number)) -> Overlay`
 
@@ -187,7 +187,7 @@ ov:frame(function(kkCtrl)
 end)
 ```
 
-## O.state
+## O.state {#o-state}
 
 A free-form table on every overlay for the owning module's own state, so it does not have to squat in the runtime's reserved `_`-prefixed fields.
 
@@ -207,7 +207,7 @@ ov:addStepper({
 })
 ```
 
-## ocrLabel — reading a control's name off the screen
+## ocrLabel — reading a control's name off the screen {#ocrlabel}
 
 Any hotspot or hotspot-toggle may carry `ocrLabel = {x1, y1, x2, y2}` (origin-relative): the control's spoken **name** is then read by OCR from that region instead of announced from the static `label`, which becomes the fallback for when OCR reads nothing.
 
@@ -225,7 +225,7 @@ ov:addHotspotToggle({
 })
 ```
 
-## O:addCustomButton(opts)
+## O:addCustomButton(opts) {#o-addcustombutton}
 
 Appends a button that runs a Luau callback on activation. `opts: { label: string, onActivate: (overlay) -> (), text: ((overlay) -> string?)?, typeLabel: string?, editable: boolean?, opensMenu: boolean?, hotkey: string?, when: ((overlay) -> boolean)? }` — `onActivate` receives the overlay itself (so a header control can reach the active context).
 
@@ -253,7 +253,7 @@ ov:addCustomButton({
 })
 ```
 
-## O:addStepper(opts)
+## O:addStepper(opts) {#o-addstepper}
 
 Appends a **value changed with Left and Right**, where the module knows how to change it. `opts: { label: string, text: (overlay) -> string?, onStep: (dir: number, overlay) -> (), onActivate: ((overlay) -> ())?, settle: number?, typeLabel: string?, when: ((overlay) -> boolean)? }`.
 
@@ -263,7 +263,7 @@ Use it where `addSlider` cannot serve. That one finds its thumb by matching an i
 
 - `onStep(dir, overlay)` — `dir` is `-1` for Left and `+1` for Right. Called guarded.
 - `onActivate` — optional, and what a **press** means. Without it, Space and Return are still captured on a stepper (it is not an inert control) and then do nothing at all, which is a promise without an action. ON:EAR's two use it for "double-click to put this back to its default", which is one keystroke instead of twenty.
-- `settle` — how long to wait **at most** for the value to change before announcing it anyway. Not how long to wait: see [`O:watch`](#watch).
+- `settle` — how long to wait **at most** for the value to change before announcing it anyway. Not how long to wait: see [`O:watch`](#o-watch).
 
 What is announced afterwards always comes from reading `text` again, never from what the step intended. A control that reports its own intention rather than the application's state is the failure this project keeps returning to.
 
@@ -279,7 +279,7 @@ ov:addStepper({
 })
 ```
 
-## O:afterIdle(key, ms, fn) {#afteridle}
+## O:afterIdle(key, ms, fn) {#o-afteridle}
 
 Runs `fn` **once**, `ms` after the last call carrying the same `key`. Every call restarts the clock, so a run of keystrokes produces exactly one action at the end of it rather than one per press.
 
@@ -301,11 +301,11 @@ onStep = function(dir, o)
 end,
 ```
 
-## O.doubleClick(x, y)
+## O.doubleClick(x, y) {#o-doubleclick}
 
 Two clicks at the same point, far enough apart in time to **be** a double-click. A module-level function rather than a method — it touches no overlay state.
 
-Worth having in one place because the same fact is needed from both sides. A plug-in that resets a control to its default on a double-click is offering a genuinely useful gesture — one keystroke instead of twenty steps — and reaching it means sending two clicks close enough together. That same fact is a hazard everywhere else, which [`O:afterIdle`](#afteridle) exists to avoid.
+Worth having in one place because the same fact is needed from both sides. A plug-in that resets a control to its default on a double-click is offering a genuinely useful gesture — one keystroke instead of twenty steps — and reaching it means sending two clicks close enough together. That same fact is a hazard everywhere else, which [`O:afterIdle`](#o-afteridle) exists to avoid.
 
 The gap is ninety milliseconds, and the number that matters is that it is **not zero**. Two clicks sent back to back go out in the same instant, and an application deciding whether it has seen a double-click is looking at the interval between two presses — an interval of zero reads as easily as one press with a stutter as it does as two. Ninety is plainly two, and comfortably inside any double-click time a system uses.
 
@@ -320,7 +320,7 @@ onActivate = function()
 end,
 ```
 
-## O:watch(spec) {#watch}
+## O:watch(spec) {#o-watch}
 
 Waits for something to **change**, rather than for a length of time. `spec: { read: (overlay) -> any, was: any?, done: ((now: any, was: any) -> boolean)?, every: number?, within: number?, onDone: ((now, was) -> ())?, onGiveUp: ((now, was) -> ())? }`.
 
@@ -344,7 +344,7 @@ self:watch({
 })
 ```
 
-## O:addOCRButton(opts)
+## O:addOCRButton(opts) {#o-addocrbutton}
 
 Appends a button whose label/value is read live by OCR over a region; activating re-reads it then clicks the region centre. `opts: { label: string, region: {number, number, number, number}, hotkey: string? }` — `region` is `{x1, y1, x2, y2}` origin-relative.
 
@@ -363,7 +363,7 @@ ov:addOCRButton({ label = "Articulation", region = { -115, 114, 165, 152 },
   readOnly = true, hotkey = "Alt+B" })
 ```
 
-## O:addGraphicalToggle(opts)
+## O:addGraphicalToggle(opts) {#o-addgraphicaltoggle}
 
 Appends a toggle whose on/off state is read by image-matching its region against an "on" and "off" template; activating clicks the region centre and re-reads the new state after ~150 ms. `opts: { label: string, region: {number, number, number, number}, onImage: string?, offImage: string?, hotkey: string? }` — `region` is `{x1, y1, x2, y2}` origin-relative; `onImage`/`offImage` are template image paths.
 
@@ -382,15 +382,15 @@ ov:addGraphicalToggle({
 })
 ```
 
-## O:addHotspotToggle(opts) {#addhotspottoggle}
+## O:addHotspotToggle(opts) {#o-addhotspottoggle}
 
-Appends a toggle whose on/off state is read from a **single pixel** at its click point (ReaHotkey's `HotspotToggleButton`) — cheap (one screen touch), where a region scan would cost ~16 ms *per pixel*. The pixel is compared to an on/off reference colour and the **nearest** wins. Activating clicks the point (toggling it) and then [waits for the state to actually change](#watch) before announcing it, giving up after ~900 ms. A control that redraws in thirty milliseconds is announced in thirty; one that takes half a second is announced correctly instead of early; one that does not change at all — the already-chosen member of a radio group — is announced at the deadline, which is the truth about it. `opts: { label: string, at: {number, number}, onColor: {number, number, number}, offColor: {number, number, number}, hotkey: string?, rawOrigin: boolean? }` — `at` is `{x, y}` origin-relative; `onColor`/`offColor` are `{r, g, b}`.
+Appends a toggle whose on/off state is read from a **single pixel** at its click point (ReaHotkey's `HotspotToggleButton`) — cheap (one screen touch), where a region scan would cost ~16 ms *per pixel*. The pixel is compared to an on/off reference colour and the **nearest** wins. Activating clicks the point (toggling it) and then [waits for the state to actually change](#o-watch) before announcing it, giving up after ~900 ms. A control that redraws in thirty milliseconds is announced in thirty; one that takes half a second is announced correctly instead of early; one that does not change at all — the already-chosen member of a radio group — is announced at the deadline, which is the truth about it. `opts: { label: string, at: {number, number}, onColor: {number, number, number}, offColor: {number, number, number}, hotkey: string?, rawOrigin: boolean? }` — `at` is `{x, y}` origin-relative; `onColor`/`offColor` are `{r, g, b}`.
 
 `at` may also be a **function** of the overlay, for a control whose position depends on what is on screen right now; returning `nil` yields no point and the click is skipped rather than guessed. `onColor`/`offColor` may each be a **list** of `{r, g, b}`, because one state can legitimately look several ways. A reading that resembles neither closely enough — measured against how far apart the references are — reports **no state at all** and logs why, rather than announcing whichever is nearer. Announcing the opposite of the truth is the worst thing this system can do to somebody who cannot check it against the screen; saying nothing is merely unhelpful.
 
 `text` is honoured here as everywhere, and is how a toggle can report something the state alone does not say — ON:EAR's panel switches use it for "unavailable", because announcing "off" for a switch that will not respond is the same failure as announcing the wrong state.
 
-Like `addHotspotButton`, the click is refused if another window is drawn over the point (see [`host.window.ownsPoint`](window#hostwindowownspointid-x-y)).
+Like `addHotspotButton`, the click is refused if another window is drawn over the point (see [`host.window.ownsPoint`](window#host-window-ownspoint)).
 
 Returns `{ kind = "hotspottoggle", label, at, onColor, offColor, text, hotkey, rawOrigin }`. Spoken state is `"on"` / `"off"` (omitted when the pixel can't be read). Prefer this over `addGraphicalToggle` when the control has a distinct lit/unlit colour (an indicator LED, a lit ⏻ icon) — it needs no template images and is a fraction of the cost.
 
@@ -403,7 +403,7 @@ ov:addHotspotToggle({
 })
 ```
 
-## O:focusNext()
+## O:focusNext() {#o-focusnext}
 
 Moves focus to the next control (wrapping) and speaks it, moving the mouse onto OCR controls if `hoverToRead` is set. No-op when there are no controls. Returns nothing.
 
@@ -416,7 +416,7 @@ host.hotkey.register("Alt+Right", function()
 end)
 ```
 
-## O:focusPrev()
+## O:focusPrev() {#o-focusprev}
 
 Moves focus to the previous control (wrapping) and speaks it. No-op when empty. Returns nothing.
 
@@ -429,7 +429,7 @@ host.hotkey.register("Alt+Left", function()
 end)
 ```
 
-## O:activate(index)
+## O:activate(index) {#o-activate}
 
 Activates the control at `index` (defaults to the focused control). `index: number?`. Behaviour by kind: `hotspot` clicks `at` and speaks `"label, activated"`; `custom` calls `onActivate(self)`; `ocr` re-reads then clicks the region centre; `gtoggle` clicks the region centre and re-reads state after ~150 ms. No-op for `static` or a missing control. Returns nothing.
 
@@ -445,7 +445,7 @@ end)
 -- ov:activate(1)
 ```
 
-## O:attach(matcher, opts)
+## O:attach(matcher, opts) {#o-attach}
 
 Binds the overlay as a **standalone** context: active while a window matching `matcher` is the foreground/active window, with coordinates relative to that window's client area. `matcher` is a window matcher passed to `host.window.test`; `opts: { hoverToRead: boolean? }?`.
 
@@ -468,7 +468,7 @@ ov:attach({
 --                           specificity = O.layer.dialog, pollMatch = 500 })
 ```
 
-## O:attachEmbedded(spec, opts)
+## O:attachEmbedded(spec, opts) {#o-attachembedded}
 
 Binds the overlay as an **embedded** context: active while keyboard focus is inside a plugin control hosted in a DAW. Coordinates are relative to that control's client area, so the same regions work standalone and embedded.
 
@@ -497,7 +497,7 @@ ov:attachEmbedded({
 
 There is no equivalent child control to match. A binding whose `control` table carries no entry for the running platform is **inert rather than broken** -- it logs and does nothing, and the module keeps working through whatever other bindings it has. That is why sforzando ships a separate standalone binding for the Mac rather than relying on this one.
 
-## O:gate(fn) / O:landmark(image)
+## O:gate(fn) / O:landmark(image) {#o-gate}
 
 `gate(fn)` sets an extra activation condition ANDed onto the context match:
 `fn(origin)` (origin = the active context's coordinate window/control) returns
@@ -534,7 +534,7 @@ end)
 ov:landmark(host.path("images/MimiPage/Wordmark.png"), { anchor = true })
 ```
 
-## O:typingWhen(fn)
+## O:typingWhen(fn) {#o-typingwhen}
 
 `fn() -> boolean`. While it returns true, the overlay **holds no keys at all** — not the navigation keys, not Space, not Return.
 
@@ -557,7 +557,7 @@ end)
 settings:typingWhen(function() return settingsDark end)
 ```
 
-## Plugin base + library overlays (the cell model)
+## Plugin base + library overlays (the cell model) {#plugin-base-library-overlays}
 
 A plugin is not one overlay. It is one overlay per **cell** — per combination of things
 that are fixed for as long as the window exists: which version it is, and where it runs
@@ -598,7 +598,7 @@ end)
 ```
 
 Splitting a module across files is what keeps this readable: see
-[`host.include`](resource-settings-modules#hostincluderel). Kontakt separates detection,
+[`host.include`](resource-settings-modules#host-include). Kontakt separates detection,
 the cell matrix, the per-version geometry, what a control does, and what a cell contains.
 
 See [Nested overlays design](../nested-overlays-design.md).

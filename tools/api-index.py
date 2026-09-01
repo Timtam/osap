@@ -1,0 +1,225 @@
+# -*- coding: utf-8 -*-
+"""Give every API entry a stable anchor, and build the index of all of them.
+
+Two problems, one pass.
+
+**The anchors were not usable.** Docusaurus derives a heading's anchor from its text, and on a
+heading like `O:addStaticText(label)` it produced `olabel` — the method name gone. Three
+different entries collapsed to `oopts`, `oopts-1`, `oopts-2`, numbered in document order, so
+adding an entry silently renumbered the ones after it and any link to them rotted. Headings
+displayed correctly throughout, which is why nothing looked wrong. An explicit `{#anchor}` is
+honoured verbatim, so every entry gets one, derived from its own name.
+
+**There was no index.** The sidebar listed six pages with names like `speech-hotkey-keys-timer-log`,
+so finding `host.timer.after` meant guessing which bundle it lived in. The index lists every
+entry, grouped by namespace, with the one-line summary each page already carries.
+
+    python tools/api-index.py            rewrite the anchors and regenerate docs/api/index.md
+    python tools/api-index.py --check    fail if either is out of date (used by check-docs.ps1)
+
+The index is generated rather than written, because a hand-kept list of 87 entries is a list
+that is wrong within a month.
+"""
+import glob
+import io
+import os
+import re
+import sys
+
+API = 'docs/api'
+INDEX = os.path.join(API, 'index.md')
+
+# The order namespaces appear in. Named rather than sorted: this is the order somebody learns
+# them in, and it puts the two things every module touches first.
+NS_ORDER = [
+    'Overlay', 'host.window', 'host.screen', 'host.ocr', 'host.uia', 'host.input',
+    'host.keys', 'host.hotkey', 'host.speech', 'host.sound', 'host.timer', 'host.settings',
+    'host.config', 'host.os', 'host.log', 'host.path', 'host.resource', 'host.require',
+    'host.tryRequire', 'host.include', 'host.epoch', 'Concepts',
+]
+
+NS_BLURB = {
+    'Overlay': 'The self-voicing control tree: what a module builds, and how it is bound to a '
+               'window. `local O = host.require("com.platform.overlay")`.',
+    'host.window': 'Finding windows and their controls, and reacting when the focus moves.',
+    'host.screen': 'Reading pixels, and finding a picture within them.',
+    'host.ocr': 'Reading text that exists nowhere but on the screen.',
+    'host.uia': 'Asking the accessibility layer what a window contains.',
+    'host.input': 'Driving the mouse and keyboard.',
+    'host.keys': 'Claiming keys before the application sees them.',
+    'host.hotkey': 'Claiming a combination system-wide.',
+    'Concepts': 'The shapes and grammars the calls above are written in.',
+}
+
+
+def slug(heading):
+    """A stable anchor, derived from the entry's own name rather than its punctuation."""
+    h = heading.split('{')[0].strip()
+    # `O:origin() / O:hwnd()` documents two calls under one heading; the first one names it.
+    h = h.split(' / ')[0]
+    h = re.split(r'\s+[—-]\s+', h)[0]          # `ocrLabel — reading a control's name` -> `ocrLabel`
+    h = re.sub(r'\(.*', '', h)                  # arguments never belong in an anchor
+    h = h.strip().lower()
+    h = re.sub(r'[^a-z0-9]+', '-', h).strip('-')
+    return h or 'entry'
+
+
+def namespace(heading):
+    h = heading.split('{')[0].strip()
+    m = re.match(r'(host\.[a-zA-Z]+)', h)
+    if m:
+        return m.group(1)
+    if h.startswith('O:') or h.startswith('O.') or h.startswith('Bindings'):
+        return 'Overlay'
+    return 'Concepts'
+
+
+def summarise(body):
+    """The first sentence of prose after the heading, with the signature line skipped."""
+    for line in body.split('\n'):
+        t = line.strip()
+        if not t or t.startswith('```') or t.startswith('|') or t.startswith('#'):
+            continue
+        # A line that is nothing but a signature in backticks describes the shape, not the job.
+        if re.fullmatch(r'`[^`]+`', t) or re.match(r'\*\*Signatures?:\*\*', t):
+            continue
+        t = re.sub(r'^\(prelude\)\s*', '', t)
+        # A summary is lifted out of its own page, so any relative link in it would resolve
+        # against the index instead and point at nothing. Keep the words, drop the link.
+        t = re.sub(r'\[([^\]]+)\]\([^)]*\)', r'', t)
+        # One sentence is enough for an index; the entry itself carries the rest.
+        s = re.split(r'(?<=[.!?])\s', t)[0].strip().rstrip(':')
+        # And one sentence can still be a paragraph. Cut at the first clause boundary past
+        # the point where a row stops being scannable — a table read aloud, cell by cell, is
+        # the case this is for.
+        if len(s) > 130:
+            head = re.split(r'\s+[—-]\s+|:\s+|;\s+', s)[0].strip()
+            s = head if 20 < len(head) <= 160 else s[:127].rsplit(' ', 1)[0] + '…'
+        return s
+    return ''
+
+
+def collect():
+    entries = []
+    for path in sorted(glob.glob(os.path.join(API, '*.md'))):
+        if os.path.basename(path) == 'index.md':
+            continue
+        page = os.path.splitext(os.path.basename(path))[0]
+        text = open(path, encoding='utf-8').read()
+        parts = re.split(r'^(## .+)$', text, flags=re.M)
+        for i in range(1, len(parts), 2):
+            head = parts[i][3:]
+            entries.append({
+                'page': page,
+                'path': path,
+                'raw': parts[i],
+                'title': head.split('{')[0].strip(),
+                'anchor': slug(head),
+                'ns': namespace(head),
+                'summary': summarise(parts[i + 1]),
+            })
+    return entries
+
+
+def rewrite_anchors(entries, dry):
+    """Stamp `{#anchor}` on every heading, and repoint links that used the old ones."""
+    changed = []
+    by_path = {}
+    for e in entries:
+        by_path.setdefault(e['path'], []).append(e)
+    # Old explicit anchors have to keep resolving from inside the docs, so every link is
+    # rewritten to the new name in the same pass.
+    renames = {}
+    for e in entries:
+        m = re.search(r'\{#([A-Za-z0-9_-]+)\}', e['raw'])
+        if m and m.group(1) != e['anchor']:
+            renames[m.group(1)] = e['anchor']
+
+    for path, es in by_path.items():
+        text = open(path, encoding='utf-8').read()
+        for e in es:
+            want = '## ' + e['title'] + ' {#' + e['anchor'] + '}'
+            if e['raw'].rstrip() != want:
+                text = text.replace(e['raw'].rstrip(), want, 1)
+        for old, new in renames.items():
+            text = text.replace('(#' + old + ')', '(#' + new + ')')
+        # Anchors that were guessed at the old scheme, in any page.
+        for e in entries:
+            guessed = re.sub(r'[^a-z0-9]+', '', e['title'].lower())
+            if guessed and guessed != e['anchor']:
+                text = text.replace('(#' + guessed + ')', '(#' + e['anchor'] + ')')
+        original = open(path, encoding='utf-8').read()
+        if text != original:
+            changed.append(path)
+            if not dry:
+                io.open(path, 'w', encoding='utf-8', newline='\n').write(text)
+    return changed
+
+
+def build_index(entries):
+    groups = {}
+    for e in entries:
+        groups.setdefault(e['ns'], []).append(e)
+    order = [n for n in NS_ORDER if n in groups] + \
+            [n for n in sorted(groups) if n not in NS_ORDER]
+
+    out = ['---', 'title: All functions', 'sidebar_position: 0', '---', '',
+           '# All functions', '',
+           'Every call the platform offers a module, in one place. ' +
+           str(len(entries)) + ' entries.', '',
+           'A module reaches the host through the global `host` table, which is always there. ' +
+           'The overlay is a module like any other and is imported: ' +
+           '`local O = host.require("com.platform.overlay")`.', '']
+    for ns in order:
+        out.append('## ' + ns)
+        out.append('')
+        if ns in NS_BLURB:
+            out.append(NS_BLURB[ns])
+            out.append('')
+        out.append('| | |')
+        out.append('|---|---|')
+        for e in sorted(groups[ns], key=lambda x: x['title']):
+            link = '[`' + e['title'] + '`](' + e['page'] + '#' + e['anchor'] + ')'
+            out.append('| ' + link + ' | ' + (e['summary'] or '') + ' |')
+        out.append('')
+    return '\n'.join(out).rstrip() + '\n'
+
+
+def main():
+    check = '--check' in sys.argv
+    entries = collect()
+
+    dupes = {}
+    for e in entries:
+        dupes.setdefault(e['anchor'], []).append(e['title'])
+    clashes = {a: t for a, t in dupes.items() if len(t) > 1}
+    if clashes:
+        print('anchor collisions — two entries would answer to the same link:')
+        for a, t in clashes.items():
+            print('  #' + a + ': ' + ', '.join(t))
+        return 1
+
+    changed = rewrite_anchors(entries, dry=check)
+    entries = collect() if not check else entries
+    index = build_index(entries)
+    current = open(INDEX, encoding='utf-8').read() if os.path.exists(INDEX) else None
+
+    if check:
+        stale = changed + ([INDEX] if current != index else [])
+        if stale:
+            print('out of date, run `python tools/api-index.py`:')
+            for f in stale:
+                print('  ' + f.replace(os.sep, '/'))
+            return 1
+        print(str(len(entries)) + ' entries: anchors stamped and the index is current.')
+        return 0
+
+    io.open(INDEX, 'w', encoding='utf-8', newline='\n').write(index)
+    print(str(len(entries)) + ' entries across ' +
+          str(len({e['ns'] for e in entries})) + ' namespaces')
+    print('anchors rewritten in ' + str(len(changed)) + ' file(s); index written to ' + INDEX)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -5,7 +5,7 @@ sidebar_position: 4
 
 Input/output reference for the speech, hotkey, low-level key-capture, timer, and logging host namespaces. These are the closures registered in `crates/host/src/lib.rs` (`install_host_api`). Coordinates do not apply to this group. All callbacks run in the calling module's own Luau VM and only fire while that module is **enabled**.
 
-## Key spec string format
+## Key spec string format {#key-spec-string-format}
 
 Two namespaces parse `+`-joined spec strings; segments are trimmed and case-insensitive.
 
@@ -51,7 +51,7 @@ The tap form behaves the same on either platform: armed when a modifier goes dow
 
 Until recently only `"Alt tap"` was armed on Windows, and `"Ctrl tap"`, `"Shift tap"` and `"Cmd tap"` were accepted, returned a token and could never fire. All four work now.
 
-## host.speech.output(text, opts?)
+## host.speech.output(text, opts?) {#host-speech-output}
 
 **Signature:** `host.speech.output(text: string, opts: { interrupt: boolean? }?)` → `nil`
 
@@ -81,7 +81,7 @@ This call never raises: a failing speech engine must not take a module's key han
 
 ---
 
-## host.hotkey.register(spec, callback)
+## host.hotkey.register(spec, callback) {#host-hotkey-register}
 
 **Signature:** `host.hotkey.register(spec: string, callback: () -> ()) ` → `id: number`
 
@@ -103,7 +103,7 @@ A Carbon event hotkey — deliberately **not** an event tap, so this needs no In
 
 A `"<modifier> tap"` spec is **refused outright here**, with a message pointing at `host.keys`: Carbon has no notion of a bare modifier press, and registering something plausible instead would fire on the wrong key. Windows rejects it too, but only incidentally — its hotkey parser has no tap branch at all, so the refusal reads as an unknown key rather than as an explanation.
 
-## host.hotkey.unregister(id)
+## host.hotkey.unregister(id) {#host-hotkey-unregister}
 
 **Signature:** `host.hotkey.unregister(id: number)` → `nil`
 
@@ -117,11 +117,11 @@ host.hotkey.unregister(id)
 
 The `host.keys` namespace is a low-level, modifier-aware keyboard hook that **intercepts and suppresses** individual keystrokes (the key does not reach the focused application) and delivers them to your callback. It is distinct from `host.hotkey`: keys are matched on exact modifier state and the captured set is recomputed across all enabled modules whenever it changes.
 
-## host.keys.capture(spec, callback)
+## host.keys.capture(spec, callback) {#host-keys-capture}
 
 **Signature:** `host.keys.capture(spec: string, callback: (mods: { shift: boolean, ctrl: boolean, alt: boolean, win: boolean }) -> ())` → `number` (a release token)
 
-Begins intercepting the [key spec](#key-spec-string-format): the keypress is swallowed (not passed to the underlying app) and `callback` is invoked with a `mods` table describing the modifier state at press time. Re-capturing the same `(vk, mask)` for this module replaces the previous callback (and mints a new token). Installs the low-level keyboard hook on first use (idempotent). Raises an error for an unknown spec. **Returns a token** to pass to [`host.keys.release`](#hostkeysreleasetoken); keep it if you'll release this specific capture (two overlays in one module can each capture the same key, so releasing by spec would be ambiguous).
+Begins intercepting the [key spec](#key-spec-string-format): the keypress is swallowed (not passed to the underlying app) and `callback` is invoked with a `mods` table describing the modifier state at press time. Re-capturing the same `(vk, mask)` for this module replaces the previous callback (and mints a new token). Installs the low-level keyboard hook on first use (idempotent). Raises an error for an unknown spec. **Returns a token** to pass to [`host.keys.release`](#host-keys-release); keep it if you'll release this specific capture (two overlays in one module can each capture the same key, so releasing by spec would be ambiguous).
 
 ```luau
 host.keys.capture("Tab", function(mods)
@@ -143,11 +143,11 @@ This call **can raise**. Without the Accessibility grant the event tap is refuse
 
 There is **no screen-reader pass-through rule**. Caps Lock contributes no modifier bit at all, so with VoiceOver's modifier set to Caps Lock, VO+Space arrives as a bare Space, mask 0, and an overlay claiming Space will capture and suppress it. With the default Ctrl+Option the mask is non-zero and a bare-key capture does not match, so this bites only on the Caps Lock setting.
 
-## host.keys.release(token)
+## host.keys.release(token) {#host-keys-release}
 
 **Signature:** `host.keys.release(token: number)` → `nil`
 
-Undoes the exact capture identified by the `token` [`host.keys.capture`](#hostkeyscapturespec-callback) returned, recomputing the global captured set so the key reaches apps normally again (unless another capture still holds it). Keying on the token — not `(vk, mask, module)` — means one overlay releasing a key cannot drop another overlay in the same module that has since re-captured it. An unknown/stale token (already superseded by a later capture of the same key) is a harmless no-op.
+Undoes the exact capture identified by the `token` [`host.keys.capture`](#host-keys-capture) returned, recomputing the global captured set so the key reaches apps normally again (unless another capture still holds it). Keying on the token — not `(vk, mask, module)` — means one overlay releasing a key cannot drop another overlay in the same module that has since re-captured it. An unknown/stale token (already superseded by a later capture of the same key) is a harmless no-op.
 
 ```luau
 local tok = host.keys.capture("Tab", onTab)
@@ -155,7 +155,7 @@ local tok = host.keys.capture("Tab", onTab)
 host.keys.release(tok)
 ```
 
-## host.keys.releaseAll()
+## host.keys.releaseAll() {#host-keys-releaseall}
 
 **Signature:** `host.keys.releaseAll()` → `nil`
 
@@ -165,7 +165,7 @@ Removes **all** key captures owned by this module and refreshes the suppression 
 host.keys.releaseAll()
 ```
 
-## host.keys.scope(toForeground)
+## host.keys.scope(toForeground) {#host-keys-scope}
 
 **Signature:** `host.keys.scope(toForeground: boolean)` → `nil`
 
@@ -183,7 +183,7 @@ The scope is a window handle, and at press time the hook compares it against a *
 
 The comparison is against a value **cached from notifications** — application activated, focused window changed. A window that merely *opens* inside an already-frontmost application raises neither, so the pin can disagree with what the tap believes is in front. Setting the scope re-asks once and stores the fresh answer, which repairs the common case; it goes unresponsive only when that second resolve disagrees too, and then Tab does nothing until the user switches away and back.
 
-## host.keys.menuOpen(open)
+## host.keys.menuOpen(open) {#host-keys-menuopen}
 
 **Signature:** `host.keys.menuOpen(open: boolean)` → `nil`
 
@@ -197,7 +197,7 @@ host.keys.menuOpen(false)
 
 ---
 
-## host.timer.after(ms, callback)
+## host.timer.after(ms, callback) {#host-timer-after}
 
 **Signature:** `host.timer.after(ms: number, callback: () -> ())` → `nil`
 
@@ -211,7 +211,7 @@ end)
 
 ---
 
-## host.timer.every(ms, callback)
+## host.timer.every(ms, callback) {#host-timer-every}
 
 **Signature:** `host.timer.every(ms: number, callback: () -> ())` → `nil`
 
@@ -225,7 +225,7 @@ end)
 
 ---
 
-## host.epoch()
+## host.epoch() {#host-epoch}
 
 **Signature:** `host.epoch() -> number`
 
@@ -246,7 +246,7 @@ end
 
 Deliberately **not** time-based, and it does not advance on an idle tick. A stale answer here means acting on the wrong screen position, and "it was fresh 50 ms ago" is not a safety property.
 
-## host.log.info(msg)
+## host.log.info(msg) {#host-log-info}
 
 **Signature:** `host.log.info(msg: string)` → `nil`
 

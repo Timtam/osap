@@ -418,6 +418,37 @@ built for themselves.
       its authored coordinates to the window's drawn size, so there is one instance and nothing
       to generalise from. It becomes worth doing when a second plug-in needs it.
 
+## The reference reads like one now (2026-08-31)
+
+Asked for after reading it: it did not feel like an API reference, and there was no index of
+what the platform offers. Both true, and underneath them a defect nobody could have seen.
+
+- [x] **The anchors were unusable, and displayed correctly the whole time.** Docusaurus derives
+      a heading's anchor from its text, and on `O:addStaticText(label)` it produced `olabel` —
+      the method name simply gone. Three entries collapsed onto `oopts`, `oopts-1`, `oopts-2`,
+      numbered in document order, so adding an entry renumbered the ones after it. Every link
+      to an overlay function was therefore either meaningless or on a timer, which is why two
+      of mine broke earlier in the same session and I patched the symptom both times without
+      asking why. The headings rendered perfectly, so nothing looked wrong. Every entry now
+      carries an explicit `{#anchor}` derived from its own name — `#o-addstatictext`,
+      `#host-window-ownspoint` — and Docusaurus honours those verbatim.
+- [x] **An index of all 87 entries**, grouped by namespace, each with the one-line summary its
+      page already carried. The sidebar had listed six pages named things like
+      `speech-hotkey-keys-timer-log`, so finding `host.timer.after` meant guessing which bundle
+      it was in.
+- [x] **Both are generated** (`tools/api-index.py`) and checked in CI. A hand-kept list of 87
+      entries is wrong within a month, and an index missing the function somebody is looking
+      for reads as "this platform does not have it". Verified the check fails: adding an
+      unstamped heading exits 1 and names both files.
+  - Docusaurus has no ready-made reference theme for an API like this — the plugins that exist
+      read OpenAPI, which describes HTTP endpoints. What makes a reference read as one is the
+      index, the stable anchors and the per-entry shape, not a stylesheet.
+- [ ] **The pages themselves are still arbitrary bundles.** `window.md` also holds `host.os` and
+      the matcher grammar; `ocr-input-sound.md` holds three namespaces. The index makes that
+      survivable rather than right. Splitting to one page per namespace would change every URL,
+      so it wants doing once, deliberately — and after the site is actually published, not
+      before.
+
 ## Found while documenting (2026-08-31)
 
 Three defects that surfaced only because somebody wrote down what the code claims. None was

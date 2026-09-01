@@ -5,7 +5,7 @@ sidebar_position: 3
 
 These three namespaces cover screen text recognition (`host.ocr`), mouse/keyboard input synthesis (`host.input`), and audio playback (`host.sound`). All coordinates are screen pixels.
 
-## host.ocr.recognize(opts?)
+## host.ocr.recognize(opts?) {#host-ocr-recognize}
 
 Recognizes text inside a screen region and returns the full text plus per-word bounding boxes.
 
@@ -41,7 +41,7 @@ There is no second engine: the dependency is compiled for Windows only. Small te
 
 So the same call fails in **opposite shapes**: empty `words` with real `text` on Windows for a lone digit, and empty `text` with real `words` here when the ladder runs out of budget.
 
-## host.ocr.recognizeMany(opts)
+## host.ocr.recognizeMany(opts) {#host-ocr-recognizemany}
 
 Recognizes several regions from **one** screen capture — on Windows. macOS does not implement it and falls back to one capture per region; the platform sections below say what that costs.
 
@@ -69,7 +69,7 @@ As documented: one capture of the bounding box of every region, cropped per regi
 
 **Not implemented — the shared default applies, which is one full capture per region**, each a separate round trip at a separate instant. The promise this call exists to make is therefore not kept here: two read-outs that must agree with each other, a note name and its cent offset say, can come from different moments and contradict each other.
 
-## host.input.cursorPos()
+## host.input.cursorPos() {#host-input-cursorpos}
 
 Returns the current mouse cursor position in screen coordinates.
 
@@ -82,7 +82,7 @@ local p = host.input.cursorPos()
 print(p.x, p.y)
 ```
 
-## host.input.move(x, y)
+## host.input.move(x, y) {#host-input-move}
 
 Moves the mouse cursor to the given screen coordinates.
 
@@ -104,7 +104,7 @@ A real move event is posted — or a **drag** event when a button is currently h
 
 So the press-then-glide-then-release gesture, composed from `mouseDown`, a timer and `mouseUp`, is a genuine drag here and can be an invisible warp on Windows: a slider that follows the pointer on a Mac may not move at all there. Where the movement itself is the point, use `host.input.drag`, which paces it on both.
 
-## host.input.click(x, y, opts?)
+## host.input.click(x, y, opts?) {#host-input-click}
 
 Moves to `(x, y)` and synthesizes a mouse click there.
 
@@ -117,7 +117,7 @@ host.input.click(300, 200)                       -- left click
 host.input.click(300, 200, { button = "right" }) -- right click
 ```
 
-## host.input.drag(x1, y1, x2, y2, opts?)
+## host.input.drag(x1, y1, x2, y2, opts?) {#host-input-drag}
 
 Presses the mouse button at `(x1, y1)`, drags to `(x2, y2)`, and releases — with real, paced movement in between.
 
@@ -142,7 +142,7 @@ host.input.drag(100, 100, 400, 300)
 host.input.drag(100, 100, 400, 300, { button = "middle" })
 ```
 
-## host.input.scroll(x, y, amount)
+## host.input.scroll(x, y, amount) {#host-input-scroll}
 
 Moves to `(x, y)` and scrolls the mouse wheel by `notches`, which may be fractional.
 
@@ -165,7 +165,7 @@ host.input.scroll(960, 540, -3)   -- down three notches
 host.input.scroll(960, 540, 0.5)  -- half a notch up, where the control is finer than a notch
 ```
 
-## host.input.send(combo)
+## host.input.send(combo) {#host-input-send}
 
 Sends a keyboard shortcut by pressing the modifiers, tapping the key, and releasing in reverse order.
 
@@ -188,7 +188,7 @@ The modifiers are set as flags on the event, and setting them **replaces the who
 
 The deferral dance is therefore unnecessary for *keys* here — but not for clicks: a synthesised click carries no flag-clearing of its own, so one posted while the user holds Alt is an Alt+click on both platforms.
 
-## host.input.text(text)
+## host.input.text(text) {#host-input-text}
 
 Types a Unicode string as synthetic keystrokes.
 
@@ -200,7 +200,7 @@ Types a Unicode string as synthetic keystrokes.
 host.input.text("Hello, world!")
 ```
 
-## host.sound.play(path)
+## host.sound.play(path) {#host-sound-play}
 
 Plays an audio file from the module's package directory, fire-and-forget.
 

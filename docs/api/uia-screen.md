@@ -5,7 +5,7 @@ sidebar_position: 2
 
 Functions for querying the Windows UI Automation tree of a window and for reading screen pixels / searching for an image template on screen. All coordinates are screen pixels.
 
-## host.uia.find(hwnd, name, controlType)
+## host.uia.find(hwnd, name, controlType) {#host-uia-find}
 
 **Signature:** `host.uia.find(hwnd: number, name: string, controlType: number) -> boolean`
 
@@ -49,7 +49,7 @@ A hand-rolled walk capped at **1500 nodes and depth 24**. Exhausting that budget
 
 The menu idiom is special-cased rather than searched: it asks the *application* whether a menu is open, walking its children and one level into its other windows, and never descends the menu bar itself. `locate` has no such special case.
 
-## host.uia.locate(hwnd, name, controlType)
+## host.uia.locate(hwnd, name, controlType) {#host-uia-locate}
 
 **Signature:** `host.uia.locate(hwnd: number, name: string, controlType: number) -> { x: number, y: number } | nil`
 
@@ -67,7 +67,7 @@ end
 
 Subject to the same **1500 node / depth 24** traversal budget as `host.uia.find` — a tree larger than that answers "not here" to every question, indistinguishably from an honest miss.
 
-## host.uia.type
+## host.uia.type {#host-uia-type}
 
 **Signature:** `host.uia.type: { [string]: number }`
 
@@ -88,7 +88,7 @@ The ids are translated to accessibility roles, and **ten of them have no mapping
 
 `findAny` behaves differently again: given several types it **drops the unmapped ones and searches the rest**, returning nothing only when every type it was given was unmapped. So the same unmapped id makes `find` impossible and makes `findAny` quietly narrower.
 
-## host.uia.findAny(hwnd, names, types)
+## host.uia.findAny(hwnd, names, types) {#host-uia-findany}
 
 **Signature:** `host.uia.findAny(hwnd: number, names: {string}, types: {number}) -> number | nil`
 
@@ -103,7 +103,7 @@ local i = host.uia.findAny(ctrl.id, VERSIONS, { U.Window, U.Pane })
 if i then host.log.info("this is " .. VERSIONS[i]) end
 ```
 
-## host.uia.pluginLocate(hwnd, containerName, name, controlType)
+## host.uia.pluginLocate(hwnd, containerName, name, controlType) {#host-uia-pluginlocate}
 
 **Signature:** `host.uia.pluginLocate(hwnd: number, containerName: string, name: string, controlType: number) -> { x: number, y: number } | nil`
 
@@ -124,7 +124,7 @@ A hand-rolled walk of its own, bounded at 4000 nodes and depth 40 — deliberate
 
 The general **1500 node / depth 24** budget applies here too; there is no larger allowance for this call. A plug-in tree that this reaches on Windows can be out of reach here, and the miss looks identical to a genuine one.
 
-## host.uia.rawDump(hwnd)
+## host.uia.rawDump(hwnd) {#host-uia-rawdump}
 
 **Signature:** `host.uia.rawDump(hwnd: number) -> { { depth: number, name: string, class: string, ctype: number }, … }`
 
@@ -146,7 +146,7 @@ for _, e in ipairs(elements) do
 end
 ```
 
-## host.screen.pixel(x, y)
+## host.screen.pixel(x, y) {#host-screen-pixel}
 
 **Signature:** `host.screen.pixel(x: number, y: number) -> { r: number, g: number, b: number, hex: string }`
 
@@ -168,7 +168,7 @@ Reads the pixel straight from the screen. What you get is what is there.
 
 Captures a small area around the point and downsamples it, so the value is a **box average of the backing pixels** rather than one of them. On a Retina display an exact comparison — `c.hex == "#FF0000"` — can therefore fail on a colour that is genuinely there, at a boundary or on a thin line. Compare with a tolerance, or read a point well inside a flat area.
 
-## host.screen.size()
+## host.screen.size() {#host-screen-size}
 
 **Signature:** `host.screen.size() -> { w: number, h: number }`
 
@@ -189,7 +189,7 @@ host.log.info("screen is " .. s.w .. "x" .. s.h)
 
 This is the difference most likely to waste a day. Coordinates and template images calibrated on a HiDPI Windows machine are exactly **twice** the numbers a Retina Mac needs, and nothing reports it — the click simply lands half a screen away.
 
-## host.screen.profile(opts?)
+## host.screen.profile(opts?) {#host-screen-profile}
 
 **Signature:** `host.screen.profile(opts: { region: Region?, axes: ("both" | "columns" | "rows")? }?) -> { x, y, w, h, columns: Axis?, rows: Axis? } | nil`
 where `Axis = { min: number[], max: number[], mean: number[], r: number[], g: number[], b: number[] }`
@@ -215,7 +215,7 @@ if p then
 end
 ```
 
-## host.screen.imageSearch(template, opts?)
+## host.screen.imageSearch(template, opts?) {#host-screen-imagesearch}
 
 **Signature:** `host.screen.imageSearch(template: string, opts: { region: Region?, tolerance: number? }?) -> { x: number, y: number, w: number, h: number } | nil`
 
@@ -243,7 +243,7 @@ local hit = host.screen.imageSearch("assets/icon.png", {
 
 Without the Screen Recording permission, macOS does **not** fail a capture — it hands back a picture of the desktop wallpaper. So a missing grant does not show up as an error or an empty result; it shows up as a search that never matches, or worse, matches something that was never on the plug-in. If every image search suddenly stops matching on a Mac, check the grant before the template.
 
-## host.screen.imageSearchAsync(template, opts?, cb)
+## host.screen.imageSearchAsync(template, opts?, cb) {#host-screen-imagesearchasync}
 
 **Signature:** `host.screen.imageSearchAsync(template: string | {string}, opts: { region: Region?, tolerance: number?, scales: {number}? }?, cb: (hit: { x: number, y: number, w: number, h: number, n: number } | nil) -> ()) -> nil`
 
@@ -259,7 +259,7 @@ host.screen.imageSearchAsync({ "images/close-v8.png", "images/close-v7.png" },
     end)
 ```
 
-## Region form
+## Region form {#region-form}
 
 Several functions (`host.screen.imageSearch`, `host.screen.profile`, `host.ocr.recognize`, and each entry of `host.ocr.recognizeMany`'s `regions` list) accept a `region` table. A region describes an axis-aligned rectangle by its top-left and bottom-right corners and may be written in **named** or **positional** form (named keys take precedence):
 

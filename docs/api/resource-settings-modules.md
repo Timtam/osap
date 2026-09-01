@@ -19,7 +19,7 @@ Paths are resolved relative to the *calling module's own root directory* (the
 unpacked package), which the host tracks per module — a module never sees
 another module's settings or files unless data is deliberately exported.
 
-## host.path(rel)
+## host.path(rel) {#host-path}
 
 Resolves a package-relative path to an **absolute** filesystem path string
 (`string`), joining `rel` onto the calling module's root and absolutising it
@@ -30,7 +30,7 @@ working directory). It does not check that the file exists.
 local img = host.path("assets/kontakt.png") -- "C:\...\modules\my-mod\assets\kontakt.png"
 ```
 
-## host.resource.read(rel)
+## host.resource.read(rel) {#host-resource-read}
 
 Reads a package-relative file as a UTF-8 string (`string`) from the calling
 module's root; raises a Luau error if the file is missing or not valid UTF-8.
@@ -40,7 +40,7 @@ local json = host.resource.read("data/layout.json")
 local layout = parse(json)
 ```
 
-## host.settings.define(key, default, opts?)
+## host.settings.define(key, default, opts?) {#host-settings-define}
 
 Registers a setting `key` for this module, pins its kind from `default`, and
 returns the **current effective value** (`boolean | number | string`).
@@ -65,7 +65,7 @@ local speed = host.settings.define("speed", 1.0, {
 local mode  = host.settings.define("mode", "fast", { oneOf = { "fast", "safe" } })
 ```
 
-## host.settings.get(key)
+## host.settings.get(key) {#host-settings-get}
 
 Returns the current stored value of a previously-defined setting
 (`boolean | number | string`). Raises an error if `key` was never `define`d, or
@@ -75,7 +75,7 @@ if it has no stored value.
 if host.settings.get("mode") == "safe" then ... end
 ```
 
-## host.settings.set(key, value)
+## host.settings.set(key, value) {#host-settings-set}
 
 Validates `value` against the setting's schema and writes it to the store
 (persisted to disk on the next event-loop tick), then fires any registered
@@ -90,7 +90,7 @@ host.settings.set("speed", 2.0)
 host.settings.set("mode", "safe")
 ```
 
-## host.settings.onChange(key, callback)
+## host.settings.onChange(key, callback) {#host-settings-onchange}
 
 Registers `callback` to run whenever this setting changes (via `set` or the
 settings GUI). Returns `nil`. Multiple callbacks may be registered per key.
@@ -105,7 +105,7 @@ host.settings.onChange("speed", function(new, old)
 end)
 ```
 
-## host.config.get / host.config.set / host.config.define / host.config.onChange
+## host.config.get / host.config.set / host.config.define / host.config.onChange {#host-config-get}
 
 `host.config` is the **same table** as `host.settings` (a catalog-compatibility
 alias). `host.config.get(key)`, `host.config.set(key, value)`,
@@ -116,13 +116,13 @@ alias). `host.config.get(key)`, `host.config.set(key, value)`,
 host.config.set("speed", 1.5) -- identical to host.settings.set("speed", 1.5)
 ```
 
-## host.include(rel)
+## host.include(rel) {#host-include}
 
 **Signature:** `host.include(rel: string) -> any`
 
 Loads **another file of this module** and returns whatever that file returns — a table of functions, a table of constants, an overlay, anything. This is how a module becomes more than one file: shared helpers, reference data, one overlay per file.
 
-Not to be confused with [`host.require`](#hostrequireid), which imports a *different module* by id.
+Not to be confused with [`host.require`](#host-require), which imports a *different module* by id.
 
 ```luau
 -- src/geometry.luau
@@ -141,11 +141,11 @@ Semantics worth knowing:
 - An include **cycle** raises an error naming the file rather than overflowing the stack.
 - Reported line numbers match the file.
 
-## host.require(id)
+## host.require(id) {#host-require}
 
 Returns the object that dependency `id` exported, where `id` is a module declared
 in this module's manifest `dependencies`. Raises an error if `id` is not loaded or
-exported nothing — use [`host.tryRequire`](#hosttryrequireid) for an optional
+exported nothing — use [`host.tryRequire`](#host-tryrequire) for an optional
 dependency that may be absent.
 
 - If `id` is a [**`code_module`**](../module-package-format.md), its code was
@@ -165,9 +165,9 @@ local lib = host.require("com.example.preset-library")
 for _, p in ipairs(lib.presets) do ... end
 ```
 
-## host.tryRequire(id)
+## host.tryRequire(id) {#host-tryrequire}
 
-Like [`host.require`](#hostrequireid), but returns **nil** instead of raising when `id`
+Like [`host.require`](#host-require), but returns **nil** instead of raising when `id`
 isn't loaded — for an **optional dependency** (an id declared in the manifest's
 `optional_dependencies`, which is loaded, and for a `code_module` evaluated into this VM,
 only when it is actually present). The module adapts to whether the dependency is there.

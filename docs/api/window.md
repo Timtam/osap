@@ -5,7 +5,7 @@ sidebar_position: 1
 
 All coordinates are screen pixels on Windows and **points** on macOS (i32 → Luau `number`) unless noted — see `host.screen.size()` for why that distinction costs a day when it is missed. `id` fields are native window handles on Windows (a Win32 `HWND` as a Luau integer) and interned counters on macOS; see the platform sections under **Table shapes**. The `host.window.list`/`active`/`controls`/`focusChain`/`ownsPoint` functions are native (Rust) bindings; `find`/`findAll`/`test`/`onTrigger`/`onFocus` are added by `window_prelude.luau` on top of them.
 
-## Table shapes
+## Table shapes {#table-shapes}
 
 ### Window table
 
@@ -55,7 +55,7 @@ Note: a control table has no `title` / `app` fields — only `id`, `class`, `bou
 
 `id` is a small interned counter, meaningful only to this platform and **never reused** — nothing outside it accepts one, and a handle whose process has exited stays permanently unmatched rather than silently matching something else. `client` is derived rather than read: a titled window's content rect is worked out from its own geometry, so on a borderless plug-in window it equals the frame.
 
-## Matchers
+## Matchers {#matchers}
 
 A *matcher* is a declarative table passed to `host.window.find/findAll/test/onTrigger`. Fields (all optional; all must match):
 
@@ -83,7 +83,7 @@ local matcher = {
 
 ---
 
-## host.os.current
+## host.os.current {#host-os-current}
 
 Read-only string: the current OS, from Rust `std::env::consts::OS` (`"windows"`, `"macos"`, `"linux"`, …). Not a function — a plain field.
 
@@ -91,7 +91,7 @@ Read-only string: the current OS, from Rust `std::env::consts::OS` (`"windows"`,
 if host.os.current == "windows" then ... end
 ```
 
-## host.os.is(name)
+## host.os.is(name) {#host-os-is}
 
 `host.os.is(name: string) -> boolean`
 
@@ -103,7 +103,7 @@ if host.os.is("macos") then ... end
 
 ---
 
-## host.window.list()
+## host.window.list() {#host-window-list}
 
 `host.window.list() -> { Window }`
 
@@ -115,7 +115,7 @@ for _, w in ipairs(host.window.list()) do
 end
 ```
 
-## host.window.active()
+## host.window.active() {#host-window-active}
 
 `host.window.active() -> Window?`
 
@@ -126,7 +126,7 @@ local w = host.window.active()
 if w then host.log.info("front: " .. w.title) end
 ```
 
-## host.window.focus(id)
+## host.window.focus(id) {#host-window-focus}
 
 **Signature:** `host.window.focus(id: number) -> boolean`
 
@@ -168,7 +168,7 @@ Three separate things are attempted — raising the window, activating its appli
 
 Minimised windows are additionally dropped from `list()` and `find()` here, so one cannot normally be reached to pass in.
 
-## host.window.controls(win?)
+## host.window.controls(win?) {#host-window-controls}
 
 `host.window.controls(win: Window?) -> { Control }`
 
@@ -192,7 +192,7 @@ Every **visible child window**, from `EnumChildWindows`, with no node or depth c
 
 So a module that identifies a plug-in by scanning `controls()` for a *leaf* control class finds it on Windows and comes back empty-handed here. Identify by container, or by `host.uia.*`.
 
-## host.window.focusChain()
+## host.window.focusChain() {#host-window-focuschain}
 
 `host.window.focusChain() -> { Control }`
 
@@ -211,7 +211,7 @@ The chain's links are **windows**: it walks from the focused `HWND` up through i
 
 The links are **accessibility elements**. Both platforms start at whatever has focus, but the units differ, so the same self-drawn plug-in can be many links deep here and one link there. A gate written as "the chain is at most one deep, therefore we are in the plug-in" is reading a granularity, not a fact about the plug-in — check what the chain actually contains rather than how long it is.
 
-## host.window.ownsPoint(id, x, y)
+## host.window.ownsPoint(id, x, y) {#host-window-ownspoint}
 
 `host.window.ownsPoint(id: number, x: number, y: number) -> boolean?`
 
@@ -243,7 +243,7 @@ end
 host.input.click(x, y)
 ```
 
-## host.window.find(matcher)
+## host.window.find(matcher) {#host-window-find}
 
 `host.window.find(matcher: Matcher) -> Window?`
 
@@ -253,7 +253,7 @@ host.input.click(x, y)
 local reaper = host.window.find({ app = { name = "reaper" } })
 ```
 
-## host.window.findAll(matcher)
+## host.window.findAll(matcher) {#host-window-findall}
 
 `host.window.findAll(matcher: Matcher) -> { Window }`
 
@@ -263,7 +263,7 @@ local reaper = host.window.find({ app = { name = "reaper" } })
 local editors = host.window.findAll({ title = { contains = "Notepad" } })
 ```
 
-## host.window.test(matcher, win)
+## host.window.test(matcher, win) {#host-window-test}
 
 `host.window.test(matcher: Matcher, win: Window) -> boolean`
 
@@ -274,7 +274,7 @@ local w = host.window.active()
 if w and host.window.test({ windows = { class = "REAPERwnd" } }, w) then ... end
 ```
 
-## host.window.onTrigger(matcher, opts, cb)
+## host.window.onTrigger(matcher, opts, cb) {#host-window-ontrigger}
 
 `host.window.onTrigger(matcher: Matcher, opts: { on: string? }?, cb: (win: Window) -> ()) -> ()`
 
@@ -296,7 +296,7 @@ Only *application* activation is system-wide. Focus-within-an-application, windo
 
 The consequence lands exactly on the embedded-plug-in case: a plug-in window opening inside a DAW that is **already** frontmost raises no application activation, so the event depends entirely on that per-process observer. In a host that refuses accessibility, the overlay never activates even though the same module works on Windows.
 
-## host.window.onFocus(cb)
+## host.window.onFocus(cb) {#host-window-onfocus}
 
 `host.window.onFocus(cb: () -> ()) -> ()`
 

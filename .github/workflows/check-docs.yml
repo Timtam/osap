@@ -40,3 +40,9 @@ jobs:
       - name: Check the API reference
         shell: pwsh
         run: ./check-docs.ps1
+
+      # The index of all 87 entries, and the explicit anchor on every heading, are generated.
+      # Left to drift they are worse than absent: an index that is missing the function you
+      # are looking for reads as "this platform does not have it".
+      - name: The index and the anchors are current
+        run: python tools/api-index.py --check
