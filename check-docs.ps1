@@ -45,12 +45,24 @@ foreach ($pattern in @(
   }
 }
 
-# The tables hanging off `host` itself. Named rather than derived: this list is short, it
-# changes rarely, and spelling it out means an entirely new table shows up as an error
-# instead of being silently accepted.
-$hostTables = @('os', 'window', 'screen', 'ocr', 'input', 'sound', 'speech', 'hotkey', 'keys',
-  'timer', 'log', 'path', 'resource', 'settings', 'config', 'require', 'include', 'uia',
-  'overlay', 'match', 'now', 'epoch', 'inputEpoch', 'arbiter', 'tryRequire')
+# What hangs off `host` itself, derived rather than listed.
+#
+# It was a hand-kept list, justified as short and slow-changing. It then reported
+# `host.calibrating` — which is real, registered at lib.rs, and had simply never been added to
+# the list — as a name the host does not provide. A checker that cries wolf gets switched off,
+# and every one of these is one regex from the source that registers it.
+$hostTables = @()
+foreach ($m in [regex]::Matches($sources, 'host\.set\(\s*"([A-Za-z_][A-Za-z0-9_]*)"')) {
+  $hostTables += $m.Groups[1].Value
+}
+foreach ($m in [regex]::Matches($sources, 'function\s+host\.([A-Za-z_][A-Za-z0-9_]*)')) {
+  $hostTables += $m.Groups[1].Value
+}
+# `host.match` is built by the prelude as a value rather than through either shape, and
+# `host.overlay` is deliberately absent — it is a module, and a documented `host.overlay.*`
+# call is a mistake worth reporting.
+$hostTables += 'match'
+$hostTables = $hostTables | Sort-Object -Unique
 
 # ---- What the documentation calls -------------------------------------------------------
 $docs = Join-Path $root "docs"

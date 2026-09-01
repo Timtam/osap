@@ -1,10 +1,27 @@
 ---
-title: "host.speech + host.hotkey + host.keys + host.timer + host.log"
-sidebar_position: 4
+title: "host.keys — taking a key from the application"
+sidebar_position: 7
 toc_max_heading_level: 2
 ---
 
-Input/output reference for the speech, hotkey, low-level key-capture, timer, and logging host namespaces. These are the closures registered in `crates/host/src/lib.rs` (`install_host_api`). Coordinates do not apply to this group. All callbacks run in the calling module's own Luau VM and only fire while that module is **enabled**.
+Where a hotkey is claimed system-wide and fires wherever the user happens to be, this **takes a key away from the application**: while a capture holds, the keystroke arrives at your callback and the focused plug-in never sees it.
+
+That is what makes an overlay navigable — Tab and Shift+Tab walk the control ring, Space and Return activate what is focused, Left and Right belong to a focused slider or tab control — and it is why the discipline is to hold only what the control in focus actually needs and hand everything else straight back. A key held is a key the plug-in does not get, and from the outside that is indistinguishable from the plug-in ignoring it: a tab control that claimed the arrow keys statically cost Melodyne's editor its arrows entirely, and Space in Melodyne is transport play and stop.
+
+Matching is exact on the modifier state, so a bare key never fires for its modified form and the two Tab directions are two separate captures. Suppression can be pinned to the window that was in front when the scope was set, and a plug-in's own menu can be declared open so navigation keys fall through to it — both exist so that a menu coming forward is driven by the operating system instead of being eaten by the overlay.
+
+On macOS the hook is an event tap, and the failure is asymmetric: without the Accessibility grant the call **raises**, while with Input Monitoring missing it returns a token, reports itself enabled, and never delivers a key.
+
+## What to declare {#declare}
+
+A module that uses this names it in its manifest:
+
+```toml
+[capabilities]
+require = ["keys"]
+```
+
+See [what that list is and is not](./index.md#capabilities).
 
 ## Key spec string format {#key-spec-string-format}
 
@@ -51,72 +68,6 @@ Modifiers map **by position, not by name**: Ctrl is Control, Alt is Option, and 
 The tap form behaves the same on either platform: armed when a modifier goes down from rest, dropped by anything at all in between — an ordinary key, a second modifier, Caps Lock — and fired on the release. It is never suppressed, so the modifier keeps working as a modifier.
 
 Until recently only `"Alt tap"` was armed on Windows, and `"Ctrl tap"`, `"Shift tap"` and `"Cmd tap"` were accepted, returned a token and could never fire. All four work now.
-
-## host.speech.output(text, opts?) {#host-speech-output}
-
-**Signature:** `host.speech.output(text: string, opts: { interrupt: boolean? }?)` → `nil`
-
-Speaks `text`; `opts.interrupt` defaults to `true` (omitting `opts` also means interrupt). Output is **not** echoed to the console — a screen reader reading the terminal would double the speech.
-
-```luau
-host.speech.output("Reverb enabled")
-host.speech.output("loading...", { interrupt = false })  -- queue, don't cut off
-```
-
-**Where it comes out**, which the caller does not choose and does not need to know:
-
-- **Windows** — the running screen reader if there is one (NVDA, JAWS and Narrator all go through Tolk), otherwise SAPI.
-- **macOS** — the platform's own voice, unless **Speak through VoiceOver** is ticked in the Application settings tab. Ticked, the line goes to VoiceOver and arrives in the user's voice, at their rate, and **on their braille display**, which nothing else can do.
-
-  It is off until somebody asks for it, and the reason is the permission rather than the feature: the first line through this path is an Apple Event, and the first Apple Event makes macOS put an Automation consent dialog on screen. On by default, that dialog appears at startup — before the user has asked for anything, about a thing they may not want, in front of a person who cannot see it to dismiss it. Ticking the box is the request, and that is the moment to ask.
-
-  Two things then send a line to the platform's own voice anyway:
-  - **VoiceOver is not running.** Checked before every line, and deliberately not remembered: VoiceOver started later in the session simply starts being used. The check is also why the overlay cannot *start* VoiceOver — `tell application "VoiceOver"` would launch it, and a tool that switches on a screen reader nobody asked for is not acceptable behaviour.
-  - **VoiceOver refuses**, most often because AppleScript control is not allowed. The line comes back and is said by the fallback, the reason is logged **once**, and the path is parked for the session so no further line pays for a process launch that will fail. Ticking the setting again re-arms it.
-
-  Either way the line is said, and unticking the switch turns the path off again for anyone who prefers a second, distinct voice.
-
-`interrupt` governs the platform's own queue. On the VoiceOver path, whether an announcement also cuts off what VoiceOver is saying for its own reasons is VoiceOver's decision, not one this API can make.
-
-This call never raises: a failing speech engine must not take a module's key handler down with it.
-
----
-
-## host.hotkey.register(spec, callback) {#host-hotkey-register}
-
-**Signature:** `host.hotkey.register(spec: string, callback: () -> ()) ` → `id: number`
-
-Registers a **global** OS hotkey (active regardless of foreground window) for the [key spec](#key-spec-string-format) and returns an integer `id`. The callback is invoked with no arguments each time the hotkey fires (only while the owning module is enabled). Raises an error if the spec is invalid or the OS refuses the registration (e.g. already taken).
-
-```luau
-local id = host.hotkey.register("Ctrl+Alt+P", function()
-  host.speech.output("Hotkey pressed")
-end)
-```
-
-### Windows
-
-`RegisterHotKey`, with auto-repeat suppressed. A combination already held by another application is refused, and the refusal is logged by name.
-
-### macOS
-
-A Carbon event hotkey — deliberately **not** an event tap, so this needs no Input Monitoring grant even though `host.keys` does.
-
-A `"<modifier> tap"` spec is **refused outright here**, with a message pointing at `host.keys`: Carbon has no notion of a bare modifier press, and registering something plausible instead would fire on the wrong key. Windows rejects it too, but only incidentally — its hotkey parser has no tap branch at all, so the refusal reads as an unknown key rather than as an explanation.
-
-## host.hotkey.unregister(id) {#host-hotkey-unregister}
-
-**Signature:** `host.hotkey.unregister(id: number)` → `nil`
-
-Releases the OS hotkey and forgets the callback for the `id` returned by `register`. Unknown ids are ignored.
-
-```luau
-host.hotkey.unregister(id)
-```
-
----
-
-The `host.keys` namespace is a low-level, modifier-aware keyboard hook that **intercepts and suppresses** individual keystrokes (the key does not reach the focused application) and delivers them to your callback. It is distinct from `host.hotkey`: keys are matched on exact modifier state and the captured set is recomputed across all enabled modules whenever it changes.
 
 ## host.keys.capture(spec, callback) {#host-keys-capture}
 
@@ -198,62 +149,60 @@ host.keys.menuOpen(false)
 
 ---
 
-## host.timer.after(ms, callback) {#host-timer-after}
+## host.keys.modifiersDown() {#host-keys-modifiersdown}
 
-**Signature:** `host.timer.after(ms: number, callback: () -> ())` → `nil`
+**Signature:** `host.keys.modifiersDown()` → `boolean`
 
-Schedules a **one-shot** callback to fire approximately `ms` milliseconds later, driven from the event-loop tick. The callback runs once with no arguments (only if the module is still enabled at fire time) and is then discarded. There is no returned handle and no way to cancel an individual timer.
+True while any of Ctrl, Alt, Shift or Win — Control, Option, Shift or Command on macOS — is physically held. The reason it exists is that a hotkey callback runs *while its own combination is still down*: you are still holding Alt when the handler for Alt+V starts, so anything the handler synthesises inherits those modifiers. `host.input.send("F10")` arrives at the plug-in as Alt+F10, and a synthesised click arrives as Alt+click, which is a different gesture entirely in most UIs. Ask this before synthesising, and defer until it answers false. It costs nothing worth counting — the hardware keyboard state, no screen touch and no accessibility query — which is why the runtime is willing to poll it every 15 ms.
 
-```luau
-host.timer.after(500, function()
-  host.speech.output("Half a second later")
-end)
-```
-
----
-
-## host.timer.every(ms, callback) {#host-timer-every}
-
-**Signature:** `host.timer.every(ms: number, callback: () -> ())` → `nil`
-
-Schedules a **recurring** callback to fire approximately every `ms` milliseconds, driven from the event-loop tick. Unlike a self-rescheduling `host.timer.after` chain, a recurring timer is **re-armed even while the owning module is disabled** (the callback is only *invoked* while enabled), so a poll resumes on re-enable instead of dying. There is no returned handle or per-timer cancel; it is released when the module is reloaded/unloaded. Use it for polling that must survive a disable/enable cycle — e.g. an overlay watching for a landmark to appear.
+Do not spin waiting for it: the thread that would block is the one carrying speech and the keyboard hook. Poll with `host.timer.after` and **bound the wait**, acting anyway when the bound is reached, or a key the user happens to hold unusually long means the control silently never fires. Caps Lock is not one of these modifiers on either platform — it is a latch rather than something held — so a screen reader whose modifier is Caps Lock does not keep this true. Overlay controls activated through the runtime's own hotkeys already wait; this call is for modules that register their own hotkeys or drive `host.input` directly.
 
 ```luau
-host.timer.every(150, function()
-  -- e.g. re-check whether a library landmark is on screen
-end)
-```
-
----
-
-## host.epoch() {#host-epoch}
-
-**Signature:** `host.epoch() -> number`
-
-A counter that changes whenever the world may have: an OS event dispatched into a module (hotkey, key, window activation, focus change), a timer firing, an async image result arriving, or the module itself driving input (click, move, drag, scroll, key send, typing).
-
-Memoize an expensive observation against it, so repeats within one dispatch are free while a genuinely new situation is always re-observed:
-
-```luau
-local cachedEpoch, cached = -1, nil
-local function expensiveThing()
-    local e = host.epoch()
-    if e ~= cachedEpoch then
-        cached, cachedEpoch = reallyWorkItOut(), e
-    end
-    return cached
+-- modules/overlay-runtime/src/main.luau: a hotkey callback runs while its own combination
+-- is still held, so the F10 it sends arrives as Alt+F10 and toggles nothing.
+local function afterModifiersReleased(fn, tries)
+  if not host.keys.modifiersDown() then return fn() end
+  tries = (tries or 0) + 1
+  -- 40 x 15 ms ≈ 600 ms, then act ANYWAY: a long hold must not mean the control never fires.
+  if tries > 40 then return fn() end
+  host.timer.after(15, function() afterModifiersReleased(fn, tries) end)
 end
+host.hotkey.register("Alt+V", function()
+  afterModifiersReleased(function() host.input.send("F10") end)
+end)
 ```
 
-Deliberately **not** time-based, and it does not advance on an idle tick. A stale answer here means acting on the wrong screen position, and "it was fresh 50 ms ago" is not a safety property.
+## host.keys.nativeMenuOpen() {#host-keys-nativemenuopen}
 
-## host.log.info(msg) {#host-log-info}
+**Signature:** `host.keys.nativeMenuOpen()` → `boolean`
 
-**Signature:** `host.log.info(msg: string)` → `nil`
+True while the application in front has a menu open that the operating system itself drew. This is the **cheap half** of "is a menu open": no accessibility traversal, no screen touch, cheap enough to ask from inside the key path and from a 150 ms timer. The expensive half — `host.uia.find(hwnd, "", host.uia.type.Menu)`, which walks a plug-in's entire accessibility tree across a process boundary — was measured at 50–194 ms per call, more than its own 150 ms interval, and was being spent almost entirely on answering "no". Ask this first and the common case is settled outright, because the menus these overlays open (u-he's preset menu, Komplete Kontrol's menu bar) turn out to be native ones. It is also the guard a module wants around anything that reads the screen on a timer: a menu is drawn *over* the region, so a read-out watcher that keeps going reports the menu's own text as a changed value, over and over, as the user moves through it.
 
-Writes `msg` to the host log under the `module` channel. This is the **only** method on `host.log` — there is no `warn`/`error`/`debug`.
+A false answer means "no menu the OS drew", not "no menu". A plug-in that paints its own menu inside its window — a Qt menu, typically — is invisible here; that case is what [`host.keys.menuOpen`](#host-keys-menuopen) is for, and the runtime's `Overlay:watchMenus` already drives it for you if you attach with `menus = true`. Note also that you do not need this call to get key pass-through while a native menu is up: the key hook consults the same answer itself on both platforms and stops suppressing captured keys for the duration. Modules call it to quiet their *own* polling and reading.
 
 ```luau
-host.log.info("module initialized")
+-- modules/overlay-runtime/src/main.luau, Overlay:watchMenus — the cheap question first.
+local tick = 0
+host.timer.every(150, function()
+  if not ov.active then return end
+  -- Every menu these overlays open turns out to be native (u-he's preset menu, KK's menu bar).
+  local open = host.keys.nativeMenuOpen() == true
+  -- The tree walk costs 50-194 ms, so it is paid on a slow backstop, not every tick.
+  tick += 1
+  if not open and tick % 8 == 0 then
+    local hwnd = ov:hwnd()
+    open = hwnd ~= nil and host.uia.find(hwnd, "", host.uia.type.Menu) == true
+  end
+  host.keys.menuOpen(open)
+end)
 ```
 
+### Windows
+
+A live question, asked fresh on every call: `GetGUIThreadInfo` for the foreground thread, true when that thread is in menu mode, popup-menu mode or system-menu mode. So it covers real Win32 menus — a `#32768` popup, the menu bar, a window's system menu — and it is never stale, because nothing is cached. A menu open in some other program does not count: only the thread that owns the foreground window is inspected.
+
+### macOS
+
+Nothing is asked at call time. The answer is a counter kept by the accessibility observer from the frontmost application's `AXMenuOpened` / `AXMenuClosed` notifications, so the common case — nothing open — is one relaxed load. It **counts rather than latches**, so a submenu opening and closing again does not clear its parent, and notifications from any application that is not frontmost are discarded — an unrelated program with a menu up must never disarm the overlay. The count is also cleared outright when a different application comes to the front, because whatever menu was believed open belonged to the application just left; switching away from an app with a menu up therefore re-arms at once rather than waiting on the valve below.
+
+Because the answer depends on a close notification arriving, there is a safety valve: a depth that has not moved for 60 seconds is treated as closed and the overlay re-arms, writing a line to the log that says so. The failure it guards against is invisible from the outside — a stuck flag hands every captured key to the application underneath and the overlay simply stops answering. An application that draws a menu without posting either notification reads here as no menu, which is the same shape of gap as a self-drawn Qt menu on Windows and has the same answer: `host.keys.menuOpen`.

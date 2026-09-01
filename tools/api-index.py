@@ -35,7 +35,8 @@ NS_ORDER = [
     'Overlay', 'host.window', 'host.screen', 'host.ocr', 'host.uia', 'host.input',
     'host.keys', 'host.hotkey', 'host.speech', 'host.sound', 'host.timer', 'host.settings',
     'host.config', 'host.os', 'host.log', 'host.path', 'host.resource', 'host.require',
-    'host.tryRequire', 'host.include', 'host.epoch', 'Concepts',
+    'host.tryRequire', 'host.include', 'host.epoch', 'host.now', 'host.inputEpoch',
+    'host.arbiter', 'host.calibrating', 'Concepts',
 ]
 
 NS_BLURB = {
@@ -48,6 +49,11 @@ NS_BLURB = {
     'host.input': 'Driving the mouse and keyboard.',
     'host.keys': 'Claiming keys before the application sees them.',
     'host.hotkey': 'Claiming a combination system-wide.',
+    'host.arbiter': 'Deciding which of several overlays owns a contested slot.',
+    'host.timer': 'Waiting without blocking, and knowing when a cached reading went stale.',
+    'host.settings': 'The few choices a module should not make on the user\'s behalf.',
+    'host.log': 'The log is evidence: the tester is blind, remote, and often on the platform '
+                'none of us can run.',
     'Concepts': 'The shapes and grammars the calls above are written in.',
 }
 
@@ -84,7 +90,10 @@ def slug(heading):
 
 
 def namespace(heading):
-    h = heading.split('{')[0].strip()
+    # Unescaped first. The escape that fixes the contents list also breaks this if it is not
+    # undone here: `O\\:addStepper` does not start with `O:`, so every overlay method was
+    # silently reclassified as a "concept" — twenty-five of them, in a group meant for four.
+    h = unescaped(heading.split('{')[0].strip())
     m = re.match(r'(host\.[a-zA-Z]+)', h)
     if m:
         return m.group(1)
@@ -141,6 +150,12 @@ def limit_toc(paths, dry):
     return changed
 
 
+# Page furniture, not an entry. Every feature page carries one, so it is eighteen headings
+# with the same name — they are not functions and must not reach the index or be slugged from
+# their text (which would collide eighteen ways).
+FURNITURE = {'What to declare'}
+
+
 def collect():
     entries = []
     for path in sorted(glob.glob(os.path.join(API, '*.md'))):
@@ -151,6 +166,8 @@ def collect():
         parts = re.split(r'^(## .+)$', text, flags=re.M)
         for i in range(1, len(parts), 2):
             head = parts[i][3:]
+            if unescaped(head.split('{')[0].strip()) in FURNITURE:
+                continue
             entries.append({
                 'page': page,
                 'path': path,
@@ -198,6 +215,36 @@ def rewrite_anchors(entries, dry):
     return changed
 
 
+# What every page's "What to declare" box links to. Said once, here, rather than repeated
+# sixteen times — and said honestly, because the alternative is a reader believing the list is
+# a boundary it is not.
+CAPABILITIES = [
+    '## What to declare in module.toml {#capabilities}',
+    '',
+    'Each page says which name to put in its manifest:',
+    '',
+    '```toml',
+    '[capabilities]',
+    'require = ["window", "screen", "speech"]',
+    '```',
+    '',
+    '**It is not enforced.** Nothing in the host gates a call on this list — every module '
+    'receives the whole `host` table whichever names it declares, and a name nobody recognises '
+    'loads without complaint. What the list actually does is two things: it is written to the '
+    'log when the module loads, and it is shown to the user before installing a module from '
+    'GitHub. That second one is the only reason to keep it accurate — it is the only thing '
+    'somebody is told about a stranger\'s module before it runs.',
+    '',
+    'Which also means it cannot be a security claim: it is a self-report from exactly the party '
+    'a reader has no reason to trust. Treat it as a declaration of intent, and expect it to '
+    'become load-bearing later.',
+    '',
+    'The overlay is the exception in shape rather than degree — it is a **module**, so it goes '
+    'under `dependencies` rather than here.',
+    '',
+]
+
+
 def build_index(entries):
     groups = {}
     for e in entries:
@@ -211,7 +258,10 @@ def build_index(entries):
            str(len(entries)) + ' entries.', '',
            'A module reaches the host through the global `host` table, which is always there. ' +
            'The overlay is a module like any other and is imported: ' +
-           '`local O = host.require("com.platform.overlay")`.', '']
+           '`local O = host.require("com.platform.overlay")`.', '',
+           'Every callback registered through any of these runs in the calling module\'s own ' +
+           'Luau VM, and only fires while that module is **enabled**.', '']
+    out += CAPABILITIES + ['']
     for ns in order:
         out.append('## ' + ns)
         out.append('')
@@ -225,6 +275,72 @@ def build_index(entries):
             out.append('| ' + link + ' | ' + (e['summary'] or '') + ' |')
         out.append('')
     return '\n'.join(out).rstrip() + '\n'
+
+
+# ── The other direction: a public name with no entry ────────────────────────────────
+#
+# `host.set("<ns>", <var>)` names a namespace and the local holding it; `<var>.set("<fn>", …)`
+# names a call inside it. That is every binding the host registers, plus what the Luau prelude
+# adds on top. Anything here without an entry is a call a module author can make and cannot
+# read about — which is how `host.os.pick`, `host.arbiter`, `host.now`, `host.inputEpoch`,
+# `host.calibrating` and `host.resource.exists` went undocumented while a checker that only
+# looked the other way reported everything as fine.
+
+# Names the host registers that are not module surface. Kept short and justified, because an
+# allowlist is where a checker goes to die.
+NOT_SURFACE = {
+    'host.match',      # the matcher constructor, documented as the "Matchers" grammar instead
+    'host.overlay',    # gone; the overlay is a module reached through host.require
+}
+
+
+def public_names():
+    """Every `host.*` a module can call, from the Rust bindings and the Luau prelude."""
+    lib = open(os.path.join('crates', 'host', 'src', 'lib.rs'), encoding='utf-8').read()
+    pre = open(os.path.join('crates', 'host', 'src', 'window_prelude.luau'),
+               encoding='utf-8').read()
+
+    names = set()
+    # host.set("ns", var) — a namespace, and the local that holds it.
+    ns_var = {}
+    for m in re.finditer(r'host\.set\(\s*"([A-Za-z_][A-Za-z0-9_]*)"\s*,\s*([A-Za-z_][A-Za-z0-9_]*)',
+                         lib):
+        ns_var[m.group(2)] = m.group(1)
+        names.add('host.' + m.group(1))
+    # var.set("fn", …) — a call inside one of them.
+    for var, ns in ns_var.items():
+        for m in re.finditer(re.escape(var) + r'\.set\(\s*"([A-Za-z_][A-Za-z0-9_]*)"', lib):
+            names.add('host.' + ns + '.' + m.group(1))
+    # The prelude adds its own, on host and on the window table.
+    for m in re.finditer(r'function\s+host\.([A-Za-z0-9_.]+)\s*\(', pre):
+        names.add('host.' + m.group(1))
+    for m in re.finditer(r'function\s+W\.([A-Za-z0-9_]+)\s*\(', pre):
+        names.add('host.window.' + m.group(1))
+    # A leading underscore is this project's mark for ''internal, do not call'': the window
+    # trigger dispatchers are reached by the prelude, never by a module.
+    return {n for n in names
+            if n not in NOT_SURFACE and not n.split('.')[-1].startswith('_')}
+
+
+def undocumented(entries):
+    """Public names no entry covers, by the name each entry leads with."""
+    documented = set()
+    for e in entries:
+        m = re.match(r'(host\.[A-Za-z0-9_.]+)', e['title'])
+        if m:
+            documented.add(m.group(1).rstrip('.'))
+        # `host.config.get / host.config.set / …` documents several in one heading.
+        for extra in re.findall(r'host\.[A-Za-z0-9_.]+', e['title']):
+            documented.add(extra.rstrip('.'))
+    missing = []
+    for name in sorted(public_names()):
+        if name in documented:
+            continue
+        # A namespace is covered when any of its calls is.
+        if any(d.startswith(name + '.') for d in documented):
+            continue
+        missing.append(name)
+    return missing
 
 
 def main():
@@ -247,7 +363,16 @@ def main():
     index = build_index(entries)
     current = open(INDEX, encoding='utf-8').read() if os.path.exists(INDEX) else None
 
+    gaps = undocumented(entries)
+    if gaps:
+        print('public name(s) with no entry — a module author can call these and cannot read')
+        print('about them:')
+        for g in gaps:
+            print('  ' + g)
+
     if check:
+        if gaps:
+            return 1
         stale = changed + ([INDEX] if current != index else [])
         if stale:
             print('out of date, run `python tools/api-index.py`:')

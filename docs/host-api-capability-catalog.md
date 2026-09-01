@@ -1,12 +1,41 @@
 # Host API Capability Catalog (Draft)
 
-*Status: Draft, 2026-06-21. Single source of truth for the module API. Belongs to [architecture-feasibility-study.md](architecture-feasibility-study.md) and [module-package-format.md](module-package-format.md).*
+*Status: design, 2026-06-21. Belongs to [architecture-feasibility-study.md](architecture-feasibility-study.md) and [module-package-format.md](module-package-format.md).*
+
+:::caution This is the plan, not the platform
+
+**For what exists today, read the [API reference](api/) — it is written from the code.** This
+catalogue is where the shape was decided at the start of the project, and much of it is still
+ahead of the implementation. The plan stands; what follows describes where it is going.
+
+Two properties of the model below are **not built**, and nothing depends on them yet:
+
+- **Default-deny and manifest gating.** `[capabilities] require` is a plain list of strings. It
+  is not validated against any set of known names and **nothing gates a call on it** — every
+  module receives the whole `host` table whatever it declares. The list is written to the log
+  at load and shown to the user before installing a module, which is its only present use.
+- **`host.<ns>.available()`.** No namespace has one.
+
+Four namespaces are planned rather than present: `host.gui`, `host.clipboard`, `host.app`
+and `host.ffi`. The **Built** column below says which is which.
+
+Two rows that used to be here have been removed, because both named something that does not
+exist under that name. The accessibility namespace shipped as **`host.uia`** — see the
+[reference](api/uia) — and **the overlay is not a host namespace at all** but a module,
+`com.platform.overlay`, declared under `dependencies`. Its own entry in the reference is
+[Overlay](api/overlay).
+
+`host.uia` is a placeholder rather than a settled name: UIA is what Windows calls its tree and
+macOS calls the same thing something else, so the name states one platform's vendor term for
+an API that abstracts over both.
+
+:::
 
 This catalog is the **single machine-readable source** from which the following are generated: (a) the Luau type definitions for module authors, (b) the `[capabilities]` enum in the manifest, (c) the versioned web documentation (a project-backlog item). It is versioned under `engine_api` (additive change = minor, breaking = new major; study §6).
 
 ## 1. Model
 
-**Design principle — primitives are first-class and overlay-independent.** Every capability (`host.ocr`, `host.screen`, `host.input`, `host.window`, `host.hotkey`, `host.speech` …) is **directly scriptable from Luau, without using `host.overlay`.** `host.overlay` is *one* optional high-level layer (for accessible, self-voicing overlays in the style of ReaHotkey) that builds on the same primitives — not a mandatory funnel. General automation (the AHK / Keyboard Maestro class) uses the primitives directly; the overlays are merely the first, not the only, use case.
+**Design principle — primitives are first-class and overlay-independent.** Every capability (`host.ocr`, `host.screen`, `host.input`, `host.window`, `host.hotkey`, `host.speech` …) is **directly scriptable from Luau, without the overlay.** The overlay is *one* optional high-level layer — accessible, self-voicing control rings in the style of ReaHotkey — built on the same primitives rather than a mandatory funnel. It shipped as a module rather than a namespace, which is exactly what that independence looks like in practice. General automation (the AHK / Keyboard Maestro class) uses the primitives directly; the overlays are merely the first use case, not the only one.
 
 - **Namespaced:** every capability is `host.<namespace>.<function>`.
 - **Default-deny + manifest gating:** a module may only use a namespace if it is listed in `module.toml` under `[capabilities].require` and the user has granted it (study §7).
@@ -20,26 +49,27 @@ This catalog is the **single machine-readable source** from which the following 
 ## 2. Overview Matrix
 
 Tier = risk level · MVP = required for the ReaHotkey vertical slice · Feasibility = Win / macOS.
+**Built** = exists today, with an entry in the [API reference](api/).
 
-| Namespace | Purpose | Tier | MVP | Win | macOS | macOS permission |
-|---|---|---|---|---|---|---|
-| `host.overlay` | Self-voicing virtual accessible-control runtime (ReaHotkey framework) | low¹ | ✅ | full | full | — (actions inherit permissions of the backends they use) |
-| `host.speech` | Screen-reader / TTS output (tts-rs) | low | ✅ | full | full | — |
-| `host.sound` | Audio asset playback | low | ✅ | full | full | — |
-| `host.resource` | Read/resolve package resources, module config | low | ✅ | full | full | — |
-| `host.hotkey` | Contextual + global hotkeys | medium | ✅ | full | limited | Input Monitoring + Accessibility |
-| `host.window` | Window / control introspection | medium | ✅ | full | limited | Accessibility |
-| `host.input` | Mouse / keyboard simulation | medium | ✅ | full | limited | Accessibility |
-| `host.screen` | Capture, image search, pixel/color | medium | ✅ | full | limited | Screen Recording |
-| `host.ocr` | Text recognition in a region/image | medium | ✅ | full | limited | (uses `screen`) |
-| `host.a11y` | Accessibility elements of foreign apps (UIA/AX) | medium | ○ | full | limited | Accessibility |
-| `host.gui` | Own accessible windows (wxDragon) | medium | ○ | full | full | — |
-| `host.clipboard` | Read/write clipboard | medium | ○ | full | full | — |
-| `host.app` | Detect/focus/launch running apps | medium | ○ | full | limited | (Automation/AppleEvents partly) |
-| `host.ffi` | Load/call native libs | **high** | ○ | full | limited | (signature, no TCC) |
-| `host.log` / `host.timer` | Logging, scheduling | low | ✅ | full | full | — |
+| Namespace | Purpose | Built | Tier | MVP | Win | macOS | macOS permission |
+|---|---|---|---|---|---|---|---|
+| `host.speech` | Screen-reader / TTS output (tts-rs) | yes | low | ✅ | full | full | — |
+| `host.sound` | Audio asset playback | yes | low | ✅ | full | full | — |
+| `host.resource` | Read/resolve package resources, module config | yes | low | ✅ | full | full | — |
+| `host.hotkey` | Contextual + global hotkeys | yes | medium | ✅ | full | limited | Input Monitoring + Accessibility |
+| `host.window` | Window / control introspection | yes | medium | ✅ | full | limited | Accessibility |
+| `host.input` | Mouse / keyboard simulation | yes | medium | ✅ | full | limited | Accessibility |
+| `host.screen` | Capture, image search, pixel/color | yes | medium | ✅ | full | limited | Screen Recording |
+| `host.ocr` | Text recognition in a region/image | yes | medium | ✅ | full | limited | (uses `screen`) |
+| `host.gui` | Own accessible windows (wxDragon) | **no** | medium | ○ | full | full | — |
+| `host.clipboard` | Read/write clipboard | **no** | medium | ○ | full | full | — |
+| `host.app` | Detect/focus/launch running apps | **no** | medium | ○ | full | limited | (Automation/AppleEvents partly) |
+| `host.ffi` | Load/call native libs | **no** | **high** | ○ | full | limited | (signature, no TCC) |
+| `host.log` / `host.timer` | Logging, scheduling | yes | low | ✅ | full | full | — |
 
-¹ `host.overlay` itself only speaks + reacts to its own hotkeys (low); its *control actions* (click, image search, OCR, AX reading) use `input`/`screen`/`ocr`/`a11y` and inherit their tier.
+The overlay module itself only speaks and reacts to its own hotkeys, which is a low tier; its
+*control actions* — click, image search, OCR, reading the accessibility tree — use `input`,
+`screen`, `ocr` and `uia`, and inherit their tier.
 
 ## 3. ReaHotkey Backends → Capabilities
 
@@ -58,24 +88,23 @@ The 6 interaction backends of the overlays map exactly onto capability combinati
 
 ## 4. Namespaces in Detail (Luau API Sketch)
 
+*Sketches, and the word is load-bearing: these are the signatures as they were imagined, not
+as they were built. Where a namespace exists, its [reference page](api/) is what it actually
+offers, and the two differ in places. Some calls below sit inside a namespace that shipped and
+were themselves never written — `host.speech.stop`, `setRate`, `setVoice` and `voices` are the
+whole of that set today.*
+
 > Signatures are a draft. `?` = optional. Paths are always **package-relative** (the host resolves them).
 
-### host.overlay — the overlay runtime (optional high-level layer)
-*One* optional high-level layer for accessible, self-voicing overlays (the ReaHotkey class) — builds on `input`/`screen`/`ocr`/`a11y`/`hotkey`. NOT required for general automation; the primitives are directly scriptable (design principle §1). Builds a tree of virtual, self-voicing controls on top of a foreign window.
-```luau
-local ov = host.overlay.new("Serum 2")           -- OverlayBuilder
-ov:addStaticText("Serum 2")
-ov:addHotspotButton{ label="Next Preset", at={968,4}, hotkey="Alt+N" }
-ov:addCustomButton{ label="Main Menu", hotkey="Ctrl+M",
-                    onActivate=function() host.input.click(1058,4) end }
-ov:addOCRButton{ label="Preset", region={540,13,608,23}, engine="best", hotkey="Alt+M" }
-ov:addGraphicalToggleButton{ label="Classic Mix", image="assets/images/serum2/preset.png" }
-ov:addTabControl{ ... }  ;  ov:addUIAControl{ path=..., role="button" }
-return ov
--- Navigation (Tab/arrows), focus announcement, activation, and coordinate compensation
--- relative to the detected plugin control are handled by the runtime.
-```
-Control types (from ReaHotkey's taxonomy): StaticText, Button/ToggleButton/Checkbox/Edit/ListBox, Tab/TabControl, plus the backend variants Hotspot*, Graphical*(+Slider H/V), Custom*, Native*, UIA*, OCRButton, PassThrough.
+### The overlay — shipped as a module, not a namespace
+
+*One* optional high-level layer for accessible, self-voicing overlays (the ReaHotkey class),
+built on `input` / `screen` / `ocr` / `uia` / `hotkey`. It is **not** required for general
+automation: the primitives are directly scriptable, which is the design principle in §1.
+
+It is not on the host table. It is a module — `com.platform.overlay`, declared under
+`dependencies` and pulled in with `host.require` — which is what that independence looks like
+once it is built. For what it offers, see the [Overlay reference](api/overlay).
 
 ### host.speech — speech output (tts-rs)
 ```luau
@@ -158,12 +187,21 @@ local r = host.ocr.recognize({ region={540,13,608,23}, engine="best", lang="eng"
 ```
 Native by default (Windows.Media.Ocr / Apple Vision), ONNX fallback (study §2). Replaces ReaHotkey's Tesseract-exe invocation.
 
-### host.a11y — accessibility elements of foreign apps
-```luau
-local el = host.a11y.focused()        -- or host.a11y.fromWindow(w):path(1,3,2)
-el:role() ; el:name() ; el:value() ; el:focus() ; el:invoke()
-```
-Win: IUIAutomation · macOS: AXUIElement. Replaces ReaHotkey's `UIA.ahk` passthrough.
+### Accessibility elements of foreign apps — shipped as `host.uia`
+
+Windows: `IUIAutomationElement`. macOS: `AXUIElement`. Replaces ReaHotkey's `UIA.ahk`
+passthrough, and is built: see the [reference](api/uia).
+
+The shipped surface is not the element-handle model sketched here — there are no element
+objects with `:role()` / `:name()` / `:invoke()`. It answers questions about a window instead:
+find an element by name and type, locate a point to click, probe a named element's state, dump
+the tree. That difference is deliberate and measured — a handle whose properties are fetched
+one at a time cost 211 ms on a 53-element window, against about 30 ms for a request that names
+what it wants up front.
+
+**The name is not settled.** `uia` is what Windows calls its tree; macOS calls the same thing
+something else, so the namespace currently states one platform's vendor term for an API whose
+whole purpose is to abstract over both.
 
 ### host.gui — own accessible windows (wxDragon)
 ```luau
@@ -206,7 +244,7 @@ Later: `a11y` (for Native/UIA overlays), `gui`, `ffi`, `clipboard`, `app`.
 The deep-dive analysis ([reahotkey-port-analysis.md](reahotkey-port-analysis.md)) **confirmed** the MVP cut against the real source code and produced three refinements:
 
 - **`host.input` extended with `drag` + `scroll`** (incorporated above) — GraphicalSlider uses `MouseClickDrag`, Zampler the mouse wheel.
-- **`host.a11y` moved up:** still not needed in the MVP (4 of the 6 backends — Custom/Hotspot/Graphical/OCR — manage without it), but as the **next** capability right after the vertical slice, not at the end. Reason: macOS audio plugins sometimes deliver real AX values; where present, AX is more robust/faster/lower-permission than OCR (no Retina problem).
+- **The accessibility namespace moved up:** not needed in the MVP (4 of the 6 backends — Custom/Hotspot/Graphical/OCR — manage without it), but as the **next** capability right after the vertical slice rather than at the end. Reason: macOS audio plugins sometimes deliver real AX values, and where they do, the tree is more robust, faster and lower-permission than OCR, with no Retina problem. *It shipped as `host.uia`, and this call was right: it is now how every plug-in in the project is identified.*
 - **Detection order is platform-specific:** under macOS, AX is often empty for audio plugins (JUCE/u-he → empty `AXGroup`), which makes Vision OCR and template matching relatively more important than under Windows. The detection strategy stays portable, its prioritization does not.
 
 Confirmed: the `host.speech` model switch on macOS (tts-rs/AVFoundation, study §11.7) and `host.sound` deliberately in the core (instead of per-plugin as in ReaHotkey).

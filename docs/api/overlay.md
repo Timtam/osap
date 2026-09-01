@@ -1,10 +1,20 @@
 ---
-title: "com.platform.overlay (O) — self-voicing overlay control layer"
-sidebar_position: 6
+title: "Overlay — the control ring"
+sidebar_position: 1
 toc_max_heading_level: 2
 ---
 
-The overlay API is a **code module**, not a host namespace: declare `com.platform.overlay` as a dependency and pull it in with `host.require` (aliased `O` throughout). `O.new` returns an `Overlay` object whose methods are called with `:`. Controls are added to a virtual tree, navigated by keyboard, and spoken as `"label, type[, value]"`. All control coordinates are **origin-relative**: the origin is the client-area top-left (in screen pixels) of the active context's coordinate window — the plugin window when standalone, or the embedded plugin's child control when hosted in a DAW — re-resolved per call so it tracks window moves; `(0, 0)` when unattached.
+An overlay is the thing this platform exists to produce: a ring of controls laid over a plug-in no screen reader can read, which the user reaches with Tab and which speaks each control as label, type and value. It is **not a host capability but a module** — declare `com.platform.overlay` under `dependencies` in `module.toml`, never under `[capabilities] require`, and pull it in with `host.require`.
+
+What comes back is very nearly the whole of most modules: Impact Soundworks' Juggernaut is a table of measured coordinates and two library overlays of a caption and one `addOCRButton` each. How a control reads its value is the cost you are choosing — a hotspot toggle samples a single pixel, which is one compositor frame (~16.7 ms on Windows); a graphical toggle image-matches templates over a region; OCR is slower than either, which is why `ocrLabel` belongs on controls whose name really does change with the loaded patch and not on every control.
+
+One plug-in is usually several overlays rather than one. Kontakt declares one per cell of version-by-environment, and overlays sharing an arbiter slot rank by `O.layer`, so Komplete Kontrol's chrome yields to the Kontakt inside it, that to the library loaded in that, and all three to a modal while it is up.
+
+Running through every method here is one rule: **announce what the application did, not what the module intended.** `O:watch` waits for a value to change instead of guessing a delay, a pixel that resembles neither reference reports no state at all rather than the nearer guess, and a click is refused when another window is drawn over the point.
+
+All control coordinates are **origin-relative**: the origin is the client-area top-left of the active context's coordinate window — the plug-in window when standalone, or the embedded plug-in's child control when hosted in a DAW — re-resolved per call so it tracks the window as it moves, and `(0, 0)` when the overlay is not attached.
+
+A control is spoken as `"label, type[, value]"`, and **every kind is a focus stop**: static text is Tab-reachable and read aloud, it simply has no activation.
 
 ```luau
 local O = host.require("com.platform.overlay")
@@ -12,7 +22,15 @@ local O = host.require("com.platform.overlay")
 
 Source: `modules/overlay-runtime/src/main.luau`.
 
-Control **kinds**: `static`, `hotspot`, `custom`, `ocr`, `gtoggle`. The spoken type label is `""` (static), `"button"` (hotspot/custom/ocr), `"toggle button"` (gtoggle). **Every kind is a focus stop** — `static` text is Tab-reachable and read aloud, it just has no activation (Enter does nothing on it).
+## What to declare {#declare}
+
+Not a capability — a **dependency**:
+
+```toml
+dependencies = ["com.platform.overlay"]
+```
+
+An `"overlay"` entry under `[capabilities] require` is a leftover from when the overlay was part of the host; `host.overlay` no longer exists. See [what that list is and is not](./index.md#capabilities).
 
 ## O.new(label) {#o-new}
 
@@ -599,7 +617,7 @@ end)
 ```
 
 Splitting a module across files is what keeps this readable: see
-[`host.include`](resource-settings-modules#host-include). Kontakt separates detection,
+[`host.include`](modules#host-include). Kontakt separates detection,
 the cell matrix, the per-version geometry, what a control does, and what a cell contains.
 
 See [Nested overlays design](../nested-overlays-design.md).

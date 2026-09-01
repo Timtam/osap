@@ -40,7 +40,7 @@ re-registers them. The enabled set is **persisted** (next to the executable, in
 ### Settings…
 
 Opens a per-module dialog built from the settings the module declared via
-[`host.settings.define`](api/resource-settings-modules.md): a native control per
+[`host.settings.define`](api/settings.md#host-settings-define): a native control per
 setting (checkbox / number field / dropdown / text), each labelled for the screen
 reader. Changes are validated and persisted; a module can react live via
 `host.settings.onChange`.

@@ -462,6 +462,56 @@ what the platform offers. Both true, and underneath them a defect nobody could h
       so it wants doing once, deliberately — and after the site is actually published, not
       before.
 
+## One page per feature (2026-08-31)
+
+The six pages of the reference grouped namespaces for no reason anybody could state —
+`speech-hotkey-keys-timer-log` was five features in a filename. Asked for: one page per
+feature, each saying what that part of the API is for and what to declare in `module.toml`.
+
+- [x] **Eighteen pages, one per feature**, each with a title that says what it is for
+      (`host.screen — what the plug-in looks like`), an introduction grounded in what the
+      modules actually do with it, and a **What to declare** box carrying the manifest line.
+      The introductions carry the measured costs, because choosing between the tree, an image
+      and OCR is the decision every control makes once: a screen touch is a compositor frame
+      whatever it reads, a 53-element accessibility walk is ~30 ms, a full-window template
+      search measured twelve seconds.
+- [x] **The capability list is described honestly, once**, on the index. It is not validated
+      and **not enforced** — every module gets the whole `host` table whatever it declares —
+      and it cannot be a security claim, being a self-report from exactly the party a reader
+      has no reason to trust. What it does do is reach the log and the install dialog, which
+      is the only reason to keep it accurate.
+- [x] **Twenty-one public names had no entry at all.** Six were found by reading
+      (`host.os.pick`, `host.resource.exists`, `host.now`, `host.inputEpoch`,
+      `host.calibrating`, `host.arbiter`), and fifteen more by the coverage check written
+      afterwards. Every one had been passed over by the same faulty test — "does a module
+      other than the runtime use it?" — which is a statement about today's callers rather than
+      about what the API is. The overlay runtime is a module like any other and will be
+      maintained separately; nothing it can reach is private.
+- [x] **The check that would have caught them.** `check-docs.ps1` asked only whether everything
+      documented exists, which catches rot and never a gap. `api-index.py` now also asks the
+      other way: every `host.*` the host registers must have an entry. It caught `host.moduleId`
+      in one of the new examples — an API I had invented while writing the arbiter page.
+  - Its allowlist is derived rather than kept by hand, after the hand-kept version reported
+      `host.calibrating` — perfectly real — as a name the host does not provide. A checker that
+      cries wolf gets switched off.
+- [x] **The drafts were adversarially checked before they shipped**, and most needed
+      correcting: an example that read a private local of the runtime and would have raised
+      when pasted, a measurement claimed for both platforms that was Windows-only, several
+      platform sections that described a difference the code does not have. One was marked
+      "this is the one that must not ship".
+- [ ] **`host.uia` is a placeholder name.** UIA is Microsoft's product name; macOS calls the
+      same thing the Accessibility API, so the namespace states one platform's vendor term for
+      an API whose whole purpose is to abstract over both. `a11y` is not the answer — it names
+      a purpose we do not have (nothing here makes anything accessible; it reads a published
+      structure) and a screen reader pronounces it as a spelled-out numeronym. **`host.element`
+      is the candidate**, on the grounds that both platforms already use that word:
+      `IUIAutomationElement` and `AXUIElement`. Measured cost of the rename: 9 manifests, 39
+      call sites across 12 module files, 63 mentions in the Rust host, 16 in the docs — all
+      mechanical, and the coverage check catches any documentation left behind. Worth doing in
+      the same pass as capability enforcement, which touches every manifest anyway.
+- [ ] **A page with no "What to declare" box is not caught.** The boxes were written by the
+      one-time split rather than generated, so a new page can be added without one.
+
 ## Found while documenting (2026-08-31)
 
 Three defects that surfaced only because somebody wrote down what the code claims. None was

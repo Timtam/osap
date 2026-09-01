@@ -1,10 +1,31 @@
 ---
-title: "host.window & host.os — windows, controls, matchers, triggers"
-sidebar_position: 1
+title: "host.window — where the user is"
+sidebar_position: 2
 toc_max_heading_level: 2
 ---
 
-All coordinates are screen pixels on Windows and **points** on macOS (i32 → Luau `number`) unless noted — see `host.screen.size()` for why that distinction costs a day when it is missed. `id` fields are native window handles on Windows (a Win32 `HWND` as a Luau integer) and interned counters on macOS; see the platform sections under **Table shapes**. The `host.window.list`/`active`/`controls`/`focusChain`/`ownsPoint` functions are native (Rust) bindings; `find`/`findAll`/`test`/`onTrigger`/`onFocus` are added by `window_prelude.luau` on top of them.
+Everything a module needs to know about where the user is: which window is in front, what surfaces sit inside it, where the keyboard actually is, and whether a point on screen still belongs to the window you think it does.
+
+Most modules never call any of it — an overlay's binding does the finding, and the overlay runtime registers `onTrigger` and `onFocus` once on everyone's behalf — so you come here for the question a binding cannot settle by itself: Kontakt walks `controls()` for the Qt container that says which Kontakt this is and whether a Komplete Kontrol wraps it, sforzando reads the depth of `focusChain()` to tell REAPER's own chrome from the plug-in inside it, and daw-hosts pairs `find` with `focus` to build the "put me back in the plug-in window" key that macOS otherwise has no command for.
+
+Nothing here touches the screen, so one call is cheap — but every overlay makes several on every foreground and focus change. Kontakt measured a single cell's context match at 15 to 96 ms with every underlying OS answer already served from cache, which is thousands of cheap calls rather than one expensive one, and why its six cells derive the whole scene once per epoch instead of each walking the control list.
+
+The same call answers with different things per platform, so read the platform sections: `controls()` yields every visible child window on Windows and container elements only on macOS, and a focus chain's links are windows there and accessibility elements here — test what a chain contains rather than how deep it is. Believe what you are told rather than what you assume: `focus` can be declined by either platform, and `ownsPoint` answers `nil` on macOS, which a caller must read as permission rather than refusal.
+
+All coordinates are screen pixels on Windows and **points** on macOS (i32 → Luau `number`) unless noted — see [`host.screen.size()`](screen#host-screen-size) for why that distinction costs a day when it is missed. `id` fields are native window handles on Windows (a Win32 `HWND` as a Luau integer) and interned counters on macOS; see the platform sections under [Table shapes](#table-shapes).
+
+`list`, `active`, `controls`, `focusChain` and `ownsPoint` are native bindings; `find`, `findAll`, `test`, `onTrigger` and `onFocus` are added on top of them by the Luau prelude.
+
+## What to declare {#declare}
+
+A module that uses this names it in its manifest:
+
+```toml
+[capabilities]
+require = ["window"]
+```
+
+See [what that list is and is not](./index.md#capabilities).
 
 ## Table shapes {#table-shapes}
 
@@ -80,26 +101,6 @@ local matcher = {
   windows = { class = "REAPERwnd" },
   where = function(w) return w.bounds.w > 400 end,
 }
-```
-
----
-
-## host.os.current {#host-os-current}
-
-Read-only string: the current OS, from Rust `std::env::consts::OS` (`"windows"`, `"macos"`, `"linux"`, …). Not a function — a plain field.
-
-```luau
-if host.os.current == "windows" then ... end
-```
-
-## host.os.is(name) {#host-os-is}
-
-`host.os.is(name: string) -> boolean`
-
-Returns `true` when `name` equals the current OS string.
-
-```luau
-if host.os.is("macos") then ... end
 ```
 
 ---
@@ -318,3 +319,25 @@ end)
 
 Same caveat as `onTrigger` above: focus changes *within* an application are delivered by a per-process accessibility observer rather than by a system-wide hook, so an application that will not answer accessibility produces no focus events at all.
 
+## host.window.recheck() {#host-window-recheck}
+
+**Signature:** `host.window.recheck() -> ()`
+
+Asks the host to run a focus-change round at the end of the current tick — after OS events, timers and image results have run — exactly as if the OS had reported one: the observation epoch turns over (so cached window answers are re-read) and every enabled module's `host.window.onFocus` callbacks fire — including the one the overlay runtime registers, which re-evaluates each overlay's context match and gate. It exists for the case where a module *itself* changed what is detectable on screen and no OS event will follow: Komplete Kontrol auto-closing its library browser reveals the nested Kontakt underneath, and nothing about that is a focus change, so without this nobody notices until the next `pollMatch` tick (~500 ms) — half a second in which the ring sits on the wrong overlay for somebody who cannot see that it moved. The dispatch is **cross-VM**, which is the whole point here: the module that acted is usually not the module that has to notice.
+
+Calls are coalesced — any number in one tick cost a single round — but the round itself is the same work a real focus change does: every overlay that is not already outranked re-runs its contexts and its gate (the runtime logs any recheck of 15 ms or more). So this is a one-shot for a change you caused and can therefore time; a match that changes on its own, with nothing of yours running, is what [`pollMatch` under `O:attach`](./overlay.md#o-attach) is for, and putting `recheck` on a recurring timer is that poll written twice. Two further things bite: only *focus* is dispatched, so a module's own `onTrigger(..., { on = "activate" })` callbacks do **not** run (overlays are unaffected — the runtime re-checks on both); and nothing guarantees the plug-in has finished redrawing by the next tick, so a reveal that takes an unknown moment is poked more than once rather than once and hopefully late enough.
+
+```luau
+-- modules/komplete-kontrol/src/main.luau — the KK overlay became active and its library
+-- browser is covering the loaded instrument, so close it.
+local p = browserToggle(o:hwnd())
+if p then
+  host.input.click(p.x, p.y)
+  -- The instrument appears a moment later with NO focus event. Poke the re-check a few
+  -- times over the next second so the Kontakt overlay — another module, another VM —
+  -- takes over promptly instead of waiting on its ~500 ms pollMatch.
+  host.timer.after(250, host.window.recheck)
+  host.timer.after(600, host.window.recheck)
+  host.timer.after(1000, host.window.recheck)
+end
+```
