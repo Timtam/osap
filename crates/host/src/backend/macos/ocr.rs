@@ -154,6 +154,21 @@ fn recognize_inner(
         // fringes off Retina glyphs.
         let margin = (3.0 * scale).round().max(1.0) as usize;
         let plan = Plan::content(&rgba, px_w, px_h, margin);
+
+        // NOTHING TO READ IS AN ANSWER, and it is the one answer a recogniser cannot give.
+        //
+        // Asked about a blank rectangle, a recogniser does not return nothing — it returns
+        // whatever its network makes of noise, and a module cannot tell that from a reading.
+        // Windows has refused this since an empty search box and five clipped tile captions
+        // all came back as the same invented string from six different places. So the question
+        // is not asked: an empty region reads as empty, which is the truth about it.
+        if plan.blank {
+            crate::logging::trace("macos", || {
+                format!("ocr: {px_w}x{px_h} px has nothing in it; returning empty unrecognised")
+            });
+            return Ok(empty());
+        }
+
         crate::logging::trace("macos", || {
             let (pw, ph) = plan.out_size();
             format!(
@@ -465,6 +480,8 @@ fn bigger_then_faster(
         ink_h: tight.ink_h,
         bg: tight.bg,
         cropped: tight.cropped,
+        // Reached only from a plan that was not blank, so this cannot be true here.
+        blank: false,
     };
     let (img, buf) = render(native, &big)?;
     if debug {
@@ -697,6 +714,13 @@ struct Plan {
     bg: [f64; 3],
     /// Whether the crop actually narrowed anything — the retry hinges on this.
     cropped: bool,
+    /// Nothing here to read: the region is one flat colour, or a panel with nothing on it.
+    ///
+    /// Not the same as "the recogniser found nothing", and the difference is the whole point.
+    /// A recogniser asked about a blank rectangle does not answer "nothing" — it answers
+    /// whatever its network makes of noise, and the caller has no way to tell that from a
+    /// reading. So the question is not asked.
+    blank: bool,
 }
 
 impl Plan {
@@ -713,6 +737,7 @@ impl Plan {
             ink_h: nh,
             bg: [0.0; 3],
             cropped: false,
+            blank: false,
         }
     }
 
@@ -740,6 +765,7 @@ impl Plan {
             ink_h,
             bg: corner_background(rgba, nw, nh),
             cropped: false,
+            blank: false,
         }
     }
 
@@ -786,7 +812,9 @@ impl Plan {
                 format!("ocr: {nw}x{nh} px capture is one flat colour, nothing to crop to")
             });
             screen_capture_permitted();
-            return Plan::whole(rgba, nw, nh);
+            let mut w = Plan::whole(rgba, nw, nh);
+            w.blank = true;
+            return w;
         }
 
         // A well, not a word.
@@ -806,9 +834,24 @@ impl Plan {
         // from outside the box. A region that really is just text is untouched: its corners
         // will not agree, and nothing changes.
         let mut bg = bg;
-        if let Some((ix0, iy0, ix1, iy1, inner_bg)) =
-            ink_inside_panel(rgba, nw, x0, y0, x1, y1, bg)
-        {
+        let panel = ink_inside_panel(rgba, nw, x0, y0, x1, y1, bg);
+        if matches!(panel, Panel::Empty) {
+            // A value field with no value in it. The crop found the WELL, so `cropped` would
+            // be true and the retry ladder would open — ending at the character model, over a
+            // box that has nothing in it. That rung has no linguistic validation and no way to
+            // answer "nothing", so what it returns is whatever it makes of an empty rectangle.
+            crate::logging::trace("macos", || {
+                format!(
+                    "ocr: the crop is a {}x{} panel with nothing on it — not recognising it",
+                    x1 - x0 + 1,
+                    y1 - y0 + 1
+                )
+            });
+            let mut w = Plan::whole(rgba, nw, nh);
+            w.blank = true;
+            return w;
+        }
+        if let Panel::Ink(ix0, iy0, ix1, iy1, inner_bg) = panel {
             if iy1 - iy0 < y1 - y0 {
                 crate::logging::trace("macos", || {
                     format!(
@@ -851,6 +894,7 @@ impl Plan {
             ink_h,
             bg,
             cropped: cw < nw || ch < nh,
+            blank: false,
         }
     }
 
@@ -866,9 +910,11 @@ impl Plan {
 /// from the colour the region as a whole was measured against, the crop is a box rather than
 /// a word — and the interesting content is whatever inside it differs from the box.
 ///
-/// Returns the inner bounds and the panel's colour, or `None` when the corners disagree
-/// (a real glyph cluster, whose corners are background on some sides and ink on others) or
-/// when nothing inside the panel stands out from it.
+/// Three answers, and the third is the one that used to be lost. `NotAPanel` is a real glyph
+/// cluster, whose corners are background on some sides and ink on others. `Ink` is a box with
+/// something drawn on it. `Empty` is a box with NOTHING drawn on it — a value field with no
+/// value in it — which used to be reported as `None` alongside the first, and so escalated
+/// through the whole retry ladder instead of stopping.
 #[allow(clippy::too_many_arguments)]
 fn ink_inside_panel(
     rgba: &[u8],
@@ -878,9 +924,9 @@ fn ink_inside_panel(
     x1: usize,
     y1: usize,
     outer_bg: [f64; 3],
-) -> Option<(usize, usize, usize, usize, [f64; 3])> {
+) -> Panel {
     if x1 <= x0 + 2 || y1 <= y0 + 2 {
-        return None;
+        return Panel::NotAPanel;
     }
     let at = |x: usize, y: usize| -> [f64; 3] {
         let i = (y * nw + x) * 4;
@@ -897,12 +943,12 @@ fn ink_inside_panel(
     const DIFFERENT_SQ: f64 = 55.0 * 55.0;
     for c in &corners[1..] {
         if far(corners[0], *c) > SAME_SQ {
-            return None;
+            return Panel::NotAPanel;
         }
     }
     let outer = [outer_bg[0] * 255.0, outer_bg[1] * 255.0, outer_bg[2] * 255.0];
     if far(corners[0], outer) <= DIFFERENT_SQ {
-        return None;
+        return Panel::NotAPanel;
     }
 
     let panel = corners[0];
@@ -920,9 +966,19 @@ fn ink_inside_panel(
         }
     }
     if !found {
-        return None;
+        // A panel, and nothing on it.
+        return Panel::Empty;
     }
-    Some((ix0, iy0, ix1, iy1, [panel[0] / 255.0, panel[1] / 255.0, panel[2] / 255.0]))
+    Panel::Ink(ix0, iy0, ix1, iy1, [panel[0] / 255.0, panel[1] / 255.0, panel[2] / 255.0])
+}
+
+/// What the crop turned out to be. See `ink_inside_panel`.
+enum Panel {
+    NotAPanel,
+    /// A box with nothing drawn on it — a value field with no value in it.
+    Empty,
+    /// A box, and the bounds of what is drawn on it, plus the box's own colour.
+    Ink(usize, usize, usize, usize, [f64; 3]),
 }
 
 /// The integer upscale that brings content of this height to roughly the target.

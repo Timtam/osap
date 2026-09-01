@@ -140,23 +140,20 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       is the same in practice: its callers are `addHotspotToggle` and the stepper, and the only
       overlay that activates on a Mac is sforzando, built entirely from OCR read-outs and OCR
       buttons. These come off the list when a macOS-reachable overlay uses them, not before.
-- [ ] **The blank-region guard is Windows-only, and macOS escalates harder on the same input.**
-      `tighten()`'s `blank` marker lives in `backend/windows.rs` and stops a flat rectangle ever
-      reaching a recogniser. `macos/ocr.rs` notices the identical fact in `Plan::content`, logs
-      it at *trace*, asks TCC whether it is a permission problem — and hands the rectangle to
-      Vision anyway. Vision is likelier to decline than PaddleOCR was, because it runs a text
-      *detector* first, but `run_vision` applies **no confidence filter at all** and sets
-      `setMinimumTextHeight(0.0)`, which removes the size floor.
-  - The worse case is not the flat rectangle. An empty *well* — a dark value field set into
-      lighter chrome — is found by the crop, so `cropped` is true, the retry ladder opens, and
-      it ends at the `FAST` character model over an empty box: the exact analogue of the
-      Windows failure. That rung already writes "only the fast model read this" to the log, but
-      **nothing marks the string untrusted on the way back to Lua**, so a module cannot decline
-      it and the person hears it. Either discard that rung's result or carry the fact in
-      `OcrText`.
-  - The probe's third region exists to measure exactly this, so the next log says whether it is
-      theoretical.
-
+- [x] **The blank-region guard is on both platforms now** (2026-08-31). macOS had noticed the
+      identical fact — one flat colour, nothing to crop to — logged it at *trace*, asked TCC
+      whether it was a permission problem, and handed the rectangle to Vision anyway.
+  - The worse case escalated rather than stopping, and it is the realistic shape: an **empty
+      well**, a dark value field set into lighter chrome, is found by the crop, so `cropped`
+      is true, the ladder opens, and it ends at the `FAST` character model reading an empty
+      box — a model with no linguistic validation and no way to answer "nothing".
+      `ink_inside_panel` used to fold "not a panel" and "a panel with nothing on it" into one
+      `None`; it now answers three ways, and the third marks the plan blank.
+  - A blank plan short-circuits before anything is rendered, so an empty region costs no
+      recognition at all rather than up to four.
+  - Blind code, and the probe already measures exactly this: its regions 1 and 2 are proved
+      flat and region 3 straddles an edge, so the next log from a Mac says whether Vision was
+      inventing on that input in the first place.
 - [ ] **The seven first-session measurements** in docs/macos-port.md, in that order: does
       anything appear, are coordinates right on Retina, is a capture real, does the tap
       suppress, does OCR read plugin text, does `_AXUIElementGetWindow` work, what does the
