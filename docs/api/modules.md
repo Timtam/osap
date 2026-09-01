@@ -1,6 +1,6 @@
 ---
 title: "Module imports — host.require, tryRequire, include"
-sidebar_position: 17
+sidebar_position: 18
 toc_max_heading_level: 2
 ---
 

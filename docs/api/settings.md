@@ -1,6 +1,6 @@
 ---
 title: "host.settings — per-module settings"
-sidebar_position: 12
+sidebar_position: 13
 toc_max_heading_level: 2
 ---
 

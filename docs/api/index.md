@@ -37,7 +37,7 @@ The overlay is the exception in shape rather than degree: it is a **module**, so
 
 ## Overlay
 
-A ring of controls laid over a plug-in a screen reader cannot read. A module, not a host namespace: `local O = host.require("com.platform.overlay")`.
+Controls a module defines over a plug-in window, walked with Tab and spoken aloud. A module, not a host namespace: `host.require("com.platform.overlay")`.
 
 | | |
 |---|---|
@@ -227,14 +227,14 @@ Writing to the log file beside the application.
 
 | | |
 |---|---|
-| [`host.path(rel)`](resources#host-path) | Resolves a package-relative path to an **absolute** filesystem path string |
+| [`host.path(rel)`](path#host-path) | Resolves a package-relative path to an **absolute** filesystem path string |
 
 ## host.resource
 
 | | |
 |---|---|
-| [`host.resource.exists(rel)`](resources#host-resource-exists) | Whether a file exists under this module's own root, without reading it. |
-| [`host.resource.read(rel)`](resources#host-resource-read) | Reads a package-relative file as a UTF-8 string (`string`) from the calling |
+| [`host.resource.exists(rel)`](resource#host-resource-exists) | Whether a file exists under this module's own root, without reading it. |
+| [`host.resource.read(rel)`](resource#host-resource-read) | Reads a package-relative file as a UTF-8 string (`string`) from the calling |
 
 ## host.require
 

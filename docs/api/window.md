@@ -1,6 +1,6 @@
 ---
 title: "host.window — windows, controls and focus"
-sidebar_position: 16
+sidebar_position: 17
 toc_max_heading_level: 2
 ---
 

@@ -1,10 +1,10 @@
 ---
-title: "Overlay — the self-voicing control ring"
-sidebar_position: 18
+title: "Overlay — keyboard controls with spoken labels"
+sidebar_position: 19
 toc_max_heading_level: 2
 ---
 
-An overlay is a ring of controls laid over a plug-in that a screen reader cannot read. The user walks it with Tab, and each control is spoken as label, type and value. It is **not a host capability but a module** — declare `com.platform.overlay` under `dependencies` in `module.toml`, never under `[capabilities] require`, and pull it in with `host.require`.
+An overlay is a list of controls a module defines over a plug-in window. The user moves through it with Tab; each control is spoken as its label, what kind of control it is, and its current value; and pressing one acts on the plug-in — a click at a coordinate, a key, a drag, whatever that control was built to do. It exists because the plug-in draws its own interface, which a screen reader cannot see into. It is **not a host capability but a module** — declare `com.platform.overlay` under `dependencies` in `module.toml`, never under `[capabilities] require`, and pull it in with `host.require`.
 
 What comes back is very nearly the whole of most modules: Impact Soundworks' Juggernaut is a table of measured coordinates and two library overlays of a caption and one `addOCRButton` each. How a control reads its value is the cost you are choosing — a hotspot toggle samples a single pixel, which is one compositor frame (~16.7 ms on Windows); a graphical toggle image-matches templates over a region; OCR is slower than either, which is why `ocrLabel` belongs on controls whose name really does change with the loaded patch and not on every control.
 

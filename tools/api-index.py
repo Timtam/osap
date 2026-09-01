@@ -40,8 +40,8 @@ NS_ORDER = [
 ]
 
 NS_BLURB = {
-    'Overlay': 'A ring of controls laid over a plug-in a screen reader cannot read. A module, '
-              'not a host namespace: `local O = host.require("com.platform.overlay")`.',
+    'Overlay': 'Controls a module defines over a plug-in window, walked with Tab and spoken '
+              'aloud. A module, not a host namespace: `host.require("com.platform.overlay")`.',
     'host.window': 'Finding windows and the surfaces inside them, and reacting when the focus '
                    'moves.',
     'host.screen': 'Reading pixels, profiling a region, and finding an image within one.',
