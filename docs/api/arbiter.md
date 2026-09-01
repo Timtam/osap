@@ -10,6 +10,36 @@ Several overlays can match the same window at the same moment — Komplete Kontr
 
 Almost every module gets this without touching the API: `O:attach` and `O:attachEmbedded` take `slot` and `specificity`, and the overlay runtime does the registering, the reporting and the tearing down. You come here to build something that competes for a slot without being an overlay, or to inspect one.
 
+### Who decides whether it matches {#matches}
+
+**The arbiter never asks whether the dialog is open. It is told, and by the claim itself.**
+
+Specificity only breaks ties. It ranks the claims that are *currently matching*, and a claim is
+matching exactly when it last said so through `setMatching`. A dialog overlay registered at
+`O.layer.dialog` outranks the base overlay underneath it — but only from the moment it reports
+`true`, and the base takes the slot back the moment it reports `false`.
+
+For an overlay, the report is produced by a re-check that runs on every window activation and
+every focus change, and answers two questions in order:
+
+1. **Does one of my bindings match this window?** The matcher given to `O:attach`, or the
+   host-plus-control spec given to `O:attachEmbedded`. The first binding that matches also
+   becomes the coordinate origin for everything the overlay does.
+2. **If so, does my gate agree?** [`O:gate(fn)`](overlay#o-gate) — or the image test that
+   [`O:landmark`](overlay#o-gate) builds from it — narrows the match further, evaluated against
+   that origin. A context match means "this window is mine"; a gate means "and what is inside
+   it is mine too".
+
+The answer to both is what reaches `setMatching`. So "is the dialog really open" is a question
+the dialog's own overlay answers, with whatever evidence it has — an element that only exists
+while the dialog is up, a landmark image, a pixel — and the arbiter does the ranking and
+nothing else.
+
+One consequence is worth planning for: a dialog that opens **inside** a window that is already
+in front raises no window event, so nothing re-checks and the slot does not move. That is what
+`pollMatch` on [`O:attach`](overlay#o-attach) is for — it re-runs the check on a timer, which is
+the only way to notice something that appears with no event at all.
+
 **The failure this design is most prone to is silent.** Slots are strings typed independently in modules that never see each other, so a typo does not error — it quietly creates a private slot where that overlay wins every time, or never competes at all. A slot with one participant is perfectly legal, so nothing else can notice. `participants` exists for exactly that, and every failure here is invisible to somebody who cannot see the screen.
 
 ## What to declare {#declare}
@@ -47,7 +77,9 @@ self._claim = host.arbiter.register(
 
 **Signature:** `host.arbiter.setMatching(slot: string, handle, matching: boolean) -> nil`
 
-Reports whether this claim's own conditions hold right now, and re-elects the slot. A change of winner runs the losing claim's `onDeactivate` and then the winner's `onActivate`, in that order, so the two never overlap.
+Reports whether this claim's own conditions hold right now, and re-elects the slot. This is
+the call that answers "is it actually open" — see [Who decides whether it matches](#matches)
+above. A change of winner runs the losing claim's `onDeactivate` and then the winner's `onActivate`, in that order, so the two never overlap.
 
 Call it on every re-check, not only on a change — the arbiter keeps the last thing each claim reported and compares for itself.
 

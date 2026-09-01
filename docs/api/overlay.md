@@ -526,6 +526,11 @@ the active context's region. A derived / library overlay uses a landmark to take
 over from its base only when its product wordmark is on screen. Both return the
 overlay (chainable).
 
+On an overlay bound to an arbiter slot, the gate's answer is what the slot is decided on:
+context match AND gate is reported to the arbiter as this claim's `matching`, and specificity
+only ranks the claims that are matching. So a dialog overlay takes the slot exactly while its
+gate says the dialog is there — see [host.arbiter](arbiter#matches).
+
 **A gate whose condition can change without a window event needs `pollMatch`.** Gates are otherwise re-evaluated only when a window is activated or focused, which is enough for a dialog — opening and closing one *is* a window event — and not enough for anything that appears and disappears *inside* a window that never changes. ON:EAR's chooser panels are exactly that, and without the poll the overlay kept the arbiter slot after its panel had closed: a ring for a panel that was no longer on screen, which somebody who cannot see it has no way to escape. See `pollMatch` under `O:attach` below.
 
 **Coordinate anchoring (opt-in):** pass `landmark(image, { anchor = true })` and, while
