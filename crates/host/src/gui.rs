@@ -240,7 +240,10 @@ struct ListInner {
     /// The tree needs a root to hang rows from, even though it is hidden.
     root: Option<TreeItemId>,
     /// Item `i` of the tree, so an index becomes a node and a node becomes an index.
-    items: RefCell<Vec<TreeItemId>>,
+    items: Rc<RefCell<Vec<TreeItemId>>>,
+    /// Whether item `i` has a checkbox at all. Shared with the key handler, which has to
+    /// answer before the control acts and so cannot ask the rows.
+    checkable: Rc<RefCell<Vec<bool>>>,
     hwnd: *mut std::ffi::c_void,
     toggled: ListCallback,
     selected: ListCallback,
@@ -256,6 +259,12 @@ impl ListInner {
         // Must be on before the first item is inserted.
         native_checkboxes::enable(hwnd);
         let root = ctrl.add_root("Modules", None, None);
+
+        // Shared with the key handler below rather than copied into it: the handler has to
+        // answer "does this row have a checkbox" BEFORE the control acts, which is before it
+        // could be told anything about rows.
+        let items: Rc<RefCell<Vec<TreeItemId>>> = Rc::new(RefCell::new(Vec::new()));
+        let checkable: Rc<RefCell<Vec<bool>>> = Rc::new(RefCell::new(Vec::new()));
 
         // The tree offers no toggle and no selection event, so both answers come off the
         // same two up-events — and they are bound ONCE here, with the callbacks stored,
@@ -289,7 +298,71 @@ impl ListInner {
                 e.skip(true);
             });
         }
-        ListInner { ctrl, root, items: RefCell::new(Vec::new()), hwnd, toggled, selected }
+        {
+            // Space is what ticks a box in this control, and it acts on the DOWN event —
+            // before any handler here. So for a row that has no box, the key is swallowed
+            // rather than corrected afterwards: not skipping it is the only point at which
+            // nothing has happened yet for a screen reader to announce.
+            let (checkable, items) = (checkable.clone(), items.clone());
+            let ctrl_for_keys = ctrl.clone();
+            ctrl.on_key_down(move |e| {
+                const SPACE: i32 = 32;
+                if let WindowEventData::Keyboard(k) = &e {
+                    if k.get_key_code() == Some(SPACE) {
+                        let blocked = ctrl_for_keys
+                            .get_selection()
+                            .and_then(|sel| {
+                                items
+                                    .borrow()
+                                    .iter()
+                                    .position(|it| native_checkboxes::same(it, &sel))
+                            })
+                            .is_some_and(|i| checkable.borrow().get(i) == Some(&false));
+                        if blocked {
+                            // CONSUMED, not merely un-skipped. Declining to call `skip` still
+                            // lets the event through, which is what let the native control
+                            // cycle its checkbox and the accessibility layer announce it.
+                            e.skip(false);
+                            return;
+                        }
+                    }
+                }
+                e.skip(true);
+            });
+        }
+        {
+            // A click lands on the state icon before any of this runs, so the same guard has
+            // to be here: hit-test what was clicked, and consume it when the row has no
+            // checkbox to click.
+            let (checkable, items) = (checkable.clone(), items.clone());
+            let ctrl_for_mouse = ctrl.clone();
+            ctrl.on_mouse_left_down(move |e| {
+                let WindowEventData::MouseButton(mb) = &e else {
+                    e.skip(true);
+                    return;
+                };
+                let Some(pos) = mb.get_position() else {
+                    e.skip(true);
+                    return;
+                };
+                let (flags, h_item) =
+                    native_checkboxes::hit_test(ctrl_for_mouse.get_handle(), pos.x, pos.y);
+                if (flags & native_checkboxes::TVHT_ONITEMSTATEICON) != 0 && !h_item.is_null() {
+                    let blocked = items
+                        .borrow()
+                        .iter()
+                        .position(|it| native_checkboxes::is(it, h_item))
+                        .is_some_and(|i| checkable.borrow().get(i) == Some(&false));
+                    if blocked {
+                        e.skip(false);
+                        return;
+                    }
+                }
+                e.skip(true);
+            });
+        }
+
+        ListInner { ctrl, root, items, checkable, hwnd, toggled, selected }
     }
 
     fn add_to(&self, sizer: &BoxSizer) {
@@ -300,16 +373,27 @@ impl ListInner {
         let previous = self.selection();
         {
             let mut items = self.items.borrow_mut();
+            let mut checkable = self.checkable.borrow_mut();
             for it in items.iter() {
                 self.ctrl.delete(it);
             }
             items.clear();
+            checkable.clear();
             let Some(root) = &self.root else {
                 return;
             };
             for r in rows {
                 if let Some(item) = self.ctrl.append_item(root, &r.label, None, None) {
-                    native_checkboxes::set(self.hwnd, &item, r.enabled);
+                    // A row for a module this platform will not run gets no checkbox:
+                    // state-image 0 is "no state image". On its own this is not enough — the
+                    // control still cycles the state underneath — which is why Space is
+                    // swallowed for such a row as well.
+                    if r.unsupported.is_some() {
+                        native_checkboxes::hide(self.hwnd, &item);
+                    } else {
+                        native_checkboxes::set(self.hwnd, &item, r.enabled);
+                    }
+                    checkable.push(r.unsupported.is_none());
                     items.push(item);
                 }
             }
@@ -434,7 +518,10 @@ impl ListInner {
 /// until the user chooses Quit.
 pub fn run_gui(
     modules: Vec<ModuleInfo>,
-    on_toggle: impl FnMut(usize, bool) + 'static,
+    // (module index if it is loaded, module id, now enabled). The id is what carries the
+    // answer for a row whose module this platform will not run: there is no index, and the
+    // enabled flag is stored by id anyway.
+    on_toggle: impl FnMut(Option<usize>, String, bool) + 'static,
     on_set: impl FnMut(usize, String, settings::Value) + 'static,
     on_install: impl Fn(std::path::PathBuf) -> Result<(String, Vec<ModuleInfo>), String> + 'static,
     on_remove: impl Fn(usize) + 'static,
@@ -642,9 +729,9 @@ pub fn run_gui(
         // The list arrives with its first row selected (see InstalledList::rebuild), so the
         // buttons start from what is actually selected rather than from "nothing".
         refresh_settings_btn(&list, &rows, &settings_btn);
-        reload_btn.enable(list.selection().is_some());
+        refresh_reload_btn(&list, &rows, &reload_btn);
         let rows = Rc::new(RefCell::new(rows));
-        let on_toggle: Rc<RefCell<Box<dyn FnMut(usize, bool)>>> =
+        let on_toggle: Rc<RefCell<Box<dyn FnMut(Option<usize>, String, bool)>>> =
             Rc::new(RefCell::new(Box::new(on_toggle)));
 
         {
@@ -660,7 +747,7 @@ pub fn run_gui(
             let (rows, l) = (rows.clone(), list.clone());
             list.on_select(move || {
                 refresh_settings_btn(&l, &rows.borrow(), &settings_btn);
-                reload_btn.enable(l.selection().is_some());
+                refresh_reload_btn(&l, &rows.borrow(), &reload_btn);
             });
         }
 
@@ -1686,6 +1773,18 @@ fn refresh_install_btn(
 /// Enables the Settings button only when the selected row's module actually has
 /// settings (and a row is selected at all) — so the user can't open an empty
 /// settings dialog.
+/// Reload needs a module to rebuild. A row for one this platform will not run has none, so
+/// the button is unavailable rather than pressable-and-then-sorry: a control that offers itself
+/// and then declines has already cost the press, and for somebody navigating by keyboard it has
+/// also cost the trip.
+fn refresh_reload_btn(list: &InstalledList, rows: &[Row], reload_btn: &Button) {
+    let reloadable = list
+        .selection()
+        .and_then(|sel| rows.get(sel))
+        .is_some_and(|r| r.module_idx.is_some());
+    reload_btn.enable(reloadable);
+}
+
 fn refresh_settings_btn(list: &InstalledList, rows: &[Row], settings_btn: &Button) {
     let has_settings = list
         .selection()
@@ -1693,14 +1792,6 @@ fn refresh_settings_btn(list: &InstalledList, rows: &[Row], settings_btn: &Butto
         .map(|r| !r.settings.is_empty())
         .unwrap_or(false);
     settings_btn.enable(has_settings);
-}
-
-/// What a checkbox change came to. `Refused` is a tick that must not stand: the row has no
-/// module behind it, because this platform will not run it.
-enum Toggled {
-    Tell(usize),
-    Nothing,
-    Refused,
 }
 
 /// One row's checkbox changed: record it and tell the host.
@@ -1712,7 +1803,7 @@ fn apply_toggle(
     list: &InstalledList,
     rows: &RefCell<Vec<Row>>,
     i: usize,
-    on_toggle: &RefCell<Box<dyn FnMut(usize, bool)>>,
+    on_toggle: &RefCell<Box<dyn FnMut(Option<usize>, String, bool)>>,
 ) {
     let now = list.checked(i);
     let changed = {
@@ -1722,35 +1813,19 @@ fn apply_toggle(
             // rather than leave a tick that means nothing — and leave the row's own label,
             // which already says why, as the explanation a screen reader will read on landing
             // there.
-            Some(r) if r.unsupported.is_some() => {
-                crate::logging::line(
-                    "manager",
-                    &format!(
-                        "'{}' cannot be enabled here: it declares {} and this is {}",
-                        r.id,
-                        r.unsupported.as_deref().unwrap_or("another platform"),
-                        std::env::consts::OS
-                    ),
-                );
-                Toggled::Refused
-            }
+            // Belt and braces for the mouse: the key is swallowed above, but a click on
+            // where the box would be can still reach the control. Ignored rather than
+            // corrected — a correction is a rebuild, and a rebuild re-announces the row.
+            Some(r) if r.unsupported.is_some() => None,
             Some(r) if r.enabled != now => {
                 r.enabled = now;
-                match r.module_idx {
-                    Some(idx) => Toggled::Tell(idx),
-                    None => Toggled::Refused,
-                }
+                Some((r.module_idx, r.id.clone()))
             }
-            _ => Toggled::Nothing,
+            _ => None,
         }
     };
-    match changed {
-        Toggled::Tell(module_idx) => on_toggle.borrow_mut()(module_idx, now),
-        Toggled::Nothing => {}
-        // The control is put back by rebuilding from the rows, which is how every other
-        // change to this list is made — there is no per-item setter, and one path for it
-        // means the two cannot drift apart.
-        Toggled::Refused => list.rebuild(&rows.borrow()),
+    if let Some((module_idx, id)) = changed {
+        on_toggle.borrow_mut()(module_idx, id, now);
     }
 }
 
@@ -1834,6 +1909,71 @@ mod native_checkboxes {
             mask: TVIF_HANDLE | TVIF_STATE,
             h_item,
             state: (if checked { 2u32 } else { 1u32 }) << 12,
+            state_mask: TVIS_STATEIMAGEMASK,
+            text: std::ptr::null_mut(),
+            text_max: 0,
+            image: 0,
+            selected_image: 0,
+            children: 0,
+            l_param: 0,
+        };
+        unsafe {
+            SendMessageW(hwnd, TVM_SETITEMW, 0 as WPARAM, &mut tvi as *mut _ as LPARAM);
+        }
+    }
+
+    /// Hit-test flag: the click landed on an item's checkbox rather than on its text.
+    pub const TVHT_ONITEMSTATEICON: u32 = 0x0040;
+    const TVM_HITTEST: u32 = TV_FIRST + 17;
+
+    #[repr(C)]
+    struct TvHitTestPoint {
+        x: i32,
+        y: i32,
+    }
+
+    /// Layout-compatible mirror of `TVHITTESTINFO` from `<commctrl.h>`.
+    #[repr(C)]
+    struct TvHitTestInfo {
+        pt: TvHitTestPoint,
+        flags: u32,
+        h_item: *mut c_void,
+    }
+
+    /// What is under `(x, y)` in the tree's client area — which is the space a wx mouse event
+    /// reports its position in.
+    pub fn hit_test(hwnd: *mut c_void, x: i32, y: i32) -> (u32, *mut c_void) {
+        let hwnd = hwnd as HWND;
+        if hwnd.is_null() {
+            return (0, std::ptr::null_mut());
+        }
+        let mut info = TvHitTestInfo {
+            pt: TvHitTestPoint { x, y },
+            flags: 0,
+            h_item: std::ptr::null_mut(),
+        };
+        unsafe {
+            SendMessageW(hwnd, TVM_HITTEST, 0 as WPARAM, &mut info as *mut _ as LPARAM);
+        }
+        (info.flags, info.h_item)
+    }
+
+    /// Whether a wx item is the native handle a hit-test returned.
+    pub fn is(item: &TreeItemId, h_item: *mut c_void) -> bool {
+        !h_item.is_null() && htreeitem(item) == h_item
+    }
+
+    /// Removes an item's checkbox — state-image index 0 is "no state image".
+    pub fn hide(hwnd: *mut c_void, item: &TreeItemId) {
+        let hwnd = hwnd as HWND;
+        let h_item = htreeitem(item);
+        if hwnd.is_null() || h_item.is_null() {
+            return;
+        }
+        let mut tvi = Tvitemw {
+            mask: TVIF_HANDLE | TVIF_STATE,
+            h_item,
+            state: 0,
             state_mask: TVIS_STATEIMAGEMASK,
             text: std::ptr::null_mut(),
             text_max: 0,

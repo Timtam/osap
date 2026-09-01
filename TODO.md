@@ -46,9 +46,20 @@ Architecture and feasibility foundation: [docs/architecture-feasibility-study.md
       for modules this platform will not run. The one place a module can be reached from is
       also the one place whose emptiness is invisible to the person it matters to, so the count
       belongs in the log a tester sends rather than only on a screen they cannot read.
-  - Verified by marking a module macOS-only: eleven loaded, twelve rows, and the log saying
-      which. **What is not verified is what it sounds like** — the row's wording and the two
-      refusals want a pass with NVDA before this is called done.
+  - Confirmed with NVDA (2026-09-01): the row reads, the checkbox is gone, Space does nothing
+      and says nothing, Reload is unavailable, Uninstall works.
+  - **Four attempts failed on one wrong assumption**, and it is worth keeping: a wx event is
+      consumed by calling `event.skip(false)`, NOT by declining to call `skip`. Without it the
+      binder passes the event on, the native tree cycles its checkbox, and the accessibility
+      layer announces the change before any handler here runs — so every correction afterwards
+      is either silent (a lie) or a list rebuild (which re-announces the row). Setting the
+      state-image index to 0 removes the picture only; the control keeps cycling underneath.
+      Both routes need suppressing: `on_key_down` for Space, and `on_mouse_left_down` with a
+      `TVM_HITTEST` for `TVHT_ONITEMSTATEICON`.
+  - The answer came from the user pointing at **rabbit**, which had solved the same problem
+      against the same control, with the reasoning written beside it. Worth looking there first
+      for anything wx-or-native-control shaped: guessing in front of a blind tester costs his
+      time, and a search costs mine.
 - [ ] **Module manager follow-ups:** CLI/IPC control surface; a **native macOS/GTK checkbox path** (`TVS_CHECKBOXES` is Windows-only — non-Windows currently shows no checkboxes). Out-of-process only for the untrusted-native-FFI tier. See [docs/module-runtime-and-lifecycle.md](docs/module-runtime-and-lifecycle.md).
   - Lifted out of the completed entries below, where they were easy to lose:
   - [ ] **Hotkey conflicts are resolved at registration only.** A binding skipped because another module held the combo does not activate when that owner is later disabled (needs a restart), and `apply_enabled`'s re-register on enable neither conflict-checks nor surfaces a clash.

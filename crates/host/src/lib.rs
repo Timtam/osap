@@ -1100,6 +1100,24 @@ impl Shared {
         }
     }
 
+    /// Records the enabled flag for a module that is not loaded here.
+    ///
+    /// There is no index and no VM to revoke or restore — the module was skipped because its
+    /// manifest says it does not run on this platform. The flag is stored by id like every
+    /// other, so ticking the box says "I want this on" and that answer is waiting wherever the
+    /// module does load.
+    fn set_enabled_unloaded(&self, id: &str, enabled: bool) {
+        self.store.borrow_mut().set_enabled(id, enabled);
+        self.save_config();
+        logging::line(
+            "manager",
+            &format!(
+                "'{id}' is not loaded here, so {} is remembered for wherever it is",
+                if enabled { "enabled" } else { "disabled" }
+            ),
+        );
+    }
+
     /// Mirrors the in-memory `enabled[]` flags into the store.
     fn sync_enabled_into_store(&self) {
         let ids = self.ids.borrow();
@@ -2319,7 +2337,10 @@ impl Manager {
                 crate::backend::note_frontmost_before_gui();
                 gui::run_gui(
                     module_infos,
-                    move |idx, enabled| toggle_shared.set_enabled(idx, enabled),
+                    move |idx, id: String, enabled| match idx {
+                        Some(i) => toggle_shared.set_enabled(i, enabled),
+                        None => toggle_shared.set_enabled_unloaded(&id, enabled),
+                    },
                     move |idx, key, value| set_shared.set_setting(idx, &key, value),
                     // Hot-load a freshly installed module into the running app so
                     // it's usable without a restart. Returns the module id, or an
