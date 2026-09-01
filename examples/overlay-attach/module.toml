@@ -7,4 +7,4 @@ license = "MIT"
 dependencies = ["com.platform.overlay"]
 
 [capabilities]
-require = ["overlay", "window", "speech", "ocr", "input", "hotkey"]
+require = ["speech"]

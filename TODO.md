@@ -462,6 +462,57 @@ what the platform offers. Both true, and underneath them a defect nobody could h
       so it wants doing once, deliberately — and after the site is actually published, not
       before.
 
+## Agreed next, in this order (2026-08-31)
+
+- [x] **1. Enforce the capability list, scoped per module** (2026-08-31). Each module's `host` table carries
+      only the namespaces it declares. The mechanism already exists and is not yet used for
+      this: `build_dep_host` gives a code dependency its own table with the owner's underneath
+      by metatable, and `eval_on_host` wraps each chunk as `function(host) … end` so it captures
+      that table rather than a global. So permission follows the module that WROTE the code,
+      while ownership stays with the VM that runs it — the overlay runtime declares `ocr` and
+      may use it; Kontakt, which depends on it, does not get `ocr` from that.
+  - Two details decide whether it works: a permitted namespace must be bound to the OWNER's
+      table, so a hotkey the dependency registers still belongs to the owner and dies with it;
+      and the metatable's `__index` must refuse a namespace the dependency did not ask for,
+      because falling through to the owner would hand back exactly what was just denied.
+  - A denial should raise naming the module and the capability, not evaluate to `nil` — the
+      symptom of `nil` is "attempt to index a nil value" three frames away.
+  - **Built as a VIEW, not a trimmed table** — the first attempt cut the namespaces out of the
+      module's own host, and that table is also what a dependency's fall-through binds to, so a
+      dependency lost a binding it was entitled to whenever its DEPENDENT had not declared the
+      same thing. sforzando showed it at once: the runtime declares `timer` and may use it,
+      sforzando does not, and `host.timer.every` came back nil three frames from anything that
+      could say why. The full table now stays whole and is only ever a source of bindings.
+  - The prelude runs BEFORE gating, on the whole table, because it extends the host
+      (`host.os.pick`, the matchers); gating first would put its additions on the view where a
+      dependency cannot see them.
+  - **The declarations are now exactly what is used**, and much smaller for it: `audio-imperia`
+      went from ten to three, `u-he` from ten to two, `impact-soundworks` from eleven to two,
+      while the overlay runtime carries the broad set because its code is what does the work.
+      That is the payoff — a library used to declare nine capabilities it never names, because
+      the runtime read a pixel on its behalf and there was no way to say so.
+  - Static analysis got them close but not right, and the difference is instructive: six
+      modules needed `window` back although their own files never write `host.window`. **A
+      callback you register is your code** — the gate and the matcher an overlay supplies are
+      called during a focus change, and the access is correctly attributed to the module that
+      supplied them. The enforcement itself settled the final set, in two rounds.
+  - Seven manifests under-declared and broke, which was the point: `melodyne` (keys, log,
+      timer), `sforzando` (uia), `kontakt` (path), `overlay-runtime` (path, resource, arbiter),
+      `examples/hello` (path), `tools/inspect` (uia). Over-declaration stays legal.
+- [ ] **2. Rename `host.uia` to `host.element`.** Both platforms already use the word —
+      `IUIAutomationElement`, `AXUIElement` — so it is the shared vocabulary rather than a
+      neutral invention, and it drops a vendor name from an API whose purpose is to abstract
+      over both. Measured: 9 manifests, 39 call sites across 12 module files, 63 mentions in
+      the Rust host, 16 in the docs. Cheaper in the same pass as (1), which touches every
+      manifest anyway.
+- [ ] **3. The reference reads like a loose collection of leaflets.** Two things, both mine:
+  - **Sort the pages alphabetically.** They currently sit in the order I happened to think of
+      them, which is no order at all to somebody looking for one.
+  - **The page titles and introductions are too pleased with themselves.** `host.speech — the
+      only way out` and `host.sound — a noise instead of a sentence` are essay titles, not
+      reference titles. A reference entry should say what the thing does and stop. Rewrite them
+      plainly, keeping the measured facts and dropping the flourishes.
+
 ## One page per feature (2026-08-31)
 
 The six pages of the reference grouped namespaces for no reason anybody could state —

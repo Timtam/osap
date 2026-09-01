@@ -8,13 +8,15 @@
 catalogue is where the shape was decided at the start of the project, and much of it is still
 ahead of the implementation. The plan stands; what follows describes where it is going.
 
-Two properties of the model below are **not built**, and nothing depends on them yet:
-
-- **Default-deny and manifest gating.** `[capabilities] require` is a plain list of strings. It
-  is not validated against any set of known names and **nothing gates a call on it** — every
-  module receives the whole `host` table whatever it declares. The list is written to the log
-  at load and shown to the user before installing a module, which is its only present use.
-- **`host.<ns>.available()`.** No namespace has one.
+- **Default-deny and manifest gating is built** (2026-08-31), and scoped per module rather
+  than per VM: a namespace a module has not declared is absent from its `host` table, and
+  reaching for it raises an error naming the module and the capability. Permission follows the
+  module that *wrote* the code, so a code dependency is judged by its own manifest wherever it
+  runs, while ownership stays with the VM. Names are still not validated against a known set —
+  a manifest may declare `"telepathy"` and load — and a handful of namespaces are ungated
+  because gating them would mean every manifest names them: `os`, `require`, `tryRequire`,
+  `include`, `epoch`, `now`, `inputEpoch`, `calibrating`.
+- **`host.<ns>.available()` is not built.** No namespace has one.
 
 Four namespaces are planned rather than present: `host.gui`, `host.clipboard`, `host.app`
 and `host.ffi`. The **Built** column below says which is which.

@@ -9,4 +9,4 @@ dependencies = ["com.platform.kontakt"]
 [capabilities]
 # Inherits Kontakt's framework (the overlay machinery runs in this VM), so the
 # effective capability surface is the union with Kontakt's.
-require = ["window", "uia", "screen", "ocr", "input", "speech", "hotkey", "keys", "timer", "log", "path"]
+require = ["log", "path", "window"]

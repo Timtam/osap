@@ -20,11 +20,19 @@ Each page says which name to put in its manifest:
 require = ["window", "screen", "speech"]
 ```
 
-**It is not enforced.** Nothing in the host gates a call on this list — every module receives the whole `host` table whichever names it declares, and a name nobody recognises loads without complaint. What the list actually does is two things: it is written to the log when the module loads, and it is shown to the user before installing a module from GitHub. That second one is the only reason to keep it accurate — it is the only thing somebody is told about a stranger's module before it runs.
+**It is enforced.** A namespace you have not declared is not on your `host` table, and reaching for it raises an error naming your module and the capability it needs rather than evaluating to `nil` three frames from anything that could explain it. Declaring more than you use is legal and harmless; declaring less is a failure at the moment you first need it.
 
-Which also means it cannot be a security claim: it is a self-report from exactly the party a reader has no reason to trust. Treat it as a declaration of intent, and expect it to become load-bearing later.
+**Permission follows the module that wrote the code, not the one running it.** A `code_module` dependency is evaluated inside its dependent's VM, and what it may reach is decided by its own manifest: the overlay runtime declares `ocr`, so its code may read text on behalf of a module that never declared `ocr` itself. The reverse also holds — a dependency cannot reach something merely because one of its dependents declared it.
 
-The overlay is the exception in shape rather than degree — it is a **module**, so it goes under `dependencies` rather than here.
+Ownership is unaffected, and deliberately so. A hotkey or a timer that a dependency's code registers still belongs to the module whose VM it ran in, so disabling that module takes it away.
+
+**A callback you register is your code.** That is why a module whose own file never writes `host.window` still declares `window` if it attaches an overlay: the gate and the matcher it supplied are called during a focus change, and they are yours.
+
+Nothing is gated on `host.os`, `host.require`, `host.tryRequire`, `host.include`, `host.epoch`, `host.now`, `host.inputEpoch` or `host.calibrating`. A clock, a counter, a platform name and a way to reach a declared dependency are not worth asking permission for, and gating them would mean every manifest names them — which is the same as naming none.
+
+The list is also shown to the user before installing a module from GitHub. It is not a security boundary on its own — a module still runs arbitrary Luau, and the declaration is the module's own word — but it is now the word the platform holds it to.
+
+The overlay is the exception in shape rather than degree: it is a **module**, so it goes under `dependencies` rather than here.
 
 
 ## Overlay

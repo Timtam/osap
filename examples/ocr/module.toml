@@ -6,4 +6,4 @@ entry = "src/main.luau"
 license = "MIT"
 
 [capabilities]
-require = ["ocr", "screen", "log", "speech"]
+require = ["ocr", "log", "speech"]

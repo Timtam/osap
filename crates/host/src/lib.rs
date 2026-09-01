@@ -97,6 +97,11 @@ struct Shared {
     ids: RefCell<Vec<String>>,
     /// module_idx → enabled.
     enabled: RefCell<Vec<bool>>,
+    /// module_idx → the capability names its manifest declares.
+    ///
+    /// Parallel to `ids`, and pushed with it: `install_host_api` runs later (from
+    /// `populate_vm`) and reads this to decide what the module's `host` table carries.
+    caps: RefCell<Vec<HashSet<String>>>,
     /// Global hotkey id → its registration (owning module, VM, callback, spec).
     hotkeys: RefCell<HashMap<i32, HotkeyReg>>,
     /// Captured keys: (vk, modifier-mask, module_idx, token, VM, callback). The
@@ -885,6 +890,7 @@ impl Shared {
         self.roots.borrow_mut().truncate(n);
         self.ids.borrow_mut().truncate(n);
         self.enabled.borrow_mut().truncate(n);
+        self.caps.borrow_mut().truncate(n);
         self.schemas.borrow_mut().truncate(n);
         self.exports.borrow_mut().remove(failed_id);
         self.refresh_captured();
@@ -1427,14 +1433,49 @@ fn build_dep_host(
     host_owner: &Table,
     dep_idx: usize,
 ) -> Result<Table> {
+    // Already gated by the DEPENDENCY's own manifest, which is the whole point: the module
+    // that wrote the code is the one whose declaration decides what the code may reach.
     let dep_full = install_host_api(lua, shared, dep_idx)?;
+    let dep_caps = shared.caps.borrow().get(dep_idx).cloned().unwrap_or_default();
     let host = lua.create_table()?;
     for key in ["path", "resource", "settings", "config", "screen", "sound"] {
-        let v: mlua::Value = dep_full.get(key)?;
-        host.set(key, v)?;
+        // Identity facilities the dependency did not ask for are left off, so the refusal
+        // below answers for them like any other.
+        if capability_for(key).is_none_or(|cap| dep_caps.contains(cap)) {
+            let v: mlua::Value = dep_full.raw_get(key)?;
+            host.set(key, v)?;
+        }
     }
+
+    // PERMISSION FROM THE DEPENDENCY, BINDING FROM THE OWNER.
+    //
+    // The fall-through used to be `__index = host_owner`, which is what makes a hotkey or a
+    // timer the dependency registers belong to the VM that runs it — disable the owner and
+    // they go with it. That has to survive, so a permitted namespace still resolves to the
+    // owner's table.
+    //
+    // What must not survive is the fall-through for a namespace the dependency did NOT ask
+    // for: handing back the owner's copy would return exactly what was just denied, and would
+    // mean a module could reach anything its dependents happen to have declared.
+    let dep_id = shared.ids.borrow().get(dep_idx).cloned().unwrap_or_default();
+    let owner = host_owner.clone();
     let mt = lua.create_table()?;
-    mt.set("__index", host_owner)?;
+    mt.set(
+        "__index",
+        lua.create_function(move |_, (_t, key): (Table, String)| -> mlua::Result<mlua::Value> {
+            if let Some(cap) = capability_for(&key) {
+                if !dep_caps.contains(cap) {
+                    return Err(undeclared(
+                        &dep_id,
+                        &key,
+                        ". Its code runs inside another module's VM; what that module declares \
+                         does not apply to it",
+                    ));
+                }
+            }
+            owner.raw_get(key)
+        })?,
+    )?;
     host.set_metatable(Some(mt))?;
     // Installed explicitly, NOT inherited through the metatable: an included file must be
     // resolved against — and handed the host of — the module that includes it. Falling
@@ -1547,8 +1588,18 @@ fn populate_vm(
     // keys/arbiter) scoped to the module (idx). Set as the global so its entry + the
     // host's dispatch resolve it; code dependencies get an identity-scoped variant.
     let host_m = install_host_api(lua, shared, idx).context("failed to install host API")?;
+    // The prelude EXTENDS the host — `host.os.pick`, the window matchers — so it runs against
+    // the whole table, before anything is gated. Gating it first would have the prelude write
+    // its additions onto the view instead, where a dependency's fall-through cannot see them.
     lua.globals().set("host", &host_m)?;
     lua.load(WINDOW_PRELUDE).set_name("window_prelude").exec()?;
+
+    // From here the module's own code sees only what its manifest declares. `host_m` stays
+    // whole, and is what a code dependency's permitted namespaces bind to, so a hotkey or a
+    // timer the dependency registers still belongs to THIS module and dies with it.
+    let caps = shared.caps.borrow().get(idx).cloned().unwrap_or_default();
+    let host_view = gated_view(lua, &host_m, &caps, id)?;
+    lua.globals().set("host", &host_view)?;
 
     // Top-down dependency loading: evaluate each `code_module` dependency
     // (transitively, in dependency order) inside this VM and record its returned
@@ -1732,6 +1783,10 @@ fn load_module(
     // true target state: a disabled module records its bindings without claiming or
     // contesting them.
     shared.enabled.borrow_mut().push(!disabled_ids.contains(&module.manifest.id));
+    shared
+        .caps
+        .borrow_mut()
+        .push(module.manifest.capabilities.require.iter().cloned().collect());
     shared.schemas.borrow_mut().push(HashMap::new());
 
     // Everything past the four parallel-vector pushes above is fallible
@@ -2027,6 +2082,7 @@ impl Manager {
             roots: RefCell::new(Vec::new()),
             ids: RefCell::new(Vec::new()),
             enabled: RefCell::new(Vec::new()),
+            caps: RefCell::new(Vec::new()),
             hotkeys: RefCell::new(HashMap::new()),
             keys: RefCell::new(Vec::new()),
             store: RefCell::new(store),
@@ -2622,6 +2678,90 @@ impl HostEvents for Dispatcher<'_> {
         c.2 += started.elapsed().as_millis();
         self.shared.ev_counts.set(c);
     }
+}
+
+/// Which `host.<key>` a manifest's capability name unlocks.
+///
+/// Everything not in here is free: `os`, `require`, `tryRequire`, `include`, `epoch`, `now`,
+/// `inputEpoch`, `calibrating`, `match`. A clock, a counter, a platform name and a way to
+/// reach a declared dependency are not worth asking permission for, and gating them would
+/// mean every manifest names them, which is the same as naming none.
+///
+/// `config` is the second name of the settings table, so it answers to the same capability
+/// rather than to one of its own — nothing declares `"config"` and nothing should have to.
+const GATED: &[(&str, &str)] = &[
+    ("window", "window"),
+    ("screen", "screen"),
+    ("ocr", "ocr"),
+    ("uia", "uia"),
+    ("input", "input"),
+    ("keys", "keys"),
+    ("hotkey", "hotkey"),
+    ("speech", "speech"),
+    ("sound", "sound"),
+    ("timer", "timer"),
+    ("settings", "settings"),
+    ("config", "settings"),
+    ("log", "log"),
+    ("path", "path"),
+    ("resource", "resource"),
+    ("arbiter", "arbiter"),
+];
+
+/// The capability a `host.<key>` access needs, or `None` when it needs none.
+fn capability_for(key: &str) -> Option<&'static str> {
+    GATED.iter().find(|(k, _)| *k == key).map(|(_, c)| *c)
+}
+
+/// The refusal a module gets for a namespace it did not declare.
+///
+/// A missing table would surface three frames away as "attempt to index a nil value", naming
+/// neither the module nor what it forgot to ask for. `note` carries the one thing that is not
+/// obvious when the code is a dependency's: the declaration that counts is the author's, not
+/// the VM owner's.
+fn undeclared(id: &str, key: &str, note: &str) -> mlua::Error {
+    let cap = capability_for(key).unwrap_or(key);
+    mlua::Error::external(format!(
+        "module '{id}' used host.{key} without declaring it — add \"{cap}\" to \
+         [capabilities] require in its module.toml{note}"
+    ))
+}
+
+/// A view over `full` that refuses the gated namespaces `caps` does not name.
+///
+/// A VIEW rather than a trimmed table, because `full` is also what a code dependency's
+/// fall-through binds to. Cutting a namespace out of it took that binding away from a
+/// dependency that was entitled to it whenever the dependent had not declared the same thing —
+/// which is backwards: permission belongs to the module that wrote the code.
+///
+/// An unknown key still answers nil. That is a typo, not a permission problem.
+fn gated_view(lua: &Lua, full: &Table, caps: &HashSet<String>, id: &str) -> Result<Table> {
+    let denied: HashSet<String> = GATED
+        .iter()
+        .filter(|(_, cap)| !caps.contains(*cap))
+        .map(|(key, _)| (*key).to_string())
+        .collect();
+    if denied.is_empty() {
+        return Ok(full.clone());
+    }
+    let owner = id.to_string();
+    let source = full.clone();
+    let view = lua.create_table()?;
+    let mt = lua.create_table()?;
+    mt.set(
+        "__index",
+        lua.create_function(move |_, (_t, key): (Table, String)| -> mlua::Result<mlua::Value> {
+            if denied.contains(&key) {
+                return Err(undeclared(&owner, &key, ""));
+            }
+            source.raw_get(key)
+        })?,
+    )?;
+    // Anything a module assigns to `host.x` lands on the view rather than on the table every
+    // other module shares, which is the right way round: one module must not be able to change
+    // what another one sees.
+    view.set_metatable(Some(mt))?;
+    Ok(view)
 }
 
 fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table> {
