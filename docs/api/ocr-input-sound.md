@@ -1,6 +1,7 @@
 ---
 title: "host.ocr + host.input + host.sound — recognition, input synthesis & audio"
 sidebar_position: 3
+toc_max_heading_level: 2
 ---
 
 These three namespaces cover screen text recognition (`host.ocr`), mouse/keyboard input synthesis (`host.input`), and audio playback (`host.sound`). All coordinates are screen pixels.

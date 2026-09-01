@@ -1,6 +1,7 @@
 ---
 title: "host.resource / host.path / host.settings / host.config / host.require / host.tryRequire"
 sidebar_position: 5
+toc_max_heading_level: 2
 ---
 
 These functions cover package-relative file access, per-module settings, and

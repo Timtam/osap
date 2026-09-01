@@ -1,6 +1,7 @@
 ---
 title: "host.uia + host.screen — UI Automation & screen pixels/images"
 sidebar_position: 2
+toc_max_heading_level: 2
 ---
 
 Functions for querying the Windows UI Automation tree of a window and for reading screen pixels / searching for an image template on screen. All coordinates are screen pixels.

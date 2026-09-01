@@ -1,6 +1,7 @@
 ---
 title: "host.speech + host.hotkey + host.keys + host.timer + host.log"
 sidebar_position: 4
+toc_max_heading_level: 2
 ---
 
 Input/output reference for the speech, hotkey, low-level key-capture, timer, and logging host namespaces. These are the closures registered in `crates/host/src/lib.rs` (`install_host_api`). Coordinates do not apply to this group. All callbacks run in the calling module's own Luau VM and only fire while that module is **enabled**.

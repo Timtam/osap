@@ -52,6 +52,25 @@ NS_BLURB = {
 }
 
 
+def escaped(title):
+    """A heading written so Markdown does not eat part of it.
+
+    `## O:addStaticText(label)` renders correctly and is still wrong. A colon glued to a word
+    is directive syntax, so `:addStaticText` is consumed before the heading's own value is
+    taken — and that value is what feeds the table of contents and the anchor. The page showed
+    the full name; its contents list showed `O(label)`, three different entries showed
+    `O(opts)`, and `O:origin() / O:hwnd()` showed `O() / O()`. For somebody navigating the page
+    by that list, half the reference had no usable names.
+
+    Escaping the colon leaves the rendering identical and stops the parse.
+    """
+    return re.sub(r'(?<!\\):(?=[A-Za-z])', r'\\:', title)
+
+
+def unescaped(title):
+    return title.replace('\\:', ':')
+
+
 def slug(heading):
     """A stable anchor, derived from the entry's own name rather than its punctuation."""
     h = heading.split('{')[0].strip()
@@ -86,7 +105,7 @@ def summarise(body):
         t = re.sub(r'^\(prelude\)\s*', '', t)
         # A summary is lifted out of its own page, so any relative link in it would resolve
         # against the index instead and point at nothing. Keep the words, drop the link.
-        t = re.sub(r'\[([^\]]+)\]\([^)]*\)', r'', t)
+        t = re.sub(r'\[([^\]]+)\]\([^)]*\)', r'\1', t)
         # One sentence is enough for an index; the entry itself carries the rest.
         s = re.split(r'(?<=[.!?])\s', t)[0].strip().rstrip(':')
         # And one sentence can still be a paragraph. Cut at the first clause boundary past
@@ -97,6 +116,29 @@ def summarise(body):
             s = head if 20 < len(head) <= 160 else s[:127].rsplit(' ', 1)[0] + '…'
         return s
     return ''
+
+
+# The contents list should be the list of entries, and nothing else. Forty-seven of the
+# fifty-one level-3 headings in the reference are the per-OS blocks, so without this a page
+# reads out as "Windows, macOS, Windows, macOS" six times over with nothing to say which call
+# each pair belongs to — noise for a sighted reader, and for somebody navigating by that list,
+# the page's structure buried in it.
+TOC_LIMIT = 'toc_max_heading_level: 2'
+
+
+def limit_toc(paths, dry):
+    """Every reference page declares the depth of its own contents list."""
+    changed = []
+    for path in paths:
+        text = open(path, encoding="utf-8").read()
+        if TOC_LIMIT in text or not text.startswith("---\n"):
+            continue
+        end = text.index("\n---\n", 4)
+        text = text[:end] + "\n" + TOC_LIMIT + text[end:]
+        changed.append(path)
+        if not dry:
+            io.open(path, "w", encoding="utf-8", newline="\n").write(text)
+    return changed
 
 
 def collect():
@@ -113,7 +155,7 @@ def collect():
                 'page': page,
                 'path': path,
                 'raw': parts[i],
-                'title': head.split('{')[0].strip(),
+                'title': unescaped(head.split('{')[0].strip()),
                 'anchor': slug(head),
                 'ns': namespace(head),
                 'summary': summarise(parts[i + 1]),
@@ -138,7 +180,7 @@ def rewrite_anchors(entries, dry):
     for path, es in by_path.items():
         text = open(path, encoding='utf-8').read()
         for e in es:
-            want = '## ' + e['title'] + ' {#' + e['anchor'] + '}'
+            want = '## ' + escaped(e['title']) + ' {#' + e['anchor'] + '}'
             if e['raw'].rstrip() != want:
                 text = text.replace(e['raw'].rstrip(), want, 1)
         for old, new in renames.items():
@@ -200,6 +242,7 @@ def main():
         return 1
 
     changed = rewrite_anchors(entries, dry=check)
+    changed += limit_toc(sorted({e['path'] for e in entries}), dry=check)
     entries = collect() if not check else entries
     index = build_index(entries)
     current = open(INDEX, encoding='utf-8').read() if os.path.exists(INDEX) else None

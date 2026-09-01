@@ -1,6 +1,7 @@
 ---
 title: "host.window & host.os — windows, controls, matchers, triggers"
 sidebar_position: 1
+toc_max_heading_level: 2
 ---
 
 All coordinates are screen pixels on Windows and **points** on macOS (i32 → Luau `number`) unless noted — see `host.screen.size()` for why that distinction costs a day when it is missed. `id` fields are native window handles on Windows (a Win32 `HWND` as a Luau integer) and interned counters on macOS; see the platform sections under **Table shapes**. The `host.window.list`/`active`/`controls`/`focusChain`/`ownsPoint` functions are native (Rust) bindings; `find`/`findAll`/`test`/`onTrigger`/`onFocus` are added by `window_prelude.luau` on top of them.

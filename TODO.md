@@ -432,6 +432,19 @@ what the platform offers. Both true, and underneath them a defect nobody could h
       asking why. The headings rendered perfectly, so nothing looked wrong. Every entry now
       carries an explicit `{#anchor}` derived from its own name — `#o-addstatictext`,
       `#host-window-ownspoint` — and Docusaurus honours those verbatim.
+- [x] **The contents list on each page was half unusable, for the same reason.** Reported from
+      the page rather than the source: the link list at the foot of the overlay page read
+      `O(label)`, `O(opts)` three times over, and `O() / O()`. Same cause as the anchors — a
+      colon glued to a word is directive syntax, so `:addStaticText` is consumed before the
+      heading's value is taken, and that value feeds both the contents list and the anchor. The
+      heading itself renders from something else, which is why the page looked right and its
+      own navigation did not. Escaping the colon leaves the rendering identical and stops the
+      parse; the twenty affected headings are all in `overlay.md`, and the generator maintains
+      the escape.
+- [x] **And the contents lists carried forty-seven "Windows"/"macOS" rows.** The per-OS blocks
+      are level-3 headings, so `ocr-input-sound` listed the pair six times with nothing to say
+      which call each belonged to. `toc_max_heading_level: 2` on every reference page, so the
+      contents list is the list of entries and nothing else.
 - [x] **An index of all 87 entries**, grouped by namespace, each with the one-line summary its
       page already carried. The sidebar had listed six pages named things like
       `speech-hotkey-keys-timer-log`, so finding `host.timer.after` meant guessing which bundle

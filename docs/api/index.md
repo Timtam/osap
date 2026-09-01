@@ -21,25 +21,6 @@ The self-voicing control tree: what a module builds, and how it is bound to a wi
 | [`O.memoByOrigin(fn, opts?)`](overlay#o-memobyorigin) | Memoizes a per-window property that does not change while that window exists |
 | [`O.new(label)`](overlay#o-new) | Creates a new overlay object. |
 | [`O.state`](overlay#o-state) | A free-form table on every overlay for the owning module's own state, so it does not have to squat in the runtime's reserved `_`-prefixed fields. |
-| [`O:activate(index)`](overlay#o-activate) | Activates the control at `index` (defaults to the focused control). |
-| [`O:addCustomButton(opts)`](overlay#o-addcustombutton) | Appends a button that runs a Luau callback on activation. |
-| [`O:addGraphicalToggle(opts)`](overlay#o-addgraphicaltoggle) | Appends a toggle whose on/off state is read by image-matching its region against an "on" and "off" template |
-| [`O:addHotspotButton(opts)`](overlay#o-addhotspotbutton) | Appends a button that, when activated, clicks a fixed origin-relative point. |
-| [`O:addHotspotToggle(opts)`](overlay#o-addhotspottoggle) | Appends a toggle whose on/off state is read from a **single pixel** at its click point (ReaHotkey's `HotspotToggleButton`) |
-| [`O:addOCRButton(opts)`](overlay#o-addocrbutton) | Appends a button whose label/value is read live by OCR over a region; activating re-reads it then clicks the region centre. |
-| [`O:addStaticText(label)`](overlay#o-addstatictext) | Appends a static text control: Tab-reachable and read aloud on focus, but with no activation (Enter does nothing). |
-| [`O:addStepper(opts)`](overlay#o-addstepper) | Appends a **value changed with Left and Right**, where the module knows how to change it. |
-| [`O:afterIdle(key, ms, fn)`](overlay#o-afteridle) | Runs `fn` **once**, `ms` after the last call carrying the same `key`. |
-| [`O:attach(matcher, opts)`](overlay#o-attach) | Binds the overlay as a **standalone** context |
-| [`O:attachEmbedded(spec, opts)`](overlay#o-attachembedded) | Binds the overlay as an **embedded** context: active while keyboard focus is inside a plugin control hosted in a DAW. |
-| [`O:focusNext()`](overlay#o-focusnext) | Moves focus to the next control (wrapping) and speaks it, moving the mouse onto OCR controls if `hoverToRead` is set. |
-| [`O:focusPrev()`](overlay#o-focusprev) | Moves focus to the previous control (wrapping) and speaks it. |
-| [`O:frame(fn)`](overlay#o-frame) | Shifts the overlay's whole coordinate frame |
-| [`O:gate(fn) / O:landmark(image)`](overlay#o-gate) | `gate(fn)` sets an extra activation condition ANDed onto the context match |
-| [`O:group(pred, build)`](overlay#o-group) | Adds everything `build` adds under a shared condition: `pred` is ANDed onto each control's own `when`, and groups nest. |
-| [`O:origin() / O:hwnd()`](overlay#o-origin) | The active context's coordinate window — the plugin control when embedded, the window when standalone — and its handle. |
-| [`O:typingWhen(fn)`](overlay#o-typingwhen) | `fn() -> boolean`. |
-| [`O:watch(spec)`](overlay#o-watch) | Waits for something to **change**, rather than for a length of time. |
 
 ## host.window
 
@@ -47,13 +28,13 @@ Finding windows and their controls, and reacting when the focus moves.
 
 | | |
 |---|---|
-| [`host.window.active()`](window#host-window-active) | Returns the  for the foreground window, or `nil` if there is none. |
-| [`host.window.controls(win?)`](window#host-window-controls) | Returns the child  of `win` (its `id` is used), or of the active window when omitted. |
+| [`host.window.active()`](window#host-window-active) | Returns the window table for the foreground window, or `nil` if there is none. |
+| [`host.window.controls(win?)`](window#host-window-controls) | Returns the child control tables of `win` (its `id` is used), or of the active window when omitted. |
 | [`host.window.find(matcher)`](window#host-window-find) | Returns the first window from `host.window.list()` that satisfies `matcher`, or `nil`. |
 | [`host.window.findAll(matcher)`](window#host-window-findall) | Returns all windows from `host.window.list()` that satisfy `matcher`. |
 | [`host.window.focus(id)`](window#host-window-focus) | Brings the window with that handle to the front and gives it the keyboard. |
-| [`host.window.focusChain()`](window#host-window-focuschain) | Returns  from the currently focused element up to its top-level window. |
-| [`host.window.list()`](window#host-window-list) | Returns an array of  for all enumerable top-level windows. |
+| [`host.window.focusChain()`](window#host-window-focuschain) | Returns control tables from the currently focused element up to its top-level window. |
+| [`host.window.list()`](window#host-window-list) | Returns an array of window tables for all enumerable top-level windows. |
 | [`host.window.onFocus(cb)`](window#host-window-onfocus) | Registers `cb` to fire whenever the keyboard focus moves — including within the same top-level window. |
 | [`host.window.onTrigger(matcher, opts, cb)`](window#host-window-ontrigger) | Registers `cb` to fire on every foreground change for which the new active window satisfies `matcher`. |
 | [`host.window.ownsPoint(id, x, y)`](window#host-window-ownspoint) | Whether the window `id` belongs to is the one drawn at that screen point. |
@@ -113,9 +94,9 @@ Claiming keys before the application sees them.
 
 | | |
 |---|---|
-| [`host.keys.capture(spec, callback)`](speech-hotkey-keys-timer-log#host-keys-capture) | Begins intercepting the  |
+| [`host.keys.capture(spec, callback)`](speech-hotkey-keys-timer-log#host-keys-capture) | Begins intercepting the key spec |
 | [`host.keys.menuOpen(open)`](speech-hotkey-keys-timer-log#host-keys-menuopen) | Tells the hook a plugin's own (Qt/UIA) menu is open (`true`) or closed (`false`). |
-| [`host.keys.release(token)`](speech-hotkey-keys-timer-log#host-keys-release) | Undoes the exact capture identified by the `token`  returned, recomputing the global captured set so the key reaches apps… |
+| [`host.keys.release(token)`](speech-hotkey-keys-timer-log#host-keys-release) | Undoes the exact capture identified by the `token` `host.keys.capture` returned, recomputing the global captured set so the… |
 | [`host.keys.releaseAll()`](speech-hotkey-keys-timer-log#host-keys-releaseall) | Removes **all** key captures owned by this module and refreshes the suppression set. |
 | [`host.keys.scope(toForeground)`](speech-hotkey-keys-timer-log#host-keys-scope) | Scopes captured-key suppression. |
 
@@ -125,7 +106,7 @@ Claiming a combination system-wide.
 
 | | |
 |---|---|
-| [`host.hotkey.register(spec, callback)`](speech-hotkey-keys-timer-log#host-hotkey-register) | Registers a **global** OS hotkey (active regardless of foreground window) for the  and returns an integer `id`. |
+| [`host.hotkey.register(spec, callback)`](speech-hotkey-keys-timer-log#host-hotkey-register) | Registers a **global** OS hotkey (active regardless of foreground window) for the key spec and returns an integer `id`. |
 | [`host.hotkey.unregister(id)`](speech-hotkey-keys-timer-log#host-hotkey-unregister) | Releases the OS hotkey and forgets the callback for the `id` returned by `register`. |
 
 ## host.speech
@@ -197,7 +178,7 @@ Claiming a combination system-wide.
 
 | | |
 |---|---|
-| [`host.tryRequire(id)`](resource-settings-modules#host-tryrequire) | Like , but returns **nil** instead of raising when `id` |
+| [`host.tryRequire(id)`](resource-settings-modules#host-tryrequire) | Like `host.require`, but returns **nil** instead of raising when `id` |
 
 ## host.include
 
@@ -219,6 +200,25 @@ The shapes and grammars the calls above are written in.
 |---|---|
 | [`Key spec string format`](speech-hotkey-keys-timer-log#key-spec-string-format) | Two namespaces parse `+`-joined spec strings; segments are trimmed and case-insensitive. |
 | [`Matchers`](window#matchers) | A *matcher* is a declarative table passed to `host.window.find/findAll/test/onTrigger`. |
+| [`O:activate(index)`](overlay#o-activate) | Activates the control at `index` (defaults to the focused control). |
+| [`O:addCustomButton(opts)`](overlay#o-addcustombutton) | Appends a button that runs a Luau callback on activation. |
+| [`O:addGraphicalToggle(opts)`](overlay#o-addgraphicaltoggle) | Appends a toggle whose on/off state is read by image-matching its region against an "on" and "off" template |
+| [`O:addHotspotButton(opts)`](overlay#o-addhotspotbutton) | Appends a button that, when activated, clicks a fixed origin-relative point. |
+| [`O:addHotspotToggle(opts)`](overlay#o-addhotspottoggle) | Appends a toggle whose on/off state is read from a **single pixel** at its click point (ReaHotkey's `HotspotToggleButton`) |
+| [`O:addOCRButton(opts)`](overlay#o-addocrbutton) | Appends a button whose label/value is read live by OCR over a region; activating re-reads it then clicks the region centre. |
+| [`O:addStaticText(label)`](overlay#o-addstatictext) | Appends a static text control: Tab-reachable and read aloud on focus, but with no activation (Enter does nothing). |
+| [`O:addStepper(opts)`](overlay#o-addstepper) | Appends a **value changed with Left and Right**, where the module knows how to change it. |
+| [`O:afterIdle(key, ms, fn)`](overlay#o-afteridle) | Runs `fn` **once**, `ms` after the last call carrying the same `key`. |
+| [`O:attach(matcher, opts)`](overlay#o-attach) | Binds the overlay as a **standalone** context |
+| [`O:attachEmbedded(spec, opts)`](overlay#o-attachembedded) | Binds the overlay as an **embedded** context: active while keyboard focus is inside a plugin control hosted in a DAW. |
+| [`O:focusNext()`](overlay#o-focusnext) | Moves focus to the next control (wrapping) and speaks it, moving the mouse onto OCR controls if `hoverToRead` is set. |
+| [`O:focusPrev()`](overlay#o-focusprev) | Moves focus to the previous control (wrapping) and speaks it. |
+| [`O:frame(fn)`](overlay#o-frame) | Shifts the overlay's whole coordinate frame |
+| [`O:gate(fn) / O:landmark(image)`](overlay#o-gate) | `gate(fn)` sets an extra activation condition ANDed onto the context match |
+| [`O:group(pred, build)`](overlay#o-group) | Adds everything `build` adds under a shared condition: `pred` is ANDed onto each control's own `when`, and groups nest. |
+| [`O:origin() / O:hwnd()`](overlay#o-origin) | The active context's coordinate window — the plugin control when embedded, the window when standalone — and its handle. |
+| [`O:typingWhen(fn)`](overlay#o-typingwhen) | `fn() -> boolean`. |
+| [`O:watch(spec)`](overlay#o-watch) | Waits for something to **change**, rather than for a length of time. |
 | [`Plugin base + library overlays (the cell model)`](overlay#plugin-base-library-overlays) | A plugin is not one overlay. |
 | [`Region form`](uia-screen#region-form) | Several functions (`host.screen.imageSearch`, `host.screen.profile`, `host.ocr.recognize`, and each entry of… |
 | [`Table shapes`](window#table-shapes) | Returned by `host.window.list()`, `host.window.active()`, `host.window.find()`, `host.window.findAll()`, and passed to trigger/test callbacks. |
