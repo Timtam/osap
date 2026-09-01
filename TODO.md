@@ -60,10 +60,14 @@ The backend, the packaging and the documentation exist; nothing has ever run on 
 See [docs/macos-port.md](docs/macos-port.md) for the decisions and
 [docs/building-on-macos.md](docs/building-on-macos.md) for how to build it.
 
-- [ ] **Get the CI build green.** `.github/workflows/macos-build.yml` is the only place this
-      code is ever linked — `check-macos.ps1` runs the compiler front end only, and `host`
-      itself cannot be checked from Windows at all (`tts` pulls `objc_exception`, whose
-      build script needs a C compiler). Everything below is downstream of that job passing.
+- [x] **The CI build is green** (2026-09-01). It had been failing on every push since 31
+      August — not on the code: the job never started, because the account's Actions were
+      blocked on billing. With that cleared it links on a real Mac and its smoke run loads
+      every module headless, which turned it into the first real verification the macOS half
+      has had: macOS 15.7.9 on a Mac mini, Accessibility and Screen Recording granted, every
+      module loading with capability enforcement on, under the new `element` and `arbiter`
+      names, with no refusals and the arbiter registering its slots. Compiling was all this
+      could say before.
 - [x] **First working macOS overlay: Sforzando standalone** (2026-08-15). Written from what
       two probes measured — `AXWindow/AXStandardWindow/` + `com.Plogue.sforzando` for identity,
       and the title-bar derivation that brought the authored coordinates within a few points
