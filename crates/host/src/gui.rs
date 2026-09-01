@@ -38,12 +38,17 @@ pub struct ModuleInfo {
     pub id: String,
     /// This module's index in the manager's module list — passed back to the
     /// toggle / settings callbacks.
-    pub module_idx: usize,
+    ///
+    /// `None` for a module this platform will not run: nothing was loaded, so there is no
+    /// index to pass to anything. The row exists so it can still be seen and removed.
+    pub module_idx: Option<usize>,
     pub enabled: bool,
     /// Ids this module depends on — used to block uninstalling a module that
     /// another currently-loaded module still needs.
     pub dependencies: Vec<String>,
     pub settings: Vec<SettingDesc>,
+    /// The platforms this module claims, when this is not one of them.
+    pub unsupported: Option<String>,
 }
 
 /// One built row in the Installed list: what the handlers need — the module index
@@ -54,7 +59,7 @@ pub struct ModuleInfo {
 /// `wxCheckListBox` offers, and it is enough as long as every change to the list goes
 /// through `rebuild_list`, so the two cannot drift apart.
 struct Row {
-    module_idx: usize,
+    module_idx: Option<usize>,
     id: String,
     name: String,
     /// What the list shows. Held because the control can neither rename one item nor
@@ -68,6 +73,8 @@ struct Row {
     enabled: bool,
     settings: Vec<SettingDesc>,
     dependencies: Vec<String>,
+    /// Set when this platform will not run the module: the platforms it does claim.
+    unsupported: Option<String>,
 }
 
 impl Row {
@@ -76,18 +83,36 @@ impl Row {
             module_idx: info.module_idx,
             id: info.id.clone(),
             name: info.name.clone(),
-            label: row_label(&info.name, &info.version, &info.id),
+            label: row_label(&info.name, &info.version, &info.id, info.unsupported.as_deref()),
             enabled: info.enabled,
             settings: info.settings.clone(),
             dependencies: info.dependencies.clone(),
+            unsupported: info.unsupported.clone(),
         }
+    }
+
+    /// The one sentence every refusal on this row says, so they cannot drift apart.
+    fn why_not(&self) -> String {
+        format!(
+            "\u{201c}{}\u{201d} is not loaded: it declares that it runs on {}, and this is {}. \
+             It can still be uninstalled.",
+            self.name,
+            self.unsupported.as_deref().unwrap_or("another platform"),
+            std::env::consts::OS
+        )
     }
 }
 
 /// How a module reads in the list. One place: it is written at first fill, at install and
 /// at update, and three copies of a format string drift.
-fn row_label(name: &str, version: &str, id: &str) -> String {
-    format!("{name}  v{version}   ({id})")
+fn row_label(name: &str, version: &str, id: &str, unsupported: Option<&str>) -> String {
+    match unsupported {
+        // Said in the row itself, because a screen reader reads the row and nothing else. A
+        // disabled-looking checkbox with no explanation is the version of this that leaves
+        // somebody guessing.
+        Some(claimed) => format!("{name}  v{version}   ({id}) — not loaded, needs {claimed}"),
+        None => format!("{name}  v{version}   ({id})"),
+    }
 }
 
 
@@ -650,9 +675,14 @@ pub fn run_gui(
                 };
                 let found = {
                     let rb = rows.borrow();
-                    rb.get(sel).map(|r| (r.module_idx, r.settings.clone()))
+                    rb.get(sel).map(|r| (r.module_idx, r.settings.clone(), r.why_not(),
+                        r.unsupported.is_some()))
                 };
-                let Some((module_idx, settings)) = found else {
+                if let Some((_, _, why, true)) = &found {
+                    modal_message(&frame, "Not loaded", why, false);
+                    return;
+                }
+                let Some((Some(module_idx), settings, _, _)) = found else {
                     return;
                 };
                 if settings.is_empty() {
@@ -679,7 +709,15 @@ pub fn run_gui(
                 let Some(sel) = list.selection() else {
                     return;
                 };
-                let idx = { rows.borrow().get(sel).map(|r| r.module_idx) };
+                let picked = {
+                    let rb = rows.borrow();
+                    rb.get(sel).map(|r| (r.module_idx, r.why_not(), r.unsupported.is_some()))
+                };
+                if let Some((_, why, true)) = &picked {
+                    modal_message(&frame, "Not loaded", why, false);
+                    return;
+                }
+                let idx = picked.and_then(|(i, _, _)| i);
                 let Some(idx) = idx else {
                     return;
                 };
@@ -691,11 +729,12 @@ pub fn run_gui(
                         // name/version. Refresh all of them on the row + its label.
                         {
                             let mut rb = rows.borrow_mut();
-                            if let Some(r) = rb.iter_mut().find(|r| r.module_idx == idx) {
+                            if let Some(r) = rb.iter_mut().find(|r| r.module_idx == Some(idx)) {
                                 r.settings = info.settings.clone();
                                 r.dependencies = info.dependencies.clone();
                                 r.name = info.name.clone();
-                                r.label = row_label(&info.name, &info.version, &info.id);
+                                r.label =
+                                    row_label(&info.name, &info.version, &info.id, None);
                             }
                         }
                         list.rebuild(&rows.borrow());
@@ -796,7 +835,13 @@ pub fn run_gui(
                 }
                 let msg = match crate::registry::uninstall(&id) {
                     Ok(true) => {
-                        on_remove(module_idx); // revoke its hotkeys/keys/triggers now
+                        // Nothing to revoke for a module that never loaded — and nothing
+                        // to pass, since it has no index. Removing its files is the whole of
+                        // the job, and is exactly what somebody who installed it by mistake
+                        // came here to do.
+                        if let Some(module_idx) = module_idx {
+                            on_remove(module_idx); // revoke its hotkeys/keys/triggers now
+                        }
                         // Dependencies only this module pulled in, now needed by nothing
                         // else (cascading) — offer to remove them too. Computed from the
                         // graph that still includes the module being removed.
@@ -832,7 +877,9 @@ pub fn run_gui(
                                 let pos = rows.borrow().iter().position(|r| &r.id == oid);
                                 if let Some(p) = pos {
                                     let removed = rows.borrow_mut().remove(p);
-                                    on_remove(removed.module_idx);
+                                    if let Some(idx) = removed.module_idx {
+                                        on_remove(idx);
+                                    }
                                     list.rebuild(&rows.borrow());
                                 }
                             }
@@ -1299,8 +1346,14 @@ pub fn run_gui(
                             // Every module that inherits this one holds a copy of its
                             // code, so the reload cascades to them -- that is what used
                             // to need a restart.
-                            let idx =
-                                rows.borrow().iter().find(|r| r.id == id).map(|r| r.module_idx);
+                            // `and_then`, not `map`: a row can exist for a module that was
+                            // never loaded, and "no row" and "a row with nothing behind it"
+                            // both mean there is nothing to reload.
+                            let idx = rows
+                                .borrow()
+                                .iter()
+                                .find(|r| r.id == id)
+                                .and_then(|r| r.module_idx);
                             let msg = match idx {
                                 None => format!(
                                     "Updated \u{201c}{id}\u{201d} on disk. It is not loaded in this \
@@ -1311,7 +1364,7 @@ pub fn run_gui(
                                         {
                                             let mut rb = rows.borrow_mut();
                                             if let Some(r) =
-                                                rb.iter_mut().find(|r| r.module_idx == idx)
+                                                rb.iter_mut().find(|r| r.module_idx == Some(idx))
                                             {
                                                 r.settings = info.settings.clone();
                                                 r.dependencies = info.dependencies.clone();
@@ -1320,6 +1373,8 @@ pub fn run_gui(
                                                     &info.name,
                                                     &info.version,
                                                     &info.id,
+                                                    // It reloaded, so it loaded.
+                                                    None,
                                                 );
                                             }
                                         }
@@ -1640,6 +1695,14 @@ fn refresh_settings_btn(list: &InstalledList, rows: &[Row], settings_btn: &Butto
     settings_btn.enable(has_settings);
 }
 
+/// What a checkbox change came to. `Refused` is a tick that must not stand: the row has no
+/// module behind it, because this platform will not run it.
+enum Toggled {
+    Tell(usize),
+    Nothing,
+    Refused,
+}
+
 /// One row's checkbox changed: record it and tell the host.
 ///
 /// Reads the control rather than assuming, so the Space handler and the platform's own
@@ -1655,15 +1718,39 @@ fn apply_toggle(
     let changed = {
         let mut rb = rows.borrow_mut();
         match rb.get_mut(i) {
+            // A module this platform will not run has nothing to enable. Put the box back
+            // rather than leave a tick that means nothing — and leave the row's own label,
+            // which already says why, as the explanation a screen reader will read on landing
+            // there.
+            Some(r) if r.unsupported.is_some() => {
+                crate::logging::line(
+                    "manager",
+                    &format!(
+                        "'{}' cannot be enabled here: it declares {} and this is {}",
+                        r.id,
+                        r.unsupported.as_deref().unwrap_or("another platform"),
+                        std::env::consts::OS
+                    ),
+                );
+                Toggled::Refused
+            }
             Some(r) if r.enabled != now => {
                 r.enabled = now;
-                Some(r.module_idx)
+                match r.module_idx {
+                    Some(idx) => Toggled::Tell(idx),
+                    None => Toggled::Refused,
+                }
             }
-            _ => None,
+            _ => Toggled::Nothing,
         }
     };
-    if let Some(module_idx) = changed {
-        on_toggle.borrow_mut()(module_idx, now);
+    match changed {
+        Toggled::Tell(module_idx) => on_toggle.borrow_mut()(module_idx, now),
+        Toggled::Nothing => {}
+        // The control is put back by rebuilding from the rows, which is how every other
+        // change to this list is made — there is no per-item setter, and one path for it
+        // means the two cannot drift apart.
+        Toggled::Refused => list.rebuild(&rows.borrow()),
     }
 }
 

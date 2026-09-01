@@ -97,6 +97,12 @@ struct Shared {
     ids: RefCell<Vec<String>>,
     /// module_idx → enabled.
     enabled: RefCell<Vec<bool>>,
+    /// Modules this platform will not run, kept so the manager can list them anyway.
+    ///
+    /// They have no module index — nothing was loaded — so they are held here rather than in
+    /// the parallel vectors, and the list is deduplicated by id because a hot-load re-reads
+    /// the same directory.
+    excluded: RefCell<Vec<ExcludedModule>>,
     /// module_idx → the capability names its manifest declares.
     ///
     /// Parallel to `ids`, and pushed with it: `install_host_api` runs later (from
@@ -1706,6 +1712,20 @@ fn load_module(
                     module.manifest.name
                 ),
             );
+            // Remembered so the manager can still list it. A module nobody can see is a
+            // module nobody can remove, and the person who cannot see it is the one this
+            // window exists for.
+            {
+                let mut ex = shared.excluded.borrow_mut();
+                if !ex.iter().any(|e| e.id == id) {
+                    ex.push(ExcludedModule {
+                        id: id.clone(),
+                        name: module.manifest.name.clone(),
+                        version: module.manifest.version.clone(),
+                        claimed: claimed.clone(),
+                    });
+                }
+            }
             return Ok((id, false));
         }
     }
@@ -2037,11 +2057,42 @@ fn module_info(shared: &Shared, m: &Module, idx: usize) -> gui::ModuleInfo {
         name: m.name.clone(),
         version: m.version.clone(),
         id: m.id.clone(),
-        module_idx: idx,
+        module_idx: Some(idx),
         enabled: shared.enabled.borrow().get(idx).copied().unwrap_or(true),
         dependencies: m.dependencies.clone(),
         settings,
+        unsupported: None,
     }
+}
+
+/// The rows for modules this platform will not run: listed, and refusing everything that
+/// would need a VM they do not have.
+fn excluded_infos(shared: &Shared) -> Vec<gui::ModuleInfo> {
+    shared
+        .excluded
+        .borrow()
+        .iter()
+        .map(|e| gui::ModuleInfo {
+            name: e.name.clone(),
+            version: e.version.clone(),
+            id: e.id.clone(),
+            module_idx: None,
+            enabled: false,
+            dependencies: Vec::new(),
+            settings: Vec::new(),
+            unsupported: Some(e.claimed.clone()),
+        })
+        .collect()
+}
+
+/// A module that was found and deliberately not loaded, because its manifest says it does not
+/// run here. Everything the manager needs to show it and to remove it.
+struct ExcludedModule {
+    id: String,
+    name: String,
+    version: String,
+    /// The platforms it does claim, as written.
+    claimed: String,
 }
 
 /// Loads and runs many modules concurrently in one process.
@@ -2083,6 +2134,7 @@ impl Manager {
             ids: RefCell::new(Vec::new()),
             enabled: RefCell::new(Vec::new()),
             caps: RefCell::new(Vec::new()),
+            excluded: RefCell::new(Vec::new()),
             hotkeys: RefCell::new(HashMap::new()),
             keys: RefCell::new(Vec::new()),
             store: RefCell::new(store),
@@ -2220,13 +2272,33 @@ impl Manager {
                         &format!("reload hotkey {RELOAD_HOTKEY_SPEC} unavailable: {e}"),
                     ),
                 }
-                let module_infos: Vec<gui::ModuleInfo> = self
+                let mut module_infos: Vec<gui::ModuleInfo> = self
                     .modules
                     .borrow()
                     .iter()
                     .enumerate()
                     .map(|(i, m)| module_info(&self.shared, m, i))
                     .collect();
+                module_infos.extend(excluded_infos(&self.shared));
+                // What the window will contain, said once. The Installed list is the only
+                // place a module can be reached from, and a module that is missing from it is
+                // invisible to somebody who cannot look — so the count belongs in the log the
+                // tester sends, not only on the screen they cannot read.
+                let cannot_run = module_infos.iter().filter(|m| m.unsupported.is_some()).count();
+                logging::line(
+                    "manager",
+                    &format!(
+                        "the installed list has {} row(s){}",
+                        module_infos.len(),
+                        if cannot_run > 0 {
+                            format!(
+                                ", {cannot_run} of them for module(s) this platform will not run — listed so they can still be removed"
+                            )
+                        } else {
+                            String::new()
+                        }
+                    ),
+                );
                 let backend = self.shared.backend.clone();
                 let shared = self.shared.clone();
                 let speak_shared = self.shared.clone();

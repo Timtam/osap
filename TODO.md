@@ -32,12 +32,23 @@ Architecture and feasibility foundation: [docs/architecture-feasibility-study.md
 - [x] **Persist the enabled set:** the manager remembers disabled modules across runs (re-applied right after a module's entry loads, revoking its OS registrations). Originally a `disabled-modules.txt`; folded into the unified settings store below. ✓ (2026-06-21)
 - [x] **Slice 16 — settings format + GUI:** `host.settings` (`define`/`get`/`set`/`onChange`, `host.config` alias) — modules declare typed, validated, auto-persisted settings; each module sees only its own. Unified portable store `host::settings` (`<exe_dir>/settings.toml`: per-module `enabled` flag + `settings` map; atomic write; corrupt-file quarantine; auto-migrates the old `disabled-modules.txt`). The tray manager has a **per-module Settings… dialog** with native, screen-reader-labeled controls (checkbox / number field / dropdown / text — each labeled by a leading `wxStaticText` + `set_name`, the only thing NVDA reliably reads; see [[accessibility-native-controls]]). Example: `examples/settings`. ✓ (2026-06-21)
   - Follow-up: optional advisory `[settings.<key>]` block in `module.toml` for pre-run GUI introspection (deferred); bump `engine_api` (additive).
-- [ ] **A module excluded by `supported_os` is invisible in the manager.** The Installed list
-      is built from what was loaded, so a module skipped for this platform has no row —
-      somebody who installs past the "will not be loaded here" warning and then looks for it
-      will not find it. A synthesised row needs Settings, Reload and Uninstall to refuse for
-      it, in the one window a blind user depends on, which is why it was not done in the same
-      change. The log names every exclusion at every start in the meantime.
+- [x] **A module excluded by `supported_os` has a row now** (2026-09-01). The Installed list
+      was built from what LOADED, so a module skipped for this platform vanished: no row, no
+      settings, no way to remove it — in the one window somebody who cannot see the screen
+      depends on. It is remembered when it is skipped and listed with the reason in the row's
+      own text, because a screen reader reads the row and nothing else.
+  - The backlog entry said Settings, Reload **and** Uninstall should all refuse. Uninstall
+      should not: it removes files by id, needs nothing loaded, and is exactly what somebody
+      who installed it past the warning came to the window for. So Settings and Reload refuse
+      by name, the checkbox puts itself back, and Uninstall works — skipping the revoke step,
+      since there are no registrations to revoke.
+  - The list now reports its own contents to the log — how many rows, and how many of them are
+      for modules this platform will not run. The one place a module can be reached from is
+      also the one place whose emptiness is invisible to the person it matters to, so the count
+      belongs in the log a tester sends rather than only on a screen they cannot read.
+  - Verified by marking a module macOS-only: eleven loaded, twelve rows, and the log saying
+      which. **What is not verified is what it sounds like** — the row's wording and the two
+      refusals want a pass with NVDA before this is called done.
 - [ ] **Module manager follow-ups:** CLI/IPC control surface; a **native macOS/GTK checkbox path** (`TVS_CHECKBOXES` is Windows-only — non-Windows currently shows no checkboxes). Out-of-process only for the untrusted-native-FFI tier. See [docs/module-runtime-and-lifecycle.md](docs/module-runtime-and-lifecycle.md).
   - Lifted out of the completed entries below, where they were easy to lose:
   - [ ] **Hotkey conflicts are resolved at registration only.** A binding skipped because another module held the combo does not activate when that owner is later disabled (needs a restart), and `apply_enabled`'s re-register on enable neither conflict-checks nor surfaces a clash.
