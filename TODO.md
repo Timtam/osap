@@ -580,13 +580,17 @@ reported by a test, because none of them fails loudly.
       than spelled, and a second modifier pressed on top drops the arm the way macOS already
       did — without that, releasing Alt while Ctrl was still held fired a tap the user never
       made.
-- [ ] **`recognizeMany` does not keep its promise on macOS.** The call exists to read several
-      regions from ONE capture so that values which must agree with each other come from the
-      same instant. `MacBackend` does not override `ocr_regions`, so the trait default applies:
-      one full capture per region, each a separate round trip at a separate moment. Two
-      read-outs that must be consistent — a note name and its cent offset — can disagree, which
-      is precisely the failure the call was added to prevent. Documented for now; the fix is an
-      override that crops from a single capture, as Windows does.
+- [x] **`recognizeMany` keeps its promise on macOS now** (2026-09-01). It had no override, so
+      the trait default applied: one full capture per region, each a separate round trip at a
+      separate moment — which is the failure the call was added to prevent, since its whole
+      purpose is that two values a module compares come from the same instant.
+  - The crop reuses `render`'s clipping rather than `CGImageCreateWithImageInRect`. That API is
+      the obvious tool and is deliberately avoided in this file: its rectangle is documented in
+      the image's own coordinate space, a convention nobody here can test.
+  - Falls back to one capture each wherever the shortcut cannot be trusted — fewer than two
+      regions, a degenerate one, a failed capture, or one that came back a different size than
+      asked for, which means it was clipped at a screen edge and every offset would point
+      somewhere else.
 - [x] **The reference contained examples that raise if you copy them** (2026-08-31). Seven
       lines in one file: `host.window.focused()` twice, a binding that has never existed, and
       `host.log("…")` five times, where `host.log` is a table carrying only `info`, so the call

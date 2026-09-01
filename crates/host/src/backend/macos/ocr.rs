@@ -122,7 +122,24 @@ fn recognize_inner(
         report_capture_failure(x, y, w, h);
         return Ok(empty());
     };
-    let nw = CGImage::width(Some(&native));
+    recognize_captured(&native, scale, x, y, w, h, lang, started, debug)
+}
+
+/// Everything after the capture, so that a caller who already has the pixels — one bounding-box
+/// capture cut into several regions — runs exactly the same pipeline as a single read.
+#[allow(clippy::too_many_arguments)]
+fn recognize_captured(
+    native: &CGImage,
+    scale: f64,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    lang: Option<&str>,
+    started: Instant,
+    debug: bool,
+) -> Result<OcrText, String> {
+    let nw = CGImage::width(Some(native));
     let nh = CGImage::height(Some(&native));
 
     let small = w <= SMALL_W && h <= SMALL_H;
@@ -133,13 +150,13 @@ fn recognize_inner(
         if debug {
             // Vision is handed the capture itself here, so the raw image and the processed
             // one are the same file.
-            if let Some((rgba, dw, dh)) = cgimage_to_rgba(&native) {
+            if let Some((rgba, dw, dh)) = cgimage_to_rgba(native) {
                 debug_dump("ocr-debug.bmp", &rgba, dw, dh);
             }
         }
-        run_vision(&native, lang, ACCURATE, &|bb| map_box(&plan, scale, bb))
+        run_vision(native, lang, ACCURATE, &|bb| map_box(&plan, scale, bb))
     } else {
-        let Some((rgba, px_w, px_h)) = cgimage_to_rgba(&native) else {
+        let Some((rgba, px_w, px_h)) = cgimage_to_rgba(native) else {
             warn_once(
                 "ocr-convert",
                 "ocr: could not read the captured pixels back out of CoreGraphics",
@@ -176,7 +193,7 @@ fn recognize_inner(
                 plan.cw, plan.ch, plan.x0, plan.y0, plan.up
             )
         });
-        let out = render(&native, &plan).and_then(|(img, buf)| {
+        let out = render(native, &plan).and_then(|(img, buf)| {
             if debug {
                 let (pw, ph) = plan.out_size();
                 debug_dump("ocr-debug.bmp", &buf, pw, ph);
@@ -198,7 +215,7 @@ fn recognize_inner(
                     "ocr: tightened pass read nothing, trying the whole region".to_string()
                 });
                 let whole = Plan::whole_with_ink(&rgba, px_w, px_h, plan.ink_h);
-                let second = render(&native, &whole).and_then(|(img, buf)| {
+                let second = render(native, &whole).and_then(|(img, buf)| {
                     if debug {
                         let (pw, ph) = whole.out_size();
                         debug_dump("ocr-debug-retry.bmp", &buf, pw, ph);
@@ -209,7 +226,7 @@ fn recognize_inner(
                 });
                 let exhausted = second.as_ref().is_none_or(|(t, _)| t.trim().is_empty());
                 if exhausted && started.elapsed() < LADDER_BUDGET {
-                    bigger_then_faster(&native, &plan, &rgba, px_w, px_h, scale, lang, debug)
+                    bigger_then_faster(native, &plan, &rgba, px_w, px_h, scale, lang, debug)
                 } else if exhausted {
                     // Out of budget with nothing to show. Said out loud rather than traced,
                     // because this is the shape of a real failure the tester met: a read
@@ -245,6 +262,87 @@ fn recognize_inner(
     });
     note_cost(ms, w, h);
     Ok(OcrText { text, words })
+}
+
+/// Several regions, one capture.
+///
+/// The promise is not speed — it is SIMULTANEITY. Two values a module has to compare with each
+/// other must come from the same instant, and reading them one after another is how a note name
+/// and its cent offset come to disagree.
+///
+/// Falls back to one capture each wherever the shortcut cannot be trusted: fewer than two
+/// regions, a degenerate one, a capture that failed, or a capture that came back a different
+/// size than asked for — which means it was clipped at a screen edge, and every offset computed
+/// from it would point somewhere else.
+pub fn recognize_regions(
+    regions: &[(i32, i32, i32, i32)],
+    lang: Option<&str>,
+) -> Vec<Result<OcrText, String>> {
+    let one_each = || -> Vec<Result<OcrText, String>> {
+        regions.iter().map(|(x, y, w, h)| recognize(*x, *y, *w, *h, lang)).collect()
+    };
+    if regions.len() < 2 || regions.iter().any(|(_, _, w, h)| *w <= 0 || *h <= 0) {
+        return one_each();
+    }
+    let x0 = regions.iter().map(|r| r.0).min().unwrap_or(0);
+    let y0 = regions.iter().map(|r| r.1).min().unwrap_or(0);
+    let x1 = regions.iter().map(|r| r.0 + r.2).max().unwrap_or(0);
+    let y1 = regions.iter().map(|r| r.1 + r.3).max().unwrap_or(0);
+    let (bw, bh) = (x1 - x0, y1 - y0);
+
+    objc2::rc::autoreleasepool(|_| {
+        let Some((big, scale)) = super::capture::capture_backing(x0, y0, bw, bh) else {
+            report_capture_failure(x0, y0, bw, bh);
+            return one_each();
+        };
+        let (gw, gh) = (CGImage::width(Some(&big)), CGImage::height(Some(&big)));
+        let (want_w, want_h) =
+            (((bw as f64) * scale).round() as usize, ((bh as f64) * scale).round() as usize);
+        if gw != want_w || gh != want_h {
+            crate::logging::trace("macos", || {
+                format!(
+                    "ocr: the {bw}x{bh} pt enclosing capture came back {gw}x{gh} px, not \
+                     {want_w}x{want_h} — reading each region on its own instead"
+                )
+            });
+            return one_each();
+        }
+
+        regions
+            .iter()
+            .map(|(x, y, w, h)| {
+                let started = Instant::now();
+                let debug = crate::appcfg::ocr_debug();
+                // A pass-through plan: crop only, no upscale and no border, so `render`'s
+                // clipping gives exactly this region's pixels out of the shared capture.
+                let cut = Plan {
+                    x0: (((x - x0) as f64) * scale).round() as usize,
+                    y0: (((y - y0) as f64) * scale).round() as usize,
+                    cw: ((*w as f64) * scale).round() as usize,
+                    ch: ((*h as f64) * scale).round() as usize,
+                    up: 1,
+                    pad: 0,
+                    ink_h: 1,
+                    bg: [0.0; 3],
+                    cropped: false,
+                    blank: false,
+                };
+                match render(&big, &cut) {
+                    Some((img, buf)) => {
+                        let r = recognize_captured(
+                            &img, scale, *x, *y, *w, *h, lang, started, debug,
+                        );
+                        // `buf` backs the image copy-on-write; it has to outlive every read
+                        // of it, which on a machine nobody here owns is not a thing to leave
+                        // to the optimiser.
+                        drop(buf);
+                        r
+                    }
+                    None => Err("could not cut this region out of the shared capture".to_string()),
+                }
+            })
+            .collect()
+    })
 }
 
 fn empty() -> OcrText {

@@ -63,7 +63,7 @@ So the same call fails in **opposite shapes**: empty `words` with real `text` on
 
 ## host.ocr.recognizeMany(opts) {#host-ocr-recognizemany}
 
-Recognizes several regions from **one** screen capture — on Windows. macOS does not implement it and falls back to one capture per region; the platform sections below say what that costs.
+Recognizes several regions from **one** screen capture, so that values which have to agree with each other come from the same instant.
 
 **Signature:** `host.ocr.recognizeMany(opts: { regions: { x1, y1, x2, y2 }[], lang?: string }) -> { { text: string, words: {…}, error?: string } }[]`
 
@@ -87,4 +87,6 @@ As documented: one capture of the bounding box of every region, cropped per regi
 
 ### macOS
 
-**Not implemented — the shared default applies, which is one full capture per region**, each a separate round trip at a separate instant. The promise this call exists to make is therefore not kept here: two read-outs that must agree with each other, a note name and its cent offset say, can come from different moments and contradict each other.
+The same, with the crop done by drawing the enclosing capture into a smaller context and letting it clip rather than by `CGImageCreateWithImageInRect`, whose rectangle is documented in the image's own coordinate space — a convention this port has no way to test.
+
+Each region then runs the identical pipeline a single `recognize` would, including the retry ladder and the blank guard, so a value read this way is the value that call would have given.

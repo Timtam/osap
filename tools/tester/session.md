@@ -1,4 +1,4 @@
-# Test session — builds of 2026-08-28 and 2026-08-31
+# Test session — builds up to 2026-09-01
 
 Keyboard only throughout. Do the steps in order and send one log at the end.
 
@@ -7,14 +7,25 @@ send this file back along with the log. Where a step mentions a log line, you do
 go looking for it: it is there for us, and sending the file is enough.
 
 Steps 1 to 5 were written for the build of 28 August and have not been run yet, so they are
-unchanged. Steps 6 and 7 are new.
+unchanged. Steps 6 to 8 are newer.
 
 
 ## Before you start
 
+**You can download a build now instead of making one.** The macOS build runs on every push
+again — it had been failing since 31 August for a billing reason on our side, not a code one —
+so the Actions tab has a finished `.app` for the current commit, already carrying the current
+modules. That saves the 10-to-25 minute first build entirely.
+
+Building yourself still works and is still the surer path if anything looks wrong:
+
     cd ~/osap
     git pull
     ./bootstrap-macos.sh
+
+Either way, the permissions are per code identity. A downloaded build is a different
+application to macOS than one you built, so it asks for Accessibility and Screen Recording
+again the first time.
 
 
 ## 1. Launching should not take your cursor
@@ -125,7 +136,8 @@ you should never have been asked to:
   - **whether the text recogniser invents words.** It finds a patch of the window that is
     provably one flat colour, reads it, and writes down anything that comes back. Nothing
     should. On Windows this failure was real — six different blank areas all came back as the
-    same invented string — and the guard against it does not exist on macOS yet;
+    same invented string. We have since put the same guard on the Mac, written without one to
+    try it on, so this is also how we find out whether it was needed and whether it works;
   - **how long a tenth of a second really is** on your machine. Every wait we do is built on
     that number.
 
@@ -158,7 +170,24 @@ will be there; and if the overlay seems dead, its absence says where to look.
 TESTER FEEDBACK:
 
 
-## 8. Send the log
+## 8. If a module refuses to load, the log now says why
+
+Nothing to do — this is one to recognise if you see it.
+
+A module has to declare what it uses (`[capabilities] require` in its `module.toml`), and until
+this week nothing checked. Now it does: a module that reaches for something it did not declare
+stops with a line naming **the module and the missing capability**. If one of them fails to
+load, that line is the whole diagnosis, and the others carry on without it.
+
+We fixed every module we could reach from Windows, and every one loads on the build machine's
+Mac. What we cannot reach from here is a path that only runs on macOS — a branch behind
+`host.os.is("macos")` — so if a module drops out on your machine and not on ours, that is the
+most likely reason and the log will say so exactly.
+
+TESTER FEEDBACK:
+
+
+## 9. Send the log
 
 `automation-platform.log`, in the folder beside the application, together with this file and
 any `probe-*.png`.
@@ -166,8 +195,8 @@ any `probe-*.png`.
 It now records by name: who had the front when the application started and whether we gave it
 back; every accessibility subscription that was refused, and why; any key we had claimed and
 let through anyway; any reading we abandoned rather than keep the keyboard waiting; the first
-key the tap ever suppressed; and, for every wait, whether the thing it was waiting for changed
-or the wait simply ran out.
+key the tap ever suppressed; for every wait, whether the thing it was waiting for changed or
+the wait simply ran out; and any module that would not load, with the reason.
 
 
 ## Two things worth knowing

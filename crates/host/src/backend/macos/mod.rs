@@ -252,6 +252,14 @@ impl Backend for MacBackend {
         input::mouse_scroll(x, y, lines);
     }
 
+    fn ocr_regions(
+        &self,
+        regions: &[(i32, i32, i32, i32)],
+        lang: Option<&str>,
+    ) -> Vec<Result<OcrText, String>> {
+        ocr::recognize_regions(regions, lang)
+    }
+
     fn key_post(&self, hwnd: isize, key: &str) -> Result<(), String> {
         input::key_post(hwnd, key)
     }

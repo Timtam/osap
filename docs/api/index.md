@@ -109,7 +109,7 @@ Recognising text in a screen region.
 | | |
 |---|---|
 | [`host.ocr.recognize(opts?)`](ocr#host-ocr-recognize) | Recognizes text inside a screen region and returns the full text plus per-word bounding boxes. |
-| [`host.ocr.recognizeMany(opts)`](ocr#host-ocr-recognizemany) | Recognizes several regions from **one** screen capture — on Windows. |
+| [`host.ocr.recognizeMany(opts)`](ocr#host-ocr-recognizemany) | Recognizes several regions from **one** screen capture, so that values which have to agree with each other come from the same instant. |
 
 ## host.element
 
