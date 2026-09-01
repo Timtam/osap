@@ -456,11 +456,10 @@ what the platform offers. Both true, and underneath them a defect nobody could h
   - Docusaurus has no ready-made reference theme for an API like this — the plugins that exist
       read OpenAPI, which describes HTTP endpoints. What makes a reference read as one is the
       index, the stable anchors and the per-entry shape, not a stylesheet.
-- [ ] **The pages themselves are still arbitrary bundles.** `window.md` also holds `host.os` and
-      the matcher grammar; `ocr-input-sound.md` holds three namespaces. The index makes that
-      survivable rather than right. Splitting to one page per namespace would change every URL,
-      so it wants doing once, deliberately — and after the site is actually published, not
-      before.
+- [x] **The pages are one per namespace now** (2026-08-31). `window.md` no longer holds
+      `host.os` and the matcher grammar; `host.path` and `host.resource` are two pages because
+      they are two namespaces. Nineteen pages, sorted alphabetically by the title the
+      navigation shows.
 
 ## Agreed next, in this order (2026-08-31)
 
@@ -557,16 +556,7 @@ feature, each saying what that part of the API is for and what to declare in `mo
       when pasted, a measurement claimed for both platforms that was Windows-only, several
       platform sections that described a difference the code does not have. One was marked
       "this is the one that must not ship".
-- [ ] **`host.uia` is a placeholder name.** UIA is Microsoft's product name; macOS calls the
-      same thing the Accessibility API, so the namespace states one platform's vendor term for
-      an API whose whole purpose is to abstract over both. `a11y` is not the answer — it names
-      a purpose we do not have (nothing here makes anything accessible; it reads a published
-      structure) and a screen reader pronounces it as a spelled-out numeronym. **`host.element`
-      is the candidate**, on the grounds that both platforms already use that word:
-      `IUIAutomationElement` and `AXUIElement`. Measured cost of the rename: 9 manifests, 39
-      call sites across 12 module files, 63 mentions in the Rust host, 16 in the docs — all
-      mechanical, and the coverage check catches any documentation left behind. Worth doing in
-      the same pass as capability enforcement, which touches every manifest anyway.
+- [x] **`host.uia` was renamed to `host.element`** (2026-08-31) — see "Agreed next".
 - [ ] **A page with no "What to declare" box is not caught.** The boxes were written by the
       one-time split rather than generated, so a new page can be added without one.
 
