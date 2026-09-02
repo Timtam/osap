@@ -37,14 +37,15 @@ if (-not $NoBuild) {
   if ($LASTEXITCODE -ne 0) { throw "build failed" }
 }
 
-# What has to be there, by name. Checked rather than copied blindly, because each one fails
-# SILENTLY and differently if it is missing: without the speech clients the overlay runs and
-# says nothing, and without DirectML the second OCR engine is gone and small text stops being
-# read — neither looks like a missing file to whoever is testing.
+# What has to be there, by name. Checked rather than copied blindly, because a missing one
+# fails SILENTLY: without DirectML the second OCR engine is gone and small text stops being
+# read, which does not look like a missing file to whoever is testing.
+#
+# The two speech client DLLs used to be here. They are not any more: prism reaches NVDA over
+# raw RPC with stubs compiled into the binary, and is linked statically, so there is nothing
+# beside the executable for speech at all.
 $required = @(
   @{ Name = "automation-platform.exe";      Why = "the application" },
-  @{ Name = "nvdaControllerClient64.dll";   Why = "speech through NVDA" },
-  @{ Name = "SAAPI64.dll";                  Why = "speech through System Access" },
   @{ Name = "DirectML.dll";                 Why = "the second OCR engine (small text)" }
 )
 
@@ -95,6 +96,51 @@ if (Test-Path (Join-Path $root "docs-site\build")) {
   Write-Host "  Build them once with:  cd docs-site; npm run build"
 }
 
+# The licences. This is not paperwork for its own sake: the application is GPL-3.0-or-later
+# and links prism, which is MPL-2.0, and MPL-2.0 section 3.2 requires that whoever receives
+# the executable is told how to get the source of the covered files. prism's own NOTICE is
+# not a sufficient attribution list — it omits highway (Apache-2.0, whose section 4(d) has a
+# real propagation requirement) and NVGT (Zlib) — so its whole LICENSES tree is shipped
+# rather than a summary of it.
+$licences = Join-Path $stage "licences"
+New-Item -ItemType Directory -Path $licences -Force | Out-Null
+Copy-Item (Join-Path $root "LICENSE") (Join-Path $licences "automation-platform-GPL-3.0.txt")
+
+$vendor = Join-Path $root "crates\prism-sys\vendor"
+if (Test-Path (Join-Path $vendor "LICENSE")) {
+  Copy-Item (Join-Path $vendor "LICENSE") (Join-Path $licences "prism-MPL-2.0.txt")
+  Copy-Item (Join-Path $vendor "NOTICE")  (Join-Path $licences "prism-NOTICE.txt")
+  Copy-Item (Join-Path $vendor "LICENSES") (Join-Path $licences "prism") -Recurse
+  Push-Location $vendor
+  $prismSha = (git rev-parse HEAD).Trim()
+  $prismTag = (git describe --tags 2>$null)
+  Pop-Location
+} else {
+  Write-Warning "crates\prism-sys\vendor is empty (git submodule update --init) — shipping without prism's licences"
+  $prismSha = "unknown"
+  $prismTag = "unknown"
+}
+
+@"
+Licences
+========
+
+Automation Platform is free software under the GNU General Public License, version 3 or
+later. The full text is in automation-platform-GPL-3.0.txt. The source is at
+https://github.com/Timtam/osap
+
+Speech on Windows goes through PRISM, which is used under the Mozilla Public License 2.0
+(prism-MPL-2.0.txt). MPL-2.0 section 3.2 asks that you be told where its source is:
+
+    https://github.com/ethindp/prism
+    commit $prismSha  ($prismTag)
+
+That commit is what this build was compiled from. prism in turn carries the libraries
+whose licences are in the prism\ folder beside this file — fmt 12.2.1, highway 1.4.0,
+simdutf 9.0.0, concurrentqueue, dr_wav, moderncom, djinni, NVGT, and NV Access's NVDA
+controller RPC definitions — and its own NOTICE is in prism-NOTICE.txt.
+"@ | Set-Content (Join-Path $licences "README.txt") -Encoding UTF8
+
 # A note for whoever unpacks it. Short on purpose: the two things that actually go wrong are
 # extracting somewhere unwritable and expecting a console window.
 @"
@@ -107,7 +153,11 @@ There is no console window. The application runs in the system tray, and writes 
 log to automation-platform.log beside the executable. Settings go to settings.toml in
 the same place, so the whole folder is portable and can be deleted to reset.
 
-Speech goes through NVDA or System Access if one of them is running.
+Speech goes through whichever screen reader is running — NVDA, JAWS or ZoomText —
+and through the system voice when there is none. Nothing has to be installed for
+that: it is all inside the executable.
+
+Licences are in the licences folder, including where to get the source.
 
 The documentation is in docs\index.html — open it in a browser. It works from
 this folder; no internet connection and no server are needed.

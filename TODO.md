@@ -1223,11 +1223,30 @@ design and the reasoning are in [docs/prism-speech-design.md](docs/prism-speech-
       for a channel where it did. Windows shows notifications when it is ready to, so both
       turned up late and together: two interruptions where one would do, and no reassurance
       either way. Confirmed live before removing it.
-- [ ] **Step 7 — packaging, licensing, docs.** The two client DLLs leave `package.ps1`. This
-      repository has **no LICENSE file** while every crate declares `GPL-3.0-or-later`, and
-      MPL-2.0 §3.2 wants recipients told how to get the source. Also settle whether a stock
-      `windows-latest` can compile C++23 with `<expected>` and `<flat_set>` — twenty minutes
-      with a throwaway workflow — before writing any Windows CI.
+- [x] **Step 7 — packaging and licences** (2026-09-02). `nvdaControllerClient64.dll` and
+      `SAAPI64.dll` are gone from the staged build: prism reaches NVDA over raw RPC with
+      stubs compiled in, and is linked statically, so nothing beside the executable is for
+      speech any more. Only `DirectML.dll` remains.
+  - **The repository had no LICENSE at all** while every crate declared `GPL-3.0-or-later`.
+      It has one now, and the ZIP carries a `licences/` folder: our GPL-3, prism's MPL-2.0
+      and NOTICE, prism's whole `LICENSES/` tree, and a README naming the pinned URL, commit
+      and tag — because MPL-2.0 §3.2 requires telling whoever receives the executable where
+      the covered source is. prism's own NOTICE is not a sufficient attribution list: it
+      omits highway (Apache-2.0, whose §4(d) has a real propagation requirement) and NVGT
+      (Zlib), so the tree ships rather than a summary of it. The SHA is read from the
+      submodule at package time rather than written down, so it cannot drift.
+  - The tester README claimed "Speech goes through NVDA or System Access if one of them is
+      running", which had been false since System Access was compiled out. Verified by
+      running `package.ps1 -NoBuild -NoZip` and reading what came out.
+  - `architecture-feasibility-study.md` still named prism as the road not taken, in two
+      places. Noted rather than rewritten — it is a dated design document — and the note says
+      what actually decided it, which was not the braille the study expected.
+- [ ] **Windows CI, if it is wanted.** Settle first whether a stock `windows-latest` can
+      compile C++23 with `<expected>` and `<flat_set>`; prism's own workflow runs on
+      `windows-2025-vs2026`, which is not a standard hosted label. Twenty minutes with a
+      throwaway workflow. Note that `Swatinem/rust-cache` will not cache a workspace crate's
+      `OUT_DIR`, so without an explicit cache key on the pinned SHA every run pays the full
+      36-second prism build.
 - [ ] **Step 8 — remove `tts` from the Windows build.** Its own commit, doing nothing else.
 - [ ] **Step 9 — braille**, behind its own switch, after a week of clean speech.
 

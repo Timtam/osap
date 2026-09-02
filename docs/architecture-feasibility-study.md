@@ -21,6 +21,7 @@
 | **GUI toolkit** | **wxDragon** (Rust→wxWidgets, native controls) | Slint+AccessKit / Tauri (Webview) — if rich text/hypertext or a pure Rust build are a priority |
 | **a11y foundation** | **Native OS a11y** (MSAA/UIA, NSAccessibility) via wxWidgets standard controls | AccessKit (only needed for custom-renderer toolkits) |
 | **Screen-reader output** | **tts-rs** (`tts` crate, pure Rust) → `host.speech` | SRAL/prism (C++ FFI) — upgrade if macOS braille is needed |
+| | *Since 2026-09: Windows took the upgrade. See [prism-speech-design.md](prism-speech-design.md).* | |
 | **OCR** | **Native-first**: Apple Vision (mac), Windows.Media.Ocr (Win) | **PP-OCRv5 via RapidOCR-ONNX** as Linux default + determinism fallback |
 | **Capture** | Win: WGC; mac: ScreenCaptureKit; Linux: X11 XShm + Wayland Portal/PipeWire | — |
 | **Image search** | Custom **SIMD-NCC** (lightweight) | OpenCV `matchTemplate` as an optional plugin |
@@ -245,6 +246,14 @@ Consequences that are no longer optional now:
 6. **The wxDragon GUI choice has two architectural consequences.** (a) The wxWidgets GUI event loop occupies the main thread with its own run loop — the global hotkey listener or macOS `CGEventTap` (both run-loop-bound) share the same thread/the same loop ⇒ GUI + input listener live in the same process/main thread (daemon or a dedicated GUI+input process). (b) a11y-by-design is enforced in the Luau API layer (a mandatory label sets the native control name), not via a compile-time DSL.
 
 7. **Screen-reader/speech output = tts-rs** (`tts` crate, pure Rust, permissive), encapsulated as a `host.speech` capability — module authors speak via `host.speech.output(text)`, without DLL wiring. Windows: Tolk→NVDA/JAWS (incl. braille) or WinRT; macOS: AVFoundation/AVSpeechSynthesizer (direct TTS, no braille routing — macOS offers no clean public API for it; prism/SRAL would have the same limit). Replaces prism (C++23/FFI) and ReaHotkey's NVDA-Controller/SAPI path and resolves the open macOS speech question. The backend remains swappable behind the host API (SRAL/prism or an NSAccessibility announcement path as an upgrade, should macOS braille become a hard requirement).
+
+> **Windows took that upgrade in September 2026**, and for reasons this paragraph did not
+> anticipate. It was not braille that decided it — though NVDA turns out to offer that too —
+> but that the Tolk path threw away every failure, so a screen reader closing mid-session
+> left the application silent with nothing in the log, and that it spoke through the
+> speakers at anybody running this without a screen reader. macOS keeps `voiceover.rs`,
+> which is better than prism's own VoiceOver backend. See
+> [prism-speech-design.md](prism-speech-design.md).
 
 With this, the open points 1, 5, 6 and the macOS speech question from Section 10 are decided; what remains open is primarily the **performance/footprint budgets** (10.2) and the **macOS distribution/MDM details** (10.4).
 
