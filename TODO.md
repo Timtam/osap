@@ -1241,6 +1241,66 @@ design and the reasoning are in [docs/prism-speech-design.md](docs/prism-speech-
   - `architecture-feasibility-study.md` still named prism as the road not taken, in two
       places. Noted rather than rewritten — it is a dated design document — and the note says
       what actually decided it, which was not the braille the study expected.
+## macOS speech — the plan, and why prism is not part of it (2026-09-02)
+
+Asked whether prism should replace `tts` on macOS as well, so that the dependency goes
+entirely. The answer is no, but the cleanup behind the question is worth doing — with our own
+wrapper rather than with prism.
+
+- [x] **The measurement that settles it was already sitting in CI.** The start-up timing added
+      for the Windows work ran on a real Mac: run 33620074214, HEAD `8e44699`, macos-15-intel —
+      `[speech] the speech engines took 28 ms to open`. Against the **2872 ms** that justified
+      removing `tts` on Windows, that is a hundredfold difference, and the reason is structural
+      rather than luck: the AVFoundation constructor registers a delegate class and allocates a
+      synthesiser, where the WinRT one built a whole `MediaPlayer`. **The argument that carried
+      Windows does not exist here.**
+- [x] **And prism would be worse, not better.** `vendor/source/backends/avspeech.cpp:165-176`
+      requests Personal Voice authorization inside `initialize()` and waits on a semaphore for
+      up to **120 seconds**; prism's own `doc/src/api/backend-notes.md:13` says so. That is a
+      permission dialog at start-up, in front of somebody who cannot see it to dismiss it —
+      exactly the failure the VoiceOver setting was shaped to avoid. The Windows escape (open
+      it on a background thread) does not port either: every avspeech call goes through
+      `dispatch_sync` to the main queue, which during start-up is not running yet.
+- [ ] **The cleanup is still worth doing, for a different reason.** `tts` is the sole reason
+      the abandoned `objc 0.2` / `cocoa-foundation` generation is in a build that otherwise
+      uses `objc2` throughout — two Objective-C runtimes in one process, 11 crates that
+      nothing else needs. It also does `version_parts[1].parse().unwrap()` on the macOS version
+      string inside our start-up path (`tts-0.26.3/src/lib.rs:347`), so a change in Apple's
+      format is an application that does not start, on the platform nobody here can run. And
+      both of its macOS backends register the same delegate class name, so a second `Tts` in
+      one process fails — macOS structurally cannot re-arm its plain voice the way the Windows
+      fallback thread does.
+- [ ] **So: our own `speech/avspeech.rs`**, in the shape and size of `voiceover.rs`, over
+      `objc2-avf-audio` (0.3.2, the same generation as the `objc2` crates already here — and
+      `AVSpeechSynthesizer` lives in AVFAudio). The decisive advantage over prism is not the
+      dependency count: it is that `crates/macos-check` can compile it **from Windows**, which
+      is the only compiler this project can run at home. A CMake C++ build on the Mac could
+      not be checked here at all.
+  - **Personal Voice belongs in it, and is the reason to write it rather than to keep `tts`.**
+      It is not out of reach for a hand-written wrapper: `requestPersonalVoiceAuthorization`
+      grants it, and the voices then appear in `AVSpeechSynthesisVoice.speechVoices()`. What
+      prism gets wrong is *when* — in `initialize()`, at start-up. Ours would ask only when
+      somebody chooses Personal Voice, and never otherwise. Verify first that
+      `objc2-avf-audio` exposes the authorization call and the voice traits; that check costs
+      one `cargo check --target aarch64-apple-darwin`.
+- [ ] **`host.speech` grows a way to see and choose what speaks** — the owner's plan, and what
+      the wrapper should be built to serve. Enumerate the engines and screen readers that are
+      actually available, and let a module pick, so an author is not stuck with whatever the
+      host decided. On macOS that is three things worth naming separately: the system voice,
+      VoiceOver, and Personal Voice. On Windows the list already exists in all but name —
+      `prism_sys::SCREEN_READERS` and `SYNTHESISERS`, and prism answers
+      `IS_SUPPORTED_AT_RUNTIME` per backend, which is exactly "is it available".
+- [ ] **Order of operations.** None of this before the Mac tester has run the current build:
+      if the plain voice is fine there, this is tidying, and tidying comes after the platform
+      is known to work at all. If it is not fine, the wrapper is the fix.
+  - prism on macOS only becomes reasonable if upstream drops the blocking Personal Voice wait
+      from `initialize()` and the unconditional `dispatch_sync` to main in `speak()`. Both are
+      changes to their source, not configuration, so it is not a decision this project can
+      take on its own.
+  - Still unmeasured, and cheap to get: the first `speak()` on macOS — the equivalent of the
+      567 ms measured on Windows. `crates/host/src/speech/**` already triggers the macOS
+      workflow, so the number would arrive on the next push.
+
 - [ ] **Windows CI, if it is wanted.** Settle first whether a stock `windows-latest` can
       compile C++23 with `<expected>` and `<flat_set>`; prism's own workflow runs on
       `windows-2025-vs2026`, which is not a standard hosted label. Twenty minutes with a

@@ -16,7 +16,14 @@ silence is indistinguishable from "nothing happened".
 through **Tolk**, which loads `nvdaControllerClient64.dll` and `SAAPI64.dll` at run time —
 the two files `package.ps1` ships beside the executable.
 
-**Windows moves to prism. macOS does not.** `speech/voiceover.rs` is better than prism's
+**Windows moves to prism. macOS does not, and will not.** Not only because
+`speech/voiceover.rs` is better than prism's VoiceOver backend, but because prism's
+*AVSpeech* backend asks for Personal Voice authorization inside `initialize()` and blocks on
+it for up to 120 seconds — a permission dialog at start-up, in front of somebody who cannot
+see it. And the measurement that justified the Windows change does not exist there: on a real
+Mac (CI run 33620074214, macos-15-intel) `Speech::new` took **28 ms**, against 2872 on
+Windows. The plan for macOS is in TODO.md: our own `objc2` wrapper, which can also reach
+Personal Voice — asking at the moment somebody chooses it, rather than at start-up. `speech/voiceover.rs` is better than prism's
 VoiceOver backend, which fires `NSAppleScript` on `dispatch_get_main_queue()` — back onto the
 keyboard thread this project deliberately moved it off — and coalesces non-interrupting lines
 with `" . "` after a 15 ms debounce, merging exactly the name-then-value pair the overlays
