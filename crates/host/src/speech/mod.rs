@@ -34,6 +34,27 @@ use anyhow::Context;
 #[cfg(target_os = "macos")]
 use tts::Tts;
 
+/// One thing that can speak, described without naming any platform's machinery.
+///
+/// The shape is what macOS has to fit into later, so nothing here is prism's: an `id` a
+/// module can compare and store, a `name` meant to be SAID rather than parsed, whether it is
+/// the user's own screen reader or a plain voice, and whether it could speak right now.
+///
+/// `id` is the only field with a stability promise. `name` is whatever the thing calls
+/// itself and may change with the version of somebody's screen reader.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Engine {
+    pub id: String,
+    pub name: String,
+    /// The user's own reader — their voice, their rate, their reading order, and their
+    /// braille display. A plain voice is none of those things.
+    pub screen_reader: bool,
+    /// Whether it could speak right now. Not "is it installed": a screen reader that is not
+    /// running cannot be spoken through, and saying otherwise would invite a module to pick
+    /// something that will never answer.
+    pub available: bool,
+}
+
 pub struct Speech {
     /// The plain voice on macOS, where `tts` reaches AVFoundation. Windows has its own, in
     /// `fallback`, because `tts` cost 2872 ms of blocking start-up there for a voice that
@@ -126,6 +147,29 @@ impl Speech {
         let _ = self.tts.borrow_mut().speak(text.to_string(), interrupt);
     }
 
+    /// Everything that could speak on this machine, whether or not it can right now.
+    ///
+    /// Answered without opening anything: opening a speech engine costs seconds, and this is
+    /// a question a module may ask. See `prism_sys::Context::is_available` for how, and for
+    /// the one backend that must never be asked twice.
+    ///
+    /// The list is the same for every caller and carries no notion of "mine" — a module's own
+    /// choice is asked for separately, so this record can be logged, cached or handed on
+    /// without carrying somebody else's preference with it.
+    pub fn engines(&self) -> Vec<Engine> {
+        #[cfg(windows)]
+        {
+            self.fallback.engines()
+        }
+        #[cfg(not(windows))]
+        {
+            // macOS fits in here: VoiceOver (available while it is running), the system
+            // voice, and — once the objc2 wrapper exists — Personal Voice. Nothing about the
+            // shape above needs to change for that.
+            Vec::new()
+        }
+    }
+
     /// Whether what we say is reaching a screen reader rather than a plain voice.
     ///
     /// Asked in one place only: when the application has something to say on its own behalf
@@ -191,5 +235,66 @@ impl Speech {
                 self.prism.borrow_mut().retry_if_due();
             }
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod engine_list {
+    //! Honest, cheap, and repeatable — and the process has to be able to EXIT afterwards,
+    //! which it could not while the query opened its library on the caller's thread.
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn what_can_speak_here() {
+        let speech = super::Speech::new().expect("speech");
+        // The first look is started when `Speech` is built; give it a moment to land, the
+        // way a module asking during a session would find it long since landed.
+        for _ in 0..40 {
+            if !speech.engines().is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let start = Instant::now();
+        let engines = speech.engines();
+        let took = start.elapsed();
+        for e in &engines {
+            println!(
+                "  {:<14} {:<14} {}  {}",
+                e.id,
+                e.name,
+                if e.screen_reader { "reader" } else { "voice " },
+                if e.available { "available" } else { "-" }
+            );
+        }
+        println!("  asked in {took:.1?}");
+
+        assert!(!engines.is_empty(), "nothing at all can speak, which cannot be right");
+        assert!(
+            engines.iter().any(|e| !e.screen_reader && e.available),
+            "no plain voice is available, and Windows ships two"
+        );
+        // The snapshot is a clone of a small vector. If this ever takes milliseconds, the
+        // answer has started being computed on the caller's thread again — which is the
+        // mistake this shape exists to prevent.
+        assert!(
+            took < Duration::from_millis(5),
+            "reading the snapshot took {took:?}, so it is not a snapshot any more"
+        );
+
+        // Ids are the only field a module compares, so they must be unique and unsurprising.
+        let mut ids: Vec<&str> = engines.iter().map(|e| e.id.as_str()).collect();
+        ids.sort();
+        let before = ids.len();
+        ids.dedup();
+        assert_eq!(before, ids.len(), "two engines share an id");
+        assert!(
+            engines
+                .iter()
+                .all(|e| e.id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())),
+            "an id contains something a module would have to quote"
+        );
+
+        assert_eq!(speech.engines(), engines, "the answer changed between two askings");
     }
 }

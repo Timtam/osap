@@ -2997,6 +2997,27 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             Ok(())
         })?,
     )?;
+    // host.speech.engines() -> { { id, name, screenReader, available }, … }
+    //
+    // What could speak on this machine, and what can right now. A module asks so that it can
+    // choose; nothing is chosen by asking. Costs about 35 ms — a question, not a hot path.
+    let sh = shared.clone();
+    speech.set(
+        "engines",
+        lua.create_function(move |lua, ()| {
+            let list = lua.create_table()?;
+            for (i, e) in sh.speech.engines().into_iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("id", e.id)?;
+                t.set("name", e.name)?;
+                t.set("screenReader", e.screen_reader)?;
+                t.set("available", e.available)?;
+                list.set(i + 1, t)?;
+            }
+            Ok(list)
+        })?,
+    )?;
+
     host.set("speech", speech)?;
 
     // host.hotkey.register(spec, cb) -> id ; host.hotkey.unregister(id)
