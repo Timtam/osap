@@ -193,6 +193,20 @@ impl Context {
         if id == 0 {
             return false;
         }
+        // OneCore is never asked, and this is not a shortcut: its `get_features` calls
+        // WinRT's `ApiInformation::IsTypePresent`, and the statics that call builds do not
+        // survive the `CoUninitialize` that closing a context performs. Probing it once is
+        // harmless; probing it in a later context kills the process with an access violation
+        // — found by measuring exactly that, and reproduced down to this single backend.
+        //
+        // An API that is safe the first time and fatal the second is worse than one that
+        // refuses, so it refuses. The answer it would have given is `true` in any case:
+        // OneCore ships with Windows, and if it turns out not to work, opening it fails and
+        // the ordinary one-strike machinery handles that.
+        if name.eq_ignore_ascii_case("OneCore") {
+            return true;
+        }
+
         // SAFETY: an id the registry recognised.
         let ptr = unsafe { sys::prism_registry_create(self.ptr, id) };
         if ptr.is_null() {
