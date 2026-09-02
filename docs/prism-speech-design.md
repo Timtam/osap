@@ -242,6 +242,26 @@ This also brings prism issue #109 along — an intermittent access violation in
 fire on a machine that actually ran ZDSR, and only at shutdown. Worth trying `/DELAYLOAD`
 without prism's `/DELAY:unload`, which is what creates the unload path in the first place.
 
+### Why the fallback is still tts-rs, and not prism itself
+
+The plan was to drop `tts` from the Windows build once prism had proved itself: prism has
+SAPI and OneCore backends, so on paper it can be both the preferred path and the fallback,
+and one dependency would go.
+
+Measured on this machine, that does not work. **Opening a speech engine costs seconds** —
+OneCore 3.5 s, SAPI 2.0 s — and the moment the fallback is needed is the moment a screen
+reader has just gone, which is exactly when the user has to be told what happened. Two to
+three and a half seconds of silence there is far worse than a crate in the dependency list.
+
+Keeping one open from the start does not rescue it either. The path is usually lost by the
+**stall deadline** rather than by an error, which means the worker holding that ready engine
+is the one wedged inside a call that will never return. Serving the fallback would then need
+a second always-running worker with its own library and its own thread, plus seconds of
+start-up work, to replace something that already exists and answers instantly.
+
+So `tts` stays on Windows, without the `tolk` feature, as the WinRT voice of last resort.
+The decision to remove it was taken before either of those two facts was known.
+
 ### Losing the screen reader is not permanent
 
 One strike takes the screen-reader path out of service; it does not keep it out. Every few

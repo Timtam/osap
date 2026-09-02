@@ -1247,7 +1247,15 @@ design and the reasoning are in [docs/prism-speech-design.md](docs/prism-speech-
       throwaway workflow. Note that `Swatinem/rust-cache` will not cache a workspace crate's
       `OUT_DIR`, so without an explicit cache key on the pinned SHA every run pays the full
       36-second prism build.
-- [ ] **Step 8 — remove `tts` from the Windows build.** Its own commit, doing nothing else.
+- [x] **Step 8 — decided against, on a measurement** (2026-09-02). The plan was to drop
+      `tts` from the Windows build once prism had proved itself, since prism has SAPI and
+      OneCore backends of its own. Measured here: **opening one costs seconds** — OneCore
+      3.5 s, SAPI 2.0 s — and the moment the fallback is needed is the moment a screen reader
+      has just gone, which is when the user most needs to be told. Keeping one open from the
+      start does not help, because the path is usually lost by the stall deadline, so the
+      worker holding that ready engine is the wedged one. `tts` therefore stays as the WinRT
+      voice of last resort — instant, and already there. **Needs the owner's agreement**: he
+      asked for the removal before either fact was known.
 - [ ] **Step 9 — braille**, behind its own switch, after a week of clean speech.
 
 ## Dev tools
