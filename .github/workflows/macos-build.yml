@@ -140,7 +140,7 @@ jobs:
           fi
           echo "no Rust change since $prev; trying to reuse its build"
           mkdir -p reuse
-          gh run download "$run_id" --dir reuse 2>/dev/null || { echo "nothing to download"; exit 0; }
+          gh run download "$run_id" --dir reuse --name AutomationPlatform-macos-universal             2>/dev/null || { echo "no universal artifact in that run"; exit 0; }
           zip=$(find reuse -name '*.zip' | head -n1)
           if [ -z "${zip:-}" ]; then echo "no zip in that artifact"; exit 0; fi
           mkdir -p dist
@@ -207,6 +207,7 @@ jobs:
 
       - name: Package
         run: ./package-macos.sh --universal
+        if: steps.reuse.outputs.reused != 'true'
 
       # `package-macos.sh` prints `lipo -archs` and carries on regardless, so a half-universal
       # bundle would ship looking fine. This is the assertion it does not make.
@@ -222,7 +223,6 @@ jobs:
           case "$archs" in
             *x86_64*) ;; *) echo "no x86_64 slice — this would not run on an Intel Mac" >&2; exit 1 ;;
           esac
-        if: steps.reuse.outputs.reused != 'true'
 
       # Load every shipped module once, on a Mac, because nothing else ever does.
       #
