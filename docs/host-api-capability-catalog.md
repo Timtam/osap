@@ -116,6 +116,8 @@ host.speech.setRate(n) ; host.speech.setVoice(id) ; host.speech.voices()
 ```
 Win: Tolk→NVDA/JAWS (+ Braille) or WinRT · macOS: AVFoundation (direct TTS). **macOS option (prior art [VOCR](prior-art-vocr.md)):** while VoiceOver is running, route output to VoiceOver via AppleScript (respects the VO voice + **Braille**; requires the `apple-events` entitlement + user opt-in), otherwise AVFoundation fallback — tiered behind `host.speech`.
 
+> **As built, the Windows braille half of that line is not true** (checked 2026-09-01). Tolk is reached through `tts-rs`, whose Tolk backend calls `Tolk_Speak` and discards its result; `Tolk_Output` — the call that also sends the line to a braille display — is never made. Braille today happens only on the macOS VoiceOver route. The same backend declares `stop` as its only feature, so `is_speaking()` is `Err(Unsupported)` and reads as **false** whenever a screen reader is driving.
+
 ### host.sound — audio feedback
 ```luau
 local h = host.sound.play("assets/sounds/focus.ogg", { volume = 0.8 })
