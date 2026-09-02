@@ -1,0 +1,65 @@
+# A one-off probe, not a build. DELETE IT once it has answered.
+#
+# The question: can a STOCK `windows-latest` runner compile prism? prism is C++23 and its own
+# workflow runs on `windows-2025-vs2026`, which is not a standard hosted label — so whether
+# the ordinary image has a new enough MSVC for `<expected>` and `<flat_set>` is unknown, and
+# it is the thing that decides whether a Windows CI job is possible at all.
+#
+# Three more answers come free, and all three are needed before writing a real workflow:
+#   * whether `build.rs` finds midl.exe and libclang on an image nobody prepared for it,
+#   * whether the C++ ATL component is there — prism.lib asks the linker for atls.lib,
+#   * and how long the build takes on runner hardware, which decides whether the 14 MB
+#     `prism.lib` needs an explicit cache key. `Swatinem/rust-cache` will not cache a
+#     workspace crate's OUT_DIR.
+#
+# Deliberately `workflow_dispatch` only: it costs nothing until somebody asks for it.
+name: Windows spike (prism, one-off)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  prism:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # NOT recursive. prism nests godot-cpp, 8 MB this configuration never builds.
+          submodules: true
+
+      - name: What this runner actually has
+        shell: pwsh
+        run: |
+          "--- cmake ---";   cmake --version
+          "--- ninja ---";   (Get-Command ninja -ErrorAction SilentlyContinue).Source ?? "not on PATH"
+          "--- MSVC ---"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          & $vswhere -latest -products * -property installationVersion
+          & $vswhere -latest -products * -property installationPath
+          "--- the C++ toolset, which is what has to understand C++23 ---"
+          Get-ChildItem "${env:ProgramFiles}\Microsoft Visual Studio\*\*\VC\Tools\MSVC" -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty Name
+          "--- ATL, which prism.lib asks the linker for ---"
+          $atl = Get-ChildItem "${env:ProgramFiles}\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\ATLMFC\lib\x64\atls.lib" -ErrorAction SilentlyContinue
+          if ($atl) { "found: " + $atl[0].FullName } else { "ATL NOT INSTALLED — the link will fail" }
+          "--- midl, which prism needs for NVDA's RPC stubs ---"
+          $midl = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\midl.exe" -ErrorAction SilentlyContinue
+          if ($midl) { "found: " + $midl[-1].FullName } else { "MIDL NOT FOUND" }
+          "--- libclang, which bindgen needs ---"
+          $clang = Get-ChildItem "${env:ProgramFiles}\Microsoft Visual Studio\*\*\VC\Tools\Llvm\x64\bin\libclang.dll",
+                                 "${env:ProgramFiles}\LLVM\bin\libclang.dll" -ErrorAction SilentlyContinue
+          if ($clang) { $clang | ForEach-Object { "found: " + $_.FullName } } else { "LIBCLANG NOT FOUND" }
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Nothing is pre-arranged on purpose: if build.rs cannot find its own tools on a stock
+      # image, that is the answer, and a better one than a green tick bought with setup steps
+      # a contributor would not know to copy.
+      - name: Build prism and run its smoke tests
+        shell: pwsh
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          cargo test -p prism-sys -- --nocapture
+          $code = $LASTEXITCODE
+          "prism-sys built and tested in {0:N1} s" -f $sw.Elapsed.TotalSeconds
+          exit $code
