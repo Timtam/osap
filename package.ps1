@@ -113,7 +113,14 @@ if (Test-Path (Join-Path $vendor "LICENSE")) {
   Copy-Item (Join-Path $vendor "LICENSES") (Join-Path $licences "prism") -Recurse
   Push-Location $vendor
   $prismSha = (git rev-parse HEAD).Trim()
+  # A tag is a nicety; its absence must not fail the packaging. `actions/checkout` fetches
+  # submodules without tags, so on CI this finds nothing, leaves $LASTEXITCODE at 128 — and
+  # because it is the last native command in this script, PowerShell then reports the whole
+  # step as failed AFTER it has successfully written the zip. Reset deliberately, not
+  # accidentally: the value belongs to a lookup that was allowed to come up empty.
   $prismTag = (git describe --tags 2>$null)
+  if (-not $prismTag) { $prismTag = "no tag on this checkout" }
+  $global:LASTEXITCODE = 0
   Pop-Location
 } else {
   Write-Warning "crates\prism-sys\vendor is empty (git submodule update --init) — shipping without prism's licences"
