@@ -279,6 +279,36 @@ feature of the `windows` crate, which this project used without declaring — `t
 enable it on the same crate, and cargo unified the features. A borrowed feature is a
 dependency you do not know you have until the lender leaves.
 
+### Opening a library repeatedly is the thing that breaks
+
+Everything unusual in the shape of the engine list comes from one property, found three
+separate times before it was recognised: **a prism library is safe to open once and keep, and
+unsafe to open and close over and over.**
+
+The three findings, in the order they arrived:
+
+1. Asking OneCore whether it is there kills the process the *second* time. Its `get_features`
+   calls WinRT's `ApiInformation::IsTypePresent`, and those statics do not survive the
+   `CoUninitialize` that closing a library performs. Documented as legal without
+   `initialize`, and it is — once. `prism-sys` refuses to probe that one backend, and prism
+   master still crashes on it.
+2. Answering the question on the **caller's** thread left a test process unable to exit after
+   every one of its tests had passed. Opening a library fixes that thread's COM apartment and
+   closing it unfixes it, and the caller here is the event loop.
+3. Answering on a fresh thread per call hung under a handful of concurrent queries.
+
+So the question goes to a worker that already holds a library and cannot wedge — the plain
+voice, not the screen reader, whose thread can be stuck inside an RPC call that never
+returns. It answers into a shared slot; the caller reads a snapshot. Measured: **1.9 µs** to
+read, against 35 ms for a fresh look when idle and 2.7 s while an engine is opening.
+
+The same property decides what a *chosen* engine is. Not something a caller opens for the
+duration of a call, but another long-lived worker with its own library, created once and kept
+for the life of the application. Two engines are then two queues — which is exactly what
+`interrupt` has always meant, since it only ever applied to the engine being addressed. A
+module speaking through its own voice does not cut off what the overlay is saying through the
+user's, in the same way another application talking over a screen reader does not.
+
 ### Losing the screen reader is not permanent
 
 One strike takes the screen-reader path out of service; it does not keep it out. Every few

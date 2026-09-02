@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 113 entries.
+Every call the platform offers a module, in one place. 116 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -173,7 +173,10 @@ Claiming a combination system-wide.
 
 | | |
 |---|---|
+| [`host.speech.engine()`](speech#host-speech-engine) | The id this module chose, or `nil` when it is on the ordinary path. |
+| [`host.speech.engines()`](speech#host-speech-engines) | Everything that could speak on this machine, and whether it can right now. |
 | [`host.speech.output(text, opts?)`](speech#host-speech-output) | Speaks `text`; `opts.interrupt` defaults to `true` (omitting `opts` also means interrupt). |
+| [`host.speech.use(id)`](speech#host-speech-use) | Chooses what speaks for **this module**. |
 
 ## host.sound
 

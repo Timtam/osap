@@ -2993,6 +2993,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 Some(t) => t.get::<bool>("interrupt").unwrap_or(true),
                 None => true,
             };
+            #[cfg(windows)]
+            sh.speech.say_for(idx, &text, interrupt);
+            #[cfg(not(windows))]
             sh.speech.say(&text, interrupt);
             Ok(())
         })?,
@@ -3017,6 +3020,28 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             Ok(list)
         })?,
     )?;
+
+    // host.speech.use(id | nil) -> boolean ; host.speech.engine() -> id | nil
+    //
+    // A module chooses what speaks for IT. Refused when the engine is not there, because
+    // accepting and quietly speaking somewhere else would be a promise not kept. Choosing
+    // costs the engine's opening time on its own thread — 2.0 s for SAPI, 3.5 s for OneCore —
+    // which the lines queue behind rather than being lost to.
+    #[cfg(windows)]
+    {
+        let sh = shared.clone();
+        speech.set(
+            "use",
+            lua.create_function(move |_, id: Option<String>| {
+                Ok(sh.speech.use_engine(idx, id.as_deref()))
+            })?,
+        )?;
+        let sh = shared.clone();
+        speech.set(
+            "engine",
+            lua.create_function(move |_, ()| Ok(sh.speech.chosen_engine(idx)))?,
+        )?;
+    }
 
     host.set("speech", speech)?;
 

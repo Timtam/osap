@@ -54,3 +54,76 @@ host.speech.output("loading...", { interrupt = false })  -- queue, don't cut off
 This call never raises: a failing speech engine must not take a module's key handler down with it.
 
 ---
+
+## host.speech.engines() {#host-speech-engines}
+
+**Signature:** `host.speech.engines()` → `{ { id: string, name: string, screenReader: boolean, available: boolean } }`
+
+Everything that could speak on this machine, and whether it can right now.
+
+`id` is the only field to compare — lower case, no punctuation, stable across a screen reader renaming itself between versions. `name` is what the thing calls itself and is meant to be **said**, not parsed. `screenReader` distinguishes the user's own reader — their voice, their rate, their reading order, their braille display — from a plain speech engine. `available` means it could take a line this second, which for a screen reader means it is running.
+
+```luau
+for _, e in host.speech.engines() do
+  if e.available and e.screenReader then
+    host.log.info("could speak through " .. e.name)
+  end
+end
+```
+
+The answer is a snapshot from a moment ago and a fresh look is started behind it, so the call costs microseconds rather than the 35 ms a look takes — the event loop's whole budget is 300 ms before Windows stops waiting for the keyboard hook, and a look while a speech engine is opening was measured at 2.7 seconds. For "which screen readers are running" a moment-old answer is the right kind: it changes when somebody starts or quits one, not between two lines of Luau.
+
+### Windows
+
+Nine entries, always the same nine, because they are what the application was compiled to reach: `nvda`, `jaws`, `zoomtext`, `zdsr`, `pctalker`, `boypcreader`, `sensereader` — and `sapi` and `onecore`, which are Windows itself and therefore always available.
+
+### macOS
+
+Empty for now. VoiceOver, the system voice and later Personal Voice belong in this list, and the shape above was chosen so that they can join it without any of it changing. See `docs/prism-speech-design.md`.
+
+---
+
+## host.speech.use(id) {#host-speech-use}
+
+**Signature:** `host.speech.use(id: string?)` → `boolean`
+
+Chooses what speaks for **this module**. `nil` returns it to the ordinary path.
+
+```luau
+-- A module that wants its own voice, so its announcements are not mistaken for the reader's
+if not host.speech.use("sapi") then
+  host.log.info("SAPI is not available here; staying with the usual voice")
+end
+```
+
+Returns `false` when the engine is not there — unknown to this build, or a screen reader that is not running. It refuses rather than accepting and quietly speaking somewhere else, because a call that reports success and does something different is a promise not kept.
+
+**The choice belongs to the module VM**, which is the unit this API can honestly promise. `host.speech` falls through to the VM owner rather than to the module that defined the code, so a `use` written inside a shared framework belongs to whichever module inherited it — and that is the module somebody installed and enabled, which makes it the right owner of the decision.
+
+Two things worth knowing before reaching for it. The first line after a choice may wait for the engine to open, measured at 2.0 s for SAPI and 3.5 s for OneCore; that happens on the new voice's own thread, so nothing else waits with it and the lines queue rather than being lost. And `interrupt` only ever applied to the engine being addressed — two engines are two queues, so a module speaking through its own voice will not cut off what the overlay is saying through the user's. That is the same everyday situation as another application talking over a screen reader, not a new one.
+
+A chosen engine that later stops answering falls through to the ordinary path rather than to silence.
+
+### Windows
+
+Any id from `host.speech.engines()` that reports `available`.
+
+### macOS
+
+Always returns `false`: there is nothing yet to choose between. It will answer for real when the list above does.
+
+---
+
+## host.speech.engine() {#host-speech-engine}
+
+**Signature:** `host.speech.engine()` → `string?`
+
+The id this module chose, or `nil` when it is on the ordinary path.
+
+```luau
+local mine = host.speech.engine()
+host.log.info(mine and ("speaking through " .. mine) or "speaking the usual way")
+```
+
+It answers what was **chosen**, not what is currently speaking: a choice that cannot be honoured falls through silently to the ordinary path, and this call still reports the choice. What is actually speaking is a question for the log, which names the voice as it opens.
+

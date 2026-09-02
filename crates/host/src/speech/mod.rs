@@ -25,6 +25,8 @@ mod prism;
 
 #[cfg(any(windows, target_os = "macos"))]
 use std::cell::Cell;
+#[cfg(windows)]
+use std::collections::HashMap;
 #[cfg(any(windows, target_os = "macos"))]
 use std::cell::RefCell;
 
@@ -76,6 +78,22 @@ pub struct Speech {
     /// The switch as it was last seen, so ticking it again re-arms a path that had failed.
     #[cfg(any(windows, target_os = "macos"))]
     last_switch: Cell<bool>,
+    /// Which engine each module VM has chosen for itself, by engine id.
+    ///
+    /// Keyed by the VM, because that is the unit the API can honestly promise. `host.speech`
+    /// falls through to the VM owner rather than to the module that defined the code, so a
+    /// choice made inside a shared framework belongs to whichever module inherited it — which
+    /// is the module somebody installed and enabled, and therefore the right owner of the
+    /// decision.
+    #[cfg(windows)]
+    chosen: RefCell<HashMap<usize, String>>,
+    /// One long-lived worker per chosen engine, shared by every VM that chose it.
+    ///
+    /// Never torn down. Opening a library is the expensive and fragile part — 2.0 s for SAPI,
+    /// 3.5 s for OneCore, and repeatedly opening and closing one has crashed and hung here —
+    /// so once a voice exists it stays.
+    #[cfg(windows)]
+    voices: RefCell<HashMap<String, fallback::Fallback>>,
 }
 
 impl Speech {
@@ -93,7 +111,63 @@ impl Speech {
             last_switch: Cell::new(crate::appcfg::voiceover_speech()),
             #[cfg(windows)]
             last_switch: Cell::new(crate::appcfg::screen_reader_speech()),
+            #[cfg(windows)]
+            chosen: RefCell::new(HashMap::new()),
+            #[cfg(windows)]
+            voices: RefCell::new(HashMap::new()),
         })
+    }
+
+    /// Says `text` for a particular module VM, honouring whatever engine it chose.
+    ///
+    /// A choice that cannot speak — its engine gone, its worker never opened — falls through
+    /// to the ordinary path rather than to silence. The module hears its own voice when it
+    /// can and the user's when it cannot, which is the right way round.
+    #[cfg(windows)]
+    pub fn say_for(&self, vm: usize, text: &str, interrupt: bool) {
+        let chosen = self.chosen.borrow().get(&vm).cloned();
+        if let Some(id) = chosen {
+            let spoke = self.voices.borrow().get(&id).is_some_and(|v| v.say(text, interrupt));
+            if spoke {
+                return;
+            }
+        }
+        self.say(text, interrupt);
+    }
+
+    /// Chooses the engine this module VM speaks through, or returns to the ordinary path.
+    ///
+    /// Returns false when the engine is not there — unknown to this build, or its screen
+    /// reader not running. Refusing is the honest answer: accepting and then quietly speaking
+    /// somewhere else would be a control claiming what it cannot honour.
+    ///
+    /// The first line after a choice may wait for the engine to open, which was measured at
+    /// 2.0 s for SAPI and 3.5 s for OneCore. That happens on the new voice's own thread, so
+    /// nothing else waits with it, and the lines queue rather than being lost.
+    #[cfg(windows)]
+    pub fn use_engine(&self, vm: usize, id: Option<&str>) -> bool {
+        let Some(id) = id else {
+            self.chosen.borrow_mut().remove(&vm);
+            return true;
+        };
+        let Some(engine) = self.engines().into_iter().find(|e| e.id == id) else {
+            return false;
+        };
+        if !engine.available {
+            return false;
+        }
+        self.voices
+            .borrow_mut()
+            .entry(engine.id.clone())
+            .or_insert_with(|| fallback::Fallback::for_engine(&engine.name));
+        self.chosen.borrow_mut().insert(vm, engine.id);
+        true
+    }
+
+    /// The engine this module VM chose, if it chose one.
+    #[cfg(windows)]
+    pub fn chosen_engine(&self, vm: usize) -> Option<String> {
+        self.chosen.borrow().get(&vm).cloned()
     }
 
     /// Says `text`. `interrupt` drops whatever has not been said yet.
@@ -296,5 +370,55 @@ mod engine_list {
         );
 
         assert_eq!(speech.engines(), engines, "the answer changed between two askings");
+    }
+
+    /// Choosing is honest about what it can honour, and never ends in silence.
+    ///
+    /// Nothing here makes a sound: every line is empty, and `prism-sys` answers an empty
+    /// line by doing nothing rather than by passing it on. This runs on somebody's working
+    /// machine.
+    #[test]
+    fn a_module_can_choose_what_speaks_for_it() {
+        let speech = super::Speech::new().expect("speech");
+        for _ in 0..40 {
+            if !speech.engines().is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let engines = speech.engines();
+        const ME: usize = 7;
+        const SOMEBODY_ELSE: usize = 8;
+
+        assert_eq!(speech.chosen_engine(ME), None, "a module starts with no choice");
+
+        // Something this machine does not have is refused rather than accepted and ignored.
+        let absent = engines.iter().find(|e| !e.available).map(|e| e.id.clone());
+        if let Some(absent) = absent {
+            assert!(!speech.use_engine(ME, Some(&absent)), "accepted {absent}, which is not here");
+            assert_eq!(speech.chosen_engine(ME), None, "a refused choice was remembered anyway");
+        }
+        assert!(!speech.use_engine(ME, Some("no-such-engine")), "accepted a name that does not exist");
+
+        // Something it does have is taken, and belongs to this VM alone.
+        let present = engines
+            .iter()
+            .find(|e| e.available && !e.screen_reader)
+            .expect("no plain voice available")
+            .id
+            .clone();
+        assert!(speech.use_engine(ME, Some(&present)), "refused {present}, which is here");
+        assert_eq!(speech.chosen_engine(ME), Some(present.clone()));
+        assert_eq!(speech.chosen_engine(SOMEBODY_ELSE), None, "one module's choice reached another");
+
+        // Saying something through it must not hang, crash, or take a visible moment: the
+        // opening happens on the voice's own thread and the line queues behind it.
+        let start = Instant::now();
+        speech.say_for(ME, "", true);
+        let took = start.elapsed();
+        assert!(took < Duration::from_millis(50), "handing a line over took {took:?}");
+
+        assert!(speech.use_engine(ME, None), "could not go back to the ordinary path");
+        assert_eq!(speech.chosen_engine(ME), None);
     }
 }

@@ -1304,13 +1304,30 @@ wrapper rather than with prism.
       somebody chooses Personal Voice, and never otherwise. Verify first that
       `objc2-avf-audio` exposes the authorization call and the voice traits; that check costs
       one `cargo check --target aarch64-apple-darwin`.
-- [ ] **`host.speech` grows a way to see and choose what speaks** — the owner's plan, and what
-      the wrapper should be built to serve. Enumerate the engines and screen readers that are
-      actually available, and let a module pick, so an author is not stuck with whatever the
-      host decided. On macOS that is three things worth naming separately: the system voice,
-      VoiceOver, and Personal Voice. On Windows the list already exists in all but name —
-      `prism_sys::SCREEN_READERS` and `SYNTHESISERS`, and prism answers
-      `IS_SUPPORTED_AT_RUNTIME` per backend, which is exactly "is it available".
+- [x] **`host.speech` grew a way to see and choose what speaks** (2026-09-02).
+      `engines()` lists what could speak and what can right now — id, name, whether it is the
+      user's own reader, whether it is available. `use(id)` chooses one for the calling module
+      VM and refuses honestly when the engine is not there; `engine()` reports the choice.
+      `use(nil)` returns to the ordinary path. macOS answers an empty list and `false` for
+      now, and the shape was chosen so VoiceOver, the system voice and Personal Voice join it
+      without changing anything.
+  - **An adversarial review argued against selection and was overruled, correctly.** Its case
+      was that two engines are two queues and `interrupt` cannot cross between them. True —
+      but `interrupt` never crossed engine boundaries in the first place, and a screen-reader
+      user already lives with another application talking over their reader. The review had
+      mistaken a property of our process for a property of the world.
+  - **Three findings on the way, all one cause**: a prism library is safe to open once and
+      keep, and unsafe to open and close repeatedly. It crashed (OneCore probed from a second
+      library), it prevented a process from exiting (a library opened on the event-loop
+      thread), and it hung (a fresh library per query). The question is now answered by a
+      worker that already holds one, and a chosen engine is another long-lived worker rather
+      than something opened per call.
+- [ ] **`host.speech` — what is left of the idea.** The macOS half: VoiceOver, the system
+      voice and Personal Voice as three entries in `engines()`, and `use` answering for real
+      there. It waits on the objc2 wrapper, which waits on the Mac tester. Also unbuilt, and
+      deliberately: a way to send DIFFERENT text to a braille display than to the ear, which
+      would be an option on `output` rather than a namespace of its own — worth building only
+      when a module needs it, and a 40-character braille line suggests one eventually will.
 - [ ] **Order of operations.** None of this before the Mac tester has run the current build:
       if the plain voice is fine there, this is tidying, and tidying comes after the platform
       is known to work at all. If it is not fine, the wrapper is the fix.

@@ -1,3 +1,12 @@
+//! A voice on a thread of its own: the plain one behind everything, and any engine a module
+//! has chosen for itself.
+//!
+//! They are the same machinery pointed at different names, and deliberately so. Everything
+//! measured here says the stable pattern is **one library per long-lived thread, opened once
+//! and kept** — repeatedly opening and closing one has crashed, hung, and prevented a process
+//! from exiting. A chosen engine is therefore not a temporary thing a caller opens; it is
+//! another worker that lives as long as the application does.
+//!
 //! The plain voice, for when no screen reader is listening or the one that was has gone.
 //!
 //! Deliberately a second worker with its own prism library rather than a second backend on
@@ -55,15 +64,29 @@ pub struct Fallback {
 }
 
 impl Fallback {
+    /// The voice behind everything: whichever speech engine this machine has.
     pub fn new() -> Self {
+        Self::for_engines(SYNTHESISERS.iter().map(|s| s.to_string()).collect())
+    }
+
+    /// One named engine, because a module asked for it by name.
+    ///
+    /// The candidate list is one long, so a worker that cannot open its engine simply has no
+    /// voice — and `say` then returns false, which sends the caller back to the path it would
+    /// have taken anyway. A choice that cannot be honoured is never silence.
+    pub fn for_engine(name: &str) -> Self {
+        Self::for_engines(vec![name.to_string()])
+    }
+
+    fn for_engines(candidates: Vec<String>) -> Self {
         let (to_worker, rx) = channel::<Job>();
         let pending = Arc::new(AtomicUsize::new(0));
         let healthy = Arc::new(AtomicBool::new(true));
         let known = Arc::new(Mutex::new(Vec::new()));
         let (p, h, k) = (pending.clone(), healthy.clone(), known.clone());
         std::thread::Builder::new()
-            .name("prism-fallback".into())
-            .spawn(move || run(rx, p, h, k))
+            .name("prism-voice".into())
+            .spawn(move || run(rx, p, h, k, candidates))
             .ok();
         Self { to_worker, pending, healthy, known }
     }
@@ -108,6 +131,7 @@ fn run(
     pending: Arc<AtomicUsize>,
     healthy: Arc<AtomicBool>,
     known: Arc<Mutex<Vec<super::Engine>>>,
+    candidates: Vec<String>,
 ) {
     // Opened before the first line is read from the channel, so anything said in the
     // meantime waits rather than being lost — and none of that waiting is start-up time,
@@ -120,13 +144,16 @@ fn run(
             return drain(&rx, &pending);
         }
     };
-    let backend = SYNTHESISERS.iter().find_map(|name| ctx.open_backend(name).ok());
+    let backend = candidates.iter().find_map(|name| ctx.open_backend(name).ok());
     let Some(backend) = backend else {
         healthy.store(false, Ordering::Relaxed);
-        crate::logging::line("speech", "no speech engine on this machine; only a screen reader can speak here");
+        crate::logging::line(
+            "speech",
+            &format!("nothing here can speak as {}", candidates.join(" or ")),
+        );
         return drain(&rx, &pending);
     };
-    crate::logging::line("speech", &format!("the plain voice is {}", backend.name()));
+    crate::logging::line("speech", &format!("a voice opened: {}", backend.name()));
     // Once before anything is said, so the first module to ask has something true to read.
     look(&ctx, &known);
 
