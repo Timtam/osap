@@ -1345,8 +1345,9 @@ wrapper rather than with prism.
       against v0.16.7, and this is v0.18.2 — the reporter's sweep now runs as a smoke test,
       because German umlauts are two-byte characters and half the announcements would have
       failed. 24 strings, all accepted.
-  - **Unverified in the field**: nobody here has a braille display. What is tested is that
-      the call is made and accepted, not that anything appears on one.
+  - **Verified on a real display** (2026-09-02, by the owner). Not only that the call is
+      made and accepted, which is all the smoke test can show, but that the announcements
+      actually arrive on the braille line.
 
 ## Dev tools
 
