@@ -19,7 +19,7 @@ use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use prism_sys::{Context, SCREEN_READERS};
+use prism_sys::{feature, Context, SCREEN_READERS};
 
 /// How long a line may go unanswered before the screen-reader path is given up on.
 ///
@@ -320,6 +320,15 @@ fn run(
             None => return,
         },
     };
+    // Decided once per worker rather than per line: whether a display is attached does not
+    // change while a session runs, and neither does whether this backend can write to one.
+    // The setting can change, and is read per line — turning it off is somebody saying "stop
+    // putting that on my display", which should take effect at once.
+    let brailling = backend.as_ref().is_some_and(|b| b.supports(feature::OUTPUT));
+    if brailling {
+        crate::logging::line("speech", "braille goes out with the speech");
+    }
+
     let mut first_line = true;
     // Said once, and only to answer a question the design could not: whether a screen reader
     // that has gone leaves the call blocked for ever or merely for a long time. The first
@@ -365,7 +374,7 @@ fn run(
 
             watch(&outstanding, &u);
             let started = Instant::now();
-            let outcome = b.speak(&u.text, u.interrupt);
+            let outcome = say(b, &u.text, u.interrupt, brailling);
             let took = started.elapsed().as_millis() as u64;
             pending.fetch_sub(1, Ordering::Relaxed);
             // Cleared after EVERY line, not only when the queue empties. Left in place, a
@@ -466,6 +475,22 @@ fn wait_for_screen_reader(
         }
         let nap = if began.elapsed() < RETRY_SOON_FOR { RETRY_SOON } else { RETRY_LATER };
         std::thread::sleep(nap);
+    }
+}
+
+/// Says a line, and writes it to a braille display as well where that is possible.
+///
+/// `output` is `speak` plus the braille display, in one call — which is the whole of the
+/// braille support, and deliberately so. There is no separate braille channel in this API,
+/// because there is none on macOS either: VoiceOver brailles what it says, and a
+/// `host.braille` that did something on one platform and nothing on the other would be an
+/// API making a promise it cannot keep. A backend without braille answers `output` by
+/// speaking, so this is a strict superset rather than a fork in the road.
+fn say(b: &prism_sys::Backend, text: &str, interrupt: bool, brailling: bool) -> Result<(), prism_sys::Error> {
+    if brailling && crate::appcfg::braille() {
+        b.output(text, interrupt)
+    } else {
+        b.speak(text, interrupt)
     }
 }
 

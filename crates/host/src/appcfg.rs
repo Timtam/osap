@@ -50,6 +50,7 @@ static IGNORE_SUPPORTED_OS: AtomicBool = AtomicBool::new(false);
 static HEADLESS: AtomicBool = AtomicBool::new(false);
 static SPEAK_VIA_VOICEOVER: AtomicBool = AtomicBool::new(false);
 static SCREEN_READER_SPEECH: AtomicBool = AtomicBool::new(true);
+static BRAILLE: AtomicBool = AtomicBool::new(true);
 static DOCK_WHILE_OPEN: AtomicBool = AtomicBool::new(true);
 
 /// Every application setting, in the order the tab shows them: the ones that take effect
@@ -138,6 +139,23 @@ pub const SWITCHES: &[Switch] = &[
         // voice back without a restart.
         default_on: true,
         state: &SCREEN_READER_SPEECH,
+    },
+    Switch {
+        key: "braille",
+        label: "Also send what is said to a braille display — takes effect immediately",
+        help: "Writes each announcement to the braille display as well as speaking it, \
+               through whichever screen reader is running. It does nothing at all without a \
+               display, and nothing on a screen reader that has no braille support. Turn it \
+               off if you would rather your display kept showing what your screen reader put \
+               there, since what the overlay writes replaces that line until the next \
+               announcement.",
+        os: Some("windows"),
+        // On, because the alternative is that a braille reader gets nothing from the
+        // overlays at all — which is what this application did until now, while its own
+        // documentation claimed otherwise. macOS needs no switch: VoiceOver brailles whatever
+        // it is told to say, so braille has always followed speech there.
+        default_on: true,
+        state: &BRAILLE,
     },
     Switch {
         key: "dock_while_open",
@@ -245,6 +263,12 @@ pub fn headless() -> bool {
 #[cfg(windows)]
 pub fn screen_reader_speech() -> bool {
     SCREEN_READER_SPEECH.load(Ordering::Relaxed)
+}
+/// Only asked on Windows. On macOS braille is not ours to route: VoiceOver brailles what it
+/// says, so it follows speech with nothing to switch.
+#[cfg(windows)]
+pub fn braille() -> bool {
+    BRAILLE.load(Ordering::Relaxed)
 }
 /// Only asked on macOS — everywhere else `applies_here` has already pinned it off.
 #[cfg(target_os = "macos")]

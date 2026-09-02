@@ -10,7 +10,9 @@ It is the whole of a module's output. A self-voicing overlay has no window and n
 
 `interrupt` is the choice between cutting off what is being said and queueing behind it, and it defaults to cutting off, which is right when the user has just moved and the previous sentence is now about the wrong control. Queueing is for the second half of one announcement: the overlay runtime speaks a control's name at once and appends an image-read value when it arrives, because reading that value costs a screen capture — measured at 20–42 ms per focus step — and nothing is gained by the user waiting in silence for it.
 
-Where the words actually come out — a screen reader, SAPI, the platform voice, or VoiceOver with the user's own braille display — is not the caller's choice and not something a module needs to know.
+Where the words actually come out — a screen reader, a speech engine, or VoiceOver — is not the caller's choice and not something a module needs to know.
+
+**Braille goes with it.** There is no separate call for a braille display, and that is deliberate rather than an omission: on macOS there is no separate channel to have one for, because VoiceOver brailles whatever it is told to say. A `host.braille` would do something on one platform and nothing on the other, which is an API making a promise it cannot keep. So a line that is spoken is also written to the display, wherever the screen reader has one — on Windows through a single call that does both, on macOS because it always did.
 
 ## What to declare {#declare}
 
@@ -36,7 +38,7 @@ host.speech.output("loading...", { interrupt = false })  -- queue, don't cut off
 
 **Where it comes out**, which the caller does not choose and does not need to know:
 
-- **Windows** — the running screen reader if there is one (NVDA, JAWS and Narrator all go through Tolk), otherwise SAPI.
+- **Windows** — the running screen reader if there is one (NVDA, JAWS, ZoomText, ZDSR, PC-Talker, Boy PC Reader or Sense Reader), otherwise OneCore or SAPI. Speech reaches them through prism, compiled into the application, so nothing has to be installed alongside it. What is spoken also reaches a **braille display**, unless **Also send what is said to a braille display** is unticked in the Application settings tab. If the screen reader stops answering, the plain voice takes over within 300 ms and the screen reader is picked up again on its own, within three seconds of coming back.
 - **macOS** — the platform's own voice, unless **Speak through VoiceOver** is ticked in the Application settings tab. Ticked, the line goes to VoiceOver and arrives in the user's voice, at their rate, and **on their braille display**, which nothing else can do.
 
   It is off until somebody asks for it, and the reason is the permission rather than the feature: the first line through this path is an Apple Event, and the first Apple Event makes macOS put an Automation consent dialog on screen. On by default, that dialog appears at startup — before the user has asked for anything, about a thing they may not want, in front of a person who cannot see it to dismiss it. Ticking the box is the request, and that is the moment to ask.

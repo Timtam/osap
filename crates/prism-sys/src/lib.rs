@@ -70,6 +70,7 @@ pub mod feature {
     pub const OUTPUT: u64 = 1 << 5;
     pub const IS_SPEAKING: u64 = 1 << 6;
     pub const STOP: u64 = 1 << 7;
+    pub const SET_VOLUME: u64 = 1 << 10;
 }
 
 /// A failed prism call, as the code it returned.
@@ -258,6 +259,17 @@ impl Backend {
         };
         // SAFETY: as above.
         check(unsafe { sys::prism_backend_output(self.ptr, text.as_ptr(), interrupt) })
+    }
+
+    /// Sets the volume, where the backend has one — `0.0` to `1.0`.
+    ///
+    /// A screen reader does not: it speaks at whatever rate and volume its user chose, which
+    /// is the entire reason for preferring it. Check [`feature::SET_VOLUME`] first. This
+    /// exists so that a test can exercise the speaking calls without shouting at whoever is
+    /// running it.
+    pub fn set_volume(&self, volume: f32) -> Result<(), Error> {
+        // SAFETY: non-null for the life of this value.
+        check(unsafe { sys::prism_backend_set_volume(self.ptr, volume) })
     }
 
     /// Drops whatever has not been said yet.

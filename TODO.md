@@ -1327,7 +1327,26 @@ wrapper rather than with prism.
       `Foundation_Collections` feature of the `windows` crate — used here without being
       declared, because `tts` enabled it on the same crate and cargo unified the features. A
       borrowed feature is a dependency you do not know you have until the lender leaves.
-- [ ] **Step 9 — braille**, behind its own switch, after a week of clean speech.
+- [x] **Step 9 — braille** (2026-09-02). What is spoken now goes to a braille display as
+      well, through `prism_backend_output`, which speaks and writes in one call. Switch
+      **"Also send what is said to a braille display"**, Windows only, default on — the
+      alternative being that a braille reader gets nothing from the overlays at all, which is
+      what this application did until now while its own documentation claimed otherwise.
+  - **No `host.braille` namespace**, asked for and argued against. There is no separate
+      braille channel on macOS to have one for: VoiceOver brailles whatever it is told to
+      say. An API that did something on one platform and nothing on the other would be making
+      a promise it cannot keep. A backend without braille answers `output` by speaking, so it
+      is a strict superset rather than a fork in the road. If a module ever needs DIFFERENT
+      text on the display than in the ear, that is an option on the existing call, not a
+      namespace of its own.
+  - **prism issue #68 was checked rather than trusted.** `prism_backend_output` used to
+      return `INVALID_UTF8` for well-formed UTF-8 depending on the byte-length parity of a
+      line containing a multi-byte character, and it shipped across four releases. Closed
+      against v0.16.7, and this is v0.18.2 — the reporter's sweep now runs as a smoke test,
+      because German umlauts are two-byte characters and half the announcements would have
+      failed. 24 strings, all accepted.
+  - **Unverified in the field**: nobody here has a braille display. What is tested is that
+      the call is made and accepted, not that anything appears on one.
 
 ## Dev tools
 

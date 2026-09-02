@@ -134,3 +134,44 @@ fn any_working_backend(ctx: &Context) -> Option<prism_sys::Backend> {
         .find_map(|name| ctx.open_backend(name).ok())
         .filter(|b| b.supports(feature::SPEAK))
 }
+
+/// The braille call must not reject the language this application speaks.
+///
+/// prism issue #68: `prism_backend_output` returned `INVALID_UTF8` for well-formed UTF-8
+/// depending on the byte-length parity of a line containing a multi-byte character. It
+/// shipped across four releases and was closed against v0.16.7; this build is v0.18.2, so it
+/// should be gone. "Should" is not a thing to build braille on — German umlauts are two-byte
+/// characters and the overlays say them constantly, so half the announcements would have
+/// failed. The sweep is the reporter's: a multi-byte character at every offset.
+///
+/// Run silently, against a speech engine rather than a screen reader, because a screen reader
+/// speaks at the volume its user chose and this is somebody's working machine.
+#[test]
+fn the_braille_call_accepts_multibyte_text() {
+    let ctx = Context::open().expect("prism did not initialise");
+    let Some(backend) = prism_sys::SYNTHESISERS.iter().find_map(|n| ctx.open_backend(n).ok())
+    else {
+        eprintln!("no speech engine here; nothing to test against");
+        return;
+    };
+    if !backend.supports(feature::OUTPUT) {
+        eprintln!("{} cannot do output; nothing to test", backend.name());
+        return;
+    }
+    if backend.supports(feature::SET_VOLUME) {
+        let _ = backend.set_volume(0.0);
+    }
+    for pad in 0..8 {
+        for multibyte in ["≈", "ä", "—"] {
+            let text = format!("{}{multibyte}", "x".repeat(pad));
+            assert_eq!(
+                backend.output(&text, false),
+                Ok(()),
+                "output rejected {} bytes of valid UTF-8 ({text:?}) — issue #68 is back, and \
+                 with it every announcement containing an umlaut",
+                text.len()
+            );
+        }
+    }
+    let _ = backend.stop();
+}
