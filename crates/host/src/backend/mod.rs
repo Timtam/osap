@@ -414,6 +414,13 @@ pub trait HostEvents {
     fn on_focus_change(&mut self);
     /// A captured key fired; `mods` is the pressed modifier bitmask (MASK_*).
     fn on_key(&mut self, vk: u32, mods: u8);
+    /// One turn of the event loop has finished delivering events.
+    ///
+    /// The GUI path has a timer tick for the work that has to happen whether or not anything
+    /// happened; a headless loop had nowhere to put it, which is how the Windows speech
+    /// deadline came to be unreachable there — it lives in `Speech::pump`, and nothing in
+    /// that loop called it. So every event loop now has the same hook.
+    fn on_tick(&mut self) {}
 }
 
 /// Maps a friendly key name ("Tab", "a", "F1", "Right", "Escape") to a Win32

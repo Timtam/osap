@@ -19,10 +19,19 @@ serde_json = "1.0"
 ureq = "3"
 zip = "2"
 toml = "1.1.2"
-tts = { version = "0.26.3", features = ["tolk"] }
+# The `tolk` feature is deliberately NOT enabled. On Windows this crate is now the
+# FALLBACK, and Tolk's whole job is to reach the running screen reader — the very thing that
+# has just stopped answering by the time anything gets here. Without the feature `tts` uses
+# WinRT, which speaks through the speakers and therefore still works when NVDA has gone.
+# On macOS the feature was never anything: `tts` gates Tolk behind `cfg(windows)` itself.
+tts = "0.26.3"
 wxdragon = "0.9.15"
 
 [target."cfg(windows)".dependencies]
+# Speech through the screen reader, compiled from source and linked statically — see
+# docs/prism-speech-design.md. Windows only: macOS reaches VoiceOver through
+# speech/voiceover.rs, which is better than prism's own VoiceOver backend.
+prism-sys = { path = "../prism-sys" }
 windows = { version = "0.58", features = ["Media_Ocr", "Graphics_Imaging", "Globalization", "Foundation", "Security_Cryptography", "Win32_System_WinRT", "Storage_Streams", "Win32_UI_Accessibility", "Win32_System_Com", "Win32_System_Variant"] }
 # Secondary OCR engine (in-process, FFI): PaddleOCR recognition model via ONNX
 # Runtime, used as a fallback for text Windows.Media.Ocr won't read (lone digits).

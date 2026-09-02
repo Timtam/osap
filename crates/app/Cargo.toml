@@ -16,4 +16,8 @@ host = { path = "../host" }
 # the windows subsystem otherwise leaves the process with no console at all. Same version
 # the host crate already pulls in, so this adds nothing to the build.
 [target.'cfg(windows)'.dependencies]
+# Not called from here. Named so that cargo hands this crate prism-sys's link metadata —
+# `DEP_PRISM_DELAYLOAD`, which only a direct dependent receives — because the executable is
+# built here and it is the executable that has to delay-load those imports. See build.rs.
+prism-sys = { path = "../prism-sys" }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Console"] }

@@ -49,6 +49,7 @@ static OCR_DEBUG: AtomicBool = AtomicBool::new(false);
 static IGNORE_SUPPORTED_OS: AtomicBool = AtomicBool::new(false);
 static HEADLESS: AtomicBool = AtomicBool::new(false);
 static SPEAK_VIA_VOICEOVER: AtomicBool = AtomicBool::new(false);
+static SCREEN_READER_SPEECH: AtomicBool = AtomicBool::new(true);
 static DOCK_WHILE_OPEN: AtomicBool = AtomicBool::new(true);
 
 /// Every application setting, in the order the tab shows them: the ones that take effect
@@ -124,6 +125,19 @@ pub const SWITCHES: &[Switch] = &[
         // and that is the moment to ask.
         default_on: false,
         state: &SPEAK_VIA_VOICEOVER,
+    },
+    Switch {
+        key: "screen_reader_speech",
+        label: "Speak through the screen reader, so it comes out the way it says everything                 else — takes effect immediately",
+        help: "Hands what a module says to NVDA, JAWS or whichever screen reader is running,                instead of speaking it with a separate voice. It then arrives in your voice,                at your rate, and in the reading order you are used to. Turn it off to go                back to the separate voice, which is also what happens by itself if the                screen reader stops answering — turning this off and on again is how you ask                for another try after that, without restarting. With no screen reader                running, nothing changes either way: a module that asks to be heard is heard                through the system voice.",
+        os: Some("windows"),
+        // On, unlike its macOS counterpart, and for the opposite reason: there is no consent
+        // dialog to spring on anybody here, and this is the path that speaks the way the
+        // user's screen reader already does. It is the way out rather than the way in — if a
+        // newly compiled speech library misbehaves, this is the switch that gets the old
+        // voice back without a restart.
+        default_on: true,
+        state: &SCREEN_READER_SPEECH,
     },
     Switch {
         key: "dock_while_open",
@@ -226,6 +240,11 @@ pub fn ignore_supported_os() -> bool {
 }
 pub fn headless() -> bool {
     HEADLESS.load(Ordering::Relaxed)
+}
+/// Only asked on Windows — everywhere else `applies_here` has already pinned it off.
+#[cfg(windows)]
+pub fn screen_reader_speech() -> bool {
+    SCREEN_READER_SPEECH.load(Ordering::Relaxed)
 }
 /// Only asked on macOS — everywhere else `applies_here` has already pinned it off.
 #[cfg(target_os = "macos")]

@@ -2643,6 +2643,15 @@ impl Dispatcher<'_> {
 }
 
 impl HostEvents for Dispatcher<'_> {
+    /// The headless loop's equivalent of the GUI timer tick.
+    ///
+    /// Only speech, deliberately: this is also where `fire_due_timers` and
+    /// `fire_image_results` are missing headless — a separate, older gap recorded in TODO.md,
+    /// and not one to fix blind in the same change that touches what the user hears.
+    fn on_tick(&mut self) {
+        self.shared.speech.pump();
+    }
+
     fn on_hotkey(&mut self, id: i32) {
         self.shared.bump_epoch();
         // Logged on ARRIVAL, before anything is looked up. Registration and delivery are

@@ -585,8 +585,19 @@ feature, each saying what that part of the API is for and what to declare in `mo
       platform sections that described a difference the code does not have. One was marked
       "this is the one that must not ship".
 - [x] **`host.uia` was renamed to `host.element`** (2026-08-31) — see "Agreed next".
-- [ ] **A page with no "What to declare" box is not caught.** The boxes were written by the
-      one-time split rather than generated, so a new page can be added without one.
+- [x] **A page with no "What to declare" box is now caught** (2026-09-01). The boxes were
+      written by the one-time split rather than generated, so a new page could be added
+      without one and nothing would say so. `api-index.py --check` now fails on any reference
+      page missing `{#declare}`, which is the same shape as the coverage check above: ask the
+      question the writer will forget, not the one they just answered.
+- [x] **The last grouped page was split** (2026-09-01) — `modules.md` held `host.require`,
+      `host.tryRequire` and `host.include` under one filename, which is the grouping the whole
+      section was meant to end. Three pages now, one namespace each, and the navigation is
+      alphabetical throughout: `host.include`, `host.require`, `host.tryRequire` sit where a
+      reader looking for them would look.
+  - The paragraph about VM isolation moved to `host.require`, which is the call it explains:
+      what crosses a module boundary depends on the dependency kind, and a `code_module`
+      brings its functions with it because its source is evaluated in the dependent's VM.
 
 ## Found while documenting (2026-08-31)
 
@@ -1071,6 +1082,142 @@ Kontrol, standalone}, with Cinematic Studio Strings inheriting on top. What is l
 - [ ] **Previous/Next snapshot cannot confirm they did anything.** They acknowledge the press, and the dropdown checks that a menu actually opened, but the arrows have no post-condition. Reading the snapshot name field by OCR before and after would both confirm the step and let the control announce the new snapshot's name — which is the announcement a screen-reader user actually wants. Needs one look at what Kontakt puts in that field when an instrument has no snapshots.
 - [ ] **`daw-hosts` accepts any `#32770` of reaper.exe as a plugin host,** because REAPER's FX window is one. So is every dialog a natively-hosted plugin opens: Kontakt's "Content Missing" passed as a host, and the Qt window drawing it passed as the plugin, until `detect.inOwnDialog` shut that door for Kontakt specifically (by title, as ReaHotkey does). The same mechanism is still open for every other module on `daw.all` — Komplete Kontrol has its own dialogs. Unverified, but it is the same mechanism, not a different one.
 - [ ] **Kontakt 8's view toggle could use UIA where it is reachable.** Standalone, a raw walk lists "Play View" as a real Button; we send F10 everywhere instead. F10 works and cannot drift the way a measured menu row can, so this is a nicety, not a fix.
+
+## Speech through prism (2026-09-01)
+
+Replacing the Windows half of `speech/mod.rs` — `tts-rs` over Tolk — with a from-source,
+statically linked binding to [prism](https://github.com/ethindp/prism). Windows only; macOS
+keeps `voiceover.rs`, which is better than prism's VoiceOver backend. The measurements, the
+design and the reasoning are in [docs/prism-speech-design.md](docs/prism-speech-design.md).
+
+- [x] **Step 1 — the crate and the build** (2026-09-01). `crates/prism-sys`, prism as a
+      submodule pinned to `f237af6` (v0.18.2, the commit the smoke test ran against), and a
+      `build.rs` that compiles it in 36 s. It asserts its own outcome rather than trusting
+      its arguments: every `-D` must come back from `CMakeCache.txt` with a real type (an
+      unknown option is a *warning* and exit 0 in CMake, so a renamed one would silently
+      build a different library — proven by feeding it a name that was real at v0.17.0), the
+      built backend set must equal the requested one, and `prism.lib` must claim the dynamic
+      C runtime (two CRTs in one process is two heaps, announced only by an `LNK4098`).
+  - The backend-set check first passed on a lie: CMake reconfigures in place and leaves the
+      targets it no longer builds behind as directories, so it was reading everything ever
+      built here. A changed option set now discards the build and install trees first, and
+      the fingerprint is recorded only after the build succeeds.
+  - Nine backends: `nvda`, `jaws`, `zoom_text`, `sapi`, `onecore`, `zdsr`, `pc_talker`,
+      `boy_pc_reader`, `sense_reader`. Out: `uia` (returns success when nobody is listening),
+      `system_access` and `window_eyes` — the only two prism marks `LEGACY`, so the legacy
+      path goes with them. Losing System Access is a deliberate, stated regression.
+- [x] **Step 2 — bindings, link flags, smoke tests** (2026-09-01). bindgen against the
+      installed header (with `-DPRISM_STATIC`, or every declaration comes back
+      `__declspec(dllimport)`), `static:+whole-archive=prism`, the `/delayload:` flags and
+      the three vendor import stubs, and five smoke tests. `build.rs` finds Visual Studio's
+      libclang itself when the shell has not, the way `run-dev.ps1` already does — with no
+      fallback to a checked-in bindings file, because a stale one cannot catch what it exists
+      to catch.
+  - **Both traps fired on the way, exactly as predicted.** Without the delay-load flags the
+      test binary did not start: `0xC0000135`, before `main`. And `-tests` was the wrong
+      qualifier — it covers integration tests and leaves the lib's own unit-test binary to
+      die at start-up. Without `+whole-archive` the backend list came back **empty**, which
+      is the silent mute this whole guard exists for.
+  - **The empty-string guard had a hole the test found and reading did not**: a NUL is not
+      whitespace, so `" "` survived `trim`, was then filtered down to an empty string and
+      handed to prism anyway. Stripped before the check now, not after.
+  - `PRISM_BACKEND_*` are `UINT64_C()` macros that bindgen cannot evaluate, so backends are
+      opened by name through `prism_registry_id` — the names the smoke test pins.
+      `PrismBackendFeature` is blocked outright: its members are 64-bit, its underlying type
+      is 4 bytes, and its last member silently evaluates to 0.
+- [x] **Step 2a — the application binary delay-loads what prism imports** (2026-09-01).
+      Cargo does not propagate a link argument to a dependent's executable the way it
+      propagates a native library, so `crates/app/build.rs` has to say it again — but not
+      keep a second copy of the DLL names: prism-sys publishes them as `cargo:delayload=…`,
+      which cargo hands to a **direct** dependent as `DEP_PRISM_DELAYLOAD`. That is the only
+      reason `app` names prism-sys in its manifest at all. Verified with `cargo build -v`:
+      all three `/delayload:` arguments reach the executable's link.
+- [x] **Step 3 — `speech/prism.rs`** (2026-09-01): one owning thread, backends opened by
+      name in order and never `create_best`, a speech engine opened lazily on the first line
+      that needs one (opening OneCore was measured at 2.9 s, which at start-up is 2.9 s of
+      frozen application), one-strike demotion, the 300 ms stall deadline enforced from
+      `refused()` on the event-loop side, and a `rearm` that replaces the whole worker
+      because prism's binding to a dead screen reader is fixed for the instance's lifetime.
+      Compiled but not yet spoken through — `Speech` still routes Windows lines to `tts`.
+  - A compiler warning about a pointless variable turned out to be pointing at a real bug:
+      the worker returned on failure with lines still in its channel, each of which had been
+      counted in `pending` when it was handed over. `is_speaking` would then have answered
+      yes for the rest of the session and every shutdown would have sat out its full fifteen
+      seconds. It hands them all back now, to be said the other way.
+- [ ] **Step 4 — wire it into `Speech`.** *First test with NVDA.*
+- [x] **Step 4 and 5 — wired in, with the switch** (2026-09-01). `Speech` tries prism first,
+      `pump()` speaks the refusals through the other path, `is_speaking` counts its own
+      outstanding lines. New switch **"Speak through the screen reader"**, Windows only,
+      **default on** — it is the way out rather than the way in. The `tolk` feature left
+      `tts` in the same commit: with it on, the fallback would have been the very screen
+      reader that had just stopped answering.
+  - **Eight defects found by an adversarial review before the user ever heard it**, five of
+      them ending in silence or in the wrong words. Fixed: the headless loop never called
+      `Speech::pump()`, where the whole stall deadline lives, so a wedged screen reader could
+      never be detected there — every event loop now has an `on_tick` hook; the 2.9-second
+      synthesiser open happened on the first line rather than at start-up, inside the very
+      call the deadline was meant to bound; `pending` stayed set after a stall, so every later
+      shutdown would have waited its full fifteen seconds; the worker could exit with the
+      channel still live, dropping a line into nobody's hands; the deadline covered only
+      `speak`, not the opens before it; a wedged worker replayed its whole backlog on
+      unblocking, announcing controls from minutes ago; and — the worst of them — an
+      interrupting line discarded everything queued **after** it as well as before, so the
+      overlay's name-then-value pair lost the name and spoke a value belonging to nothing.
+  - Not fixed, and deliberate: a screen reader that is merely SLOW rather than wedged finishes
+      after the deadline has already handed the same words to the fallback, and the line is
+      heard twice. The call cannot be cancelled, so the choice is between hearing something
+      twice and risking not hearing it at all.
+- [x] **The startup report no longer guesses at the screen reader** (2026-09-01). It asked
+      whether `nvdaControllerClient64` or `SAAPI64` was loaded in this process — a fair proxy
+      only while Tolk loaded them on demand. The first run through prism printed "none
+      detected (speech falls back to SAPI)" two lines above "speaking through NVDA". Removed
+      rather than repaired: the speech layer's own line says which backend will speak, which
+      is the question worth answering.
+  - `run-dev.ps1` stopped the running copy AFTER building, so a rebuild failed with "failed
+      to remove file … Zugriff verweigert" — which looks nothing like "the app is running".
+      Moved above the build, the order `package.ps1` already used and documented.
+- [x] **The screen reader comes back by itself** (2026-09-02), which is what the first live
+      test asked for: quitting NVDA moved speech to WinRT correctly, but getting it back meant
+      restarting the application. One searcher now looks every 3 seconds for the first minute
+      and every 30 after, silent unless it finds one, stopped while the setting is off and
+      stopped when its channel closes.
+  - **The first version was wrong in a way the log made obvious**: it keyed the eager tier off
+      when the worker had started rather than when the path was lost, so the first attempt
+      waited thirty seconds. It did work — `back to NVDA` thirty seconds after the deadline
+      fired — and from a keyboard that is indistinguishable from not working. Two tests now
+      cover it, one of which simulates a loss and requires the pickup within five seconds; it
+      takes 0.08 s.
+  - **One searcher rather than one per attempt**, because the cost is not where it looked: a
+      sweep of the seven screen-reader backends costs 86 ms, of which 62 is `prism_init`. The
+      searcher keeps its library open and sleeps between looks.
+  - **Losing NVDA does not return an error — the call blocks.** The 300 ms deadline is
+      therefore the normal way a loss is noticed, and the abandoned thread its normal price. A
+      log line now records whether such a call ever comes back at all, because the design
+      should not have to assume.
+  - It rests on a measured property rather than a hope: prism refuses a backend whose reader
+      is not running — with NVDA up, the other six answered `BACKEND_NOT_AVAILABLE`. A smoke
+      test now asserts the invariant, because a retry that adopted a dead backend would be
+      silence, which is the one outcome this design exists to prevent.
+  - Measured in passing: NVDA reports `braille=true` and `output=true`, so the braille step
+      has something real to switch on.
+- [ ] **The headless loop is missing more than speech.** `fire_due_timers` and
+      `fire_image_results` are called only from the GUI timer tick, so `host.timer` and image
+      results are dead in headless mode — which the macOS headless loop's own comment claims
+      is "a fair test of the rest". Older than this change and left alone by it; the `on_tick`
+      hook is now the place to fix it, but not blind and not in the same change as speech.
+- [ ] **Step 6 — application speech separated from module speech.** `host.speech` always
+      speaks, through SAPI if that is what is there; the two places the application speaks on
+      its own behalf gate on a screen reader being present and use a tray balloon otherwise.
+      Today `tts-rs` falls through to WinRT and talks out loud at a sighted user with no
+      screen reader. Symmetrically on macOS, where `voiceover::is_running()` already answers
+      the same question.
+- [ ] **Step 7 — packaging, licensing, docs.** The two client DLLs leave `package.ps1`. This
+      repository has **no LICENSE file** while every crate declares `GPL-3.0-or-later`, and
+      MPL-2.0 §3.2 wants recipients told how to get the source. Also settle whether a stock
+      `windows-latest` can compile C++23 with `<expected>` and `<flat_set>` — twenty minutes
+      with a throwaway workflow — before writing any Windows CI.
+- [ ] **Step 8 — remove `tts` from the Windows build.** Its own commit, doing nothing else.
+- [ ] **Step 9 — braille**, behind its own switch, after a week of clean speech.
 
 ## Dev tools
 

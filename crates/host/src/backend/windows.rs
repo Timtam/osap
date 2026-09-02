@@ -212,14 +212,6 @@ fn capture_screen(x: i32, y: i32, w: i32, h: i32) -> Option<CapturedImage> {
     }
 }
 
-/// Is a DLL of that name loaded in THIS process? Used only for the startup report: the
-/// speech clients are loaded by the `tts` crate on demand, so their presence is a fair
-/// proxy for "a screen reader answered", and it costs one call rather than a process walk.
-fn module_running(name: &str) -> bool {
-    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    !unsafe { GetModuleHandleW(wide.as_ptr()) }.is_null()
-}
-
 /// What `DllGetVersion` fills in. Declared here because `windows-sys` does not carry it:
 /// the function is not exported for linking, it is fetched by name at run time.
 #[repr(C)]
@@ -289,14 +281,13 @@ impl Backend for WindowsBackend {
             format!("{dpi} ({}%)", (dpi as f32 / 96.0 * 100.0).round() as i32),
         ));
         out.push(("common controls".to_string(), common_controls()));
-        out.push((
-            "screen reader".to_string(),
-            match (module_running("nvdaControllerClient64"), module_running("SAAPI64")) {
-                (true, _) => "NVDA client loaded".to_string(),
-                (_, true) => "System Access client loaded".to_string(),
-                _ => "none detected (speech falls back to SAPI)".to_string(),
-            },
-        ));
+        // No "screen reader" line here any more. It asked whether `nvdaControllerClient64`
+        // or `SAAPI64` was loaded in this process, which was a fair proxy only while Tolk
+        // loaded them on demand — with speech going through prism nothing loads either, so
+        // the line reported "none detected (speech falls back to SAPI)" with NVDA running
+        // and prism speaking through it. The speech layer logs the real answer a moment
+        // later, and it is a better answer: which backend WILL speak, rather than which DLL
+        // happens to be in memory.
         out
     }
 
@@ -816,6 +807,7 @@ impl Backend for WindowsBackend {
             // Hotkeys reach our window proc during dispatch; the hooks queued
             // foreground/key events on this thread. Drain them all.
             self.pump_pending(events);
+            events.on_tick();
         }
         Ok(())
     }

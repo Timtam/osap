@@ -149,5 +149,6 @@ pub fn run_event_loop(events: &mut dyn HostEvents) -> Result<(), String> {
             );
         }
         drain(events);
+        events.on_tick();
     }
 }
