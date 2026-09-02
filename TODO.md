@@ -1247,15 +1247,26 @@ design and the reasoning are in [docs/prism-speech-design.md](docs/prism-speech-
       throwaway workflow. Note that `Swatinem/rust-cache` will not cache a workspace crate's
       `OUT_DIR`, so without an explicit cache key on the pinned SHA every run pays the full
       36-second prism build.
-- [x] **Step 8 — decided against, on a measurement** (2026-09-02). The plan was to drop
-      `tts` from the Windows build once prism had proved itself, since prism has SAPI and
-      OneCore backends of its own. Measured here: **opening one costs seconds** — OneCore
-      3.5 s, SAPI 2.0 s — and the moment the fallback is needed is the moment a screen reader
-      has just gone, which is when the user most needs to be told. Keeping one open from the
-      start does not help, because the path is usually lost by the stall deadline, so the
-      worker holding that ready engine is the wedged one. `tts` therefore stays as the WinRT
-      voice of last resort — instant, and already there. **Needs the owner's agreement**: he
-      asked for the removal before either fact was known.
+- [x] **Step 8 — `tts` is gone from the Windows build** (2026-09-02), and the reasoning
+      that nearly stopped it is the useful part. It was rejected on half a measurement:
+      opening a prism speech engine costs seconds (OneCore 3.5 s, SAPI 2.0 s) and the
+      fallback is needed exactly when a screen reader has just gone — against which `tts`
+      looked instant and already there.
+  - The owner asked the question that was missing: *does `tts` take just as long?* It does,
+      and worse — **2872 ms of BLOCKING start-up** in the running application, measured, for
+      a voice that with a screen reader present never says anything, plus 567 ms for its
+      first line. Not cheaper than prism: more expensive, and charged to everybody at every
+      start rather than to one person once.
+  - The fallback is now a second prism worker with its own library on its own thread
+      (`speech/fallback.rs`), opening in the background and queueing what arrives meanwhile.
+      `Speech::new` measures **0 ms**. Two threads and two libraries on purpose: the
+      screen-reader path is usually lost by the stall deadline, so its thread is wedged, and
+      anything sharing it would be wedged too. The screen-reader worker no longer opens
+      speech engines at all.
+  - Removing the crate broke the build on `OcrResult::Lines`, which needs the
+      `Foundation_Collections` feature of the `windows` crate — used here without being
+      declared, because `tts` enabled it on the same crate and cargo unified the features. A
+      borrowed feature is a dependency you do not know you have until the lender leaves.
 - [ ] **Step 9 — braille**, behind its own switch, after a week of clean speech.
 
 ## Dev tools

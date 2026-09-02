@@ -19,12 +19,7 @@ serde_json = "1.0"
 ureq = "3"
 zip = "2"
 toml = "1.1.2"
-# The `tolk` feature is deliberately NOT enabled. On Windows this crate is now the
-# FALLBACK, and Tolk's whole job is to reach the running screen reader — the very thing that
-# has just stopped answering by the time anything gets here. Without the feature `tts` uses
-# WinRT, which speaks through the speakers and therefore still works when NVDA has gone.
-# On macOS the feature was never anything: `tts` gates Tolk behind `cfg(windows)` itself.
-tts = "0.26.3"
+
 wxdragon = "0.9.15"
 
 [target."cfg(windows)".dependencies]
@@ -32,7 +27,7 @@ wxdragon = "0.9.15"
 # docs/prism-speech-design.md. Windows only: macOS reaches VoiceOver through
 # speech/voiceover.rs, which is better than prism's own VoiceOver backend.
 prism-sys = { path = "../prism-sys" }
-windows = { version = "0.58", features = ["Media_Ocr", "Graphics_Imaging", "Globalization", "Foundation", "Security_Cryptography", "Win32_System_WinRT", "Storage_Streams", "Win32_UI_Accessibility", "Win32_System_Com", "Win32_System_Variant"] }
+windows = { version = "0.58", features = ["Media_Ocr", "Graphics_Imaging", "Globalization", "Foundation", "Foundation_Collections", "Security_Cryptography", "Win32_System_WinRT", "Storage_Streams", "Win32_UI_Accessibility", "Win32_System_Com", "Win32_System_Variant"] }
 # Secondary OCR engine (in-process, FFI): PaddleOCR recognition model via ONNX
 # Runtime, used as a fallback for text Windows.Media.Ocr won't read (lone digits).
 ort = { version = "=2.0.0-rc.10", features = ["download-binaries", "copy-dylibs", "ndarray"] }
@@ -44,6 +39,10 @@ windows-sys = { version = "0.61.2", features = ["Win32_UI_Input_KeyboardAndMouse
 # from a Windows machine. A feature enabled there and missing here would mean the check
 # passes and the real Mac build does not.
 [target.'cfg(target_os = "macos")'.dependencies]
+# macOS only. On Windows this cost 2872 ms of BLOCKING start-up — measured in the running
+# application — to build a voice that, with a screen reader present, never says anything;
+# prism serves that role there instead, on a thread, without holding the start up.
+tts = "0.26.3"
 libc = "0.2"
 objc2 = "0.6"
 block2 = "0.6"

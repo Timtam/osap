@@ -19,7 +19,7 @@ use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use prism_sys::{Context, SCREEN_READERS, SYNTHESISERS};
+use prism_sys::{Context, SCREEN_READERS};
 
 /// How long a line may go unanswered before the screen-reader path is given up on.
 ///
@@ -297,17 +297,16 @@ fn run(
         }
     };
 
-    // Opened here rather than on the first line that needs one. Opening a speech engine was
-    // measured at 2.9 seconds, and doing it lazily would spend all of that with somebody
-    // already waiting for an answer to a keystroke — inside the very call the deadline exists
-    // to bound. Here it is paid while nothing is waiting on it.
+    // Screen readers only, on both paths. The plain voice lives on its own thread — see
+    // `fallback.rs` — because this one is the one that gets wedged, and that is exactly when
+    // the other has to speak.
     let backend = match start {
         Start::First => match open_screen_reader(&ctx, start) {
             Some(b) => {
                 reader.store(true, Ordering::Relaxed);
                 Some(b)
             }
-            None => open_synthesiser(&ctx),
+            None => None,
         },
         Start::Retry => match wait_for_screen_reader(&ctx, &rx, &refused, &pending, &outstanding)
         {
@@ -538,17 +537,6 @@ fn open_screen_reader(ctx: &Context, start: Start) -> Option<prism_sys::Backend>
     None
 }
 
-/// A plain speech engine, for a module that wants to be heard with no screen reader present.
-fn open_synthesiser(ctx: &Context) -> Option<prism_sys::Backend> {
-    for name in SYNTHESISERS {
-        if let Ok(b) = ctx.open_backend(name) {
-            crate::logging::line("speech", &format!("speaking through {}", b.name()));
-            return Some(b);
-        }
-    }
-    crate::logging::line("speech", "nothing on this machine can speak");
-    None
-}
 
 #[cfg(test)]
 mod tests {

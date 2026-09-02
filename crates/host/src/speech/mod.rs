@@ -19,17 +19,32 @@
 #[cfg(target_os = "macos")]
 mod voiceover;
 #[cfg(windows)]
+mod fallback;
+#[cfg(windows)]
 mod prism;
 
 #[cfg(any(windows, target_os = "macos"))]
 use std::cell::Cell;
+#[cfg(any(windows, target_os = "macos"))]
 use std::cell::RefCell;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+#[cfg(target_os = "macos")]
+use anyhow::Context;
+#[cfg(target_os = "macos")]
 use tts::Tts;
 
 pub struct Speech {
+    /// The plain voice on macOS, where `tts` reaches AVFoundation. Windows has its own, in
+    /// `fallback`, because `tts` cost 2872 ms of blocking start-up there for a voice that
+    /// usually never speaks.
+    #[cfg(target_os = "macos")]
     tts: RefCell<Tts>,
+    /// The plain voice on Windows: a prism speech engine opened in the background on a
+    /// thread that cannot be wedged by the screen-reader path, since the moment it is needed
+    /// is usually the moment that path has stopped answering.
+    #[cfg(windows)]
+    fallback: fallback::Fallback,
     /// The Windows screen reader. `RefCell` because re-arming after a failure replaces the
     /// whole worker: the backend it spoke through is dead, and prism's binding to it is
     /// fixed for the lifetime of the instance and never retried.
@@ -44,9 +59,11 @@ pub struct Speech {
 
 impl Speech {
     pub fn new() -> Result<Self> {
-        let tts = Tts::default().context("failed to initialize TTS engine")?;
         Ok(Self {
-            tts: RefCell::new(tts),
+            #[cfg(target_os = "macos")]
+            tts: RefCell::new(Tts::default().context("failed to initialize TTS engine")?),
+            #[cfg(windows)]
+            fallback: fallback::Fallback::new(),
             #[cfg(windows)]
             prism: RefCell::new(prism::Prism::new()),
             #[cfg(target_os = "macos")]
@@ -97,7 +114,15 @@ impl Speech {
             if on && self.prism.borrow().say(text, interrupt) {
                 return;
             }
+            if !self.fallback.say(text, interrupt) {
+                // Nowhere left to fall. Written down rather than dropped, because an
+                // application that has gone completely mute should at least be able to say
+                // why afterwards.
+                crate::logging::line("speech", &format!("nothing could say: {text}"));
+            }
+            return;
         }
+        #[cfg(target_os = "macos")]
         let _ = self.tts.borrow_mut().speak(text.to_string(), interrupt);
     }
 
@@ -131,9 +156,10 @@ impl Speech {
             return true;
         }
         #[cfg(windows)]
-        if self.prism.borrow().pending() {
-            return true;
+        {
+            return self.prism.borrow().pending() || self.fallback.pending();
         }
+        #[cfg(not(windows))]
         self.tts.borrow().is_speaking().unwrap_or(false)
     }
 
@@ -156,7 +182,7 @@ impl Speech {
             // mutably, and a `for` loop holds its borrow for the whole body.
             let refused = self.prism.borrow().refused();
             for text in refused {
-                let _ = self.tts.borrow_mut().speak(text, false);
+                self.fallback.say(&text, false);
             }
             // Only while the setting is on: switched off, the screen-reader path is not
             // wanted, and starting a worker every few seconds to look for one would be work

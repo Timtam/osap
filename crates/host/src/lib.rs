@@ -2156,7 +2156,16 @@ pub struct Manager {
 impl Manager {
     pub fn new() -> Result<Self> {
         let backend = backend::platform();
+        // Timed because it is not free and it is not obvious: building the fallback speech
+        // engine measured 3.1 seconds in a test, and this call is synchronous — that is
+        // start-up time the user waits through, for a voice that on a machine with a screen
+        // reader will very likely never say anything.
+        let began = Instant::now();
         let speech = speech::Speech::new()?;
+        logging::line(
+            "speech",
+            &format!("the speech engines took {} ms to open", began.elapsed().as_millis()),
+        );
         // What the backend sees of this machine, before anything else can fail. On a
         // machine we cannot touch — and increasingly that is the case — this block is the
         // difference between "it does not work" and a cause.

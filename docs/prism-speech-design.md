@@ -242,25 +242,33 @@ This also brings prism issue #109 along — an intermittent access violation in
 fire on a machine that actually ran ZDSR, and only at shutdown. Worth trying `/DELAYLOAD`
 without prism's `/DELAY:unload`, which is what creates the unload path in the first place.
 
-### Why the fallback is still tts-rs, and not prism itself
+### The plain voice is prism too, on a second thread
 
-The plan was to drop `tts` from the Windows build once prism had proved itself: prism has
-SAPI and OneCore backends, so on paper it can be both the preferred path and the fallback,
-and one dependency would go.
+Dropping `tts` from the Windows build was nearly abandoned on a half-measurement. Opening a
+prism speech engine costs seconds — OneCore 3.5 s, SAPI 2.0 s — and the moment the fallback
+is needed is the moment a screen reader has just gone, which is exactly when the user has to
+be told what happened. Against that, `tts` looked instant and already there.
 
-Measured on this machine, that does not work. **Opening a speech engine costs seconds** —
-OneCore 3.5 s, SAPI 2.0 s — and the moment the fallback is needed is the moment a screen
-reader has just gone, which is exactly when the user has to be told what happened. Two to
-three and a half seconds of silence there is far worse than a crate in the dependency list.
+It is neither. Asked what it actually costs, the answer was **2872 ms of blocking start-up in
+the running application**, for a voice that on a machine with a screen reader never says a
+word, and **567 ms more** for its first line if it ever does. It was not cheaper than prism;
+it was more expensive, and it charged everybody at every start rather than one person once.
 
-Keeping one open from the start does not rescue it either. The path is usually lost by the
-**stall deadline** rather than by an error, which means the worker holding that ready engine
-is the one wedged inside a call that will never return. Serving the fallback would then need
-a second always-running worker with its own library and its own thread, plus seconds of
-start-up work, to replace something that already exists and answers instantly.
+So the fallback is a second prism worker, in `speech/fallback.rs`, with its own library on
+its own thread. It opens in the background and queues whatever arrives meanwhile, so none of
+that time is start-up time: `Speech::new` now measures **0 ms**. Two threads and two
+libraries rather than one, and that is the point — the screen-reader path is usually lost by
+the stall deadline, so its thread is wedged inside a call that will never return, and
+anything sharing that thread would be wedged with it.
 
-So `tts` stays on Windows, without the `tolk` feature, as the WinRT voice of last resort.
-The decision to remove it was taken before either of those two facts was known.
+The screen-reader worker therefore stopped opening speech engines at all. It is screen
+readers or nothing; the plain voice is somebody else's job.
+
+One thing fell out of removing the crate, worth naming because nothing would otherwise have
+caught it: the build broke on `OcrResult::Lines`. That call needs the `Foundation_Collections`
+feature of the `windows` crate, which this project used without declaring — `tts` happened to
+enable it on the same crate, and cargo unified the features. A borrowed feature is a
+dependency you do not know you have until the lender leaves.
 
 ### Losing the screen reader is not permanent
 
