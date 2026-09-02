@@ -28,6 +28,13 @@ $profileDir = "debug"
 if ($Release) { $profileDir = "release" }
 $exe = Join-Path $root "target\$profileDir\automation-platform.exe"
 
+# BEFORE the build, not after: a running copy holds its own .exe open, and cargo reports
+# that as "failed to remove file ... Zugriff verweigert", which looks nothing like "the app
+# is running". It also holds the log file and its own hotkeys. package.ps1 already does it
+# in this order.
+Get-Process -Name automation-platform -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Milliseconds 500
+
 if ($Build -or -not (Test-Path $exe)) {
   # wxDragon needs these; setting them here rather than expecting a configured shell.
   if (-not $env:LIBCLANG_PATH) {
@@ -52,10 +59,6 @@ $dirs = Get-ChildItem $srcDir -Directory |
   ForEach-Object { $_.FullName }
 
 if (-not $dirs) { throw "no modules found in $srcDir$(if ($Only) { " matching: $($Only -join ', ')" })" }
-
-# A module the app is already running would hold the log file and its own hotkeys.
-Get-Process -Name automation-platform -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep -Milliseconds 500
 
 if ($Calibrate) { $env:AUTOMATION_PLATFORM_CALIBRATE = "1" }
 else { Remove-Item Env:\AUTOMATION_PLATFORM_CALIBRATE -ErrorAction SilentlyContinue }
