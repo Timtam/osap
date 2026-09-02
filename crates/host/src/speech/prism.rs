@@ -105,6 +105,12 @@ pub struct Prism {
     /// perfectly healthy screen reader on its first wait.
     pending: Arc<AtomicUsize>,
     outstanding: Outstanding,
+    /// Whether what opened was a screen reader rather than a plain speech engine.
+    ///
+    /// The difference matters only to the application's own announcements: those are
+    /// addressed to somebody who cannot see the screen, so with no screen reader listening
+    /// they must not be spoken at all. A module that asks to be heard is heard either way.
+    reader: Arc<AtomicBool>,
     /// Whether a worker is already out looking for the screen reader, so that exactly one is.
     retrying: bool,
 }
@@ -124,12 +130,23 @@ impl Prism {
         let healthy = Arc::new(AtomicBool::new(start == Start::First));
         let pending = Arc::new(AtomicUsize::new(0));
         let outstanding: Outstanding = Arc::new(Mutex::new(None));
-        let (h, p, o) = (healthy.clone(), pending.clone(), outstanding.clone());
+        let reader = Arc::new(AtomicBool::new(false));
+        let (h, p, o, r) =
+            (healthy.clone(), pending.clone(), outstanding.clone(), reader.clone());
         std::thread::Builder::new()
             .name("prism-speech".into())
-            .spawn(move || run(start, rx, refused_tx, h, p, o))
+            .spawn(move || run(start, rx, refused_tx, h, p, o, r))
             .ok();
-        Self { to_worker, refused_rx, healthy, pending, outstanding, retrying: false }
+        Self { to_worker, refused_rx, healthy, pending, outstanding, reader, retrying: false }
+    }
+
+    /// Whether a screen reader is what would say the next line.
+    ///
+    /// False when a plain speech engine is speaking instead, and false while the path is out
+    /// of service — in both cases the words would come out of the speakers at somebody who
+    /// may not have asked for them.
+    pub fn via_screen_reader(&self) -> bool {
+        self.healthy.load(Ordering::Relaxed) && self.reader.load(Ordering::Relaxed)
     }
 
     /// Sends somebody to look for the screen reader, once, as soon as it is gone.
@@ -254,6 +271,7 @@ impl Prism {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     start: Start,
     rx: Receiver<Utterance>,
@@ -261,6 +279,7 @@ fn run(
     healthy: Arc<AtomicBool>,
     pending: Arc<AtomicUsize>,
     outstanding: Outstanding,
+    reader: Arc<AtomicBool>,
 ) {
     // Everything prism owns lives on this thread and dies with it. `Context` is `!Send`,
     // which is what makes that a compiler guarantee rather than a comment.
@@ -283,12 +302,19 @@ fn run(
     // already waiting for an answer to a keystroke — inside the very call the deadline exists
     // to bound. Here it is paid while nothing is waiting on it.
     let backend = match start {
-        Start::First => open_screen_reader(&ctx, start).or_else(|| open_synthesiser(&ctx)),
+        Start::First => match open_screen_reader(&ctx, start) {
+            Some(b) => {
+                reader.store(true, Ordering::Relaxed);
+                Some(b)
+            }
+            None => open_synthesiser(&ctx),
+        },
         Start::Retry => match wait_for_screen_reader(&ctx, &rx, &refused, &pending, &outstanding)
         {
             Some(b) => {
                 // Found. Only NOW does anything start coming this way, which is why the
                 // fallback never loses a line to a search that was going to come up empty.
+                reader.store(true, Ordering::Relaxed);
                 healthy.store(true, Ordering::Relaxed);
                 Some(b)
             }

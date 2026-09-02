@@ -528,10 +528,14 @@ pub fn run_gui(
     on_reload: impl Fn(usize) -> Result<(ModuleInfo, crate::ReloadReport), String> + 'static,
     mut pump: impl FnMut() + 'static,
     mut drain_errors: impl FnMut() -> Vec<(String, String)> + 'static,
-    // Speech belongs to the host, which owns the single engine — a second one is an error
-    // on macOS, where both of the `tts` crate's backends register the same Objective-C
-    // class name. So the GUI is handed the ability to say something rather than the means.
+    // Announcing belongs to the host: it owns the single speech engine — a second one is an
+    // error on macOS, where both of the `tts` crate's backends register the same Objective-C
+    // class name — and it owns the rule about when the application may speak at all. So the
+    // GUI is handed the ability to say something rather than the means.
     announce: impl Fn(&str) + 'static,
+    // The other direction: the tray icon is the only thing that can show a notification, and
+    // it lives here, so the host is handed a way to reach it. Called once, when it exists.
+    install_notifier: impl FnOnce(Box<dyn Fn(&str, &str) -> bool>) + 'static,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let on_reload = std::rc::Rc::new(on_reload);
     wxdragon::main(move |app| {
@@ -1300,19 +1304,24 @@ pub fn run_gui(
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         taskbar.on_left_double_click(move |_| show_manager(&frame));
 
-        // The one signal that the application actually started. `show_balloon` is
-        // Windows-only — it returns false everywhere else without doing anything — and on
-        // macOS there is no Dock icon to notice either, so a user who cannot see the screen
-        // would have nothing at all to go on. Speech is the honest channel here: it reaches
-        // the person the application is for, on both platforms, and it is the same channel
-        // everything else in the product uses.
+        // Hand the host the only thing that can show a notification. `show_balloon` is
+        // Windows-only and answers false everywhere else without doing anything, which is
+        // exactly the answer the host needs to decide whether to speak instead.
+        let taskbar = std::rc::Rc::new(taskbar);
+        install_notifier(Box::new({
+            let taskbar = taskbar.clone();
+            move |title: &str, text: &str| taskbar.show_balloon(title, text, 0, 0, None)
+        }));
+
+        // The one signal that the application actually started. On macOS there is no balloon
+        // and no Dock icon to notice either, so somebody who cannot see the screen would have
+        // nothing at all to go on — which is why the host may still speak this one. It decides
+        // that, not this file.
         #[cfg(target_os = "macos")]
         let hint = "Automation Platform is running in the menu bar. Open its menu to manage modules.";
         #[cfg(not(target_os = "macos"))]
         let hint = "Running in the system tray. Double-click the tray icon to manage modules.";
-        if !taskbar.show_balloon("Automation Platform", hint, 0, 0, None) {
-            announce(hint);
-        }
+        announce(hint);
         std::mem::forget(taskbar); // keep the icon + its handlers alive
 
         // wxWidgets owns the loop now, so this recurring tick is how our OS events

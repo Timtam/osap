@@ -188,6 +188,12 @@ struct Shared {
     /// Set by `host.window.recheck()`; drained on the tick to fire a cross-VM overlay
     /// re-check (as an OS focus event would), for state changes an overlay itself caused.
     recheck_requested: Cell<bool>,
+    /// Shows a notification, and says whether it managed to.
+    ///
+    /// Installed by the GUI once its tray icon exists, so `None` means headless — there is
+    /// nothing to show anything in. Returns false where the platform has no notifications at
+    /// all, which is macOS: `show_balloon` is Windows-only and answers false everywhere else.
+    notify: RefCell<Option<Box<dyn Fn(&str, &str) -> bool>>>,
 }
 
 /// Max distinct template PNGs kept decoded in the cache before least-recently-used
@@ -601,6 +607,30 @@ impl Shared {
             }
         }
         Ok(dec)
+    }
+
+    /// Tells the user something ON THE APPLICATION'S OWN BEHALF — not a module's.
+    ///
+    /// Shown rather than spoken, because a notification serves everybody: a screen reader
+    /// reads it out, and somebody who is not using one can see it. That is one channel for
+    /// two kinds of user, instead of a voice that talks at people who did not ask for one.
+    ///
+    /// Speech is only the way out where there is nothing to show it in — macOS has no
+    /// balloon — and even then only if a screen reader is actually listening. With none
+    /// running, the application says nothing at all, which is the right amount for an
+    /// audience that is not there.
+    ///
+    /// Module speech is not routed through here. `host.speech` always speaks: whoever
+    /// installed and enabled that module decided so.
+    fn announce(&self, text: &str) {
+        if let Some(show) = self.notify.borrow().as_ref() {
+            if show("Automation Platform", text) {
+                return;
+            }
+        }
+        if self.speech.via_screen_reader() {
+            self.speech.say(text, false);
+        }
     }
 
     /// Logs + queues an accessible dialog `(title, message)`, deduped on
@@ -2178,6 +2208,7 @@ impl Manager {
             template_cache: RefCell::new(HashMap::new()),
             template_seq: Cell::new(0),
             recheck_requested: Cell::new(false),
+            notify: RefCell::new(None),
         });
         // Claimed before the first module is loaded, so it is the one id no module can be
         // given (see the field). Registering with the OS happens later, in `run`, on the
@@ -2451,17 +2482,25 @@ impl Manager {
                         if shared.reload_all.replace(false) {
                             drop(dispatcher);
                             drop(mods);
-                            // Said first: rebuilding every VM takes long enough that silence
-                            // would read as "the key did nothing", and the user is working in
-                            // another application with no window to look at.
-                            shared.speech.say("Reloading modules", true);
+                            // The report, and nothing before it. There used to be a
+                            // "Reloading modules" first, because rebuilding every VM takes
+                            // long enough that silence would read as "the key did nothing" —
+                            // but that only works if it arrives at once, and it was written
+                            // for a channel where it did. Windows shows notifications when it
+                            // is ready to, so both of them turned up late and together, which
+                            // is two interruptions where one would do and no reassurance at
+                            // all. The reassurance is gone either way; the noise need not be.
                             let (done, failed) = reload_everything(&shared, &modules);
-                            shared.speech.say(&reload_report_text(&done, &failed), true);
+                            shared.announce(&reload_report_text(&done, &failed));
                         }
                     },
                     move || errors_shared.drain_errors(),
-                    move |text: &str| {
-                        speak_shared.speech.say(text, false);
+                    move |text: &str| speak_shared.announce(text),
+                    {
+                        let shared = self.shared.clone();
+                        move |show: Box<dyn Fn(&str, &str) -> bool>| {
+                            *shared.notify.borrow_mut() = Some(show);
+                        }
                     },
                 )
                 .map_err(|e| anyhow::anyhow!("{e}"))

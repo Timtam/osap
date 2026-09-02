@@ -52,13 +52,20 @@ through whatever engine is available, screen reader or SAPI. A module was instal
 enabled deliberately; whoever did that asked for it. The overlay runtime is a module like any
 other, so every overlay announcement is module speech.
 
-**Application speech** is two sites and no more: the startup hint at
-`crates/host/src/gui.rs:1314`, and the reload hotkey at `crates/host/src/lib.rs:2457`. These
-speak only **when a screen reader is running**, and are otherwise shown — a tray balloon on
-Windows, which `gui.rs:1314` already prefers and the reload path does not yet use. That is one
-channel that serves a sighted user and a blind user equally, and the reload case needs it
-either way: it is triggered by a global hotkey from inside another application, where nobody
-has a window to look at.
+**Application speech** is two sites and no more: the startup hint and the reload hotkey.
+Both go through `Shared::announce`, and the rule there turned out simpler than it was
+designed. It is not "speak when a screen reader is running, show otherwise" — it is **show,
+and speak only where there is nothing to show it in**:
+
+1. Show a notification. On Windows a screen reader reads the balloon out and everybody else
+   can see it, so one channel serves both, and the application never speaks at all.
+2. `show_balloon` is Windows-only and answers false everywhere else, which is exactly the
+   signal for step 3. On macOS there is no balloon and no Dock icon either, so somebody who
+   cannot see the screen would otherwise have nothing to go on.
+3. Speak — but only if a screen reader is actually listening. With none running the
+   application says nothing, which is the right amount for an audience that is not there.
+
+Headless has no tray icon, so step 1 does nothing there and the same rule applies.
 
 No sound is used to report anything. A sound reaches the person it does not concern.
 

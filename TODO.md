@@ -1205,12 +1205,24 @@ design and the reasoning are in [docs/prism-speech-design.md](docs/prism-speech-
       results are dead in headless mode — which the macOS headless loop's own comment claims
       is "a fair test of the rest". Older than this change and left alone by it; the `on_tick`
       hook is now the place to fix it, but not blind and not in the same change as speech.
-- [ ] **Step 6 — application speech separated from module speech.** `host.speech` always
-      speaks, through SAPI if that is what is there; the two places the application speaks on
-      its own behalf gate on a screen reader being present and use a tray balloon otherwise.
-      Today `tts-rs` falls through to WinRT and talks out loud at a sighted user with no
-      screen reader. Symmetrically on macOS, where `voiceover::is_running()` already answers
-      the same question.
+- [x] **Step 6 — application speech separated from module speech** (2026-09-02).
+      `host.speech` still always speaks, through SAPI if that is what is there — whoever
+      installed and enabled a module decided that. The two places the application speaks on
+      its own behalf now go through `Shared::announce`, which **shows** rather than speaks.
+  - The rule came out simpler than it was designed, because the owner pointed out the thing
+      the design had missed: a screen reader reads a notification out anyway. So it is not
+      "speak when a screen reader is running, show otherwise" — it is show, and speak only
+      where there is nothing to show it in. On Windows that means the application never
+      speaks on its own behalf at all; on macOS, where `show_balloon` answers false, it may,
+      and then only with VoiceOver actually running.
+  - The tray icon is the only thing that can show a notification and it lives in `gui.rs`,
+      so the host is handed a way to reach it — the mirror of the `announce` callback that
+      already went the other way. Headless installs none, and the rule still holds.
+  - The reload's "Reloading modules" line is gone. It existed so that silence would not read
+      as "the key did nothing", which only works if it arrives at once — and it was written
+      for a channel where it did. Windows shows notifications when it is ready to, so both
+      turned up late and together: two interruptions where one would do, and no reassurance
+      either way. Confirmed live before removing it.
 - [ ] **Step 7 — packaging, licensing, docs.** The two client DLLs leave `package.ps1`. This
       repository has **no LICENSE file** while every crate declares `GPL-3.0-or-later`, and
       MPL-2.0 §3.2 wants recipients told how to get the source. Also settle whether a stock

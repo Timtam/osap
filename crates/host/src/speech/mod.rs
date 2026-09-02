@@ -101,6 +101,28 @@ impl Speech {
         let _ = self.tts.borrow_mut().speak(text.to_string(), interrupt);
     }
 
+    /// Whether what we say is reaching a screen reader rather than a plain voice.
+    ///
+    /// Asked in one place only: when the application has something to say on its own behalf
+    /// and there was no notification to show it in. Those words are addressed to somebody who
+    /// cannot see the screen, so with nobody listening they are not said at all. A module
+    /// that calls `host.speech` is never asked — whoever installed and enabled it decided
+    /// that already.
+    pub fn via_screen_reader(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            crate::appcfg::voiceover_speech() && voiceover::is_running()
+        }
+        #[cfg(windows)]
+        {
+            crate::appcfg::screen_reader_speech() && self.prism.borrow().via_screen_reader()
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
+        {
+            false
+        }
+    }
+
     /// Whether anything is still waiting to be said. On macOS this is only ever a lower
     /// bound: once VoiceOver has been handed a line, its own queue is not ours to inspect.
     pub fn is_speaking(&self) -> bool {
