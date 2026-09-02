@@ -44,15 +44,9 @@ on:
       - 'modules/**'
       - 'package-macos.sh'
       - '.github/workflows/macos-build.yml'
+  # No inputs any more. There used to be a choice of Mac, which was really a choice of which
+  # architecture the artifact would run on; a universal build makes the question go away.
   workflow_dispatch:
-    inputs:
-      runner:
-        description: Which Mac to build for
-        type: choice
-        default: macos-15-intel
-        options:
-          - macos-15-intel
-          - macos-14
 
 # A superseded run is wasted allowance.
 concurrency:
@@ -73,8 +67,32 @@ jobs:
     # included minutes, so this is a choice about who can run the result, not about cost.
     #
     # A universal binary needs both slices and `lipo`, which means two runs; see
-    # package-macos.sh --universal. Not worth it for a test build that one person installs.
-    runs-on: ${{ inputs.runner || 'macos-15-intel' }}
+    # A UNIVERSAL app, so it runs natively on Apple silicon as well as on Intel.
+    #
+    # Built on an Apple-silicon runner with both slices cross-compiled there, rather than on
+    # two machines with the halves posted between them. Three reasons, all checked:
+    #
+    #   * wxdragon-sys cross-compiles by design — build.rs reads CARGO_CFG_TARGET_ARCH and
+    #     forces CMAKE_OSX_ARCHITECTURES, as a define AND in the environment so the nested
+    #     wxWidgets configure inherits it. It even carries a workaround for a library name you
+    #     only ever see when cross-building macOS, so somebody has run this.
+    #   * The other assumed blocker is not there at all: `ort` sits under
+    #     cfg(windows) in crates/host/Cargo.toml, so ONNX Runtime is never resolved for a Mac.
+    #     macOS OCR is Apple Vision. Nothing per-architecture goes into the bundle but the
+    #     executable itself, which is why one `lipo` makes the whole thing universal.
+    #   * Intel runners have a published end date and are stated to be the last x86_64 images.
+    #     A job that cross-builds Intel from arm outlives them without changing.
+    #
+    # And the direction matters for what gets EXECUTED: the smoke run below can only run the
+    # runner's own architecture. On Intel it re-ran the slice that already worked; here it
+    # runs arm64, which no machine has ever executed.
+    runs-on: macos-15
+    env:
+      # The plist promises 12.0 and nothing has ever enforced it. rustc's default floor
+      # differs per architecture, so without this the two slices would disagree with each
+      # other and with the plist they ship inside.
+      MACOSX_DEPLOYMENT_TARGET: '12.0'
+      TARGETS: aarch64-apple-darwin x86_64-apple-darwin
     steps:
       # Full history, because the reuse check below asks git what has changed since the commit
       # the last build was made from, and a shallow clone does not have that commit.
@@ -156,7 +174,9 @@ jobs:
       # runs once a month is always cold — budget for the full build, not the cached one.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: macos-wx-${{ inputs.runner || 'macos-15-intel' }}
+          # Two slices means two wxWidgets compiles, and they land in different
+          # per-target directories. Both are worth keeping.
+          key: macos-wx-universal
         if: steps.reuse.outputs.reused != 'true'
 
       - name: Install build tools
@@ -167,18 +187,41 @@ jobs:
         run: echo "LIBCLANG_PATH=$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib" >> "$GITHUB_ENV"
         if: steps.reuse.outputs.reused != 'true'
 
-      - name: Build
-        run: cargo build --release
+      - name: Build both slices
+        run: |
+          for t in $TARGETS; do
+            rustup target add "$t"
+            cargo build --release --target "$t"
+          done
         if: steps.reuse.outputs.reused != 'true'
 
       # The platform-independent logic — dependency ordering, key parsing, the bundle-path
       # rule — on a machine where the bundle-path rule is not hypothetical.
       - name: Test
         if: steps.reuse.outputs.reused != 'true'
-        run: cargo test --release
+        # Targeted deliberately. A bare `cargo test --release` would build a THIRD copy of
+        # wxWidgets, into target/release, because that is a different output directory from
+        # target/<triple>/release — roughly tripling the cold cost while looking like a
+        # one-word step. arm64 because that is the slice this runner can also execute.
+        run: cargo test --release --target aarch64-apple-darwin
 
       - name: Package
-        run: ./package-macos.sh --no-build
+        run: ./package-macos.sh --universal
+
+      # `package-macos.sh` prints `lipo -archs` and carries on regardless, so a half-universal
+      # bundle would ship looking fine. This is the assertion it does not make.
+      - name: It has to actually contain both
+        run: |
+          exe="dist/AutomationPlatform/Automation Platform.app/Contents/MacOS/automation-platform"
+          [ -f "$exe" ] || exe=$(find dist -type f -name automation-platform | head -n1)
+          archs=$(lipo -archs "$exe")
+          echo "architectures: $archs"
+          case "$archs" in
+            *arm64*) ;; *) echo "no arm64 slice — this would not run natively on an M-series Mac" >&2; exit 1 ;;
+          esac
+          case "$archs" in
+            *x86_64*) ;; *) echo "no x86_64 slice — this would not run on an Intel Mac" >&2; exit 1 ;;
+          esac
         if: steps.reuse.outputs.reused != 'true'
 
       # Load every shipped module once, on a Mac, because nothing else ever does.
@@ -223,6 +266,6 @@ jobs:
           # Named by the machine it runs on, because the two are not interchangeable and a
           # download called "macos" that will not launch is a bad half hour for whoever
           # tries it.
-          name: AutomationPlatform-${{ inputs.runner || 'macos-15-intel' }}
+          name: AutomationPlatform-macos-universal
           path: dist/*.zip
           if-no-files-found: error

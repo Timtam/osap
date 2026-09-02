@@ -42,10 +42,14 @@ translates Intel code so it runs on Apple silicon, never the other way round. So
 someone else sends has to have been made for your architecture — `uname -m` says which you
 have, `arm64` or `x86_64`. It is the strongest argument for building locally.
 
-The CI job builds for Intel by default, because that is what the machine being tested on
-is; its dispatch form offers `macos-14` for an Apple-silicon build instead.
+**The CI job builds a universal binary**, so what it hands you runs natively either way and
+the question does not arise. It compiles both slices on one Apple-silicon runner —
+`wxdragon-sys` cross-compiles wxWidgets on purpose, and nothing else in the macOS build is
+architecture-specific — and refuses to publish a bundle that turns out to contain only one of
+them.
 
-One binary that runs on both is a *universal* binary — two builds joined with `lipo`:
+Locally, one binary that runs on both is a *universal* binary — two builds joined with
+`lipo`, which is what the CI does and what this does by hand:
 
 ```bash
 rustup target add x86_64-apple-darwin aarch64-apple-darwin
