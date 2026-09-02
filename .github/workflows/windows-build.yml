@@ -1,0 +1,98 @@
+# Builds the whole application on Windows and publishes what a tester downloads.
+#
+# The macOS job exists because nobody here has a Mac. This one exists for a different reason:
+# the Windows build works on the developer's machine by definition, but three things about it
+# are invisible there.
+#
+#   * `crates/prism-sys` compiles a C++ library from a vendored submodule, and its smoke tests
+#     are the only thing standing between a lost linker flag and an application that starts,
+#     exits 0, and says NOTHING. Until now those tests ran only where somebody ran them.
+#   * The build depends on tools nobody declared: MSVC, the Windows SDK's midl.exe, the C++
+#     ATL component, libclang. A machine that has them by accident cannot tell you that.
+#   * `package.ps1` is what a tester actually receives, and it had been shipping two DLLs that
+#     are no longer needed and a README that was no longer true. It is worth exercising.
+#
+# Measured on a stock `windows-latest` (which is currently the windows-2025-vs2026 image, the
+# same one prism itself builds on): prism-sys alone, cold, from clone to green tests, 209 s.
+# The rest of this job is wxWidgets, which wxdragon compiles from source and which the cache
+# below exists for.
+name: Windows build
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'crates/**'
+      - 'modules/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'package.ps1'
+      - '.github/workflows/windows-build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # NOT recursive: prism nests godot-cpp, 8 MB this configuration never builds.
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # wxWidgets is compiled from source by wxdragon's build script and is by far the longest
+      # part of this job. Actions evicts a cache after 7 days without a hit, so a job that
+      # only runs when these paths change can well be cold — budget for the full build.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-wx
+
+      # rust-cache deliberately does not keep a WORKSPACE crate's OUT_DIR, and prism-sys's
+      # OUT_DIR is a 13 MB static library that takes half a minute to produce. Keyed on the
+      # submodule's commit and the build script, which are the only two things that change it.
+      - name: Cache the compiled prism
+        uses: actions/cache@v4
+        with:
+          path: target/*/build/prism-sys-*/out
+          key: prism-${{ hashFiles('.gitmodules', 'crates/prism-sys/build.rs') }}-${{ hashFiles('crates/prism-sys/vendor/include/prism.h') }}
+
+      # Nothing else is arranged on purpose. If the build script cannot find midl.exe, ATL or
+      # libclang on a stock image, that is worth failing over: it is exactly what a new
+      # contributor would hit, and a green tick bought with setup steps they do not know about
+      # would hide it.
+      - name: Build
+        run: cargo build --release
+
+      # The whole suite, not just the host's. prism-sys's tests are the point of this job:
+      # they assert the backend NAMES, because zero backends is a clean build and a mute
+      # application, and nothing else in this repository can catch that.
+      - name: Test
+        run: cargo test --release -- --nocapture
+
+      # The documentation ships inside the artifact and works offline from the folder, so a
+      # tester with no internet still has it. `package.ps1` packages without it rather than
+      # failing — a tester without docs still has a working application — but an artifact that
+      # quietly lacks what its own README points at is not what should leave here.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: docs-site/package-lock.json
+
+      - name: Build the documentation
+        working-directory: docs-site
+        run: |
+          npm ci
+          npm run build
+
+      - name: Package
+        run: ./package.ps1 -NoBuild
+
+      # What a tester downloads. The same staging `package.ps1` produces locally, so a problem
+      # in it shows up here rather than in somebody's hands.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutomationPlatform-windows
+          path: dist/AutomationPlatform
+          if-no-files-found: error
