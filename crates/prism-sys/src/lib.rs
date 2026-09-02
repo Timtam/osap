@@ -176,6 +176,32 @@ impl Context {
         Some(unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned())
     }
 
+    /// Whether the named backend could speak right now, WITHOUT paying to open it.
+    ///
+    /// The distinction is the whole cost model of any "what can speak" list. Opening a
+    /// speech engine was measured at 2.0 s (SAPI) and 3.5 s (OneCore), which is far too much
+    /// to spend answering a question — but prism's own documentation says `initialize` is
+    /// required before every call *except* `prism_backend_name`, `prism_backend_free` and
+    /// `prism_backend_get_features`. So the instance is created, asked whether it is
+    /// supported at runtime, and freed again, with the expensive step never taken.
+    pub fn is_available(&self, name: &str) -> bool {
+        let Ok(cname) = CString::new(name) else {
+            return false;
+        };
+        // SAFETY: both pointers are valid for the duration of the call.
+        let id = unsafe { sys::prism_registry_id(self.ptr, cname.as_ptr()) };
+        if id == 0 {
+            return false;
+        }
+        // SAFETY: an id the registry recognised.
+        let ptr = unsafe { sys::prism_registry_create(self.ptr, id) };
+        if ptr.is_null() {
+            return false;
+        }
+        let backend = Backend { ptr, _not_send: PhantomData };
+        backend.supports(feature::IS_SUPPORTED_AT_RUNTIME)
+    }
+
     /// Creates the named backend and initialises it, or returns why it could not.
     ///
     /// A fresh instance rather than a shared one, so that a backend which has died can be
