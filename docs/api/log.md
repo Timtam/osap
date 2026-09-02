@@ -1,6 +1,6 @@
 ---
 title: "host.log — logging"
-sidebar_position: 7
+sidebar_position: 8
 toc_max_heading_level: 2
 ---
 

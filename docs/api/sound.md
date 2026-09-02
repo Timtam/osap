@@ -1,6 +1,6 @@
 ---
 title: "host.sound — audio playback"
-sidebar_position: 14
+sidebar_position: 16
 toc_max_heading_level: 2
 ---
 

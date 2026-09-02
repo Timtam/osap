@@ -1,6 +1,6 @@
 ---
 title: "host.path — module-relative paths"
-sidebar_position: 10
+sidebar_position: 11
 toc_max_heading_level: 2
 ---
 

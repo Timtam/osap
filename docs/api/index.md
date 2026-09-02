@@ -240,19 +240,19 @@ Writing to the log file beside the application.
 
 | | |
 |---|---|
-| [`host.require(id)`](modules#host-require) | Returns the object that dependency `id` exported, where `id` is a module declared |
+| [`host.require(id)`](require#host-require) | Returns the object that dependency `id` exported, where `id` is a module declared |
 
 ## host.tryRequire
 
 | | |
 |---|---|
-| [`host.tryRequire(id)`](modules#host-tryrequire) | Like `host.require`, but returns **nil** instead of raising when `id` |
+| [`host.tryRequire(id)`](tryrequire#host-tryrequire) | Like `host.require`, but returns **nil** instead of raising when `id` |
 
 ## host.include
 
 | | |
 |---|---|
-| [`host.include(rel)`](modules#host-include) | Loads **another file of this module** and returns whatever that file returns |
+| [`host.include(rel)`](include#host-include) | Loads **another file of this module** and returns whatever that file returns |
 
 ## host.epoch
 

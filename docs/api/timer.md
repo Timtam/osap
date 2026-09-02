@@ -1,6 +1,6 @@
 ---
 title: "host.timer — timers and change counters"
-sidebar_position: 16
+sidebar_position: 18
 toc_max_heading_level: 2
 ---
 

@@ -362,9 +362,32 @@ def undocumented(entries):
     return missing
 
 
+def undeclared_pages():
+    """Reference pages missing the box that says what module.toml must list.
+
+    Every page answers the same question for the namespace it documents, and a page that
+    forgets to is one an author reads without ever learning whether it costs them a
+    declaration.
+    """
+    missing = []
+    for path in sorted(glob.glob(os.path.join(API, '*.md'))):
+        if os.path.basename(path) == 'index.md':
+            continue
+        if '{#declare}' not in open(path, encoding='utf-8').read():
+            missing.append(path)
+    return missing
+
+
 def main():
     check = '--check' in sys.argv
     entries = collect()
+
+    undeclared = undeclared_pages()
+    if undeclared:
+        print('reference page(s) with no "What to declare" box — an author cannot tell from')
+        print('these what module.toml needs:')
+        for f in undeclared:
+            print('  ' + f.replace(os.sep, '/'))
 
     dupes = {}
     for e in entries:
@@ -390,7 +413,7 @@ def main():
             print('  ' + g)
 
     if check:
-        if gaps:
+        if gaps or undeclared:
             return 1
         stale = changed + ([INDEX] if current != index else [])
         if stale:

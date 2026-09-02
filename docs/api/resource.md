@@ -1,6 +1,6 @@
 ---
 title: "host.resource — bundled files"
-sidebar_position: 11
+sidebar_position: 13
 toc_max_heading_level: 2
 ---
 

@@ -1,6 +1,6 @@
 ---
 title: "host.screen — pixels, profiles and image search"
-sidebar_position: 12
+sidebar_position: 14
 toc_max_heading_level: 2
 ---
 

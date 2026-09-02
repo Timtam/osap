@@ -1,6 +1,6 @@
 ---
 title: "Overlay — keyboard controls with spoken labels"
-sidebar_position: 19
+sidebar_position: 21
 toc_max_heading_level: 2
 ---
 
@@ -622,7 +622,7 @@ end)
 ```
 
 Splitting a module across files is what keeps this readable: see
-[`host.include`](modules#host-include). Kontakt separates detection,
+[`host.include`](./include.md#host-include). Kontakt separates detection,
 the cell matrix, the per-version geometry, what a control does, and what a cell contains.
 
 See [Nested overlays design](../nested-overlays-design.md).
