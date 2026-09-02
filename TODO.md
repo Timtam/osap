@@ -1262,6 +1262,56 @@ that is *enough* is unknown, because no Mac has ever been asked.
       ask a blind tester to produce one. It is a question for the test round, on a plug-in
       that has such a field, not for a synthetic check.
 
+## An error dialog nobody can get back to (2026-09-03)
+
+Reported from a real session: a module-error dialog appeared with, from the user's side, no
+title and no taskbar entry. Two separate defects behind one window, and the second is the
+serious one.
+
+- [ ] **The dialog has no taskbar button, on either platform.** `modal_message` builds a
+      `wxDialog` (`crates/host/src/gui.rs`), and a dialog never gets a taskbar button — only
+      a frame does. Its parent is the manager window, which in a tray application is normally
+      hidden, so there is no button for the parent either. Alt+Tab away from it and there is
+      nothing to come back to: the modal is still there, holding the application, unreachable.
+  - **macOS is worse, not better.** The application ships as an agent with no Dock icon at
+      all — `gui.rs` says so where it builds the menu-bar item — so there is not even a Dock
+      tile to click. The existing `dock_while_open` setting is the machinery that already
+      solves this for the manager window; a dialog needs the same treatment.
+  - Three ways out, and the choice is a product decision rather than a technical one:
+      show the manager window (which has a taskbar button, and on macOS a Dock icon while
+      open) whenever a dialog is queued and let the modal ride on it; make the message a
+      **notification** instead, the way `Shared::announce` now does for the application's own
+      announcements, keeping a dialog only for things that need an answer; or build it as a
+      frame rather than a dialog, which gets a button but stops being modal.
+- [ ] **The title may be fine and read as missing.** The dialog IS given one —
+      `report_callback_error` passes "Module error: <id>" — so if a screen reader announces
+      no title, the accessible NAME of the dialog is not reaching it, which is a different
+      bug from the one above and needs checking with NVDA before anything is changed.
+
+## A module was blamed for a capability it never used (2026-09-03)
+
+The same dialog said `com.platform.impact-soundworks` used `host.log` without declaring it.
+It does not: the string `log` does not appear anywhere in its 65 lines.
+
+- [ ] **The attribution is wrong, and that is a host bug, not a manifest one.** Do NOT "fix"
+      it by adding `log` to that module's manifest — that would paper over the defect and
+      quietly widen a module's declared surface for code it never wrote.
+  - The message came from `gated_view` — the module's OWN gated table — and not from the
+      dependency path in `build_dep_host`, which appends a different sentence ("Its code runs
+      inside another module's VM…"). So something reached `host.log` while holding
+      impact-soundworks' own host table.
+  - What actually logs here is Kontakt's framework: `modules/kontakt/src/actions.luau` and
+      `detect.luau`, both reached through `host.include`, and both running inside this
+      module's VM because Kontakt is a `code_module`. Kontakt declares `log`. The include
+      path looks correct on inspection — `install_include` wraps each file in
+      `function(host)` and calls it with the *includer's* table — so the fault is somewhere
+      the reading did not find, and needs evidence rather than more reading. A Lua traceback
+      attached to the refusal would name the frame that called it.
+  - It fires on a **focus change**, which is when Kontakt's detection runs. That is the state
+      to reproduce: a Kontakt window with an Impact Soundworks patch, and the focus moving.
+  - Worth knowing while it is open: the refusal is a real error raised into the module's
+      callback, so whatever that callback was doing did not finish.
+
 ## macOS speech — the plan, and why prism is not part of it (2026-09-02)
 
 Asked whether prism should replace `tts` on macOS as well, so that the dependency goes
