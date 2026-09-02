@@ -1,0 +1,29 @@
+# Builds `ethindp/prism` from source and links it into the application.
+#
+# Windows only, and gated in three places so that a macOS build never sees any of it: this
+# file's target table, `build.rs`'s early return, and `#![cfg(windows)]` on the crate root.
+# The reason is `macos-build.yml`, which runs `cargo build --release` at the workspace root
+# on a Mac runner and checks out WITHOUT submodules — so `vendor/` is an empty directory
+# there, and anything that reads it must not run.
+#
+# `links = "prism"` because this crate owns a native library: it makes a second crate
+# claiming the same one a resolver error rather than a duplicate-symbol link failure.
+[package]
+name = "prism-sys"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+links = "prism"
+
+# Host-gated, not target-gated: a build script runs on the host, and there is no
+# cross-compilation story here — Windows is built on Windows, macOS on a Mac runner. On the
+# Mac the `cmake` crate is therefore never even compiled.
+[target.'cfg(windows)'.build-dependencies]
+cmake = "0.1"
+# Generated at build time against the header that was just compiled, rather than checked in.
+# A checked-in file cannot catch what it exists to catch: the compiler only ever compares it
+# against our Rust, never against prism's header, so a submodule bump that changed a
+# signature would build clean and get the calling convention wrong at run time — silence, in
+# an application whose whole output is speech.
+bindgen = "0.72"
