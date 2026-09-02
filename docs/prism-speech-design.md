@@ -23,11 +23,13 @@ it for up to 120 seconds — a permission dialog at start-up, in front of somebo
 see it. And the measurement that justified the Windows change does not exist there: on a real
 Mac (CI run 33620074214, macos-15-intel) `Speech::new` took **28 ms**, against 2872 on
 Windows. The plan for macOS is in TODO.md: our own `objc2` wrapper, which can also reach
-Personal Voice — asking at the moment somebody chooses it, rather than at start-up. `speech/voiceover.rs` is better than prism's
-VoiceOver backend, which fires `NSAppleScript` on `dispatch_get_main_queue()` — back onto the
-keyboard thread this project deliberately moved it off — and coalesces non-interrupting lines
-with `" . "` after a 15 ms debounce, merging exactly the name-then-value pair the overlays
-depend on. It also has no braille. macOS keeps `voiceover.rs` plus `tts` as its fallback.
+Personal Voice — asking at the moment somebody chooses it, rather than at start-up.
+
+The VoiceOver half of that: prism's backend fires `NSAppleScript` on
+`dispatch_get_main_queue()` — back onto the keyboard thread this project deliberately moved
+it off — and coalesces non-interrupting lines with `" . "` after a 15 ms debounce, merging
+exactly the name-then-value pair the overlays depend on. It also has no braille. So macOS
+keeps `voiceover.rs`, with `tts` behind it as the plain voice.
 
 ## Three defects in what we ship today
 
