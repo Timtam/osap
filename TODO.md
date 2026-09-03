@@ -1290,27 +1290,30 @@ serious one.
 
 ## A module was blamed for a capability it never used (2026-09-03)
 
-The same dialog said `com.platform.impact-soundworks` used `host.log` without declaring it.
-It does not: the string `log` does not appear anywhere in its 65 lines.
+The error dialog said `com.platform.impact-soundworks` used `host.log` without declaring it.
+It does not: the string does not appear anywhere in its 65 lines.
 
-- [ ] **The attribution is wrong, and that is a host bug, not a manifest one.** Do NOT "fix"
-      it by adding `log` to that module's manifest — that would paper over the defect and
-      quietly widen a module's declared surface for code it never wrote.
-  - The message came from `gated_view` — the module's OWN gated table — and not from the
-      dependency path in `build_dep_host`, which appends a different sentence ("Its code runs
-      inside another module's VM…"). So something reached `host.log` while holding
-      impact-soundworks' own host table.
-  - What actually logs here is Kontakt's framework: `modules/kontakt/src/actions.luau` and
-      `detect.luau`, both reached through `host.include`, and both running inside this
-      module's VM because Kontakt is a `code_module`. Kontakt declares `log`. The include
-      path looks correct on inspection — `install_include` wraps each file in
-      `function(host)` and calls it with the *includer's* table — so the fault is somewhere
-      the reading did not find, and needs evidence rather than more reading. A Lua traceback
-      attached to the refusal would name the frame that called it.
-  - It fires on a **focus change**, which is when Kontakt's detection runs. That is the state
-      to reproduce: a Kontakt window with an Impact Soundworks patch, and the focus moving.
-  - Worth knowing while it is open: the refusal is a real error raised into the module's
-      callback, so whatever that callback was doing did not finish.
+- [x] **Found and fixed — it was the platform accusing a module of its own doing.** The owner
+      supplied the one fact that turned two hours of reading into five minutes: `window_prelude`
+      was the top frame. That is not a module at all; it is the Luau prelude the host injects
+      into every VM, and `W._dispatchFocus` logs there when a dispatch runs slow.
+  - The mechanism: the prelude is loaded against the WHOLE host table, deliberately, because
+      it extends it. But its functions looked `host` up as a GLOBAL, and they run later — by
+      which time the global has become the module's gated view. So the platform's own
+      diagnostic was charged to whichever module's VM it happened to fire in.
+  - It is worse than a wrong name in a dialog. The refusal is a raised error, thrown into the
+      middle of the focus dispatch it was measuring — so the dispatch it was diagnosing did
+      not finish, and a module that had done nothing wrong got a dialog about it.
+  - The fix is that the prelude now holds the whole table as an **upvalue**: it is wrapped in
+      `function(host)` and called with the ungated table. That covers the two `host.log` calls
+      and anything anybody adds there later, which is the point — the next diagnostic written
+      into the prelude would have walked into the same trap.
+  - Proven rather than reasoned: with `SLOW_DISPATCH_MS` temporarily set to 0, so every focus
+      dispatch logs, 44 dispatch lines and 0 refusals — including from the modules that do not
+      declare `log`.
+  - Worth remembering as a rule: **host code that runs inside a module VM must not be subject
+      to that module's declarations.** The prelude was the only such code; if more is ever
+      added, it needs the same treatment.
 
 ## macOS speech — the plan, and why prism is not part of it (2026-09-02)
 

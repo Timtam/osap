@@ -1646,7 +1646,25 @@ fn populate_vm(
     // the whole table, before anything is gated. Gating it first would have the prelude write
     // its additions onto the view instead, where a dependency's fall-through cannot see them.
     lua.globals().set("host", &host_m)?;
-    lua.load(WINDOW_PRELUDE).set_name("window_prelude").exec()?;
+    // Wrapped so that `host` inside the prelude is an UPVALUE holding the whole table, not a
+    // global looked up when its functions later run — by which time the global has become the
+    // module's gated view.
+    //
+    // That distinction was not academic. `W._dispatchFocus` logs when a dispatch is slow, and
+    // that `host.log` resolved at call time against whichever module's VM it happened to be
+    // running in. In a module that had not declared `log` — and it had no reason to; the line
+    // is OURS — the platform's own diagnostic raised a capability refusal into the middle of
+    // the focus dispatch it was measuring, aborting it and putting an error dialog in front of
+    // somebody whose module had done nothing wrong.
+    //
+    // The wrapper opens on the same line as the prelude's first, so reported line numbers
+    // still match the file.
+    let prelude = lua
+        .load(format!("return function(host) {WINDOW_PRELUDE}
+end"))
+        .set_name("window_prelude")
+        .into_function()?;
+    prelude.call::<Function>(())?.call::<()>(&host_m)?;
 
     // From here the module's own code sees only what its manifest declares. `host_m` stays
     // whole, and is what a code dependency's permitted namespaces bind to, so a hotkey or a
