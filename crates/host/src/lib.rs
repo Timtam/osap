@@ -1566,6 +1566,205 @@ fn panic_text(p: &Box<dyn std::any::Any + Send>) -> String {
 }
 
 #[cfg(test)]
+mod capability_gate_tests {
+    use super::*;
+
+    /// Can a module reach a namespace it did not declare?
+    ///
+    /// This started as a scratch module run against the real application, after the window
+    /// prelude was changed to hold the whole host table as an upvalue and the owner asked the
+    /// right question: privileged Luau running inside a module's VM knows a way to the ungated
+    /// table, so is that way open to every module? It is not, and this is here so it stays
+    /// shut — a regression would be silent, and the manifest a module shows the user before
+    /// installation is only worth reading if the runtime holds the author to it.
+    ///
+    /// The last case is the sharp one. `host.log.privileged` is a Luau function holding the
+    /// FULL table as an upvalue, reachable from a namespace the module does have: the shape
+    /// of the prelude, reduced to what makes it dangerous.
+    #[test]
+    fn a_module_cannot_reach_an_undeclared_namespace() {
+        let lua = Lua::new();
+        let full = lua.create_table().unwrap();
+        for (key, _) in GATED {
+            let ns = lua.create_table().unwrap();
+            ns.set("marker", *key).unwrap();
+            full.set(*key, ns).unwrap();
+        }
+
+        // `host.os` is not gated and the prelude reads it, so the stub needs it too.
+        let os = lua.create_table().unwrap();
+        os.set("current", "windows").unwrap();
+        full.set("os", os).unwrap();
+
+        // The REAL prelude, loaded the way the runtime loads it: wrapped in `function(host)`
+        // and called with the ungated table, so `host` is an upvalue and not a global. This
+        // is the privileged Luau the question was about, so it is the privileged Luau the
+        // test uses — a stand-in written for the test would only prove things about itself.
+        lua.load(format!("return function(host) {WINDOW_PRELUDE}
+end"))
+            .set_name("window_prelude")
+            .into_function()
+            .unwrap()
+            .call::<Function>(())
+            .unwrap()
+            .call::<()>(&full)
+            .unwrap();
+
+        // `window` is declared, `speech` and the rest are not: the module may hold the
+        // prelude's own functions and still must not get from them to anything else.
+        let caps: HashSet<String> =
+            ["log", "window"].iter().map(|s| (*s).to_string()).collect();
+        let view = gated_view(&lua, &full, &caps, "com.platform.probe").unwrap();
+        lua.globals().set("host", &view).unwrap();
+
+        let failures: Vec<String> = lua
+            .load(
+                r#"
+                local holes = {}
+                local function check(what, f)
+                    local ok, res = pcall(f)
+                    if ok and res then table.insert(holes, what .. ": " .. tostring(res)) end
+                end
+                -- Does this value hand over a namespace we never declared?
+                local function opens(v)
+                    return type(v) == "table" and rawget(v, "speech") ~= nil
+                end
+
+                check("host.speech directly", function()
+                    return opens(host.speech) and "reached" or nil
+                end)
+                check("_G.host", function()
+                    return opens(_G.host.screen) and "reached" or nil
+                end)
+                check("a scan of _G", function()
+                    for k, v in pairs(_G) do
+                        if opens(v) then return "global " .. tostring(k) end
+                    end
+                    return nil
+                end)
+                check("debug.getupvalue on a prelude function", function()
+                    local d = debug
+                    if type(d) ~= "table" or type(d.getupvalue) ~= "function" then return nil end
+                    for i = 1, 20 do
+                        local name, value = d.getupvalue(host.window.find, i)
+                        if name == nil then break end
+                        if opens(value) then return "upvalue " .. tostring(name) end
+                    end
+                    return nil
+                end)
+                check("getfenv", function()
+                    if type(getfenv) ~= "function" then return nil end
+                    return opens(getfenv(1).host.speech) and "reached" or nil
+                end)
+                check("the metatable of host", function()
+                    local mt = getmetatable(host)
+                    if mt == nil then return nil end
+                    local idx = rawget(mt, "__index")
+                    if opens(idx) then return "__index is the whole table" end
+                    if type(idx) == "function" then
+                        local ok, v = pcall(idx, host, "speech")
+                        if ok and v ~= nil then return "__index handed it over" end
+                    end
+                    return nil
+                end)
+                check("a scan of host.log", function()
+                    for k, v in pairs(host.log) do
+                        if opens(v) then return "host.log." .. tostring(k) end
+                    end
+                    return nil
+                end)
+                -- Everything the prelude hung on the namespace it extends, two levels deep.
+                -- A privileged table left reachable there would be the whole gate undone.
+                check("what the prelude left on host.window", function()
+                    for k, v in pairs(host.window) do
+                        if opens(v) then return "host.window." .. tostring(k) end
+                        if type(v) == "table" then
+                            for k2, v2 in pairs(v) do
+                                if opens(v2) then
+                                    return "host.window." .. tostring(k) .. "." .. tostring(k2)
+                                end
+                            end
+                        end
+                    end
+                    return nil
+                end)
+
+                return holes
+            "#,
+            )
+            .eval()
+            .unwrap();
+
+        assert!(failures.is_empty(), "capability gate has holes: {failures:?}");
+    }
+
+    /// The one rule privileged Luau has to follow, written down as a test because it is the
+    /// only thing between the gate and nothing.
+    ///
+    /// Host code running inside a module VM holds the ungated table. Nothing stops such a
+    /// function from handing it out — no mechanism could, short of not writing the function
+    /// — so this asserts the leak rather than denying it. It is here so that anyone adding
+    /// to `window_prelude.luau` meets the rule before they meet the consequences: **do not
+    /// return the host table, and do not store it anywhere a module can name.** The test
+    /// above checks that the prelude as it stands obeys that.
+    #[test]
+    fn privileged_luau_that_hands_out_its_host_defeats_the_gate() {
+        let lua = Lua::new();
+        let full = lua.create_table().unwrap();
+        full.set("speech", lua.create_table().unwrap()).unwrap();
+        let leaky: Function = lua
+            .load("return function(host) return function() return host end end")
+            .eval::<Function>()
+            .unwrap()
+            .call(&full)
+            .unwrap();
+
+        let caps: HashSet<String> = ["log"].iter().map(|s| (*s).to_string()).collect();
+        let view = gated_view(&lua, &full, &caps, "com.example.probe").unwrap();
+        let log = lua.create_table().unwrap();
+        log.set("leaky", leaky).unwrap();
+        full.set("log", log).unwrap();
+        lua.globals().set("host", view).unwrap();
+
+        // Denied through the front door...
+        assert!(lua.load("return host.speech").eval::<mlua::Value>().is_err());
+        // ...and wide open through a function that gives its table away.
+        let reached: bool =
+            lua.load("return host.log.leaky().speech ~= nil").eval().unwrap();
+        assert!(reached, "the demonstration this test exists for stopped working");
+    }
+
+    /// The gate refuses by NAME, so the message can say which module and which capability —
+    /// a refusal a user cannot act on is only half a refusal.
+    #[test]
+    fn the_refusal_names_the_module_and_the_capability() {
+        let lua = Lua::new();
+        let full = lua.create_table().unwrap();
+        full.set("speech", lua.create_table().unwrap()).unwrap();
+        let caps: HashSet<String> = ["log"].iter().map(|s| (*s).to_string()).collect();
+        let view = gated_view(&lua, &full, &caps, "com.example.quiet").unwrap();
+        lua.globals().set("host", view).unwrap();
+
+        let err = lua.load("return host.speech").eval::<mlua::Value>().unwrap_err().to_string();
+        assert!(err.contains("com.example.quiet"), "{err}");
+        assert!(err.contains("speech"), "{err}");
+    }
+
+    /// A module that declares everything gets the table itself, with no view in the way.
+    /// Worth pinning: it is the path every dependency's code takes.
+    #[test]
+    fn declaring_everything_removes_the_view() {
+        let lua = Lua::new();
+        let full = lua.create_table().unwrap();
+        full.set("speech", "yes").unwrap();
+        let caps: HashSet<String> = GATED.iter().map(|(_, cap)| (*cap).to_string()).collect();
+        let view = gated_view(&lua, &full, &caps, "com.example.everything").unwrap();
+        assert_eq!(view.get::<String>("speech").unwrap(), "yes");
+        assert!(view.metatable().is_none());
+    }
+}
+
+#[cfg(test)]
 mod guard_tests {
     use super::*;
     #[test]
@@ -1701,8 +1900,37 @@ end"))
         let host_dep = build_dep_host(lua, shared, &host_m, dep_idx)?;
         let dep_ret = eval_on_host(lua, &host_dep, &dep_code, &dep_entry.display().to_string())
             .with_context(|| format!("error running dependency '{dep_id}' of '{id}'"))?;
-        if let mlua::Value::Table(_) = dep_ret {
-            reg.set(dep_id.as_str(), dep_ret)?;
+        if let mlua::Value::Table(t) = &dep_ret {
+            // A dependency must not hand its own host table back to the module that required
+            // it. Everything else here is deliberate — a dependency acts with ITS permissions
+            // on the dependent's behalf, and a wrapper function it exports is exactly that
+            // working as intended. But the table itself is not an API: passing it over grants
+            // every capability the dependency holds, in one object, to a module whose manifest
+            // names none of them. Nobody designs that on purpose, so it is caught.
+            //
+            // Deliberately shallow, and by identity. A closure that returns the table when
+            // called cannot be caught by any amount of scanning — that is the rule
+            // `privileged_luau_that_hands_out_its_host_defeats_the_gate` records — so this
+            // catches the accident and does not pretend to be a boundary.
+            let mut leaked = t == &host_dep;
+            if !leaked {
+                for (_, v) in t.clone().pairs::<mlua::Value, mlua::Value>().flatten() {
+                    if let mlua::Value::Table(v) = v {
+                        if v == host_dep {
+                            leaked = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if leaked {
+                anyhow::bail!(
+                    "dependency '{dep_id}' of '{id}' returns its own host table, which would \
+                     hand '{id}' every capability '{dep_id}' declares. Export functions that \
+                     use the host, not the host itself."
+                );
+            }
+            reg.set(dep_id.as_str(), dep_ret.clone())?;
         }
     }
 

@@ -33,6 +33,66 @@ an API that abstracts over both.
 
 :::
 
+## 0. What the gate actually stops
+
+Asked directly, after the Luau prelude was changed to hold the whole host table as an upvalue:
+*if privileged Luau runs inside a module's VM holding the ungated table, can a module get at
+it?* The honest answer needed measuring rather than reasoning, so a probe module was written
+that declares `log` and nothing else and then tries seven ways to reach `speech` and `screen`.
+All seven were refused (2026-09-03):
+
+| Route | Outcome |
+| --- | --- |
+| `host.speech` directly | refused, naming the module and the capability |
+| `_G.host.screen` | refused — the global *is* the gated view, not a second table |
+| a scan of every global for a table with a `speech` key | nothing found |
+| `debug.getupvalue` on a prelude function | **Luau does not have it** |
+| `getfenv(1).host.speech` | refused — the environment is the gated view |
+| `getmetatable(host)` | reachable, and useless: `__index` is a Rust function that performs the check, and the full table is held in Rust |
+| a scan of `host.log`, a namespace it *does* have | nothing found |
+
+Two properties do the work, and both are worth keeping true when this code is touched:
+
+1. **The full table never becomes a Luau value a module can name.** The gated view's `__index`
+   is a Rust closure; the table it reads from is captured there. Handing the metatable out is
+   therefore harmless — which is why the probe checks the metatable's *contents* rather than
+   its existence.
+2. **Privileged Luau never indexes `host` with a name a module supplies**, and never stores
+   `host` in anything it returns. The prelude is the only privileged Luau there is; if more is
+   added, it inherits this obligation, because a single `host[name]` there would be a
+   capability oracle for every module in the process.
+
+### And what it does not stop
+
+**A declared dependency widens what a module can cause.** A module that declares nothing can
+depend on one that declares `screen`, and call its functions — which then act, correctly, with
+`screen`. That is the inheritance model working as designed (permission belongs to the author
+of the code, not to the VM it runs in), but it means a manifest describes *what this module's
+own code touches*, not the full reach of installing it. The manager shows the whole dependency
+tree at install time for exactly this reason.
+
+One thing in that direction *is* refused, because it is never a design and always an accident:
+a dependency that **returns its own host table** from its entry point fails to load, naming
+both modules. Exporting a function that uses `screen` is the model; exporting the table hands
+over every capability the dependency declares, in one object, to a module whose manifest names
+none of them. The check is by identity and one level deep — a closure that returns the table
+when called cannot be caught by any amount of scanning, which is the next paragraph's point.
+
+**Privileged Luau has one obligation, and it is not enforceable.** The window prelude runs
+inside every module VM holding the ungated table. Nothing can stop such code from handing that
+table out; no mechanism exists, short of not writing it that way. So the rule is written down
+as a test that asserts the leak
+(`privileged_luau_that_hands_out_its_host_defeats_the_gate`), next to the one that checks the
+prelude as it stands obeys it: **do not return the host table, and do not store it anywhere a
+module can name.**
+
+**And the gate is a guard rail, not a sandbox.** Modules are Luau in our own process; native
+FFI is a planned capability that would run in it too. The gate reliably stops a module from
+reaching a namespace by accident or by casual poking — which is what it is for, and what the
+probe measures. It is not a defence against an author who is actively hostile, and nothing
+in this design claims to be one. The manifest's real job is to be *readable before installing*:
+it is a statement by the author, which the user weighs, and the runtime holds the author to.
+
 This catalog is the **single machine-readable source** from which the following are generated: (a) the Luau type definitions for module authors, (b) the `[capabilities]` enum in the manifest, (c) the versioned web documentation (a project-backlog item). It is versioned under `engine_api` (additive change = minor, breaking = new major; study §6).
 
 ## 1. Model
