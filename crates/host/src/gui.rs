@@ -140,20 +140,13 @@ fn hide_manager(frame: &Frame) {
     frame.show(false);
     // Demoted after hiding, never before: the window has to be off the screen before the
     // application stops being one that has windows.
-    #[cfg(target_os = "macos")]
-    if crate::appcfg::dock_while_open() {
-        crate::backend::set_regular(false, "hiding the module window");
-    }
+    dock::release("manager", "hiding the module window");
 }
 
 fn show_manager(frame: &Frame) {
+    dock::want("manager", "showing the module window");
     #[cfg(target_os = "macos")]
-    {
-        if crate::appcfg::dock_while_open() {
-            crate::backend::set_regular(true, "showing the module window");
-        }
-        crate::backend::activate_self();
-    }
+    crate::backend::activate_self();
     frame.show(true);
     frame.centre();
     frame.raise();
@@ -1336,6 +1329,13 @@ pub fn run_gui(
             // during which this continuous timer keeps firing and re-enters on_tick.
             // Bail on re-entry so we don't pump module callbacks — or stack further
             // dialogs — behind an already-open modal.
+            //
+            // Module ERRORS no longer go through a modal, so they no longer pause the pump:
+            // a faulting module keeps running while its report sits on screen, and a second
+            // fault appends to the same window. That is the intended trade — a modal that
+            // stopped everything was how the unreachable window held the whole application —
+            // but it is a behaviour change, and the guard below still exists for the
+            // `modal_message` callers that remain.
             let in_tick = Rc::new(std::cell::Cell::new(false));
             // Lives as long as the timer: the error window outlives the tick that opened it.
             let error_window: Rc<RefCell<Option<ErrorWindow>>> = Rc::new(RefCell::new(None));
@@ -1560,11 +1560,87 @@ fn number_to_string(v: &settings::Value) -> String {
     }
 }
 
-/// A modal message dialog whose body text is screen-reader-accessible: the
-/// message lives in a focused, read-only multiline text control. (A bare
-/// StaticText isn't focusable, so a wxMessageDialog's body is only reachable by
-/// object navigation — this is read aloud on open.) Returns whether the user
-/// confirmed (Yes); an OK-only dialog always returns true.
+/// Who currently wants the application to look like a regular, Dock-visible application.
+///
+/// macOS only in effect, deliberately not in structure. There, the application runs as an
+/// agent with no Dock icon and no entry in the application switcher; a window that opens has
+/// to promote it, and the last window to close has to demote it again. With one window that
+/// is a pair of calls. With two it is a refcount, and getting it wrong is not cosmetic: the
+/// manager window used to demote unconditionally when it was hidden, which stripped the Dock
+/// icon out from under an error window that was still on screen — reproducing, on the
+/// platform nobody here can test, exactly the unreachable-window bug the error frame was
+/// written to fix.
+///
+/// Keyed by owner rather than counted, so a second `want` from the same window is not a
+/// second claim. The bookkeeping is compiled everywhere and only the policy call is gated,
+/// because a rule that exists only on the platform nobody can run is a rule nobody can test.
+mod dock {
+    use std::cell::RefCell;
+    use std::collections::BTreeSet;
+
+    thread_local! {
+        static WANTERS: RefCell<BTreeSet<&'static str>> = const { RefCell::new(BTreeSet::new()) };
+    }
+
+    /// Records `owner` as wanting the icon. True when this is the FIRST wanter.
+    fn add(owner: &'static str) -> bool {
+        WANTERS.with(|w| {
+            let mut w = w.borrow_mut();
+            let was_empty = w.is_empty();
+            let is_new = w.insert(owner);
+            was_empty && is_new
+        })
+    }
+
+    /// Drops `owner`. True when that was the LAST wanter — never true for an owner that was
+    /// not holding a claim, which is what stops a stray release from demoting.
+    fn release_owner(owner: &'static str) -> bool {
+        WANTERS.with(|w| {
+            let mut w = w.borrow_mut();
+            let had = w.remove(owner);
+            had && w.is_empty()
+        })
+    }
+
+    pub fn want(owner: &'static str, why: &str) {
+        let first = add(owner);
+        let _ = (first, why);
+        #[cfg(target_os = "macos")]
+        if first && crate::appcfg::dock_while_open() {
+            crate::backend::set_regular(true, why);
+        }
+    }
+
+    pub fn release(owner: &'static str, why: &str) {
+        let last = release_owner(owner);
+        let _ = (last, why);
+        #[cfg(target_os = "macos")]
+        if last && crate::appcfg::dock_while_open() {
+            crate::backend::set_regular(false, why);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_last_window_out_turns_the_icon_off_and_no_earlier_one_does() {
+            // Two windows want it; the first release must NOT demote.
+            assert!(add("manager"), "the first wanter promotes");
+            assert!(!add("errors"), "the second does not promote again");
+            assert!(!release_owner("manager"), "hiding the manager must not demote");
+            assert!(release_owner("errors"), "the last one out demotes");
+            // A second window asking twice is still one claim.
+            assert!(add("errors"));
+            assert!(!add("errors"));
+            assert!(release_owner("errors"), "one release clears one claim");
+            // And a release from someone who never asked demotes nothing.
+            assert!(!release_owner("manager"));
+        }
+    }
+}
+
 /// The one window module errors are reported in.
 ///
 /// A frame rather than a dialog, and that is the whole point of it. A `wxDialog` never gets
@@ -1581,6 +1657,12 @@ fn number_to_string(v: &settings::Value) -> String {
 struct ErrorWindow {
     frame: Frame,
     text: TextCtrl,
+    /// Kept in order to move focus off the text control and back, which is the only way to
+    /// make a screen reader announce a report that arrives while the window already has focus.
+    close: Button,
+    /// The first report's own title, held because the window title stops being specific as
+    /// soon as there is a second one and the first would otherwise lose its label.
+    heading: String,
     /// The accumulated text, kept here rather than read back out of the control: newest
     /// first, so focusing the box reads the report that just arrived and not a history.
     body: String,
@@ -1611,36 +1693,74 @@ fn report_error(
 ) {
     // A backstop, and honestly labelled as one. Writing into a handle wx has already
     // destroyed is a silent no-op, and a report that vanishes silently is the worst shape
-    // this failure can take: the user is not told, and nothing looks wrong. During testing
-    // one report did disappear exactly like that — but the close handler below has fired on
-    // every run since, this branch has never fired, and the first observation was not
-    // reproduced, so the cause is not established. The check costs one comparison and turns
-    // an unexplained disappearance into a logged one, which is the trade worth making.
+    // this failure can take: the user is not told, and nothing looks wrong.
+    //
+    // During testing one report appeared to vanish exactly like that, and this was written to
+    // catch it. It has never fired since — and the more likely explanation is now that the
+    // MEASUREMENT was wrong rather than the code: a later run showed the same symptom, and it
+    // turned out to be two stuck processes still listed by the OS, one of which the test
+    // script sampled instead of the live one. So this stays as a cheap guard that logs if it
+    // ever does fire, not as evidence that anything is broken.
     if slot.borrow().as_ref().is_some_and(|w| !w.frame.is_valid()) {
         crate::logging::line("gui", "error window: stale handle discarded");
         *slot.borrow_mut() = None;
     }
 
     if let Some(win) = slot.borrow_mut().as_mut() {
+        // The first report never needed a heading in the body: the window title said what it
+        // was, and repeating it would have had the screen reader read the same words twice.
+        // The moment a second arrives that stops being true, so it gets its label now.
+        if win.reports == 1 {
+            win.body = format!("{}\n\n{}", win.heading, win.body);
+        }
         win.reports += 1;
-        win.body = format!("{message}\n\n(earlier)\n\n{}", win.body);
-        let heading = format!("Module errors ({})", win.reports);
+        // Each report keeps its OWN heading in the body. Four different things feed this
+        // queue — a module error, a binding conflict, a binding the OS refused, and a module
+        // that did not load — so a window holding two of them can only be titled generically,
+        // and then the specific title has to survive somewhere. It survives here, at the top
+        // of its own entry, which is also the first thing read aloud.
+        win.body = format!("{title}\n\n{message}\n\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\n{}", win.body);
+        // "2 problems" and not "Module errors (2)": two binding conflicts are not module
+        // errors, and a window that says they are is a control claiming something it cannot
+        // honour. The count is the only thing that is true of all four producers.
+        let heading = format!("Automation Platform \u{2014} {} problems", win.reports);
         win.text.set_value(&win.body);
         win.text.set_name(&heading);
         win.frame.set_title(&heading);
+        // Re-fit, or the window keeps the size the FIRST message asked for. A one-line
+        // binding conflict clamps the box to 70px; the 40-line traceback that arrives next
+        // would then land in exactly the "narrow, heavily-wrapped box" `message_size` exists
+        // to prevent — a regression that reusing the window introduced.
+        win.text.set_min_size(message_size(&win.body));
+        win.frame.fit();
+        win.frame.layout();
+        // Everything the creation path below does to make the window REACHABLE has to happen
+        // here too. It did not, and each omission failed differently: on macOS the
+        // application was never re-promoted or brought forward, so a second report raised a
+        // window behind whatever was in front; and a minimized window stayed minimized,
+        // because `show(true)` returns early for a frame that already believes it is shown,
+        // and `raise()` orders a window in without restoring it.
+        dock::want("errors", "a further module error");
+        #[cfg(target_os = "macos")]
+        crate::backend::activate_self();
+        if win.frame.is_iconized() {
+            win.frame.iconize(false);
+        }
         win.frame.show(true);
         win.frame.raise();
+        // The focus has to LEAVE and come back, or nothing is announced. A screen reader is
+        // told about a focus change, not about a value being replaced underneath one — and
+        // focus is already in this box, so `set_focus()` alone is a no-op that fires no
+        // event. Without this a second module error arrives in total silence, while the text
+        // under the reader's caret is quietly replaced.
+        win.close.set_focus();
         win.text.set_focus();
         return;
     }
 
+    dock::want("errors", "showing the module error window");
     #[cfg(target_os = "macos")]
-    {
-        if crate::appcfg::dock_while_open() {
-            crate::backend::set_regular(true, "showing the module error window");
-        }
-        crate::backend::activate_self();
-    }
+    crate::backend::activate_self();
 
     // No parent. A top-level frame is what earns a taskbar button; parenting it on the
     // manager would tie its lifetime to a window that is usually hidden.
@@ -1666,13 +1786,15 @@ fn report_error(
     outer.add(&panel, 1, SizerFlag::Expand, 0);
     frame.set_sizer_and_fit(outer, true);
 
-    // Escape closes it, bound on the TEXT CONTROL and not on the frame. A key the focused
-    // control does not handle is not carried up to its parent: `wxKeyEvent` derives from
-    // `wxEvent`, so its propagation level is `wxEVENT_PROPAGATE_NONE`. That mistake is
-    // written up at length where the manager window builds its menu bar; here it costs
-    // nothing to avoid, because focus is always in this one box.
-    text.on_key_down(move |e| {
-        const ESCAPE: i32 = 27;
+    // Escape closes it, bound on EVERY control that can hold focus rather than on the frame.
+    // A key the focused control does not handle is not carried up to its parent:
+    // `wxKeyEvent` derives from `wxEvent`, so its propagation level is
+    // `wxEVENT_PROPAGATE_NONE`. That mistake is written up at length where the manager window
+    // builds its menu bar. This window has two focusable controls and no menu bar, so binding
+    // only the text control left Escape dead the moment Tab moved focus to the button — which
+    // is exactly where somebody looking for the way out arrives.
+    const ESCAPE: i32 = 27;
+    let escapes = move |e: WindowEventData| {
         if let WindowEventData::Keyboard(k) = &e {
             if k.get_key_code() == Some(ESCAPE) {
                 frame.close(true);
@@ -1680,7 +1802,9 @@ fn report_error(
             }
         }
         e.skip(true);
-    });
+    };
+    text.on_key_down(escapes);
+    close.on_key_down(escapes);
     close.on_click(move |_| frame.close(true));
 
     // Forget the window when it goes, so the next error builds a fresh one rather than
@@ -1690,10 +1814,10 @@ fn report_error(
         let manager = *manager;
         frame.on_close(move |event| {
             *slot.borrow_mut() = None;
-            #[cfg(target_os = "macos")]
-            if crate::appcfg::dock_while_open() && !manager.is_shown() {
-                crate::backend::set_regular(false, "closing the module error window");
-            }
+            // Only this window's claim. Whether the icon actually goes is the refcount's
+            // business — the manager may still be holding one, and deciding that here is how
+            // the two windows got out of step in the first place.
+            dock::release("errors", "closing the module error window");
             let _ = &manager;
             if let WindowEventData::General(e) = &event {
                 e.skip(true);
@@ -1706,9 +1830,23 @@ fn report_error(
     frame.raise();
     text.set_focus(); // read the message aloud when the window opens
 
-    *slot.borrow_mut() = Some(ErrorWindow { frame, text, body: message.to_string(), reports: 1 });
+    *slot.borrow_mut() = Some(ErrorWindow {
+        frame,
+        text,
+        close,
+        heading: title.to_string(),
+        body: message.to_string(),
+        reports: 1,
+    });
 }
 
+/// A modal message dialog whose body text is screen-reader-accessible: the
+/// message lives in a focused, read-only multiline text control. (A bare
+/// StaticText isn't focusable, so a wxMessageDialog's body is only reachable by
+/// object navigation — this is read aloud on open.) Returns whether the user
+/// confirmed (Yes); an OK-only dialog always returns true.
+///
+/// Not used for module errors any more — those get a frame, see `report_error`.
 fn modal_message(parent: &Frame, title: &str, message: &str, yes_no: bool) -> bool {
     let dialog = Dialog::builder(parent, title).build();
     let panel = Panel::builder(&dialog).build();
