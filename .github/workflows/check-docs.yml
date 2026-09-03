@@ -17,6 +17,9 @@ on:
       - 'crates/host/src/lib.rs'
       - 'crates/host/src/window_prelude.luau'
       - 'check-docs.ps1'
+      # The checkers' own source. Without this, a change to the scraper could break the check
+      # and nothing would run it until the next docs edit — which is exactly what happened.
+      - 'tools/api-index.py'
       - '.github/workflows/check-docs.yml'
   pull_request:
     paths:
@@ -24,6 +27,7 @@ on:
       - 'crates/host/src/lib.rs'
       - 'crates/host/src/window_prelude.luau'
       - 'check-docs.ps1'
+      - 'tools/api-index.py'
   workflow_dispatch:
 
 permissions:
