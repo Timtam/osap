@@ -1144,7 +1144,6 @@ design and the reasoning are in [docs/prism-speech-design.md](docs/prism-speech-
       counted in `pending` when it was handed over. `is_speaking` would then have answered
       yes for the rest of the session and every shutdown would have sat out its full fifteen
       seconds. It hands them all back now, to be said the other way.
-- [ ] **Step 4 — wire it into `Speech`.** *First test with NVDA.*
 - [x] **Step 4 and 5 — wired in, with the switch** (2026-09-01). `Speech` tries prism first,
       `pump()` speaks the refusals through the other path, `is_speaking` counts its own
       outstanding lines. New switch **"Speak through the screen reader"**, Windows only,
@@ -1291,10 +1290,29 @@ serious one.
       **notification** instead, the way `Shared::announce` now does for the application's own
       announcements, keeping a dialog only for things that need an answer; or build it as a
       frame rather than a dialog, which gets a button but stops being modal.
-- [ ] **The title may be fine and read as missing.** The dialog IS given one —
-      `report_callback_error` passes "Module error: <id>" — so if a screen reader announces
-      no title, the accessible NAME of the dialog is not reaching it, which is a different
-      bug from the one above and needs checking with NVDA before anything is changed.
+- [ ] **The title may be fine and read as missing — and the window it was asked about no
+      longer exists.** The question was whether a screen reader gets the accessible NAME of
+      the report, since `report_callback_error` does pass "Module error: <id>". That report is
+      a frame now, with `set_name` on its text control, so the question needs re-asking
+      against the new window rather than answered from the old one. Two things to check with
+      NVDA in one sitting: does the FIRST report read its own title, and does a SECOND one —
+      which retitles the window "Automation Platform — N problems" and puts each report's own
+      heading at the top of its own entry — read the new report rather than the old text.
+- [ ] **The error window on macOS is written and unrun.** It compiles and links (the macOS CI
+      builds `gui.rs`), and nothing beyond that is known. Three things only a Mac can answer:
+      does the agent promotion actually produce a Dock icon and an app-switcher entry for it;
+      does VoiceOver read the text control when it opens; and does the refcount hold — open
+      the manager, make a module fault, close the manager, and check the error window still
+      has its Dock icon. That last one is the bug this window was written to prevent, so it is
+      the one worth doing first.
+- [ ] **A failing code dependency reports once per dependent.** `report_load_failure` pushes
+      straight onto the error queue rather than through `queue_dialog`, so it is not deduped:
+      if `com.platform.overlay` ever failed to load, each of the eight modules that depend on
+      it would queue its own report. They land in one window in one tick, and each carries its
+      own heading, so it is legible rather than eight windows — but eight entries saying the
+      same thing is still the wrong shape. Found by the completeness critic of the 2026-09-03
+      review; left standing because the fix (dedupe on the CAUSE rather than the dependent)
+      needs a think about what a user most needs to be told.
 
 ## A module was blamed for a capability it never used (2026-09-03)
 
@@ -1400,12 +1418,12 @@ wrapper rather than with prism.
       567 ms measured on Windows. `crates/host/src/speech/**` already triggers the macOS
       workflow, so the number would arrive on the next push.
 
-- [ ] **Windows CI, if it is wanted.** Settle first whether a stock `windows-latest` can
-      compile C++23 with `<expected>` and `<flat_set>`; prism's own workflow runs on
-      `windows-2025-vs2026`, which is not a standard hosted label. Twenty minutes with a
-      throwaway workflow. Note that `Swatinem/rust-cache` will not cache a workspace crate's
-      `OUT_DIR`, so without an explicit cache key on the pinned SHA every run pays the full
-      36-second prism build.
+- [x] **Windows CI — built** (2026-09-03). The open question answered itself: a stock
+      `windows-latest` is currently the `windows-2025-vs2026` image, so it compiles C++23
+      with `<expected>` and `<flat_set>` without a custom label. `.github/workflows/windows-build.yml`
+      builds, tests, builds the docs, packages the artifact — and, since 2026-09-03, runs the
+      capability probe headless. As predicted, `Swatinem/rust-cache` does not cache a
+      workspace crate's `OUT_DIR`, so prism gets its own cache key on the pinned SHA.
 - [x] **Step 8 — `tts` is gone from the Windows build** (2026-09-02), and the reasoning
       that nearly stopped it is the useful part. It was rejected on half a measurement:
       opening a prism speech engine costs seconds (OneCore 3.5 s, SAPI 2.0 s) and the
