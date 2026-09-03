@@ -313,9 +313,43 @@ NOT_SURFACE = {
 }
 
 
+def without_test_modules(src):
+    """`src` with every `#[cfg(test)] mod … { … }` block removed.
+
+    A test may build a table named after a namespace and put anything it likes on it — the
+    capability-gate tests hang a deliberately leaky function on a stand-in `log` table — and
+    the scraper below would read that as a call a module author can make. It cannot, and
+    telling them to document it would be telling them to document a fixture.
+
+    Cut on a closing brace in COLUMN ZERO rather than by counting braces: a test that embeds
+    Luau (these do) has braces inside string literals, and a counter that does not also parse
+    Rust string syntax would land in the wrong place. rustfmt puts a top-level `mod`'s closing
+    brace at column zero, and everything inside it is indented.
+    """
+    lines = src.splitlines(keepends=True)
+    out, skipping = [], False
+    for i, line in enumerate(lines):
+        # Only a `#[cfg(test)]` that introduces a MODULE opens a block to skip. On a `use` or
+        # a single item there is no brace to close, and skipping to the next column-zero one
+        # would swallow the real code in between.
+        if not skipping and line.startswith('#[cfg(test)]'):
+            following = lines[i + 1] if i + 1 < len(lines) else ''
+            if following.startswith('mod '):
+                skipping = True
+                continue
+        if skipping:
+            if line.rstrip() == '}':
+                skipping = False
+            continue
+        out.append(line)
+    return ''.join(out)
+
+
 def public_names():
     """Every `host.*` a module can call, from the Rust bindings and the Luau prelude."""
-    lib = open(os.path.join('crates', 'host', 'src', 'lib.rs'), encoding='utf-8').read()
+    lib = without_test_modules(
+        open(os.path.join('crates', 'host', 'src', 'lib.rs'), encoding='utf-8').read()
+    )
     pre = open(os.path.join('crates', 'host', 'src', 'window_prelude.luau'),
                encoding='utf-8').read()
 
