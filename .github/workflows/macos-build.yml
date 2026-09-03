@@ -33,6 +33,17 @@ on:
       - 'crates/host/src/speech/**'
       # Not borrowed by macos-check (it cannot be — wxdragon), but it carries a macOS
       # branch of its own now, and this job is the only place that ever compiles it.
+      #
+      # `crates/host/src/lib.rs` is deliberately NOT here, and the reasoning is worth keeping
+      # so nobody has to redo it. It is the biggest file in the crate and changes on most
+      # pushes, while a run of this job has cost anywhere between 1.6 and 15.7 minutes (the
+      # spread is unexplained — a warm rust-cache is not a reliable predictor), so listing it
+      # would spend a large and unpredictable share of the month's macOS minutes. What it buys
+      # is small: lib.rs holds exactly ONE macOS-gated block against ten in gui.rs, and the
+      # rest is plain Rust that compiles anywhere. When a change there touches something this
+      # job actually exercises — module loading, or the headless path it runs modules through
+      # — dispatch the job by hand. That is a real gap, chosen with the price in front of us
+      # rather than overlooked.
       - 'crates/host/src/gui.rs'
       - 'crates/host/src/appcfg.rs'
       - 'crates/host/src/portable.rs'
