@@ -3,10 +3,10 @@ name = "Capability probe"
 version = "0.1.0"
 license = "GPL-3.0-or-later"
 
-# Deliberately minimal, and the whole point of the module. It declares `log` so it can report,
-# and NOTHING else — every namespace it reaches for below is one it has not asked for. A run
-# that reaches any of them is a hole in the capability gate.
+# Deliberately minimal, and the whole point of the module: `log` so it can report, `timer` for
+# the liveness line below, and NOTHING else. Every namespace it reaches for is one it has not
+# asked for — `speech` and `screen` — so a run that reaches either is a hole in the gate.
 [capabilities]
-require = ["log"]
+require = ["log", "timer"]
 
 entry = "src/main.luau"

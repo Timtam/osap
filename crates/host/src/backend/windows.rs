@@ -37,7 +37,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumChildWindows,
     EnumWindows, GetAncestor, GetClassNameW, GetClientRect, GetCursorPos,
     GetForegroundWindow,
-    GetGUIThreadInfo, GetMessageW, GetSystemMetrics, GetWindowRect,
+    GetGUIThreadInfo, GetSystemMetrics, GetWindowRect,
+    MsgWaitForMultipleObjects, PeekMessageW, PM_REMOVE, QS_ALLINPUT, WM_QUIT,
     GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
     WindowFromPoint,
     GUI_INMENUMODE, GUI_POPUPMENUMODE, GUI_SYSTEMMENUMODE,
@@ -793,23 +794,58 @@ impl Backend for WindowsBackend {
         Ok(())
     }
 
+    /// The headless loop: wait for input, but never for longer than one tick.
+    ///
+    /// It used to sit in a blocking `GetMessageW`, and in a headless session there is no
+    /// window of ours and nobody typing at it, so no message ever arrives. Everything hanging
+    /// off the tick was therefore dead rather than merely uncalled: `host.timer`, async image
+    /// results, and the speech pump that says a refused line through the other path and looks
+    /// for a screen reader that came back.
+    ///
+    /// This was one of TWO defects between a headless module and its timers, and they were
+    /// separated by experiment rather than by reading, because the first hid the second
+    /// completely. `Manager::run` would not enter this loop at all for a module whose only
+    /// reason to be alive was a timer, so the first measurement — zero ticks in ten idle
+    /// seconds — proved nothing about the loop. With that guard fixed and this wait still
+    /// blocking, the loop was entered and no timer fired for four seconds. With both fixed,
+    /// `every(500)` fires twice a second, which is the number that was wanted.
+    ///
+    /// The shape here is the one the macOS loop already had (`CFRunLoop::run_in_mode` with a
+    /// 0.015 timeout) and the one the GUI path gets from its 15 ms wx timer. Three copies of
+    /// the same interval, which is the point rather than an accident: if the two headless
+    /// paths and the GUI path do not deliver on the same cadence, headless stops being a fair
+    /// test of the rest — and headless is the only way module Luau is ever run on a Mac here.
     fn run_event_loop(&self, events: &mut dyn HostEvents) -> Result<(), String> {
+        /// Matches `timer.start(15, …)` in `gui.rs` and the macOS run-loop interval.
+        const TICK_MS: u32 = 15;
+
         let mut msg: MSG = unsafe { std::mem::zeroed() };
         loop {
-            let res = unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) };
-            if res == 0 || res == -1 {
-                break; // WM_QUIT or error
-            }
+            // Returns as soon as anything is queued, or when the interval is up. Its return
+            // value is deliberately ignored: an empty queue and a timeout are the same
+            // instruction here — drain what is there, then tick.
             unsafe {
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
+                MsgWaitForMultipleObjects(0, std::ptr::null(), 0, TICK_MS, QS_ALLINPUT);
+            }
+            // Drain, without blocking on an empty queue. `PeekMessageW` is what makes the
+            // timeout above meaningful; `GetMessageW` would give the block straight back.
+            loop {
+                if unsafe { PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) } == 0 {
+                    break;
+                }
+                if msg.message == WM_QUIT {
+                    return Ok(());
+                }
+                unsafe {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
             }
             // Hotkeys reach our window proc during dispatch; the hooks queued
             // foreground/key events on this thread. Drain them all.
             self.pump_pending(events);
             events.on_tick();
         }
-        Ok(())
     }
 
     fn pump_pending(&self, events: &mut dyn HostEvents) {

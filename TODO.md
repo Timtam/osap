@@ -1199,11 +1199,33 @@ design and the reasoning are in [docs/prism-speech-design.md](docs/prism-speech-
       silence, which is the one outcome this design exists to prevent.
   - Measured in passing: NVDA reports `braille=true` and `output=true`, so the braille step
       has something real to switch on.
-- [ ] **The headless loop is missing more than speech.** `fire_due_timers` and
-      `fire_image_results` are called only from the GUI timer tick, so `host.timer` and image
-      results are dead in headless mode — which the macOS headless loop's own comment claims
-      is "a fair test of the rest". Older than this change and left alone by it; the `on_tick`
-      hook is now the place to fix it, but not blind and not in the same change as speech.
+- [x] **The headless loop is missing more than speech** (2026-09-03) — and it was missing
+      more than the two calls. Three defects, stacked so that each hid the next, separated by
+      experiment because reading could not tell them apart.
+  1. **`Manager::run` would not start a loop at all** for a module whose only reason to be
+      alive was a timer: the guard asked for a hotkey, a captured key or a window trigger, and
+      otherwise waited for speech and returned. The condition was right when written —
+      `host.timer` fired from the GUI tick only — and stopped being right when the tick grew a
+      headless counterpart. Armed timers and outstanding image searches now count.
+  2. **The Windows loop then sat in a blocking `GetMessageW`.** No window of ours, nobody
+      typing at it, so no message ever arrived and the tick never came. It waits with a 15 ms
+      timeout now and drains with `PeekMessageW` — the shape the macOS loop already had
+      (`CFRunLoop::run_in_mode`, 0.015) and the GUI path gets from `timer.start(15, …)`.
+  3. **`on_tick` really was missing the two calls**, which is where this item started.
+  - Measured at each step, and the order matters because defect 1 made the first measurement
+      worthless: a module arming `host.timer.every(500, …)` logged `activate` and nothing for
+      ten seconds — which proved only that the loop was never entered. With the guard fixed
+      and the blocking wait still in place, the loop was entered and no timer fired in four
+      seconds. With all three fixed, `every(500)` fires seven times in four seconds.
+  - **This is why it mattered more than it read.** Headless is the only way module Luau is
+      ever run on a Mac here (the macOS job's "Load the modules once" step), and it is how the
+      Windows job runs the capability probe. Both jobs were blind to everything an overlay
+      actually does. `tools/capability-probe` now reports its verdict from inside a timer
+      callback, so a regression is a MISSING line and the job fails on it rather than passing
+      quietly.
+  - Still not done, and deliberately: the headless tick has none of the GUI path's phase
+      instrumentation (which splits an iteration into events/timers/images and logs anything
+      over 250 ms). Worth adding when there is a reason to look at it.
 - [x] **Step 6 — application speech separated from module speech** (2026-09-02).
       `host.speech` still always speaks, through SAPI if that is what is there — whoever
       installed and enabled a module decided that. The two places the application speaks on

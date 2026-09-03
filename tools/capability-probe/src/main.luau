@@ -35,5 +35,21 @@ return {
     else
       host.log.info("CAPABILITY PROBE: HOLE — reached " .. table.concat(holes, ", "))
     end
+
+    -- A second, unrelated property, checked here because this is the only module CI runs
+    -- headless and the check costs one line: does `host.timer` fire at all in that mode?
+    --
+    -- It did not, for two separate reasons, and neither failed loudly: `Manager::run` did
+    -- not even enter the event loop for a module whose only reason to be alive was a timer,
+    -- and the Windows loop then sat in a blocking `GetMessageW` that nothing ever woke. A
+    -- module logged its `activate` line and went silent for ten seconds. Since headless is
+    -- the ONLY way module Luau is ever run on a Mac here, that made both CI jobs blind to
+    -- everything a real overlay does.
+    --
+    -- Reported from inside the callback on purpose: if timers die again, this line is simply
+    -- absent, and the job fails on the missing line rather than passing quietly.
+    host.timer.after(200, function()
+      host.log.info("HEADLESS TIMER: fired — host.timer runs without a window")
+    end)
   end,
 }

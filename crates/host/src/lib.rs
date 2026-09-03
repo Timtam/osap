@@ -2552,18 +2552,32 @@ impl Manager {
         ));
     }
 
-    /// Runs the shared event loop if any module registered hotkeys, keys, or
-    /// window triggers; otherwise waits for pending speech and returns.
+    /// Runs the shared event loop if any module has something to wait for; otherwise waits
+    /// for pending speech and returns.
     pub fn run(&mut self) -> Result<()> {
         let has_hotkeys = !self.shared.hotkeys.borrow().is_empty();
         let has_keys = !self.shared.keys.borrow().is_empty();
         let has_triggers = self.modules.borrow().iter().any(|m| window_has_triggers(&m.lua));
+        // A timer or an outstanding image search is a reason to keep running too, and this
+        // is the second half of a bug found by measurement: a headless module that armed
+        // `host.timer.every(500, …)` in `activate` logged that line and then nothing at all,
+        // because the condition below decided it had nothing to wait for and fell through to
+        // waiting on speech. Nothing was broken inside the loop — the loop was never entered.
+        //
+        // The condition was right when it was written: `host.timer` fired from the GUI tick
+        // only, so headless genuinely had nothing to run for except an OS trigger. It stopped
+        // being right when the tick grew a headless counterpart, and nothing failed loudly
+        // enough to say so — which is what makes it worth naming here. A module's own reasons
+        // to be alive are not only the ones the OS delivers.
+        let has_own_work = !self.shared.timers.borrow().is_empty()
+            || !self.shared.recurring.borrow().is_empty()
+            || !self.shared.pending_image.borrow().is_empty();
         let headless = appcfg::headless();
 
         // The tray manager is shown whenever there's a window (non-headless), even
         // with nothing loaded yet, so modules can be browsed/installed/managed.
-        // Headless has no window, so it only runs with an OS trigger registered.
-        if has_hotkeys || has_keys || has_triggers || !headless {
+        // Headless has no window, so it only runs when something is actually pending.
+        if has_hotkeys || has_keys || has_triggers || has_own_work || !headless {
             if has_triggers {
                 self.shared
                     .backend
@@ -2968,13 +2982,26 @@ impl Dispatcher<'_> {
 }
 
 impl HostEvents for Dispatcher<'_> {
-    /// The headless loop's equivalent of the GUI timer tick.
+    /// The headless loop's equivalent of the GUI timer tick, and now actually equivalent.
     ///
-    /// Only speech, deliberately: this is also where `fire_due_timers` and
-    /// `fire_image_results` are missing headless — a separate, older gap recorded in TODO.md,
-    /// and not one to fix blind in the same change that touches what the user hears.
+    /// It used to pump speech and nothing else, with a comment saying the two missing calls
+    /// were "a separate, older gap". They were — and the gap was wider than the comment: the
+    /// Windows headless loop had no cadence at all (it blocked in `GetMessageW`, and nothing
+    /// ever sent it a message), so this function was not being called late, it was not being
+    /// called. Measured before touching it: a module arming `host.timer.every(500, …)` logged
+    /// its `activate` line and then nothing for ten seconds.
+    ///
+    /// The three calls are in the same order as the GUI path's — OS events are drained by the
+    /// loop before this runs, then timers, then image results — because a timer that fires
+    /// before the window activation it was waiting for reads as a race in module code.
+    ///
+    /// Not instrumented the way the GUI path is (which breaks its iteration into phases and
+    /// logs anything over 250 ms). Worth adding when there is a reason to look; a headless
+    /// session is a test harness, not somebody's desktop.
     fn on_tick(&mut self) {
         self.shared.speech.pump();
+        self.shared.fire_due_timers();
+        self.shared.fire_image_results();
     }
 
     fn on_hotkey(&mut self, id: i32) {

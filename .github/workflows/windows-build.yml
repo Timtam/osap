@@ -85,7 +85,7 @@ jobs:
           $p = Start-Process -FilePath 'target/release/automation-platform.exe' `
                  -ArgumentList "$PWD/tools/capability-probe" -PassThru
           for ($i = 0; $i -lt 40; $i++) {
-            if ((Test-Path $log) -and (Select-String -Path $log -Pattern 'CAPABILITY PROBE' -Quiet)) { break }
+            if ((Test-Path $log) -and (Select-String -Path $log -Pattern 'HEADLESS TIMER' -Quiet)) { break }
             Start-Sleep -Milliseconds 500
           }
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
@@ -94,6 +94,12 @@ jobs:
           $verdict = Select-String -Path $log -Pattern 'CAPABILITY PROBE:'
           if (-not $verdict) { throw 'the probe never reported a verdict — it did not run' }
           if ($verdict.Line -match 'HOLE') { throw "the capability gate is open: $($verdict.Line)" }
+          # The probe reports this from inside a timer callback, so a missing line means
+          # `host.timer` is dead headless — which is how both CI jobs were blind to
+          # everything a real overlay does until 2026-09-03.
+          if (-not (Select-String -Path $log -Pattern 'HEADLESS TIMER: fired' -Quiet)) {
+            throw 'host.timer did not fire in headless mode — the event loop is not ticking'
+          }
 
       # The documentation ships inside the artifact and works offline from the folder, so a
       # tester with no internet still has it. `package.ps1` packages without it rather than
