@@ -1268,7 +1268,15 @@ Reported from a real session: a module-error dialog appeared with, from the user
 title and no taskbar entry. Two separate defects behind one window, and the second is the
 serious one.
 
-- [ ] **The dialog has no taskbar button, on either platform.** `modal_message` builds a
+- [x] **The dialog has no taskbar button, on either platform.** Fixed on Windows, verified by
+      measurement: the error report is now a top-level `Frame` (`report_error` in
+      `crates/host/src/gui.rs`), unowned and not a tool window, which is what earns a taskbar
+      button. Escape closes it, bound on the text control because key events do not propagate
+      to a frame. A second report appends to the same window rather than opening another, and
+      a report after it was closed opens a fresh one. **macOS is written but unverified** —
+      it promotes the agent to a regular application while the window is open, the same way
+      the manager window does, and demotes again on close unless the manager is still open.
+      The original diagnosis follows, for the record: `modal_message` built a
       `wxDialog` (`crates/host/src/gui.rs`), and a dialog never gets a taskbar button — only
       a frame does. Its parent is the manager window, which in a tray application is normally
       hidden, so there is no button for the parent either. Alt+Tab away from it and there is

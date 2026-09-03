@@ -1337,6 +1337,8 @@ pub fn run_gui(
             // Bail on re-entry so we don't pump module callbacks — or stack further
             // dialogs — behind an already-open modal.
             let in_tick = Rc::new(std::cell::Cell::new(false));
+            // Lives as long as the timer: the error window outlives the tick that opened it.
+            let error_window: Rc<RefCell<Option<ErrorWindow>>> = Rc::new(RefCell::new(None));
             timer.on_tick(move |_event| {
                 if in_tick.replace(true) {
                     return;
@@ -1353,7 +1355,7 @@ pub fn run_gui(
                 // accessible dialog (deduped + queued host-side), so a faulting module
                 // is visible (and isolated) rather than silently logged or a crash.
                 for (title, msg) in drain_errors() {
-                    modal_message(&frame, &title, &msg, false);
+                    report_error(&error_window, &frame, &title, &msg);
                 }
                 // Drain background-job results and apply them on the GUI thread.
                 let jobs: Vec<Job> = std::mem::take(&mut *inbox.lock().unwrap());
@@ -1563,6 +1565,150 @@ fn number_to_string(v: &settings::Value) -> String {
 /// StaticText isn't focusable, so a wxMessageDialog's body is only reachable by
 /// object navigation — this is read aloud on open.) Returns whether the user
 /// confirmed (Yes); an OK-only dialog always returns true.
+/// The one window module errors are reported in.
+///
+/// A frame rather than a dialog, and that is the whole point of it. A `wxDialog` never gets
+/// a taskbar button; only a frame does. This message used to be a modal dialog parented on
+/// the manager window — which in a tray application is normally hidden, so neither the
+/// dialog nor its parent had a button. Alt+Tab away from it and there was nothing to come
+/// back to: the modal was still open, still holding the application, and unreachable. For
+/// somebody who cannot see the screen, an application that stops responding and offers no
+/// way to find the window that is holding it is indistinguishable from one that has hung.
+///
+/// One window, reused. A module that faults in a timer usually faults again, and although
+/// the host dedupes on (module, context) a handful of distinct contexts would still have
+/// stacked a handful of windows. A second report goes into the same box instead.
+struct ErrorWindow {
+    frame: Frame,
+    text: TextCtrl,
+    /// The accumulated text, kept here rather than read back out of the control: newest
+    /// first, so focusing the box reads the report that just arrived and not a history.
+    body: String,
+    reports: usize,
+}
+
+/// Sizes a message box to its content (~62 chars per 440px line), so a long traceback is not
+/// crammed into a narrow, heavily-wrapped box.
+fn message_size(message: &str) -> Size {
+    let lines: usize = message
+        .lines()
+        .map(|l| (l.chars().count().saturating_sub(1) / 62) + 1)
+        .sum::<usize>()
+        .max(1);
+    Size::new(440, ((lines as i32) * 20 + 36).clamp(70, 380))
+}
+
+/// Shows `message` in the error window, creating it if it is not already open.
+///
+/// `manager` is consulted, not used as a parent: on macOS the application is an agent with
+/// no Dock icon, and the promotion that gives a window somewhere to be clicked from has to
+/// be undone when the last window goes away — but only if the manager is not open too.
+fn report_error(
+    slot: &Rc<RefCell<Option<ErrorWindow>>>,
+    manager: &Frame,
+    title: &str,
+    message: &str,
+) {
+    // A backstop, and honestly labelled as one. Writing into a handle wx has already
+    // destroyed is a silent no-op, and a report that vanishes silently is the worst shape
+    // this failure can take: the user is not told, and nothing looks wrong. During testing
+    // one report did disappear exactly like that — but the close handler below has fired on
+    // every run since, this branch has never fired, and the first observation was not
+    // reproduced, so the cause is not established. The check costs one comparison and turns
+    // an unexplained disappearance into a logged one, which is the trade worth making.
+    if slot.borrow().as_ref().is_some_and(|w| !w.frame.is_valid()) {
+        crate::logging::line("gui", "error window: stale handle discarded");
+        *slot.borrow_mut() = None;
+    }
+
+    if let Some(win) = slot.borrow_mut().as_mut() {
+        win.reports += 1;
+        win.body = format!("{message}\n\n(earlier)\n\n{}", win.body);
+        let heading = format!("Module errors ({})", win.reports);
+        win.text.set_value(&win.body);
+        win.text.set_name(&heading);
+        win.frame.set_title(&heading);
+        win.frame.show(true);
+        win.frame.raise();
+        win.text.set_focus();
+        return;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if crate::appcfg::dock_while_open() {
+            crate::backend::set_regular(true, "showing the module error window");
+        }
+        crate::backend::activate_self();
+    }
+
+    // No parent. A top-level frame is what earns a taskbar button; parenting it on the
+    // manager would tie its lifetime to a window that is usually hidden.
+    let frame = Frame::builder().with_title(title).build();
+    let panel = Panel::builder(&frame).build();
+    let sizer = BoxSizer::builder(Orientation::Vertical).build();
+
+    let text = TextCtrl::builder(&panel)
+        .with_style(TextCtrlStyle::MultiLine | TextCtrlStyle::ReadOnly)
+        .build();
+    text.set_value(message);
+    text.set_name(title);
+    text.set_min_size(message_size(message));
+    sizer.add(&text, 1, SizerFlag::All | SizerFlag::Expand, 12);
+
+    let close = Button::builder(&panel).with_label("Close").build();
+    let buttons = BoxSizer::builder(Orientation::Horizontal).build();
+    buttons.add(&close, 0, SizerFlag::All, 6);
+    sizer.add_sizer(&buttons, 0, SizerFlag::AlignRight | SizerFlag::All, 6);
+
+    panel.set_sizer(sizer, true);
+    let outer = BoxSizer::builder(Orientation::Vertical).build();
+    outer.add(&panel, 1, SizerFlag::Expand, 0);
+    frame.set_sizer_and_fit(outer, true);
+
+    // Escape closes it, bound on the TEXT CONTROL and not on the frame. A key the focused
+    // control does not handle is not carried up to its parent: `wxKeyEvent` derives from
+    // `wxEvent`, so its propagation level is `wxEVENT_PROPAGATE_NONE`. That mistake is
+    // written up at length where the manager window builds its menu bar; here it costs
+    // nothing to avoid, because focus is always in this one box.
+    text.on_key_down(move |e| {
+        const ESCAPE: i32 = 27;
+        if let WindowEventData::Keyboard(k) = &e {
+            if k.get_key_code() == Some(ESCAPE) {
+                frame.close(true);
+                return;
+            }
+        }
+        e.skip(true);
+    });
+    close.on_click(move |_| frame.close(true));
+
+    // Forget the window when it goes, so the next error builds a fresh one rather than
+    // writing into a control wx has already destroyed.
+    {
+        let slot = slot.clone();
+        let manager = *manager;
+        frame.on_close(move |event| {
+            *slot.borrow_mut() = None;
+            #[cfg(target_os = "macos")]
+            if crate::appcfg::dock_while_open() && !manager.is_shown() {
+                crate::backend::set_regular(false, "closing the module error window");
+            }
+            let _ = &manager;
+            if let WindowEventData::General(e) = &event {
+                e.skip(true);
+            }
+        });
+    }
+
+    frame.show(true);
+    frame.centre();
+    frame.raise();
+    text.set_focus(); // read the message aloud when the window opens
+
+    *slot.borrow_mut() = Some(ErrorWindow { frame, text, body: message.to_string(), reports: 1 });
+}
+
 fn modal_message(parent: &Frame, title: &str, message: &str, yes_no: bool) -> bool {
     let dialog = Dialog::builder(parent, title).build();
     let panel = Panel::builder(&dialog).build();
@@ -1573,14 +1719,7 @@ fn modal_message(parent: &Frame, title: &str, message: &str, yes_no: bool) -> bo
         .build();
     text.set_value(message);
     text.set_name(title);
-    // Size to the content (~62 chars per 440px line) so a longer message isn't
-    // crammed into a narrow, heavily-wrapped box.
-    let lines: usize = message
-        .lines()
-        .map(|l| (l.chars().count().saturating_sub(1) / 62) + 1)
-        .sum::<usize>()
-        .max(1);
-    text.set_min_size(Size::new(440, ((lines as i32) * 20 + 36).clamp(70, 380)));
+    text.set_min_size(message_size(message));
     sizer.add(&text, 1, SizerFlag::All | SizerFlag::Expand, 12);
 
     let buttons = BoxSizer::builder(Orientation::Horizontal).build();
