@@ -38,8 +38,12 @@ an API that abstracts over both.
 Asked directly, after the Luau prelude was changed to hold the whole host table as an upvalue:
 *if privileged Luau runs inside a module's VM holding the ungated table, can a module get at
 it?* The honest answer needed measuring rather than reasoning, so a probe module was written
-that declares `log` and nothing else and then tries seven ways to reach `speech` and `screen`.
-All seven were refused (2026-09-03):
+that declares `log` and nothing else and then tries to reach `speech` and `screen`.
+
+Seven routes were refused. **An eighth was wide open**, and the probe never tried it — it was
+found afterwards by an adversarial review of the very commit that published the table below.
+That is worth leaving in the record rather than tidying away: a probe measures the routes
+somebody thought of, and a clean result from one is evidence, not proof.
 
 | Route | Outcome |
 | --- | --- |
@@ -50,13 +54,33 @@ All seven were refused (2026-09-03):
 | `getfenv(1).host.speech` | refused — the environment is the gated view |
 | `getmetatable(host)` | reachable, and useless: `__index` is a Rust function that performs the check, and the full table is held in Rust |
 | a scan of `host.log`, a namespace it *does* have | nothing found |
+| **a second file in the module's own package, via `host.include`** | **was open until 2026-09-03** — see below |
+
+### The eighth route, and why it was open
+
+`host.include` runs another file from the module's own package. It needs no capability — every
+module has it — and it hands that file a host table. Until 2026-09-03 that table was the
+**ungated** one: `include` was registered inside `install_host_api`, which builds the whole
+table, while the gated view is created afterwards. So any module could put its real code in a
+second file and have every capability, whatever its manifest said. Measured with a module
+declaring only `log`: from the entry point `host.speech` was refused, and from an included
+file both `host.speech` and `host.screen` were reached.
+
+The fix separates the table `include` is *registered on* (the whole one, because that is what a
+gated view falls through to) from the one it *hands over* (the view). `install_include` now
+takes both, and `install_host_api` does not install `include` at all — a module's `include`
+cannot be built before its gated view exists, and an absent function fails loudly at the first
+call where a silently ungated one did not fail at all.
 
 Two properties do the work, and both are worth keeping true when this code is touched:
 
 1. **The full table never becomes a Luau value a module can name.** The gated view's `__index`
    is a Rust closure; the table it reads from is captured there. Handing the metatable out is
    therefore harmless — which is why the probe checks the metatable's *contents* rather than
-   its existence.
+   its existence. This is the sentence the `include` route falsified: it was written as a
+   measured fact while a function on that very table was handing the whole thing to any module
+   that asked. Anything that passes the host table to Luau — `include` today, whatever is added
+   tomorrow — has to pass the view.
 2. **Privileged Luau never indexes `host` with a name a module supplies**, and never stores
    `host` in anything it returns. The prelude is the only privileged Luau there is; if more is
    added, it inherits this obligation, because a single `host[name]` there would be a

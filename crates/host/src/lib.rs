@@ -1535,7 +1535,7 @@ fn build_dep_host(
     // resolved against — and handed the host of — the module that includes it. Falling
     // through to the owner would resolve a code module's own files under the DEPENDENT's
     // root, and hand them the dependent's host.
-    install_include(lua, shared, dep_idx, &host)?;
+    install_include(lua, shared, dep_idx, &host, &host)?;
     Ok(host)
 }
 
@@ -1734,6 +1734,38 @@ end"))
         assert!(reached, "the demonstration this test exists for stopped working");
     }
 
+    /// The require guard: what it catches, and what it lets through on purpose.
+    #[test]
+    fn a_dependency_may_export_functions_but_not_its_host() {
+        let lua = Lua::new();
+        let dep_host = lua.create_table().unwrap();
+        dep_host.set("screen", lua.create_table().unwrap()).unwrap();
+
+        // The two shapes that are a handover.
+        assert!(hands_over_its_host(&dep_host, &dep_host), "returning the table itself");
+        let wrapped = lua.create_table().unwrap();
+        wrapped.set("host", &dep_host).unwrap();
+        assert!(hands_over_its_host(&wrapped, &dep_host), "one level down is still a handover");
+
+        // And the shapes that are an API, which must keep working — this is the whole
+        // inheritance model: a dependency acts with ITS permissions on the dependent's behalf.
+        let api = lua.create_table().unwrap();
+        api.set("look", lua.create_function(|_, ()| Ok(1)).unwrap()).unwrap();
+        api.set("name", "kontakt").unwrap();
+        assert!(!hands_over_its_host(&api, &dep_host), "exported functions are the model");
+
+        // A namespace the dependency was granted is not the host table, and passing one on is
+        // the dependency's own decision to make — the guard is about the accident, not about
+        // policing what a module chooses to expose.
+        let ns = lua.create_table().unwrap();
+        ns.set("screen", dep_host.get::<Table>("screen").unwrap()).unwrap();
+        assert!(!hands_over_its_host(&ns, &dep_host));
+
+        // A different module's host table must not trip it either.
+        let other = lua.create_table().unwrap();
+        assert!(!hands_over_its_host(&other, &dep_host));
+    }
+
     /// The gate refuses by NAME, so the message can say which module and which capability —
     /// a refusal a user cannot act on is only half a refusal.
     #[test]
@@ -1870,6 +1902,9 @@ end"))
     // timer the dependency registers still belongs to THIS module and dies with it.
     let caps = shared.caps.borrow().get(idx).cloned().unwrap_or_default();
     let host_view = gated_view(lua, &host_m, &caps, id)?;
+    // Registered on the whole table (that is what the view falls through to), handing over
+    // the VIEW (an included file is this module's own code, judged by this module's manifest).
+    install_include(lua, shared, idx, &host_m, &host_view)?;
     lua.globals().set("host", &host_view)?;
 
     // Top-down dependency loading: evaluate each `code_module` dependency
@@ -1912,18 +1947,7 @@ end"))
             // called cannot be caught by any amount of scanning — that is the rule
             // `privileged_luau_that_hands_out_its_host_defeats_the_gate` records — so this
             // catches the accident and does not pretend to be a boundary.
-            let mut leaked = t == &host_dep;
-            if !leaked {
-                for (_, v) in t.clone().pairs::<mlua::Value, mlua::Value>().flatten() {
-                    if let mlua::Value::Table(v) = v {
-                        if v == host_dep {
-                            leaked = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if leaked {
+            if hands_over_its_host(t, &host_dep) {
                 anyhow::bail!(
                     "dependency '{dep_id}' of '{id}' returns its own host table, which would \
                      hand '{id}' every capability '{dep_id}' declares. Export functions that \
@@ -2501,8 +2525,15 @@ impl Manager {
     /// place that could disable or remove the offending module is the window that never
     /// opened.
     ///
-    /// So: a log line, and the same queue the module-error dialog drains, which puts it in
-    /// front of the user as an accessible modal as soon as there is a window.
+    /// So: a log line, and the same queue the module-error report drains, which puts it in
+    /// front of the user as an accessible window as soon as there is one. Not a modal any
+    /// more — that queue is drained into a top-level frame (`report_error` in `gui.rs`), so a
+    /// load failure no longer stops the application while it waits to be read.
+    ///
+    /// Note that this pushes STRAIGHT onto the queue rather than through `queue_dialog`, so
+    /// it is not deduped: one failing code dependency reports once per dependent that could
+    /// not load because of it. They land in one window, in one tick, which is why that window
+    /// gives every report its own heading.
     fn report_load_failure(&self, dir: &str, e: &anyhow::Error) {
         let name = std::path::Path::new(dir)
             .file_name()
@@ -3121,6 +3152,28 @@ fn undeclared(id: &str, key: &str, note: &str) -> mlua::Error {
         "module '{id}' used host.{key} without declaring it — add \"{cap}\" to \
          [capabilities] require in its module.toml{note}"
     ))
+}
+
+/// Does `exported` hand `host_dep` — the dependency's own host table — back to the module
+/// that required it?
+///
+/// A named function rather than four lines inline, because it is the rule that decides
+/// whether a dependency's export is an API or a capability handover, and a rule nobody can
+/// call is a rule nobody can test.
+///
+/// Deliberately shallow, and by identity. A closure that returns the table when called
+/// cannot be caught by any amount of scanning — see
+/// `privileged_luau_that_hands_out_its_host_defeats_the_gate` — so this catches the accident
+/// and does not pretend to be a boundary.
+fn hands_over_its_host(exported: &Table, host_dep: &Table) -> bool {
+    if exported == host_dep {
+        return true;
+    }
+    exported
+        .clone()
+        .pairs::<mlua::Value, mlua::Value>()
+        .flatten()
+        .any(|(_, v)| matches!(v, mlua::Value::Table(t) if &t == host_dep))
 }
 
 /// A view over `full` that refuses the gated namespaces `caps` does not name.
@@ -4842,7 +4895,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     )?;
     host.set("arbiter", arbiter)?;
 
-    install_include(lua, shared, idx, &host)?;
+    // `include` is deliberately NOT installed here. It has to hand over the module's GATED
+    // view, which does not exist yet at this point — see the call after `gated_view` in
+    // `run_module_code`, and the note on `install_include` about why the two tables differ.
 
     // host.calibrating — true while "Calibration keys in overlays" is on (the Application
     // settings tab, or the AUTOMATION_PLATFORM_CALIBRATE variable for a launch with no window
@@ -4880,11 +4935,25 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
 ///     without normalizing, which lets a path escape the module directory; that is a
 ///     nuisance for reading a file and a different thing entirely for executing one.
 ///   * An include cycle is an error naming the file, not a stack overflow.
-fn install_include(lua: &Lua, shared: &Rc<Shared>, idx: usize, host: &Table) -> Result<()> {
+fn install_include(
+    lua: &Lua,
+    shared: &Rc<Shared>,
+    idx: usize,
+    host: &Table,
+    hand: &Table,
+) -> Result<()> {
     let sh = shared.clone();
-    // The host table the included file will receive. Held in the registry for the VM's
-    // lifetime, which is exactly how long the host table itself lives.
-    let host_ref = std::rc::Rc::new(lua.create_registry_value(host.clone())?);
+    // The host table the included file will receive — `hand`, which is NOT necessarily the
+    // table `include` is registered on.
+    //
+    // These were one argument, and it was a hole. `include` has to be REGISTERED on the
+    // ungated table, because that is what a module's gated view falls through to; but what
+    // an included file is HANDED must be the gated view, because an included file is the
+    // module's own code and gets the module's own permissions. Passing the same table for
+    // both meant every included file ran ungated — and since `include` needs no capability,
+    // every module had that route. Measured, not deduced: a module declaring only `log`
+    // reached `host.speech` and `host.screen` from a second file in its own package.
+    let host_ref = std::rc::Rc::new(lua.create_registry_value(hand.clone())?);
     host.set(
         "include",
         lua.create_function(move |lua, rel: String| {

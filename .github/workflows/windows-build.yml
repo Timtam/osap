@@ -70,6 +70,31 @@ jobs:
       - name: Test
         run: cargo test --release -- --nocapture
 
+      # A hole in the capability gate is silent by nature, which is why this is a job step and
+      # not a unit test. `host.include` handed included files the UNGATED host table for as
+      # long as includes existed and nothing ever failed, because every module that used the
+      # route was entitled to what it reached; an adversarial review of an unrelated commit
+      # found it. The defect was not inside a function but BETWEEN two of them — in which
+      # table one handed the other — so only a real load of a real module can see it.
+      - name: The capability gate still holds
+        shell: pwsh
+        run: |
+          $env:AUTOMATION_PLATFORM_HEADLESS = '1'
+          $log = 'target/release/automation-platform.log'
+          Remove-Item $log -ErrorAction SilentlyContinue
+          $p = Start-Process -FilePath 'target/release/automation-platform.exe' `
+                 -ArgumentList "$PWD/tools/capability-probe" -PassThru
+          for ($i = 0; $i -lt 40; $i++) {
+            if ((Test-Path $log) -and (Select-String -Path $log -Pattern 'CAPABILITY PROBE' -Quiet)) { break }
+            Start-Sleep -Milliseconds 500
+          }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          if (-not (Test-Path $log)) { throw 'the probe produced no log at all' }
+          Get-Content $log
+          $verdict = Select-String -Path $log -Pattern 'CAPABILITY PROBE:'
+          if (-not $verdict) { throw 'the probe never reported a verdict — it did not run' }
+          if ($verdict.Line -match 'HOLE') { throw "the capability gate is open: $($verdict.Line)" }
+
       # The documentation ships inside the artifact and works offline from the folder, so a
       # tester with no internet still has it. `package.ps1` packages without it rather than
       # failing — a tester without docs still has a working application — but an artifact that

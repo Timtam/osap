@@ -1,0 +1,12 @@
+id = "com.tool.capability-probe"
+name = "Capability probe"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
+
+# Deliberately minimal, and the whole point of the module. It declares `log` so it can report,
+# and NOTHING else — every namespace it reaches for below is one it has not asked for. A run
+# that reaches any of them is a hole in the capability gate.
+[capabilities]
+require = ["log"]
+
+entry = "src/main.luau"
