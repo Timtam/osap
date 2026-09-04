@@ -178,6 +178,16 @@ fn post_mouse(etype: CGEventType, x: i32, y: i32, button: CGMouseButton, clicks:
     let src = source();
     match CGEvent::new_mouse_event(src.as_deref(), etype, point, button) {
         Some(event) => {
+            // Cleared rather than inherited, for the reason `key_post` gives: a source built
+            // on the hardware state hands the new event whatever modifiers are physically
+            // held, and a click is often posted from inside a hotkey callback — while the
+            // combination that triggered it is still down. Found by review of the shortcut
+            // that puts the keyboard back into a plugin: it clicks while a five-key chord is
+            // held, and a Control-modified left click is a secondary click on this platform,
+            // so the click would have opened a context menu instead of moving the keyboard.
+            // Keys had this clearing since Melodyne wanted a bare F-key; mouse events did not,
+            // and the reference for `send` said so in as many words.
+            CGEvent::set_flags(Some(&event), CGEventFlags::empty());
             if let Some(n) = clicks {
                 CGEvent::set_integer_value_field(
                     Some(&event),
@@ -314,6 +324,14 @@ pub fn mouse_scroll(x: i32, y: i32, lines: i32) {
             // Setting it explicitly means the target does not depend on the move posted just
             // above having been processed first.
             CGEvent::set_location(Some(&event), CGPoint::new(x as f64, y as f64));
+            // Cleared for the same reason `post_mouse` clears, and here because leaving one
+            // synthesised mouse event inheriting the chord is worse than leaving all of
+            // them: Shift plus a wheel is a horizontal scroll to AppKit and a fine step to
+            // several plug-in frameworks, so a module scrolling from its own hotkey handler
+            // would move the wrong axis and then read back "it did not move". No shipped
+            // caller does that today — both reach `scroll` from bare captures — which is why
+            // this is symmetry rather than a fix for something measured.
+            CGEvent::set_flags(Some(&event), CGEventFlags::empty());
             post(&event);
         }
         None => crate::logging::line(

@@ -185,15 +185,44 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
   - Blind code, and the probe already measures exactly this: its regions 1 and 2 are proved
       flat and region 3 straddles an edge, so the next log from a Mac says whether Vision was
       inventing on that input in the first place.
-- [ ] **The seven first-session measurements** in docs/macos-port.md, in that order: does
-      anything appear, are coordinates right on Retina, is a capture real, does the tap
-      suppress, does OCR read plugin text, does `_AXUIElementGetWindow` work, what does the
-      pump cost.
-- [ ] **Does Apple Vision read a lone digit?** The one measurement that decides whether the
-      second OCR engine has to become cross-platform: Windows runs a neural fallback
-      precisely because the system engine refuses single glyphs, and that fallback is a
-      Windows-only dependency. Ten minutes with one request against the crops the Windows
-      spike already produced.
+- [x] **The seven first-session measurements** — taken (2026-09-03), on a 2015 Intel
+      MacBook Air, macOS 12.7.6, VoiceOver running, all three permissions granted, the
+      build signed as "OSAP Local Signing" so the grants survive a rebuild. In the order the
+      doc lists them:
+  1. **Does anything appear** — yes: bundle, menu-bar item, environment block, three clean
+      sessions, no module refused, no crash.
+  2. **Coordinates on Retina** — HALF. The pointer's position and the window's AX frame
+      agree, and a capture comes back at 1.00x — but this machine has a backing scale of
+      1.00, so the 2.00x case the question was really about is still unmeasured. Needs a
+      Retina Mac or an external display at a scaled resolution.
+  3. **Is a capture real** — yes: `probe-1.png` is a faithful 1013x580 screenshot, 16 ms.
+  4. **Does the tap suppress** — yes: "the event tap suppressed its first key (vk 0x09)",
+      which is Tab, and Input Monitoring reported granted.
+  5. **Does OCR read plugin text** — yes: 58 words from REAPER's FX window; the three
+      sforzando read-outs read `empty`, `64`, `DEF`.
+  6. **`_AXUIElementGetWindow`** — indirectly: the frame lines ("content starts 28pt below
+      the frame top") show the window pairing holds. No log line names the private call
+      itself, so this is inferred from the geometry working, not read off a measurement.
+  7. **The pump budget** — measured, and it is the number this port most needed. An ordinary
+      Tab step costs **90–250 ms on the event thread**: the synchronous Vision read of the
+      read-out (`announce 248` for the 123x23 pt Instrument field). Windows pays 23–34 ms
+      for the same step. The tap SURVIVED that — not one re-enable in minutes of navigation.
+      It was switched off three times in the session, each during a stall of over a second
+      (five F6 presses at 1.0–1.5 s each, and the probe's 2.4 s), and the watchdog had it
+      back within about two seconds every time. So: the main thread suffices, the ceiling is
+      roughly a second, and the two things that crossed it are named below.
+- [x] **Does Apple Vision read a lone digit?** Yes (2026-09-03). The probe of REAPER's FX
+      window returned `'1'`, `'2'` and `'0%'` as tokens of their own, so the second OCR engine
+      does NOT have to become cross-platform for that reason. What the same session left open
+      is narrower and is the next item.
+- [ ] **PB RANGE reads nothing at the value 1 in sforzando standalone; POLY. at 1 reads
+      fine.** Reported by the tester, and the module predicted it about itself: its macOS
+      region for the pitchbend field `{576, 38, 607, 60}` was flagged in its own comment as
+      "the one most likely to want a nudge", because the probe's box for RANGE overlapped
+      DEF's by three points. Since Vision reads lone digits, the region is the suspect, not
+      the recogniser. One probe of the standalone with PB RANGE set to 1 settles it — a state
+      the tester CAN produce, through our own menu — and no log line for it exists yet,
+      because the overlay logs a read's timing, never its text.
 - [ ] **Do Qt object names survive into `AXIdentifier`?** The strings the Kontakt and
       Komplete Kontrol modules navigate by (`FileTypeSelector`, `WhatsNewScreen`) reach
       Windows through Qt's Windows accessibility provider; the macOS bridge is a different
@@ -648,8 +677,12 @@ reported by a test, because none of them fails loudly.
 
 Foundation: [docs/reahotkey-port-analysis.md](docs/reahotkey-port-analysis.md).
 
-- [ ] **Pre-Flight 1:** Verify the window/plugin frame on macOS. [VOCR](docs/prior-art-vocr.md) demonstrates: the AX frame (`AXPosition`/`AXSize`) of the focused app window is reliable even for non-accessible plugin windows and serves as the capture/coordinate origin. What remains to be checked: sub-view frame of an *embedded* plugin vs. floating window (REAPER can show plugins as floating windows → simplest case).
-- [ ] **Pre-Flight 2:** macOS TCC onboarding (Accessibility + Screen Recording, Input Monitoring only with CGEventTap). **Hotkey strategy per VOCR:** registered hotkeys via Carbon `RegisterEventHotKey` + context scopes → **no** CGEventTap/Input Monitoring/silent-disable needed. CGEventTap + health watchdog (`tapIsEnabled`/`tapEnable`) only if suppression/remapping/hotstrings are required. Permission persistence across self-updates (stable team/bundle ID). Study P0-2 + P0-9.
+- [x] **Pre-Flight 1** — verified 2026-09-03: the AX frame of REAPER's FX window and of
+      sforzando standalone both resolve, with the content inset (28 pt below the frame top)
+      reported per window class. Original text follows. Verify the window/plugin frame on macOS. [VOCR](docs/prior-art-vocr.md) demonstrates: the AX frame (`AXPosition`/`AXSize`) of the focused app window is reliable even for non-accessible plugin windows and serves as the capture/coordinate origin. What remains to be checked: sub-view frame of an *embedded* plugin vs. floating window (REAPER can show plugins as floating windows → simplest case).
+- [x] **Pre-Flight 2** — verified 2026-09-03: all three grants present in the tester's
+      session and surviving a rebuild under the local signing identity. Original text
+      follows. macOS TCC onboarding (Accessibility + Screen Recording, Input Monitoring only with CGEventTap). **Hotkey strategy per VOCR:** registered hotkeys via Carbon `RegisterEventHotKey` + context scopes → **no** CGEventTap/Input Monitoring/silent-disable needed. CGEventTap + health watchdog (`tapIsEnabled`/`tapEnable`) only if suppression/remapping/hotstrings are required. Permission persistence across self-updates (stable team/bundle ID). Study P0-2 + P0-9.
 - [x] **Overlay calibrator (Windows):** armed with `AUTOMATION_PLATFORM_CALIBRATE=1` and captured (not registered), so the keys belong to whichever overlay is ACTIVE — the only thing that can answer where its own controls land, since the coordinate frame (origin, frame offset, `rawOrigin`, landmark anchoring) is its own. **Ctrl+Alt+Shift+S** writes a screenshot of the coordinate window with a crosshair on every control plus the pixel read there, and logs the active window, every control in enumeration order with the chosen origin marked, and the origin's named accessibility elements; **+T** crops a template around the focused control straight into the module; **+V** counts that template's matches. It replaced a workflow of three-to-six rounds of throwaway diagnostics per coordinate, and the roster/tree half exists because a wrong ORIGIN is invisible in a list of coordinates — they are all faithfully wrong together. ✓ (2026-07-27)
   - [ ] The macOS counterpart, once there is a macOS backend to calibrate against.
 - [ ] Concretize the **capture+OCR performance budget** (max capture frequency, ROI size) — GTune polls at 4 Hz; more expensive under ScreenCaptureKit than Windows `PixelGetColor`. Part of study §10.2.
@@ -1368,6 +1401,80 @@ It does not: the string does not appear anywhere in its 65 lines.
 Asked whether prism should replace `tts` on macOS as well, so that the dependency goes
 entirely. The answer is no, but the cleanup behind the question is worth doing — with our own
 wrapper rather than with prism.
+## The first Mac session — what it left open (2026-09-03)
+
+Three sessions, one tester, one plugin. Everything that was settled is ticked where it was
+asked; this is what was NOT, plus what the session found that nobody had asked.
+
+- [ ] **The startup announcement is silent on every Mac, by default.** The tester: "I don't
+      hear the spoken notification that Automation Platform is running in the menu bar".
+      The log explains it completely: `announce()` speaks only when `via_screen_reader()` is
+      true, which on macOS is `voiceover_speech() && is_running()` — and "Speak through
+      VoiceOver" is off by default (`settings on: dock_while_open`, nothing else). The comment
+      in `gui.rs` says the host "may still speak this one"; it cannot, with the defaults. The
+      fix is the plain voice for this one line when there is no balloon, which is what the
+      comment meant. Not done in this round — the owner chose F6 and the busy-skip first.
+- [ ] **F6 into the plugin: rewritten, and unrun.** Five of five presses failed in the
+      session, with the backend reporting every request accepted and the focus chain still
+      three deep — REAPER keeps its keyboard on the FX list, and the plugin's view exposes no
+      element to hand it to. `daw-hosts` now clicks three points inside the plugin's panel
+      when the chain says the keyboard is on REAPER's own chrome, reads the chain again a
+      quarter of a second later on a timer (a posted click has not been processed when the
+      call returns; the first draft read it in the same breath and would have raced it), and
+      announces only what that reading supports. Two readings of the chain an adversarial
+      review caught as wrong: an EMPTY chain is a failed read, not "inside", and a chain that
+      does not end in our window belongs to another application. No click is sent on either,
+      because a click on that basis lands in whatever is actually in front. The click point
+      is derived from the probe (content 240,52 plus the measured FX-list width, memoised per
+      window). A third finding, from the review's critic rather than its reviewers: the click
+      was posted while the hotkey's four modifiers were still physically held, and macOS
+      mouse events inherited them — a Control-modified left click is a secondary click, so
+      the shortcut would have opened a context menu. Mouse events now have their flags
+      cleared in the backend, as key events have since Melodyne. And the backend's focus
+      chain now answers EMPTY when the focus could not be read, instead of substituting the
+      window and looking exactly like "inside". Whether REAPER moves its focus on the click,
+      only the next session can say.
+  - **Known limitation, and it needs a second plug-in to settle.** "The keyboard is on the
+      host's chrome" is read from the chain being deeper than the window itself, which is
+      only right for a plug-in whose view exposes nothing — sforzando, as measured. A plug-in
+      that exposes its own controls would put the focus several elements deep INSIDE itself,
+      be read as chrome, get clicked at its corner and be reported as a failure that is not
+      one. The REAPER matcher is title-based, so every plug-in takes this path. Distinguishing
+      the two needs an accessible plug-in on the tester's machine to look at first.
+- [ ] **Each F6 press cost a second and switched the tap off twice.** `host.window.find`
+      lists every window, `enumerate_windows` asked every application, one of them was not
+      answering, and the loop never consulted the busy quarantine that
+      `frontmost_window_element` has used since it was introduced. It does now — and the
+      review was right that this is narrower than it reads: the quarantine lasts five
+      seconds, his presses were 16–51 s apart, so it would have spared none of them. The fix
+      that would have: `find` carries an `app` clause (`exe`, `bundleId`), and
+      `runningApplications()` answers name and bundle without one accessibility call, so
+      `list` could ask only the applications a matcher names. That needs the filter to reach
+      the backend (`host.window.list(filter?)`), which is API surface, and is not done blind.
+      When an application IS in the quarantine, `find` is blind to its windows for five
+      seconds; the log now names the application it did not ask, and the shortcut says "could
+      not find a plugin window", which is what it knows.
+- [ ] **Retina is still unmeasured.** The tester's Air has a backing scale of 1.00. The
+      coordinate agreement shown by the probe is real and answers nothing about 2.00x.
+- [ ] **The arm64 half of the universal build has never run.** The session ran the x86_64
+      slice (no Rosetta). The CI's `lipo` check proves both slices exist, not that the arm64
+      one launches.
+- [ ] **Qt object names in `AXIdentifier`** — still open. The tester probed sforzando, which
+      is not a Qt application. Needs a probe of Kontakt or Komplete Kontrol.
+- [ ] **The VoiceOver transport** — still unmeasured, because the switch was off. Ask the
+      tester to turn "Speak through VoiceOver" on for the next round; the `voiceover.sdef`
+      he sent confirms the `output` command exists.
+- [x] **The pump line spoke of Windows on a Mac.** "past ~300 ms Windows stops waiting for
+      our keyboard hook" appeared 34 times in a macOS log. It names the platform's own
+      hazard now (the tap being switched off). Noted because it cost reading time before it
+      was recognised as wording.
+- [x] **`docs/macos-port.md` claimed the tap lives on its own thread.** It does not
+      (`tap.rs`: main thread), and the session showed the main thread suffices. Corrected.
+- Observed and left alone, because they behaved: REAPER and sforzando each refused the focus
+  observer when first seen (busy at startup) and were subscribed later on the next
+  activation; seven `Return` presses reached the plugin while its menu was open, which is the
+  menu pass-through working; `ownsPoint` answered `nil` throughout, by design.
+
 
 - [x] **The measurement that settles it was already sitting in CI.** The start-up timing added
       for the Windows work ran on a real Mac: run 33620074214, HEAD `8e44699`, macos-15-intel —
@@ -1429,9 +1536,11 @@ wrapper rather than with prism.
       deliberately: a way to send DIFFERENT text to a braille display than to the ear, which
       would be an option on `output` rather than a namespace of its own — worth building only
       when a module needs it, and a 40-character braille line suggests one eventually will.
-- [ ] **Order of operations.** None of this before the Mac tester has run the current build:
-      if the plain voice is fine there, this is tidying, and tidying comes after the platform
-      is known to work at all. If it is not fine, the wrapper is the fix.
+- [x] **Order of operations — answered by the first session** (2026-09-03): the plain voice
+      is fine. The tester heard the overlay throughout (and noted that with VoiceOver on
+      system TTS it does not even interrupt us). The wrapper is therefore tidying plus
+      Personal Voice, not a fix, and it waits on one more measurement: the VoiceOver
+      transport, which this round could not take because the switch was off.
   - prism on macOS only becomes reasonable if upstream drops the blocking Personal Voice wait
       from `initialize()` and the unconditional `dispatch_sync` to main in `speak()`. Both are
       changes to their source, not configuration, so it is not a decision this project can

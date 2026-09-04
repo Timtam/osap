@@ -10,4 +10,9 @@ license = "GPL-3.0-or-later"
 code_module = true
 
 [capabilities]
-require = ["window", "hotkey", "speech", "log"]
+# `input` for exactly one click, and `timer` for the one deferred reading that follows it:
+# the shortcut that puts the keyboard back into a plugin inside REAPER on macOS clicks into
+# the plugin's panel when the window accepted the focus but kept the keyboard on its own FX
+# list, then asks a quarter of a second later where the keyboard actually is. Whether the
+# click achieves that is unmeasured; the module announces only what the later reading says.
+require = ["window", "hotkey", "speech", "log", "input", "timer"]

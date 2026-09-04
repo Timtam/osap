@@ -301,6 +301,12 @@ is invisible on single-line text and wrong on everything else.
 **The first OCR call killing the keyboard.** Vision loads its model on the first request —
 routinely half a second to two seconds — and OCR runs synchronously on the pump thread. On
 a shared run loop that alone would have exceeded the tap's tolerance and disabled key
-capture permanently, mid-session, in a way that reads as "it worked and then stopped". The
-tap living on its own thread removes the mechanism; warming Vision on a background thread
-at startup, as the Windows backend already does for its second engine, removes the stall.
+capture, mid-session, in a way that reads as "it worked and then stopped". Warming Vision on
+a background thread at startup, as the Windows backend already does for its second engine,
+removes the stall. (An earlier draft of this paragraph said the tap "living on its own
+thread removes the mechanism" — it does not live there. The tap runs on the main thread, as
+`tap.rs` says, with a watchdog that re-enables it; a thread of its own is the escalation
+described above, not something that was built. The first tester session showed the main
+thread suffices for ordinary use: the tap was never disabled during minutes of Tab
+navigation, only by stalls of over a second, and the watchdog had it back within about two
+seconds each time.)

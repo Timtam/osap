@@ -119,31 +119,20 @@ ov:attachEmbedded({
 -- name into it — `FX: Track 1 "sforzando"` — on both platforms, and because on this one it is
 -- the only thing available.
 if host.os.is("macos") then
-  -- Measured from the probe capture rather than guessed: the plugin's dark panel begins at
-  -- x=240 and y=52 relative to the window's content origin. An OCR landmark present in both
-  -- the standalone and the embedded shot agreed to within one pixel.
+  -- Where the plugin sits inside the FX window is REAPER's geometry, not sforzando's, so the
+  -- numbers live in `daw-hosts` (`reaperPluginOrigin`), next to the shortcut that has to
+  -- click there. They were measured from this module's own probe captures — the plugin's
+  -- dark panel at content (240,52), with an OCR landmark in the standalone and the embedded
+  -- shot agreeing to within a pixel — and moved, not re-derived; one copy now.
   --
-  -- Only the vertical is authored. REAPER's FX list can be dragged wider or narrower, so the
-  -- horizontal is measured at run time from the one surface the accessibility tree does
-  -- expose — that list — plus the gap between it and the plugin, which the same capture puts
-  -- at nine points. The authored 240 stays as the answer for when the list cannot be read.
-  local REAPER_TOP_INSET = 52
-  local REAPER_LIST_GAP = 9
-  local REAPER_LEFT_FALLBACK = 240
-
   -- Memoised per window. Reading the surface list is an accessibility traversal, and paying
   -- for one on every spoken read-out is not affordable on the machine this runs on. The cost
   -- of memoising is that dragging the FX list divider needs a window switch before the
   -- coordinates follow; that is the right trade for a divider nobody moves mid-session.
   local pluginOrigin = O.memoByOrigin(function(o)
-    local dx = REAPER_LEFT_FALLBACK
-    local surfaces = host.window.controls()
-    local list = surfaces and surfaces[1]
-    if list and list.bounds and o.client then
-      dx = (list.bounds.x + list.bounds.w) - o.client.x + REAPER_LIST_GAP
-    end
-    host.log.info(("[sforzando] plugin origin inside the FX window: %d,%d"):format(dx, REAPER_TOP_INSET))
-    return { dx, REAPER_TOP_INSET }
+    local p = daw.reaperPluginOrigin(o)
+    host.log.info(("[sforzando] plugin origin inside the FX window: %d,%d"):format(p[1], p[2]))
+    return p
   end)
 
   local inDaw = O.new("sforzando in a DAW")
@@ -159,7 +148,12 @@ if host.os.is("macos") then
   -- it is the same question the Windows path asks with its list of chrome classes.
   inDaw:gate(function()
     local chain = host.window.focusChain()
-    return not chain or #chain <= 1
+    -- Exactly one link — the window — and not "one or none". An empty chain is the
+    -- backend saying it could not read where the keyboard is, and an overlay that took
+    -- that as "inside" would start capturing Tab and Return on a guess. It gated in on
+    -- `not chain or #chain <= 1` until the F6 work made the shortcut treat the same empty
+    -- reading as unknown, and one window with two readings of one fact is a contradiction.
+    return chain ~= nil and #chain == 1
   end)
   inDaw:attach({
     title = { contains = "sforzando" },

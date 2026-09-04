@@ -3058,6 +3058,22 @@ impl HostEvents for Dispatcher<'_> {
         if appcfg::trace() || appcfg::calibrate() {
             logging::line("keys", &format!("dispatch vk 0x{vk:02X}/m{mods}"));
         }
+                            // The hazard is different on each platform, and the line has to
+                            // name the right one: a Mac tester's log full of "Windows stops
+                            // waiting for our keyboard hook" was a puzzle before it was a
+                            // diagnosis. On macOS the system switches off an event tap whose
+                            // thread stops answering; the watchdog in tap.rs re-enables it
+                            // and logs that it did, so the two lines can be read together.
+                            #[cfg(windows)]
+                            let hazard = "past ~300 ms Windows stops waiting for our \
+                                          keyboard hook and delivers the key without us";
+                            #[cfg(target_os = "macos")]
+                            let hazard = "a stall this long is what gets the event tap \
+                                          switched off, and keys go uncaptured until the \
+                                          watchdog re-enables it";
+                            #[cfg(not(any(windows, target_os = "macos")))]
+                            let hazard = "keys can be delivered without us while the pump \
+                                          is this busy";
         let found = {
             let keys = self.shared.keys.borrow();
             keys.iter()
@@ -3610,7 +3626,17 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     win.set(
         "focus",
-        lua.create_function(move |_, id: isize| Ok(sh.backend.focus_window(id)))?,
+        lua.create_function(move |_, id: isize| {
+            let accepted = sh.backend.focus_window(id);
+            // A focus change is a fresh observation of the world, so the cache that served
+            // the last one is turned over — the same way a click does it. Without this, a
+            // module asking `focusChain()` right after this call, to find out whether the
+            // keyboard actually moved, would be answered from BEFORE the move: the two
+            // reads share the epoch the hotkey dispatch began, and the answer is the one
+            // thing the caller is asking for.
+            sh.bump_epoch();
+            Ok(accepted)
+        })?,
     )?;
 
     let sh = shared.clone();

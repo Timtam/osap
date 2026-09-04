@@ -73,6 +73,14 @@ host.input.click(300, 200)                       -- left click
 host.input.click(300, 200, { button = "right" }) -- right click
 ```
 
+### Windows
+
+Whatever the user is **physically holding is inherited** by the injected click, so one posted from a hotkey callback while Alt is still down is an Alt+click. The overlay runtime waits for the modifiers to come up before clicking for exactly that reason; a module clicking from its own hotkey handler needs the same care.
+
+### macOS
+
+The event's modifier flags are **cleared**, so a click is a bare click whatever is held — the same treatment `send` gives a key, and the same for `scroll`, `drag` and the `mouseDown`/`mouseUp` pair. Added when the shortcut that puts the keyboard back into a plug-in was found to click while its five-key chord was still down. What such a click would have done was not measured: by the AppKit convention a Control-modified left click is a secondary click, and the chord in question holds Control among four others, so a context menu is the likely reading rather than an observed one.
+
 ## host.input.drag(x1, y1, x2, y2, opts?) {#host-input-drag}
 
 Presses the mouse button at `(x1, y1)`, drags to `(x2, y2)`, and releases — with real, paced movement in between.
@@ -142,7 +150,7 @@ The modifiers are synthesised as real key presses around the key, and whatever t
 
 The modifiers are set as flags on the event, and setting them **replaces the whole set**, so anything the user is holding is stripped and the same call delivers a bare Escape. No modifier key event is posted at all, so an application that watches for physical modifier presses sees an unmodified key.
 
-The deferral dance is therefore unnecessary for *keys* here — but not for clicks: a synthesised click carries no flag-clearing of its own, so one posted while the user holds Alt is an Alt+click on both platforms.
+The deferral dance is therefore unnecessary for keys here, and since 2026-09-03 not for clicks either: a synthesised click has its flags cleared the same way (see `click`).
 
 ## host.input.text(text) {#host-input-text}
 

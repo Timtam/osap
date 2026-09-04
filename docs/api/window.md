@@ -144,12 +144,23 @@ doing nothing.
 
 ```luau
 local w = host.window.find({ title = { contains = "sforzando" } })
-if w and host.window.focus(w.id) then
-    host.speech.output("sforzando")
-else
+if not (w and host.window.focus(w.id)) then
     host.speech.output("could not get back to sforzando")
+    return
+end
+-- Accepted is not the same as arrived: read where the keyboard is before saying so. The
+-- identity test is the portable half — an empty chain, or one ending in another window,
+-- means this read says nothing about our window on either platform.
+local chain = host.window.focusChain()
+if #chain == 0 or chain[#chain].id ~= w.id then
+    host.speech.output("could not tell whether the keyboard is in sforzando")
+else
+    host.speech.output("sforzando")
 end
 ```
+
+A call also turns the observation cache over, so a `focusChain()` read straight after it
+reports the world after the change rather than before it.
 
 **Why it exists.** On Windows a screen-reader user gets back to a plugin's window with
 OSARA's F6. macOS has no equivalent: VoiceOver offers no command for it, so a plugin window
@@ -166,7 +177,7 @@ A minimised window is restored first, then brought to the foreground. `true` mea
 
 ### macOS
 
-Three separate things are attempted — raising the window, activating its application, and setting the accessibility focus flag — and the return is true if **either of the first two** succeeded. That is weaker than it reads: a tester session had it return `true` while the keyboard stayed on the host application's own control, and one Shift+Tab was needed to get in. So `true` means "raised", not "the keyboard is in it", and an overlay gating on focus-being-inside-the-plug-in can still decline to act after this reported success.
+Three separate things are attempted — raising the window, activating its application, and setting the accessibility focus flag — and the return is `true` if **either of the first two** succeeded; the focus flag's own answer is not part of it. Measured in the first tester session, five presses out of five in REAPER: all three were accepted and the keyboard stayed on REAPER's own FX list, because that plug-in's view exposes no accessibility element there is to hand it to. So `true` here means "raised and in front", never "the keyboard is in it", and an overlay gating on the focus being inside the plug-in can still decline to act after this reported success. Read [`focusChain()`](#host-window-focuschain) and take it three ways: **empty** means the backend could not read where the keyboard is; a chain whose last link is **not this window** belongs to another application, since activation is asynchronous; and a chain ending in this window tells you how deep the focus sits inside it. The `daw-hosts` shortcut does that, clicks just inside the plug-in's panel when the focus is deeper than the window itself, and reads the chain again a quarter of a second later, because a posted click has not been processed when the call returns. Whether that click moves REAPER's keyboard is not yet measured.
 
 Minimised windows are additionally dropped from `list()` and `find()` here, so one cannot normally be reached to pass in.
 
@@ -212,6 +223,10 @@ The chain's links are **windows**: it walks from the focused `HWND` up through i
 ### macOS
 
 The links are **accessibility elements**. Both platforms start at whatever has focus, but the units differ, so the same self-drawn plug-in can be many links deep here and one link there. A gate written as "the chain is at most one deep, therefore we are in the plug-in" is reading a granularity, not a fact about the plug-in — check what the chain actually contains rather than how long it is.
+
+**An empty chain means the focus could not be read**, and is never "the keyboard is in the window". Several states produce it: the application did not answer within the accessibility timeout, it is in the short quarantine that follows such a timeout, there is no frontmost application, or the Accessibility permission is not granted at all — in which case every chain is empty for the whole session. When the read succeeds and nothing inside the window reports focus (a plug-in view that is not accessible is exactly that), the window alone is returned, and that one-link chain is the honest answer. Until 2026-09-03 a failed read took the same fallback and came out identical to it.
+
+Depth is still not a fact about the plug-in. A one-link chain says the focus is the window; whether that means "the user is in the plug-in" depends on whether the plug-in exposes anything, which differs per plug-in and per platform.
 
 ## host.window.ownsPoint(id, x, y) {#host-window-ownspoint}
 

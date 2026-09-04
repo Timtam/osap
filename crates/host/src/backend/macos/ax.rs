@@ -387,6 +387,37 @@ pub(super) fn attribute_element(el: &AXUIElement, name: &CFString) -> Option<CFR
     v.downcast_ref::<AXUIElement>().map(|e| e.retain())
 }
 
+/// An element attribute read that tells a FAILED read apart from an absent value.
+///
+/// `attribute` folds both into `None`, and for every other caller that is right: nobody
+/// there needs to know. The focus chain does. "Nothing reports focus" and "the application
+/// did not answer within the messaging timeout" are opposite answers to the question a
+/// caller is asking — the first means the keyboard is in the window itself, the second
+/// means nothing is known — and folding them made a timed-out read look like success.
+pub(super) fn attribute_element_checked(
+    el: &AXUIElement,
+    name: &CFString,
+) -> Result<Option<CFRetained<AXUIElement>>, AXError> {
+    let mut raw: *const CFType = core::ptr::null();
+    let err = unsafe { el.copy_attribute_value(name, NonNull::from(&mut raw)) };
+    match err {
+        // The same three `note_error` files as "expected absence" rather than failure —
+        // classified here the way the funnel already classifies them, not by a second
+        // opinion of what counts as absent.
+        AXError::Success | AXError::NoValue | AXError::AttributeUnsupported => {
+            let v = NonNull::new(raw.cast_mut()).map(|p| unsafe { CFRetained::from_raw(p) });
+            Ok(v.and_then(|v: CFRetained<CFType>| v.downcast_ref::<AXUIElement>().map(|e| e.retain())))
+        }
+        other => {
+            if other == AXError::CannotComplete {
+                note_busy(element_pid(el));
+            }
+            note_error(other, &name.to_string());
+            Err(other)
+        }
+    }
+}
+
 /// An attribute read as a boolean. Absent is `None`, not `false`: for `AXMinimized` those
 /// two mean different things.
 fn attribute_bool(el: &AXUIElement, name: &CFString) -> Option<bool> {
@@ -1114,6 +1145,42 @@ pub fn enumerate_windows() -> Vec<WinInfo> {
         if pid <= 0 {
             continue;
         }
+        // The penalty box applies here too. The read below already RECORDS a timeout
+        // (`attribute` marks the application busy on CannotComplete); this loop simply never
+        // looked before asking, while `frontmost_window_element` has since the quarantine
+        // was introduced.
+        //
+        // What this buys is narrower than it first read. The tester's F6 — `host.window.find`,
+        // which lists every window — paid the full one-second messaging timeout on every one
+        // of five presses, because one application was not answering; the stalls were on the
+        // thread that carries the event tap, and the tap was switched off twice among them.
+        // This skip spares a press that comes within BUSY_PENALTY (five seconds) of the last
+        // timeout. His presses were 16 to 51 seconds apart, so it would have spared none of
+        // them, and it says nothing about why the key did not work (the focus stayed on the
+        // FX list, a different matter). The fix that would have helped is to ask only the
+        // applications a matcher names — `find` carries an `app` clause this loop never sees
+        // — and that is recorded in TODO.md rather than pretended here.
+        //
+        // Logged at line level, not trace, because this is what makes a window vanish from
+        // `find` for five seconds, and a module that then reports it could not find a window
+        // is saying something the log has to be able to explain. Bounded: `find`/`findAll`
+        // are the only callers, and the only shipped caller of those is the shortcut.
+        if is_busy(pid) {
+            // Named, not numbered. A module that finds nothing says so to somebody who
+            // cannot see the screen, and "could not find a plugin window" is only
+            // actionable if the log says which application was left out — a bare pid is a
+            // number the reader has to resolve themselves, and `exe_for_pid` is already
+            // cached on this thread.
+            crate::logging::line(
+                "macos",
+                &format!(
+                    "enumerate_windows: not asking {} (pid {pid}) for its windows, it did \
+                     not answer a moment ago",
+                    exe_for_pid(pid)
+                ),
+            );
+            continue;
+        }
         let app_el = app_element(pid);
         let Some(v) = attribute(&app_el, a_windows()) else {
             continue; // no windows, or a process with no accessibility surface at all
@@ -1289,10 +1356,14 @@ pub fn focus_window(handle: isize) -> bool {
             if raised { "yes" } else { "REFUSED" },
             if activated { "yes" } else { "REFUSED" },
             if focused { "yes" } else { "REFUSED" },
-            if depth <= 1 {
-                ", which means the keyboard is in the window itself"
-            } else {
-                ", so the keyboard is still on one of the host's own controls"
+            // Depth only, and said as depth. The chain is read straight after an
+            // activation that is asynchronous, so it can still describe another
+            // application — the caller that needs to know checks the last link's identity
+            // against the window it asked for, and this log line is not that caller.
+            match depth {
+                0 => ", and where the keyboard is could not be read",
+                1 => ", and the focused element is a window",
+                _ => ", so the focus is on something inside whatever is in front",
             }
         ),
     );
@@ -1511,9 +1582,16 @@ pub fn window_controls(hwnd: isize) -> Vec<ControlInfo> {
 ///
 /// The question it answers is whether the keyboard focus is inside a plugin's surface or on
 /// the host application's own chrome, so the order is the contract: `focusChain[1]` in Lua
-/// is the focused control. Never empty while there is a foreground window — where nothing
-/// reports focus, the window stands in for it, exactly as the Windows version falls back
-/// from `hwndFocus` to the foreground window.
+/// is the focused control.
+///
+/// **Empty means the focus could not be read.** Where the read succeeds and nothing reports
+/// focus, the window stands in for it, exactly as the Windows version falls back from
+/// `hwndFocus` to the foreground window — a plugin view that is not accessible is exactly
+/// that case, and a one-link chain ending in the window is the honest "inside". A read that
+/// FAILED (the application did not answer within the messaging timeout) used to take the
+/// same fallback and come out identical, so a module could not tell "measured: in the
+/// window" from "measured nothing", and would have announced the first for the second. Now
+/// it is empty, and the module treats empty as not knowing.
 pub fn window_focus_chain() -> Vec<ControlInfo> {
     let t = Instant::now();
     let sw = system_wide();
@@ -1521,15 +1599,21 @@ pub fn window_focus_chain() -> Vec<ControlInfo> {
     // overlay recheck, and resolving the frontmost application costs a workspace query plus
     // two or three cross-process reads that the usual case — something does have focus —
     // has no use for.
-    let (start, pid) = match attribute_element(&sw, a_focused_element()) {
-        Some(f) => {
+    let (start, pid) = match attribute_element_checked(&sw, a_focused_element()) {
+        Ok(Some(f)) => {
             let pid = element_pid(&f);
             (Some(f), pid)
         }
-        None => match frontmost_window_element() {
+        Ok(None) => match frontmost_window_element() {
             Some((w, p)) => (Some(w), p),
             None => (None, 0),
         },
+        Err(_) => {
+            crate::logging::trace("macos", || {
+                "focus chain: the focused element could not be read; answering empty".to_string()
+            });
+            return Vec::new();
+        }
     };
     let Some(start) = start else {
         return Vec::new();
