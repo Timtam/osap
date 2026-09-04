@@ -1454,6 +1454,44 @@ asked; this is what was NOT, plus what the session found that nobody had asked.
       When an application IS in the quarantine, `find` is blind to its windows for five
       seconds; the log now names the application it did not ask, and the shortcut says "could
       not find a plugin window", which is what it knows.
+- [ ] **`window.active()` is the biggest thing blocking the pump, and it is not what was
+      fixed.** Found on a second, systematic reading of the same log. It stalled the pump
+      **fourteen times**, worst case **2605 ms**; `enumerate_windows`, which the F6 work
+      guarded, stalled it six times. And the worst one had nothing to do with F6: it came
+      while the tester was simply using the plug-in, a moment after a menu closed
+      (`pid 1218 answered the frontmost-window question after 2455 ms`). This is the question
+      every overlay asks on every tick.
+  - The mechanism is written in `frontmost_window_element`'s own comment: "an application
+      that is not answering charges the messaging timeout three times over". It reads
+      `AXFocusedWindow`, then `AXMainWindow`, then `AXWindows` — and the `is_busy` gate is
+      only at the TOP. When the first read times out it quarantines the application, and the
+      two fall-backs then ask the application we just decided not to ask. The log shows
+      exactly that shape: `timed out reading AXFocusedWindow after 1s`, then an answer at
+      2455 ms.
+  - **Not fixed blind, because the obvious fix has a user-visible cost.** Re-checking
+      `is_busy` between the fall-backs caps the worst case at one timeout instead of three —
+      but it returns `None`, and `None` means "no active window", which is what an overlay
+      gates on: it would deactivate for up to the five-second quarantine rather than stall
+      for two seconds. Which of those a blind user would rather have is not answerable from
+      here. Three candidates, in the order I would try them: re-check between the fall-backs
+      AND serve the last known window while the application is quarantined; or cap the total
+      by lowering the messaging timeout for this one question; or get the question off the
+      thread that carries the event tap, which is the structural answer and the large one.
+- [ ] **Timers run about 5% slow on that machine, and a settle is a deadline.** Measured by
+      the probe: `10 x 100 ms took 1050 ms (shortest 105, longest 105)`, so a 900 ms watch
+      deadline is really about 945 ms there. Nothing is broken; it is a number modules with
+      settles and deadlines are written against, and every one of those was tuned on Windows.
+      Worth a look before blaming a module for missing a window that was never open long
+      enough.
+- [ ] **Vision costs the same whether the region is tiny or the whole window.** From the
+      same probe: a 1013x580 pt read took 730 ms and finished, while a **64x16 pt** read was
+      abandoned at its 457 ms deadline. Region size is not the lever — the per-request cost
+      is — which is why an ordinary Tab step costs 90-250 ms there against 23-34 ms on
+      Windows. It also means an overlay that reads three small fields pays three times, and
+      the way out is fewer requests rather than smaller ones: one read of a region covering
+      several fields, split afterwards by position. Before building that, measure whether one
+      request over a region holding three read-outs really costs less than three requests.
+
 - [ ] **Retina is still unmeasured.** The tester's Air has a backing scale of 1.00. The
       coordinate agreement shown by the probe is real and answers nothing about 2.00x.
 - [ ] **The arm64 half of the universal build has never run.** The session ran the x86_64
