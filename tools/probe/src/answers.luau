@@ -474,7 +474,13 @@ end
 -- it wants a measurement rather than an inference from two incidental log lines.
 --
 -- Reads the window's own content area once, then three small strips inside it, and reports
--- both. Nothing is interpreted here: the two numbers are the answer.
+-- both — best of three rounds each, because one pair of timings on a machine this variable is
+-- a single sample.
+--
+-- It DOES interpret, and the sentence that used to say otherwise was the problem: the verdict
+-- underneath compared the two totals with no margin at all, so five per cent read as "worth
+-- building". The rule it applies now is written into the line it prints, so a reader can
+-- disagree with the threshold instead of only with the conclusion.
 function M.ocrBatching(line, win)
   if not (host.ocr and host.ocr.recognize and win and win.client) then
     line("  ocr batching: host.ocr or the window's client area unavailable")
@@ -490,36 +496,75 @@ function M.ocrBatching(line, win)
   local band = { c.x, c.y, c.x + c.w, c.y + math.min(120, floor(c.h / 4)) }
   local third = floor((band[3] - band[1]) / 3)
 
-  local t0 = host.now()
-  local okOne, one = pcall(function() return host.ocr.recognize({ region = band }) end)
-  local oneMs = host.now() - t0
+  -- Three rounds, and the CHEAPEST of each kept. One pair of timings is a single sample on a
+  -- machine where an ordinary Tab step was measured anywhere between 90 and 250 ms, and
+  -- scheduling can only ever inflate a sample, never deflate it — so the floor is the honest
+  -- estimator for "what does this cost when nothing is in the way".
+  local ROUNDS = 3
+  local oneMs, manyMs = math.huge, math.huge
+  local oneWords, manyWords, failed = 0, 0, 0
+  for _ = 1, ROUNDS do
+    local t0 = host.now()
+    local okOne, one = pcall(function() return host.ocr.recognize({ region = band }) end)
+    local ms = host.now() - t0
+    if ms < oneMs then
+      oneMs = ms
+      oneWords = (okOne and one and one.words and #one.words) or 0
+    end
 
-  local manyMs, manyWords, failed = 0, 0, 0
-  for i = 0, 2 do
-    local strip = { band[1] + i * third, band[2], band[1] + (i + 1) * third, band[4] }
-    local t1 = host.now()
-    local ok, res = pcall(function() return host.ocr.recognize({ region = strip }) end)
-    manyMs = manyMs + (host.now() - t1)
-    if ok and res and res.words then
-      manyWords = manyWords + #res.words
-    else
-      failed = failed + 1
+    local roundMs, roundWords = 0, 0
+    for i = 0, 2 do
+      local strip = { band[1] + i * third, band[2], band[1] + (i + 1) * third, band[4] }
+      local t1 = host.now()
+      local ok, res = pcall(function() return host.ocr.recognize({ region = strip }) end)
+      roundMs = roundMs + (host.now() - t1)
+      if ok and res and res.words then
+        roundWords = roundWords + #res.words
+      else
+        failed = failed + 1
+      end
+    end
+    if roundMs < manyMs then
+      manyMs = roundMs
+      manyWords = roundWords
     end
   end
 
+  -- The number that actually decides, rather than the two it is derived from. Batching would
+  -- replace up to three reads with one, so what it saves is two EXTRA requests — and that is
+  -- the figure to compare against the cost of building it.
+  local extra = floor((manyMs - oneMs) / 2)
   line(
     "  ocr batching: one %dx%d region took %d ms and read %d word(s); the same band as three "
-      .. "strips took %d ms and read %d word(s)%s",
-    band[3] - band[1], band[4] - band[2], oneMs,
-    (okOne and one and one.words and #one.words) or 0,
-    manyMs, manyWords,
+      .. "strips took %d ms and read %d word(s); best of %d round(s)%s",
+    band[3] - band[1], band[4] - band[2], oneMs, oneWords,
+    manyMs, manyWords, ROUNDS,
     failed > 0 and string.format(" (%d strip(s) failed or timed out)", failed) or ""
   )
+  -- The rule is stated so it can be disagreed with, which is the whole difference between a
+  -- measurement and a verdict.
+  --
+  -- It used to be `manyMs > oneMs`: ANY difference at all read as "worth building". The first
+  -- run of this on a real Mac returned 354 ms against 374 — five per cent — and duly declared
+  -- a change to the runtime worth making, days before a session that could not be repeated.
+  -- An instrument whose threshold is zero cannot tell its finding from its noise, and this one
+  -- was about to cost a feature nobody needed.
+  --
+  -- WORTH_MS is what one extra Vision request has to cost before removing two of them is worth
+  -- a change to shared runtime code. Fifty, because an announcement on that machine already
+  -- costs 90 to 250 ms: saving a hundred is something a person notices, and saving twenty is
+  -- not. A guess, said out loud, with the number beside it so the next reader can pick another.
+  local WORTH_MS = 50
   line(
-    "  ocr batching: %s",
-    manyMs > oneMs
-      and "three reads cost MORE than one — batching a row of read-outs into one region is worth building"
-      or "three reads did not cost more than one — batching would buy nothing, leave the runtime alone"
+    "  ocr batching: an extra read costs about %d ms — %s",
+    extra,
+    extra >= WORTH_MS
+      and ("that is more than the " .. WORTH_MS
+        .. " ms this is worth building for, so batching a row of read-outs into one region "
+        .. "would pay for itself")
+      or ("that is under the " .. WORTH_MS
+        .. " ms this would be worth building for, so leave the runtime alone — three reads "
+        .. "are barely dearer than one here, and the per-request cost is not the thing to fix")
   )
 end
 

@@ -49,6 +49,25 @@ pub(crate) fn note_frontmost_before_gui() {
         .map(|app| app.processIdentifier())
         .unwrap_or(0);
     if front <= 0 || front == me {
+        // Said out loud, because this is where the trail used to end. Nothing is remembered
+        // here, so nothing is handed back later, and the agent stays in front of an
+        // application it never took the front from — with no window of its own for a screen
+        // reader's cursor to land on. The macOS tester described exactly that shape on a
+        // second launch ("the VO cursor ended up in no-mans-land") and there was not one line
+        // in the log about it, because both halves of this returned in silence.
+        crate::logging::line(
+            "macos",
+            &format!(
+                "nothing to hand the front back to at launch: frontmost is {}",
+                if front == me {
+                    "this application itself — a relaunch, or the window system named us before \
+                     anyone else"
+                        .to_string()
+                } else {
+                    format!("pid {front}")
+                }
+            ),
+        );
         return;
     }
     LAUNCH_FRONT.store(front, Ordering::Relaxed);
@@ -64,6 +83,14 @@ pub(crate) fn note_frontmost_before_gui() {
 pub(crate) fn restore_frontmost_after_gui_start() {
     let pid = LAUNCH_FRONT.swap(0, Ordering::Relaxed);
     if pid <= 0 {
+        // The other half of the same silence. `note_frontmost_before_gui` has already said why
+        // there is nothing here, so this one is traced rather than logged — but it is traced,
+        // because "the front was never handed back" and "the front was handed back and it did
+        // not help" are different sessions and used to look identical.
+        crate::logging::trace("macos", || {
+            "the front is not being handed back: nothing was noted before the GUI started"
+                .to_string()
+        });
         return;
     }
     let now = NSWorkspace::sharedWorkspace()

@@ -1630,10 +1630,23 @@ in macOS 14`, where without it the process would have aborted), `window.active` 
       (shortest 104, longest 729)`, so a 900 ms watch deadline is really about 1505 ms there,
       and a single hop can take 729 ms on its own. Every settle and deadline in every module
       was tuned on Windows. Measured twice in the same session (1673 and 1637 ms).
-- [ ] **One wide OCR read beats three narrow ones, measured:** `one 774x120 region took 354 ms
-      and read 28 word(s); the same band as three strips took 374 ms and read 26 word(s)`. The
-      probe states the conclusion itself — "batching a row of read-outs into one region is
-      worth building". That is now a design decision with a number behind it.
+- [x] **Batching OCR reads is NOT worth building, and the instrument said the opposite** —
+      corrected 2026-09-04, before the work was done rather than after. The numbers are `one
+      774x120 region took 354 ms and read 28 word(s); the same band as three strips took 374 ms
+      and read 26 word(s)`: three requests cost **5.6% more** than one, so an extra Vision
+      request is worth about 10 ms, not the hundreds the earlier hypothesis ("Vision costs the
+      same whether the region is tiny or the whole window") implied. Replacing three reads with
+      one would save about 20 ms of an announcement that costs 90-250 ms on that machine.
+  - **The verdict was `manyMs > oneMs`** — any difference at all, however small, read as "worth
+      building", and the function's own doc comment two lines above claimed it interpreted
+      nothing. So the instrument turned five per cent into a change to shared runtime code,
+      days before a session that cannot be repeated, and I was about to make it. The same
+      failure as the `window.active cost` verdict: a threshold that cannot tell the finding
+      from the noise.
+  - Fixed in the probe: best of three rounds rather than one sample, the per-extra-request cost
+      reported as the figure that actually decides, and a stated threshold (50 ms) with the
+      reasoning beside it so a reader can disagree with the rule rather than only the
+      conclusion.
 - [ ] **`enumerate_windows` is now the biggest stall on that machine** — 1291 ms and 1033 ms in
       the two probe runs, against `active_window`'s worst of 329 ms. It is the probe's own doing
       (`host.window.list`), so no shipped module pays it today, but the `find`-with-an-`app`
@@ -1648,7 +1661,20 @@ in macOS 14`, where without it the process would have aborted), `window.active` 
       handler (written precisely so a VoiceOver user is not left reading a list he cannot
       change) is never reached, because VoiceOver takes Space first. He asks whether that is
       expected of an `NSTableView`; it needs Apple's own documentation read rather than a guess.
-- [ ] **The startup announcement was silent on a second launch, and we have no log of it.**
+- [x] **The startup announcement now says what happened to it** — 2026-09-04. It could end
+      three ways — shown as a notification, spoken, or deliberately dropped because nobody is
+      listening — and the log recorded none of them, so a silence that was correct and a
+      silence that was a fault looked identical. All three are logged now, and `Speech::say`
+      names the transport it chose whenever that CHANGES (a line per line would bury a log an
+      overlay writes to on every focus step).
+  - **And two silent early returns were found on the way, which may be the whole fault.**
+      `note_frontmost_before_gui` gives up without a word when the frontmost application is
+      already this one — which is likelier on a relaunch — and `restore_frontmost_after_gui_start`
+      then finds nothing to hand back and also returns in silence. The front is never given
+      back, the agent stays in front of an application it never took the front from, and it has
+      no window for a screen reader's cursor to land on. That is the exact shape of "the VO
+      cursor ended up in no-mans-land", and it left no trace at all. Both say so now.
+- [ ] **The failing launch itself is still unreproduced.**
       "On first launch the expected prompt spoke with system TTS and VO cursor remained in
       Finder. However on a second launch, I got no feedback when OSAP was set to speak through
       VoiceOver, and in that failed case the VO cursor ended up in no-mans-land." The log we

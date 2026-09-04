@@ -90,6 +90,15 @@ pub struct Speech {
     /// permission needs, and `pump` sees it on the next tick.
     #[cfg(target_os = "macos")]
     last_personal: Cell<bool>,
+    /// Which way the last line went out, so a CHANGE can be logged without a line per line.
+    ///
+    /// 0 nothing yet, 1 VoiceOver, 2 the system voice. The tester reported a launch on which
+    /// he heard nothing at all with "Speak through VoiceOver" on; from the log it was
+    /// impossible to tell whether the line had gone to VoiceOver and vanished there, or gone
+    /// to the system voice and been inaudible for some other reason. Those are different
+    /// faults and this is the one bit that separates them.
+    #[cfg(target_os = "macos")]
+    last_route: Cell<u8>,
     /// Which engine each module VM has chosen for itself, by engine id.
     ///
     /// Keyed by the VM, because that is the unit the API can honestly promise. `host.speech`
@@ -121,6 +130,8 @@ impl Speech {
             vo: voiceover::VoiceOver::new(),
             #[cfg(target_os = "macos")]
             last_switch: Cell::new(crate::appcfg::voiceover_speech()),
+            #[cfg(target_os = "macos")]
+            last_route: Cell::new(0),
             // Seeded with the STORED value, so a switch that was already on when the
             // application started does not count as a rising edge and put a dialog up at
             // launch — which is the one thing this whole arrangement exists to avoid.
@@ -213,6 +224,18 @@ impl Speech {
     }
 
     /// Says `text`. `interrupt` drops whatever has not been said yet.
+    /// Says where speech is going, but only when that changes.
+    ///
+    /// A line per line would bury the log — an overlay speaks on every focus step. A line per
+    /// change is one at start-up and one whenever the answer moves, which is exactly the
+    /// number of times it is news.
+    #[cfg(target_os = "macos")]
+    fn note_route(&self, route: u8, why: &str) {
+        if self.last_route.replace(route) != route {
+            crate::logging::line("speech", &format!("speech is going to {why}"));
+        }
+    }
+
     pub fn say(&self, text: &str, interrupt: bool) {
         #[cfg(target_os = "macos")]
         {
@@ -229,9 +252,22 @@ impl Speech {
             // default — so without this the first thing the overlay ever said would switch a
             // screen reader on for somebody who had not asked for one. Not a failure either:
             // VoiceOver can be started later in the session and this simply starts working.
-            if on && voiceover::is_running() && self.vo.say(text, interrupt) {
+            let running = voiceover::is_running();
+            if on && running && self.vo.say(text, interrupt) {
+                self.note_route(1, "VoiceOver");
                 return;
             }
+            self.note_route(
+                2,
+                if !on {
+                    "the system voice — \"Speak through VoiceOver\" is off"
+                } else if !running {
+                    "the system voice — the setting is on but VoiceOver is not running"
+                } else {
+                    "the system voice — the setting is on and VoiceOver is running, but the \
+                     transport would not take the line"
+                },
+            );
         }
         #[cfg(windows)]
         {

@@ -634,6 +634,17 @@ impl Shared {
     fn announce(&self, text: &str) {
         if let Some(show) = self.notify.borrow().as_ref() {
             if show("Automation Platform", text) {
+                // Logged here too, and not only on the speech path below. An announcement has
+                // three possible ends — shown, spoken, or deliberately dropped — and a log
+                // that only records one of them cannot answer "what happened to it", which is
+                // the question this instrumentation exists for.
+                logging::line(
+                    "speech",
+                    &format!(
+                        "announcement ({} chars): shown as a notification",
+                        text.chars().count()
+                    ),
+                );
                 return;
             }
         }
@@ -644,7 +655,26 @@ impl Shared {
         // there was no balloon on that platform to show him anything instead. The line goes
         // out through whatever `say` chooses; the question here is only whether anybody is
         // there to hear it.
-        if self.speech.a_reader_is_present() {
+        // Logged either way, and this is the whole point of the line. The tester reported a
+        // launch on which nothing was said and the log had nothing to say about it — silence
+        // that was correct (nobody listening) and silence that was a fault looked the same
+        // from here, and only one of them is worth investigating. One line per announcement,
+        // and there are a handful per session.
+        let present = self.speech.a_reader_is_present();
+        logging::line(
+            "speech",
+            &format!(
+                "announcement ({} chars): {}",
+                text.chars().count(),
+                if present {
+                    "a screen reader is running, handing it to speech"
+                } else {
+                    "no screen reader is running, so it is not said — this application does \
+                     not speak at somebody who never asked it to"
+                }
+            ),
+        );
+        if present {
             self.speech.say(text, false);
         }
     }
