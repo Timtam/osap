@@ -1,9 +1,10 @@
 # macOS permissions
 
-*Three switches decide whether this application can do anything at all. None can be granted
-by the application. Two of them, when missing, do not produce an error — they produce
-plausible wrong answers, which for someone who cannot see the screen is the worst possible
-failure. This page is what to grant, how to check, and what each absence looks like.*
+*Four switches now, and none can be granted by the application. Three of them, when
+missing, do not produce an error — they produce plausible wrong answers, which for someone
+who cannot see the screen is the worst possible failure. The count grew with Automation,
+whose absence is the quietest of the lot: the setting reads as on and nothing happens. This
+page is what to grant, how to check, and what each absence looks like.*
 
 ## The short version
 
