@@ -88,9 +88,10 @@ sessions, which is what a module storing a choice needs.
 order, and to their braille display — none of which a voice can do. It reports `available`
 only while VoiceOver is running.
 
-**A Personal Voice is listed before it is usable.** Choosing one is what asks macOS for
-permission, so hiding it until then would make the feature invisible rather than merely
-unavailable. It reports `available` until somebody has been asked and refused.
+**Every voice in this list is usable, Personal ones included.** macOS only shows a Personal
+Voice at all once it has been authorised, so its presence *is* its availability — an entry
+here marked unavailable would describe a state that cannot occur. Getting one into the list
+is what the "Offer my Personal Voice to modules" switch does.
 
 ---
 
@@ -127,11 +128,13 @@ There is no per-voice worker here, unlike Windows: a voice is a property of each
 rather than of the synthesiser, so choosing one costs nothing and the first line after a
 choice is not slower than any other.
 
-**Choosing a Personal Voice is what asks for it.** macOS may put up a consent dialog; the
-answer arrives while the choice already stands, and a voice that turns out not to be
-permitted falls back to the system one rather than to silence. Asking at that moment rather
-than at start-up is deliberate — the authorisation call has been measured blocking for two
-minutes, and nobody should pay that for a feature they have not asked for.
+**A Personal Voice appears here only once it is allowed.** macOS does not let an application
+see that such a voice exists until the user has permitted that application to use it, so
+this list cannot offer one as a choice-that-asks: its presence is already the permission. The
+asking happens on the **"Offer my Personal Voice to modules"** switch in the Application
+settings, which is a deliberate act by the person at the keyboard rather than something a
+module can trigger. Needs macOS 14 or later; on anything older the API does not exist and
+nothing here pretends otherwise.
 
 ---
 

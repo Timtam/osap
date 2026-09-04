@@ -3637,9 +3637,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 Some(t) => t.get::<bool>("interrupt").unwrap_or(true),
                 None => true,
             };
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             sh.speech.say_for(idx, &text, interrupt);
-            #[cfg(not(windows))]
+            #[cfg(not(any(windows, target_os = "macos")))]
             sh.speech.say(&text, interrupt);
             Ok(())
         })?,
@@ -3671,7 +3671,11 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // accepting and quietly speaking somewhere else would be a promise not kept. Choosing
     // costs the engine's opening time on its own thread — 2.0 s for SAPI, 3.5 s for OneCore —
     // which the lines queue behind rather than being lost to.
-    #[cfg(windows)]
+    // Registered wherever `Speech` can honour them, which since 2026-09-04 is macOS as well.
+    // These went cross-platform in `Speech` and were left behind here for one commit, which
+    // made `engines()` list voices no module could select — a control claiming exactly what
+    // it cannot honour, and the rule this project treats as the important one.
+    #[cfg(any(windows, target_os = "macos"))]
     {
         let sh = shared.clone();
         speech.set(

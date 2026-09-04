@@ -83,6 +83,13 @@ pub struct Speech {
     /// The switch as it was last seen, so ticking it again re-arms a path that had failed.
     #[cfg(any(windows, target_os = "macos"))]
     last_switch: Cell<bool>,
+    /// The Personal Voice switch as it was last seen.
+    ///
+    /// Watched rather than wired to the checkbox, because the checkbox cannot reach here:
+    /// `run_gui` is handed closures, not the host. A rising edge is the deliberate act this
+    /// permission needs, and `pump` sees it on the next tick.
+    #[cfg(target_os = "macos")]
+    last_personal: Cell<bool>,
     /// Which engine each module VM has chosen for itself, by engine id.
     ///
     /// Keyed by the VM, because that is the unit the API can honestly promise. `host.speech`
@@ -114,6 +121,11 @@ impl Speech {
             vo: voiceover::VoiceOver::new(),
             #[cfg(target_os = "macos")]
             last_switch: Cell::new(crate::appcfg::voiceover_speech()),
+            // Seeded with the STORED value, so a switch that was already on when the
+            // application started does not count as a rising edge and put a dialog up at
+            // launch — which is the one thing this whole arrangement exists to avoid.
+            #[cfg(target_os = "macos")]
+            last_personal: Cell::new(crate::appcfg::personal_voice()),
             #[cfg(windows)]
             last_switch: Cell::new(crate::appcfg::screen_reader_speech()),
             #[cfg(any(windows, target_os = "macos"))]
@@ -184,14 +196,12 @@ impl Speech {
             .borrow_mut()
             .entry(engine.id.clone())
             .or_insert_with(|| fallback::Fallback::for_engine(&engine.name));
-        // A Personal Voice is listed but not usable until macOS has been asked, and asking is
-        // what choosing one means. The answer arrives on the worker; the choice stands either
-        // way, because a voice that turns out not to be permitted falls back to the system
-        // one rather than to silence.
-        #[cfg(target_os = "macos")]
-        if self.av.voices().iter().any(|v| v.id == engine.id && v.personal) {
-            self.av.authorise_personal();
-        }
+        // Nothing to ask for here, and an earlier draft asked in exactly the wrong place: it
+        // requested authorisation when the chosen voice was already marked personal — but
+        // macOS does not put a Personal Voice into `speechVoices()` UNTIL it is authorised,
+        // so the condition could never be true and the feature was unreachable. The request
+        // is a deliberate act by the user now, on the Personal Voice switch, and by the time
+        // one appears in this list it is already usable.
         self.chosen.borrow_mut().insert(vm, engine.id);
         true
     }
@@ -285,16 +295,16 @@ impl Speech {
                 screen_reader: true,
                 available: voiceover::is_running(),
             }];
-            let granted = self.av.personal_granted();
             for v in self.av.voices() {
+                // Every voice in this list is usable, Personal ones included: macOS only
+                // shows a Personal Voice at all once it has been authorised, so its presence
+                // IS its availability. Listing one as unavailable would describe a state that
+                // cannot occur.
                 out.push(Engine {
-                    // Available unless it is a Personal Voice nobody has been allowed to use.
-                    // `None` — nobody asked yet — counts as available: choosing it is what
-                    // asks, and refusing before the question has been put would be a guess.
-                    available: !v.personal || granted.unwrap_or(true),
                     id: v.id,
                     name: v.name,
                     screen_reader: false,
+                    available: true,
                 });
             }
             out
@@ -350,6 +360,37 @@ impl Speech {
     /// screen reader that goes silent without explanation is worse than one that says the
     /// wrong thing. So the refusal comes back here and the fallback says it instead.
     pub fn pump(&self) {
+        // The rising edge of the Personal Voice switch is the request. Falling is not the
+        // reverse: macOS keeps the grant, and nothing here should try to hand it back.
+        #[cfg(target_os = "macos")]
+        {
+            let on = crate::appcfg::personal_voice();
+            if on && !self.last_personal.replace(on) {
+                // What the status says decides whether there is anything to ask. Asking again
+                // when it is already granted would put a dialog up for nothing; asking again
+                // after a refusal does not bring the dialog back, so the log names the pane
+                // instead. Same shape as the VoiceOver Automation permission next door.
+                match self.av.personal_granted() {
+                    Some(true) => crate::logging::line(
+                        "speech",
+                        "Personal Voice: already granted — it is among the voices a module                          can choose",
+                    ),
+                    Some(false) => crate::logging::line(
+                        "speech",
+                        "Personal Voice: refused earlier, and macOS does not ask twice.                          System Settings > Privacy & Security > Speech Recognition is not                          it — a Personal Voice is allowed per application from the dialog                          alone, so the switch has to be turned off and on with the grant                          reset, or the voice re-shared in Accessibility settings.",
+                    ),
+                    None => {
+                        crate::logging::line(
+                            "speech",
+                            "Personal Voice was switched on — asking macOS, on the speech                              worker so the dialog cannot hold the event loop",
+                        );
+                        self.av.authorise_personal();
+                    }
+                }
+            } else {
+                self.last_personal.set(on);
+            }
+        }
         #[cfg(target_os = "macos")]
         for text in self.vo.refused() {
             // Not `interrupt`: these are lines VoiceOver turned down, said late and out of

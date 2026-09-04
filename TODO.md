@@ -1660,9 +1660,27 @@ wrapper rather than with prism.
       caught a `self.tts` that the rewrite had missed on the first pass, in the path that
       speaks lines VoiceOver turned down. That would have reached CI, not a person, but it is
       exactly the class of thing that used to reach the tester.
+  - **Three findings from the review, two of them structural.** `Speech::use_engine` and
+      `say_for` went cross-platform while the LUA BINDINGS in `lib.rs` stayed
+      `cfg(windows)` — so for one commit macOS listed voices no module could select and
+      `host.speech.use` did not exist there, which is precisely the rule this project treats
+      as the important one. And Personal Voice was unreachable by construction: the code asked
+      for authorisation only when the chosen voice was already marked personal, but macOS does
+      not put a Personal Voice into `speechVoices()` until it IS authorised. The circle is
+      broken by a switch — "Offer my Personal Voice to modules" — which is a deliberate act by
+      the person at the keyboard, the same shape as the VoiceOver Automation permission.
+  - **And one that would have killed the application at launch.** `voiceTraits` is not
+      available on every macOS this bundle promises to run on (12.0), the objc2 bindings carry
+      no availability information whatsoever, and an unrecognised selector is not a `None` —
+      it is an Objective-C exception through a Rust frame. Three sources gave three different
+      answers for when that selector arrived (10.15, 13.0, 14.0), so the code asks the runtime
+      with `respondsToSelector` instead of trusting any of them, and the answer goes in the
+      log. The class-method check needed the METACLASS, which is its own trap: `responds_to`
+      on a class object answers about instance methods and would have reported "no" for a
+      selector that exists.
   - Unrun, and these are what the next session settles: does the system voice speak at all,
-      does a chosen voice change what is heard, and does the Personal Voice consent dialog
-      appear when — and only when — one is chosen.
+      does a chosen voice change what is heard, does the Personal Voice switch raise its
+      dialog, and — from one log line — which macOS versions actually have `voiceTraits`.
 - [x] **The original plan, kept for the record:** our own `speech/avspeech.rs`, in the shape and size of `voiceover.rs`, over
       `objc2-avf-audio` (0.3.2, the same generation as the `objc2` crates already here — and
       `AVSpeechSynthesizer` lives in AVFAudio). The decisive advantage over prism is not the

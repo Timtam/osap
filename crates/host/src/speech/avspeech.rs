@@ -7,9 +7,12 @@
 //! **Why hand-written rather than a crate.** This replaces `tts`, and the reason is not the
 //! dependency count. It is Personal Voice: a voice the user recorded of themselves, which for
 //! somebody who spends their day listening to a synthesiser is not a novelty. `tts` does not
-//! expose it, and prism — the other candidate — asks for it in `initialize()`, at start-up,
-//! where the authorisation call blocks for up to two minutes. Asking only when somebody
-//! actually chooses a Personal Voice is the whole difference, and it needs the API directly.
+//! expose it, and prism — the other candidate — asks for it in `initialize()`, at start-up.
+//! Nobody here has measured what that costs; what is known is that prism's own vendor
+//! documentation puts a 120-second bound on the call, which is a bound rather than a
+//! measurement and is exactly why it must not be paid at launch. Asking only when the user
+//! deliberately switches Personal Voice on is the whole difference, and it needs the API
+//! directly.
 //!
 //! **Why a worker thread.** `speakUtterance` queues and returns, so the speaking itself does
 //! not block — but building the synthesiser and enumerating the installed voices do, and this
@@ -24,9 +27,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use objc2::rc::Retained;
+use objc2::runtime::NSObjectProtocol;
+use objc2::{sel, ClassType};
 use objc2_avf_audio::{
-    AVSpeechBoundary, AVSpeechSynthesisVoice, AVSpeechSynthesisVoiceTraits, AVSpeechSynthesizer,
-    AVSpeechUtterance,
+    AVSpeechBoundary, AVSpeechSynthesisPersonalVoiceAuthorizationStatus, AVSpeechSynthesisVoice,
+    AVSpeechSynthesisVoiceTraits, AVSpeechSynthesizer, AVSpeechUtterance,
 };
 use objc2_foundation::NSString;
 
@@ -45,7 +50,7 @@ pub struct Voice {
 
 enum Job {
     Say { text: String, interrupt: bool, voice: Option<String> },
-    /// Re-read the installed voices into the shared snapshot.
+    /// Re-read the installed voices and the Personal Voice status into the shared snapshot.
     Refresh,
     /// Ask macOS for permission to use Personal Voice. Only ever sent when somebody has
     /// chosen one — see the note on the file.
@@ -64,7 +69,8 @@ pub struct AvSpeech {
     /// Windows side uses, and for the same reason: enumerating voices is not free, and
     /// `engines()` is a question a module may ask on any tick.
     voices: Arc<Mutex<Vec<Voice>>>,
-    /// Whether Personal Voice has been granted. `None` until anybody has asked.
+    /// Whether Personal Voice has been granted. `None` where the question does not exist —
+    /// this macOS is too old for the API, or nobody has been asked and the system says so.
     personal_granted: Arc<Mutex<Option<bool>>>,
 }
 
@@ -159,6 +165,13 @@ fn run(
                 if let Ok(mut v) = voices.lock() {
                     *v = list;
                 }
+                // Read, not asked: `personalVoiceAuthorizationStatus` is a property and
+                // raises nothing. Knowing the answer before anybody chooses is what lets
+                // `engines()` say honestly whether a Personal Voice is available, instead of
+                // guessing and finding out later.
+                if let Ok(mut g) = personal_granted.lock() {
+                    *g = personal_status();
+                }
             }
             Job::AuthorisePersonal => {
                 let granted = request_personal_voice();
@@ -237,30 +250,84 @@ fn run(
 }
 
 /// Every installed voice, with the Personal ones marked.
+///
+/// **`voiceTraits` is asked for rather than assumed**, and that is not caution for its own
+/// sake. This bundle promises macOS 12.0, the tester's machine is 12.7.6, and the objc2
+/// bindings carry no availability information at all — every selector in them compiles to a
+/// bare `objc_msgSend`, so a method that does not exist on the running system is not a
+/// compile error and not a `None`: it is an unrecognised selector, an Objective-C exception
+/// crossing a Rust frame, and an application that dies at launch. For somebody who cannot
+/// see the screen that is indistinguishable from the application not being installed.
+///
+/// Which macOS introduced `voiceTraits` was, when this was written, answered three different
+/// ways by three different sources (10.15, 13.0, 14.0). Asking the runtime settles it without
+/// anybody having to be right — and the answer goes in the log, so the next session turns the
+/// disagreement into a measurement.
 fn installed_voices() -> Vec<Voice> {
     let t = Instant::now();
     let mut out = Vec::new();
     // SAFETY: a class method with no arguments returning an array of voices; nothing here
     // outlives the call except the strings, which are copied.
     let list = unsafe { AVSpeechSynthesisVoice::speechVoices() };
+    let traits_known = list.iter().next().is_some_and(|v| v.respondsToSelector(sel!(voiceTraits)));
     for v in list.iter() {
-        let (id, name, traits) = unsafe { (v.identifier(), v.name(), v.voiceTraits()) };
+        let (id, name) = unsafe { (v.identifier(), v.name()) };
         out.push(Voice {
             id: id.to_string(),
             name: name.to_string(),
-            personal: traits.contains(AVSpeechSynthesisVoiceTraits::IsPersonalVoice),
+            // Without the selector there are no Personal Voices to find: the trait bit and
+            // the authorisation call arrived together, so a system that cannot answer this
+            // cannot have one either. `false` is the true answer there, not a guess — and it
+            // is also what keeps `authorise_personal` unreachable, since the only caller
+            // asks for it exactly when a chosen voice reports `personal`.
+            personal: traits_known
+                && unsafe { v.voiceTraits() }
+                    .contains(AVSpeechSynthesisVoiceTraits::IsPersonalVoice),
         });
     }
     let personal = out.iter().filter(|v| v.personal).count();
     crate::logging::line(
         "speech",
         &format!(
-            "{} system voice(s) installed, {personal} of them personal, read in {} ms",
+            "{} system voice(s) installed, {personal} of them personal, read in {} ms{}",
             out.len(),
-            t.elapsed().as_millis()
+            t.elapsed().as_millis(),
+            if traits_known {
+                ""
+            } else {
+                " — this macOS has no voiceTraits, so Personal Voice does not exist here"
+            }
         ),
     );
     out
+}
+
+/// The Personal Voice authorisation as it stands, without asking anybody.
+///
+/// `Some(true)` granted, `Some(false)` refused, `None` never asked — or no such API on this
+/// macOS, which is the same answer to every caller: there is nothing to offer yet.
+///
+/// Guarded by `respondsToSelector` on the CLASS, for the reason `installed_voices` gives:
+/// these bindings carry no availability information, and a selector that does not exist is
+/// not a `None` but a dead process.
+fn personal_status() -> Option<bool> {
+    // The METACLASS, not the class: `personalVoiceAuthorizationStatus` is a class method, and
+    // `responds_to` on a class object answers about its INSTANCE methods. Asking the wrong one
+    // returns false for a selector that exists, which would have quietly reported "nobody has
+    // been asked" on every macOS including the ones that can answer.
+    if !AVSpeechSynthesizer::class().metaclass().responds_to(sel!(personalVoiceAuthorizationStatus))
+    {
+        return None;
+    }
+    // SAFETY: a class property with no arguments, returning an enum by value.
+    let status = unsafe { AVSpeechSynthesizer::personalVoiceAuthorizationStatus() };
+    match status {
+        AVSpeechSynthesisPersonalVoiceAuthorizationStatus::Authorized => Some(true),
+        AVSpeechSynthesisPersonalVoiceAuthorizationStatus::Denied
+        | AVSpeechSynthesisPersonalVoiceAuthorizationStatus::Unsupported => Some(false),
+        // NotDetermined, and anything a later macOS adds: nobody has been asked.
+        _ => None,
+    }
 }
 
 /// Asks macOS whether this application may use the user's Personal Voice.
@@ -283,10 +350,10 @@ fn request_personal_voice() -> bool {
         });
         AVSpeechSynthesizer::requestPersonalVoiceAuthorizationWithCompletionHandler(&handler);
     }
-    // A bound rather than a wait: prism asks this at start-up and has been measured sitting
-    // in it for two minutes, which is what a consent dialog with nobody at the keyboard costs.
-    // Here the wait is on a worker and only after a deliberate choice, but an unbounded one
-    // would still hold the queue behind it for ever.
+    // A bound rather than a wait, and 120 s because that is the bound prism's own vendor
+    // documentation gives this call — not something measured here. What it protects against
+    // is a consent dialog nobody answers: the worker also says every line, so an unbounded
+    // wait would hold the overlay's voice behind a window the user may not have noticed.
     let granted = rx.recv_timeout(std::time::Duration::from_secs(120)).unwrap_or(false);
     crate::logging::line(
         "speech",

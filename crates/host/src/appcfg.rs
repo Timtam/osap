@@ -49,6 +49,7 @@ static OCR_DEBUG: AtomicBool = AtomicBool::new(false);
 static IGNORE_SUPPORTED_OS: AtomicBool = AtomicBool::new(false);
 static HEADLESS: AtomicBool = AtomicBool::new(false);
 static SPEAK_VIA_VOICEOVER: AtomicBool = AtomicBool::new(false);
+static PERSONAL_VOICE: AtomicBool = AtomicBool::new(false);
 static SCREEN_READER_SPEECH: AtomicBool = AtomicBool::new(true);
 static BRAILLE: AtomicBool = AtomicBool::new(true);
 static DOCK_WHILE_OPEN: AtomicBool = AtomicBool::new(true);
@@ -127,6 +128,25 @@ pub const SWITCHES: &[Switch] = &[
         // and that is the moment to ask.
         default_on: false,
         state: &SPEAK_VIA_VOICEOVER,
+    },
+    Switch {
+        key: "personal_voice",
+        label: "Offer my Personal Voice to modules — asks macOS for permission when you \
+                switch it on, and takes effect immediately once granted",
+        help: "A Personal Voice is one you recorded of yourself, in System Settings under \
+               Accessibility. macOS does not let an application see that such a voice exists \
+               until you have allowed that application to use it, so this is the permission \
+               rather than the feature: with it granted, your Personal Voice appears among \
+               the voices a module can choose, and without it nothing here can tell it is \
+               there. Needs macOS 14 or later. Asking takes a moment and puts a system \
+               dialog on screen, which is why it happens when you tick this and never on \
+               its own.",
+        os: Some("macos"),
+        // Off by default for the same reason as the switch above, and one more: the
+        // authorisation call has no upper bound anybody here can name. Nothing should pay
+        // that at start-up for a feature it has not been asked for.
+        default_on: false,
+        state: &PERSONAL_VOICE,
     },
     Switch {
         key: "screen_reader_speech",
@@ -275,6 +295,12 @@ pub fn braille() -> bool {
 #[cfg(target_os = "macos")]
 pub fn voiceover_speech() -> bool {
     SPEAK_VIA_VOICEOVER.load(Ordering::Relaxed)
+}
+
+/// Whether the user has asked for their Personal Voice to be offered to modules.
+#[cfg(target_os = "macos")]
+pub fn personal_voice() -> bool {
+    PERSONAL_VOICE.load(Ordering::Relaxed)
 }
 #[cfg(target_os = "macos")]
 pub fn dock_while_open() -> bool {
