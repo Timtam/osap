@@ -435,22 +435,82 @@ impl Speech {
 mod engine_list {
     //! Honest, cheap, and repeatable — and the process has to be able to EXIT afterwards,
     //! which it could not while the query opened its library on the caller's thread.
+    use std::sync::Mutex;
     use std::time::{Duration, Instant};
+
+    /// The two tests below must not run beside each other.
+    ///
+    /// What they exercise is process-global — one speech library, one worker thread per
+    /// `Speech`, and the machine's actual synthesisers. And the waiting is self-inflicted:
+    /// **every `engines()` call queues a refresh on that worker**, so a poll loop asking for
+    /// a usable voice is also generating the work it is waiting behind. One test doing that
+    /// is fine (a look is about 35 ms, the loop asks every 200). Two of them in parallel,
+    /// with the other test opening SAPI at the same time — a look while an engine is opening
+    /// was measured at 2.7 s — starve each other, and the wait never completes. Measured:
+    /// alone, both pass in 4.7 s; together in the full suite, one spent its entire ten-second
+    /// budget and still found no usable voice.
+    ///
+    /// Serialised here rather than with `--test-threads=1`, which would slow every other test
+    /// in the crate for the sake of these two. The lock is deliberately taken for the whole
+    /// body, and poisoning is ignored: a panic in one test must fail that test, not turn the
+    /// other into a second, confusing failure.
+    static SPEECH_TESTS: Mutex<()> = Mutex::new(());
+
+    /// Waits for a voice that can actually be CHOSEN, not merely for a list to exist.
+    ///
+    /// Both tests here used to wait for `!engines().is_empty()`, and that is the wrong
+    /// condition. The nine Windows entries appear together, but the two that are usable —
+    /// `sapi` and `onecore` — are marked available only once the library has answered for
+    /// them. So the list goes non-empty while nothing in it can speak, and a test that
+    /// proceeds at that moment fails on a machine that is merely slow. That is what
+    /// `no plain voice available` was: not a broken machine, a race.
+    ///
+    /// The size of the window came out of writing `tools/speech-probe`, which asks the same
+    /// question from Luau: two consecutive runs on ONE Windows machine took **500 ms and
+    /// 5500 ms** before a plain voice could be chosen, against 282 ms on a macOS CI runner.
+    /// Ten seconds is generous against the larger of those and still bounded.
+    fn wait_for_a_usable_voice(speech: &super::Speech) -> Vec<super::Engine> {
+        // Every 200 ms rather than every 100: the call itself queues the refresh it is
+        // waiting for, so asking twice as often does not make the answer arrive sooner — it
+        // makes the worker do twice the work between answers.
+        for _ in 0..50 {
+            let engines = speech.engines();
+            if engines.iter().any(|e| e.available && !e.screen_reader) {
+                return engines;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        speech.engines()
+    }
+
+    /// The cheapest of several reads, rather than one.
+    ///
+    /// What is being asserted is that reading the snapshot does no WORK — that the answer is
+    /// not being computed on the caller's thread, which would cost the 35 ms a real look
+    /// takes. A single wall-clock sample cannot tell that apart from the thread simply being
+    /// descheduled: `cargo test` runs its tests in parallel, on a shared CI runner with a
+    /// couple of cores, and one sample there measured **6.4 ms** for a clone of a
+    /// nine-element vector and turned main red for no defect at all.
+    ///
+    /// Scheduling can only ever inflate a sample, never deflate it, so the minimum is the
+    /// honest estimator here — and the property still holds: if the work moved back onto
+    /// this thread, EVERY sample would be tens of milliseconds and the minimum with them.
+    fn cheapest_read(speech: &super::Speech) -> Duration {
+        let mut best = Duration::from_secs(1);
+        for _ in 0..5 {
+            let start = Instant::now();
+            let _ = speech.engines();
+            best = best.min(start.elapsed());
+        }
+        best
+    }
 
     #[test]
     fn what_can_speak_here() {
+        let _serial = SPEECH_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let speech = super::Speech::new().expect("speech");
-        // The first look is started when `Speech` is built; give it a moment to land, the
-        // way a module asking during a session would find it long since landed.
-        for _ in 0..40 {
-            if !speech.engines().is_empty() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        let start = Instant::now();
-        let engines = speech.engines();
-        let took = start.elapsed();
+        let engines = wait_for_a_usable_voice(&speech);
+        let took = cheapest_read(&speech);
         for e in &engines {
             println!(
                 "  {:<14} {:<14} {}  {}",
@@ -472,7 +532,7 @@ mod engine_list {
         // mistake this shape exists to prevent.
         assert!(
             took < Duration::from_millis(5),
-            "reading the snapshot took {took:?}, so it is not a snapshot any more"
+            "the cheapest of five reads took {took:?}, so it is not a snapshot any more"
         );
 
         // Ids are the only field a module compares, so they must be unique and unsurprising.
@@ -498,14 +558,9 @@ mod engine_list {
     /// machine.
     #[test]
     fn a_module_can_choose_what_speaks_for_it() {
+        let _serial = SPEECH_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let speech = super::Speech::new().expect("speech");
-        for _ in 0..40 {
-            if !speech.engines().is_empty() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        let engines = speech.engines();
+        let engines = wait_for_a_usable_voice(&speech);
         const ME: usize = 7;
         const SOMEBODY_ELSE: usize = 8;
 

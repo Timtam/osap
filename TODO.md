@@ -1581,6 +1581,25 @@ asked; this is what was NOT, plus what the session found that nobody had asked.
       which is what makes the step above possible at all.
   - `tools/**` is now in the job's paths filter. It packages one tool and runs another and
       watched neither — the third time this exact gap has been found here.
+- [x] **Two speech tests were flaky, and the same measurement explains both** — fixed
+      2026-09-04, after one of them turned main red. Neither failure was caused by the change
+      that exposed it, and both had been dismissed twice as "environmental, CI is green".
+  - They waited for `!engines().is_empty()`, which is the wrong condition: the nine Windows
+      entries appear together, but `sapi`/`onecore` are marked available only once the library
+      has answered — so the list goes non-empty while nothing in it can speak. They wait for a
+      usable voice now.
+  - **They also starved each other.** Every `engines()` call queues a refresh on the same
+      worker, so a poll loop generates the work it is waiting behind; two of them in parallel,
+      with one opening SAPI (a look while an engine is opening was measured at 2.7 s), never
+      converge. Measured: alone both pass in 4.7 s, together one spent its whole ten-second
+      budget and found nothing. Serialised with a mutex rather than `--test-threads=1`, which
+      would slow the other 49 tests for the sake of these two. The suite is now FASTER (10.1 s
+      to 4.6 s) and passed five consecutive runs.
+  - **What actually failed on CI was neither**: the assertion `took < 5 ms` on a single
+      wall-clock sample of a nine-element vector clone, which measured 6.4 ms on a shared
+      runner where `cargo test` runs in parallel. It takes the cheapest of five reads now —
+      scheduling can only inflate a sample, and the property still holds, because work moved
+      back onto the caller's thread would cost 35 ms in every sample.
 - [x] **`host.speech.engines()` can answer EMPTY for seconds after start-up**, and neither the
       docs nor anything else said so. The first snapshot is taken behind the scenes so that a
       session which says nothing pays nothing, and a module asking early is told there is
