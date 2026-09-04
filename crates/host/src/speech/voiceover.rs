@@ -1,6 +1,12 @@
 //! Saying things through VoiceOver, so they come out in the user's own voice and — the
 //! part nothing else can do — on their braille display.
 //!
+//! Every line here reaches VoiceOver as an Apple Event, which needs the **Automation**
+//! permission — a different one from Accessibility, in its own pane, and refused by default.
+//! That check lives with the other permissions in `backend::macos::perm`, not here: this
+//! file is borrowed on its own by `crates/macos-check`, so a path into the backend would
+//! resolve in one crate and not the other.
+//!
 //! Its own file rather than a block inside `speech`, because this is macOS code written
 //! without a Mac: `crates/macos-check` borrows it by path and asks the compiler whether it
 //! is true, which a module nested inside a file that needs `tts` could not be.

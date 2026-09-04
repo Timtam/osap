@@ -19,6 +19,11 @@ mod macos;
 pub(crate) use macos::app::{
     activate_self, note_frontmost_before_gui, restore_frontmost_after_gui_start, set_regular,
 };
+/// Asking the user to allow Apple Events to VoiceOver — see `macos::perm`. Re-exported for
+/// the same reason as the app calls above: `gui.rs` reaches it without a macOS-only `use`,
+/// and the path resolves identically in `crates/macos-check`, which borrows this file.
+#[cfg(target_os = "macos")]
+pub(crate) use macos::perm::request_voiceover_automation;
 #[cfg(not(any(windows, target_os = "macos")))]
 mod stub;
 

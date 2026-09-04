@@ -35,11 +35,14 @@ pub fn checked() -> std::rc::Rc<dyn backend::Backend> {
 /// They are called from `gui.rs`, which this crate cannot borrow (wxdragon), so without
 /// this the re-export is unreferenced here — and an unreferenced re-export warns instead of
 /// proving that the path resolves and the signatures are what the caller expects.
-pub fn app_calls() -> (fn(), fn(bool, &str) -> bool, fn(), fn()) {
+pub fn app_calls() -> (fn(), fn(bool, &str) -> bool, fn(), fn(), fn()) {
     (
         backend::activate_self,
         backend::set_regular,
         backend::note_frontmost_before_gui,
         backend::restore_frontmost_after_gui_start,
+        // Called from the settings switch in `gui.rs`, which this crate cannot borrow, so
+        // naming it here is the only thing that proves the path and the signature.
+        backend::request_voiceover_automation,
     )
 }

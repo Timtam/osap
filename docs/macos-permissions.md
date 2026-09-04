@@ -14,8 +14,10 @@ failure. This page is what to grant, how to check, and what each absence looks l
 | **Accessibility** | reading and clicking anything | every plugin looks empty; no overlay ever activates |
 | **Screen Recording** | capture, image search, OCR | **captures silently return the desktop wallpaper** — never an error |
 | **Input Monitoring** | intercepting and suppressing keys | overlay keys reach the plugin instead of the overlay |
+| **Automation** → VoiceOver | speaking *through* VoiceOver | the setting is on and the overlay still speaks in its own voice |
 
-Only the first two need granting. **Input Monitoring normally follows the Accessibility
+Only the first two need granting for the platform to work at all; **Automation** is asked
+for separately, and only if you switch on "Speak through VoiceOver". **Input Monitoring normally follows the Accessibility
 grant** rather than needing one of its own — observed across three sessions on one machine:
 it read *unknown* before Accessibility was granted, *granted* immediately afterwards without
 that pane ever being opened, and denied again once a rebuild invalidated the Accessibility
@@ -79,6 +81,42 @@ registered through an older, narrower mechanism precisely so the main interactio
 working before the fussiest permission has been granted. So an application with
 Accessibility but not Input Monitoring is half-alive: shortcuts open overlays, and
 navigating inside one leaks keys to the plugin.
+
+## Automation, and why it is the quietest of the four
+
+The three above are about *observing* — reading other applications, capturing the screen,
+seeing keys. **Automation is about telling an application to do something**, and it is the
+one the VoiceOver transport needs, because every line it says arrives at VoiceOver as an
+Apple Event.
+
+It behaves unlike the others in the way that matters most: **its refusal does not look like
+a refusal.** A missing Accessibility grant makes every plugin look empty, which is obvious.
+A missing Screen Recording grant hands back the wallpaper, which is at least visible in a
+capture. A missing Automation grant makes macOS decline the event — and the transport then
+does what it does for any failure: it marks itself unhealthy and hands the line to the
+overlay's own voice. So you still hear everything. It just does not come out of VoiceOver,
+in your voice, at your rate, or on your braille display, and that reads as "the setting did
+not take" rather than as a permission problem.
+
+So it is asked for at the one moment where the question is obviously about what you just
+did: when you switch **"Speak through VoiceOver"** on. macOS then puts up its own dialog
+naming both applications. Two things follow from that:
+
+- **VoiceOver has to be running when you switch it on.** The system will not ask about
+  controlling an application that is not there, and the log says so rather than failing
+  quietly: *"VoiceOver automation not requested: VoiceOver is not running"*. Switch it on
+  again with VoiceOver up.
+- **Switching it off and on again puts the question again**, unlike the other two, which ask
+  once per session. That is deliberate: switching it off and on is exactly what somebody does
+  when they are trying to fix this. Whether macOS actually shows the dialog a second time is
+  its decision rather than ours — after a refusal it generally does not, which is why the log
+  names the pane instead of relying on the dialog coming back.
+
+The session header reports it as `voiceover automation`, asked without prompting — a log
+line must never put a dialog on screen. `not asked yet` is the ordinary state until the
+setting goes on. When it reads `REFUSED`, a `voiceover automation fix` line follows it with
+the pane to open, the same way the other permissions do, and it names whichever pane this
+machine actually has.
 
 ## When the switch is on and the application still cannot use it
 

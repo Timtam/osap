@@ -108,7 +108,8 @@ pub const SWITCHES: &[Switch] = &[
     Switch {
         key: "voiceover_speech",
         label: "Speak through VoiceOver, so it comes out the way VoiceOver says everything \
-                else — takes effect immediately, and asks macOS for permission the first time",
+                else — takes effect immediately, and asks macOS for permission when you \
+                switch it on",
         help: "Hands what the overlay says to VoiceOver instead of speaking it with a \
                separate voice, so it arrives in your voice, at your rate, and through \
                whatever VoiceOver already outputs to — including a braille display, which \

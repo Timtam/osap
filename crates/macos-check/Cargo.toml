@@ -54,6 +54,14 @@ features = ["CGBase", "CGEvent", "CGEventTypes", "CGEventSource", "CGDirectDispl
 version = "0.3"
 features = ["VNRequest", "VNRecognizeTextRequest", "VNObservation", "VNRequestHandler", "VNTypes", "VNGeometry", "VNError", "VNUtils", "VNRequestRevisionProviding", "objc2-core-graphics", "objc2-core-foundation"]
 
+# For the one question `objc2-foundation` cannot answer on its own: whether this application
+# is ALLOWED to send Apple Events to VoiceOver. `AEDeterminePermissionToAutomateTarget` both
+# asks and, with its own flag, prompts — so no fake event has to be sent to raise the dialog.
+[target.'cfg(target_os = "macos")'.dependencies.objc2-core-services]
+version = "0.3"
+default-features = false
+features = ["AE", "AEDataModel", "AppleEvents"]
+
 [target.'cfg(target_os = "macos")'.dependencies.objc2-application-services]
 version = "0.3"
 features = ["AXUIElement", "AXValue", "AXError", "AXAttributeConstants", "AXRoleConstants", "AXNotificationConstants", "AXActionConstants", "AXValueConstants", "HIServices", "Processes"]

@@ -1502,6 +1502,16 @@ asked; this is what was NOT, plus what the session found that nobody had asked.
 - [ ] **The VoiceOver transport** — still unmeasured, because the switch was off. Ask the
       tester to turn "Speak through VoiceOver" on for the next round; the `voiceover.sdef`
       he sent confirms the `output` command exists.
+  - **The permission that would have swallowed that measurement is now asked for**
+      (2026-09-04). Every line of that transport is an Apple Event, which needs the
+      **Automation** grant — a fourth permission, in its own pane, refused by default, and
+      refused SILENTLY: TCC declines the event, so VoiceOver says nothing and the setting
+      looks broken. We knew about it only as a sentence in a failure message, after the fact.
+      `AEDeterminePermissionToAutomateTarget` both asks and prompts depending on one flag, so
+      the check and the request are the same call; it is made when the switch goes on, and
+      the session header reports the status without prompting. Prompted by VOCR 3.0, whose
+      permission wizard does the same thing the harder way (a fake Apple Event to raise the
+      dialog). Written blind, type-checked, never run.
 - [x] **The pump line spoke of Windows on a Mac.** "past ~300 ms Windows stops waiting for
       our keyboard hook" appeared 34 times in a macOS log. It names the platform's own
       hazard now (the tap being switched off). Noted because it cost reading time before it

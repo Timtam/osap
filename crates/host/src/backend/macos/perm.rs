@@ -16,6 +16,11 @@ use std::ffi::CString;
 use std::sync::Once;
 
 use objc2_app_kit::{NSRunningApplication, NSScreen};
+use objc2_core_services::{
+    errAEEventNotPermitted, errAEEventWouldRequireUserConsent, typeWildCard,
+    AEDeterminePermissionToAutomateTarget,
+};
+use objc2_foundation::NSAppleEventDescriptor;
 use objc2_application_services::{
     kAXTrustedCheckOptionPrompt, AXIsProcessTrusted, AXIsProcessTrustedWithOptions,
 };
@@ -231,6 +236,168 @@ fn prompt_is_unreliable() -> bool {
 /// prompt for anything — the one prompt this application shows has already been shown by
 /// [`request_accessibility_once`], and a second dialog during startup would be read out on
 /// top of the speech engine announcing itself.
+/// Whether this application may send Apple Events to VoiceOver.
+///
+/// The fourth permission, and the one nothing else in this file covers. Accessibility lets
+/// us READ other applications; Screen Recording lets us capture them; Input Monitoring lets
+/// us see keys; **Automation** is what lets us tell an application to do something — and
+/// every line the VoiceOver transport says is an Apple Event. It lives in its own pane, is
+/// refused by default, and its refusal is quiet: TCC declines the event, the transport's
+/// health flag goes false, and the overlay falls back to its own voice. So the symptom is
+/// not silence — it is the overlay talking in the wrong voice, which is easy to mistake for
+/// the setting simply not having taken.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Automation {
+    Granted,
+    /// Asked and declined, or switched off in System Settings since.
+    Refused,
+    /// Nobody has been asked yet. The ordinary state of a fresh install, and its own word
+    /// rather than "unknown", because the two mean different things to whoever reads the log.
+    NotAsked,
+    /// The question could not be put, or was answered with something this code does not know.
+    Unknown,
+}
+
+impl Automation {
+    /// The value column of the startup block: short, greppable, no pane name.
+    ///
+    /// The pane goes in a separate `… fix` row, which is this file's own convention — and
+    /// which also keeps the version-correct name out of a `&'static str`.
+    fn as_str(self) -> &'static str {
+        match self {
+            Automation::Granted => "granted",
+            Automation::Refused => "REFUSED",
+            Automation::NotAsked => "not asked yet (asked when the setting is switched on)",
+            Automation::Unknown => "could not be determined",
+        }
+    }
+}
+
+/// `procNotFound`, the documented answer when the target application is not running.
+///
+/// Spelled out here because it lives in CarbonCore rather than in the AppleEvents module
+/// this file already imports, and pulling in a framework for one integer is not worth it.
+const PROC_NOT_FOUND: i32 = -600;
+
+/// Puts the permission question to TCC. With `prompt`, this is also what raises the dialog.
+///
+/// One function for both, because the system provides one:
+/// `AEDeterminePermissionToAutomateTarget` takes an `askUserIfNeeded` flag, so the check and
+/// the request differ by an argument rather than by mechanism. Worth preferring over the
+/// common trick of sending a harmless real event to raise the dialog — a fake event is a
+/// real event to whoever receives it.
+///
+/// **Every status Apple documents is handled by name**, because the interesting one is the
+/// ordinary one: with `prompt` false and nobody yet asked, the answer is
+/// `errAEEventWouldRequireUserConsent`, which is the state of every fresh install. An
+/// earlier draft let that fall into the catch-all and wrote "the system answered -1744,
+/// which this code does not recognise" into the startup block of every first run.
+///
+/// Builds its own descriptor rather than taking one, so it can be called from a worker
+/// thread — see `request_voiceover_automation`.
+fn ask_tcc(prompt: bool) -> Automation {
+    let target = NSAppleEventDescriptor::descriptorWithBundleIdentifier(&NSString::from_str(
+        "com.apple.VoiceOver",
+    ));
+    // SAFETY: `aeDesc` borrows the descriptor's own storage, which outlives the call, and the
+    // call does not keep it. The wildcards ask about any event of any class, which the
+    // documentation names as the way to ask "may I send anything at all".
+    let status = unsafe {
+        let desc = target.aeDesc();
+        if desc.is_null() {
+            return Automation::Unknown;
+        }
+        AEDeterminePermissionToAutomateTarget(desc, typeWildCard, typeWildCard, prompt)
+    };
+    match status {
+        0 => Automation::Granted,
+        s if s == errAEEventNotPermitted => Automation::Refused,
+        s if s == errAEEventWouldRequireUserConsent => Automation::NotAsked,
+        // VoiceOver quit between the check above and this call. Not worth a line: the next
+        // switch-on asks again, and the startup block already says VoiceOver is not running.
+        PROC_NOT_FOUND => Automation::Unknown,
+        other => {
+            crate::logging::line(
+                "macos",
+                &format!(
+                    "VoiceOver automation: the system answered {other}, which is none of the \
+                     statuses this call documents — treating it as unknown"
+                ),
+            );
+            Automation::Unknown
+        }
+    }
+}
+
+/// The permission as it stands, without putting anything on screen.
+///
+/// Safe on the main thread: the warning below is about the PROMPTING call, which can sit
+/// there as long as the user takes to read a dialog.
+fn voiceover_automation() -> Automation {
+    if !voiceover_running() {
+        return Automation::Unknown;
+    }
+    ask_tcc(false)
+}
+
+/// Asks the USER for the permission, and logs what came back.
+///
+/// Called when "Speak through VoiceOver" is switched on, and only then. It raises a system
+/// dialog, and a dialog nobody asked for is worse than a missing permission: the user would
+/// have to work out what it wants and why it appeared now. The moment they switch the
+/// setting on is the moment the question is obviously about what they just did.
+///
+/// **On a thread of its own, because Apple says so** — the header for this call reads "Do
+/// not call this function on your main thread because it may take arbitrarily long to
+/// return if the user needs to be prompted for consent". That is not a style note here: the
+/// main thread is the one carrying the CGEvent tap, and a stall of about a second is what
+/// gets the tap switched off. A modal dialog on it would take the keyboard away for as long
+/// as the dialog is up, which on this platform means for as long as a blind user needs to
+/// find and answer it. The call is documented thread-safe since 10.14.
+///
+/// Not `Once`, unlike the two permissions above: the user can switch this off and on again,
+/// and the second time is exactly when they are trying to fix the thing this asks about.
+/// Whether macOS shows the dialog a second time after a refusal is its decision, not ours —
+/// it does not, in general, which is why the log names the pane instead.
+pub fn request_voiceover_automation() {
+    if !voiceover_running() {
+        crate::logging::line(
+            "macos",
+            "VoiceOver automation not requested: VoiceOver is not running, so there is \
+             nothing to ask about yet. Switch the setting on again with VoiceOver up.",
+        );
+        return;
+    }
+    let before = voiceover_automation();
+    if before == Automation::Granted {
+        crate::logging::line("macos", "VoiceOver automation: already granted");
+        return;
+    }
+    crate::logging::line(
+        "macos",
+        &format!(
+            "VoiceOver automation: {} — asking, on a worker thread so the dialog cannot hold \
+             the event tap",
+            before.as_str()
+        ),
+    );
+    std::thread::spawn(move || {
+        let after = ask_tcc(true);
+        crate::logging::line(
+            "macos",
+            &format!(
+                "VoiceOver automation: {} after asking{}",
+                after.as_str(),
+                if after == Automation::Granted {
+                    String::new()
+                } else {
+                    format!(" — {} > Automation, then tick this application's VoiceOver entry", privacy_pane())
+                }
+            ),
+        );
+    });
+}
+
 pub fn environment_report() -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     let mut push = |k: &str, v: String| out.push((k.to_string(), v));
@@ -406,6 +573,21 @@ pub fn environment_report() -> Vec<(String, String)> {
             "not running (speech goes to the built-in engine)".into()
         },
     );
+    // Asked without prompting: a session header must not put a dialog on screen.
+    let automation = voiceover_automation();
+    push("voiceover automation", automation.as_str().into());
+    if automation == Automation::Refused {
+        // Only when it is actually wrong. "Not asked yet" is the ordinary state and needs no
+        // instruction — switching the setting on is what asks.
+        push(
+            "voiceover automation fix",
+            format!(
+                "{} > Automation, then tick this application's VoiceOver entry. No restart \
+                 needed — the transport picks it up on the next line it says.",
+                privacy_pane()
+            ),
+        );
+    }
 
     // macOS records every permission above against the *bundle*, not the executable path.
     // A build run as a bare binary out of `target/` is a different identity from the same

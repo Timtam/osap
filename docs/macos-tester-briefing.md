@@ -124,14 +124,30 @@ precisely: say which of the three, and the log will have the OCR to go with it.
 ### 4. Is it your voice, and does it get in the way — ask this early
 
 The overlay can hand what it says to VoiceOver instead of speaking it with a voice of its
-own. **That is off until you turn it on**, because the first line through it makes macOS ask
-your permission, and a dialog you did not ask for is not a good way for an application to
+own. **That is off until you turn it on**, because turning it on is what makes macOS ask your
+permission, and a dialog you did not ask for is not a good way for an application to
 introduce itself.
 
 So: open the manager from the menu-bar icon, go to the **Application settings** tab, and tick
-**Speak through VoiceOver**. macOS will ask once whether this application may control
-VoiceOver — say yes. Then, with the sforzando overlay speaking (step 3), two things are worth
-a sentence each:
+**Speak through VoiceOver**. Three things about that moment, because they changed since the
+last round and one of them cost us that round's measurement:
+
+- **VoiceOver has to be running when you tick it.** macOS will not ask about controlling an
+  application that is not there. If it was not running, the log says so and you can simply
+  untick and tick again.
+- **The dialog arrives a moment later, not instantly.** It is asked from a background thread
+  on purpose: Apple's own documentation says this call must not be made on the main thread,
+  because it sits there for as long as you take to answer — and on this platform that is the
+  thread carrying the key tap, so a dialog on it would take your keyboard away while you read
+  it. So: tick, wait a beat, answer **yes**.
+- **If you say no, the dialog does not come back.** The log then carries a
+  `voiceover automation fix` line naming the exact pane to open.
+
+Last round this was never asked at all — the setting went on and the permission behind it was
+never requested, so nothing could come through and the whole measurement below was lost. If
+you hear your own voice this time, that is the fix working.
+
+Then, with the sforzando overlay speaking (step 3), two things are worth a sentence each:
 
 - Do the read-outs come out in **your** VoiceOver voice, at your rate — or in a second,
   different voice? A second voice means the hand-off failed and the fallback took over, and

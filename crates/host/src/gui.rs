@@ -700,6 +700,14 @@ pub fn run_gui(
                 // what is stored), and then every click would flip the wrong way.
                 let want = event.is_checked();
                 crate::appcfg::set(key, want);
+                // Switching the VoiceOver transport on is the one moment where asking for the
+                // Automation permission is obviously about what the user just did. Every line
+                // that transport says is an Apple Event, and TCC refuses those silently — so
+                // without this the setting appears to work and nothing is ever spoken.
+                #[cfg(target_os = "macos")]
+                if want && key == "voiceover_speech" {
+                    crate::backend::request_voiceover_automation();
+                }
                 let now = crate::appcfg::get(key);
                 let mut store = settings::Store::load();
                 store.set_app_flag(key, now);

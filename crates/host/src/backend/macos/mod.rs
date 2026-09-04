@@ -41,7 +41,7 @@ mod hotkey;
 mod input;
 mod keys;
 mod ocr;
-mod perm;
+pub(crate) mod perm;
 mod queue;
 mod tap;
 mod watch;
