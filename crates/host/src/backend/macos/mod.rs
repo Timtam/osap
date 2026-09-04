@@ -34,6 +34,7 @@ static SCROLL_SEEN: AtomicBool = AtomicBool::new(false);
 
 pub(super) mod app;
 mod ax;
+mod budget;
 mod capture;
 mod ffi;
 mod front_memory;

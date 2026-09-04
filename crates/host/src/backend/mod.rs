@@ -50,6 +50,13 @@ mod macos_keys;
 #[path = "macos/front_memory.rs"]
 mod macos_front_memory;
 
+/// And the walk budget, for the third time and the same reason: a counter and a clock, with
+/// nothing macOS about them. This one bounds how long an accessibility walk may take, and the
+/// next session's most valuable keypress points it at the largest tree it has ever seen.
+#[cfg(all(test, not(target_os = "macos")))]
+#[path = "macos/budget.rs"]
+mod macos_budget;
+
 /// Where a permission stands, for something that has to SHOW it rather than log it.
 ///
 /// `Missing` and `Unknown` are constructed on macOS only, which is the whole point of the

@@ -1561,6 +1561,30 @@ asked; this is what was NOT, plus what the session found that nobody had asked.
       cache-served line at all, because the forty asks are in forty ticks. The output also
       says what it cannot tell apart: an ask served from the backend's memory is fast BY
       DESIGN, so the verdict line points at the log rather than declaring health.
+- [x] **A macOS accessibility walk was bounded by nodes and by nothing else** — fixed
+      2026-09-05, and found by asking what the next session's most valuable keypress points at.
+      The probe over a Kontakt or Komplete Kontrol window is by a distance the largest tree
+      this has ever dumped: sforzando's entire window came to **sixteen nodes**
+      (`dump(6): 16 element(s), 16 node(s) visited`), against a budget of 2000. Every one of
+      those nodes is a cross-process round trip whose own ceiling is the messaging timeout, so
+      600 nodes was bounded at 600 seconds — which is not a bound. The Windows side learned
+      exactly this the same morning, where a node budget still left one window taking thirty
+      seconds.
+  - Two deadlines, each with a reason rather than a number. `HOT_DEADLINE` is **300 ms**, and
+      that is not a guess: it is the figure this file already names as the point past which
+      macOS switches the event tap off, so a walk that crosses it has already cost the user
+      their keyboard. `DUMP_DEADLINE` is 5 s, the same trade as Windows — a truncated dump is
+      worth much less than a slow one, and nobody is waiting on the keyboard while a tester
+      presses the probe key deliberately. The log now names WHICH bound stopped a walk,
+      because a node budget reached wants a larger count and a deadline reached cannot be
+      helped by any count.
+  - **Extracted to `macos/budget.rs` and unit-tested here**, the third file to take that route
+      after `keys.rs` and `front_memory.rs` — and the tests immediately failed. Not the
+      expectations: the code. A walk whose node count landed exactly on zero consulted the
+      clock on that last step and reported that it had run out of TIME when what ran out was
+      nodes, which is the one attribution that sends the next reader the wrong way. Five tests,
+      and the granularity of the 64-node clock check is now written down rather than assumed.
+
 - [x] **The Retina audit found nothing, and that is the finding** (2026-09-04). Four lenses
       over the capture path, the OCR mapping, window and control geometry with mouse input, and
       the Luau side plus the documentation, each adversarially refuted. **No points-versus-pixels

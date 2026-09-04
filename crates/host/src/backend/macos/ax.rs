@@ -59,6 +59,7 @@ use objc2_core_graphics::{
 };
 use objc2_foundation::NSString;
 
+use super::budget::Budget;
 use super::front_memory::{Memory, Recall};
 use super::handles;
 use crate::backend::{ControlInfo, DumpNode, WinInfo};
@@ -103,6 +104,36 @@ const FOCUS_DEPTH: i32 = 20;
 /// Children examined per node. A list with ten thousand rows is a real thing and none of the
 /// questions here are answered by the ten-thousandth one.
 const CHILDREN_MAX: usize = 256;
+
+/// How long a HOT walk may take: the control walk, the queries, the focus step.
+///
+/// The node counts above bound how many elements a walk visits. They do not bound how long
+/// that takes, and on this platform every element is a cross-process round trip whose own
+/// ceiling is [`MESSAGING_TIMEOUT`] — so six hundred nodes is bounded at six hundred seconds,
+/// which is not a bound anybody can use. The Windows backend learned exactly this on
+/// 2026-09-04: after its per-call timeout went in, one window still took thirty seconds to
+/// walk, because a budget that counts nodes cannot see a clock.
+///
+/// **300 ms is not a guess.** It is the figure this file already names as the point past
+/// which macOS stops waiting for the event tap and switches it off — see the pump's own
+/// warning line. A walk that crosses it has already cost the user their keyboard, so there is
+/// nothing to be gained by letting it finish. Twenty times the pump's 15 ms budget, so it
+/// cannot fire on a healthy tree.
+const HOT_DEADLINE: Duration = Duration::from_millis(300);
+
+/// And how long the DIAGNOSTIC dump may take, which is a different trade.
+///
+/// `host.element.rawDump` is how a plug-in's tree gets read at all, by somebody who cannot
+/// see it; a truncated dump is worth much less than a slow one, and nothing is waiting on the
+/// keyboard while a tester presses the probe key on purpose. Five seconds, the same number and
+/// the same reasoning as the Windows side.
+///
+/// This is the one that matters most right now. The most valuable press of the next session is
+/// the probe over a Kontakt or Komplete Kontrol window, and that is by a distance the largest
+/// tree this has ever been pointed at: sforzando's whole window came to sixteen nodes. A hang
+/// there would cost the answer the session exists for.
+const DUMP_DEADLINE: Duration = Duration::from_secs(5);
+
 /// An observation slower than this is worth a line in the log: the host warns at the same
 /// threshold, and on this platform the cause is almost always the target app, not us.
 const SLOW_MS: u128 = 50;
@@ -799,20 +830,32 @@ fn walk(
     el: &AXUIElement,
     depth: i32,
     max_depth: i32,
-    budget: &mut i32,
+    budget: &mut Budget,
     visit: &mut impl FnMut(&AXUIElement, &Snap, i32) -> WalkStep,
 ) -> bool {
-    if *budget <= 0 {
-        // Said out loud, once, and not at trace level. A walk that ran out of budget returns
-        // exactly what a walk that finished and found nothing returns, so without this line
-        // a plugin whose tree is larger than the bound answers "that element is not here" to
-        // every question, for ever, and the overlay simply never activates — with nothing
-        // anywhere to distinguish it from a plugin we do not support.
+    if !budget.spend() {
+        // Said out loud, once, and not at trace level. A walk that ran out returns exactly
+        // what a walk that finished and found nothing returns, so without this line a plugin
+        // whose tree is larger than the bound answers "that element is not here" to every
+        // question, for ever, and the overlay simply never activates — with nothing anywhere
+        // to distinguish it from a plugin we do not support.
+        //
+        // Which bound ran out is named, because the two want opposite responses: a node
+        // budget reached means raise the count for that walk, a deadline reached means the
+        // application is answering too slowly to walk at all and no count will help.
         if !BUDGET_REPORTED.with(Cell::get) {
             BUDGET_REPORTED.with(|c| c.set(true));
             crate::logging::line(
                 "macos",
-                "an accessibility walk hit its node budget and stopped early — any answer from it is 'not found so far', not 'not there'. If detection is failing on a large plugin, this is the first thing to look at.",
+                if budget.ran_out_of_time() {
+                    "an accessibility walk ran out of TIME and stopped early — the application \
+                     is answering too slowly to walk, so any answer from it is 'not found so \
+                     far', not 'not there'. A larger node budget would not help this one."
+                } else {
+                    "an accessibility walk hit its NODE budget and stopped early — any answer \
+                     from it is 'not found so far', not 'not there'. If detection is failing \
+                     on a large plugin, this is the first thing to look at."
+                },
             );
         }
         return true;
@@ -820,7 +863,6 @@ fn walk(
     if depth > max_depth {
         return true;
     }
-    *budget -= 1;
     let snap = snapshot(el);
     match visit(el, &snap, depth) {
         WalkStep::Stop => return false,
@@ -828,9 +870,6 @@ fn walk(
         WalkStep::Descend => {}
     }
     for child in children(el) {
-        if *budget <= 0 {
-            return true;
-        }
         if !walk(&child, depth + 1, max_depth, budget, visit) {
             return false;
         }
@@ -1882,7 +1921,7 @@ pub fn window_controls(hwnd: isize) -> Vec<ControlInfo> {
         return Vec::new();
     }
     let mut out: Vec<ControlInfo> = Vec::new();
-    let mut budget = CONTROL_NODES;
+    let mut budget = Budget::new(CONTROL_NODES, HOT_DEADLINE);
     walk(
         &entry.element,
         0,
@@ -1913,7 +1952,7 @@ pub fn window_controls(hwnd: isize) -> Vec<ControlInfo> {
         format!(
             "window_controls({hwnd}): {} surface(s), {} node(s) visited, {ms} ms",
             out.len(),
-            CONTROL_NODES - budget
+            CONTROL_NODES - budget.nodes_left()
         )
     });
     if ms > SLOW_MS {
@@ -2064,7 +2103,7 @@ pub fn find(hwnd: isize, name: &str, control_type: i32) -> bool {
     }
     let t = Instant::now();
     let mut hit = false;
-    let mut budget = QUERY_NODES;
+    let mut budget = Budget::new(QUERY_NODES, HOT_DEADLINE);
     walk(&root, 0, QUERY_DEPTH, &mut budget, &mut |_, snap, _| {
         if role_matches(snap, roles) && snap.matches_name(name) {
             hit = true;
@@ -2159,7 +2198,7 @@ pub fn find_any(hwnd: isize, names: &[String], types: &[i32]) -> Option<usize> {
     let root = root_of(hwnd, "find_any")?;
     let t0 = Instant::now();
     let mut best: Option<usize> = None;
-    let mut budget = QUERY_NODES;
+    let mut budget = Budget::new(QUERY_NODES, HOT_DEADLINE);
     walk(&root, 0, QUERY_DEPTH, &mut budget, &mut |_, snap, _| {
         if !role_matches(snap, &roles) {
             return WalkStep::Descend;
@@ -2185,7 +2224,7 @@ pub fn find_any(hwnd: isize, names: &[String], types: &[i32]) -> Option<usize> {
             "find_any({hwnd}, {} name(s), {} type(s)) = {best:?} after {} node(s) in {ms} ms",
             names.len(),
             types.len(),
-            QUERY_NODES - budget
+            QUERY_NODES - budget.nodes_left()
         )
     });
     if ms > SLOW_MS {
@@ -2203,10 +2242,12 @@ fn first_match(
     name: &str,
     roles: &[&str],
     depth: i32,
-    budget: i32,
+    nodes: i32,
 ) -> Option<(CFRetained<AXUIElement>, Snap)> {
     let mut found: Option<(CFRetained<AXUIElement>, Snap)> = None;
-    let mut budget = budget;
+    // A hot query like the others: it runs on the pump, so it gets the deadline that says
+    // the event tap is about to be switched off rather than the diagnostic one.
+    let mut budget = Budget::new(nodes, HOT_DEADLINE);
     walk(root, 0, depth, &mut budget, &mut |el, snap, _| {
         if role_matches(snap, roles) && snap.matches_name(name) {
             found = Some((el.retain(), snap.clone()));
@@ -2260,7 +2301,7 @@ fn plugin_containers(root: &AXUIElement, container_name: &str) -> Vec<CFRetained
     let window_roles = roles_for_type(50032).unwrap_or(&[]);
     let pane_roles = roles_for_type(50033).unwrap_or(&[]);
     let mut found: Vec<(bool, CFRetained<AXUIElement>)> = Vec::new();
-    let mut budget = QUERY_NODES;
+    let mut budget = Budget::new(QUERY_NODES, HOT_DEADLINE);
     walk(root, 0, QUERY_DEPTH, &mut budget, &mut |el, snap, _| {
         // An exact name match, not `Snap::matches_name`: an empty container name means "a
         // container with no name", the way it does on Windows, and not "any container".
@@ -2336,7 +2377,7 @@ pub fn dump(hwnd: isize) -> Vec<DumpNode> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    let mut budget = DUMP_NODES;
+    let mut budget = Budget::new(DUMP_NODES, DUMP_DEADLINE);
     walk(&root, 0, DUMP_DEPTH, &mut budget, &mut |_, snap, depth| {
         let name = if snap.title.is_empty() {
             snap.description.clone()
@@ -2366,7 +2407,7 @@ pub fn dump(hwnd: isize) -> Vec<DumpNode> {
     });
     crate::logging::line(
         "macos",
-        &format!("dump({hwnd}): {} element(s), {} node(s) visited", out.len(), DUMP_NODES - budget),
+        &format!("dump({hwnd}): {} element(s), {} node(s) visited", out.len(), DUMP_NODES - budget.nodes_left()),
     );
     out
 }
@@ -2450,7 +2491,7 @@ pub fn class_nav_point(
     let roles = roles_or_log(ctype)?;
     let root = root_of(hwnd, "class_nav_point")?;
     let mut found: Option<CFRetained<AXUIElement>> = None;
-    let mut budget = QUERY_NODES;
+    let mut budget = Budget::new(QUERY_NODES, HOT_DEADLINE);
     walk(&root, 0, QUERY_DEPTH, &mut budget, &mut |el, snap, _| {
         if role_matches(snap, roles) && snap.identifier.contains(class_substr) {
             found = Some(el.retain());
@@ -2468,7 +2509,7 @@ pub fn class_nav_point(
         // object name against it could only ever succeed by accident, and on a German
         // machine not even that. The batched snapshot has already fetched this one, so the
         // pass costs no extra round trip per element.
-        let mut budget = QUERY_NODES;
+        let mut budget = Budget::new(QUERY_NODES, HOT_DEADLINE);
         walk(&root, 0, QUERY_DEPTH, &mut budget, &mut |_el, snap, _| {
             if role_matches(snap, roles) && snap.description.contains(class_substr) {
                 found = Some(_el.retain());
@@ -2529,7 +2570,7 @@ pub fn focus_step(hwnd: isize, direction: i32) -> Option<(String, i32, i32, i32)
     let scope = children(&root).into_iter().next().unwrap_or_else(|| root.clone());
 
     let mut items: Vec<(CFRetained<AXUIElement>, Snap)> = Vec::new();
-    let mut budget = FOCUS_NODES;
+    let mut budget = Budget::new(FOCUS_NODES, HOT_DEADLINE);
     walk(&scope, 0, FOCUS_DEPTH, &mut budget, &mut |el, snap, depth| {
         if depth == 0 {
             return WalkStep::Descend; // the scope itself is not a stop on the ring
