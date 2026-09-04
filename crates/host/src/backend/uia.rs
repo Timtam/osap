@@ -9,6 +9,8 @@ use super::DumpNode;
 use windows::core::{Interface, BSTR, VARIANT};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{
+    IUIAutomation2,
+    CUIAutomation8,
     CUIAutomation, IUIAutomation, IUIAutomationCondition, IUIAutomationElement,
     IUIAutomationLegacyIAccessiblePattern, IUIAutomationTogglePattern, IUIAutomationTreeWalker,
     TreeScope_Descendants, TreeScope_Subtree, UIA_BoundingRectanglePropertyId,
@@ -23,20 +25,135 @@ thread_local! {
     static AUTOMATION: RefCell<Option<IUIAutomation>> = RefCell::new(None);
 }
 
+/// How long a single cross-process UIA call may take before it is given up on.
+///
+/// **Every read in this file is synchronous IPC into another application**, and that
+/// application answers on its own message pump. One that is busy, mid-repaint, or simply not
+/// pumping does not answer at all — and UIA's default is to wait about two minutes for it.
+/// On the thread that carries the keyboard, that is not a slow answer, it is a dead
+/// application.
+///
+/// Measured rather than assumed: timing `element_raw_dump` over every top-level window on
+/// one desktop, the Chromium-backed ones answered in 65-374 ms for up to 2876 elements,
+/// while one wxWidgets window never answered at all — the run stopped in front of it and
+/// stayed there. That is the shape this bounds.
+///
+/// The macOS backend has done exactly this since it was written (`MESSAGING_TIMEOUT` in
+/// `macos/ax.rs`, with a comment explaining that an unbounded walk against an unresponsive
+/// plugin hangs the thread that carries the keyboard). The same reasoning applies here and
+/// nobody had applied it: this platform had no bound at all.
+const UIA_TIMEOUT_MS: u32 = 1000;
+
+/// How long a whole tree walk may take before it stops and reports what it has.
+///
+/// The per-call timeout above bounds ONE question. A walk asks thousands, and an application
+/// that answers every one of them slowly is not caught by it: measured after the timeout went
+/// in, a WinUI window with an embedded web view took **thirty seconds** to dump — bounded, and
+/// still far past anything an event loop can absorb. The node budget does not help either; it
+/// bounds nodes, and the cost here is per question rather than per node.
+///
+/// Five seconds rather than something tighter, because this is a diagnostic: the probe's dump
+/// is how a plug-in's tree gets read at all, and a truncated one is worth much less than a
+/// slow one. What must not happen is an application that stops answering for half a minute,
+/// and a truncated dump says so in its own output rather than looking complete.
+const WALK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What a bounded walk has left: nodes, and time.
+struct Budget {
+    nodes: i32,
+    until: std::time::Instant,
+    /// True once either bound stopped it, so the caller can say the dump is partial instead
+    /// of letting a truncated tree read as a complete one.
+    stopped: bool,
+}
+
+impl Budget {
+    fn new(nodes: i32) -> Self {
+        Self { nodes, until: std::time::Instant::now() + WALK_DEADLINE, stopped: false }
+    }
+
+    /// Spends one node. False when there is nothing left to spend.
+    ///
+    /// The clock is read every 64 nodes rather than every one: `Instant::now` is a syscall on
+    /// some platforms, and a walk that measured itself more often than it worked would be
+    /// its own problem. 64 nodes is well under a second even at the timeout above.
+    fn spend(&mut self) -> bool {
+        if self.nodes <= 0 {
+            self.stopped = true;
+            return false;
+        }
+        self.nodes -= 1;
+        if self.nodes % 64 == 0 && std::time::Instant::now() >= self.until {
+            self.stopped = true;
+            return false;
+        }
+        true
+    }
+}
+
+/// The thread's automation object, created on first use with its timeouts set.
+///
+/// One place rather than nine. Every function here used to open its own with the same six
+/// lines, which is how the timeouts came to be missing everywhere at once: there was no
+/// single place to put them.
+fn automation(cell: &RefCell<Option<IUIAutomation>>) -> std::cell::RefMut<'_, Option<IUIAutomation>> {
+    // The app's main thread already RoInitialize's COM (MTA) for WinRT OCR;
+    // this is a harmless S_FALSE there and initializes the MTA otherwise.
+    let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    let mut borrow = cell.borrow_mut();
+    if borrow.is_none() {
+        // `CUIAutomation8` rather than `CUIAutomation`, and the difference is the whole point
+        // of this function: the older class does not implement `IUIAutomation2`, so asking it
+        // for the timeouts returns E_NOINTERFACE and the bound is silently not applied. That
+        // was the first version of this code, and it looked like it worked — the measurement
+        // is what said otherwise. `CUIAutomation8` has been present since Windows 8; the
+        // fall-back is for anything older, where there is no timeout to set anyway.
+        let made = unsafe {
+            CoCreateInstance::<_, IUIAutomation>(&CUIAutomation8, None, CLSCTX_INPROC_SERVER)
+                .or_else(|_| {
+                    CoCreateInstance::<_, IUIAutomation>(
+                        &CUIAutomation,
+                        None,
+                        CLSCTX_INPROC_SERVER,
+                    )
+                })
+        }
+        .ok();
+        if let Some(a) = made.as_ref() {
+            // `IUIAutomation2` is where the timeouts live and it is not on every Windows this
+            // runs on, so a failure to reach it is not an error — it is the older behaviour,
+            // said out loud once rather than left to be discovered by a hang.
+            match a.cast::<IUIAutomation2>() {
+                Ok(a2) => unsafe {
+                    let _ = a2.SetConnectionTimeout(UIA_TIMEOUT_MS);
+                    let _ = a2.SetTransactionTimeout(UIA_TIMEOUT_MS);
+                    crate::logging::line(
+                        "uia",
+                        &format!(
+                            "accessibility call timeout set to {UIA_TIMEOUT_MS} ms for this \
+                             thread (the default is about two minutes)"
+                        ),
+                    );
+                },
+                Err(e) => crate::logging::line(
+                    "uia",
+                    &format!(
+                        "IUIAutomation2 unavailable ({e}); calls into an application that \
+                         does not answer will wait for the system default"
+                    ),
+                ),
+            }
+        }
+        *borrow = made;
+    }
+    borrow
+}
+
 /// Finds the first element in `hwnd`'s UIA subtree whose Name == `name` and
 /// ControlType == `control_type`. Never panics; any failure / no-match → None.
 fn find_element(hwnd: isize, name: &str, control_type: i32) -> Option<IUIAutomationElement> {
     AUTOMATION.with(|cell| unsafe {
-        // The app's main thread already RoInitialize's COM (MTA) for WinRT OCR;
-        // this is a harmless S_FALSE there and initializes the MTA otherwise.
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-
-        let mut borrow = cell.borrow_mut();
-        if borrow.is_none() {
-            *borrow =
-                CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
-                    .ok();
-        }
+        let borrow = automation(cell);
         let automation = borrow.as_ref()?;
 
         let element = automation.ElementFromHandle(HWND(hwnd as *mut _)).ok()?;
@@ -80,13 +197,7 @@ pub fn element_find_any(hwnd: isize, names: &[String], types: &[i32]) -> Option<
         return None;
     }
     AUTOMATION.with(|cell| unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let mut borrow = cell.borrow_mut();
-        if borrow.is_none() {
-            *borrow =
-                CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
-                    .ok();
-        }
+        let borrow = automation(cell);
         let automation = borrow.as_ref()?;
         let element = automation.ElementFromHandle(HWND(hwnd as *mut _)).ok()?;
 
@@ -154,13 +265,7 @@ pub fn element_locate_via(
     control_type: i32,
 ) -> Option<(i32, i32)> {
     AUTOMATION.with(|cell| unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let mut borrow = cell.borrow_mut();
-        if borrow.is_none() {
-            *borrow =
-                CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
-                    .ok();
-        }
+        let borrow = automation(cell);
         let automation = borrow.as_ref()?;
         let root = automation.ElementFromHandle(HWND(hwnd as *mut _)).ok()?;
 
@@ -214,13 +319,7 @@ fn rect_of(el: &IUIAutomationElement) -> (i32, i32, i32, i32) {
 pub fn element_dump(hwnd: isize) -> Vec<DumpNode> {
     let mut out: Vec<DumpNode> = Vec::new();
     AUTOMATION.with(|cell| unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let mut borrow = cell.borrow_mut();
-        if borrow.is_none() {
-            *borrow =
-                CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
-                    .ok();
-        }
+        let borrow = automation(cell);
         let automation = match borrow.as_ref() {
             Some(a) => a,
             None => return,
@@ -272,13 +371,7 @@ pub fn element_class_nav_point(
     sibling: i32,
 ) -> Option<(i32, i32)> {
     AUTOMATION.with(|cell| unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let mut borrow = cell.borrow_mut();
-        if borrow.is_none() {
-            *borrow =
-                CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
-                    .ok();
-        }
+        let borrow = automation(cell);
         let automation = borrow.as_ref()?;
         let root = automation.ElementFromHandle(HWND(hwnd as *mut _)).ok()?;
         let walker = automation.RawViewWalker().ok()?;
@@ -318,13 +411,12 @@ unsafe fn raw_walk(
     walker: &IUIAutomationTreeWalker,
     el: &IUIAutomationElement,
     depth: i32,
-    budget: &mut i32,
+    budget: &mut Budget,
     visit: &mut impl FnMut(&IUIAutomationElement, i32) -> bool,
 ) -> bool {
-    if depth > 40 || *budget <= 0 {
+    if depth > 40 || !budget.spend() {
         return true;
     }
-    *budget -= 1;
     if !visit(el, depth) {
         return false;
     }
@@ -336,7 +428,7 @@ unsafe fn raw_walk(
         if !raw_walk(walker, &child, depth + 1, budget, visit) {
             return false;
         }
-        if *budget <= 0 {
+        if budget.nodes <= 0 || budget.stopped {
             return true;
         }
         child = match walker.GetNextSiblingElement(&child) {
@@ -359,13 +451,12 @@ unsafe fn raw_walk(
 unsafe fn cached_walk(
     el: &IUIAutomationElement,
     depth: i32,
-    budget: &mut i32,
+    budget: &mut Budget,
     out: &mut Vec<DumpNode>,
 ) {
-    if depth > 40 || *budget <= 0 {
+    if depth > 40 || !budget.spend() {
         return;
     }
-    *budget -= 1;
     let name = el.CachedName().map(|b| b.to_string()).unwrap_or_default();
     let class = el.CachedClassName().map(|b| b.to_string()).unwrap_or_default();
     let ctype = el.CachedControlType().map(|t| t.0).unwrap_or(0);
@@ -390,13 +481,7 @@ unsafe fn cached_walk(
 pub fn element_raw_dump(hwnd: isize) -> Vec<DumpNode> {
     let mut out: Vec<DumpNode> = Vec::new();
     AUTOMATION.with(|cell| unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let mut borrow = cell.borrow_mut();
-        if borrow.is_none() {
-            *borrow =
-                CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
-                    .ok();
-        }
+        let borrow = automation(cell);
         let automation = match borrow.as_ref() {
             Some(a) => a,
             None => return,
@@ -432,9 +517,10 @@ pub fn element_raw_dump(hwnd: isize) -> Vec<DumpNode> {
         });
 
         if let Some(cached_root) = cached {
-            let mut budget = 4000;
+            let mut budget = Budget::new(4000);
             cached_walk(&cached_root, 0, &mut budget, &mut out);
             if !out.is_empty() {
+                report_partial(&budget, out.len());
                 return;
             }
             // An empty result from a cache that reported success is not proof of an empty
@@ -451,7 +537,7 @@ pub fn element_raw_dump(hwnd: isize) -> Vec<DumpNode> {
             Ok(w) => w,
             Err(_) => return,
         };
-        let mut budget = 4000;
+        let mut budget = Budget::new(4000);
         raw_walk(&walker, &root, 0, &mut budget, &mut |el, depth| {
             let name = el.CurrentName().map(|b| b.to_string()).unwrap_or_default();
             let class = el.CurrentClassName().map(|b| b.to_string()).unwrap_or_default();
@@ -462,8 +548,25 @@ pub fn element_raw_dump(hwnd: isize) -> Vec<DumpNode> {
             }
             true
         });
+        report_partial(&budget, out.len());
     });
     out
+}
+
+/// Says so when a dump stopped early, because a truncated tree is indistinguishable from a
+/// small one to whoever reads it afterwards — and this output is read by somebody working
+/// from a log file on a machine nobody here can touch.
+fn report_partial(budget: &Budget, found: usize) {
+    if budget.stopped {
+        crate::logging::line(
+            "uia",
+            &format!(
+                "the accessibility dump stopped early with {found} element(s) — it ran out \
+                 of {} and what is above is PART of the tree, not all of it",
+                if budget.nodes <= 0 { "nodes" } else { "time" }
+            ),
+        );
+    }
 }
 
 /// ReaHotkey's `GetPluginUIAElement` + `MainElement.FindElement(...)`, ported.
@@ -486,20 +589,14 @@ pub fn element_plugin_locate(
     control_type: i32,
 ) -> Option<(i32, i32)> {
     AUTOMATION.with(|cell| unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let mut borrow = cell.borrow_mut();
-        if borrow.is_none() {
-            *borrow =
-                CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
-                    .ok();
-        }
+        let borrow = automation(cell);
         let automation = borrow.as_ref()?;
         let root = automation.ElementFromHandle(HWND(hwnd as *mut _)).ok()?;
         let walker = automation.RawViewWalker().ok()?;
 
         // Every element that IS the plugin (ReaHotkey's CheckElement), in raw-tree order.
         let mut containers: Vec<(bool, IUIAutomationElement)> = Vec::new();
-        let mut budget = 4000;
+        let mut budget = Budget::new(4000);
         raw_walk(&walker, &root, 0, &mut budget, &mut |el, _| {
             let t = el.CurrentControlType().map(|t| t.0).unwrap_or(0);
             if t == 50032 || t == 50033 {
@@ -519,7 +616,7 @@ pub fn element_plugin_locate(
 
         for (_, container) in &containers {
             let mut hit: Option<(i32, i32)> = None;
-            let mut budget = 4000;
+            let mut budget = Budget::new(4000);
             raw_walk(&walker, container, 0, &mut budget, &mut |el, _| {
                 let t = el.CurrentControlType().map(|t| t.0).unwrap_or(0);
                 if t != control_type {
@@ -565,19 +662,13 @@ pub fn element_state_probe(
     control_type: i32,
 ) -> Option<(i32, i32)> {
     AUTOMATION.with(|cell| unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let mut borrow = cell.borrow_mut();
-        if borrow.is_none() {
-            *borrow =
-                CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
-                    .ok();
-        }
+        let borrow = automation(cell);
         let automation = borrow.as_ref()?;
         let root = automation.ElementFromHandle(HWND(hwnd as *mut _)).ok()?;
         let walker = automation.RawViewWalker().ok()?;
 
         let mut containers: Vec<(bool, IUIAutomationElement)> = Vec::new();
-        let mut budget = 4000;
+        let mut budget = Budget::new(4000);
         raw_walk(&walker, &root, 0, &mut budget, &mut |el, _| {
             let t = el.CurrentControlType().map(|t| t.0).unwrap_or(0);
             if t == 50032 || t == 50033 {
@@ -593,7 +684,7 @@ pub fn element_state_probe(
 
         for (_, container) in &containers {
             let mut found: Option<(i32, i32)> = None;
-            let mut budget = 4000;
+            let mut budget = Budget::new(4000);
             raw_walk(&walker, container, 0, &mut budget, &mut |el, _| {
                 let t = el.CurrentControlType().map(|t| t.0).unwrap_or(0);
                 if t != control_type {
@@ -681,13 +772,7 @@ unsafe fn find_by_class(
 /// None if the scope has no focusable descendant that accepts focus.
 pub fn element_focus_step(hwnd: isize, direction: i32) -> Option<(String, i32, i32, i32)> {
     AUTOMATION.with(|cell| unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let mut borrow = cell.borrow_mut();
-        if borrow.is_none() {
-            *borrow =
-                CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
-                    .ok();
-        }
+        let borrow = automation(cell);
         let automation = borrow.as_ref()?;
         let root = automation.ElementFromHandle(HWND(hwnd as *mut _)).ok()?;
 

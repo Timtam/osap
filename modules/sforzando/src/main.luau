@@ -41,8 +41,22 @@ local ov = O.new("sforzando")
 -- clears the label to its left — POLY. ends at 488, PB RANGE at 574 — and is generous
 -- vertically, which costs nothing because the recogniser crops to the ink it finds.
 --
--- Worth re-checking on the next probe: the reported box for RANGE overlaps DEF's by three
--- points, so the pitchbend region is the one most likely to want a nudge.
+-- **Re-checked, and it did want one** (2026-09-04). The tester reported that this field
+-- reads as nothing when its value is 1, while POLY. at 1 reads fine — and the region was the
+-- cause rather than the recogniser. A second probe, this time of the plug-in EMBEDDED in
+-- REAPER, put the label and the value in the same row without any overlap once both were
+-- converted to the plug-in's own coordinates: RANGE at x 535..566, DEF at x 572..599. So
+-- there are six clear points between them, and the region below started at 576 — four points
+-- INSIDE its own value.
+--
+-- That is invisible for DEF, which is 27 points wide and survives losing its left edge. For a
+-- single left-aligned glyph it is fatal: a "1" occupies roughly 572..579, of which a region
+-- starting at 576 sees three points, and three points of a digit is not a digit. It starts at
+-- 569 now — three points clear of the label, three before the value.
+--
+-- The earlier note here read the standalone probe as putting RANGE's box at 574, overlapping
+-- DEF at 571, which cannot both be true of non-overlapping text; the embedded measurement is
+-- the cleaner one and is what these numbers come from. Still unrun: whether a 1 now reads.
 -- Built fresh each time rather than shared, because two overlays now want them and a
 -- control table is not something to alias between them.
 -- `opensMenu` on all three because all three do: Enter on any of them opens sforzando's own
@@ -61,7 +75,7 @@ local function addReadOuts(o)
   } })
   o:addOCRButton({ label = "Pitchbend range", opensMenu = true, region = host.os.pick {
     windows = { 576, 40, 602, 60 },
-    macos = { 576, 38, 607, 60 },
+    macos = { 569, 38, 607, 60 },
   } })
 end
 

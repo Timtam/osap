@@ -1511,7 +1511,29 @@ asked; this is what was NOT, plus what the session found that nobody had asked.
       probe prints it verbatim for every element. One probe run over a Kontakt or Komplete
       Kontrol window answers it. The tester probed sforzando, which is not a Qt application;
       he thinks he can install one.
-- [ ] **`host.element.rawDump` did not return on Windows, twice, over a WinUI window.** Found
+- [x] **`host.element.rawDump` did not return on Windows** — fixed 2026-09-04, and the
+      diagnosis was wrong twice before the measurement settled it. First guess: the Chromium
+      subtree. Measured by timing the dump over all 21 top-level windows on this desktop,
+      Chromium answered in 65-374 ms for up to 2876 elements — and the run stopped dead in
+      front of a **wxWidgets** window and stayed there for minutes.
+  - The cause: this platform set no accessibility call timeout at all, where the macOS
+      backend has bounded every AX call since it was written and says why in its own header.
+      UIA waits about two minutes for an application that is not answering.
+  - The first fix was a silent no-op, and only the log line caught it: `CUIAutomation` does
+      not implement `IUIAutomation2`, so asking it for the timeouts returns E_NOINTERFACE.
+      Created from `CUIAutomation8` now, with a fall-back, and the timeout is announced once
+      per thread.
+  - A node budget bounds nodes, not time. With the timeout in, a WinUI window took thirty
+      seconds instead of never — so the walk carries a five-second deadline too, and says in
+      the log when a dump is PART of a tree rather than all of it. Verified by forcing the
+      deadline to a millisecond and watching the line appear.
+  - **What is left, measured and not fixed:** that WinUI window still costs ~23 s, and it is
+      not in the walk — it is `BuildUpdatedCache(TreeScope_Subtree)`, which materialises the
+      whole subtree in one call before the deadline can see anything. Caching per LEVEL
+      (`TreeScope_Children`) would bound it and still keep most of the win the subtree cache
+      was measured to bring (211 ms per walk down to one crossing instead of six per
+      element). Worth doing when something other than a diagnostic needs that window.
+- [ ] **The original note, for the record.** `host.element.rawDump` did not return on Windows, twice, over a WinUI window. Found
       while self-testing the probe's new answers: the run reached "note: tree rectangles
       below are SCREEN coordinates" — printed immediately before the dump — and produced
       nothing further in 40 s, twice, over a WhatsApp window (`WinUIDesktopWin32WindowClass`,
