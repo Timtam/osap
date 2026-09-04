@@ -1757,6 +1757,15 @@ in macOS 14`, where without it the process would have aborted), `window.active` 
       budget and found nothing. Serialised with a mutex rather than `--test-threads=1`, which
       would slow the other 49 tests for the sake of these two. The suite is now FASTER (10.1 s
       to 4.6 s) and passed five consecutive runs.
+  - **And it came back the next day, because I fixed the condition and not the duration.**
+      The wait was 10 s; on a CI runner the first of the two tests spent all ten and failed,
+      while the second found the same voices 1.2 MICROSECONDS later. The first always pays the
+      cold open — each test builds its own `Speech`, and the fallback worker opens the speech
+      libraries before reading its first job (2.0 s for SAPI, 3.5 for OneCore on an idle
+      machine, evidently far worse on a contended one). Thirty seconds now, and a failure
+      prints how long it waited and what the list held, because Windows always has sapi and
+      onecore: an empty list there is a worker that has not finished, not a machine that
+      cannot speak.
   - **What actually failed on CI was neither**: the assertion `took < 5 ms` on a single
       wall-clock sample of a nine-element vector clone, which measured 6.4 ms on a shared
       runner where `cargo test` runs in parallel. It takes the cheapest of five reads now —

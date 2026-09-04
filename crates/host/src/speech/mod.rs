@@ -519,13 +519,30 @@ mod engine_list {
         // Every 200 ms rather than every 100: the call itself queues the refresh it is
         // waiting for, so asking twice as often does not make the answer arrive sooner — it
         // makes the worker do twice the work between answers.
-        for _ in 0..50 {
+        //
+        // Thirty seconds, and the number was earned twice. Ten was not enough: on a CI runner
+        // this test waited its full ten and then failed, while the test that ran five seconds
+        // later found the same voices in 1.2 microseconds. The FIRST of the two always pays
+        // the cold open — each builds its own `Speech`, and the fallback's worker opens the
+        // speech libraries before it reads its first job, measured at 2.0 s for SAPI and 3.5
+        // for OneCore on an idle machine and evidently far worse on a contended one.
+        //
+        // Waiting longer is honest here in a way it would not be elsewhere: Windows always has
+        // sapi and onecore, so the list WILL fill. The only question is when, and a test that
+        // fails because a build agent was busy is measuring the agent.
+        let waited_for = Duration::from_secs(30);
+        let started = Instant::now();
+        while started.elapsed() < waited_for {
             let engines = speech.engines();
             if engines.iter().any(|e| e.available && !e.screen_reader) {
                 return engines;
             }
             std::thread::sleep(Duration::from_millis(200));
         }
+        println!(
+            "  no plain voice became available in {waited_for:?} — the list has {} entr(ies)",
+            speech.engines().len()
+        );
         speech.engines()
     }
 
@@ -624,7 +641,9 @@ mod engine_list {
         let present = engines
             .iter()
             .find(|e| e.available && !e.screen_reader)
-            .expect("no plain voice available")
+            .expect(
+                "no plain voice available — see the line above for how long this waited and                  what the list held; Windows always has sapi and onecore, so an empty list                  here means the speech worker had not finished opening them",
+            )
             .id
             .clone();
         assert!(speech.use_engine(ME, Some(&present)), "refused {present}, which is here");
