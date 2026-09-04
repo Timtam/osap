@@ -385,6 +385,151 @@ function M.timerCadence(line, hops)
   host.timer.after(100, hop)
 end
 
+-- == What does asking "which window is in front" actually cost? ================
+--
+-- The biggest single stall in the first tester's log, and it is not the one that was fixed.
+-- `window.active()` blocked the event loop fourteen times, worst case 2605 ms — during
+-- ordinary use, a moment after a plugin menu closed. `enumerate_windows`, which the F6 work
+-- guarded, blocked it six times. This is the question every overlay asks on every tick.
+--
+-- The mechanism is known: the backend tries AXFocusedWindow, then AXMainWindow, then
+-- AXWindows, so an application that is not answering charges the messaging timeout three
+-- times over. What is NOT known is the shape of the distribution, and that is what decides
+-- the remedy. If almost every ask is fast and one in fifty is catastrophic, the answer is to
+-- serve the last known window while an application is quarantined. If the middle of the
+-- distribution is already tens of milliseconds, the answer is to get the question off the
+-- thread that carries the event tap, which is a much larger change.
+--
+-- So: ask it repeatedly, report the whole shape rather than an average. An average would
+-- hide exactly the tail that matters. Read-only — `active()` is a question, not a command.
+function M.activeWindowCost(line, hops)
+  if not (host.window and host.window.active and host.now) then
+    line("  window.active cost: host.window.active or host.now unavailable")
+    return
+  end
+  hops = hops or 40
+  local times = {}
+  local worst, best, total = 0, math.huge, 0
+  for _ = 1, hops do
+    local t0 = host.now()
+    host.window.active()
+    local d = host.now() - t0
+    times[#times + 1] = d
+    total = total + d
+    if d > worst then worst = d end
+    if d < best then best = d end
+  end
+  table.sort(times)
+  local median = times[floor((#times + 1) / 2)]
+  local p90 = times[math.max(1, floor(#times * 0.9))]
+  line(
+    "  window.active cost: %d asks — best %d ms, median %d ms, 90th %d ms, worst %d ms, "
+      .. "%d ms in total",
+    hops, best, median, p90, worst, total
+  )
+  -- The tail named separately, because the tail is the finding. A single ask over 300 ms is
+  -- already past what the event tap tolerates.
+  local slow = 0
+  for _, d in ipairs(times) do
+    if d >= 100 then slow = slow + 1 end
+  end
+  line(
+    "  window.active cost: %d of %d asks took 100 ms or more%s",
+    slow, hops,
+    slow == 0 and "  <- the cache and the quarantine are holding" or "  <- this is the stall"
+  )
+end
+
+-- == Is a big OCR read cheaper than several small ones? ========================
+--
+-- Measured on the first tester's machine, from two lines in the same log: a 1013x580 pt read
+-- finished in 730 ms, while a 64x16 pt read was ABANDONED at its 457 ms deadline. So cost is
+-- not proportional to area — it is close to flat per request — and that is why an ordinary
+-- Tab step costs 90-250 ms there against 23-34 ms on Windows.
+--
+-- If that holds, an overlay reading three small fields should read ONE region covering all
+-- three and split it by position afterwards. That would be a real change to the runtime, so
+-- it wants a measurement rather than an inference from two incidental log lines.
+--
+-- Reads the window's own content area once, then three small strips inside it, and reports
+-- both. Nothing is interpreted here: the two numbers are the answer.
+function M.ocrBatching(line, win)
+  if not (host.ocr and host.ocr.recognize and win and win.client) then
+    line("  ocr batching: host.ocr or the window's client area unavailable")
+    return
+  end
+  local c = win.client
+  if c.w < 240 or c.h < 120 then
+    line("  ocr batching: the window is too small to split meaningfully (%dx%d)", c.w, c.h)
+    return
+  end
+  -- A band across the top of the content, where a plugin's read-outs usually sit, and three
+  -- strips inside that same band. Same pixels either way, so the comparison is honest.
+  local band = { c.x, c.y, c.x + c.w, c.y + math.min(120, floor(c.h / 4)) }
+  local third = floor((band[3] - band[1]) / 3)
+
+  local t0 = host.now()
+  local okOne, one = pcall(function() return host.ocr.recognize({ region = band }) end)
+  local oneMs = host.now() - t0
+
+  local manyMs, manyWords, failed = 0, 0, 0
+  for i = 0, 2 do
+    local strip = { band[1] + i * third, band[2], band[1] + (i + 1) * third, band[4] }
+    local t1 = host.now()
+    local ok, res = pcall(function() return host.ocr.recognize({ region = strip }) end)
+    manyMs = manyMs + (host.now() - t1)
+    if ok and res and res.words then
+      manyWords = manyWords + #res.words
+    else
+      failed = failed + 1
+    end
+  end
+
+  line(
+    "  ocr batching: one %dx%d region took %d ms and read %d word(s); the same band as three "
+      .. "strips took %d ms and read %d word(s)%s",
+    band[3] - band[1], band[4] - band[2], oneMs,
+    (okOne and one and one.words and #one.words) or 0,
+    manyMs, manyWords,
+    failed > 0 and string.format(" (%d strip(s) failed or timed out)", failed) or ""
+  )
+  line(
+    "  ocr batching: %s",
+    manyMs > oneMs
+      and "three reads cost MORE than one — batching a row of read-outs into one region is worth building"
+      or "three reads did not cost more than one — batching would buy nothing, leave the runtime alone"
+  )
+end
+
+-- == Does the module-error window work on a Mac? ==============================
+--
+-- Not a measurement the probe can take: it needs a person to say what they heard and whether
+-- the window could be reached. So the probe does the one part a person cannot do reliably —
+-- provoke a real module error at a known moment — and the briefing asks the three questions.
+--
+-- A real error rather than a simulated one: this raises it from inside a timer callback,
+-- which is the path `report_callback_error` actually takes, so what appears is the genuine
+-- article and not something shaped like it.
+--
+-- Deliberately LAST in the run, and behind its own delay: it puts a window on screen, and
+-- everything above should be in the log before anything steals the focus.
+function M.provokeErrorWindow(line)
+  if not (host.timer and host.timer.after) then
+    line("  error window: host.timer unavailable, cannot provoke one")
+    return
+  end
+  line("  error window: raising a real module error in one second — expect a window titled")
+  line("  error window: 'Module error: com.tool.probe'. Three things to report:")
+  line("     1. does it have a Dock icon and an entry in the app switcher (Cmd-Tab)")
+  line("     2. does VoiceOver read the message when it opens")
+  line("     3. with the module manager ALSO open, close the manager — does the error window")
+  line("        keep its Dock icon (that is the refcount, and it is the bug this was written")
+  line("        to prevent)")
+  host.timer.after(1000, function()
+    error("this is the probe, raising an error on purpose so the error window can be looked at")
+  end)
+end
+
 -- The whole section, in the order the answers are worth reading.
 function M.all(line, win)
   line("----- what this platform answers -----")
@@ -392,6 +537,10 @@ function M.all(line, win)
   guard(line, "ownsPoint", function() M.ownsPoint(line, win) end)
   guard(line, "blank OCR", function() M.blankOcr(line, win) end)
   guard(line, "timers", function() M.timerCadence(line) end)
+  guard(line, "window.active cost", function() M.activeWindowCost(line) end)
+  guard(line, "ocr batching", function() M.ocrBatching(line, win) end)
+  -- Last, because it raises a window: everything above wants to be in the log first.
+  guard(line, "error window", function() M.provokeErrorWindow(line) end)
 end
 
 return M

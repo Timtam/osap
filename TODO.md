@@ -1497,8 +1497,21 @@ asked; this is what was NOT, plus what the session found that nobody had asked.
 - [ ] **The arm64 half of the universal build has never run.** The session ran the x86_64
       slice (no Rosetta). The CI's `lipo` check proves both slices exist, not that the arm64
       one launches.
-- [ ] **Qt object names in `AXIdentifier`** — still open. The tester probed sforzando, which
-      is not a Qt application. Needs a probe of Kontakt or Komplete Kontrol.
+- [ ] **Qt object names in `AXIdentifier`** — still open, and it needs NO code. The class
+      string the backend publishes is already `AXRole/AXSubrole/AXIdentifier` (see
+      `join_class`, whose own doc gives `"AXGroup//NI.Kontakt.Main"` as its example), and the
+      probe prints it verbatim for every element. One probe run over a Kontakt or Komplete
+      Kontrol window answers it. The tester probed sforzando, which is not a Qt application;
+      he thinks he can install one.
+- [ ] **`host.element.rawDump` did not return on Windows, twice, over a WinUI window.** Found
+      while self-testing the probe's new answers: the run reached "note: tree rectangles
+      below are SCREEN coordinates" — printed immediately before the dump — and produced
+      nothing further in 40 s, twice, over a WhatsApp window (`WinUIDesktopWin32WindowClass`,
+      four surfaces including a `Chrome_WidgetWin_0`). The same probe completes on macOS. It
+      is wrapped in `pcall`, so an error would have been logged; nothing was, which points at
+      a hang rather than a failure. Not chased — it is the Windows side and it did not block
+      what was being tested. Worth its own look: a probe that stops before its own answers is
+      an instrument that lies by omission.
 - [ ] **The VoiceOver transport** — still unmeasured, because the switch was off. Ask the
       tester to turn "Speak through VoiceOver" on for the next round; the `voiceover.sdef`
       he sent confirms the `output` command exists.

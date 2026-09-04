@@ -200,6 +200,44 @@ to find that out except from a real machine with the real plugin open.
 Please do it for each plugin you would want an overlay for. Press it once per window; the
 files are numbered.
 
+**Two windows are worth more than the others this round**, because each settles a question
+that has been open for weeks and cannot be settled anywhere else:
+
+- **sforzando standalone, with PB RANGE set to 1.** You reported that this field reads as
+  nothing at that value while POLY. at 1 reads fine. We already know from your last log that
+  Vision reads lone digits perfectly well — it returned `1`, `2` and `0%` as words of their
+  own — so the recogniser is not the suspect; the region the module reads is. Your last probe
+  put the value `DEF` at content (812,97) while the module's region starts at 816, clipping
+  its left edge. Probing with the value set to **1** tells us whether a `1` is read at all,
+  which decides between "our box is in the wrong place" and something harder. Set the value,
+  then press the key.
+- **Kontakt or Komplete Kontrol, if you can install one.** Not for the plugin's own sake: it
+  is a Qt application, and Qt puts its internal object names into the accessibility tree
+  where macOS calls them `AXIdentifier`. Whether they survive is the single unknown standing
+  between us and matchers for every Qt plugin — which is most of them. sforzando cannot
+  answer it because it is not a Qt application. **No new code is needed for this**: the probe
+  already prints that identifier as the third part of every class it lists, so one press over
+  a Kontakt window answers it.
+
+**The probe now also answers three things by itself**, at the end of each run, so you do not
+have to describe them:
+
+- **What it costs to ask which window is in front.** This was the biggest stall in your last
+  log — fourteen of them, the worst 2605 ms, during ordinary use rather than while pressing
+  anything. The probe now asks forty times and reports the whole spread, which is what
+  decides how to fix it.
+- **Whether one big text read is cheaper than three small ones.** Your log suggested reading
+  costs the same whatever the size, which would mean overlays should read one wide strip and
+  split it afterwards. That is a real change to the runtime, so it wants a measurement.
+- **The module-error window.** At the very end of a run the probe raises a real error on
+  purpose, and a window appears. It is not a fault — it is there to be looked at. Three
+  things about it, and they are the only part of this the log cannot answer:
+  1. Does it have a **Dock icon**, and does **Command-Tab** reach it?
+  2. Does **VoiceOver read the message** when it opens?
+  3. Open the module manager as well, then close the manager. Does the error window **keep**
+     its Dock icon? (That is the bug this window was rewritten to prevent, and nobody has
+     ever seen it work.)
+
 A quick check you can make yourself: if `probe-1.png` shows your desktop wallpaper instead
 of the plugin, **Screen Recording was not granted** (or the application was not restarted
 after granting it). macOS does not report that as an error — it just hands back the
