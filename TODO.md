@@ -1561,6 +1561,37 @@ asked; this is what was NOT, plus what the session found that nobody had asked.
       cache-served line at all, because the forty asks are in forty ticks. The output also
       says what it cannot tell apart: an ask served from the backend's memory is fast BY
       DESIGN, so the verdict line points at the log rather than declaring health.
+- [x] **And the loop around that walk was bounded by nothing either** — fixed 2026-09-05, an
+      hour after the walk itself, and found by searching the list rather than recalling it.
+      The probe dumps the window's tree and then calls the same dump on EVERY surface
+      `host.window.controls()` returned. Each dump is bounded; the number of them was not.
+      `CONTROL_MAX` is 256 and `is_surface` counts `AXGroup` and `AXUnknown` — which is what a
+      custom-drawn toolkit publishes for nearly everything it does not map — so the worst case
+      was 257 walks of five seconds each: twenty minutes of frozen application, a log large
+      enough to rotate the session away, and no spoken word until the end. A blind tester
+      force-quits a frozen application, and that press is the one the session exists for.
+      Never exercised, because the only Mac this has run on could not run a plug-in with any
+      sub-surfaces (`surfaces inside it: 0`).
+  - Bounded now by a wall clock across the whole phase and a cap on surfaces, with a line
+      naming what was skipped, and a spoken line BEFORE the work so a tester can tell work
+      from a hang. Verified end to end on a real window with six surfaces, then with the cap
+      forced to two to watch the refusal appear.
+- [x] **A macOS dump could not say it had been truncated** — fixed with it. The completeness
+      notice lived inside `walk` behind a once-per-session flag, so the first walk to run out
+      consumed it, and on a large plug-in the control walk (600 nodes, 300 ms) will do that
+      before the dump is asked for. The dump's own line now says whether it stopped on nodes,
+      on time, or not at all — the Windows side has done this per dump since the day before.
+      The stake: the probe builds "N of M elements publish an AXIdentifier" from that dump, and
+      that sentence decides whether the nested-overlay design ports or is rebuilt out of image
+      matching. It now says "of the N returned" rather than implying it saw the whole tree.
+- [x] **`probe-N.png` restarted at 1 on every launch and overwrote the last one** — fixed
+      2026-09-05. Not a corner case on the machine this is aimed at: setting up a new Mac means
+      granting a permission, quitting and reopening (macOS hands a new permission only to a
+      process that started after it), and the protocol has him press the key in more than one
+      step. The picture is half of what he sends back and the half nothing else can
+      reconstruct. The count resumes from the first free name now; `resource` is declared for
+      that one read.
+
 - [x] **A macOS accessibility walk was bounded by nodes and by nothing else** — fixed
       2026-09-05, and found by asking what the next session's most valuable keypress points at.
       The probe over a Kontakt or Komplete Kontrol window is by a distance the largest tree

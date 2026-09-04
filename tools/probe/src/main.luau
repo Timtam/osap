@@ -32,7 +32,29 @@ local answers = host.include("src/answers.luau")
 
 -- A run counter, so pressing the key twice does not overwrite the first answer with the
 -- second — and so the log and the image can be matched up by eye.
-local run = 0
+-- Where the numbering starts, which is NOT zero.
+--
+-- It was, and the pictures are named `probe-N.png` from it, so the first press of every
+-- launch wrote `probe-1.png` over the one from the launch before. That is not a corner case
+-- on the machine this is aimed at: setting up a new Mac means granting a permission, quitting,
+-- reopening — macOS hands a new permission only to a process that started after it — and the
+-- tester's own protocol has him press this key in more than one step. The picture is half of
+-- what he sends back, and it is the half that cannot be reconstructed from anything else.
+--
+-- So the count resumes rather than restarts: the first free name wins. `host.resource.exists`
+-- reads from the module's own folder, which is exactly where `host.screen.save` writes.
+local run = (function()
+  if not (host.resource and host.resource.exists) then
+    return 0
+  end
+  -- Bounded: a folder somebody has filled should not make the module hang at load.
+  for n = 1, 500 do
+    if not host.resource.exists(string.format("probe-%d.png", n)) then
+      return n - 1
+    end
+  end
+  return 500
+end)()
 
 local function say(text)
   host.speech.output(text, { interrupt = true })
@@ -76,14 +98,20 @@ local function identifierSummary(label, elements)
     end
   end
   if withId == 0 then
+    -- "of the N returned", not "of N". The dump above is bounded by nodes and by time, and it
+    -- says on its own line whether it was cut short — so this sentence must not imply it saw
+    -- the whole tree. Reading "NONE publish an AXIdentifier" off a fragment is the one wrong
+    -- answer this press can give that would send the whole nested-overlay design to image
+    -- matching for no reason.
     line(
-      "  tree %s — NONE of %d element(s) publish an AXIdentifier, so a matcher here has "
-        .. "only role and geometry to work with",
+      "  tree %s — NONE of the %d element(s) returned publish an AXIdentifier. If the dump "
+        .. "line above says it was complete, a matcher here has only role and geometry to "
+        .. "work with",
       label, #elements
     )
   else
     line(
-      "  tree %s — %d of %d element(s) publish an AXIdentifier; first few: %s",
+      "  tree %s — %d of the %d element(s) returned publish an AXIdentifier; first few: %s",
       label, withId, #elements, table.concat(sample, ", ")
     )
   end
@@ -177,12 +205,53 @@ host.hotkey.register(KEY, function()
       .. "(%d,%d) to get what a module would author",
     win.client.x, win.client.y
   )
+  -- Said before the work, not after it.
+  --
+  -- Everything below is silent until the run finishes, and on a large plug-in that is a long
+  -- time to sit in front of an application that appears to have stopped. Somebody who cannot
+  -- see a spinner has no way to tell work from a hang, and force-quitting is the reasonable
+  -- response to a hang — which would lose the press this whole session is for.
+  say("Recording. This can take a few seconds on a large plugin.")
+
   local total = dumpTree(string.format("window '%s'", win.title or ""), win.id)
+
+  -- The loop is bounded, and it was not.
+  --
+  -- Each `dumpTree` is bounded by the host — 2000 nodes and five seconds — but the NUMBER of
+  -- them was not bounded by anything: `host.window.controls()` returns up to 256 surfaces on
+  -- macOS, and `AXGroup` and `AXUnknown` both count as surfaces, which is what a custom-drawn
+  -- toolkit publishes for nearly every node it does not map. Worst case that is 257 walks of
+  -- five seconds each — twenty minutes of frozen application and a log large enough to rotate
+  -- the session away — for a press whose only spoken confirmation comes at the end.
+  --
+  -- It has never been exercised: the only Mac this has ever run on could not run a plug-in
+  -- with any sub-surfaces at all (`surfaces inside it: 0`), and Kontakt is the first tree with
+  -- them. Same shape as the fault fixed in the backend an hour earlier, one level up: that one
+  -- bounded a walk, and nothing bounded the loop around it.
+  --
+  -- The surfaces are also descendants of the window, so in the good case their subtrees are
+  -- already in the dump above; these exist for the case where that one was truncated, or where
+  -- a surface turns out to be a separate hierarchy. That is worth some duplication, not
+  -- unbounded duplication.
+  local DUMP_BUDGET_MS = 20000
+  local MAX_SURFACES = 24
+  local started = host.now()
+  local dumped, skipped = 0, 0
   for i, c in ipairs(controls) do
-    -- Every surface, not only the ones matching a toolkit pattern: on a platform where
-    -- nobody yet knows what the classes look like, filtering by a guess would hide the
-    -- answer.
-    total = total + dumpTree(string.format("surface %d [%s]", i, c.class or ""), c.id)
+    if dumped >= MAX_SURFACES or (host.now() - started) > DUMP_BUDGET_MS then
+      skipped = skipped + 1
+    else
+      total = total + dumpTree(string.format("surface %d [%s]", i, c.class or ""), c.id)
+      dumped = dumped + 1
+    end
+  end
+  if skipped > 0 then
+    line(
+      "  trees: %d of %d surface(s) dumped, %d SKIPPED after %d ms — this recording is "
+        .. "partial by design rather than by accident, and the window's own tree above is "
+        .. "the complete one to read",
+      dumped, #controls, skipped, host.now() - started
+    )
   end
 
   -- A picture of the window, next to the application. The one artefact a sighted helper can

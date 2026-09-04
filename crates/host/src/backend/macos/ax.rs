@@ -2405,9 +2405,35 @@ pub fn dump(hwnd: isize) -> Vec<DumpNode> {
         }
         WalkStep::Descend
     });
+    // Whether this is the whole tree, on the dump's OWN line rather than through the
+    // once-per-session notice inside `walk`.
+    //
+    // That notice is a single thread-local flag, so the first walk of the session to run out
+    // consumes it — and on a large plug-in the control walk (600 nodes at a 300 ms deadline)
+    // will do that before the dump is even asked for. The dump would then be truncated in
+    // silence, and the sentence the probe builds from it — "N of M elements publish an
+    // AXIdentifier" — would be computed over a fragment and read exactly like a complete
+    // answer. That sentence decides whether the nested-overlay design ports or is rebuilt out
+    // of image matching, so it is the most expensive wrong answer available here.
+    //
+    // The Windows side has said this per dump since 2026-09-04 (`report_partial` in `uia.rs`)
+    // and its doc gives the reason in one line: a truncated tree is indistinguishable from a
+    // small one to whoever reads it afterwards. The platform that had the report was the one
+    // that will never be pointed at the tree.
+    let whole = if budget.ran_out_of_time() {
+        " — STOPPED ON TIME, so this is PART of the tree and not all of it"
+    } else if budget.nodes_left() <= 0 {
+        " — STOPPED ON THE NODE BUDGET, so this is PART of the tree and not all of it"
+    } else {
+        " (complete)"
+    };
     crate::logging::line(
         "macos",
-        &format!("dump({hwnd}): {} element(s), {} node(s) visited", out.len(), DUMP_NODES - budget.nodes_left()),
+        &format!(
+            "dump({hwnd}): {} element(s), {} node(s) visited{whole}",
+            out.len(),
+            DUMP_NODES - budget.nodes_left()
+        ),
     );
     out
 }
