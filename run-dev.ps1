@@ -9,12 +9,17 @@
 #   .\run-dev.ps1 -Only kontakt,cinematic-studio-strings
 #                                 just those, by directory name
 #   .\run-dev.ps1 -Examples       run the examples/ set instead
+#   .\run-dev.ps1 -Tools          run the tools/ set instead. Combine it with -Only: several
+#                                 of the dev tools register hotkeys of their own, so loading
+#                                 all of them at once is a contest nobody asked for.
+#                                 .\run-dev.ps1 -Tools -Only hotkey-test-a,hotkey-test-b
 [CmdletBinding()]
 param(
   [switch]$Calibrate,
   [switch]$Build,
   [switch]$Release,
   [switch]$Examples,
+  [switch]$Tools,
   [string[]]$Only
 )
 
@@ -50,8 +55,10 @@ if ($Build -or -not (Test-Path $exe)) {
 
 # Spelled out rather than a ternary: `? :` is PowerShell 7+ only, and this script has to
 # run under whichever powershell.exe someone happens to have (5.1 is still the default).
+if ($Examples -and $Tools) { throw "-Examples and -Tools name different folders; pick one" }
 $srcName = "modules"
 if ($Examples) { $srcName = "examples" }
+if ($Tools) { $srcName = "tools" }
 $srcDir = Join-Path $root $srcName
 $dirs = Get-ChildItem $srcDir -Directory |
   Where-Object { Test-Path (Join-Path $_.FullName "module.toml") } |

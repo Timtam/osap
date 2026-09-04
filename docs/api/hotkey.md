@@ -27,7 +27,7 @@ See [what that list is and is not](./index.md#capabilities).
 
 **Signature:** `host.hotkey.register(spec: string, callback: () -> ()) ` → `id: number`
 
-Registers a **global** OS hotkey (active regardless of foreground window) for the [key spec](keys#key-spec-string-format) and returns an integer `id`. The callback is invoked with no arguments each time the hotkey fires (only while the owning module is enabled). Raises an error if the spec is invalid or the OS refuses the registration (e.g. already taken).
+Registers a **global** OS hotkey (active regardless of foreground window) for the [key spec](keys#key-spec-string-format) and returns an integer `id`. The callback is invoked with no arguments each time the hotkey fires (only while the owning module is enabled). Raises an error if the spec is invalid.
 
 ```luau
 local id = host.hotkey.register("Ctrl+Alt+P", function()
@@ -35,9 +35,32 @@ local id = host.hotkey.register("Ctrl+Alt+P", function()
 end)
 ```
 
+### A registration is a claim, not a guarantee
+
+Only one module can hold a combination at a time, and a valid spec that somebody else is
+already holding does **not** raise. It is recorded as a standing claim, you get a real `id`
+back, and your callback simply does not fire while the other holder has it. The user is told
+which two modules want the same key.
+
+The claim is honoured the moment the combination becomes free — the other module being
+disabled in the module manager, uninstalled, or releasing the key with
+[`unregister`](#host-hotkey-unregister). Nothing needs restarting, and there is nothing for
+you to retry: the runtime recomputes who holds what whenever the set of enabled modules
+changes. Between enabled modules the one that **loaded first** keeps the combination, and within a
+single module its own earliest registration does. Load order rather than raw registration
+order, so that reloading a module does not cost it its own key: it comes back with a fresh
+registration that would otherwise look like the newest claim on the combination.
+
+The practical consequence for an overlay: **do not announce a hotkey as available just
+because `register` returned an id.** It returns one either way.
+
 ### Windows
 
-`RegisterHotKey`, with auto-repeat suppressed. A combination already held by another application is refused, and the refusal is logged by name.
+`RegisterHotKey`, with auto-repeat suppressed. A combination held by another **application**
+(rather than by another module) cannot be taken, and that refusal is surfaced to the user by
+name and logged. The claim still stands, and it is tried again on the next change to the
+enabled set — so quitting the application that holds the key can be enough, where it used to
+take a restart of this one.
 
 ### macOS
 

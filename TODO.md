@@ -62,7 +62,92 @@ Architecture and feasibility foundation: [docs/architecture-feasibility-study.md
       time, and a search costs mine.
 - [ ] **Module manager follow-ups:** CLI/IPC control surface; a **native macOS/GTK checkbox path** (`TVS_CHECKBOXES` is Windows-only — non-Windows currently shows no checkboxes). Out-of-process only for the untrusted-native-FFI tier. See [docs/module-runtime-and-lifecycle.md](docs/module-runtime-and-lifecycle.md).
   - Lifted out of the completed entries below, where they were easy to lose:
-  - [ ] **Hotkey conflicts are resolved at registration only.** A binding skipped because another module held the combo does not activate when that owner is later disabled (needs a restart), and `apply_enabled`'s re-register on enable neither conflict-checks nor surfaces a clash.
+  - [x] **Hotkey conflicts are resolved at registration only** — fixed 2026-09-03, and the
+      entry understated it. The skipped registration was not merely inactive: `host.hotkey.register`
+      returned *before* inserting it, so the callback was dropped and the module got the id `0`.
+      There was nothing to revive, which is why it took a restart. Liveness is now DERIVED by
+      `refresh_hotkeys` from the enabled set, the way `refresh_captured` has always derived the
+      captured-key set — the earliest claim among enabled modules holds the combination, and
+      there is no stored decision left to go stale. `apply_enabled` recomputes instead of
+      re-registering blind (it discarded the result with `let _ =`), every release path
+      refreshes, `hotkey_owner` and `is_enabled` are gone with their last callers, and the
+      conflict message no longer tells the user to restart.
+    - **The reload is where this wanted to go wrong, twice.** First: `purge_module` must NOT
+      refresh, because both its callers are the reload path and promoting a waiting claim
+      mid-rebuild hands a module its own key away. Keeping the refresh out closed the window
+      — and not the outcome, which was the second mistake and only surfaced when the review
+      was done by hand after the workflow failed. Ids are monotonic and never reused, so the
+      rebuilt module registers with a HIGHER id than the standing claim and "lowest id wins"
+      still gave the key away, permanently, for the session. The rule is `(module_idx, id)`
+      now — load order between modules, registration order within one — which survives a
+      reload because a module keeps its index. At start-up the two readings agree, so nothing
+      changes for the ordinary case.
+    - Also from that review: a module that HAD a hotkey and is reloaded WITHOUT one registers
+      nothing, so nothing triggered a refresh and the combination its purge released at the
+      OS was left held by nobody. `reload_module` refreshes at the end of the operation now.
+    - Measured end to end, not reasoned: two modules contesting Ctrl+Alt+H, the loser now gets
+      a real id (3, not 0) and its claim stands; when the holder releases the key, the log
+      shows it passing over within the same second. With the first module persisted off, the
+      second holds the key at load and no conflict is reported. Four unit tests pin the rule
+      itself, including the case that regressed.
+    - **Five more findings from an adversarial review, all on the conflict MESSAGE**, and one
+      of them overturned the rule again:
+      - A module that is *holding* a key now keeps it. Ordering by `(module_idx, id)` alone
+        let a lower-indexed module take a live key away, and the review showed the case is
+        real rather than theoretical: overlays register control hotkeys on activation and
+        release them on deactivation, `Alt+B` is a control in more than one shipped overlay,
+        and a plug-in switch can have the arriving overlay register while the leaving one is
+        still holding. Incumbency is derived from `live`, so no stored state came back.
+      - A loser was told "module A already uses it" even when A's own registration had been
+        refused by the OS — `want` is computed from claims, not from what was granted. Only
+        reported when the winner is actually live now.
+      - With three claimants both losers were told to disable the holder and promised the key
+        would pass to *them*; it passes to the next in load order. The message no longer
+        promises who gets it, only who has it and what makes it move.
+      - The dedup key carried no owner, so the corrected message naming the new holder was
+        swallowed — a user could carry out an instruction that was never retracted.
+      - `docs/module-manager.md` still said "(then restart)", contradicting the API reference.
+    - **Not verified by me, and both are things the owner can do in seconds:** the
+      manager-checkbox path (`set_enabled` → `apply_enabled` → `refresh_hotkeys`, same
+      plumbing, rule unit-tested for that exact transition — driving a tree control's checkbox
+      from a script was not worth the machinery), and the reload itself, which needs the
+      reload hotkey pressed. Six unit tests cover the rule including the reload ordering; what
+      is unmeasured is the plumbing around those two triggers.
+  - **Decided, so it is not re-opened: the holder is not remembered across a restart.**
+      Raised by the owner from the test itself — re-enabling the module that used to hold a
+      combination does not take it back, which is the rule working (whoever holds it keeps
+      it; loading earlier is not a reason to interrupt a module that is using something).
+      What that leaves is a wrinkle: at start-up nobody holds anything, so load order decides
+      again and the first module has it back. Persisting the holder would have made the
+      toggle a durable control over who owns a shared key; the owner's answer was that this
+      is solving the wrong problem. **The problem is that two modules want one combination at
+      all** — the same thing NVDA add-ons have always had — and a user settles it by turning
+      off what they do not need, which persists on its own. Load order therefore stays the
+      tie-break, and the restart behaviour is documented rather than fixed.
+  - [ ] **Application-side hotkey remapping — the feature the conflict actually points at.**
+      Not urgent; written down while the reasoning is fresh. The user should be able to move
+      a module's key rather than choose between two modules.
+      - The shape: the host already records every claim — `hotkeys` holds the spec, the
+        owning module and whether it is live, and `refresh_hotkeys` already knows who lost to
+        whom. So it can offer "module A wants Ctrl+Win+Alt+F8, which module B is using" and
+        let the user bind A's to Ctrl+Win+F8 instead. The remap is stored per **(module id,
+        requested spec)**, so a module's other keys are untouched, and the next time A asks
+        for Ctrl+Win+Alt+F8 the host registers Ctrl+Win+F8 for it — silently, from then on.
+      - Where it is stored: the settings, not an environment variable. Whether the manager
+        gets a column, a dialog on the conflict itself, or a settings pane is a UI question
+        that should be answered by whoever is looking at that window.
+      - **The hard part is not the binding, it is what the module SAYS.** An overlay
+        announces its own keys ("press Alt+B"), and a control must never claim something it
+        cannot honour — so a remapped module that still announces the spec it asked for is
+        lying to somebody who cannot check. `host.hotkey.register` would have to report the
+        **effective** spec back, and the overlay runtime would have to announce that rather
+        than the authored string. That is the real work, and it reaches into every overlay
+        that names a key.
+      - Conflict detection then has to run against effective specs, not requested ones, or a
+        remap could quietly collide with a third module. And a replacement can itself be
+        unavailable — held by another application, or unparseable — which needs the same
+        honest refusal the OS-conflict path already gives.
+
   - [ ] **`rollback_to` still has the active-overlay `onDeactivate` gap** that `purge_module` fixed for reload — it applies on uninstall and on a failed load.
   - [ ] **Versioned dependencies: no version SELECTION.** Install fetches the default branch's latest, so a `>= x.y` constraint is checked at load but never used to choose what to fetch; reload does not re-verify constraints; and the `"id >= x.y"` syntax is undocumented in the module.toml docs.
   - [x] **Hotkey conflict detection (bd53d02):** a cross-module global-hotkey clash is detected at registration (parsed `(vk,mask)` compare via `key_spec`, order/case-stable) and surfaced in the accessible no-TTS dialog naming both modules + the combo; first-come keeps it, the later module stays loaded with that binding inactive. An OS rejection (another app holds the combo) is reported distinctly; a malformed spec fails loudly with the real parse error. Captured-key duplicates are intentionally NOT flagged (window-scoped overlays legitimately share Tab/Return). Adversarially reviewed. **Follow-up:** dynamic re-resolution — a skipped/disabled binding doesn't activate when the owner is later disabled (needs a restart), and `apply_enabled`'s re-register on enable doesn't conflict-check/surface (silent). Conflicts are registration-time only.
@@ -1316,6 +1401,80 @@ that is *enough* is unknown, because no Mac has ever been asked.
       ask a blind tester to produce one. It is a question for the test round, on a plug-in
       that has such a field, not for a synthetic check.
 
+## The first Mac session — what it left open (2026-09-03)
+
+Three sessions, one tester, one plugin. Everything that was settled is ticked where it was
+asked; this is what was NOT, plus what the session found that nobody had asked.
+
+- [ ] **The startup announcement is silent on every Mac, by default.** The tester: "I don't
+      hear the spoken notification that Automation Platform is running in the menu bar".
+      The log explains it completely: `announce()` speaks only when `via_screen_reader()` is
+      true, which on macOS is `voiceover_speech() && is_running()` — and "Speak through
+      VoiceOver" is off by default (`settings on: dock_while_open`, nothing else). The comment
+      in `gui.rs` says the host "may still speak this one"; it cannot, with the defaults. The
+      fix is the plain voice for this one line when there is no balloon, which is what the
+      comment meant. Not done in this round — the owner chose F6 and the busy-skip first.
+- [ ] **F6 into the plugin: rewritten, and unrun.** Five of five presses failed in the
+      session, with the backend reporting every request accepted and the focus chain still
+      three deep — REAPER keeps its keyboard on the FX list, and the plugin's view exposes no
+      element to hand it to. `daw-hosts` now clicks three points inside the plugin's panel
+      when the chain says the keyboard is on REAPER's own chrome, reads the chain again a
+      quarter of a second later on a timer (a posted click has not been processed when the
+      call returns; the first draft read it in the same breath and would have raced it), and
+      announces only what that reading supports. Two readings of the chain an adversarial
+      review caught as wrong: an EMPTY chain is a failed read, not "inside", and a chain that
+      does not end in our window belongs to another application. No click is sent on either,
+      because a click on that basis lands in whatever is actually in front. The click point
+      is derived from the probe (content 240,52 plus the measured FX-list width, memoised per
+      window). A third finding, from the review's critic rather than its reviewers: the click
+      was posted while the hotkey's four modifiers were still physically held, and macOS
+      mouse events inherited them — a Control-modified left click is a secondary click, so
+      the shortcut would have opened a context menu. Mouse events now have their flags
+      cleared in the backend, as key events have since Melodyne. And the backend's focus
+      chain now answers EMPTY when the focus could not be read, instead of substituting the
+      window and looking exactly like "inside". Whether REAPER moves its focus on the click,
+      only the next session can say.
+  - **Known limitation, and it needs a second plug-in to settle.** "The keyboard is on the
+      host's chrome" is read from the chain being deeper than the window itself, which is
+      only right for a plug-in whose view exposes nothing — sforzando, as measured. A plug-in
+      that exposes its own controls would put the focus several elements deep INSIDE itself,
+      be read as chrome, get clicked at its corner and be reported as a failure that is not
+      one. The REAPER matcher is title-based, so every plug-in takes this path. Distinguishing
+      the two needs an accessible plug-in on the tester's machine to look at first.
+- [ ] **Each F6 press cost a second and switched the tap off twice.** `host.window.find`
+      lists every window, `enumerate_windows` asked every application, one of them was not
+      answering, and the loop never consulted the busy quarantine that
+      `frontmost_window_element` has used since it was introduced. It does now — and the
+      review was right that this is narrower than it reads: the quarantine lasts five
+      seconds, his presses were 16–51 s apart, so it would have spared none of them. The fix
+      that would have: `find` carries an `app` clause (`exe`, `bundleId`), and
+      `runningApplications()` answers name and bundle without one accessibility call, so
+      `list` could ask only the applications a matcher names. That needs the filter to reach
+      the backend (`host.window.list(filter?)`), which is API surface, and is not done blind.
+      When an application IS in the quarantine, `find` is blind to its windows for five
+      seconds; the log now names the application it did not ask, and the shortcut says "could
+      not find a plugin window", which is what it knows.
+- [ ] **Retina is still unmeasured.** The tester's Air has a backing scale of 1.00. The
+      coordinate agreement shown by the probe is real and answers nothing about 2.00x.
+- [ ] **The arm64 half of the universal build has never run.** The session ran the x86_64
+      slice (no Rosetta). The CI's `lipo` check proves both slices exist, not that the arm64
+      one launches.
+- [ ] **Qt object names in `AXIdentifier`** — still open. The tester probed sforzando, which
+      is not a Qt application. Needs a probe of Kontakt or Komplete Kontrol.
+- [ ] **The VoiceOver transport** — still unmeasured, because the switch was off. Ask the
+      tester to turn "Speak through VoiceOver" on for the next round; the `voiceover.sdef`
+      he sent confirms the `output` command exists.
+- [x] **The pump line spoke of Windows on a Mac.** "past ~300 ms Windows stops waiting for
+      our keyboard hook" appeared 34 times in a macOS log. It names the platform's own
+      hazard now (the tap being switched off). Noted because it cost reading time before it
+      was recognised as wording.
+- [x] **`docs/macos-port.md` claimed the tap lives on its own thread.** It does not
+      (`tap.rs`: main thread), and the session showed the main thread suffices. Corrected.
+- Observed and left alone, because they behaved: REAPER and sforzando each refused the focus
+  observer when first seen (busy at startup) and were subscribed later on the next
+  activation; seven `Return` presses reached the plugin while its menu was open, which is the
+  menu pass-through working; `ownsPoint` answered `nil` throughout, by design.
+
 ## An error dialog nobody can get back to (2026-09-03)
 
 Reported from a real session: a module-error dialog appeared with, from the user's side, no
@@ -1401,80 +1560,6 @@ It does not: the string does not appear anywhere in its 65 lines.
 Asked whether prism should replace `tts` on macOS as well, so that the dependency goes
 entirely. The answer is no, but the cleanup behind the question is worth doing — with our own
 wrapper rather than with prism.
-## The first Mac session — what it left open (2026-09-03)
-
-Three sessions, one tester, one plugin. Everything that was settled is ticked where it was
-asked; this is what was NOT, plus what the session found that nobody had asked.
-
-- [ ] **The startup announcement is silent on every Mac, by default.** The tester: "I don't
-      hear the spoken notification that Automation Platform is running in the menu bar".
-      The log explains it completely: `announce()` speaks only when `via_screen_reader()` is
-      true, which on macOS is `voiceover_speech() && is_running()` — and "Speak through
-      VoiceOver" is off by default (`settings on: dock_while_open`, nothing else). The comment
-      in `gui.rs` says the host "may still speak this one"; it cannot, with the defaults. The
-      fix is the plain voice for this one line when there is no balloon, which is what the
-      comment meant. Not done in this round — the owner chose F6 and the busy-skip first.
-- [ ] **F6 into the plugin: rewritten, and unrun.** Five of five presses failed in the
-      session, with the backend reporting every request accepted and the focus chain still
-      three deep — REAPER keeps its keyboard on the FX list, and the plugin's view exposes no
-      element to hand it to. `daw-hosts` now clicks three points inside the plugin's panel
-      when the chain says the keyboard is on REAPER's own chrome, reads the chain again a
-      quarter of a second later on a timer (a posted click has not been processed when the
-      call returns; the first draft read it in the same breath and would have raced it), and
-      announces only what that reading supports. Two readings of the chain an adversarial
-      review caught as wrong: an EMPTY chain is a failed read, not "inside", and a chain that
-      does not end in our window belongs to another application. No click is sent on either,
-      because a click on that basis lands in whatever is actually in front. The click point
-      is derived from the probe (content 240,52 plus the measured FX-list width, memoised per
-      window). A third finding, from the review's critic rather than its reviewers: the click
-      was posted while the hotkey's four modifiers were still physically held, and macOS
-      mouse events inherited them — a Control-modified left click is a secondary click, so
-      the shortcut would have opened a context menu. Mouse events now have their flags
-      cleared in the backend, as key events have since Melodyne. And the backend's focus
-      chain now answers EMPTY when the focus could not be read, instead of substituting the
-      window and looking exactly like "inside". Whether REAPER moves its focus on the click,
-      only the next session can say.
-  - **Known limitation, and it needs a second plug-in to settle.** "The keyboard is on the
-      host's chrome" is read from the chain being deeper than the window itself, which is
-      only right for a plug-in whose view exposes nothing — sforzando, as measured. A plug-in
-      that exposes its own controls would put the focus several elements deep INSIDE itself,
-      be read as chrome, get clicked at its corner and be reported as a failure that is not
-      one. The REAPER matcher is title-based, so every plug-in takes this path. Distinguishing
-      the two needs an accessible plug-in on the tester's machine to look at first.
-- [ ] **Each F6 press cost a second and switched the tap off twice.** `host.window.find`
-      lists every window, `enumerate_windows` asked every application, one of them was not
-      answering, and the loop never consulted the busy quarantine that
-      `frontmost_window_element` has used since it was introduced. It does now — and the
-      review was right that this is narrower than it reads: the quarantine lasts five
-      seconds, his presses were 16–51 s apart, so it would have spared none of them. The fix
-      that would have: `find` carries an `app` clause (`exe`, `bundleId`), and
-      `runningApplications()` answers name and bundle without one accessibility call, so
-      `list` could ask only the applications a matcher names. That needs the filter to reach
-      the backend (`host.window.list(filter?)`), which is API surface, and is not done blind.
-      When an application IS in the quarantine, `find` is blind to its windows for five
-      seconds; the log now names the application it did not ask, and the shortcut says "could
-      not find a plugin window", which is what it knows.
-- [ ] **Retina is still unmeasured.** The tester's Air has a backing scale of 1.00. The
-      coordinate agreement shown by the probe is real and answers nothing about 2.00x.
-- [ ] **The arm64 half of the universal build has never run.** The session ran the x86_64
-      slice (no Rosetta). The CI's `lipo` check proves both slices exist, not that the arm64
-      one launches.
-- [ ] **Qt object names in `AXIdentifier`** — still open. The tester probed sforzando, which
-      is not a Qt application. Needs a probe of Kontakt or Komplete Kontrol.
-- [ ] **The VoiceOver transport** — still unmeasured, because the switch was off. Ask the
-      tester to turn "Speak through VoiceOver" on for the next round; the `voiceover.sdef`
-      he sent confirms the `output` command exists.
-- [x] **The pump line spoke of Windows on a Mac.** "past ~300 ms Windows stops waiting for
-      our keyboard hook" appeared 34 times in a macOS log. It names the platform's own
-      hazard now (the tap being switched off). Noted because it cost reading time before it
-      was recognised as wording.
-- [x] **`docs/macos-port.md` claimed the tap lives on its own thread.** It does not
-      (`tap.rs`: main thread), and the session showed the main thread suffices. Corrected.
-- Observed and left alone, because they behaved: REAPER and sforzando each refused the focus
-  observer when first seen (busy at startup) and were subscribed later on the next
-  activation; seven `Return` presses reached the plugin while its menu was open, which is the
-  menu pass-through working; `ownsPoint` answered `nil` throughout, by design.
-
 
 - [x] **The measurement that settles it was already sitting in CI.** The start-up timing added
       for the Windows work ran on a real Mac: run 33620074214, HEAD `8e44699`, macos-15-intel —

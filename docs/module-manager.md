@@ -165,12 +165,20 @@ setting that is on and which of the two turned it on.
 ## Conflict detection
 
 Two modules from different authors can end up wanting the same **global hotkey**.
-When that happens, the clash is detected at registration and surfaced in an
-accessible dialog naming **both** modules and the combo — so you can see *why* a
-hotkey isn't working, instead of it silently failing. First-come keeps the hotkey;
-the later module still loads (with that one binding inactive). Disable one of them
-(then restart) to switch. (Captured keys are *not* flagged — window-scoped
-overlays legitimately share keys like Tab/Enter for their own windows.)
+Only one module can hold a combination at a time, so the clash is surfaced in an
+accessible dialog naming **both** modules and the combo — you can see *why* a
+hotkey isn't working instead of it silently failing.
+
+Both modules stay loaded, and the one that missed out keeps a standing **claim**.
+The module that loaded first holds the combination, and a module that is already
+holding one keeps it. **The claim is honoured the moment the combination is free** —
+disable, uninstall or reload the module holding it and the hotkey passes over by
+itself. Nothing needs restarting. (Before 2026-09-03 it did: a claim that lost was
+not recorded at all, so there was nothing left to hand the key to.)
+
+(Captured keys are *not* flagged — window-scoped overlays legitimately share keys
+like Tab/Enter for their own windows, and the hook suppresses a key for the whole
+process rather than granting it to one module.)
 
 ## Crash protection
 

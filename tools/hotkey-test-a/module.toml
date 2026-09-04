@@ -1,0 +1,11 @@
+id = "com.tool.hotkey-test-a"
+name = "Hotkey test A"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
+
+# Half of a pair. Both halves want the SAME combination, which is the whole point: only one
+# module can hold one, and these two exist to make it audible which one does.
+[capabilities]
+require = ["hotkey", "speech", "log"]
+
+entry = "src/main.luau"

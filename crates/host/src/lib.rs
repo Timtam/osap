@@ -43,6 +43,15 @@ struct HotkeyReg {
     /// The spec parsed to `(vk, modifier-mask)` for cross-module conflict
     /// detection (`None` if unparseable — then conflict-checked only via the OS).
     binding: Option<(u32, u8)>,
+    /// Whether this registration currently HOLDS its combination at the OS.
+    ///
+    /// Recorded rather than inferred, because the two are not the same thing and the
+    /// difference was the bug: a registration skipped because another module held the combo
+    /// stayed skipped for the session, so disabling that other module did not hand the key
+    /// over — it needed a restart. `refresh_hotkeys` derives this from the enabled set every
+    /// time that set changes, the way `refresh_captured` already derives the captured-key
+    /// set. Liveness that is stored goes stale; liveness that is derived cannot.
+    live: bool,
 }
 
 /// One overlay's claim on an arbiter slot: which module/VM owns it, how specific
@@ -653,28 +662,15 @@ impl Shared {
         );
     }
 
-    /// The enabled module that already owns global hotkey `binding` (if any) —
-    /// includes the registering module itself, so a redundant self-rebind is also
-    /// caught (and skipped) instead of failing against the OS.
-    fn hotkey_owner(&self, binding: (u32, u8)) -> Option<usize> {
-        let enabled = self.enabled.borrow();
-        self.hotkeys
-            .borrow()
-            .values()
-            .find(|reg| {
-                reg.binding == Some(binding) && enabled.get(reg.module_idx).copied().unwrap_or(false)
-            })
-            .map(|reg| reg.module_idx)
-    }
-
-    /// Whether module `idx` is currently enabled.
-    fn is_enabled(&self, idx: usize) -> bool {
-        self.enabled.borrow().get(idx).copied().unwrap_or(false)
-    }
-
-    /// Surfaces a cross-module binding clash (two modules want the same hotkey or
-    /// captured key): logs it + queues an accessible dialog naming both modules.
-    /// First-come keeps the binding; the later module stays loaded with it inactive.
+    /// Surfaces a cross-module hotkey clash: logs it + queues an accessible dialog naming
+    /// both modules. The module that loaded first keeps the combination; the other stays
+    /// loaded with a standing claim that `refresh_hotkeys` honours the moment the holder
+    /// gives it up.
+    ///
+    /// Hotkeys only, despite the generic `kind` parameter — captured keys do not contend for
+    /// exclusive ownership (the hook suppresses a key for the process and every enabled
+    /// module that captured it is dispatched to), so there is nothing to report there. The
+    /// doc used to say "hotkey or captured key" and named a caller that does not exist.
     fn report_conflict(&self, idx: usize, owner_idx: usize, kind: &str, spec: &str) {
         let (me, owner) = {
             let ids = self.ids.borrow();
@@ -685,10 +681,22 @@ impl Shared {
         };
         logging::line("conflict", &format!("[{me}] {kind} '{spec}' conflicts with [{owner}]"));
         self.queue_dialog(
-            format!("{me}\u{1}conflict\u{1}{kind}\u{1}{spec}"),
+            // The OWNER is part of the key. Without it, three modules wanting one combination
+            // produced one message per loser naming the first holder, and then the corrected
+            // message — naming whoever took over after the user disabled that holder — had
+            // the same key and was silently dropped. The user would have been left having
+            // carried out an instruction that was never retracted.
+            format!("{me}\u{1}conflict\u{1}{kind}\u{1}{spec}\u{1}{owner}"),
             "Binding conflict".to_string(),
+            // States who holds it and what makes it move, and promises nothing about WHO it
+            // moves to. The old wording said disabling the holder passed the key to the
+            // reader "straight away", which is true only when there are exactly two
+            // claimants: with three, disabling the named holder hands it to the next module
+            // in load order, not to the one reading the message. It also said "tried to
+            // bind", which stopped being true once this report could name a module that had
+            // been holding the key and was asked to give it up.
             format!(
-                "Module \u{201c}{me}\u{201d} tried to bind the {kind} {spec}, but module \u{201c}{owner}\u{201d} already uses it. {spec} stays with \u{201c}{owner}\u{201d} \u{2014} disable one of them (then restart) to switch."
+                "Module \u{201c}{me}\u{201d} wants the {kind} {spec}, and module \u{201c}{owner}\u{201d} is using it. Only one module can hold a combination at a time. {spec} passes on by itself as soon as \u{201c}{owner}\u{201d} releases it \u{2014} disabling or removing that module in the module manager is enough, and nothing needs restarting."
             ),
         );
     }
@@ -711,6 +719,157 @@ impl Shared {
     fn drain_errors(&self) -> Vec<(String, String)> {
         std::mem::take(&mut *self.errors.borrow_mut())
     }
+}
+
+/// Which registration holds each combination: **whoever holds it already keeps it**, and
+/// otherwise the earliest claim among enabled modules — load order first, registration order
+/// second.
+///
+/// Lifted out of `refresh_hotkeys` so the RULE can be tested without an OS to register
+/// against — the plumbing around it is untestable here, and the rule is the part that was
+/// wrong.
+///
+/// Ordering by id alone was the obvious reading of "first-come", and it does not survive a
+/// reload. Ids are monotonic and never reused (`alloc_id`), so a reloaded module registers
+/// again with a HIGHER id than any standing claim on its combination — and would hand its own
+/// key to whoever had been waiting, permanently, for the rest of the session. Reloading a
+/// module would silently cost it its hotkey. Keeping the refresh out of `purge_module` closed
+/// the window during the rebuild but not the outcome, because the outcome is decided here.
+///
+/// A module's index survives a reload (the VM is swapped in at the same index), so ordering by
+/// `(module_idx, id)` is stable across one. At start-up the two readings agree — module 0
+/// loads and registers before module 1 — so this changes nothing for the ordinary case and
+/// only settles the cases where they disagree.
+///
+/// **The holder is deliberately not remembered across a restart**, and that was decided
+/// rather than overlooked. Re-enabling a module does not take a combination back from
+/// whoever has been using it — which is right — but at start-up nobody holds anything, so
+/// the order below decides again and the earlier module has it. Persisting the holder would
+/// have turned enabling and disabling into a durable way to say who owns a shared key; the
+/// answer was that it solves the wrong problem, because the problem is two modules wanting
+/// one combination at all, and a user settles that by turning off what they do not need.
+/// The thing worth building instead is a remap — see TODO.md.
+///
+/// Order alone is still not enough, and the case that shows why is not hypothetical.
+/// Overlays register their control hotkeys when they activate and release them when they
+/// deactivate, and `Alt+B` is a control in more than one of the shipped overlays. Switching
+/// between two plug-ins can therefore have the arriving overlay register while the leaving one
+/// is still holding — and pure order would let the lower-indexed module take a LIVE key away
+/// from the module that is using it, mid-gesture, on the way out. So a live claim wins: taking
+/// a key off a module that is holding it needs a reason better than "I load earlier", and the
+/// reasons that count (the holder is disabled, unregisters, or goes away) all remove the claim
+/// and let the order decide again.
+///
+/// A registration whose spec did not parse has no `(vk, mask)` and so cannot be compared with
+/// anybody else's; it is left out and answered by the OS alone.
+fn hotkey_winners(
+    regs: impl Iterator<Item = (i32, Option<(u32, u8)>, usize, bool)>,
+    enabled: impl Fn(usize) -> bool,
+) -> HashMap<(u32, u8), i32> {
+    // Sorted so `false` (a live claim) comes before `true`: the incumbent outranks the order,
+    // and the order decides among everybody else. At most one claim per combination is live.
+    let mut best: HashMap<(u32, u8), (bool, usize, i32)> = HashMap::new();
+    for (id, binding, module_idx, live) in regs {
+        if !enabled(module_idx) {
+            continue;
+        }
+        let Some(b) = binding else { continue };
+        let rank = (!live, module_idx, id);
+        best.entry(b).and_modify(|cur| *cur = (*cur).min(rank)).or_insert(rank);
+    }
+    best.into_iter().map(|(b, (_, _, id))| (b, id)).collect()
+}
+
+impl Shared {
+    /// Recomputes which registrations hold their combination at the OS, from *enabled*
+    /// modules — the counterpart to `refresh_captured` below, and needed for the same reason.
+    ///
+    /// Conflicts used to be resolved once, at registration, and never revisited. Worse: a
+    /// registration that lost the contest was not even recorded — `host.hotkey.register`
+    /// returned early, before the insert, so the callback was dropped and the module got the
+    /// id `0`. There was therefore nothing to revive, and disabling the module that held the
+    /// combination did not hand the key over; it needed a restart. That is what the TODO
+    /// entry meant by "resolved at registration only", and it was the deeper half of it.
+    ///
+    /// Now every registration is recorded and liveness is DERIVED here: for each combination,
+    /// the earliest registration among enabled modules holds it. Ids are handed out in order,
+    /// so the lowest id is first-come — the rule the conflict message already promises. Stale
+    /// state cannot accumulate, because there is no stored decision to go stale.
+    ///
+    /// Release before claim, in two passes. The OS refuses a combination that is already
+    /// held, and the previous holder is usually one of ours: claiming first would fail on our
+    /// own registration and leave the key belonging to nobody.
+    fn refresh_hotkeys(&self) {
+        // Who should hold what.
+        let want = {
+            let map = self.hotkeys.borrow();
+            let enabled = self.enabled.borrow();
+            hotkey_winners(
+                map.iter().map(|(id, reg)| (*id, reg.binding, reg.module_idx, reg.live)),
+                |idx| enabled.get(idx).copied().unwrap_or(false),
+            )
+        };
+
+        // What has to change, decided before anything is touched so no borrow is held across
+        // an OS call or a report.
+        let (mut release, mut claim, mut losers) = (Vec::new(), Vec::new(), Vec::new());
+        {
+            let map = self.hotkeys.borrow();
+            let enabled = self.enabled.borrow();
+            for (id, reg) in map.iter() {
+                let winner = reg.binding.and_then(|b| want.get(&b).copied());
+                let should = winner == Some(*id);
+                if reg.live && !should {
+                    release.push(*id);
+                }
+                if !reg.live && should {
+                    claim.push((*id, reg.spec.clone(), reg.module_idx));
+                }
+                // An enabled module whose combination belongs to somebody else.
+                //
+                // Only reported when the winner ACTUALLY HOLDS it. `want` is computed from
+                // claims, not from what the OS granted, so a winner whose own registration
+                // another application refused is still the winner on paper — and telling
+                // somebody "module A already uses it" when nobody does sends them to disable
+                // A for nothing. A is separately told the truth by `report_os_conflict`.
+                if !should
+                    && enabled.get(reg.module_idx).copied().unwrap_or(false)
+                    && reg.binding.is_some()
+                {
+                    if let Some(owner) = winner.and_then(|w| map.get(&w)) {
+                        if owner.module_idx != reg.module_idx && owner.live {
+                            losers.push((reg.module_idx, owner.module_idx, reg.spec.clone()));
+                        }
+                    }
+                }
+            }
+        }
+
+        for id in release {
+            self.backend.unregister_hotkey(id);
+            if let Some(reg) = self.hotkeys.borrow_mut().get_mut(&id) {
+                reg.live = false;
+            }
+        }
+        for (id, spec, idx) in claim {
+            match self.backend.register_hotkey(id, &spec) {
+                Ok(()) => {
+                    if let Some(reg) = self.hotkeys.borrow_mut().get_mut(&id) {
+                        reg.live = true;
+                    }
+                    let me = self.ids.borrow().get(idx).cloned().unwrap_or_default();
+                    logging::line("keys", &format!("hotkey '{spec}' is now held by [{me}]"));
+                }
+                // Held by another application rather than by us. Left not-live, so a later
+                // refresh tries again — which is the one thing a restart used to be for.
+                Err(e) => self.report_os_conflict(idx, "hotkey", &spec, &e),
+            }
+        }
+        for (idx, owner, spec) in losers {
+            self.report_conflict(idx, owner, "hotkey", &spec);
+        }
+    }
+
     /// Recomputes the global captured-key set from *enabled* modules and updates
     /// the hook (so a disabled module's keys are no longer suppressed).
     fn refresh_captured(&self) {
@@ -827,6 +986,15 @@ impl Shared {
         if let Some(id) = id {
             self.exports.borrow_mut().remove(&id);
         }
+        // Deliberately NOT `refresh_hotkeys()` here, and this is the subtle one — it was
+        // written that way first and it was wrong. Both callers of this function are the
+        // RELOAD path: it purges, rebuilds the VM, and the fresh VM re-registers. A refresh
+        // in between would hand the module's own combination to whoever else had a standing
+        // claim on it, and since the rebuilt module registers again with a HIGHER id it
+        // would never get it back — reloading a module would silently cost it its hotkey.
+        // The refresh belongs at the end of the operation: the fresh VM's own
+        // `host.hotkey.register` does it on success, and `reload_module` does it on failure,
+        // where the module really is gone.
         self.refresh_captured();
     }
 
@@ -847,16 +1015,12 @@ impl Shared {
             let prefix = format!("{id}\u{1}");
             self.error_seen.borrow_mut().retain(|k| !k.starts_with(&prefix));
         }
-        for (id, reg) in self.hotkeys.borrow().iter() {
-            if reg.module_idx != idx {
-                continue;
-            }
-            if enabled {
-                let _ = self.backend.register_hotkey(*id, &reg.spec);
-            } else {
-                self.backend.unregister_hotkey(*id);
-            }
-        }
+        // Derived, not toggled. This loop used to register or unregister only THIS module's
+        // hotkeys, discarding the result (`let _ =`) — so enabling a module whose combination
+        // another one held failed silently, and disabling the holder left the waiting module
+        // waiting. Both are the same missing step: the set of live registrations is a function
+        // of the enabled set, so it is recomputed rather than nudged.
+        self.refresh_hotkeys();
         self.refresh_captured();
         // A disabled module must not stay the active overlay (and an enabled one
         // may now win): re-elect every arbiter slot it participates in.
@@ -929,6 +1093,7 @@ impl Shared {
         self.caps.borrow_mut().truncate(n);
         self.schemas.borrow_mut().truncate(n);
         self.exports.borrow_mut().remove(failed_id);
+        self.refresh_hotkeys();
         self.refresh_captured();
     }
 
@@ -1563,6 +1728,135 @@ fn panic_text(p: &Box<dyn std::any::Any + Send>) -> String {
         .or_else(|| p.downcast_ref::<String>().cloned())
         .map(|s| format!("Rust panic: {s}"))
         .unwrap_or_else(|| "Rust panic (no message)".into())
+}
+
+#[cfg(test)]
+mod hotkey_conflict_tests {
+    use super::*;
+
+    /// Ctrl+Alt+H, wanted by two modules.
+    const H: (u32, u8) = (0x48, 0b011);
+    /// A different combination, so the tests can tell "nobody holds it" from "the wrong one".
+    const J: (u32, u8) = (0x4A, 0b011);
+
+    /// `(id, binding, module_idx)` claims, none of them holding the key yet.
+    fn winners(regs: &[(i32, Option<(u32, u8)>, usize)], on: &[bool]) -> HashMap<(u32, u8), i32> {
+        hotkey_winners(regs.iter().map(|(i, b, m)| (*i, *b, *m, false)), |i| {
+            on.get(i).copied().unwrap_or(false)
+        })
+    }
+
+    /// The same, with a fourth field saying which claim currently HOLDS its combination.
+    fn winners_live(
+        regs: &[(i32, Option<(u32, u8)>, usize, bool)],
+        on: &[bool],
+    ) -> HashMap<(u32, u8), i32> {
+        hotkey_winners(regs.iter().copied(), |i| on.get(i).copied().unwrap_or(false))
+    }
+
+    /// A module that is holding a key does not lose it to a module that merely loads earlier.
+    ///
+    /// Not hypothetical: overlays register their control hotkeys on activation and release
+    /// them on deactivation, and `Alt+B` is a control in more than one shipped overlay. On a
+    /// switch between two plug-ins the arriving overlay can register while the leaving one is
+    /// still holding, and pure load order would take the key off the module still using it —
+    /// mid-gesture, on its way out, with a dialog telling the user the wrong thing.
+    #[test]
+    fn a_module_holding_a_key_keeps_it_against_a_lower_index() {
+        // Module 1 holds Ctrl+Alt+H; module 0 loads earlier and now claims it too.
+        let regs = [(9, Some(H), 1usize, true), (12, Some(H), 0usize, false)];
+        assert_eq!(winners_live(&regs, &[true, true]).get(&H), Some(&9));
+
+        // The moment the holder is disabled, order decides again and module 0 takes it.
+        assert_eq!(winners_live(&regs, &[true, false]).get(&H), Some(&12));
+
+        // And with nobody holding it, order decides from the start.
+        let fresh = [(9, Some(H), 1usize, false), (12, Some(H), 0usize, false)];
+        assert_eq!(winners_live(&fresh, &[true, true]).get(&H), Some(&12));
+    }
+
+    /// The bug this was written for: disabling the module that holds a combination has to
+    /// hand it to the module that has been waiting since the session started.
+    #[test]
+    fn disabling_the_holder_hands_the_key_over() {
+        // Module 0 loads first (id 1), module 1 second (id 2), both want Ctrl+Alt+H.
+        let regs = [(1, Some(H), 0usize), (2, Some(H), 1usize)];
+
+        // Both enabled: the one that loaded first keeps it, which is what the conflict
+        // message promises the user.
+        assert_eq!(winners(&regs, &[true, true]).get(&H), Some(&1));
+
+        // Module 0 disabled: module 1's standing claim becomes the live one. Before the fix
+        // this was not merely wrong — module 1's registration had never been recorded, so
+        // there was nothing here to promote and it took a restart.
+        assert_eq!(winners(&regs, &[false, true]).get(&H), Some(&2));
+
+        // And back again when it is re-enabled.
+        assert_eq!(winners(&regs, &[true, true]).get(&H), Some(&1));
+
+        // Neither enabled: nobody holds it, and the combination is left to other applications.
+        assert!(winners(&regs, &[false, false]).is_empty());
+    }
+
+    /// Load order decides between modules, and the reason is the reload.
+    ///
+    /// Ordering by id alone reads like "first-come" and fails: ids are monotonic and never
+    /// reused, so a module that reloads registers again with a higher id than any standing
+    /// claim on its combination and hands its own key away for the rest of the session. This
+    /// is that scenario, written as the numbers actually come out.
+    #[test]
+    fn a_reloaded_module_keeps_its_own_key() {
+        // Module 0 registered id 2 at start-up and holds Ctrl+Alt+H; module 1 has a standing
+        // claim with id 3. Then module 0 is reloaded: its old registration is gone and the
+        // fresh VM registers again — as id 42, because ids only ever go up.
+        let after_reload = [(42, Some(H), 0usize), (3, Some(H), 1usize)];
+        assert_eq!(
+            winners(&after_reload, &[true, true]).get(&H),
+            Some(&42),
+            "the reloaded module keeps its key; ordering by id alone would give it to module 1"
+        );
+        // And the ordinary case is unchanged, because at start-up the two readings agree.
+        let at_startup = [(2, Some(H), 0usize), (3, Some(H), 1usize)];
+        assert_eq!(winners(&at_startup, &[true, true]).get(&H), Some(&2));
+    }
+
+    /// Within one module, its own earliest registration wins — load order only decides
+    /// BETWEEN modules.
+    #[test]
+    fn registration_order_is_the_tiebreak_inside_a_module() {
+        let regs = [(7, Some(H), 0usize), (3, Some(H), 0usize)];
+        assert_eq!(winners(&regs, &[true]).get(&H), Some(&3));
+    }
+
+    /// Disabling the holder passes it down the load order, not to whoever has the lowest id.
+    #[test]
+    fn the_next_module_in_load_order_takes_over() {
+        let regs = [(7, Some(H), 0usize), (3, Some(H), 1usize), (5, Some(H), 2usize)];
+        assert_eq!(winners(&regs, &[true, true, true]).get(&H), Some(&7));
+        assert_eq!(winners(&regs, &[false, true, true]).get(&H), Some(&3));
+        assert_eq!(winners(&regs, &[false, false, true]).get(&H), Some(&5));
+    }
+
+    /// One module holding two different combinations keeps both, and a self-rebind of the
+    /// same combination does not fight itself into nobody holding it.
+    #[test]
+    fn separate_combinations_and_a_self_rebind() {
+        let regs = [(1, Some(H), 0usize), (2, Some(J), 0usize), (3, Some(H), 0usize)];
+        let w = winners(&regs, &[true]);
+        assert_eq!(w.get(&H), Some(&1), "the module's own earlier claim keeps it");
+        assert_eq!(w.get(&J), Some(&2));
+        assert_eq!(w.len(), 2);
+    }
+
+    /// An unparseable spec has no comparable binding, so it never wins or loses a contest
+    /// here — the OS is its only judge, and it was already asked at registration.
+    #[test]
+    fn an_unparseable_spec_is_left_to_the_os() {
+        let regs = [(1, None, 0usize), (2, Some(H), 0usize)];
+        let w = winners(&regs, &[true]);
+        assert_eq!(w.len(), 1);
+        assert_eq!(w.get(&H), Some(&2));
+    }
 }
 
 #[cfg(test)]
@@ -2244,6 +2538,8 @@ fn reload_module(
         // A partial rebuild may have registered hotkeys/keys against the fresh VM
         // (about to be dropped) — purge again so nothing dangles; restore the store.
         shared.purge_module(idx);
+        // Now the module really is gone, so its combinations go to whoever was waiting.
+        shared.refresh_hotkeys();
         shared.store.borrow_mut().restore(&old_id, store_snapshot);
         return Err(e);
     }
@@ -2269,6 +2565,13 @@ fn reload_module(
             logging::line("manager", &format!("watch_foreground failed: {e}"));
         }
     }
+    // The end of the operation, which is where the refresh belongs — `purge_module`
+    // deliberately does not do it (see the note there). The fresh VM's own
+    // `host.hotkey.register` usually covers this, but not always: a module that HAD a hotkey
+    // and comes back without one registers nothing, so nothing would run, and the
+    // combination its purge released at the OS would be held by nobody while another
+    // module's standing claim went on waiting.
+    shared.refresh_hotkeys();
     logging::line("manager", &format!("reloaded module: {old_id}"));
 
     let graph: Vec<(String, Vec<String>)> = modules
@@ -2755,14 +3058,29 @@ impl Manager {
                         let images_ms = t.elapsed().as_millis();
                         let pump_ms = pump_started.elapsed().as_millis();
                         if pump_ms >= 250 {
+                            // The hazard is different on each platform, and the line has to
+                            // name the right one: a Mac tester's log full of "Windows stops
+                            // waiting for our keyboard hook" was a puzzle before it was a
+                            // diagnosis. On macOS the system switches off an event tap whose
+                            // thread stops answering; the watchdog in tap.rs re-enables it
+                            // and logs that it did, so the two lines can be read together.
+                            #[cfg(windows)]
+                            let hazard = "past ~300 ms Windows stops waiting for our \
+                                          keyboard hook and delivers the key without us";
+                            #[cfg(target_os = "macos")]
+                            let hazard = "a stall this long is what gets the event tap \
+                                          switched off, and keys go uncaptured until the \
+                                          watchdog re-enables it";
+                            #[cfg(not(any(windows, target_os = "macos")))]
+                            let hazard = "keys can be delivered without us while the pump \
+                                          is this busy";
                             logging::line(
                                 "pump",
                                 &format!(
                                     "one iteration took {pump_ms} ms (os events {events_ms} \
                                      = {act_n}x window-activate {act_ms} + focus-change \
                                      {focus_ms}, timers {timers_ms}, image results \
-                                     {images_ms}) — past ~300 ms Windows stops waiting for \
-                                     our keyboard hook and delivers the key without us"
+                                     {images_ms}) — {hazard}"
                                 ),
                             );
                         }
@@ -3058,22 +3376,6 @@ impl HostEvents for Dispatcher<'_> {
         if appcfg::trace() || appcfg::calibrate() {
             logging::line("keys", &format!("dispatch vk 0x{vk:02X}/m{mods}"));
         }
-                            // The hazard is different on each platform, and the line has to
-                            // name the right one: a Mac tester's log full of "Windows stops
-                            // waiting for our keyboard hook" was a puzzle before it was a
-                            // diagnosis. On macOS the system switches off an event tap whose
-                            // thread stops answering; the watchdog in tap.rs re-enables it
-                            // and logs that it did, so the two lines can be read together.
-                            #[cfg(windows)]
-                            let hazard = "past ~300 ms Windows stops waiting for our \
-                                          keyboard hook and delivers the key without us";
-                            #[cfg(target_os = "macos")]
-                            let hazard = "a stall this long is what gets the event tap \
-                                          switched off, and keys go uncaptured until the \
-                                          watchdog re-enables it";
-                            #[cfg(not(any(windows, target_os = "macos")))]
-                            let hazard = "keys can be delivered without us while the pump \
-                                          is this busy";
         let found = {
             let keys = self.shared.keys.borrow();
             keys.iter()
@@ -3400,36 +3702,38 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             // later enable registers it — it neither registers with the OS nor
             // contests a combo (avoids a spurious conflict for a module the user
             // turned off, and keeps its binding so re-enable restores it).
-            if sh.is_enabled(idx) {
-                // Conflict: this combo is already held by another enabled module
-                // (surface the cross-module clash) or already by this one (a
-                // redundant self-rebind). Skip either way — first-come keeps it and
-                // the module stays loaded with this binding inactive.
-                if let Some(b) = binding {
-                    if let Some(owner) = sh.hotkey_owner(b) {
-                        if owner != idx {
-                            sh.report_conflict(idx, owner, "hotkey", &spec);
-                        }
-                        return Ok(0);
-                    }
-                }
+            // An unparseable spec is a module-author bug and is still answered here, loudly
+            // and immediately, because there is nothing for `refresh_hotkeys` to derive from:
+            // with no `(vk, mask)` the combination cannot be compared with anybody else's, so
+            // the OS is the only authority and its error is the useful one. Matches
+            // host.keys.capture.
+            if binding.is_none() {
                 if let Err(e) = sh.backend.register_hotkey(id, &spec) {
-                    // binding Some ⇒ a valid combo the OS rejected (another app holds
-                    // it) → surface as a conflict, keep the module loaded. binding
-                    // None ⇒ the spec didn't parse → a module-author bug; fail loudly
-                    // with the real error (matching host.keys.capture).
-                    if binding.is_some() {
-                        sh.report_os_conflict(idx, "hotkey", &spec, &e);
-                        return Ok(0);
-                    }
                     return Err(mlua::Error::external(e));
                 }
             }
+
+            // Recorded whether or not it wins the combination — and THAT is the fix. It used
+            // to return here, before this insert, whenever another enabled module held the
+            // combo: the callback was dropped, the module got the id 0, and nothing was left
+            // to hand the key to when that other module was later disabled. A registration is
+            // now a standing claim, and `refresh_hotkeys` decides which claims are live.
             let key = lua.create_registry_value(cb)?;
             sh.hotkeys.borrow_mut().insert(
                 id,
-                HotkeyReg { module_idx: idx, lua: lua.clone(), cb: key, spec, binding },
+                HotkeyReg {
+                    module_idx: idx,
+                    lua: lua.clone(),
+                    cb: key,
+                    spec,
+                    binding,
+                    // Set by the refresh below; for an unparseable spec, by the OS call above.
+                    live: binding.is_none(),
+                },
             );
+            // Which also reports the clash, so a module that lost the contest is told once
+            // here rather than in two places that could disagree.
+            sh.refresh_hotkeys();
             Ok(id)
         })?,
     )?;
@@ -3446,6 +3750,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             }
             sh.backend.unregister_hotkey(id);
             sh.hotkeys.borrow_mut().remove(&id);
+            // Offer the freed combination to whoever else asked for it.
+            sh.refresh_hotkeys();
             Ok(())
         })?,
     )?;

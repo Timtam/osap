@@ -1,0 +1,11 @@
+id = "com.tool.hotkey-test-b"
+name = "Hotkey test B"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
+
+# The other half of a pair — see tools/hotkey-test-a for what the pair is for and how to
+# run it. Both halves want the SAME combination, and only one module can hold one.
+[capabilities]
+require = ["hotkey", "speech", "log"]
+
+entry = "src/main.luau"
