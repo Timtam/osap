@@ -315,21 +315,33 @@ impl Speech {
         }
     }
 
-    /// Whether what we say is reaching a screen reader rather than a plain voice.
+    /// Whether a screen reader is RUNNING — not whether we speak through it.
     ///
     /// Asked in one place only: when the application has something to say on its own behalf
-    /// and there was no notification to show it in. Those words are addressed to somebody who
-    /// cannot see the screen, so with nobody listening they are not said at all. A module
-    /// that calls `host.speech` is never asked — whoever installed and enabled it decided
-    /// that already.
-    pub fn via_screen_reader(&self) -> bool {
+    /// and there was no notification to show it in. Those words are addressed to somebody
+    /// who cannot see the screen, so with nobody listening they are not said at all. A
+    /// module that calls `host.speech` is never asked — whoever installed and enabled it
+    /// decided that already.
+    ///
+    /// **Presence and transport are two questions**, and this used to ask both at once as
+    /// `via_screen_reader`, which cost the macOS tester his startup announcement. "Speak
+    /// through VoiceOver" chooses a transport; whether anybody is listening is a separate
+    /// fact. With that switch off and VoiceOver running the honest answer is "yes, somebody
+    /// is there" — and the line then goes out through the system voice, which is what a
+    /// plain-voice user asked for by leaving the switch alone. On macOS there is no balloon
+    /// and no Dock icon either, so that announcement was the only signal the application had
+    /// started, and it was silent on every Mac by default.
+    ///
+    /// The rule this protects is unchanged: with no reader running, the application stays
+    /// quiet. Somebody who never asked for speech is not spoken at.
+    pub fn a_reader_is_present(&self) -> bool {
         #[cfg(target_os = "macos")]
         {
-            crate::appcfg::voiceover_speech() && voiceover::is_running()
+            voiceover::is_running()
         }
         #[cfg(windows)]
         {
-            crate::appcfg::screen_reader_speech() && self.prism.borrow().via_screen_reader()
+            self.prism.borrow().via_screen_reader()
         }
         #[cfg(not(any(windows, target_os = "macos")))]
         {

@@ -637,7 +637,14 @@ impl Shared {
                 return;
             }
         }
-        if self.speech.via_screen_reader() {
+        // Asked about PRESENCE, not about the transport. The two were the same call until
+        // 2026-09-04, and the difference is what the macOS tester reported: he heard no
+        // startup announcement at all, because "Speak through VoiceOver" is off by default
+        // and this gate required it — while VoiceOver itself was running the whole time and
+        // there was no balloon on that platform to show him anything instead. The line goes
+        // out through whatever `say` chooses; the question here is only whether anybody is
+        // there to hear it.
+        if self.speech.a_reader_is_present() {
             self.speech.say(text, false);
         }
     }

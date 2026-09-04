@@ -1406,7 +1406,15 @@ that is *enough* is unknown, because no Mac has ever been asked.
 Three sessions, one tester, one plugin. Everything that was settled is ticked where it was
 asked; this is what was NOT, plus what the session found that nobody had asked.
 
-- [ ] **The startup announcement is silent on every Mac, by default.** The tester: "I don't
+- [x] **The startup announcement is silent on every Mac, by default** — fixed 2026-09-04.
+      `announce()` asked `via_screen_reader()`, which is `voiceover_speech() && is_running()`
+      — the TRANSPORT switch, off by default. It now asks `a_reader_is_present()`, which is
+      only the second half: is anybody listening. With the switch off and VoiceOver running,
+      the line goes out through the system voice, which is what leaving that switch alone
+      asks for. The rule it protects is unchanged: no reader running, nothing said.
+      `via_screen_reader` is gone — the compiler pointed out it had no callers left, which is
+      the whole finding: it had exactly one, and that one was asking it the wrong question.
+      Original report follows. The startup announcement is silent on every Mac, by default. The tester: "I don't
       hear the spoken notification that Automation Platform is running in the menu bar".
       The log explains it completely: `announce()` speaks only when `via_screen_reader()` is
       true, which on macOS is `voiceover_speech() && is_running()` — and "Speak through
