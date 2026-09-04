@@ -1561,6 +1561,34 @@ asked; this is what was NOT, plus what the session found that nobody had asked.
       cache-served line at all, because the forty asks are in forty ticks. The output also
       says what it cannot tell apart: an ask served from the backend's memory is fast BY
       DESIGN, so the verdict line points at the log rather than declaring health.
+- [x] **The Mac we already own was being asked one question** — fixed 2026-09-04. The macOS
+      job packages a bundle, links it, and loads every module once; that was all. Speech is
+      the one new subsystem a runner can actually exercise, because every accessibility call
+      needs a TCC grant a runner does not have and speaking needs none — and the macOS speech
+      path had never run anywhere but a build machine. `tools/speech-probe` (loaded by path,
+      deliberately NOT packaged: it speaks, and this application does not speak unprompted)
+      walks the wiring: `engines()`, `use()`, `output()`, `engine()`. The job fails if it does
+      not reach the end, if no voice was chosen, or if a call was refused or ignored.
+  - The first thing it settled cost nothing to find: reading the existing CI log showed the
+      new path already works there — `the speech engines took 0 ms to open`, `191 system
+      voice(s) installed, 0 of them personal, read in 282 ms`. So the worst risk, an
+      unrecognised selector aborting the process (objc2 0.6.4 emits no availability cfgs),
+      is retired for macOS 15. The tester's 12.7.6 is still only covered by the
+      `respondsToSelector` guards, which are runtime checks and hold regardless.
+  - **And the workflow comment was wrong about its own runner.** It said Accessibility being
+      ungranted means the event loop refuses to start. The log says `listening for events
+      (headless)` and then `headless: running the CoreFoundation run loop`. Timers fire there,
+      which is what makes the step above possible at all.
+  - `tools/**` is now in the job's paths filter. It packages one tool and runs another and
+      watched neither — the third time this exact gap has been found here.
+- [x] **`host.speech.engines()` can answer EMPTY for seconds after start-up**, and neither the
+      docs nor anything else said so. The first snapshot is taken behind the scenes so that a
+      session which says nothing pays nothing, and a module asking early is told there is
+      nothing. Measured while writing the probe: 282 ms on a macOS runner, and on ONE Windows
+      machine two consecutive runs at **500 ms and 5500 ms** before a plain voice could be
+      chosen. No shipped module calls `use`/`engines`, so nothing is broken today; a module
+      author who asks once would have been. `docs/api/speech.md` says it now, including that
+      "nine entries, always the same nine" is only true once the list has filled.
 - [ ] **Timers run about 5% slow on that machine, and a settle is a deadline.** Measured by
       the probe: `10 x 100 ms took 1050 ms (shortest 105, longest 105)`, so a 900 ms watch
       deadline is really about 945 ms there. Nothing is broken; it is a number modules with

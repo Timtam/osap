@@ -53,6 +53,11 @@ on:
       # The Luau too, now that a Mac actually loads it: a module's macOS-only branch is
       # never executed anywhere else, so this job is its only gate.
       - 'modules/**'
+      # And the dev tools, because this job packages one of them into the bundle and loads
+      # it, and now runs a second by path. A job that does not watch what it runs is a gap
+      # this repo has found three times: the documentation job and its Python checker, the
+      # Windows job and its two probes, and now this one.
+      - 'tools/**'
       - 'package-macos.sh'
       - '.github/workflows/macos-build.yml'
   # No inputs any more. There used to be a choice of Mac, which was really a choice of which
@@ -244,9 +249,14 @@ jobs:
       # sforzando VoiceOver probe called `onActivate` after the overlay was bound, which the
       # runtime rejects, and the first anyone knew of it was a remote crash log.
       #
-      # Headless, so no window and no tray. Accessibility is not granted on a CI runner, so
-      # the event loop will refuse to start afterwards — that is expected, and not what this
-      # step is about. It asks one question: did every module load.
+      # Headless, so no window and no tray. Accessibility is not granted on a CI runner, and
+      # this used to say the event loop would therefore refuse to start. It does start — the
+      # log says `listening for events (headless)` and then `headless: running the
+      # CoreFoundation run loop`, and the observation cache reports epochs afterwards. The
+      # difference matters, because it means timers fire here and a module can be given real
+      # work rather than merely being loaded. The step below is the first thing to use that.
+      #
+      # This one still asks a single question: did every module load.
       - name: Load the modules once, on a Mac
         run: |
           cd dist/AutomationPlatform
@@ -269,6 +279,56 @@ jobs:
           fi
           if ! grep -q "loading module:" automation-platform.log; then
             echo "::error::no module was even attempted — the smoke run proved nothing"
+            exit 1
+          fi
+
+      # Speech, which is the one new subsystem a runner can actually exercise.
+      #
+      # Every accessibility call needs a TCC grant a runner does not have, so that half can
+      # only be compiled here. Speaking needs no grant at all — and the macOS speech path was
+      # rewritten from scratch (`avspeech.rs`, replacing `tts`) and has never run anywhere but
+      # a build machine. Compiling proves the calls exist; it cannot prove the WIRING, which is
+      # where the mistakes are: which voice a line is handed to, whether choosing one takes
+      # effect, whether the list is even populated when somebody asks.
+      #
+      # It also stands between a blind tester and the worst outcome there is. On this objc2
+      # version a selector that does not exist aborts the process instead of returning
+      # nothing, so a wrong guess about when an API arrived does not degrade — it takes the
+      # application with it, and he would get nothing at all out of a session.
+      #
+      # Loaded by path rather than from the bundle, deliberately: this must not ship. It
+      # speaks on purpose, and an application that says something unprompted at every start-up
+      # is exactly what this project does not do.
+      - name: Speech, on a Mac
+        run: |
+          cd dist/AutomationPlatform
+          rm -f automation-platform.log
+          AUTOMATION_PLATFORM_HEADLESS=1 \
+            ./AutomationPlatform.app/Contents/MacOS/automation-platform \
+            "$GITHUB_WORKSPACE/tools/speech-probe" &
+          pid=$!
+          for _ in $(seq 1 30); do
+            if grep -q "SPEECH PROBE: done\|fatal:" automation-platform.log 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          kill "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          echo "----- automation-platform.log -----"
+          cat automation-platform.log || true
+          # Three assertions, and the first matters most: reaching "done" at all means the
+          # process was still alive after asking AVFoundation everything this platform asks it.
+          if ! grep -q "SPEECH PROBE: done" automation-platform.log; then
+            echo "::error::the speech probe never finished — the speech path did not survive a Mac"
+            exit 1
+          fi
+          if ! grep -q "SPEECH PROBE: spoke through" automation-platform.log; then
+            echo "::error::no voice was ever chosen on a machine with system voices installed"
+            exit 1
+          fi
+          if grep -q "REFUSED\|THREW\|WHICH IS NOT WHAT WAS CHOSEN" automation-platform.log; then
+            echo "::error::a speech call was refused, threw, or did not honour the choice"
             exit 1
           fi
 

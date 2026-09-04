@@ -42,6 +42,53 @@ local function line(fmt, ...)
   host.log.info(string.format(fmt, ...))
 end
 
+-- Do the plugin's own control names survive into what macOS publishes?
+--
+-- The single question a Kontakt or Komplete Kontrol window is being probed to answer, and it
+-- decides an architecture: on Windows a plugin's parts are matched by the internal names Qt
+-- gives them, and whether those reach `AXIdentifier` decides whether the nested-overlay
+-- design ports or has to be rebuilt out of image templates. sforzando could not answer it —
+-- it is not a Qt application.
+--
+-- The answer is already in the dump above, spread across three hundred lines. Counting it
+-- here is the difference between a question somebody has to reconstruct and one the log
+-- states. The backend composes the class as `AXRole/AXSubrole/AXIdentifier` (see
+-- `join_class`), so the identifier is the third field and an absent subrole leaves `//`.
+--
+-- macOS only, and not out of caution: on Windows this is already known — UIA publishes an
+-- AutomationId and the shipped modules match on it — so the count would be noise beside an
+-- answer nobody is waiting for.
+local function identifierSummary(label, elements)
+  if not (host.os and host.os.is and host.os.is("macos")) then
+    return
+  end
+  local withId, seen, sample = 0, {}, {}
+  for _, e in ipairs(elements) do
+    local ident = string.match(e.class or "", "^[^/]*/[^/]*/(.+)$")
+    if ident and ident ~= "" then
+      withId = withId + 1
+      if not seen[ident] then
+        seen[ident] = true
+        if #sample < 8 then
+          sample[#sample + 1] = ident
+        end
+      end
+    end
+  end
+  if withId == 0 then
+    line(
+      "  tree %s — NONE of %d element(s) publish an AXIdentifier, so a matcher here has "
+        .. "only role and geometry to work with",
+      label, #elements
+    )
+  else
+    line(
+      "  tree %s — %d of %d element(s) publish an AXIdentifier; first few: %s",
+      label, withId, #elements, table.concat(sample, ", ")
+    )
+  end
+end
+
 -- The accessibility tree of one element, bounded by what a log is worth reading.
 local function dumpTree(label, id)
   local ok, elements = pcall(function()
@@ -70,6 +117,7 @@ local function dumpTree(label, id)
       b.x, b.y, b.w, b.h
     )
   end
+  identifierSummary(label, elements)
   return #elements
 end
 

@@ -73,9 +73,11 @@ end
 
 The answer is a snapshot from a moment ago and a fresh look is started behind it, so the call costs microseconds rather than the 35 ms a look takes — the event loop's whole budget is 300 ms before Windows stops waiting for the keyboard hook, and a look while a speech engine is opening was measured at 2.7 seconds. For "which screen readers are running" a moment-old answer is the right kind: it changes when somebody starts or quits one, not between two lines of Luau.
 
+**It can be empty just after start-up, and that is not the same as "nothing can speak here."** The first snapshot is taken behind the scenes rather than at launch, deliberately — a session that says nothing should not pay for opening a synthesiser — so a module that asks immediately may be told there is nothing. Measured: on one macOS machine the list arrived after 282 ms, while on one Windows machine two consecutive runs took 500 ms and **5500 ms** before a plain voice could be chosen. A module that picks a voice should keep looking rather than ask once and believe the answer; `tools/speech-probe` is written that way and says how long it waited.
+
 ### Windows
 
-Nine entries, always the same nine, because they are what the application was compiled to reach: `nvda`, `jaws`, `zoomtext`, `zdsr`, `pctalker`, `boypcreader`, `sensereader` — and `sapi` and `onecore`, which are Windows itself and therefore always available.
+Nine entries once the list has filled, always the same nine, because they are what the application was compiled to reach: `nvda`, `jaws`, `zoomtext`, `zdsr`, `pctalker`, `boypcreader`, `sensereader` — and `sapi` and `onecore`, which are Windows itself and therefore always available. Before it has filled there are none; see above.
 
 ### macOS
 

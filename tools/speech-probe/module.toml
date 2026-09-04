@@ -1,0 +1,10 @@
+id = "com.tool.speechprobe"
+name = "Speech smoke"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
+
+[capabilities]
+# Nothing but speech, and the two things needed to say what it found. Deliberately no
+# `window`: this is the one subsystem a CI runner can exercise, precisely because it needs
+# no accessibility grant, and asking for one would make the module refuse to load there.
+require = ["speech", "log", "timer"]
