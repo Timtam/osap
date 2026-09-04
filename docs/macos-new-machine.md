@@ -108,6 +108,13 @@ An app you built yourself is not quarantined, so this is only for a zip somebody
 
 ## 4. The four permissions
 
+**The application now tells you where you stand.** Open the menu-bar icon, choose **Show**, and
+go to the manager's **Permissions** tab. It lists all four on every visit — the granted ones
+too, because a list that only names problems cannot be trusted when it is silent — each as a
+sentence beginning with its state, with a button beside it that opens the right settings pane
+(and raises the system's own dialog first, where there is one). A **Re-check now** button
+re-reads them after you have granted something.
+
 All four live in **System Settings → Privacy & Security** on macOS 13 and later. None of them
 can be granted by the application itself, and macOS never says which one is missing — it just
 behaves as though the application is broken.

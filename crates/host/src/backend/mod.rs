@@ -24,6 +24,11 @@ pub(crate) use macos::app::{
 /// and the path resolves identically in `crates/macos-check`, which borrows this file.
 #[cfg(target_os = "macos")]
 pub(crate) use macos::perm::request_voiceover_automation;
+/// The four permissions as something a window can show — see `macos::perm::permissions`.
+/// Re-exported for the same reason as the call above: `gui.rs` reaches it without a
+/// macOS-only `use`, and the path resolves identically in `crates/macos-check`.
+#[cfg(target_os = "macos")]
+pub(crate) use macos::perm::{ask_for, open_pane, permissions};
 #[cfg(not(any(windows, target_os = "macos")))]
 mod stub;
 
@@ -44,6 +49,74 @@ mod macos_keys;
 #[cfg(all(test, not(target_os = "macos")))]
 #[path = "macos/front_memory.rs"]
 mod macos_front_memory;
+
+/// Where a permission stands, for something that has to SHOW it rather than log it.
+///
+/// `Missing` and `Unknown` are constructed on macOS only, which is the whole point of the
+/// type living here: the window that reads them compiles everywhere so it can be checked
+/// where it is written. The allow says that out loud rather than letting a warning teach
+/// somebody to stop reading them.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Grant {
+    Granted,
+    Missing,
+    /// The system would not say. Not the same as missing, and kept apart from it on purpose:
+    /// telling somebody who cannot see the screen that a permission is absent, when it may be
+    /// present, sends them to a settings pane to fix what is not broken.
+    Unknown,
+}
+
+impl Grant {
+    /// The word a screen reader says. Short, because it is read before the explanation on
+    /// every visit to the list.
+    pub fn word(self) -> &'static str {
+        match self {
+            Grant::Granted => "granted",
+            Grant::Missing => "NOT granted",
+            Grant::Unknown => "cannot be determined",
+        }
+    }
+}
+
+/// One permission, as a person needs it described.
+///
+/// Platform-neutral although only macOS has any, and deliberately so: it is what lets the
+/// window that displays them be compiled and run on the machine this project is written on.
+/// `gui.rs` cannot be borrowed by `crates/macos-check` — it needs wxWidgets — so anything
+/// inside a `cfg(target_os = "macos")` block there is checked by exactly one thing, the macOS
+/// CI job, and only after a push. A list that is simply empty everywhere else costs nothing
+/// and moves that check back to the desk.
+pub struct Permission {
+    /// What the system calls it, so the name in the window matches the name in the pane.
+    pub name: &'static str,
+    pub state: Grant,
+    /// What stops working without it — the sentence that makes it worth granting.
+    pub without: &'static str,
+    /// The settings-pane URL, for the button beside it.
+    pub anchor: &'static str,
+    /// Whether the application can raise the system's own consent dialog for this one, or
+    /// whether the pane is the only route.
+    pub can_ask: bool,
+}
+
+/// The permissions this platform needs the user to grant. Empty where there are none.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn permissions() -> Vec<Permission> {
+    Vec::new()
+}
+
+/// Opens a settings pane. False where there is no such thing to open.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn open_pane(_anchor: &str) -> bool {
+    false
+}
+
+/// Raises the system's own consent dialog, where there is one. False otherwise.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn ask_for(_name: &str) -> bool {
+    false
+}
 
 /// A snapshot of a window's matchable properties (normalized across platforms).
 #[derive(Clone, Debug, PartialEq, Eq)]

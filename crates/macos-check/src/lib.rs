@@ -42,6 +42,20 @@ pub fn checked() -> std::rc::Rc<dyn backend::Backend> {
 /// They are called from `gui.rs`, which this crate cannot borrow (wxdragon), so without
 /// this the re-export is unreferenced here — and an unreferenced re-export warns instead of
 /// proving that the path resolves and the signatures are what the caller expects.
+/// The permissions page's three calls, named for the same reason as `app_calls` below.
+///
+/// They live in `gui.rs`, which this crate cannot borrow (wxdragon), so without naming them
+/// here the compiler would only tell us they are unused — and a signature that no longer
+/// matches its caller would reach the macOS CI job as a link error, or a tester as a page
+/// that does not build.
+pub fn permission_calls() -> (
+    fn() -> Vec<backend::Permission>,
+    fn(&str) -> bool,
+    fn(&str) -> bool,
+) {
+    (backend::permissions, backend::open_pane, backend::ask_for)
+}
+
 pub fn app_calls() -> (fn(), fn(bool, &str) -> bool, fn(), fn(), fn()) {
     (
         backend::activate_self,

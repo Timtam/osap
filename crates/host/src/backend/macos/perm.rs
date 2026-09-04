@@ -15,7 +15,7 @@
 use std::ffi::CString;
 use std::sync::Once;
 
-use objc2_app_kit::{NSRunningApplication, NSScreen};
+use objc2_app_kit::{NSRunningApplication, NSScreen, NSWorkspace};
 use objc2_core_services::{
     errAEEventNotPermitted, errAEEventWouldRequireUserConsent, typeWildCard,
     AEDeterminePermissionToAutomateTarget,
@@ -227,6 +227,118 @@ pub(super) fn privacy_pane() -> &'static str {
 /// application does.
 fn prompt_is_unreliable() -> bool {
     NSProcessInfo::processInfo().operatingSystemVersion().majorVersion < 13
+}
+
+use crate::backend::{Grant, Permission};
+
+/// The four permissions, as they stand right now.
+///
+/// Written for the permissions window, which exists because the log was the only place any of
+/// this appeared — and a log is what a tester reads AFTERWARDS, when the session has already
+/// been spent. macOS never says which permission is missing; it lets the application behave as
+/// though it were broken, and three of the four fail without any error at all. Somebody
+/// setting this up on a new machine needs to be told what is done and what is not, in the
+/// application, before they start.
+///
+/// Nothing here prompts. Every check is the quiet form, so the list can be built whenever the
+/// window is opened without putting a dialog on screen behind a screen reader's back.
+pub fn permissions() -> Vec<Permission> {
+    vec![
+        Permission {
+            name: "Accessibility",
+            state: if is_trusted(false) { Grant::Granted } else { Grant::Missing },
+            without: "Nothing can be read or clicked. Every window and control comes back \
+                      empty, and no overlay ever activates.",
+            anchor: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+            can_ask: true,
+        },
+        Permission {
+            name: "Screen Recording",
+            state: if CGPreflightScreenCaptureAccess() {
+                Grant::Granted
+            } else {
+                Grant::Missing
+            },
+            without: "Captures do not fail. They come back as a picture of the desktop with \
+                      every other application removed, so image search finds nothing and OCR \
+                      reads nothing, for ever, without an error. This is the dangerous one.",
+            anchor: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+            can_ask: true,
+        },
+        Permission {
+            name: "Input Monitoring",
+            state: match input_monitoring() {
+                Some(0) => Grant::Granted,
+                Some(ACCESS_DENIED) => Grant::Missing,
+                _ => Grant::Unknown,
+            },
+            without: "Keys an overlay has claimed reach the plugin instead of the overlay. It \
+                      usually follows the Accessibility grant without being asked for \
+                      separately, so it is only worth opening if it is still missing after that.",
+            anchor: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
+            can_ask: false,
+        },
+        Permission {
+            name: "Automation, for VoiceOver",
+            state: match voiceover_automation() {
+                Automation::Granted => Grant::Granted,
+                Automation::Refused => Grant::Missing,
+                // Never asked, or the question could not be put. Both are "not known yet"
+                // rather than "refused", and the difference decides whether ticking the
+                // setting will raise a dialog or do nothing visible.
+                Automation::NotAsked | Automation::Unknown => Grant::Unknown,
+            },
+            without: "Only needed for \"Speak through VoiceOver\". Without it that setting \
+                      looks on and the overlay goes on speaking in its own voice — macOS \
+                      refuses the Apple Event silently. Ticking the setting is what asks for \
+                      it.",
+            anchor: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation",
+            can_ask: true,
+        },
+    ]
+}
+
+/// Opens a settings pane, and says whether macOS took it.
+///
+/// The return value is not decoration. These URLs are the documented way in, but they are also
+/// the sort of thing Apple has moved before — System Preferences became System Settings in
+/// Ventura and the anchors survived, which is evidence rather than a promise. A button that
+/// silently does nothing is the worst outcome for somebody who cannot see whether a window
+/// opened, so a refusal is logged and the caller says so.
+pub fn open_pane(anchor: &str) -> bool {
+    let url = objc2_foundation::NSURL::URLWithString(&NSString::from_str(anchor));
+    let Some(url) = url else {
+        crate::logging::line("macos", &format!("settings pane: '{anchor}' is not a URL"));
+        return false;
+    };
+    let opened = NSWorkspace::sharedWorkspace().openURL(&url);
+    crate::logging::line(
+        "macos",
+        &format!(
+            "settings pane: {} for {anchor}",
+            if opened { "opened" } else { "REFUSED by macOS" }
+        ),
+    );
+    opened
+}
+
+/// Asks for the one permission whose dialog we can raise from a button.
+///
+/// Accessibility and Screen Recording have system prompts; Input Monitoring has none we can
+/// trigger, and Automation is asked for by ticking the setting that needs it. Anything else
+/// returns false and the caller falls back to opening the pane.
+pub fn ask_for(name: &str) -> bool {
+    match name {
+        "Accessibility" => {
+            request_accessibility_once();
+            true
+        }
+        "Screen Recording" => {
+            request_screen_recording_once();
+            true
+        }
+        _ => false,
+    }
 }
 
 /// The startup environment block: displays and their scale, the three permissions, the

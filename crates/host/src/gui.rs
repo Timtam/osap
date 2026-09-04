@@ -742,6 +742,92 @@ The setting stays on and                          changes nothing. On a Mac runn
         app_tab.set_sizer(as_, false);
         notebook.add_page(&app_tab, "Application settings", false, None);
 
+        // The permissions page, and the reason it is a page rather than a paragraph in the
+        // documentation.
+        //
+        // macOS needs four separate grants, none of which the application can give itself, and
+        // three of the four fail with NO ERROR — a capture returns the wallpaper, an Apple
+        // Event is dropped, a key goes to the plugin. So the failure a user sees is "this
+        // application does not work", and the only place that said otherwise was the log,
+        // which is what somebody reads after a session has already been spent.
+        //
+        // What this page owes a blind user is two things at once: what is still to do, and
+        // what is already done. A list that only names problems cannot be trusted when it is
+        // empty — "nothing said" and "nothing wrong" are the same sound. So every one of the
+        // four is listed on every visit, granted ones included, in a sentence that begins with
+        // its state.
+        // Gated on the LIST being empty rather than on the platform, which is what lets this
+        // page be compiled and clicked on the machine it was written on. Windows needs no such
+        // grants, so it gets no page.
+        if !crate::backend::permissions().is_empty() {
+            let perm_tab = ScrolledWindow::builder(&notebook).build();
+            perm_tab.set_scroll_rate(0, 10);
+            let ps = BoxSizer::builder(Orientation::Vertical).build();
+            let head = StaticText::builder(&perm_tab).with_label("").build();
+            ps.add(&head, 0, SizerFlag::Left | SizerFlag::All, 8);
+            // One label per permission, rebuilt in place by `refresh`. Built once and
+            // relabelled rather than destroyed and recreated, because a screen reader's focus
+            // is inside these controls when the Re-check button is pressed.
+            let mut lines = Vec::new();
+            for p in crate::backend::permissions() {
+                let line = StaticText::builder(&perm_tab).with_label("").build();
+                ps.add(&line, 0, SizerFlag::Left | SizerFlag::All, 8);
+                let btn = Button::builder(&perm_tab)
+                    .with_label(&format!("Open the {} settings", p.name))
+                    .build();
+                let (anchor, name, can_ask) = (p.anchor, p.name, p.can_ask);
+                btn.on_click(move |_| {
+                    // The system's own dialog first where there is one: it grants in place,
+                    // where the pane needs the application found in a list and ticked. Falling
+                    // through to the pane either way, because a prompt macOS decides not to
+                    // show a second time leaves nothing on screen at all.
+                    if can_ask {
+                        crate::backend::ask_for(name);
+                    }
+                    crate::backend::open_pane(anchor);
+                });
+                ps.add(&btn, 0, SizerFlag::Left | SizerFlag::Bottom, 10);
+                lines.push(line);
+            }
+            let recheck = Button::builder(&perm_tab).with_label("Re-check now").build();
+            ps.add(&recheck, 0, SizerFlag::Left | SizerFlag::All, 8);
+            ps.add(
+                &StaticText::builder(&perm_tab)
+                    .with_label(
+                        "After granting one, quit and open the application again. macOS \
+                         hands a new permission only to a process that started after it \
+                         was granted, which is the commonest reason a grant looks like it \
+                         did nothing.",
+                    )
+                    .build(),
+                0,
+                SizerFlag::Left | SizerFlag::All,
+                8,
+            );
+            let refresh = {
+                let (head, lines) = (head.clone(), lines.clone());
+                move || {
+                    let all = crate::backend::permissions();
+                    let done = all
+                        .iter()
+                        .filter(|p| p.state == crate::backend::Grant::Granted)
+                        .count();
+                    head.set_label(&format!(
+                        "{done} of {} granted. None of these can be granted by the \
+                         application itself.",
+                        all.len()
+                    ));
+                    for (line, p) in lines.iter().zip(all.iter()) {
+                        line.set_label(&format!("{} — {}. {}", p.name, p.state.word(), p.without));
+                    }
+                }
+            };
+            refresh();
+            recheck.on_click(move |_| refresh());
+            perm_tab.set_sizer(ps, false);
+            notebook.add_page(&perm_tab, "Permissions", false, None);
+        }
+
         sizer.add(&notebook, 1, SizerFlag::All | SizerFlag::Expand, 0);
         let hint = StaticText::builder(&panel)
             .with_label("Closing this window hides it to the tray; modules keep running. Quit from the tray icon.")
