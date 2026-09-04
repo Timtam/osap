@@ -1561,6 +1561,79 @@ asked; this is what was NOT, plus what the session found that nobody had asked.
       cache-served line at all, because the forty asks are in forty ticks. The output also
       says what it cannot tell apart: an ask served from the backend's memory is fast BY
       DESIGN, so the verdict line points at the log rather than declaring health.
+## The second macOS session (2026-09-04)
+
+The protocol is `docs/macos-session-two.md`; his answers and log came back the same evening.
+What it confirmed, in his words and in the log: the pitchbend region fix ("Pitchbend now reads
+correctly when set to 1"), F6 ("Keyboard focus arrived! Hurray!" — five of five failed last
+time), the Personal Voice guard added hours earlier (`this macOS has no such API — it arrived
+in macOS 14`, where without it the process would have aborted), `window.active` at 1-2 ms over
+40 asks with no stall, and the module list reading one row per press with its state.
+
+- [x] **The menu hold was a safety net doing a mechanism's job** — fixed 2026-09-04. He
+      reported it without recognising it: "Pitchbend's menu doesn't track when I use arrows and
+      Enter anymore ... inconsistent with the Polyphony menu, which still works". Not two
+      menus — two durations. Every menu in his log printed `a control opened a menu and no
+      detector ever saw one`: sforzando's popup is not an `AXMenu`, so nothing on that platform
+      can see it and the 2500 ms stopwatch IS the mechanism there. Under it his Enter reached
+      the menu; over it the overlay had taken Enter back and only VoiceOver's own VO+Space
+      still committed — and a longer list read out by ear takes longer, which is why the longer
+      menu was the one that broke. Two changes: detection now ENDS the hold the moment it has
+      proved it can see this plugin's menu (it used to go on forcing "menu open" until the
+      deadline even where the answer was known, which is what made lengthening the deadline
+      unsafe), and the unconfirmed hold is 8000 ms, the same guess as `MENU_PLAUSIBLE_MS`
+      because it answers the same question. The expiry line now says the hold RAN OUT, so a key
+      arriving just after it is evidence the number is still too short.
+- [x] **A switch that ticks and does nothing** — fixed 2026-09-04, on his own suggestion. "The
+      checkbox appears to be ticked but nothing happens. Would be clearer to present a dialog
+      saying this is unsupported and ideally, saying the minimum supported OS version." He is
+      right: on and inert is indistinguishable from broken. Ticking Personal Voice on a macOS
+      without the API now says so and names macOS 14.
+- [x] **The arrival announcement cut off the sentence that brought him there** — fixed
+      2026-09-04. "When speaking through VoiceOver, the first control that gets focus
+      interrupts the notification of where keyboard focus has gone." Every announcement in the
+      runtime interrupted, which is right for one a keypress asked for and wrong for arrival.
+      `speakControl` takes a `queued` flag and the activation path uses it. Bounded honestly:
+      `interrupt` governs OUR queue only — whether VoiceOver cuts itself off is VoiceOver's
+      decision — so this fixes the case where both lines are still ours, which is this one.
+- [ ] **The line the protocol told him to watch for cannot tell the bug from normal
+      operation.** It fired eight times in his log, every time as `because a plugin menu is
+      open`, which is by design. Only `because the scoped window is not frontmost` is the
+      defect. Either split the two log lines or, in the next protocol, name the second half.
+- [ ] **Timers are far worse than the 5% previously recorded:** `10 x 100 ms took 1673 ms
+      (shortest 104, longest 729)`, so a 900 ms watch deadline is really about 1505 ms there,
+      and a single hop can take 729 ms on its own. Every settle and deadline in every module
+      was tuned on Windows. Measured twice in the same session (1673 and 1637 ms).
+- [ ] **One wide OCR read beats three narrow ones, measured:** `one 774x120 region took 354 ms
+      and read 28 word(s); the same band as three strips took 374 ms and read 26 word(s)`. The
+      probe states the conclusion itself — "batching a row of read-outs into one region is
+      worth building". That is now a design decision with a number behind it.
+- [ ] **`enumerate_windows` is now the biggest stall on that machine** — 1291 ms and 1033 ms in
+      the two probe runs, against `active_window`'s worst of 329 ms. It is the probe's own doing
+      (`host.window.list`), so no shipped module pays it today, but the `find`-with-an-`app`
+      clause noted elsewhere in this file is what would bound it.
+- [ ] **The VoiceOver transport is free, and that answers the question set before the
+      numbers:** `50 lines through VoiceOver: 0 ms on average, 0 at best, 0 at worst`, against
+      `an osascript that talks to nobody took 212 ms`. So `output` returns when VoiceOver has
+      the text rather than blocking until it is spoken, and no change of transport buys
+      anything. Close the question.
+- [ ] **Space in the module list needs VoiceOver interaction.** "Space in the row without VO
+      interaction doesn't work ... I could VO interact, then VO+Space worked." Our own Space
+      handler (written precisely so a VoiceOver user is not left reading a list he cannot
+      change) is never reached, because VoiceOver takes Space first. He asks whether that is
+      expected of an `NSTableView`; it needs Apple's own documentation read rather than a guess.
+- [ ] **The startup announcement was silent on a second launch, and we have no log of it.**
+      "On first launch the expected prompt spoke with system TTS and VO cursor remained in
+      Finder. However on a second launch, I got no feedback when OSAP was set to speak through
+      VoiceOver, and in that failed case the VO cursor ended up in no-mans-land." The log we
+      have contains ONE session, in which the switch was still off at start-up and went on nine
+      minutes later — so the case he describes is not in it. Ask for the log of a failing
+      launch; and independently, make that launch explain itself, because the startup line
+      records neither which transport it took nor whether anything accepted it.
+- [ ] **Qt is still unanswered and no longer his problem.** Kontakt and Komplete Kontrol will
+      not run on macOS 12.7.6, and the Qt applications he could think of are equally
+      unsupported there. It is on the new-machine list instead (`docs/macos-new-machine.md`).
+
 - [x] **Personal Voice would have killed the application on the tester's Mac** — found
       2026-09-04 by an adversarial review of the test protocol, before he was asked to press
       it. `request_personal_voice` called

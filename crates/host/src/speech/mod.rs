@@ -431,6 +431,16 @@ impl Speech {
     }
 }
 
+/// Whether this macOS has Personal Voice at all — see [`avspeech::supported`].
+///
+/// Free-standing rather than a method, for the same reason
+/// `backend::request_voiceover_automation` is: the caller is the settings switch in `gui.rs`,
+/// which has no `Shared` in the closure that runs when a box is ticked.
+#[cfg(target_os = "macos")]
+pub fn personal_voice_supported() -> bool {
+    avspeech::supported()
+}
+
 #[cfg(all(test, windows))]
 mod engine_list {
     //! Honest, cheap, and repeatable — and the process has to be able to EXIT afterwards,

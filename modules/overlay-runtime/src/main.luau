@@ -72,9 +72,29 @@ end
 -- _menuOpening (far above it) is what sets the deadline.
 local MENU_PLAUSIBLE_MS = 8000
 -- How long a control's own claim that it opened a menu is believed without confirmation.
--- Long enough to read a short menu and choose from it; short enough that a claim which was
--- wrong does not leave the overlay deaf for the rest of the session.
-local MENU_HOLD_MS = 2500
+--
+-- **Ended early wherever detection works**, so this number only ever governs a plugin whose
+-- menu nothing can see. On Windows the detector confirms within a tick or two and its word
+-- that the menu has gone is what closes the hold; there this is a floor for the moment a menu
+-- takes to appear, and nothing more.
+--
+-- It was 2500 ms, and that was a safety-net number being asked to do a mechanism's job. The
+-- macOS tester's log settles it: every single menu he opened logged "a control opened a menu
+-- and no detector ever saw one" — sforzando's popup is not an `AXMenu`, so nothing on that
+-- platform can see it, and the stopwatch IS the mechanism there. He reported the consequence
+-- without recognising it as one: the pitchbend menu "doesn't track when I use arrows and
+-- Enter anymore", while polyphony's still did. Not two menus behaving differently — two
+-- durations. Under 2.5 seconds his Enter reached the menu; over it, the overlay had taken
+-- Enter back and only VoiceOver's own VO+Space still committed. A longer list read out by ear
+-- takes longer, which is why the longer menu was the one that broke.
+--
+-- 8000 ms is a guess, and deliberately the same guess as `MENU_PLAUSIBLE_MS` above: both are
+-- answering "how long is a control's claim worth believing", and two different numbers for
+-- one question would be two things to maintain. What it costs when wrong is bounded and
+-- recoverable — a menu cancelled at once leaves the overlay's per-control keys quiet for up
+-- to eight seconds. What the old number cost was not: a choice that silently never committed,
+-- with nothing to tell the user why.
+local MENU_HOLD_MS = 8000
 local menuPlausibleUntil = 0
 
 -- The width and height of an origin's CONTENT, which is what coordinates are measured
@@ -1370,7 +1390,21 @@ local function hintFor(c, state)
   return c.hint[state]
 end
 
-local function speakControl(self, index, moveMouse, withHint)
+-- `queued` says this announcement was not asked for by a keypress, so it must not cut off
+-- whatever is already being said.
+--
+-- Every other caller here follows a key the user just pressed, and interrupting is then
+-- exactly right: they asked for this and not for the last thing. Arrival is the exception,
+-- and the macOS tester found it — pressing the shortcut that puts the keyboard back in a
+-- plug-in window, he heard "the first control that gets focus interrupts the notification of
+-- where keyboard focus has gone". The sentence being cut off is the one that answered the
+-- question he pressed the key to ask.
+--
+-- What this can and cannot do: `interrupt` governs OUR queue only. Whether VoiceOver cuts
+-- itself off is VoiceOver's decision (see `speech/voiceover.rs`), so this fixes the case
+-- where both lines are still ours — which is this one, the two being about 350 ms apart —
+-- and cannot promise anything about a line VoiceOver has already taken.
+local function speakControl(self, index, moveMouse, withHint, queued)
   local c = self.controls[index]
   if not c then return end
   -- A tab control announces WHICH tab is current, then that it is a tab control (so the
@@ -1490,7 +1524,7 @@ local function speakControl(self, index, moveMouse, withHint)
   -- control's state read out while the second one is focused, which would be a plain lie
   -- about what is in front of the user.
   local needsValue = c.kind == "gtoggle" or c.kind == "slider" or c.kind == "gbutton"
-  host.speech.output(table.concat(parts, ", "), { interrupt = true })
+  host.speech.output(table.concat(parts, ", "), { interrupt = not queued })
   if needsValue then
     local at = self.focus
     local pinned = self:hwnd()
@@ -2669,7 +2703,8 @@ function Overlay:_activate()
           ))
         end
       end
-      if self.active then speakControl(self, self.focus, false) end
+      -- Queued, not interrupting: see `speakControl`. Nobody pressed a key to hear this.
+      if self.active then speakControl(self, self.focus, false, false, true) end
     end)
   end
 end
@@ -3493,19 +3528,27 @@ function Overlay:watchMenus()
     else
       for _, o in ipairs(menuWatched) do
         if o.active and o._menuHoldUntil then
-          if host.now() < o._menuHoldUntil then
+          if o._menuHoldConfirmed then
+            -- Detection has already PROVED it can see this plugin's menu, so its word that
+            -- the menu has gone beats a stopwatch that was only ever standing in for it.
+            -- Without this the hold went on forcing "menu open" until its deadline even where
+            -- the answer was known — which is what made lengthening the deadline unsafe, and
+            -- is why it stayed too short for the platform that has no detector at all.
+            o._menuHoldUntil = nil
+          elseif host.now() < o._menuHoldUntil then
             open = true
-          elseif not o._menuHoldConfirmed then
+          else
             -- Logged, not spoken, and once: this line is the answer to "is this plugin's
             -- menu something the accessibility layer can see at all", which nobody here can
-            -- ask any other way.
+            -- ask any other way. It now also says the hold RAN OUT rather than merely that
+            -- nothing was seen — because a key arriving just after this line is the evidence
+            -- that the duration above is still too short, and the two used to be
+            -- indistinguishable in a log.
             host.log.info(
-              ("[overlay] '%s': a control opened a menu and no detector ever saw one"):format(
-                tostring(o.label)
-              )
+              ("[overlay] '%s': a control opened a menu, no detector ever saw one, and the "
+                .. "%d ms hold has run out — a key claimed by the overlay from here on was "
+                .. "meant for that menu"):format(tostring(o.label), MENU_HOLD_MS)
             )
-            o._menuHoldUntil = nil
-          else
             o._menuHoldUntil = nil
           end
         end

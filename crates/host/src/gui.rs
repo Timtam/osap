@@ -708,6 +708,24 @@ pub fn run_gui(
                 if want && key == "voiceover_speech" {
                     crate::backend::request_voiceover_automation();
                 }
+                // And the opposite case for the switch next to it. Personal Voice arrived in
+                // macOS 14; on anything older the code correctly notices and carries on, and
+                // the interface said nothing at all — which the tester reported as its own
+                // fault: "the checkbox appears to be ticked but nothing happens". He is
+                // right. A setting that is on and inert is indistinguishable from one that is
+                // broken, and he had no way to tell which he had. Said once, here, where he
+                // asked for it, and naming the version he would otherwise have to look up.
+                #[cfg(target_os = "macos")]
+                if want && key == "personal_voice" && !crate::speech::personal_voice_supported() {
+                    modal_message(
+                        &frame,
+                        "Personal Voice",
+                        "This Mac cannot offer a Personal Voice: the feature arrived in                          macOS 14, and this system is older.
+
+The setting stays on and                          changes nothing. On a Mac running macOS 14 or later, ticking it                          asks macOS for permission and your Personal Voice then appears                          among the voices a module can choose.",
+                        false,
+                    );
+                }
                 let now = crate::appcfg::get(key);
                 let mut store = settings::Store::load();
                 store.set_app_flag(key, now);

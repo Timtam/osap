@@ -302,6 +302,20 @@ fn installed_voices() -> Vec<Voice> {
     out
 }
 
+/// Does this macOS have Personal Voice at all?
+///
+/// Asked by the settings switch, before it is worth telling the user anything. The tester's
+/// report is what this exists for: he ticked the box, the log said the API is absent, and the
+/// interface said nothing — "the checkbox appears to be ticked but nothing happens". A
+/// setting that is on and inert looks exactly like a setting that is broken, and he could not
+/// tell which he had.
+///
+/// The same metaclass check `personal_status` makes; see there for why it is a metaclass and
+/// not a class. Cheap, local, and does not ask macOS for permission to anything.
+pub fn supported() -> bool {
+    AVSpeechSynthesizer::class().metaclass().responds_to(sel!(personalVoiceAuthorizationStatus))
+}
+
 /// The Personal Voice authorisation as it stands, without asking anybody.
 ///
 /// `Some(true)` granted, `Some(false)` refused, `None` never asked — or no such API on this
