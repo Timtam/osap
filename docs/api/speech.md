@@ -79,7 +79,18 @@ Nine entries, always the same nine, because they are what the application was co
 
 ### macOS
 
-Empty for now. VoiceOver, the system voice and later Personal Voice belong in this list, and the shape above was chosen so that they can join it without any of it changing. See `docs/prism-speech-design.md`.
+`voiceover` first, then every installed system voice by its AVFoundation identifier —
+`com.apple.voice.compact.en-GB.Daniel` and its like. Those identifiers are stable across
+sessions, which is what a module storing a choice needs.
+
+`voiceover` is the odd one and the only one with `screenReader` true: it is not a voice but a
+**transport**, handing the line to the user's own reader, at their rate, in their reading
+order, and to their braille display — none of which a voice can do. It reports `available`
+only while VoiceOver is running.
+
+**A Personal Voice is listed before it is usable.** Choosing one is what asks macOS for
+permission, so hiding it until then would make the feature invisible rather than merely
+unavailable. It reports `available` until somebody has been asked and refused.
 
 ---
 
@@ -110,7 +121,17 @@ Any id from `host.speech.engines()` that reports `available`.
 
 ### macOS
 
-Always returns `false`: there is nothing yet to choose between. It will answer for real when the list above does.
+Any id from `host.speech.engines()` that reports `available`, including `voiceover`.
+
+There is no per-voice worker here, unlike Windows: a voice is a property of each utterance
+rather than of the synthesiser, so choosing one costs nothing and the first line after a
+choice is not slower than any other.
+
+**Choosing a Personal Voice is what asks for it.** macOS may put up a consent dialog; the
+answer arrives while the choice already stands, and a voice that turns out not to be
+permitted falls back to the system one rather than to silence. Asking at that moment rather
+than at start-up is deliberate — the authorisation call has been measured blocking for two
+minutes, and nobody should pay that for a feature they have not asked for.
 
 ---
 

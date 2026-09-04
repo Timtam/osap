@@ -17,6 +17,8 @@
 //! worse than one that says the wrong thing.
 
 #[cfg(target_os = "macos")]
+mod avspeech;
+#[cfg(target_os = "macos")]
 mod voiceover;
 #[cfg(windows)]
 mod fallback;
@@ -25,16 +27,17 @@ mod prism;
 
 #[cfg(any(windows, target_os = "macos"))]
 use std::cell::Cell;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 use std::collections::HashMap;
 #[cfg(any(windows, target_os = "macos"))]
 use std::cell::RefCell;
 
 use anyhow::Result;
+
+/// What `use("voiceover")` names, and the one id on macOS that is a TRANSPORT rather than a
+/// voice: it hands the line to the user's screen reader instead of choosing how to say it.
 #[cfg(target_os = "macos")]
-use anyhow::Context;
-#[cfg(target_os = "macos")]
-use tts::Tts;
+const VOICEOVER_ID: &str = "voiceover";
 
 /// One thing that can speak, described without naming any platform's machinery.
 ///
@@ -58,11 +61,13 @@ pub struct Engine {
 }
 
 pub struct Speech {
-    /// The plain voice on macOS, where `tts` reaches AVFoundation. Windows has its own, in
-    /// `fallback`, because `tts` cost 2872 ms of blocking start-up there for a voice that
-    /// usually never speaks.
+    /// The plain voice on macOS: AVFoundation directly, on a thread, built on first use.
+    ///
+    /// Replaced `tts`, and not to save a dependency — `tts` cannot reach Personal Voice, and
+    /// a voice the user recorded of themselves is not a novelty to somebody who listens to a
+    /// synthesiser all day. See `avspeech.rs`.
     #[cfg(target_os = "macos")]
-    tts: RefCell<Tts>,
+    av: avspeech::AvSpeech,
     /// The plain voice on Windows: a prism speech engine opened in the background on a
     /// thread that cannot be wedged by the screen-reader path, since the moment it is needed
     /// is usually the moment that path has stopped answering.
@@ -85,7 +90,7 @@ pub struct Speech {
     /// choice made inside a shared framework belongs to whichever module inherited it — which
     /// is the module somebody installed and enabled, and therefore the right owner of the
     /// decision.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     chosen: RefCell<HashMap<usize, String>>,
     /// One long-lived worker per chosen engine, shared by every VM that chose it.
     ///
@@ -100,7 +105,7 @@ impl Speech {
     pub fn new() -> Result<Self> {
         Ok(Self {
             #[cfg(target_os = "macos")]
-            tts: RefCell::new(Tts::default().context("failed to initialize TTS engine")?),
+            av: avspeech::AvSpeech::new(),
             #[cfg(windows)]
             fallback: fallback::Fallback::new(),
             #[cfg(windows)]
@@ -111,7 +116,7 @@ impl Speech {
             last_switch: Cell::new(crate::appcfg::voiceover_speech()),
             #[cfg(windows)]
             last_switch: Cell::new(crate::appcfg::screen_reader_speech()),
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             chosen: RefCell::new(HashMap::new()),
             #[cfg(windows)]
             voices: RefCell::new(HashMap::new()),
@@ -123,13 +128,31 @@ impl Speech {
     /// A choice that cannot speak — its engine gone, its worker never opened — falls through
     /// to the ordinary path rather than to silence. The module hears its own voice when it
     /// can and the user's when it cannot, which is the right way round.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     pub fn say_for(&self, vm: usize, text: &str, interrupt: bool) {
         let chosen = self.chosen.borrow().get(&vm).cloned();
         if let Some(id) = chosen {
-            let spoke = self.voices.borrow().get(&id).is_some_and(|v| v.say(text, interrupt));
-            if spoke {
-                return;
+            #[cfg(windows)]
+            {
+                let spoke =
+                    self.voices.borrow().get(&id).is_some_and(|v| v.say(text, interrupt));
+                if spoke {
+                    return;
+                }
+            }
+            // macOS needs no worker per voice, because the voice is a property of the
+            // UTTERANCE rather than of the synthesiser: one thread says everything, in
+            // whichever voice each line asks for. VoiceOver is the exception — it is a
+            // different transport, not a different voice — so it goes the ordinary way.
+            #[cfg(target_os = "macos")]
+            {
+                if id == VOICEOVER_ID {
+                    if voiceover::is_running() && self.vo.say(text, interrupt) {
+                        return;
+                    }
+                } else if self.av.say(text, interrupt, Some(&id)) {
+                    return;
+                }
             }
         }
         self.say(text, interrupt);
@@ -144,7 +167,7 @@ impl Speech {
     /// The first line after a choice may wait for the engine to open, which was measured at
     /// 2.0 s for SAPI and 3.5 s for OneCore. That happens on the new voice's own thread, so
     /// nothing else waits with it, and the lines queue rather than being lost.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     pub fn use_engine(&self, vm: usize, id: Option<&str>) -> bool {
         let Some(id) = id else {
             self.chosen.borrow_mut().remove(&vm);
@@ -156,16 +179,25 @@ impl Speech {
         if !engine.available {
             return false;
         }
+        #[cfg(windows)]
         self.voices
             .borrow_mut()
             .entry(engine.id.clone())
             .or_insert_with(|| fallback::Fallback::for_engine(&engine.name));
+        // A Personal Voice is listed but not usable until macOS has been asked, and asking is
+        // what choosing one means. The answer arrives on the worker; the choice stands either
+        // way, because a voice that turns out not to be permitted falls back to the system
+        // one rather than to silence.
+        #[cfg(target_os = "macos")]
+        if self.av.voices().iter().any(|v| v.id == engine.id && v.personal) {
+            self.av.authorise_personal();
+        }
         self.chosen.borrow_mut().insert(vm, engine.id);
         true
     }
 
     /// The engine this module VM chose, if it chose one.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     pub fn chosen_engine(&self, vm: usize) -> Option<String> {
         self.chosen.borrow().get(&vm).cloned()
     }
@@ -218,7 +250,12 @@ impl Speech {
             return;
         }
         #[cfg(target_os = "macos")]
-        let _ = self.tts.borrow_mut().speak(text.to_string(), interrupt);
+        if !self.av.say(text, interrupt, None) {
+            // Nowhere left to fall, the same as the Windows arm above. Written down rather
+            // than dropped: an application that has gone completely mute should at least be
+            // able to say why afterwards.
+            crate::logging::line("speech", &format!("nothing could say: {text}"));
+        }
     }
 
     /// Everything that could speak on this machine, whether or not it can right now.
@@ -235,11 +272,35 @@ impl Speech {
         {
             self.fallback.engines()
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
         {
-            // macOS fits in here: VoiceOver (available while it is running), the system
-            // voice, and — once the objc2 wrapper exists — Personal Voice. Nothing about the
-            // shape above needs to change for that.
+            // VoiceOver first, because it is the one that is not a voice but a reader: the
+            // user's own rate, reading order and braille display. Then every installed
+            // system voice, Personal ones included — those are listed before they are
+            // authorised, because choosing one is what asks, and a list that hid them would
+            // make an unavailable feature invisible rather than merely unavailable.
+            let mut out = vec![Engine {
+                id: VOICEOVER_ID.to_string(),
+                name: "VoiceOver".to_string(),
+                screen_reader: true,
+                available: voiceover::is_running(),
+            }];
+            let granted = self.av.personal_granted();
+            for v in self.av.voices() {
+                out.push(Engine {
+                    // Available unless it is a Personal Voice nobody has been allowed to use.
+                    // `None` — nobody asked yet — counts as available: choosing it is what
+                    // asks, and refusing before the question has been put would be a guess.
+                    available: !v.personal || granted.unwrap_or(true),
+                    id: v.id,
+                    name: v.name,
+                    screen_reader: false,
+                });
+            }
+            out
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
+        {
             Vec::new()
         }
     }
@@ -277,8 +338,10 @@ impl Speech {
         {
             return self.prism.borrow().pending() || self.fallback.pending();
         }
-        #[cfg(not(windows))]
-        self.tts.borrow().is_speaking().unwrap_or(false)
+        #[cfg(target_os = "macos")]
+        return self.av.pending();
+        #[cfg(not(any(windows, target_os = "macos")))]
+        false
     }
 
     /// Speaks anything VoiceOver turned down. Called from the event loop.
@@ -289,7 +352,10 @@ impl Speech {
     pub fn pump(&self) {
         #[cfg(target_os = "macos")]
         for text in self.vo.refused() {
-            let _ = self.tts.borrow_mut().speak(text, false);
+            // Not `interrupt`: these are lines VoiceOver turned down, said late and out of
+            // order already. Cutting off whatever the system voice is in the middle of would
+            // lose a second line to recover a first.
+            self.av.say(&text, false, None);
         }
         // Also where the Windows stall deadline is enforced, because this runs on the event
         // loop while the speech thread may be stuck inside a call that cannot be cancelled —

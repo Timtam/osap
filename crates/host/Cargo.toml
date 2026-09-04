@@ -39,10 +39,6 @@ windows-sys = { version = "0.61.2", features = ["Win32_UI_Input_KeyboardAndMouse
 # from a Windows machine. A feature enabled there and missing here would mean the check
 # passes and the real Mac build does not.
 [target.'cfg(target_os = "macos")'.dependencies]
-# macOS only. On Windows this cost 2872 ms of BLOCKING start-up — measured in the running
-# application — to build a voice that, with a screen reader present, never says anything;
-# prism serves that role there instead, on a thread, without holding the start up.
-tts = "0.26.3"
 libc = "0.2"
 objc2 = "0.6"
 block2 = "0.6"
@@ -75,6 +71,14 @@ features = ["VNRequest", "VNRecognizeTextRequest", "VNObservation", "VNRequestHa
 version = "0.3"
 default-features = false
 features = ["AE", "AEDataModel", "AppleEvents"]
+
+# AVFoundation's speech synthesiser, which replaced `tts`. Not for the dependency count:
+# `tts` cannot reach Personal Voice, and a voice the user recorded of themselves is worth a
+# hand-written wrapper to somebody who listens to a synthesiser all day. See speech/avspeech.rs.
+[target.'cfg(target_os = "macos")'.dependencies.objc2-avf-audio]
+version = "0.3"
+default-features = false
+features = ["std", "block2", "AVSpeechSynthesis"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-application-services]
 version = "0.3"

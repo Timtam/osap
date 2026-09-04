@@ -29,6 +29,10 @@ publish = false
 # again under [target.'cfg(target_os = "macos")'.dependencies], and a feature enabled here
 # but missing there would make this crate check code that the real build cannot compile.
 [target.'cfg(target_os = "macos")'.dependencies]
+# `speech/mod.rs` returns `anyhow::Result` from its constructor, and borrowing the whole
+# module rather than its two macOS leaves is what makes the WIRING checkable from here —
+# which one line of that wiring immediately needed.
+anyhow = "1"
 libc = "0.2"
 objc2 = "0.6"
 block2 = "0.6"
@@ -61,6 +65,14 @@ features = ["VNRequest", "VNRecognizeTextRequest", "VNObservation", "VNRequestHa
 version = "0.3"
 default-features = false
 features = ["AE", "AEDataModel", "AppleEvents"]
+
+# AVFoundation's speech synthesiser, which replaced `tts`. Not for the dependency count:
+# `tts` cannot reach Personal Voice, and a voice the user recorded of themselves is worth a
+# hand-written wrapper to somebody who listens to a synthesiser all day. See speech/avspeech.rs.
+[target.'cfg(target_os = "macos")'.dependencies.objc2-avf-audio]
+version = "0.3"
+default-features = false
+features = ["std", "block2", "AVSpeechSynthesis"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-application-services]
 version = "0.3"

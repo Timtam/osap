@@ -1645,7 +1645,25 @@ wrapper rather than with prism.
       both of its macOS backends register the same delegate class name, so a second `Tts` in
       one process fails — macOS structurally cannot re-arm its plain voice the way the Windows
       fallback thread does.
-- [ ] **So: our own `speech/avspeech.rs`**, in the shape and size of `voiceover.rs`, over
+- [x] **Built** (2026-09-04), written blind and never run. `speech/avspeech.rs` over
+      `objc2-avf-audio` 0.3.2, which was verified to expose all six symbols the plan named —
+      `requestPersonalVoiceAuthorization` and `personalVoiceAuthorizationStatus` included —
+      before a line was written. `tts` is gone from the tree entirely. The synthesiser is
+      built on the worker's FIRST line rather than at start-up, so a session that says
+      nothing pays nothing; Personal Voice is asked for only when somebody chooses one, which
+      is the whole difference from prism. `engines()` and `use` answer for real on macOS now:
+      `voiceover` plus every installed voice by its AVFoundation identifier, and choosing a
+      Personal Voice is what asks for it.
+  - **The check crate now borrows the WHOLE speech module**, not its two macOS leaves. It
+      could not before — `speech/mod.rs` pulled in `tts`, which does not build for that
+      target from here — so the wiring was the one part never checked at home. Borrowing it
+      caught a `self.tts` that the rewrite had missed on the first pass, in the path that
+      speaks lines VoiceOver turned down. That would have reached CI, not a person, but it is
+      exactly the class of thing that used to reach the tester.
+  - Unrun, and these are what the next session settles: does the system voice speak at all,
+      does a chosen voice change what is heard, and does the Personal Voice consent dialog
+      appear when — and only when — one is chosen.
+- [x] **The original plan, kept for the record:** our own `speech/avspeech.rs`, in the shape and size of `voiceover.rs`, over
       `objc2-avf-audio` (0.3.2, the same generation as the `objc2` crates already here — and
       `AVSpeechSynthesizer` lives in AVFAudio). The decisive advantage over prism is not the
       dependency count: it is that `crates/macos-check` can compile it **from Windows**, which

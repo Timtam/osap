@@ -21,8 +21,15 @@ pub mod backend;
 
 /// The VoiceOver speech path, borrowed for the same reason — it talks to an application
 /// that does not exist on this machine, through a binary that does not either.
-#[path = "../../host/src/speech/voiceover.rs"]
-pub mod voiceover;
+/// The WHOLE speech module now, not just the two macOS files inside it.
+///
+/// It could not be borrowed before: it pulled in `tts`, which does not build for this
+/// target from here. Removing `tts` in favour of `avspeech.rs` took that away — so the part
+/// that was never checked at home, the WIRING (which transport a line goes to, what
+/// `engines()` answers, what `use` accepts), is checked now. That wiring is where the
+/// mistakes are; the two leaf files were only ever the easy half.
+#[path = "../../host/src/speech/mod.rs"]
+pub mod speech;
 
 /// Names the backend so the check cannot pass by leaving it out of the build: without a
 /// use, an unreferenced `mod` still compiles, but a typo'd `platform()` would not be caught.
