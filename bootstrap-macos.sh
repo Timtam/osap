@@ -40,9 +40,31 @@ if ! xcode-select -p >/dev/null 2>&1; then
 fi
 echo "    Command line tools: $(xcode-select -p)"
 
+# Homebrew, and the reason this is not just `have brew`.
+#
+# On Apple silicon it installs to /opt/homebrew/bin, which is NOT on the default PATH — the
+# installer prints the two lines that fix that at the end of a long run, where they scroll
+# past. Somebody who cannot see the screen then opens a new Terminal, runs this, and is told
+# Homebrew is not installed; installs it again; and is told the same thing. The loop has no
+# exit, and it fires on the first machine this project has ever been set up on that is not
+# Intel. On Intel it lands in /usr/local/bin, which IS on the default PATH, which is why
+# nobody hit it before.
+if ! have brew; then
+  for b in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+    if [ -x "$b" ]; then
+      eval "$("$b" shellenv)"
+      echo "    Found Homebrew at $b and put it on the PATH for this run."
+      echo "    To make that permanent:  echo 'eval \"\$($b shellenv)\"' >> ~/.zprofile"
+      break
+    fi
+  done
+fi
 if ! have brew; then
   step "Homebrew is not installed"
-  echo "    It is needed for cmake. Install it from https://brew.sh and run this script again."
+  echo "    It is needed for cmake. Install it from https://brew.sh, then run this again."
+  echo "    If you HAVE just installed it and this still says otherwise, it is on the PATH"
+  echo "    problem above rather than missing — run this and try again:"
+  echo "        eval \"\$(/opt/homebrew/bin/brew shellenv)\""
   exit 1
 fi
 

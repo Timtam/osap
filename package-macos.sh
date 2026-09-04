@@ -80,8 +80,34 @@ fi
 dist="$root/dist"
 stage="$dist/$APP_NAME"
 app="$stage/$APP_NAME.app"
+
+# The log and the settings live BESIDE the .app, because the application is portable — which
+# put them inside the folder this used to delete outright. A tester whose whole contribution
+# is a log file was being told "git pull && ./bootstrap-macos.sh" to pick up a fix, and that
+# threw away the evidence of the session that had just produced it. His settings went with it,
+# so every rebuild also silently switched "Speak through VoiceOver" back off, which is exactly
+# the sort of thing that gets reported as a regression in the feature itself.
+#
+# So they are carried across. Everything else in dist is build output and is rebuilt.
+keep="$(mktemp -d)"
+for f in automation-platform.log automation-platform.log.1 settings.toml settings.toml.bak; do
+  [ -f "$stage/$f" ] && cp -p "$stage/$f" "$keep/$f"
+done
+# And the probe's pictures, which are the other half of what a tester sends. They are written
+# INSIDE the probe's module folder rather than beside the log, because `host.screen.save`
+# resolves a relative name against the calling module's own root — a capability boundary, not
+# an oversight, so the fix belongs here rather than there. Kept with their paths, because the
+# module folder is repopulated from the repository and would otherwise take them with it.
+if [ -d "$stage/modules" ]; then
+  ( cd "$stage" && find modules -name 'probe-*.png' -print0 2>/dev/null       | while IFS= read -r -d "" f; do
+          mkdir -p "$keep/$(dirname "$f")" && cp -p "$f" "$keep/$f"
+        done )
+fi
 rm -rf "$dist"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+for f in automation-platform.log automation-platform.log.1 settings.toml settings.toml.bak; do
+  [ -f "$keep/$f" ] && cp -p "$keep/$f" "$stage/$f" && echo "  kept $f from the previous build"
+done
 
 cp "$exe" "$app/Contents/MacOS/automation-platform"
 chmod +x "$app/Contents/MacOS/automation-platform"
@@ -142,6 +168,16 @@ if [ -d "$root/tools/probe" ]; then
   cp -R "$root/tools/probe" "$modules_out/probe"
   shipped=$((shipped + 1))
 fi
+
+# The pictures set aside at the top go back now, after the module folders they live in have
+# been repopulated. Restored rather than merged: nothing here writes a probe-*.png, so a name
+# that exists in both places would be the same file.
+if [ -d "$keep/modules" ]; then
+  ( cd "$keep" && find modules -name 'probe-*.png' -print0 2>/dev/null       | while IFS= read -r -d "" f; do
+          mkdir -p "$stage/$(dirname "$f")" && cp -p "$f" "$stage/$f"             && echo "  kept $f from the previous build"
+        done )
+fi
+rm -rf "$keep"
 
 # The documentation, if it has been built. Skipped rather than fatal: a tester without docs
 # still has a working application.

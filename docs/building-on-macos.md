@@ -12,10 +12,13 @@ Be a little suspicious of a first run. As of this writing:
 - The application builds, launches, and lives in the **menu bar** (no Dock icon).
 - The log is written and contains a full account of the machine — permissions, displays,
   screen reader, versions.
-- **No overlay will activate.** Every shipped module identifies its plugin by a Windows
-  window class (`NINormalWindow`, `Vst3PlugWindow`, `#32770`), and a module whose matcher
-  has no `macos = { … }` block correctly never matches. So the application runs, sees
-  windows, and does nothing — that is expected, not a fault.
+- **One overlay activates: sforzando standalone.** That was not true when this page was
+  written, and a tester disproved it on 2026-09-04 — his log shows the overlay coming up,
+  announcing its first read-out, and answering Tab and Shift-Tab across all three of them in
+  about 100 ms each. Everything else is still Windows-only: a module identifies its plugin by
+  a window class (`NINormalWindow`, `Vst3PlugWindow`, `#32770`), and one whose matcher has no
+  `macos = { … }` block correctly never matches. So most of what is installed sees windows and
+  does nothing, and that is expected rather than a fault.
 - Speech goes through the platform's **own voice** unless **Speak through VoiceOver** is
   ticked in the Application settings tab. Ticked, it is handed to VoiceOver and comes out
   the way VoiceOver says everything else. It is off until asked for: the first line through
