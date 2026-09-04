@@ -10,7 +10,8 @@ are different faults with different causes, and the difference is invisible from
 
 You are not asked to diagnose anything. What you expected and what you got is the whole job.
 
-**If you only have twenty minutes:** do step 1, step 4 and step 6. Those three answer the most.
+**If you only have twenty minutes:** do step 1, step 3 and step 6. Those three answer the
+most, and step 4 arrives on its own during step 3.
 
 ## Before you start
 
@@ -18,7 +19,9 @@ You are not asked to diagnose anything. What you expected and what you got is th
   Accessibility and Screen Recording. That is not a fault.
 - **The application lives in the menu bar**, not the Dock. Its icon's menu has **Show** and
   **Quit**; Quit is the only thing that exits it, and closing the manager window only puts it
-  away. The list inside the manager announces itself as "Installed modules".
+  away. The modules are in a list on the manager's **Installed** tab, under a line reading
+  "Installed modules — uncheck to disable, check to enable:". What VoiceOver calls the list
+  itself is not something we know — see step 2a.
 - **The log** is `automation-platform.log`, in the same folder as `Automation Platform.app` —
   beside it, not inside it. If that folder is not writable (the app was moved into
   `/Applications`, or is still quarantined), it goes to
@@ -80,14 +83,21 @@ unknown.
    Does each row report **its own** state?
 3. Press **Space** again to put it back. Does it come back?
 
-**Careful:** unticking a module really does turn it off. If you leave sforzando unticked, step
-3 will not work.
+**Careful:** unticking a module really does turn it off. Put back whatever you untick — and
+in particular leave **sforzando** and **Window probe** ticked, or steps 3, 4 and 6 have
+nothing to work with.
+
+**Also write down:** what VoiceOver calls the list itself when you land in it — a name, or
+just "table"? We genuinely do not know, and it is part of the answer.
 
 ### 2b. Speak through VoiceOver
 
 **Do:** go to the **Application settings** tab. It is a scrolling page, so keep arrowing past
-the bottom of what fits — the two you want are at the end. Tick the one whose label begins
-**"Speak through VoiceOver…"**.
+the bottom of what fits. There are eight checkboxes; the two that matter here are the **sixth
+and seventh**. Tick the one whose label begins **"Speak through VoiceOver…"**.
+
+**Leave the eighth alone.** It is "Show a Dock icon while the module manager is open", it is
+on by default, and step 4 depends on it staying on.
 
 **Should happen:** macOS puts up a permission dialog asking whether this application may
 control VoiceOver. Allow it.
@@ -109,13 +119,17 @@ General pane. Worth checking that before deciding this failed.
 
 ## 3. sforzando, and the field that read as nothing
 
-**Do:** open **sforzando standalone**. Click into its window so the overlay activates, then
-press **Tab**.
+**Do:** open **sforzando standalone** and click into its window so the overlay activates.
 
-**Should happen:** it says "Instrument". Tab again for "Polyphony", again for "Pitchbend
-range". **Shift-Tab** goes back.
+**Should happen:** without you pressing anything, it names the first read-out — "Instrument" —
+and reads its value. Then **Tab** gives you "Polyphony", **Tab** again "Pitchbend range", and a
+third **Tab** comes back round to "Instrument". **Shift-Tab** goes the other way.
 
-**Then:** set **Pitchbend range to 1** and read it again. It should say **"1"**.
+If nothing is spoken on arrival and the first **Tab** is what speaks, say so — that is worth
+knowing on its own.
+
+**Then:** set **Pitchbend range to 1**. Press **Return** (or **Space**) on that read-out and
+sforzando's own menu opens; choose 1 there. Now read it again — it should say **"1"**.
 
 Last time it said *nothing* at that value, while Polyphony at 1 read fine. Your own probe
 explained it: the region we read started four points inside the value itself — harmless for a
