@@ -1435,6 +1435,19 @@ pub fn active_window() -> Option<WinInfo> {
             match win_info(el, false) {
                 Some(w) => {
                     remember_front(pid, w.hwnd, Some(w.clone()));
+                    // The key tap holds a NUMBER rather than asking this question itself —
+                    // asking it inside the tap callback is the one cross-process call that
+                    // must never happen there. That number is told to it by two
+                    // notifications, and a notification that arrives while the application
+                    // is quarantined tells it nothing, so it can go stale and stay stale:
+                    // no further notification is due while the user works inside one plugin.
+                    // This is the same fact, resolved fresh, on the tick, for free. It costs
+                    // one atomic store and it is what makes the gate self-heal.
+                    //
+                    // Only on this arm on purpose: a REMEMBERED window is an answer about
+                    // geometry, not about which window has the keyboard now, and writing it
+                    // here would arm the gate from something nobody has confirmed.
+                    super::tap::note_foreground(w.hwnd);
                     Some(w)
                 }
                 // `win_info` reads a dozen attributes of its own and any of them can be the
@@ -1488,20 +1501,31 @@ pub fn window_info(handle: isize, require_title: bool) -> Option<WinInfo> {
     win_info(entry.element, require_title)
 }
 
-/// The handle of the frontmost window, or 0. Used for the key-scope snapshot.
+/// The handle of the frontmost window. Used for the key-scope snapshot.
 ///
 /// Returns the interned handle without building a whole `WinInfo`, because the caller wants
 /// identity and nothing else — but it does intern, so the number it hands back is the same
 /// one `active_window` reports and the comparison at key-press time is meaningful.
-pub fn foreground_window_id() -> isize {
+///
+/// **`None` is not zero.** `Some(0)` means the application answered and has no window;
+/// `None` means it did not answer at all, and the two lead to opposite actions in the caller.
+/// This is the third time the same conflation has been found in this codebase — it cost the
+/// macOS tester his startup announcement as `via_screen_reader`, and it is recorded a second
+/// time against `note_foreground` in TODO.md, which is what this returns for. A caller that
+/// writes a fabricated 0 into the key tap's idea of what is in front closes the scope gate
+/// for EVERY hotkey an overlay owns, and nothing reopens it until the next notification —
+/// which, if the user stays inside the plugin, may be a long time. Reasoned from the code
+/// rather than observed: the log line that would show it ("a key the overlay had claimed
+/// reached the application instead") has not been seen in a tester's log.
+pub fn foreground_window_id() -> Option<isize> {
     let Some(pid) = frontmost_pid() else {
-        return 0;
+        return Some(0);
     };
     match front_window_of(pid) {
         Front::Fresh(el) => {
             let handle = handles::intern(el, pid, 0);
             remember_front(pid, handle, None);
-            handle
+            Some(handle)
         }
         // Deliberately NOT served from memory, unlike `active_window`. Memory can answer
         // "which window is in front", which is what the pump asks on every tick. It cannot
@@ -1529,10 +1553,10 @@ pub fn foreground_window_id() -> isize {
         // matching until the next notification arrives, which may be a long time. That is a
         // pre-existing defect this change deliberately does not touch, and it is recorded in
         // TODO.md: the fix is to let `note_foreground` say "unknown", not to guess a window.
-        Front::Silent => 0,
+        Front::Silent => None,
         Front::NoWindow => {
             forget_front(pid);
-            0
+            Some(0)
         }
     }
 }

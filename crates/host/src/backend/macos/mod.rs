@@ -293,7 +293,26 @@ impl Backend for MacBackend {
         // Snapshot semantics, exactly as on Windows: `true` freezes the window that is
         // foreground AT THIS MOMENT. Resolving it lazily at press time would always match
         // and a menu opened by a control could never be navigated.
-        tap::set_key_scope(if to_foreground { ax::foreground_window_id() } else { 0 });
+        // A window that could not be resolved pins nothing, which is what 0 already meant
+        // here and is the permissive answer: scope 0 is global, so the overlay's keys are
+        // claimed everywhere rather than nowhere. Said out loud, because it is a scope the
+        // caller did not ask for.
+        let window = if to_foreground {
+            match ax::foreground_window_id() {
+                Some(w) => w,
+                None => {
+                    crate::logging::line(
+                        "macos",
+                        "key scope: the frontmost application did not say which window is in \
+                         front, so the scope stays global for now",
+                    );
+                    0
+                }
+            }
+        } else {
+            0
+        };
+        tap::set_key_scope(window);
     }
 
     fn set_menu_open(&self, open: bool) {

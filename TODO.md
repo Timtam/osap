@@ -1500,22 +1500,48 @@ asked; this is what was NOT, plus what the session found that nobody had asked.
       quarantine. A remembered handle also reached `queue::drain`, which resolves it on the
       pump thread with no gate at all.
 - [ ] **Still open, and named rather than implied.**
-  - **Candidates 2 and 3 from the original analysis are untouched:** capping the total by
-      lowering the messaging timeout for this one question, and getting the question off the
-      thread that carries the event tap, which is the structural answer and the large one.
-      What was shipped bounds a wedged application to ONE timeout per five-second quarantine
-      cycle. That is still ~1000 ms, and past ~300 ms the system switches the tap off — so
-      the shape is fixed and the worst case is not.
+  - **Candidate 2 is contradicted by a measurement already in this file, and is off the
+      table.** The idea was to give this one question its own short messaging timeout —
+      Apple's header allows it ("Setting the timeout on another accessibility object sets it
+      only for that object"), so it looked cheap. But `MESSAGING_TIMEOUT`'s own doc records
+      why it was RAISED from 0.25 s to 1.0 s: on the tester's 2015 Air with VoiceOver
+      running, sforzando never once answered inside a quarter second, every read timed out,
+      the application went into the penalty box and the overlay never saw a window it could
+      plainly read. A short budget for the hot question would reproduce that exactly — and
+      the memory added above does not save it, because an application that never answers a
+      first time has nothing remembered to serve. The same probe measured an ordinary Tab
+      step at 90-250 ms there against 23-34 ms on Windows, so a healthy answer on that
+      machine can already approach the ~300 ms at which the tap is switched off. No timeout
+      value fixes that.
+  - **Which leaves candidate 3**, getting the question off the thread that carries the event
+      tap. The structural answer and the large one, and now the only one. What was shipped
+      bounds a wedged application to ONE timeout per five-second quarantine cycle; that is
+      still ~1000 ms. Before starting it, read the next session's `window.active cost` line,
+      which the probe can finally produce.
   - **`win_info` can still cost a timeout of its own on the healthy path.** `snapshot` is a
       batch, its fall-back is seven individual reads, and the quarantine is only consulted
       after them. The guard added there stops the SECOND timeout inside one `win_info`, not
       the first.
-  - **`note_foreground(0)` says "no window" where the truth is "not known".** The same
-      conflation that cost the tester his startup announcement (`via_screen_reader`). When a
-      quarantine lands on a focus-change notification, `foreground_window_id` returns 0, and
-      0 makes every scoped hotkey stop matching until the next notification — which may be a
-      long time. The fix is to let `tap::note_foreground` carry "unknown" as a third state,
-      not to guess a window.
+  - [x] **`note_foreground(0)` said "no window" where the truth was "not known"** — fixed
+      2026-09-04. The third time this exact conflation has been found here, after
+      `via_screen_reader` (which cost the tester his startup announcement) and
+      `attribute_element_checked` (which made a timed-out read look like "nothing has
+      focus"). `foreground_window_id` returns `Option<isize>` now: `Some(0)` is "it answered,
+      it has no window", `None` is "it did not answer". Nobody writes the fabricated zero any
+      more — `watch` leaves the tap holding what it had, `tap::set_key_scope` leaves its
+      disagreement standing rather than resolving it wrongly, and the backend's key-scope
+      snapshot says out loud when it falls back to a global scope.
+    - And `active_window` now tells the tap what it just learned. The tap holds a NUMBER
+      because resolving it inside the tap callback is the one cross-process call that must
+      never happen there, and that number was told to it only by two notifications — so a
+      notification arriving during a quarantine left it stale with nothing due to correct it
+      while the user stays inside one plugin. The pump asks the same question every tick
+      anyway; passing the answer on costs one atomic store, and only the FRESH arm does it (a
+      remembered window is an answer about geometry, not about which window has the
+      keyboard).
+    - **Reasoned from the code, not observed.** The log line that would show it — "a key the
+      overlay had claimed reached the application instead" — has not appeared in a tester's
+      log. It is in the next session's list to watch for.
   - **`window_focus_chain` reads `AXFocusedUIElement` off the SYSTEM-WIDE element**, so it
       has no pid to gate on and its failure cannot arm the quarantine either (`element_pid`
       of the system-wide element is not an application's). During a quarantine `active()` now

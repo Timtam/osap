@@ -280,16 +280,35 @@ pub fn set_key_scope(window: isize) {
     KEY_SCOPE.store(window, Ordering::Relaxed);
     if window != 0 && FOREGROUND.load(Ordering::Relaxed) != window {
         let stale = FOREGROUND.load(Ordering::Relaxed);
-        let now = super::ax::foreground_window_id();
-        FOREGROUND.store(now, Ordering::Relaxed);
-        logging::line(
-            "macos",
-            &format!(
-                "key scope pinned to window {window} while the tap still thought {stale} was \
-                 in front; asked again and it is {now}{}",
-                if now == window { "" } else { " — which still does not match, so keys stay unclaimed" }
+        match super::ax::foreground_window_id() {
+            Some(now) => {
+                FOREGROUND.store(now, Ordering::Relaxed);
+                logging::line(
+                    "macos",
+                    &format!(
+                        "key scope pinned to window {window} while the tap still thought \
+                         {stale} was in front; asked again and it is {now}{}",
+                        if now == window {
+                            ""
+                        } else {
+                            " — which still does not match, so keys stay unclaimed"
+                        }
+                    ),
+                );
+            }
+            // The disagreement stands unresolved rather than being resolved wrongly. Storing
+            // a 0 here would replace a possibly-correct number with a definitely-wrong one,
+            // on the path whose whole purpose is to correct the tap's idea of what is in
+            // front.
+            None => logging::line(
+                "macos",
+                &format!(
+                    "key scope pinned to window {window} while the tap still thought {stale} \
+                     was in front; the application did not answer, so the tap keeps {stale} \
+                     until the pump gets a real answer"
+                ),
             ),
-        );
+        }
     }
     logging::trace("macos", || match window {
         0 => "tap: key scope is global".to_string(),

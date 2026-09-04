@@ -278,7 +278,12 @@ fn on_app_activated(notification: &NSNotification) {
     // of the problem that ends with keystrokes going missing, and a log nobody can reproduce
     // from is the only diagnosis anyone will get.
     let started = Instant::now();
-    let window = super::ax::foreground_window_id();
+    // `None` means the application did not answer. Zero is what the rest of this path is
+    // written around — the drain resolves it, fails to match and arms the delayed re-check
+    // ladder, which is exactly what an application too busy to talk needs — so the two
+    // collapse HERE rather than silently further down, and the log says which it was.
+    let answered = super::ax::foreground_window_id();
+    let window = answered.unwrap_or(0);
     let took = started.elapsed().as_millis();
     if took >= 50 {
         crate::logging::line(
@@ -288,7 +293,21 @@ fn on_app_activated(notification: &NSNotification) {
     }
     // The key tap compares against this rather than resolving it itself; doing that inside
     // its callback would be a cross-process call on the one path that must not make any.
-    super::tap::note_foreground(window);
+    //
+    // Not told anything when the application did not answer. Storing the 0 would say "no
+    // window is in front", which closes the scope gate for every hotkey an overlay owns; not
+    // storing leaves the last thing that was actually known, and `active_window` corrects it
+    // on the next tick that gets a real answer.
+    match answered {
+        Some(w) => super::tap::note_foreground(w),
+        None => crate::logging::line(
+            "macos",
+            &format!(
+                "{name} (pid {pid}) came to the front without answering which of its windows \
+                 is in front; the tap keeps what it had rather than being told there is none"
+            ),
+        ),
+    }
     crate::logging::trace("macos", || {
         format!("activated: {name} (pid {pid}), frontmost window handle {window}")
     });
@@ -571,7 +590,18 @@ fn on_notification(pid: i32, name: &CFString) {
         // same application coming to the front raises no workspace notification, so without
         // this the gate would go on comparing against a window that is no longer in front —
         // and keep swallowing keys that belong to whatever replaced it.
-        super::tap::note_foreground(super::ax::foreground_window_id());
+        // Only when the application actually said which window it is. This notification is
+        // the ONLY thing that tells the tap about a window change inside one application —
+        // no workspace notification is raised for it — so a fabricated 0 written here is
+        // sticky: nothing else is due to correct it while the user stays in the plugin, and
+        // every scoped hotkey stops matching in the meantime. `active_window` refreshes the
+        // same fact from the pump, which is what closes the gap this leaves open.
+        match super::ax::foreground_window_id() {
+            Some(w) => super::tap::note_foreground(w),
+            None => crate::logging::trace("macos", || {
+                format!("focused window changed in pid {pid}, which did not say to what")
+            }),
+        }
         crate::logging::trace("macos", || format!("focused window changed in pid {pid}"));
         super::queue::mark_focus_dirty();
         return;
