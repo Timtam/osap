@@ -1632,7 +1632,8 @@ in macOS 14`, where without it the process would have aborted), `window.active` 
       records neither which transport it took nor whether anything accepted it.
 - [ ] **Qt is still unanswered and no longer his problem.** Kontakt and Komplete Kontrol will
       not run on macOS 12.7.6, and the Qt applications he could think of are equally
-      unsupported there. It is on the new-machine list instead (`docs/macos-new-machine.md`).
+      unsupported there. It moves to the next session's protocol instead, on a machine where
+      they run.
 
 - [x] **Personal Voice would have killed the application on the tester's Mac** — found
       2026-09-04 by an adversarial review of the test protocol, before he was asked to press

@@ -137,6 +137,24 @@ knowing which one catches what:
 
 If you are changing macOS code, assume the check is necessary and the CI run is the proof.
 
+## Two things about the folder it builds into
+
+**The log accumulates, and only the last block is about this run.** It is opened in append
+mode, so every launch adds another block to the END of the file — the top of it is the first
+time the application was ever started, before anything was granted. Reading `head` of it after
+granting a permission reports the opposite of the truth. The last block is the one that counts:
+
+```bash
+grep '\[env\]' dist/AutomationPlatform/automation-platform.log | tail -20
+```
+
+**A rebuild keeps the evidence, and only the evidence.** `package-macos.sh` empties `dist/`
+and rewrites it, and it carries four things across: `automation-platform.log`, its rotated
+`.log.1`, `settings.toml`, and any `probe-*.png` the probe has written. Everything else there
+is build output. It did not always: `git pull && ./bootstrap-macos.sh` used to throw away the
+log of the session that prompted the fix, along with the settings and the screenshots a tester
+had been asked to send.
+
 ## When something goes wrong
 
 Send `automation-platform.log`. It sits beside the `.app` — or, if that folder was not
