@@ -1561,6 +1561,32 @@ asked; this is what was NOT, plus what the session found that nobody had asked.
       cache-served line at all, because the forty asks are in forty ticks. The output also
       says what it cannot tell apart: an ask served from the backend's memory is fast BY
       DESIGN, so the verdict line points at the log rather than declaring health.
+- [x] **The Retina audit found nothing, and that is the finding** (2026-09-04). Four lenses
+      over the capture path, the OCR mapping, window and control geometry with mouse input, and
+      the Luau side plus the documentation, each adversarially refuted. **No points-versus-pixels
+      confusion survived.** The reason is in `capture.rs`'s own header: the destination bitmap
+      is created at exactly the requested size in POINTS and the captured image is drawn into
+      it, so `cap.w == w` and `rgba.len() == w * h * 4` are structural rather than hoped for,
+      and "the scale factor never appears in the arithmetic, which is exactly why it cannot be
+      got wrong". The one caller that wants the sharp image — OCR — gets the backing-store
+      image plus the scale MEASURED from what came back rather than read from the display,
+      because a laptop docked to an external display changes it mid-session.
+  - **And the instrument for it already exists.** `first screen capture: 774x566 points at
+      333,87 came back at 1.00x and took 20 ms` is in the tester's log today; on a Retina Mac
+      that line says 2.00x, and it is derived from the returned image. Nothing needs building
+      to answer the question — it needs one probe press and one line read out.
+- [x] **A focus chain reported a window's frame as its client rect** — fixed 2026-09-04, and
+      found by the audit above while looking for something else. `control_info` collapses
+      client onto frame, correctly, for everything BELOW a window — its own comment says so —
+      and `window_focus_chain` ends its chain with the AXWindow itself, which is the case the
+      comment excludes. So `focusChain()`'s last link and `active_window()` described one
+      window with a `y` a title bar apart, and the Windows backend, which fills a top-level
+      window's client fields from `ClientToScreen`, disagreed with both.
+  - Fixed now rather than filed, for a reason that is not its severity: it is a coordinate
+      wrong by a CONSTANT, which is exactly what a points-versus-pixels fault looks like from
+      the outside. Leaving a decoy of that shape in place for the one session that finally has
+      a Retina display would have been the expensive choice.
+
 ## The second macOS session (2026-09-04)
 
 The protocol is `docs/macos-session-two.md`; his answers and log came back the same evening.

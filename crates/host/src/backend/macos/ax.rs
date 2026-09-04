@@ -1800,21 +1800,41 @@ fn control_info(el: CFRetained<AXUIElement>, snap: &Snap, pid: i32) -> Option<Co
     }
     let (x, y, w, h) = rect_i32(frame);
     let class = join_class(snap);
+    let hwnd = handles::intern(el.clone(), pid, 0);
+    // There is no frame-versus-client distinction below the window: an accessibility
+    // element's rectangle is its content, with no border and no title bar of its own. The
+    // Windows backend reports the same thing for the borderless windows plugins use —
+    // `mod.rs` says so in as many words.
+    //
+    // A WINDOW is the exception, and this function is handed one: `window_focus_chain` ends
+    // its chain with the AXWindow itself. Taking the shortcut there reported the frame as the
+    // client rect, so the last link of `host.window.focusChain()` and `host.window.active()`
+    // described the same window with a `y` about a title bar apart — and the Windows backend
+    // does fill a top-level window's client fields from `ClientToScreen`, so the two
+    // platforms disagreed as well.
+    //
+    // Found by an audit looking for something else entirely. It is not a scale fault: 28
+    // points at 1.00 and the same 28 points at 2.00. But it is a coordinate wrong by a
+    // constant, which is precisely what a points-versus-pixels fault looks like from the
+    // outside, and the next session is the one that finally has a Retina display to test on.
+    // Leaving a decoy of that shape in place for a session that cannot be repeated is the
+    // expensive choice.
+    let client = if snap.role == "AXWindow" {
+        rect_i32(content_rect(&el, snap, frame, hwnd))
+    } else {
+        (x, y, w, h)
+    };
     Some(ControlInfo {
-        hwnd: handles::intern(el, pid, 0),
+        hwnd,
         class,
         x,
         y,
         w,
         h,
-        // There is no frame-versus-client distinction below the window: an accessibility
-        // element's rectangle is its content, with no border and no title bar of its own.
-        // The Windows backend reports the same thing for the borderless windows plugins
-        // use — `mod.rs` says so in as many words.
-        client_x: x,
-        client_y: y,
-        client_w: w,
-        client_h: h,
+        client_x: client.0,
+        client_y: client.1,
+        client_w: client.2,
+        client_h: client.3,
     })
 }
 
