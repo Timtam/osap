@@ -24,6 +24,13 @@ on:
     paths:
       - 'crates/**'
       - 'modules/**'
+      # The dev tools this job LOADS. Watching what a job runs is not automatic — the
+      # documentation job ran a Python checker it did not watch until 2026-09-03, and this is
+      # the same gap on a different job: `tools/capability-probe` is the gate below, and
+      # `tools/probe` is the only instrument the macOS tester has. A syntax error in either
+      # would ship unnoticed and cost him a session.
+      - 'tools/capability-probe/**'
+      - 'tools/probe/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'package.ps1'
@@ -99,6 +106,32 @@ jobs:
           # everything a real overlay does until 2026-09-03.
           if (-not (Select-String -Path $log -Pattern 'HEADLESS TIMER: fired' -Quiet)) {
             throw 'host.timer did not fire in headless mode — the event loop is not ticking'
+          }
+
+      # The instrument the macOS tester works with. It is not built here — it is Luau — so
+      # nothing else would notice a syntax error in it, and he would find out by pressing the
+      # key and getting nothing. Loading it is enough: `activate` runs, which is where every
+      # `host.include` and every top-level statement is executed.
+      - name: The probe still loads
+        shell: pwsh
+        run: |
+          $env:AUTOMATION_PLATFORM_HEADLESS = '1'
+          $log = 'target/release/automation-platform.log'
+          Remove-Item $log -ErrorAction SilentlyContinue
+          $p = Start-Process -FilePath 'target/release/automation-platform.exe' `
+                 -ArgumentList "$PWD/tools/probe" -PassThru
+          for ($i = 0; $i -lt 40; $i++) {
+            if ((Test-Path $log) -and (Select-String -Path $log -Pattern '\[probe\] ready' -Quiet)) { break }
+            Start-Sleep -Milliseconds 500
+          }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          if (-not (Test-Path $log)) { throw 'the probe produced no log at all' }
+          Get-Content $log
+          if (Select-String -Path $log -Pattern 'did not load' -Quiet) {
+            throw 'the probe module did not load — the tester would press the key and get nothing'
+          }
+          if (-not (Select-String -Path $log -Pattern '\[probe\] ready' -Quiet)) {
+            throw 'the probe loaded but never said it was ready'
           }
 
       # The documentation ships inside the artifact and works offline from the folder, so a
