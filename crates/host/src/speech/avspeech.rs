@@ -337,6 +337,27 @@ fn personal_status() -> Option<bool> {
 /// channel, because everything above it is written as "ask, then act on the answer" and a
 /// callback threaded through the queue would buy nothing.
 fn request_personal_voice() -> bool {
+    // The same metaclass check `personal_status` makes twenty lines above, for the reason it
+    // gives there: these bindings carry no availability information, and a selector that does
+    // not exist is not a `None` but a dead process.
+    //
+    // It was missing here, and the path that reaches this function is exactly the one the
+    // guard exists for. `personal_status` answers `None` on a macOS without the API; `None`
+    // is read by `Speech::pump` as "nobody has been asked yet"; and that is the arm that
+    // sends `Job::AuthorisePersonal`. So on any macOS before 14 — the tester's is 12.7.6 —
+    // ticking the Personal Voice switch would have sent an unrecognised selector to the
+    // class and taken the application down, at the moment somebody deliberately asked for
+    // something. Found by review before it reached him.
+    if !AVSpeechSynthesizer::class()
+        .metaclass()
+        .responds_to(sel!(requestPersonalVoiceAuthorizationWithCompletionHandler:))
+    {
+        crate::logging::line(
+            "speech",
+            "Personal Voice: this macOS has no such API — it arrived in macOS 14 — so there              is nothing to ask for. The switch stays on and changes nothing.",
+        );
+        return false;
+    }
     let (tx, rx) = channel::<bool>();
     let t = Instant::now();
     // SAFETY: the block is called once, on some queue, with the status. `tx` is moved into it

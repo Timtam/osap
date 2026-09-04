@@ -1561,6 +1561,18 @@ asked; this is what was NOT, plus what the session found that nobody had asked.
       cache-served line at all, because the forty asks are in forty ticks. The output also
       says what it cannot tell apart: an ask served from the backend's memory is fast BY
       DESIGN, so the verdict line points at the log rather than declaring health.
+- [x] **Personal Voice would have killed the application on the tester's Mac** — found
+      2026-09-04 by an adversarial review of the test protocol, before he was asked to press
+      it. `request_personal_voice` called
+      `requestPersonalVoiceAuthorizationWithCompletionHandler` with no guard, twenty lines
+      below `personal_status`, which guards its sibling class method and says exactly why:
+      "a selector that does not exist is not a `None` but a dead process". The selector
+      arrived in macOS 14; his machine is 12.7.6. And the path is the one the guard exists
+      for — `personal_status` answers `None` where the API is missing, `Speech::pump` reads
+      `None` as "nobody has been asked yet", and that arm is what sends
+      `Job::AuthorisePersonal`. Guarded now, with a log line naming the version. The draft
+      protocol had told him to tick that switch as an early step and called "it still works"
+      a pass, which was a fact nobody had measured.
 - [x] **The Mac we already own was being asked one question** — fixed 2026-09-04. The macOS
       job packages a bundle, links it, and loads every module once; that was all. Speech is
       the one new subsystem a runner can actually exercise, because every accessibility call
