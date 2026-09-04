@@ -251,6 +251,7 @@ pub fn permissions() -> Vec<Permission> {
                       empty, and no overlay ever activates.",
             anchor: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
             can_ask: true,
+            blocking: true,
         },
         Permission {
             name: "Screen Recording",
@@ -264,6 +265,7 @@ pub fn permissions() -> Vec<Permission> {
                       reads nothing, for ever, without an error. This is the dangerous one.",
             anchor: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
             can_ask: true,
+            blocking: true,
         },
         Permission {
             name: "Input Monitoring",
@@ -277,6 +279,7 @@ pub fn permissions() -> Vec<Permission> {
                       separately, so it is only worth opening if it is still missing after that.",
             anchor: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
             can_ask: false,
+            blocking: true,
         },
         Permission {
             name: "Automation, for VoiceOver",
@@ -294,6 +297,7 @@ pub fn permissions() -> Vec<Permission> {
                       it.",
             anchor: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation",
             can_ask: true,
+            blocking: false,
         },
     ]
 }

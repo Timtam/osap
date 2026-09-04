@@ -720,7 +720,7 @@ pub fn run_gui(
                     modal_message(
                         &frame,
                         "Personal Voice",
-                        "This Mac cannot offer a Personal Voice: the feature arrived in                          macOS 14, and this system is older.
+ "This Mac cannot offer a Personal Voice: the feature arrived in macOS 14, and this system is older.
 
 The setting stays on and                          changes nothing. On a Mac running macOS 14 or later, ticking it                          asks macOS for permission and your Personal Voice then appears                          among the voices a module can choose.",
                         false,
@@ -759,6 +759,7 @@ The setting stays on and                          changes nothing. On a Mac runn
         // Gated on the LIST being empty rather than on the platform, which is what lets this
         // page be compiled and clicked on the machine it was written on. Windows needs no such
         // grants, so it gets no page.
+        let mut perm_page: Option<usize> = None;
         if !crate::backend::permissions().is_empty() {
             let perm_tab = ScrolledWindow::builder(&notebook).build();
             perm_tab.set_scroll_rate(0, 10);
@@ -826,6 +827,10 @@ The setting stays on and                          changes nothing. On a Mac runn
             recheck.on_click(move |_| refresh());
             perm_tab.set_sizer(ps, false);
             notebook.add_page(&perm_tab, "Permissions", false, None);
+            // Its index, taken rather than counted: pages are added in one place today and
+            // that is exactly the kind of thing a later page inserted above would break
+            // silently, sending somebody to the wrong tab.
+            perm_page = Some(notebook.get_page_count().saturating_sub(1));
         }
 
         sizer.add(&notebook, 1, SizerFlag::All | SizerFlag::Expand, 0);
@@ -1426,7 +1431,38 @@ The setting stays on and                          changes nothing. On a Mac runn
         let hint = "Automation Platform is running in the menu bar. Open its menu to manage modules.";
         #[cfg(not(target_os = "macos"))]
         let hint = "Running in the system tray. Double-click the tray icon to manage modules.";
-        announce(hint);
+        // A page nobody knows about is not a guide.
+        //
+        // The permissions page can say what is done and what is not, and on a machine where
+        // nothing has been granted yet it is also the only thing worth doing — but it lives
+        // behind a menu-bar icon, on a tab, in a window that starts hidden. Somebody setting
+        // this up for the first time has no reason to look for it, and no way to see that it
+        // is there. So when something that gates everything is missing, the window comes to
+        // them, on the right page, and says why it appeared.
+        //
+        // Only `Missing`, never `Unknown`: Input Monitoring often cannot answer, and putting
+        // a window in front of a blind user to send them and fix what may not be broken is
+        // worse than staying quiet. And only the three that gate everything — Automation is
+        // asked for by the switch that wants it, and interrupting a launch over a voice
+        // setting nobody turned on would be pestering.
+        let missing: Vec<&'static str> = crate::backend::permissions()
+            .iter()
+            .filter(|p| p.blocking && p.state == crate::backend::Grant::Missing)
+            .map(|p| p.name)
+            .collect();
+        if missing.is_empty() {
+            announce(hint);
+        } else {
+            if let Some(page) = perm_page {
+                notebook.set_selection(page);
+            }
+            show_manager(&frame);
+            announce(&format!(
+ "Automation Platform cannot work yet: {} {} not been granted. The Permissions page is open, and lists what to do.",
+                missing.join(" and "),
+                if missing.len() == 1 { "has" } else { "have" }
+            ));
+        }
         std::mem::forget(taskbar); // keep the icon + its handlers alive
 
         // wxWidgets owns the loop now, so this recurring tick is how our OS events

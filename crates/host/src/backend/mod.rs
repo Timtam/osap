@@ -98,6 +98,13 @@ pub struct Permission {
     /// Whether the application can raise the system's own consent dialog for this one, or
     /// whether the pane is the only route.
     pub can_ask: bool,
+    /// Whether nothing works without it — and therefore whether its absence is worth putting
+    /// a window in front of somebody who did not ask for one.
+    ///
+    /// Three of the four gate everything. The fourth only affects which voice speaks, is
+    /// asked for by the switch that wants it, and interrupting a launch over it would be
+    /// pestering somebody about a feature they never turned on.
+    pub blocking: bool,
 }
 
 /// The permissions this platform needs the user to grant. Empty where there are none.

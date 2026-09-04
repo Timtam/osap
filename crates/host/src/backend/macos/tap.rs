@@ -497,7 +497,7 @@ unsafe extern "C-unwind" fn tap_callback(
         logging::line(
             "macos",
             &format!(
-                "the event tap suppressed its first key (vk {vk:#04x} mask {mask}) — the tap                  is live and Input Monitoring is granted"
+ "the event tap suppressed its first key (vk {vk:#04x} mask {mask}) — the tap is live and Input Monitoring is granted"
             ),
         );
     }

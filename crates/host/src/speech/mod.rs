@@ -421,16 +421,16 @@ impl Speech {
                 match self.av.personal_granted() {
                     Some(true) => crate::logging::line(
                         "speech",
-                        "Personal Voice: already granted — it is among the voices a module                          can choose",
+ "Personal Voice: already granted — it is among the voices a module can choose",
                     ),
                     Some(false) => crate::logging::line(
                         "speech",
-                        "Personal Voice: refused earlier, and macOS does not ask twice.                          System Settings > Privacy & Security > Speech Recognition is not                          it — a Personal Voice is allowed per application from the dialog                          alone, so the switch has to be turned off and on with the grant                          reset, or the voice re-shared in Accessibility settings.",
+ "Personal Voice: refused earlier, and macOS does not ask twice. System Settings > Privacy & Security > Speech Recognition is not it — a Personal Voice is allowed per application from the dialog alone, so the switch has to be turned off and on with the grant reset, or the voice re-shared in Accessibility settings.",
                     ),
                     None => {
                         crate::logging::line(
                             "speech",
-                            "Personal Voice was switched on — asking macOS, on the speech                              worker so the dialog cannot hold the event loop",
+ "Personal Voice was switched on — asking macOS, on the speech worker so the dialog cannot hold the event loop",
                         );
                         self.av.authorise_personal();
                     }

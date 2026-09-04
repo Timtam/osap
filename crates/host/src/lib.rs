@@ -638,12 +638,14 @@ impl Shared {
                 // three possible ends — shown, spoken, or deliberately dropped — and a log
                 // that only records one of them cannot answer "what happened to it", which is
                 // the question this instrumentation exists for.
+                //
+                // The TEXT, not its length. A length can only be compared against a guess at
+                // what was probably said; the sentence itself is what tells a remote reader
+                // which of several announcements this was, and there are a handful per
+                // session rather than a stream.
                 logging::line(
                     "speech",
-                    &format!(
-                        "announcement ({} chars): shown as a notification",
-                        text.chars().count()
-                    ),
+                    &format!("announcement, shown as a notification: {text}"),
                 );
                 return;
             }
@@ -664,13 +666,12 @@ impl Shared {
         logging::line(
             "speech",
             &format!(
-                "announcement ({} chars): {}",
-                text.chars().count(),
+                "announcement, {}: {text}",
                 if present {
-                    "a screen reader is running, handing it to speech"
+                    "handed to speech because a screen reader is running"
                 } else {
-                    "no screen reader is running, so it is not said — this application does \
-                     not speak at somebody who never asked it to"
+                    "NOT said because no screen reader is running — this application does not \
+                     speak at somebody who never asked it to"
                 }
             ),
         );

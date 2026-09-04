@@ -150,8 +150,8 @@ pub const SWITCHES: &[Switch] = &[
     },
     Switch {
         key: "screen_reader_speech",
-        label: "Speak through the screen reader, so it comes out the way it says everything                 else — takes effect immediately",
-        help: "Hands what a module says to NVDA, JAWS or whichever screen reader is running,                instead of speaking it with a separate voice. It then arrives in your voice,                at your rate, and in the reading order you are used to. Turn it off to go                back to the separate voice, which is also what happens by itself if the                screen reader stops answering — turning this off and on again is how you ask                for another try after that, without restarting. With no screen reader                running, nothing changes either way: a module that asks to be heard is heard                through the system voice.",
+ label: "Speak through the screen reader, so it comes out the way it says everything else — takes effect immediately",
+ help: "Hands what a module says to NVDA, JAWS or whichever screen reader is running, instead of speaking it with a separate voice. It then arrives in your voice, at your rate, and in the reading order you are used to. Turn it off to go back to the separate voice, which is also what happens by itself if the screen reader stops answering — turning this off and on again is how you ask for another try after that, without restarting. With no screen reader running, nothing changes either way: a module that asks to be heard is heard through the system voice.",
         os: Some("windows"),
         // On, unlike its macOS counterpart, and for the opposite reason: there is no consent
         // dialog to spring on anybody here, and this is the path that speaks the way the

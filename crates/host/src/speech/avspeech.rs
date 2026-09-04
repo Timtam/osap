@@ -368,7 +368,7 @@ fn request_personal_voice() -> bool {
     {
         crate::logging::line(
             "speech",
-            "Personal Voice: this macOS has no such API — it arrived in macOS 14 — so there              is nothing to ask for. The switch stays on and changes nothing.",
+ "Personal Voice: this macOS has no such API — it arrived in macOS 14 — so there is nothing to ask for. The switch stays on and changes nothing.",
         );
         return false;
     }

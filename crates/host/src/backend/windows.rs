@@ -263,7 +263,7 @@ fn common_controls() -> String {
         format!("{v} — the manifest took")
     } else {
         format!(
-            "{v} — THE MANIFEST DID NOT TAKE. wxWidgets will say so and fall back to the              pre-XP controls: no checkboxes in the module list, and everything reads worse              to a screen reader"
+ "{v} — THE MANIFEST DID NOT TAKE. wxWidgets will say so and fall back to the pre-XP controls: no checkboxes in the module list, and everything reads worse to a screen reader"
         )
     }
 }
