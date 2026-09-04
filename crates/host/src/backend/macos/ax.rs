@@ -59,6 +59,7 @@ use objc2_core_graphics::{
 };
 use objc2_foundation::NSString;
 
+use super::front_memory::{Memory, Recall};
 use super::handles;
 use crate::backend::{ControlInfo, DumpNode, WinInfo};
 
@@ -191,6 +192,62 @@ thread_local! {
     /// the system switches the key tap off. Remembering that an application is not talking
     /// turns that into one timeout every few seconds instead of three per question.
     static BUSY_UNTIL: RefCell<HashMap<i32, Instant>> = RefCell::new(HashMap::new());
+
+    /// What each application last said when asked which of its windows is in front.
+    ///
+    /// The rules live in [`super::front_memory`], where they can be tested on a machine with
+    /// no accessibility API. This is the per-thread instance, and the only thing here that
+    /// knows how to ask whether a process is still running.
+    static LAST_FRONT: RefCell<Memory> = RefCell::new(Memory::default());
+
+    /// When a served-from-memory answer was last written to the log, so the note appears
+    /// without one line per pump tick.
+    static LAST_REMEMBERED: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+/// Records what an application answered, so the next question has a fall-back if it stops.
+fn remember_front(pid: i32, handle: isize, info: Option<WinInfo>) {
+    LAST_FRONT.with(|m| {
+        m.borrow_mut().remember(pid, handle, info, Instant::now(), |p| {
+            // The one part of this that cannot be compiled at home, which is why it is passed
+            // in rather than reached for: `libc` is a macOS-only dependency here.
+            unsafe { libc::kill(p, 0) == 0 }
+        })
+    });
+}
+
+/// Forgets an application's window: it has said it no longer has one, or what is remembered
+/// has just been ruled out.
+fn forget_front(pid: i32) {
+    LAST_FRONT.with(|m| m.borrow_mut().forget(pid));
+}
+
+/// Says that an answer came out of memory rather than out of the application.
+///
+/// At line level rather than trace: a remembered window may since have moved, and a session
+/// where an overlay worked from stale geometry has to be explainable afterwards from the log
+/// alone — the only thing a remote tester can send. Rate-limited to one line a second,
+/// because the question behind it is asked on every pump tick and the quarantine lasts five.
+fn note_remembered(pid: i32, age: Duration) {
+    let now = Instant::now();
+    let due = LAST_REMEMBERED.with(|c| match c.get() {
+        Some(prev) if now.duration_since(prev) < Duration::from_secs(1) => false,
+        _ => {
+            c.set(Some(now));
+            true
+        }
+    });
+    if due {
+        crate::logging::line(
+            "macos",
+            &format!(
+                "active_window: {} (pid {pid}) is not answering — serving the window it \
+                 last described, {} ms ago",
+                exe_for_pid(pid),
+                age.as_millis()
+            ),
+        );
+    }
 }
 
 /// How long an application that failed to answer is left alone.
@@ -227,6 +284,32 @@ pub(super) fn is_busy(pid: i32) -> bool {
             None => false,
         }
     })
+}
+
+/// Whether to give up on a call into an application that is not answering.
+///
+/// The quarantine only ever meant anything at the two places that consulted it. Everything
+/// else resolved a handle and walked straight in — which is how serving a REMEMBERED window
+/// from `active_window` turned into `host.window.controls()` walking six hundred nodes of a
+/// wedged application on the very same tick, the stall removed from one function and paid one
+/// function later. The overlay runtime asks `active()` and then, if it got a window, asks for
+/// its controls; before the memory existed the first answer was `nil` and the second question
+/// was never asked at all.
+///
+/// Traced rather than logged at line level, unlike the same check in `enumerate_windows`:
+/// that one is cold, these are asked on every tick, and a line each would bury the log. The
+/// once-a-second line from `note_remembered` is what explains the session.
+fn skip_busy(pid: i32, what: &str) -> bool {
+    if !is_busy(pid) {
+        return false;
+    }
+    crate::logging::trace("macos", || {
+        format!(
+            "{what}: not asking {} (pid {pid}), it did not answer a moment ago",
+            exe_for_pid(pid)
+        )
+    });
+    true
 }
 
 /// Classifies a failed accessibility call and logs the ones a person could act on.
@@ -1093,9 +1176,20 @@ fn apply_inset(frame: CGRect, d: (f64, f64, f64, f64)) -> CGRect {
 /// Kontrol's Save-preset dialog carries no title at all, and dropping it would leave the
 /// module with no origin to match against.
 fn win_info(el: CFRetained<AXUIElement>, require_title: bool) -> Option<WinInfo> {
+    // Local, not a round trip: the element carries its owner. Wanted before the reads rather
+    // than after them, so the quarantine can be consulted between them.
+    let pid = element_pid(&el);
     let snap = snapshot(&el);
     let title = snap.title.clone();
     if require_title && title.is_empty() {
+        return None;
+    }
+    // The snapshot may have BEEN the read that timed out — it is a batch, and its
+    // individual-attribute fall-back is seven more reads after that. Asking this application
+    // anything else now pays the messaging timeout a second time inside one `win_info`, which
+    // is how a bounded call still costs two seconds. `attribute` has already written the
+    // quarantine down by the time we get here; this is the first place that reads it back.
+    if skip_busy(pid, "win_info") {
         return None;
     }
     // Minimised is this platform's "not visible": the window still exists and still answers,
@@ -1104,7 +1198,6 @@ fn win_info(el: CFRetained<AXUIElement>, require_title: bool) -> Option<WinInfo>
         return None;
     }
     let frame = snap.rect?;
-    let pid = element_pid(&el);
     let class = join_class(&snap);
     // Interned before the content rect is worked out, because that answer is remembered per
     // handle: the handle is the only thing that identifies this window across calls.
@@ -1208,69 +1301,180 @@ pub fn enumerate_windows() -> Vec<WinInfo> {
     out
 }
 
-/// The element of the frontmost application's frontmost window.
-///
-/// `AXFocusedWindow` is the one that would receive a keystroke, which is the question the
-/// host is really asking; `AXMainWindow` and then the first of `AXWindows` stand in for it
-/// while a window is still coming up, because a dialog that is foreground before it has
-/// settled is exactly the case this has to answer for.
-pub(super) fn frontmost_window_element() -> Option<(CFRetained<AXUIElement>, i32)> {
+/// Which application is in front. Asked of the workspace, which is local, cheap, and still
+/// answers when the application itself has stopped talking to us.
+fn frontmost_pid() -> Option<i32> {
     let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
     let pid = app.processIdentifier();
-    if pid <= 0 {
-        return None;
-    }
-    // Asked of the workspace, which is local and cheap, BEFORE anything is asked of the
-    // application itself. The three reads below are tried in turn, so an application that
-    // is not answering charges the messaging timeout three times over — and this is the
-    // hottest question in the system.
+    (pid > 0).then_some(pid)
+}
+
+/// The answer to "which window is in front", and how much it is worth.
+enum Front {
+    /// The application answered. This element is live and may be asked further questions.
+    Fresh(CFRetained<AXUIElement>),
+    /// It did not answer. Nothing more may be asked of it — every question would pay the
+    /// messaging timeout over again — so the caller serves what it remembers, or nothing.
+    Silent,
+    /// It answered, and the answer is that it has no window. To be believed.
+    NoWindow,
+}
+
+/// The frontmost window of one application, or why there isn't one.
+fn front_window_of(pid: i32) -> Front {
     if is_busy(pid) {
         crate::logging::trace("macos", || {
             format!("skipping pid {pid}: it did not answer a moment ago")
         });
-        return None;
+        return Front::Silent;
     }
     // How long the answer actually took, when it came at all.
     //
-    // The timeout above was set from an assumption about healthy applications and cost a tester
-    // his whole session; the replacement is a guess too, and this is what turns the next one into
-    // a measurement. Only slow successes are reported — a fast answer is not news, and a failure
-    // already writes its own line.
+    // The timeout was set from an assumption about healthy applications and cost a tester his
+    // whole session; the replacement is a guess too, and this is what turns the next one into
+    // a measurement. Only slow SUCCESSES are reported — a fast answer is not news, and a
+    // failure already writes its own line.
+    //
+    // That "only successes" is load-bearing, and the restructure that introduced this
+    // function nearly lost it: the fall-back chain used to end in `?`, which returned before
+    // this line, and moving the search into a function that returns `Option` put the log
+    // ahead of the test. A read that timed out would then have been written down as
+    // "answered after 1002 ms" — the messaging timeout reported as a response time, on the
+    // one line whose whole purpose is to measure what a real answer costs. The application
+    // not answering must never be logged as it answering.
     let started = Instant::now();
     let app_el = app_element(pid);
-    let el = attribute_element(&app_el, a_focused_window())
-        .or_else(|| attribute_element(&app_el, a_main_window()))
-        .or_else(|| {
-            let v = attribute(&app_el, a_windows())?;
-            let arr = v.downcast_ref::<CFArray>()?;
-            // SAFETY: AXWindows is an array of AXUIElementRef.
-            let typed: &CFArray<AXUIElement> = unsafe { arr.cast_unchecked::<AXUIElement>() };
-            typed.get(0)
-        })?;
+    let found = window_after_fallbacks(&app_el, pid);
     let ms = started.elapsed().as_millis();
-    if ms >= 100 {
-        crate::logging::line(
-            "macos",
-            &format!("pid {pid} answered the frontmost-window question after {ms} ms"),
-        );
+    match found {
+        Some(el) => {
+            if ms >= 100 {
+                crate::logging::line(
+                    "macos",
+                    &format!("pid {pid} answered the frontmost-window question after {ms} ms"),
+                );
+            }
+            Front::Fresh(el)
+        }
+        // Whether the application went quiet is what tells "it has no window" apart from "it
+        // did not say". `attribute` quarantines a pid the moment a read comes back
+        // `CannotComplete`, so the quarantine IS that answer, already recorded.
+        None if is_busy(pid) => Front::Silent,
+        None => Front::NoWindow,
     }
-    Some((el, pid))
+}
+
+/// `AXFocusedWindow`, then `AXMainWindow`, then the first of `AXWindows` — and the busy check
+/// between them, which is the point of this function existing.
+///
+/// `AXFocusedWindow` is the window that would receive a keystroke, which is the question the
+/// host is really asking. The two fall-backs are there for an application that ANSWERS and
+/// has no focused window: a dialog that is foreground before it has settled is exactly the
+/// case they were written for.
+///
+/// They were also being paid by applications that do not answer at all, which is a different
+/// thing needing the opposite treatment — and the tester's log shows what it cost. This
+/// question stalled his pump **fourteen times**, worst case 2605 ms, the worst of them while
+/// he was simply using the plug-in; the shape in the log is `timed out reading
+/// AXFocusedWindow after 1s` followed by an answer at 2455 ms. One timeout, then two more
+/// charged to an application we had already written down as not answering.
+///
+/// The check between the reads separates the two exactly, and needs nothing new to do it: an
+/// absent value does not set the quarantine and still falls through, a timed-out read does
+/// and stops here.
+fn window_after_fallbacks(app_el: &AXUIElement, pid: i32) -> Option<CFRetained<AXUIElement>> {
+    if let Some(w) = attribute_element(app_el, a_focused_window()) {
+        return Some(w);
+    }
+    if is_busy(pid) {
+        return None;
+    }
+    if let Some(w) = attribute_element(app_el, a_main_window()) {
+        return Some(w);
+    }
+    if is_busy(pid) {
+        return None;
+    }
+    let v = attribute(app_el, a_windows())?;
+    let arr = v.downcast_ref::<CFArray>()?;
+    // SAFETY: AXWindows is an array of AXUIElementRef.
+    let typed: &CFArray<AXUIElement> = unsafe { arr.cast_unchecked::<AXUIElement>() };
+    typed.get(0)
+}
+
+/// The element of the frontmost application's frontmost window.
+///
+/// Deliberately without the remembered fall-back the other two callers have: this hands back
+/// a LIVE element, and both of its callers immediately snapshot it or walk it upwards. A
+/// remembered element would move the timeouts one line down rather than remove them.
+pub(super) fn frontmost_window_element() -> Option<(CFRetained<AXUIElement>, i32)> {
+    let pid = frontmost_pid()?;
+    match front_window_of(pid) {
+        Front::Fresh(el) => Some((el, pid)),
+        Front::Silent | Front::NoWindow => None,
+    }
 }
 
 /// The frontmost window. A title is NOT required — an untitled dialog is exactly the case
 /// this has to answer for.
 pub fn active_window() -> Option<WinInfo> {
     let t = Instant::now();
-    let (el, _pid) = frontmost_window_element()?;
-    let info = win_info(el, false);
+    let pid = frontmost_pid()?;
+    // Whether the answer came from the application or out of memory. Carried into the trace
+    // because a remembered answer is fast, and a fast line that does not say so reads as a
+    // healthy application — which is the opposite of what it means.
+    let mut from_memory = false;
+    let info = match front_window_of(pid) {
+        Front::Fresh(el) => {
+            // Interned BEFORE the snapshot, not after. It costs no call into the application
+            // — the handle table is local — and it is the only way to know afterwards WHICH
+            // window the application named, in the case where it named one and then stopped
+            // describing it. `win_info` interns the same element again and gets the same
+            // number back.
+            let named = handles::intern(el.clone(), pid, 0);
+            match win_info(el, false) {
+                Some(w) => {
+                    remember_front(pid, w.hwnd, Some(w.clone()));
+                    Some(w)
+                }
+                // `win_info` reads a dozen attributes of its own and any of them can be the
+                // one that times out, so the same rule applies a second time: the quarantine
+                // is what separates "no window" from "no answer".
+                None if is_busy(pid) => {
+                    let got = remembered_info(pid, Some(named));
+                    from_memory = got.is_some();
+                    got
+                }
+                None => {
+                    forget_front(pid);
+                    None
+                }
+            }
+        }
+        // Nothing was named here — the application was not asked at all — so there is no
+        // identity to check the memory against, and the memory is the best that exists.
+        Front::Silent => {
+            let got = remembered_info(pid, None);
+            from_memory = got.is_some();
+            got
+        }
+        Front::NoWindow => {
+            forget_front(pid);
+            None
+        }
+    };
     let ms = t.elapsed().as_millis();
-    crate::logging::trace("macos", || match &info {
-        Some(w) => format!(
-            "active_window: id {} '{}' class {} at {},{} {}x{} client {},{} {}x{} in {ms} ms",
-            w.hwnd, w.title, w.class, w.x, w.y, w.w, w.h, w.client_x, w.client_y, w.client_w,
-            w.client_h
-        ),
-        None => format!("active_window: none in {ms} ms"),
+    crate::logging::trace("macos", || {
+        let how = if from_memory { " (remembered — the application is not answering)" } else { "" };
+        match &info {
+            Some(w) => format!(
+                "active_window: id {} '{}' class {} at {},{} {}x{} client {},{} {}x{} in \
+                 {ms} ms{how}",
+                w.hwnd, w.title, w.class, w.x, w.y, w.w, w.h, w.client_x, w.client_y,
+                w.client_w, w.client_h
+            ),
+            None => format!("active_window: none in {ms} ms{how}"),
+        }
     });
     if ms > SLOW_MS {
         crate::logging::line("macos", &format!("active_window blocked the pump for {ms} ms"));
@@ -1290,9 +1494,102 @@ pub fn window_info(handle: isize, require_title: bool) -> Option<WinInfo> {
 /// identity and nothing else — but it does intern, so the number it hands back is the same
 /// one `active_window` reports and the comparison at key-press time is meaningful.
 pub fn foreground_window_id() -> isize {
-    match frontmost_window_element() {
-        Some((el, pid)) => handles::intern(el, pid, 0),
-        None => 0,
+    let Some(pid) = frontmost_pid() else {
+        return 0;
+    };
+    match front_window_of(pid) {
+        Front::Fresh(el) => {
+            let handle = handles::intern(el, pid, 0);
+            remember_front(pid, handle, None);
+            handle
+        }
+        // Deliberately NOT served from memory, unlike `active_window`. Memory can answer
+        // "which window is in front", which is what the pump asks on every tick. It cannot
+        // answer what every caller of THIS function asks, which is a form of "what just
+        // changed": `watch` calls it on an `AXFocusedWindowChanged` notification, where the
+        // remembered window is by definition the one that is no longer focused, and on an
+        // application activation, where memory of that pid may be minutes old;
+        // `tap::set_key_scope` calls it to re-check a pin it already disagrees with, where
+        // memory would repeat the number that caused the disagreement and the log would
+        // report it as a fresh answer. `set_key_scope` then FREEZES what this returns into
+        // the hotkey scope for as long as the overlay is active, so a stale answer here does
+        // not expire with the quarantine the way a stale `active_window` does.
+        //
+        // And a handle handed back here does not stop at the caller. `watch::on_activated`
+        // pushes it into the activation queue, and `queue::drain` resolves it on the pump
+        // thread with `window_info` — which is how a remembered handle would send the pump
+        // straight back into the application that had just failed to answer, paying the
+        // timeout in `snapshot` and again in its individual-attribute fall-back. That path
+        // is gated now (`win_info` consults the quarantine), so this is belt and braces
+        // rather than the only thing standing in the way; the reason above is the one that
+        // decides it.
+        //
+        // Returning 0 is not right either: it means "no window" where the truth is "not
+        // known", and the difference is not cosmetic — 0 makes every scoped hotkey stop
+        // matching until the next notification arrives, which may be a long time. That is a
+        // pre-existing defect this change deliberately does not touch, and it is recorded in
+        // TODO.md: the fix is to let `note_foreground` say "unknown", not to guess a window.
+        Front::Silent => 0,
+        Front::NoWindow => {
+            forget_front(pid);
+            0
+        }
+    }
+}
+
+/// The snapshot this application last gave, served because it has stopped answering.
+///
+/// `named` is the window the application just told us is in front, where it got that far
+/// before going quiet. A remembered snapshot of a DIFFERENT window is not an old answer, it
+/// is a wrong one: what the caller reads out of it is a rectangle, and an overlay's clicks
+/// are placed inside that rectangle. A plug-in that opens a dialog is exactly the case —
+/// the new window is named immediately and is the likeliest thing to stall while it comes
+/// up, and the answer would otherwise be the main window's geometry with the dialog sitting
+/// on top of it.
+///
+/// `None` where nothing is remembered, or where the wrong thing is. Inventing a window is
+/// worse than admitting there is none.
+fn remembered_info(pid: i32, named: Option<isize>) -> Option<WinInfo> {
+    // The borrow ends with the call: the two refusals below take a mutable one.
+    let recalled = LAST_FRONT.with(|m| m.borrow().recall(pid, named, Instant::now()));
+    match recalled {
+        Recall::Serve { info, age } => {
+            note_remembered(pid, age);
+            Some(info)
+        }
+        Recall::Mismatch { remembered } => {
+            crate::logging::line(
+                "macos",
+                &format!(
+                    "active_window: {} (pid {pid}) named window {} and then stopped \
+                     describing it; the one remembered is {remembered} — reporting no active \
+                     window rather than the wrong one",
+                    exe_for_pid(pid),
+                    named.unwrap_or(0)
+                ),
+            );
+            // Dropped as well as declined. Without this, every `Front::Silent` tick for the
+            // rest of the quarantine would go on serving the window just ruled out.
+            forget_front(pid);
+            None
+        }
+        Recall::TooOld { age } => {
+            crate::logging::line(
+                "macos",
+                &format!(
+                    "active_window: {} (pid {pid}) has not described its window for {} s — \
+                     that is past what this will stand behind, so it reports no active window \
+                     rather than a rectangle nobody has confirmed",
+                    exe_for_pid(pid),
+                    age.as_secs()
+                ),
+            );
+            // Nothing will make it younger, so it goes: the line above is said once rather
+            // than on every tick for as long as the application stays wedged.
+            forget_front(pid);
+            None
+        }
+        Recall::Nothing => None,
     }
 }
 
@@ -1534,6 +1831,12 @@ pub fn window_controls(hwnd: isize) -> Vec<ControlInfo> {
         return Vec::new();
     };
     let pid = entry.pid;
+    // Six hundred nodes into an application that is not answering is the worst shape this
+    // file can take: the walk is bounded by nodes and by depth, and by nothing at all in
+    // time. This is the question the overlay runtime asks immediately after `active()`.
+    if skip_busy(pid, "window_controls") {
+        return Vec::new();
+    }
     let mut out: Vec<ControlInfo> = Vec::new();
     let mut budget = CONTROL_NODES;
     walk(
@@ -1687,6 +1990,11 @@ pub fn window_focus_chain() -> Vec<ControlInfo> {
 /// Where a query starts: the element behind the handle.
 fn root_of(hwnd: isize, what: &str) -> Option<CFRetained<AXUIElement>> {
     match handles::get(hwnd) {
+        // One check covering `find`, `find_any`, `locate`, `dump` and `focus_step`, because
+        // every one of them starts here and then walks. A module reaches them with a handle
+        // it got from `active()`, so a remembered window would otherwise hand each of them
+        // an application already known not to be answering.
+        Some(e) if skip_busy(e.pid, what) => None,
         Some(e) => Some(e.element),
         None => {
             crate::logging::trace("macos", || format!("{what}: {hwnd} is not a live handle"));

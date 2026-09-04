@@ -387,30 +387,40 @@ end
 
 -- == What does asking "which window is in front" actually cost? ================
 --
--- The biggest single stall in the first tester's log, and it is not the one that was fixed.
+-- The biggest single stall in the first tester's log, and it was not the one that was fixed.
 -- `window.active()` blocked the event loop fourteen times, worst case 2605 ms — during
--- ordinary use, a moment after a plugin menu closed. `enumerate_windows`, which the F6 work
--- guarded, blocked it six times. This is the question every overlay asks on every tick.
+-- ordinary use, a moment after a plugin menu closed.
 --
--- The mechanism is known: the backend tries AXFocusedWindow, then AXMainWindow, then
--- AXWindows, so an application that is not answering charges the messaging timeout three
--- times over. What is NOT known is the shape of the distribution, and that is what decides
--- the remedy. If almost every ask is fast and one in fifty is catastrophic, the answer is to
--- serve the last known window while an application is quarantined. If the middle of the
--- distribution is already tens of milliseconds, the answer is to get the question off the
--- thread that carries the event tap, which is a much larger change.
+-- Since then the backend has changed twice, and this measurement is what says whether the
+-- changes did anything. It now stops asking an application that has just failed to answer
+-- (it used to charge the messaging timeout three times over per question), and while an
+-- application is in that penalty box it serves the window that application last described,
+-- rather than reporting no active window at all.
 --
--- So: ask it repeatedly, report the whole shape rather than an average. An average would
--- hide exactly the tail that matters. Read-only — `active()` is a question, not a command.
+-- ONE ASK PER TICK, and that is the whole point of the rewrite. The host answers this
+-- question from a per-tick cache — the same overlay asking twice in one tick costs one OS
+-- call, which is the cache doing its job — so forty asks in a row, as this used to do,
+-- measured thirty-nine cache hits and one real call. It reported a beautiful distribution of
+-- zeroes and would have confirmed any fix at all, including one that made things worse. Each
+-- ask now sits in its own timer hop, so each one crosses a tick boundary and reaches the
+-- backend.
+--
+-- Two things to know when reading the result. A fast ask may still be a cache hit if another
+-- module asked first in the same tick, so a low median is weak evidence; the TAIL is the
+-- finding, because nothing in the cache can invent a slow answer. And an ask served from the
+-- backend's memory of a wedged application is fast BY DESIGN — the log line "serving the
+-- window it last described" is what tells those apart, so read this next to the log rather
+-- than on its own.
 function M.activeWindowCost(line, hops)
-  if not (host.window and host.window.active and host.now) then
-    line("  window.active cost: host.window.active or host.now unavailable")
+  if not (host.window and host.window.active and host.now and host.timer and host.timer.after) then
+    line("  window.active cost: host.window.active, host.now or host.timer unavailable")
     return
   end
   hops = hops or 40
   local times = {}
   local worst, best, total = 0, math.huge, 0
-  for _ = 1, hops do
+  local n = 0
+  local function ask()
     local t0 = host.now()
     host.window.active()
     local d = host.now() - t0
@@ -418,26 +428,38 @@ function M.activeWindowCost(line, hops)
     total = total + d
     if d > worst then worst = d end
     if d < best then best = d end
+    n = n + 1
+    if n < hops then
+      -- Longer than one tick on purpose. A delay under the tick length can come due inside
+      -- the same pump iteration that scheduled it, which would put two asks in one epoch and
+      -- put the cache back in the measurement.
+      host.timer.after(20, ask)
+      return
+    end
+    table.sort(times)
+    local median = times[floor((#times + 1) / 2)]
+    local p90 = times[math.max(1, floor(#times * 0.9))]
+    line(
+      "  window.active cost: %d asks, one per tick — best %d ms, median %d ms, 90th %d ms, "
+        .. "worst %d ms, %d ms in total",
+      hops, best, median, p90, worst, total
+    )
+    -- The tail named separately, because the tail is the finding. A single ask over 300 ms is
+    -- already past what the event tap tolerates.
+    local slow = 0
+    for _, d in ipairs(times) do
+      if d >= 100 then slow = slow + 1 end
+    end
+    line(
+      "  window.active cost: %d of %d asks took 100 ms or more%s",
+      slow, hops,
+      slow == 0
+        and "  <- no stall seen in this run; check the log for \"serving the window it last "
+          .. "described\" before reading that as healthy"
+        or "  <- this is the stall"
+    )
   end
-  table.sort(times)
-  local median = times[floor((#times + 1) / 2)]
-  local p90 = times[math.max(1, floor(#times * 0.9))]
-  line(
-    "  window.active cost: %d asks — best %d ms, median %d ms, 90th %d ms, worst %d ms, "
-      .. "%d ms in total",
-    hops, best, median, p90, worst, total
-  )
-  -- The tail named separately, because the tail is the finding. A single ask over 300 ms is
-  -- already past what the event tap tolerates.
-  local slow = 0
-  for _, d in ipairs(times) do
-    if d >= 100 then slow = slow + 1 end
-  end
-  line(
-    "  window.active cost: %d of %d asks took 100 ms or more%s",
-    slow, hops,
-    slow == 0 and "  <- the cache and the quarantine are holding" or "  <- this is the stall"
-  )
+  host.timer.after(20, ask)
 end
 
 -- == Is a big OCR read cheaper than several small ones? ========================
@@ -518,14 +540,20 @@ function M.provokeErrorWindow(line)
     line("  error window: host.timer unavailable, cannot provoke one")
     return
   end
-  line("  error window: raising a real module error in one second — expect a window titled")
+  line("  error window: raising a real module error in three seconds — expect a window titled")
   line("  error window: 'Module error: com.tool.probe'. Three things to report:")
   line("     1. does it have a Dock icon and an entry in the app switcher (Cmd-Tab)")
   line("     2. does VoiceOver read the message when it opens")
   line("     3. with the module manager ALSO open, close the manager — does the error window")
   line("        keep its Dock icon (that is the refcount, and it is the bug this was written")
   line("        to prevent)")
-  host.timer.after(1000, function()
+  -- Three seconds, not one. Two of the answers above run on timer hops of their own — the
+  -- timer cadence takes about a second, and window.active cost about 1.2, because it now
+  -- deliberately crosses a tick boundary per ask — and a window appearing on screen while
+  -- their lines are still arriving makes the run harder to read and harder to describe.
+  -- Raising the error does NOT stop them (a callback error is logged and shown, the module
+  -- stays loaded), so this is about the order things reach the tester, not about losing them.
+  host.timer.after(3000, function()
     error("this is the probe, raising an error on purpose so the error window can be looked at")
   end)
 end

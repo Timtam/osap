@@ -36,6 +36,7 @@ pub(super) mod app;
 mod ax;
 mod capture;
 mod ffi;
+mod front_memory;
 mod handles;
 mod hotkey;
 mod input;

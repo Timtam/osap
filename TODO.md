@@ -1462,29 +1462,79 @@ asked; this is what was NOT, plus what the session found that nobody had asked.
       When an application IS in the quarantine, `find` is blind to its windows for five
       seconds; the log now names the application it did not ask, and the shortcut says "could
       not find a plugin window", which is what it knows.
-- [ ] **`window.active()` is the biggest thing blocking the pump, and it is not what was
-      fixed.** Found on a second, systematic reading of the same log. It stalled the pump
-      **fourteen times**, worst case **2605 ms**; `enumerate_windows`, which the F6 work
-      guarded, stalled it six times. And the worst one had nothing to do with F6: it came
-      while the tester was simply using the plug-in, a moment after a menu closed
-      (`pid 1218 answered the frontmost-window question after 2455 ms`). This is the question
-      every overlay asks on every tick.
-  - The mechanism is written in `frontmost_window_element`'s own comment: "an application
-      that is not answering charges the messaging timeout three times over". It reads
-      `AXFocusedWindow`, then `AXMainWindow`, then `AXWindows` — and the `is_busy` gate is
-      only at the TOP. When the first read times out it quarantines the application, and the
-      two fall-backs then ask the application we just decided not to ask. The log shows
-      exactly that shape: `timed out reading AXFocusedWindow after 1s`, then an answer at
-      2455 ms.
-  - **Not fixed blind, because the obvious fix has a user-visible cost.** Re-checking
-      `is_busy` between the fall-backs caps the worst case at one timeout instead of three —
-      but it returns `None`, and `None` means "no active window", which is what an overlay
-      gates on: it would deactivate for up to the five-second quarantine rather than stall
-      for two seconds. Which of those a blind user would rather have is not answerable from
-      here. Three candidates, in the order I would try them: re-check between the fall-backs
-      AND serve the last known window while the application is quarantined; or cap the total
-      by lowering the messaging timeout for this one question; or get the question off the
+- [x] **`window.active()` was the biggest thing blocking the pump** — fixed 2026-09-04, and
+      the fix needed two rounds because the first one moved the stall rather than removing it.
+      It had stalled the pump **fourteen times**, worst case **2605 ms**; the worst had
+      nothing to do with F6 — it came while the tester was simply using the plug-in, a moment
+      after a menu closed (`pid 1218 answered the frontmost-window question after 2455 ms`).
+      This is the question every overlay asks on every tick.
+  - **The cause, from `frontmost_window_element`'s own comment:** it read `AXFocusedWindow`,
+      then `AXMainWindow`, then `AXWindows`, with the `is_busy` gate only at the TOP. The
+      first read timing out quarantined the application, and the two fall-backs then asked
+      the application we had just written down as not answering. `is_busy` is now re-checked
+      between them (`window_after_fallbacks`), which separates the two cases exactly and
+      needs nothing new to do it: an absent value does not set the quarantine and still falls
+      through; a timed-out read does and stops there.
+  - **And the quarantine now serves the last known window instead of "no window"**
+      (`front_memory.rs`). Returning `None` is what every overlay gates its activation on, so
+      a plug-in busy for a moment made the overlay switch itself off and on again. The rules
+      that keep that from becoming a WRONG answer live in their own file so they can be
+      executed rather than read: it is served only for the window the application itself last
+      named, never past `STALE_LIMIT` (30 s, a guess, and the log says how old every served
+      answer was), and an identity-only refresh keeps the snapshot's own timestamp. Ten unit
+      tests, run on Windows through the `#[path]` borrow `keys.rs` established, and each one
+      confirmed to fail when its rule is broken on purpose.
+  - **The first version moved the stall one function along, and review caught it.** Serving a
+      remembered window meant `host.window.active()` answered — so the overlay runtime went
+      on to `host.window.controls()`, which walked up to 600 nodes into the same wedged
+      application with no quarantine check at all, on the tick rather than on an app switch.
+      The quarantine now also guards `win_info`, `window_controls` and `root_of` (which is
+      the funnel for `find`, `find_any`, `locate`, `dump` and `focus_step`). Its own header
+      had stated the principle three lines above the code that broke it.
+  - **`foreground_window_id` deliberately does NOT serve memory.** Memory can answer "which
+      window is in front"; it cannot answer what all four of that function's callers ask,
+      which is a form of "what just changed" — `watch` calls it on an
+      `AXFocusedWindowChanged` notification, where the remembered window is by definition the
+      one that is no longer focused, and `tap::set_key_scope` FREEZES what it returns for as
+      long as the overlay is active, so a stale answer there would not expire with the
+      quarantine. A remembered handle also reached `queue::drain`, which resolves it on the
+      pump thread with no gate at all.
+- [ ] **Still open, and named rather than implied.**
+  - **Candidates 2 and 3 from the original analysis are untouched:** capping the total by
+      lowering the messaging timeout for this one question, and getting the question off the
       thread that carries the event tap, which is the structural answer and the large one.
+      What was shipped bounds a wedged application to ONE timeout per five-second quarantine
+      cycle. That is still ~1000 ms, and past ~300 ms the system switches the tap off — so
+      the shape is fixed and the worst case is not.
+  - **`win_info` can still cost a timeout of its own on the healthy path.** `snapshot` is a
+      batch, its fall-back is seven individual reads, and the quarantine is only consulted
+      after them. The guard added there stops the SECOND timeout inside one `win_info`, not
+      the first.
+  - **`note_foreground(0)` says "no window" where the truth is "not known".** The same
+      conflation that cost the tester his startup announcement (`via_screen_reader`). When a
+      quarantine lands on a focus-change notification, `foreground_window_id` returns 0, and
+      0 makes every scoped hotkey stop matching until the next notification — which may be a
+      long time. The fix is to let `tap::note_foreground` carry "unknown" as a third state,
+      not to guess a window.
+  - **`window_focus_chain` reads `AXFocusedUIElement` off the SYSTEM-WIDE element**, so it
+      has no pid to gate on and its failure cannot arm the quarantine either (`element_pid`
+      of the system-wide element is not an application's). During a quarantine `active()` now
+      answers from memory while `focusChain()` still pays a full second and returns empty.
+  - **`enumerate_windows` was not changed and now disagrees with `active_window`:** during a
+      quarantine `find`/`list` are blind to that application's windows while `active()`
+      returns one from memory, so a module can be told in the same tick that a window exists
+      and cannot be found.
+- [x] **The probe measured this question forty times and reached the backend once** — found
+      2026-09-04 by the review, then measured rather than argued. `host.window.active()` is
+      served from a per-tick cache in `lib.rs`, and the probe asked forty times inside one
+      callback, which is one tick. The host's own accounting says it exactly: driving the old
+      loop headless logs `epoch served 39 of 40 OS question(s) from cache (1 actually
+      asked)`. It reported a distribution of zeroes and would have confirmed ANY change,
+      including one that made things worse — and it was about to do that in the next session
+      with the tester. Each ask now sits in its own timer hop; the same run logs no
+      cache-served line at all, because the forty asks are in forty ticks. The output also
+      says what it cannot tell apart: an ask served from the backend's memory is fast BY
+      DESIGN, so the verdict line points at the log rather than declaring health.
 - [ ] **Timers run about 5% slow on that machine, and a settle is a deadline.** Measured by
       the probe: `10 x 100 ms took 1050 ms (shortest 105, longest 105)`, so a 900 ms watch
       deadline is really about 945 ms there. Nothing is broken; it is a number modules with

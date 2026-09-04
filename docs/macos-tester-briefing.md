@@ -224,8 +224,13 @@ have to describe them:
 
 - **What it costs to ask which window is in front.** This was the biggest stall in your last
   log — fourteen of them, the worst 2605 ms, during ordinary use rather than while pressing
-  anything. The probe now asks forty times and reports the whole spread, which is what
-  decides how to fix it.
+  anything. Since then the backend has stopped asking an application that has just failed to
+  answer, and serves the window that application last described while it is not talking. The
+  probe asks forty times, **one ask per tick**, and reports the whole spread; the earlier
+  version asked forty times in a row and the host answered thirty-nine of those from its own
+  per-tick cache, so it was measuring almost nothing. Read the TAIL rather than the median,
+  and read it next to the log: an answer served from memory is fast on purpose, and the log
+  line "serving the window it last described" is what tells the two apart.
 - **Whether one big text read is cheaper than three small ones.** Your log suggested reading
   costs the same whatever the size, which would mean overlays should read one wide strip and
   split it afterwards. That is a real change to the runtime, so it wants a measurement.

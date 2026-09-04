@@ -128,6 +128,28 @@ local w = host.window.active()
 if w then host.log.info("front: " .. w.title) end
 ```
 
+### macOS
+
+**An answer can be up to five seconds old.** Every reading here is a synchronous call into
+another application, and a plugin that is mid-repaint does not answer one. When that happens
+the application is left alone for five seconds, and during those five seconds this returns
+the window it last reported rather than `nil`.
+
+That is deliberate: the application is still in front, it is simply not talking, and `nil`
+means "no foreground window" — which is what an overlay gates its own activation on. Without
+the memory an overlay would switch itself off, and then back on, every time a plugin was busy
+for a moment.
+
+What it costs is that `bounds` and `client` may be stale for those five seconds. In practice
+an application that is not answering is also not moving its window, but a module that acts on
+a coordinate far from where the user last saw it has no way to tell. Every served answer is
+in the log, so a session can be explained afterwards.
+
+### Windows
+
+Always current: the foreground window is a local question there, answered without asking the
+application anything.
+
 ## host.window.focus(id) {#host-window-focus}
 
 **Signature:** `host.window.focus(id: number) -> boolean`

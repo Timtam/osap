@@ -37,8 +37,16 @@ mod stub;
 #[path = "macos/keys.rs"]
 mod macos_keys;
 
+/// The same trick for the frontmost-window memory: pure bookkeeping over pids, handles and
+/// timestamps, so the rules it enforces can be executed rather than merely read. They decide
+/// whether a blind user's overlay clicks into a rectangle that is still true, and every one
+/// of them was got wrong at least once under review.
+#[cfg(all(test, not(target_os = "macos")))]
+#[path = "macos/front_memory.rs"]
+mod macos_front_memory;
+
 /// A snapshot of a window's matchable properties (normalized across platforms).
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WinInfo {
     pub hwnd: isize,
     pub title: String,
