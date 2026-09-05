@@ -277,10 +277,22 @@ jobs:
             fi
             sleep 1
           done
+          # Same question as the speech step asks, and for the same reason: every check below
+          # reads lines already written, so a process that aborted after writing them looks
+          # exactly like one that finished.
+          kill -0 "$pid" 2>/dev/null || {
+            echo "::error::the application is no longer running — it died during the module smoke run"
+            cat automation-platform.log || true
+            exit 1
+          }
           kill "$pid" 2>/dev/null || true
           wait "$pid" 2>/dev/null || true
           echo "----- automation-platform.log -----"
           cat automation-platform.log || true
+          if ! grep -q "listening for events" automation-platform.log; then
+            echo "::error::the event loop never started — the run got no further than loading"
+            exit 1
+          fi
           if grep -q "did not load" automation-platform.log; then
             echo "::error::a module failed to load on macOS"
             exit 1
@@ -323,19 +335,28 @@ jobs:
             "$GITHUB_WORKSPACE/tools/speech-probe" &
           pid=$!
           for _ in $(seq 1 30); do
-            if grep -q "SPEECH PROBE: done\|fatal:" automation-platform.log 2>/dev/null; then
+            if grep -q "SPEECH PROBE: still alive\|fatal:" automation-platform.log 2>/dev/null; then
               break
             fi
             sleep 1
           done
+          # Asked BEFORE the kill, because this is the assertion the step is really for. Every
+          # grep below is satisfied by lines already on disk, so an abort during the say left a
+          # log indistinguishable from a healthy run — and an abort during the say is the one
+          # failure this whole step exists to catch.
+          kill -0 "$pid" 2>/dev/null || {
+            echo "::error::the application is no longer running — it died during the speech probe"
+            cat automation-platform.log || true
+            exit 1
+          }
           kill "$pid" 2>/dev/null || true
           wait "$pid" 2>/dev/null || true
           echo "----- automation-platform.log -----"
           cat automation-platform.log || true
           # Three assertions, and the first matters most: reaching "done" at all means the
           # process was still alive after asking AVFoundation everything this platform asks it.
-          if ! grep -q "SPEECH PROBE: done" automation-platform.log; then
-            echo "::error::the speech probe never finished — the speech path did not survive a Mac"
+          if ! grep -q "SPEECH PROBE: still alive after speaking" automation-platform.log; then
+            echo "::error::the speech probe did not report back after speaking — the process may have died in the AVFoundation call"
             exit 1
           fi
           if ! grep -q "SPEECH PROBE: spoke through" automation-platform.log; then

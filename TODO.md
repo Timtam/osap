@@ -1606,12 +1606,29 @@ lenses, adversarially refuted, eleven findings standing. The three criticals are
       30-second runs) advertised "today's modules" with the tester's only instrument missing,
       and nothing downstream noticed: the smoke step asserts that modules loaded, not that
       THAT one did. Fixed, and CI now names `com.tool.probe` in its assertion.
-- [ ] **Still standing from the same audit, not yet built** (each with its evidence in the
-      workflow output): `surfaces inside it: N` prints a bounded walk's partial result as a
-      fact; the pump's stall breakdown has no bucket for key and hotkey dispatch, so all 31
-      stalls in the tester's log read `= 0 + 0`; `0.0 ms inside the bindings` covers two of the
-      six binding families it counts and none of `window.active`; and neither macOS run step
-      checks the application was still alive at the end.
+- [x] **The four remaining findings from that audit, built 2026-09-05.**
+  - **The CI step that exists to catch a process abort could not see one.** `output` hands the
+      utterance to a channel and returns; the AVFoundation call happens afterwards on the
+      worker. So `SPEECH PROBE: done` was written BEFORE the selector that could abort was
+      sent, `kill` and `wait` discard their status, and every grep is satisfied by lines
+      already on disk — an aborted process left a log identical to a healthy one, and an abort
+      is the single named failure the step was written for. The probe now reports again 1.5 s
+      after speaking, both macOS steps ask `kill -0` before killing, and the module step also
+      requires `listening for events`.
+  - **The pump's stall breakdown had no term for key and hotkey dispatch**, so every one of
+      the 31 stalls in the tester's log read `= 0x window-activate 0 + focus-change 0` — an
+      equation that does not balance, printed by a line whose own comment says it exists
+      because "one iteration took 729 ms names a symptom and no cause". It prints the
+      remainder now, named as mostly key and hotkey dispatch.
+  - **`0.0 ms inside the bindings` counted two of the six families in the same sentence** —
+      and not `window.active`, the one binding with a stall line of its own. It says what it
+      measures now: rebuilding Lua tables in `window.controls` and `window.focusChain`.
+  - **`surfaces inside it: N` was a bounded walk's partial result printed as a fact**, and
+      spoken aloud as the confirmation that the press landed. Four bounds can cut it and none
+      was visible: the 256-surface stop never touches the budget, the depth cut returns
+      silently, `CHILDREN_MAX` clips a child list, and the node/time notice hangs on the
+      once-per-session flag an earlier walk will have spent. `window_controls` has the
+      per-call line `dump()` was given, and the probe points at it.
 
 - [x] **And the loop around that walk was bounded by nothing either** — fixed 2026-09-05, an
       hour after the walk itself, and found by searching the list rather than recalling it.

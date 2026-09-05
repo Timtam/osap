@@ -198,7 +198,14 @@ host.hotkey.register(KEY, function()
   )
 
   local controls = host.window.controls()
-  line("surfaces inside it: %d", #controls)
+  -- The count is a bounded walk's result, and the backend now says on its own line whether it
+  -- was cut short. Pointing at that line rather than repeating a bare number: this one is
+  -- spoken aloud as the confirmation that the press landed, and a partial count sounds exactly
+  -- like a complete one.
+  line(
+    "surfaces inside it: %d (the window_controls line above says whether that is all of them)",
+    #controls
+  )
   for i, c in ipairs(controls) do
     line(
       "  [%d] class='%s' frame %d,%d %dx%d  content %d,%d %dx%d",

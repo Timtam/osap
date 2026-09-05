@@ -90,6 +90,19 @@ local function examine(chosen, engines)
   else
     report("engine() threw: %s", tostring(now))
   end
+
+  -- And one more line, a second and a half later, which is the whole point of this file.
+  --
+  -- `output` hands the utterance to a channel and returns; the AVFoundation call happens
+  -- afterwards on the worker thread. So "done" was written BEFORE the selector that could
+  -- abort the process was ever sent, and a job asserting on "done" would have passed on a
+  -- process that died a moment later — while the one named failure this exists to catch is
+  -- exactly that: "a selector that does not exist aborts the process instead of returning
+  -- nothing". A line that can only be written by a process that is still running, after the
+  -- call that could stop it, is the assertion the job believes it is making.
+  host.timer.after(1500, function()
+    report("still alive after speaking")
+  end)
 end
 
 local waited = 0

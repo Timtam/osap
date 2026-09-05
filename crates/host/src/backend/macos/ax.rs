@@ -1948,13 +1948,33 @@ pub fn window_controls(hwnd: isize) -> Vec<ControlInfo> {
         },
     );
     let ms = t.elapsed().as_millis();
-    crate::logging::trace("macos", || {
-        format!(
-            "window_controls({hwnd}): {} surface(s), {} node(s) visited, {ms} ms",
+    // At LINE level, and saying whether that count is all of them.
+    //
+    // The probe prints this number as "surfaces inside it: N" and SPEAKS it — it is the
+    // tester's confirmation that the press landed — and the Kontakt window is the first one
+    // that will have any. Four bounds can cut it short and none of them was visible: the
+    // 256-surface stop returns `WalkStep::Stop` without touching the budget, the depth cut
+    // returns silently, `CHILDREN_MAX` clips a long child list, and the node/time bound is
+    // announced only by a once-per-session flag that an earlier walk in the same session will
+    // already have spent. So a partial count read exactly like a complete one, which is the
+    // same fault `dump()` had and was given its own line for.
+    let cut = if budget.ran_out_of_time() {
+        " — STOPPED ON TIME, so there may be more"
+    } else if out.len() >= CONTROL_MAX {
+        " — STOPPED AT THE SURFACE LIMIT, so there are almost certainly more"
+    } else if budget.nodes_left() <= 0 {
+        " — STOPPED ON THE NODE BUDGET, so there may be more"
+    } else {
+        " (neither bound was reached; anything below depth 8, or past 256 children of one          node, is still not looked at)"
+    };
+    crate::logging::line(
+        "macos",
+        &format!(
+            "window_controls({hwnd}): {} surface(s), {} node(s) visited, {ms} ms{cut}",
             out.len(),
             CONTROL_NODES - budget.nodes_left()
-        )
-    });
+        ),
+    );
     if ms > SLOW_MS {
         crate::logging::line(
             "macos",

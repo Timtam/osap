@@ -492,6 +492,13 @@ struct Observations {
     /// as fresh Lua tables, once per calling overlay, in each of nine VMs.
     ///
     /// In MICROseconds, and that is the whole point. Accumulated in whole milliseconds this
+    /// **It is not "inside the bindings", though the line used to say so.** It is incremented
+    /// at exactly two sites — `window.controls` and `window.focusChain` — and at each it times
+    /// only the Lua-table rebuild, not the backend call beside it. The `asked` counter printed
+    /// in the same sentence spans SIX families, `window.active` among them, and that is the
+    /// one binding with a stall line of its own. A numerator over two and a denominator over
+    /// six read as a price for everything just counted. The line names what it measures now.
+    ///
     /// read 0 for an epoch of 1858 calls — because each individual conversion rounds down to
     /// zero, and eighteen hundred zeroes are still zero. The reading was not evidence that
     /// the conversions are free; it was a unit too coarse to see them, and it retired a
@@ -519,8 +526,8 @@ impl Shared {
                     "observe",
                     &format!(
                         "epoch served {} of {} OS question(s) from cache ({} actually \
-                         asked), {:.1} ms inside the bindings, plus {} screen pixel \
-                         read(s) costing {:.1} ms",
+                         asked), {:.1} ms rebuilding Lua tables in window.controls and \
+                         window.focusChain, plus {} screen pixel read(s) costing {:.1} ms",
                         obs.served,
                         obs.asked,
                         obs.asked - obs.served,
@@ -3088,6 +3095,18 @@ impl Manager {
                         backend.pump_pending(&mut dispatcher);
                         let events_ms = pump_started.elapsed().as_millis();
                         let (act_n, act_ms, focus_ms, _) = shared.ev_counts.get();
+                        // What the two named phases do NOT account for, printed rather than
+                        // left to be inferred as zero.
+                        //
+                        // `ev_counts` is written in two places only — the window-activate and
+                        // focus-change handlers — while `pump_pending` also dispatches every
+                        // KEY and every HOTKEY into every module's Lua. So the cost of what
+                        // the pump mostly does while somebody is pressing Tab had no term of
+                        // its own, and the line printed an equation that did not balance: all
+                        // thirty-one stalls in the macOS tester's log read "= 0x
+                        // window-activate 0 + focus-change 0", which reads as "the cause is
+                        // none of these" when it means "the cause is not measured".
+                        let other_ms = events_ms.saturating_sub(act_ms).saturating_sub(focus_ms);
                         let t = std::time::Instant::now();
                         shared.fire_due_timers();
                         let timers_ms = t.elapsed().as_millis();
@@ -3117,8 +3136,9 @@ impl Manager {
                                 &format!(
                                     "one iteration took {pump_ms} ms (os events {events_ms} \
                                      = {act_n}x window-activate {act_ms} + focus-change \
-                                     {focus_ms}, timers {timers_ms}, image results \
-                                     {images_ms}) — {hazard}"
+                                     {focus_ms} + everything else {other_ms}, which is \
+                                     mostly key and hotkey dispatch; timers {timers_ms}, \
+                                     image results {images_ms}) — {hazard}"
                                 ),
                             );
                         }
