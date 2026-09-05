@@ -1561,6 +1561,58 @@ asked; this is what was NOT, plus what the session found that nobody had asked.
       cache-served line at all, because the forty asks are in forty ticks. The output also
       says what it cannot tell apart: an ask served from the backend's memory is fast BY
       DESIGN, so the verdict line points at the log rather than declaring health.
+## The instruments, audited on purpose (2026-09-05)
+
+Three faults were found in instruments today and none in the product, so the next round was
+aimed at the instruments themselves: what does each one MEASURE, against what it CLAIMS. Four
+lenses, adversarially refuted, eleven findings standing. The three criticals are fixed.
+
+- [x] **A dump that never ran printed as a measured zero, and the session's headline verdict
+      was computed from it.** `dump()` returns an empty `Vec` before writing its own line when
+      the handle is not live or the application is in the five-second busy quarantine — and
+      **an empty Lua table is truthy**, measured: `ok=true type=table truthy=true count=0`. So
+      `if not ok or not elements` could not catch it, the probe printed "0 element(s)", and
+      `identifierSummary` went on to state "NONE of the 0 element(s) returned publish an
+      AXIdentifier" — the sentence the file itself calls the one wrong answer that would send
+      the nested-overlay design to image matching for nothing. Worse in combination with the
+      20-second surface loop added an hour earlier: one timeout at surface 3 quarantines the
+      application for 5 s, and every surface after it fabricates its own verdict. The backend
+      now says `NOT WALKED` on its own line, and the probe draws no conclusion from an empty
+      answer.
+- [x] **"blank OCR: 0 word(s) — nothing invented" measured the host's own guard, not Vision.**
+      The section deliberately picks provably flat rectangles; `ocr.rs` refuses to send a flat
+      rectangle to Vision at all (`if plan.blank { return Ok(empty()) }`), so the harder it
+      worked to prove the region uniform, the more certainly the recogniser was never asked.
+      The guard's only trace was at TRACE level, off by default, so a remote log showed no
+      sign of it and the section read as a pass. The guard now logs at line level and says
+      what an empty result there does and does not mean. **I checked this instrument myself an
+      hour before and called it sound** — the luminance readings do prove the capture was
+      real, which is what I looked at; I never asked whether Vision was reached.
+- [x] **The timer cadence measured the probe's own OCR.** `prev` was taken at scheduling time,
+      so the first interval contained everything the hotkey callback still had to do — and it
+      goes on to run the OCR batching comparison synchronously. The tester's log proves it:
+      `10 x 100 ms took 1673 ms (shortest 104, longest 729)`, with an OCR read of 354 ms and
+      three more totalling 374 two lines above. **354 + 374 = 728.** The verdict divided the
+      total by ten and reported a 900 ms deadline as 1505 ms; the honest number was in the
+      same line all along, `shortest 104`. My own `ROUNDS = 3` change earlier that day made it
+      worse. Now: the first interval is not measured, and the verdict comes from the MEDIAN.
+      Re-run here — `shortest 100 ms, median 115 ms, longest 141 ms`.
+  - **The number reported to the user from this line was wrong**, and the correction matters:
+      timers on that machine are not "dramatically slow". A 900 ms deadline is about 1035 ms
+      there, not 1505.
+- [x] **The macOS reuse path shipped an artifact with no probe in it.** It deletes
+      `dist/.../modules` and repopulates from `modules/*/` only — `package-macos.sh` stages
+      `tools/probe` on a separate line, and the reuse path did not. So a reused build (the
+      30-second runs) advertised "today's modules" with the tester's only instrument missing,
+      and nothing downstream noticed: the smoke step asserts that modules loaded, not that
+      THAT one did. Fixed, and CI now names `com.tool.probe` in its assertion.
+- [ ] **Still standing from the same audit, not yet built** (each with its evidence in the
+      workflow output): `surfaces inside it: N` prints a bounded walk's partial result as a
+      fact; the pump's stall breakdown has no bucket for key and hotkey dispatch, so all 31
+      stalls in the tester's log read `= 0 + 0`; `0.0 ms inside the bindings` covers two of the
+      six binding families it counts and none of `window.active`; and neither macOS run step
+      checks the application was still alive at the end.
+
 - [x] **And the loop around that walk was bounded by nothing either** — fixed 2026-09-05, an
       hour after the walk itself, and found by searching the list rather than recalling it.
       The probe dumps the window's tree and then calls the same dump on EVERY surface

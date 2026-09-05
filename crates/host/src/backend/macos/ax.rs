@@ -2374,6 +2374,20 @@ pub fn plugin_locate(
 /// id that will match that role again.
 pub fn dump(hwnd: isize) -> Vec<DumpNode> {
     let Some(root) = root_of(hwnd, "dump") else {
+        // Said at line level, because the caller cannot tell this from a walk that ran and
+        // found nothing — and what it does with "nothing" is print the sentence that decides
+        // an architecture. `root_of` refuses for two reasons: the handle is not live, or the
+        // application is in the five-second busy quarantine, and both of ITS notices are
+        // traced rather than logged. So an empty answer arrived with no explanation anywhere,
+        // and the probe's own escape clause ("if the dump line above says it was complete")
+        // pointed at a line that was never written.
+        crate::logging::line(
+            "macos",
+            &format!(
+                "dump({hwnd}): NOT WALKED — the handle is not live, or the application is in \
+                 the busy quarantine. This is not an empty tree; it is no answer."
+            ),
+        );
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -2425,7 +2439,11 @@ pub fn dump(hwnd: isize) -> Vec<DumpNode> {
     } else if budget.nodes_left() <= 0 {
         " — STOPPED ON THE NODE BUDGET, so this is PART of the tree and not all of it"
     } else {
-        " (complete)"
+        // Not "complete". Neither bound was reached, which is a smaller claim: `walk` also
+        // returns early at `depth > max_depth` without spending anything, so a tree deeper
+        // than DUMP_DEPTH is cut off with both budgets intact. Saying "complete" would assert
+        // something this function cannot know.
+        " — neither bound was reached (anything below depth 24 is still cut off)"
     };
     crate::logging::line(
         "macos",

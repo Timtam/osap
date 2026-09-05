@@ -126,6 +126,22 @@ local function dumpTree(label, id)
     line("  tree %s: unavailable (%s)", label, tostring(elements))
     return 0
   end
+  if #elements == 0 then
+    -- An empty table is not an empty tree. `host.element.rawDump` answers with one when the
+    -- handle is not live or the application is in the busy quarantine, and a Lua table is
+    -- truthy either way, so the guard above cannot catch it. Printing the identifier verdict
+    -- here would state "NONE publish an AXIdentifier" about a walk that never happened — the
+    -- one wrong answer this press can give that would send the whole nested-overlay design to
+    -- image matching for nothing. The backend now says which of the two it was on its own
+    -- line, immediately above this one.
+    line(
+      "  tree %s — NOTHING CAME BACK. That is not the same as an empty tree: see the "
+        .. "dump(...) line above for whether it was walked at all. No conclusion is drawn "
+        .. "from this.",
+      label
+    )
+    return 0
+  end
   line("  tree %s — %d element(s)", label, #elements)
   for _, e in ipairs(elements) do
     -- The class is the join key a matcher is written against, so it is printed exactly as

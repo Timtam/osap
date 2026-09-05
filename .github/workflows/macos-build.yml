@@ -172,6 +172,14 @@ jobs:
             cp -R "$dir" "dist/AutomationPlatform/modules/$name"
             rm -rf "dist/AutomationPlatform/modules/$name/calibration"
           done
+          # And the probe, which `package-macos.sh` stages separately because it lives under
+          # tools/ rather than modules/. This loop did not, so every reused build shipped an
+          # artifact advertising "today's modules" with the tester's ONLY instrument missing
+          # from it — and nothing downstream said so, because the smoke run asserts that
+          # modules loaded, not that this one did.
+          if [ -d tools/probe ]; then
+            cp -R tools/probe dist/AutomationPlatform/modules/probe
+          fi
           # Re-zipped so the artifact a tester downloads carries today's modules rather than
           # the ones the binary happened to ship with.
           rm -f dist/*.zip
@@ -279,6 +287,13 @@ jobs:
           fi
           if ! grep -q "loading module:" automation-platform.log; then
             echo "::error::no module was even attempted — the smoke run proved nothing"
+            exit 1
+          fi
+          # Named, not counted. The probe is what a blind tester records a plug-in with, and
+          # it is staged by a different line from every other module — so it is the one that
+          # can go missing while everything else still loads and this step still passes.
+          if ! grep -q "com.tool.probe" automation-platform.log; then
+            echo "::error::the window probe is not in this build — the tester's instrument is missing"
             exit 1
           fi
 

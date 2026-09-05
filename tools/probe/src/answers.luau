@@ -363,24 +363,43 @@ function M.timerCadence(line, hops)
     return
   end
   hops = hops or 10
-  local t0, prev = host.now(), host.now()
-  local worst, best, n = 0, math.huge, 0
+  -- `prev` is set by the FIRST hop, not here, and the first interval is not measured.
+  --
+  -- It used to be taken at scheduling time, and that made the first interval contain
+  -- everything the hotkey callback still had to do: the timers cannot fire until it returns,
+  -- and it goes on to run the OCR batching comparison synchronously. The tester's log shows
+  -- exactly that — "10 x 100 ms took 1673 ms (shortest 104, longest 729)", and two lines above
+  -- it one OCR read of 354 ms and three more totalling 374. 354 + 374 = 728. The "longest
+  -- timer hop" was the probe's own OCR, and the verdict divided the total by ten and reported
+  -- a 900 ms deadline as 1505 ms. The honest figure was in the same line all along: the
+  -- shortest hop, 104.
+  --
+  -- And the MEDIAN rather than the mean, for the same reason: one interval that landed behind
+  -- other work must not set the answer. What an overlay's deadline is written against is the
+  -- ordinary hop.
+  local prev, samples = nil, {}
+  local n = 0
   local function hop()
     local now = host.now()
-    local d = now - prev
+    if prev then samples[#samples + 1] = now - prev end
     prev = now
     n = n + 1
-    if d > worst then worst = d end
-    if d < best then best = d end
-    if n < hops then
+    if n <= hops then
       host.timer.after(100, hop)
-    else
-      line(
-        "  timers: %d x 100 ms took %d ms (shortest %d, longest %d) — a 900 ms watch deadline "
-          .. "is really about %d ms here",
-        hops, host.now() - t0, best, worst, floor(9 * ((host.now() - t0) / hops))
-      )
+      return
     end
+    if #samples == 0 then
+      line("  timers: no interval was measured")
+      return
+    end
+    table.sort(samples)
+    local median = samples[math.max(1, floor((#samples + 1) / 2))]
+    line(
+      "  timers: %d interval(s) of 100 ms — shortest %d ms, median %d ms, longest %d ms. A "
+        .. "900 ms watch deadline is really about %d ms here, from the median; a long one may "
+        .. "be an interval that landed behind other work rather than a slow timer",
+      #samples, samples[1], median, samples[#samples], floor(9 * median)
+    )
   end
   host.timer.after(100, hop)
 end

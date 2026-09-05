@@ -180,9 +180,24 @@ fn recognize_captured(
         // all came back as the same invented string from six different places. So the question
         // is not asked: an empty region reads as empty, which is the truth about it.
         if plan.blank {
-            crate::logging::trace("macos", || {
-                format!("ocr: {px_w}x{px_h} px has nothing in it; returning empty unrecognised")
-            });
+            // At LINE level, not trace, and the reason is an instrument rather than this
+            // function. The probe has a section that picks provably flat rectangles, reads
+            // them, and reports "0 word(s) <- nothing invented" as evidence that the
+            // recogniser invents nothing on a blank. It is evidence of no such thing: a
+            // provably flat rectangle is exactly what this branch refuses to send to Vision,
+            // so the harder that section works to prove the region uniform, the more certainly
+            // Vision was never asked. With this at trace level — off by default — a remote log
+            // showed no sign the guard had fired, and the section read as a pass.
+            //
+            // Rare enough to afford a line: it fires only for a region with no ink in it.
+            crate::logging::line(
+                "macos",
+                &format!(
+                    "ocr: {px_w}x{px_h} px has nothing in it — returning empty WITHOUT asking \
+                     the recogniser, so an empty result here says nothing about what Vision \
+                     would have done"
+                ),
+            );
             return Ok(empty());
         }
 
