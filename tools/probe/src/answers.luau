@@ -158,10 +158,14 @@ end
 -- different places, because a recognition-only network has no way to answer "nothing here".
 -- The Windows fix is a guard that refuses to hand a flat rectangle to a recogniser at all.
 --
--- The macOS path notices the same fact — one flat colour, nothing to crop to — and then hands
--- the rectangle over anyway. Whether Apple Vision invents on that input is not knowable from
--- the code: it runs a text DETECTOR first, which can legitimately find nothing, but no
--- confidence floor is applied to what it does return. So it is a measurement, and this is it.
+-- The macOS path refuses it too now, and that changed what this section can measure. A
+-- rectangle proved flat is exactly what neither guard will hand to an engine, so "0 word(s)"
+-- out of one is the guard's answer and says nothing about what Vision would have invented —
+-- whether it does is still not knowable from the code, which runs a text DETECTOR first but
+-- applies no confidence floor to what that returns. The tester's third session printed the
+-- same "nothing invented" line whether or not the engine had been asked, with the only
+-- difference in a runtime log line the probe cannot read. So the result now carries the fact
+-- as `skipped`, and every reading below says which of the two it got.
 --
 -- Two things make the measurement worth trusting:
 --
@@ -230,7 +234,10 @@ local function confirmFlat(rect, lum)
   return true
 end
 
-local function readRegion(line, what, rect)
+-- `unexercised` names what a region the guard refused did NOT test, because the honest
+-- sentence differs per region: a flat one was there to show whether the engine invents, the
+-- edged one whether the retry ladder does.
+local function readRegion(line, what, rect, unexercised)
   local ok, res = pcall(function()
     return host.ocr.recognize({ region = rect })
   end)
@@ -239,7 +246,26 @@ local function readRegion(line, what, rect)
     return nil
   end
   local words, texts = res.words or {}, {}
-  line("     %s: %d word(s)%s", what, #words, #words == 0 and "  <- nothing invented" or "")
+  if res.skipped == true then
+    line(
+      "     %s — NOT measured: the runtime's blank guard found no ink and did not ask the "
+        .. "engine — %s",
+      what, unexercised
+    )
+  elseif res.skipped == nil then
+    -- A host built before the result carried the flag. Nothing here can tell the two cases
+    -- apart, so neither is claimed.
+    line(
+      "     %s — %d word(s), and this build does not say whether the engine was asked (no "
+        .. "`skipped` field in the result)",
+      what, #words
+    )
+  else
+    line(
+      "     %s — measured: %d word(s), engine asked%s",
+      what, #words, #words == 0 and "  <- nothing invented" or ""
+    )
+  end
   for _, wd in ipairs(words) do
     -- Verbatim, with coordinates. A string here IS the finding, and paraphrasing it would
     -- destroy the one comparison that matters: whether two different blanks read the same.
@@ -315,7 +341,10 @@ function M.blankOcr(line, win)
       -- from it: a measurement whose premise failed is worse than none at all.
       line("     not uniform on re-reading (%s) — skipped rather than reported", tostring(why))
     else
-      readings[idx] = readRegion(line, string.format("region %d, proved flat", idx), rect)
+      readings[idx] = readRegion(
+        line, string.format("region %d, proved flat", idx), rect,
+        "this region did not test whether the recogniser invents"
+      )
     end
   end
 
@@ -332,6 +361,10 @@ function M.blankOcr(line, win)
   -- finds something, so the retry ladder is allowed to escalate, ending at the fastest and
   -- least trusted model. A perfectly flat rectangle never reaches that rung, so testing only
   -- flat ones would leave the worse case unmeasured.
+  --
+  -- Whether it DID take that path is not assumed: an edge the crop's ink threshold does not
+  -- count is a blank as far as the guard is concerned, and two of the tester's three runs were
+  -- exactly that, so the reading says which it was.
   local band = picked[1]
   local edge = band.y + band.height
   if edge + 8 < band.limit then
@@ -339,7 +372,10 @@ function M.blankOcr(line, win)
     local rect = { band.x, y1, band.x + band.w, y1 + 16 }
     line("  region 3: %d,%d %dx16 — straddles the edge of region 1, so it is NOT flat",
       band.x, y1, band.w)
-    readRegion(line, "region 3, an edge but no text", rect)
+    readRegion(
+      line, "region 3, an edge but no text", rect,
+      "this region did not exercise the retry ladder"
+    )
   end
 end
 
@@ -599,11 +635,28 @@ end
 --
 -- Deliberately LAST in the run, and behind its own delay: it puts a window on screen, and
 -- everything above should be in the log before anything steals the focus.
+--
+-- And ONCE per session, which is what the briefing promised and what the code did not do:
+-- the tester's third session had the window after every one of four presses, each stealing
+-- the focus from the plug-in the run had just finished describing. "Session" here means the
+-- module's VM, which lives until the module is reloaded — the manager's hot-load, a disable
+-- and enable, or a restart of the host — and a reload starts a fresh VM with this flag clear,
+-- so the first press after one raises the error again. That is the right behaviour, since a
+-- reload is also when the error window is worth looking at anew.
+local errorRaised = false
+
 function M.provokeErrorWindow(line)
   if not (host.timer and host.timer.after) then
     line("  error window: host.timer unavailable, cannot provoke one")
     return
   end
+  if errorRaised then
+    -- Said so the log explains the absence: a reader who missed the first window would
+    -- otherwise take this section's silence for the error never firing.
+    line("  error window: already raised once this session, not again")
+    return
+  end
+  errorRaised = true
   line("  error window: raising a real module error in three seconds — expect a window titled")
   line("  error window: 'Module error: com.tool.probe'. Three things to report:")
   line("     1. does it have a Dock icon and an entry in the app switcher (Cmd-Tab)")

@@ -4953,7 +4953,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     )?;
     host.set("screen", screen)?;
 
-    // host.ocr.recognize({ region, lang }) -> { text, words = {{text,x,y,w,h}, ...} }
+    // host.ocr.recognize({ region, lang }) -> { text, words = {{text,x,y,w,h}, ...}, skipped }
     let ocr = lua.create_table()?;
     let sh = shared.clone();
     ocr.set(
@@ -4979,10 +4979,14 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 words.push(w)?;
             }
             t.set("words", words)?;
+            // Whether the engine was asked at all. A blank region answers empty either way,
+            // and a module that wants to know which — the probe does — has nothing else to
+            // look at from Lua.
+            t.set("skipped", res.skipped)?;
             Ok(t)
         })?,
     )?;
-    // host.ocr.recognizeMany{ regions = { Region, … }, lang? } -> { { text, words }, … }
+    // host.ocr.recognizeMany{ regions = { Region, … }, lang? } -> { { text, words, skipped }, … }
     //
     // The same recognitions, ONE screen touch. Measured on this machine: recognising a 67x13
     // read-out costs 4-6 ms and cropping it 0.5, while the capture underneath is a fixed ~17 ms
@@ -5035,10 +5039,14 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                             words.push(w)?;
                         }
                         t.set("words", words)?;
+                        t.set("skipped", r.skipped)?;
                     }
                     Err(e) => {
                         t.set("text", "")?;
                         t.set("words", lua.create_table()?)?;
+                        // Present so every entry has the same shape; false because a failed
+                        // read is not the blank guard answering, and `error` says what it was.
+                        t.set("skipped", false)?;
                         t.set("error", e)?;
                     }
                 }

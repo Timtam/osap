@@ -237,6 +237,15 @@ pub struct OcrWord {
 pub struct OcrText {
     pub text: String,
     pub words: Vec<OcrWord>,
+    /// The blank guard answered instead of the engine: the region's content crop found no
+    /// ink, so the recogniser was never asked, and the empty `text` and `words` are the
+    /// guard's answer rather than a reading. It rides on the result because the only other
+    /// record of it is a log line, and an instrument reading a blank region cannot tell
+    /// "the engine found nothing" from "the engine was not asked" without it — the probe
+    /// printed the same "nothing invented" verdict for both. False for every other empty
+    /// result: a failed capture or a zero-sized region is a different fault, and the log
+    /// names those on its own.
+    pub skipped: bool,
 }
 
 /// One element of an accessibility dump: what it is, what it is called, and WHERE it is.

@@ -189,6 +189,12 @@ fn recognize_captured(
             // Vision was never asked. With this at trace level — off by default — a remote log
             // showed no sign the guard had fired, and the section read as a pass.
             //
+            // The line turned out not to be enough on its own. The probe prints its verdict
+            // from the result it is handed and cannot read this log, so the next session
+            // showed the guard's line and the probe's "nothing invented" side by side, twice.
+            // The result carries the fact as `skipped` now, and that is the field an
+            // instrument has to look at before it calls an empty answer a measurement.
+            //
             // Rare enough to afford a line: it fires only for a region with no ink in it.
             crate::logging::line(
                 "macos",
@@ -198,7 +204,7 @@ fn recognize_captured(
                      would have done"
                 ),
             );
-            return Ok(empty());
+            return Ok(OcrText { skipped: true, ..empty() });
         }
 
         crate::logging::trace("macos", || {
@@ -276,7 +282,7 @@ fn recognize_captured(
         )
     });
     note_cost(ms, w, h);
-    Ok(OcrText { text, words })
+    Ok(OcrText { text, words, skipped: false })
 }
 
 /// Several regions, one capture.
@@ -364,6 +370,10 @@ fn empty() -> OcrText {
     OcrText {
         text: String::new(),
         words: Vec::new(),
+        // Not the blank guard's answer. Every caller of this is a fault of its own — a
+        // zero-sized region, a capture that failed, pixels that could not be read back —
+        // and each says so in the log; the guard overrides this at its one site.
+        skipped: false,
     }
 }
 

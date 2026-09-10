@@ -1731,7 +1731,9 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
         // region there was never anything to read in.
         if tight.as_ref().is_some_and(|t| t.blank) {
             drop(paddle);
-            return Ok(OcrText { text: String::new(), words: Vec::new() });
+            // `skipped` is how a caller learns this branch was taken: neither engine ran, so
+            // the empty answer is the guard's and not a reading of anything.
+            return Ok(OcrText { text: String::new(), words: Vec::new(), skipped: true });
         }
         let t_win = std::time::Instant::now();
         let (mut text, mut words) = run_ocr(img, lang).map_err(|e| format!("OCR failed: {e}"))?;
@@ -1795,5 +1797,5 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
                 word.h /= s;
             }
         }
-        Ok(OcrText { text, words })
+        Ok(OcrText { text, words, skipped: false })
 }

@@ -27,21 +27,25 @@ See [what that list is and is not](./index.md#capabilities).
 
 Recognizes text inside a screen region and returns the full text plus per-word bounding boxes.
 
-**Signature:** `host.ocr.recognize(opts: { region?: { x1, y1, x2, y2 }, lang?: string }?) -> { text: string, words: { { text: string, x: number, y: number, w: number, h: number } } }`
+**Signature:** `host.ocr.recognize(opts: { region?: { x1, y1, x2, y2 }, lang?: string }?) -> { text: string, words: { { text: string, x: number, y: number, w: number, h: number } }, skipped: boolean }`
 
 `opts` is optional. The `region` is given as corner coordinates `{ x1, y1, x2, y2 }` (also accepted positionally as `{ [1]=x1, [2]=y1, [3]=x2, [4]=y2 }`); missing corners default to `x1=0, y1=0` and `x2/y2` = screen width/height, so omitting `region` scans the whole primary display. `lang` is an optional OCR language hint (e.g. `"en"`). The internal capture rectangle is `(x1, y1, x2-x1, y2-y1)`.
 
 The returned table always has:
 - `text` — the full recognized string for the region.
 - `words` — an array; each entry is `{ text, x, y, w, h }` where `x`/`y` are the word's top-left in **absolute screen coordinates** (the region origin `x1,y1` is added back to the per-word offset), and `w`/`h` are the box size.
+- `skipped` — `true` when the **blank guard answered instead of the engine**: the region was small enough to be cropped to its content, the crop found no ink, and the recogniser was never asked — so the empty `text` and `words` are the guard's answer, not a reading. `false` whenever the guard did not fire, which includes every other way of getting an empty result; those are different faults and the log names them.
 
-On a backend OCR failure the call raises a Lua error **on Windows**; see the platform sections below, because macOS never raises here and a failure is indistinguishable from an empty region.
+On a backend OCR failure the call raises a Lua error **on Windows**; see the platform sections below, because macOS never raises here and a failure is indistinguishable from an empty region — unless `skipped` says so.
 
 ```luau
 local res = host.ocr.recognize({ region = { x1 = 100, y1 = 200, x2 = 500, y2 = 240 }, lang = "en" })
 print(res.text)
 for _, word in ipairs(res.words) do
   print(word.text, word.x, word.y, word.w, word.h)
+end
+if res.skipped then
+  print("nothing drawn there: the recogniser was not asked")
 end
 ```
 
@@ -51,6 +55,8 @@ A failed capture and an unavailable OCR language both come back as errors and ar
 
 For a region of 400x200 or less a second recogniser runs alongside the system one and its answer is used when the system engine returns nothing — which is the lone-digit case, the thing `Windows.Media.Ocr` refuses. That fallback recognises without locating, so when it answers it sets `text` and leaves **`words` empty**.
 
+The blank guard is that same crop step, so it exists only for a region of 400x200 or less: when the tightened crop finds no content the call returns `{ text = "", words = {}, skipped = true }` before either recogniser runs. A larger region is never checked and always reaches the system engine, so `skipped` is `false` for it whatever it contains.
+
 ### macOS
 
 **Nothing in this path returns an error.** A failed capture, a refused recognition request and an unknown language code all log and return `{ text = "", words = {} }`. A `pcall` guard around this call is dead code here, and a broken Screen Recording permission is indistinguishable from a genuinely empty region — the only symptom is a read-out that is permanently blank.
@@ -59,15 +65,17 @@ There is no second engine: the dependency is compiled for Windows only. Small te
 
 A region with **nothing in it is not recognised at all**, on either platform. Two shapes count as nothing: one flat colour, and a filled panel with nothing drawn on it — a value field with no value. The second is the one that matters, because the crop finds the *well*, which used to open the retry ladder and end at the character model reading an empty box. A recogniser asked about a blank rectangle does not answer "nothing"; it answers whatever its network makes of noise, and neither a module nor the person listening can tell that from a reading.
 
+That branch is the one `skipped` reports: `true` means Vision was not asked, and the log carries a line saying so at the same moment. Like Windows it applies only to a region of 400x200 or less — a larger one goes to Vision as captured, with no crop and so no guard. The capture failures above return empty with `skipped = false`, so the two empties this platform produces can be told apart from Lua even though neither raises.
+
 So the same call fails in **opposite shapes**: empty `words` with real `text` on Windows for a lone digit, and empty `text` with real `words` here when the ladder runs out of budget.
 
 ## host.ocr.recognizeMany(opts) {#host-ocr-recognizemany}
 
 Recognizes several regions from **one** screen capture, so that values which have to agree with each other come from the same instant.
 
-**Signature:** `host.ocr.recognizeMany(opts: { regions: { x1, y1, x2, y2 }[], lang?: string }) -> { { text: string, words: {…}, error?: string } }[]`
+**Signature:** `host.ocr.recognizeMany(opts: { regions: { x1, y1, x2, y2 }[], lang?: string }) -> { { text: string, words: {…}, skipped: boolean, error?: string } }[]`
 
-Returns one entry per region, in the order given, each shaped like `host.ocr.recognize`'s result — with word boxes still in absolute screen coordinates relative to **that** region. A region that could not be read comes back as `{ text = "", words = {}, error = "…" }` rather than as a hole, so `results[2]` is always the second region's answer.
+Returns one entry per region, in the order given, each shaped like `host.ocr.recognize`'s result — with word boxes still in absolute screen coordinates relative to **that** region, and `skipped` set per region. A region that could not be read comes back as `{ text = "", words = {}, skipped = false, error = "…" }` rather than as a hole, so `results[2]` is always the second region's answer.
 
 **Why:** recognition is cheap and the capture is not. Measured on the reference machine, a 67×13 read-out recognizes in 4–6 ms while the capture underneath costs a fixed ~17 ms compositor frame whatever its size — so two adjacent read-outs, read one after the other, spend two thirds of their time photographing the screen twice. A watcher polling two boxes at 120 ms measured 44 ms per tick with two calls and 27 ms with one.
 
@@ -89,4 +97,4 @@ As documented: one capture of the bounding box of every region, cropped per regi
 
 The same, with the crop done by drawing the enclosing capture into a smaller context and letting it clip rather than by `CGImageCreateWithImageInRect`, whose rectangle is documented in the image's own coordinate space — a convention this port has no way to test.
 
-Each region then runs the identical pipeline a single `recognize` would, including the retry ladder and the blank guard, so a value read this way is the value that call would have given.
+Each region then runs the identical pipeline a single `recognize` would, including the retry ladder and the blank guard, so a value read this way is the value that call would have given — and its `skipped` is the one that call would have set.

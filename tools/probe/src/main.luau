@@ -188,9 +188,14 @@ host.hotkey.register(KEY, function()
     win.app.bundleId or "",
     win.app.pid or 0
   )
-  -- Frame against content. On Windows these differ by the border and title bar; on macOS
-  -- they are currently reported as the same rectangle, and whether that is right is one of
-  -- the things this probe exists to settle.
+  -- Frame against content. On Windows these differ by the border and title bar. On macOS
+  -- there is no client rect to ask for and the backend derives one (`content_rect` in
+  -- `backend/macos/ax.rs`): a titled window's content view, or failing that twice the centre
+  -- offset of its own close button; a window without a title bar has content == frame, and
+  -- that is right. When the derivation finds neither, the backend reports content == frame
+  -- for a titled window too, and that is one title bar wrong — two Kontakt dumps in the
+  -- tester's third session were exactly that. The note further down says so on the line an
+  -- author would otherwise take the rectangles from.
   line(
     "frame: %d,%d %dx%d    content: %d,%d %dx%d",
     win.bounds.x, win.bounds.y, win.bounds.w, win.bounds.h,
@@ -223,10 +228,23 @@ host.hotkey.register(KEY, function()
     line("  [%d] class='%s' %d,%d %dx%d", i, c.class or "", c.bounds.x, c.bounds.y, c.bounds.w, c.bounds.h)
   end
 
+  -- The subrole is the second field of the class the backend composes (`join_class`:
+  -- `AXRole/AXSubrole/AXIdentifier`), and these three are the ones `content_rect` treats as
+  -- titled — the same set, so the caveat fires exactly where the derivation was attempted.
+  local subrole = string.match(win.class or "", "^[^/]*/([^/]*)/") or ""
+  local titled = subrole == "AXStandardWindow" or subrole == "AXDialog"
+    or subrole == "AXSystemDialog"
+  local contentIsFrame = win.client.x == win.bounds.x and win.client.y == win.bounds.y
+    and win.client.w == win.bounds.w and win.client.h == win.bounds.h
+  local caveat = ""
+  if host.os.is("macos") and titled and contentIsFrame then
+    caveat = " — content == frame on a titled window: the title-bar inset could not be "
+      .. "derived, so authoring from these rectangles would land one title bar too high"
+  end
   line(
     "note: tree rectangles below are SCREEN coordinates; subtract the content origin "
-      .. "(%d,%d) to get what a module would author",
-    win.client.x, win.client.y
+      .. "(%d,%d) to get what a module would author%s",
+    win.client.x, win.client.y, caveat
   )
   -- Said before the work, not after it.
   --
