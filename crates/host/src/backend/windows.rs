@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicI32, AtomicBool, AtomicIsize, AtomicU32, Ordering};
+use std::sync::Mutex;
 
 use super::{
     Backend, CapturedImage, ControlInfo, DumpNode, HostEvents, MouseButton, OcrText, OcrWord,
@@ -780,6 +781,50 @@ impl Backend for WindowsBackend {
         popup_menu_open()
     }
 
+    fn take_menu_pass_through(&self) -> Vec<(u32, u8)> {
+        MENU_PASS.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default()
+    }
+
+    /// Visible top-level windows of a process — including a `#32768` popup menu, which is a
+    /// top-level window owned by the thread that opened it, and a toolkit's self-drawn
+    /// popup, which is usually a tool window of its own. `EnumWindows` is local and
+    /// microseconds, so this can be asked on the menu watch's tick.
+    fn windows_of(&self, pid: u32) -> Vec<crate::backend::WindowSpot> {
+        let mut hwnds: Vec<isize> = Vec::new();
+        unsafe {
+            EnumWindows(Some(enum_proc), &mut hwnds as *mut Vec<isize> as LPARAM);
+        }
+        let mut out = Vec::new();
+        for h in hwnds {
+            let hwnd = h as HWND;
+            unsafe {
+                if IsWindowVisible(hwnd) == 0 {
+                    continue;
+                }
+                let mut owner: u32 = 0;
+                GetWindowThreadProcessId(hwnd, &mut owner);
+                if owner != pid {
+                    continue;
+                }
+                let mut cbuf = [0u16; 256];
+                let cn = GetClassNameW(hwnd, cbuf.as_mut_ptr(), cbuf.len() as i32);
+                let class = String::from_utf16_lossy(&cbuf[..cn.max(0) as usize]);
+                let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                GetWindowRect(hwnd, &mut rect);
+                out.push(crate::backend::WindowSpot {
+                    id: h as u64,
+                    layer: 0,
+                    class,
+                    x: rect.left,
+                    y: rect.top,
+                    w: rect.right - rect.left,
+                    h: rect.bottom - rect.top,
+                });
+            }
+        }
+        out
+    }
+
     fn watch_keys(&self) -> Result<(), String> {
         if KEY_HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
             return Ok(()); // already installed
@@ -1045,6 +1090,19 @@ unsafe extern "system" fn win_event_proc(
     }
 }
 
+/// Captured keys the hook let through because a menu was open. A mutex rather than a
+/// thread-local because the hook runs on its own thread and the reader is the pump.
+static MENU_PASS: Mutex<Vec<(u32, u8)>> = Mutex::new(Vec::new());
+const MENU_PASS_MAX: usize = 32;
+
+fn note_menu_pass(vk: u32, mask: u8) {
+    if let Ok(mut m) = MENU_PASS.lock() {
+        if m.len() < MENU_PASS_MAX {
+            m.push((vk, mask));
+        }
+    }
+}
+
 /// True while a standard Win32 popup menu (class "#32768") is open — ReaHotkey's
 /// `WinExist("ahk_class #32768")` check. While a menu is up, captured navigation
 /// keys must pass through to it: its window is owned by the plugin, so the
@@ -1229,6 +1287,12 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                         }
                     }
                     return 1; // suppress the matched combo (down + up)
+                } else if in_scope && is_down {
+                    // Let through because a menu is open. Remembered, not discarded: the
+                    // overlay runtime asks for these to learn that Return or Escape reached
+                    // the menu, which where nothing can see the menu itself is the best
+                    // available word that it is closing. See `take_menu_pass_through`.
+                    note_menu_pass(vk, mask);
                 }
             }
         }

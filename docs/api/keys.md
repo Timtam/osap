@@ -206,3 +206,29 @@ A live question, asked fresh on every call: `GetGUIThreadInfo` for the foregroun
 Nothing is asked at call time. The answer is a counter kept by the accessibility observer from the frontmost application's `AXMenuOpened` / `AXMenuClosed` notifications, so the common case — nothing open — is one relaxed load. It **counts rather than latches**, so a submenu opening and closing again does not clear its parent, and notifications from any application that is not frontmost are discarded — an unrelated program with a menu up must never disarm the overlay. The count is also cleared outright when a different application comes to the front, because whatever menu was believed open belonged to the application just left; switching away from an app with a menu up therefore re-arms at once rather than waiting on the valve below.
 
 Because the answer depends on a close notification arriving, there is a safety valve: a depth that has not moved for 60 seconds is treated as closed and the overlay re-arms, writing a line to the log that says so. The failure it guards against is invisible from the outside — a stuck flag hands every captured key to the application underneath and the overlay simply stops answering. An application that draws a menu without posting either notification reads here as no menu, which is the same shape of gap as a self-drawn Qt menu on Windows and has the same answer: `host.keys.menuOpen`.
+
+---
+
+## host.keys.passedThrough() {#host-keys-passedthrough}
+
+**Signature:** `host.keys.passedThrough()` → `{ { vk: number, mask: number, key: string } }`
+
+The captured keys the hook let through to the application because a menu was open, since the last call — drained on read, so each key is reported once. `key` is the spelling `host.keys.capture` would accept (`"Return"`, `"Escape"`, `"Tab"`, `"A"`, `"F5"`), or `"vk 0x.."` for a key the spec grammar cannot name.
+
+What it is for: **Return and Escape end a menu.** Where nothing can see a plugin's menu — no notification, no menu element, no window of its own — the overlay runtime's hold is a stopwatch, and the only word it can get that the menu has closed is one of those two keys going through to it. The menu watch asks this on its tick and cuts the hold to a short grace when it finds one, instead of leaving Tab and Return with the plugin for the rest of the stopwatch. Only for a hold no detector has confirmed: where a detector can see the menu, its word is better than a guess about what a key did.
+
+```luau
+for _, k in ipairs(host.keys.passedThrough()) do
+  if k.key == "Return" or k.key == "Escape" then
+    host.log.info(k.key .. " reached the menu, which is therefore closing")
+  end
+end
+```
+
+### Windows
+
+Recorded by the low-level keyboard hook, on its own thread, for a captured key it let past because the foreground thread was in menu mode or `host.keys.menuOpen(true)` was in force. Only key-down events; the matching key-up is not reported.
+
+### macOS
+
+Recorded by the event tap for a captured key it let past because a native menu was open or `host.keys.menuOpen(true)` was in force. Key-down only. A key that never reached the tap at all — VoiceOver's own chords, for instance — is not in here, because the tap never saw it.

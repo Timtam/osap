@@ -149,6 +149,33 @@ Derived from the visible top-level windows: their owning processes, one entry pe
 
 The workspace's own list of running applications, minus those whose activation policy is *prohibited* (helpers, agents, XPC services — more of them than everything else together, and none can own a window). Hidden applications are included here; `list()` skips them, `apps()` does not, because "is it running" and "are its windows on screen" are different questions.
 
+## host.window.windowsOf(pid) {#host-window-windowsof}
+
+`host.window.windowsOf(pid: number) -> { { id: number, layer: number, class: string, x: number, y: number, w: number, h: number } }`
+
+Every on-screen window a process owns, as the **window manager** lists them rather than as accessibility does. The difference is the point: a popup menu drawn as a window of its own is in this list from the moment it opens to the moment it closes, whether or not the application posts a notification about it or exposes it as a menu element. The overlay runtime's menu watch takes this list before clicking a control that opens a menu and compares on every tick while the menu is plausible — a window that is there now and was not then is the menu, and its going is the menu closing. That is the third detector, after the native-menu notification and the accessibility walk, and the one that works for a plugin whose menu neither of those can see, provided the menu is a window at all. A module needs it directly only for the same kind of question.
+
+Cheap: one system-wide list, no message to the application, so it may be asked on the tick that carries the keyboard. Nothing here needs a window's title, and none is read.
+
+```luau
+-- Before opening the menu:
+local before = {}
+for _, w in ipairs(host.window.windowsOf(pid)) do before[w.id] = true end
+host.input.click(x, y)
+-- A tick later: anything new is the popup.
+for _, w in ipairs(host.window.windowsOf(pid)) do
+  if not before[w.id] then host.log.info(("popup %dx%d at layer %d"):format(w.w, w.h, w.layer)) end
+end
+```
+
+### Windows
+
+`EnumWindows` filtered to visible windows owned by the process, with the Win32 class in `class`. A `#32768` popup menu is a top-level window owned by the thread that opened it, so it appears here; so does a toolkit's self-drawn popup, which is usually a tool window of its own. `layer` is always 0.
+
+### macOS
+
+`CGWindowListCopyWindowInfo` for on-screen windows, filtered by owning pid. `id` is the `CGWindowID`, `layer` the window server's level — an `NSMenu` sits at 101, an ordinary window at 0. `class` is empty. Whether a given plugin's self-drawn menu is a window of its own or painted inside the plugin's window is exactly what this exists to find out; the runtime logs the answer the first time a hold runs with this detector armed.
+
 ## host.window.active() {#host-window-active}
 
 `host.window.active() -> Window?`

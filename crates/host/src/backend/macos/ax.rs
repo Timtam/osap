@@ -53,8 +53,8 @@ use objc2_core_foundation::{
     CGSize, Type,
 };
 use objc2_core_graphics::{
-    kCGWindowBounds, kCGWindowNumber, kCGWindowOwnerPID, CGRectMakeWithDictionaryRepresentation,
-    CGWindowListCopyWindowInfo, CGWindowListOption,
+    kCGWindowBounds, kCGWindowLayer, kCGWindowNumber, kCGWindowOwnerPID,
+    CGRectMakeWithDictionaryRepresentation, CGWindowListCopyWindowInfo, CGWindowListOption,
 };
 use objc2_foundation::NSString;
 
@@ -1271,6 +1271,47 @@ fn win_info(el: CFRetained<AXUIElement>, require_title: bool) -> Option<WinInfo>
         client_w: cw,
         client_h: ch,
     })
+}
+
+/// Every on-screen window a process owns, from the window server.
+///
+/// This is the list the accessibility tree does not have. A popup menu drawn as a window of
+/// its own — an `NSMenu` at level 101, or a borderless panel a toolkit puts up for a
+/// self-drawn menu — is in here from the moment it appears until it goes, whether or not
+/// the application posts a notification about it or exposes it as an `AXMenu`. The overlay
+/// runtime's menu watch compares this list against the one it took before clicking the
+/// control that opens the menu; a window that is there now and was not then is the menu.
+///
+/// One system-wide call, no message to the application, so it is safe on the tick that
+/// carries the keyboard. Names are deliberately not read: without Screen Recording they are
+/// withheld, and nothing here needs them.
+pub fn windows_of(pid: u32) -> Vec<crate::backend::WindowSpot> {
+    let mut out = Vec::new();
+    let Some(list) = CGWindowListCopyWindowInfo(
+        CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
+        0,
+    ) else {
+        return out;
+    };
+    // SAFETY: CGWindowListCopyWindowInfo is documented to return an array of dictionaries.
+    let typed: &CFArray<CFDictionary> = unsafe { list.cast_unchecked::<CFDictionary>() };
+    for i in 0..typed.len().min(512) {
+        let Some(dict) = typed.get(i) else { continue };
+        if dict_i64(&dict, unsafe { kCGWindowOwnerPID }).unwrap_or(-1) != pid as i64 {
+            continue;
+        }
+        let Some(b) = dict_rect(&dict) else { continue };
+        out.push(crate::backend::WindowSpot {
+            id: dict_i64(&dict, unsafe { kCGWindowNumber }).unwrap_or(0) as u64,
+            layer: dict_i64(&dict, unsafe { kCGWindowLayer }).unwrap_or(0) as i32,
+            class: String::new(),
+            x: b.origin.x as i32,
+            y: b.origin.y as i32,
+            w: b.size.width as i32,
+            h: b.size.height as i32,
+        });
+    }
+    out
 }
 
 /// How long one application may take to list its windows when NOBODY asked for that

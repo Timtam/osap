@@ -96,6 +96,11 @@ local MENU_PLAUSIBLE_MS = 8000
 -- with nothing to tell the user why.
 local MENU_HOLD_MS = 8000
 local menuPlausibleUntil = 0
+-- How long after Return or Escape went through to a menu that nothing can see the hold
+-- keeps the keys given up. The menu closes on that key; the grace is for the plugin to take
+-- it down before Tab and Return are claimed again. Only applies where no detector has
+-- confirmed the menu — see watchMenus — so where one can see it, its word governs instead.
+local MENU_CLOSE_GRACE_MS = 300
 
 -- The width and height of an origin's CONTENT, which is what coordinates are measured
 -- against — `client` for a window that has a frame, falling back to the window rect for
@@ -2065,6 +2070,18 @@ function Overlay:_suspendControlHotkeys(suspend)
   end
 end
 
+-- The on-screen windows of the overlay's own process, keyed by the platform's window id,
+-- or nil when the origin is not known. What the menu watch compares before and after a
+-- control opens a menu — see watchMenus for why the window list, of all things.
+local function windowIdsOf(o)
+  local origin = o:origin()
+  local pid = origin and origin.app and origin.app.pid
+  if not pid then return nil end
+  local ids = {}
+  for _, w in ipairs(host.window.windowsOf(pid)) do ids[w.id] = w end
+  return ids
+end
+
 -- Called the moment a control that OPENS a menu is activated, because the watch's 150 ms
 -- poll is too slow to be the only answer: ReaHotkey does the same eagerly (Kontakt8.ahk:97
 -- checks for the menu immediately after clicking the snapshot dropdown) rather than waiting
@@ -2073,6 +2090,12 @@ function Overlay:_menuOpening()
   if not self.active then return end
   host.keys.menuOpen(true)
   self:_suspendControlHotkeys(true)
+  -- The window list as it stands BEFORE the click (this runs before it — see the call
+  -- site), so a window that is there afterwards and was not now can be told from the ones
+  -- that were always there. The watch does the comparing.
+  self._menuBaseline = windowIdsOf(self)
+  self._menuPopup = nil
+  self._menuHoldCut = nil
   -- Tells the menu watch that a self-drawn menu is now plausible, so its expensive
   -- accessibility walk is worth running at full rate for a while. Outside that window the
   -- walk drops to a backstop cadence — see watchMenus for what it costs.
@@ -3516,6 +3539,85 @@ function Overlay:watchMenus()
         end
       end
     end
+    -- THE THIRD DETECTOR: a menu drawn as a window of its own. Neither of the two above can
+    -- see a popup that posts no accessibility notification and is not an AXMenu — which is
+    -- what every menu the macOS tester opened looked like, though that session could not
+    -- say so for certain (its observer was never armed on the process). A popup that is
+    -- its own window is in the window manager's list, though, whatever the accessibility
+    -- tree says of it: compared against the list _menuOpening took before the click, a
+    -- window that is there now and was not then is the menu, and its going is the menu
+    -- closing. Asked only while a hold is running, so it costs nothing the rest of the
+    -- time, and logged the first time it answers either way — "does this plugin's menu
+    -- appear in the window list" is the question that decides whether this detector is the
+    -- mechanism for that plugin or the stopwatch still is.
+    for _, o in ipairs(menuWatched) do
+      if o.active and o._menuHoldUntil and o._menuBaseline then
+        local now = windowIdsOf(o)
+        if now then
+          if o._menuPopup then
+            local still = false
+            for id in pairs(o._menuPopup) do
+              if now[id] then still = true break end
+            end
+            if still then
+              open = true
+            else
+              host.log.info(("[overlay] '%s': the menu window is gone — the menu closed")
+                :format(tostring(o.label)))
+              o._menuPopup = nil
+              -- Detection has spoken: the hold below was confirmed by this window and ends
+              -- now that it has gone.
+            end
+          else
+            local appeared, n = {}, 0
+            for id, w in pairs(now) do
+              if not o._menuBaseline[id] then
+                appeared[id] = w
+                n += 1
+              end
+            end
+            if n > 0 then
+              o._menuPopup = appeared
+              open = true
+              for id, w in pairs(appeared) do
+                host.log.info(("[overlay] '%s': a window appeared for the plugin while a menu "
+                  .. "was plausible — id %s%s, layer %d, %dx%d at %d,%d — treated as the menu")
+                  :format(tostring(o.label), tostring(id),
+                    w.class ~= "" and (" class '" .. w.class .. "'") or "",
+                    w.layer, w.w, w.h, w.x, w.y))
+              end
+            end
+          end
+        end
+      end
+    end
+    -- THE KEY THAT CLOSED IT. Return and Escape end a menu — Return commits the item under
+    -- the cursor, Escape cancels — so while a hold is running and no detector has confirmed
+    -- a menu, a Return or Escape that the hook let through to the plugin is the best
+    -- evidence there is that the menu is now closing, and the hold is cut to a short grace
+    -- instead of running its full course. That course is what left Tab dead for the rest
+    -- of eight seconds after every choice the macOS tester made. Unconfirmed holds only:
+    -- where a detector can see the menu, its word beats a guess about what a key did
+    -- (Return can open a submenu, and a detector sees that; this cannot).
+    local passed = host.keys.passedThrough()
+    if #passed > 0 then
+      for _, o in ipairs(menuWatched) do
+        if o.active and o._menuHoldUntil and not o._menuHoldConfirmed then
+          for _, k in ipairs(passed) do
+            if k.key == "Return" or k.key == "Escape" then
+              local grace = host.now() + MENU_CLOSE_GRACE_MS
+              if grace < o._menuHoldUntil then
+                o._menuHoldUntil = grace
+                o._menuHoldCut = k.key
+                host.log.info(("[overlay] '%s': %s went through to the menu; the hold ends "
+                  .. "in %d ms unless something sees the menu still open")
+                  :format(tostring(o.label), k.key, MENU_CLOSE_GRACE_MS))
+              end
+            end
+          end
+        end
+      end
+    end
     -- A control's own word that it opened a menu, honoured until it expires. Detection wins
     -- when it finds something — it is the more specific answer — but never overrules the
     -- hold by finding nothing, because "found nothing" is the failure mode being covered.
@@ -3543,13 +3645,27 @@ function Overlay:watchMenus()
             -- ask any other way. It now also says the hold RAN OUT rather than merely that
             -- nothing was seen — because a key arriving just after this line is the evidence
             -- that the duration above is still too short, and the two used to be
-            -- indistinguishable in a log.
-            host.log.info(
-              ("[overlay] '%s': a control opened a menu, no detector ever saw one, and the "
-                .. "%d ms hold has run out — a key claimed by the overlay from here on was "
-                .. "meant for that menu"):format(tostring(o.label), MENU_HOLD_MS)
-            )
+            -- indistinguishable in a log. And it says whether the window list moved: a hold
+            -- that ran its course with the plugin's windows unchanged is a menu drawn inside
+            -- the plugin's own window, which no detector this runtime has can see.
+            local windows = o._menuBaseline
+              and " — and the plugin's window list did not change, so its menu is drawn inside its own window"
+              or ""
+            if o._menuHoldCut then
+              host.log.info(
+                ("[overlay] '%s': the hold ended %d ms after %s went through to a menu no "
+                  .. "detector ever saw%s"):format(tostring(o.label), MENU_CLOSE_GRACE_MS,
+                  o._menuHoldCut, windows)
+              )
+            else
+              host.log.info(
+                ("[overlay] '%s': a control opened a menu, no detector ever saw one, and the "
+                  .. "%d ms hold has run out — a key claimed by the overlay from here on was "
+                  .. "meant for that menu%s"):format(tostring(o.label), MENU_HOLD_MS, windows)
+              )
+            end
             o._menuHoldUntil = nil
+            o._menuHoldCut = nil
           end
         end
       end

@@ -3922,6 +3922,25 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "nativeMenuOpen",
         lua.create_function(move |_, ()| Ok(sh.backend.native_menu_open()))?,
     )?;
+    // host.keys.passedThrough() -> { {vk, mask, key} } — the captured keys the hook let
+    // through to the application because a menu was open, since the last call. Drained on
+    // read. The menu watch asks on its tick: a Return or Escape in here means the menu is
+    // closing, which on a platform where nothing can see the menu is the only word it gets.
+    let sh = shared.clone();
+    keys.set(
+        "passedThrough",
+        lua.create_function(move |lua, ()| {
+            let t = lua.create_table()?;
+            for (vk, mask) in sh.backend.take_menu_pass_through() {
+                let k = lua.create_table()?;
+                k.set("vk", vk)?;
+                k.set("mask", mask)?;
+                k.set("key", backend::vk_name(vk).unwrap_or_else(|| format!("vk {vk:#04x}")))?;
+                t.push(k)?;
+            }
+            Ok(t)
+        })?,
+    )?;
     host.set("keys", keys)?;
 
     // host.now() -> milliseconds since the app started. A CLOCK, not a date: the only
@@ -4061,6 +4080,29 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 app.set("bundleId", a.bundle_id.clone())?;
                 app.set("pid", a.pid)?;
                 t.push(app)?;
+            }
+            Ok(t)
+        })?,
+    )?;
+    // host.window.windowsOf(pid) — every on-screen window a process owns, from the window
+    // manager rather than from accessibility. A popup menu drawn as a window of its own is
+    // in this list and in no accessibility tree; the overlay runtime's menu watch compares
+    // the list before and after the click that opens a menu.
+    let sh = shared.clone();
+    win.set(
+        "windowsOf",
+        lua.create_function(move |lua, pid: u32| {
+            let t = lua.create_table()?;
+            for s in sh.backend.windows_of(pid) {
+                let w = lua.create_table()?;
+                w.set("id", s.id)?;
+                w.set("layer", s.layer)?;
+                w.set("class", s.class)?;
+                w.set("x", s.x)?;
+                w.set("y", s.y)?;
+                w.set("w", s.w)?;
+                w.set("h", s.h)?;
+                t.push(w)?;
             }
             Ok(t)
         })?,

@@ -479,6 +479,7 @@ unsafe extern "C-unwind" fn tap_callback(
         // stays closed for as long as a menu is open or a window is not frontmost, and one
         // line per keystroke would bury the log it is meant to explain.
         report_gate_pass(vk, mask, why);
+        note_menu_pass(vk, mask, why);
         return pass;
     }
     queue::push_key(vk, mask);
@@ -616,12 +617,36 @@ fn mask_of(flags: CGEventFlags) -> u8 {
     mask
 }
 
-/// The three conditions that have to hold together before a matched key is taken: in scope,
-/// no native menu, no plugin-drawn menu. `None` means take it, `Some(reason)` means let it
-/// past — and when it goes past, nothing is queued either.
-///
-/// Every one of them is an atomic read. Nothing in here reaches into another process, and
-/// that is a requirement rather than an optimisation — see the scope comparison.
+thread_local! {
+    // Captured keys let through because a menu was open, waiting for the overlay runtime
+    // to ask. Bounded: nobody presses more than a few keys inside a menu between two ticks
+    // of the watch, and a reader that never comes must not grow this for ever.
+    static MENU_PASS: std::cell::RefCell<Vec<(u32, u8)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+const MENU_PASS_MAX: usize = 32;
+
+/// A captured key went to the application because a menu was open. Remembered so the
+/// overlay runtime can learn that Return or Escape reached the menu — where nothing can see
+/// the menu itself, that is the best available word that it is closing, and the alternative
+/// was a stopwatch running its full course while Tab stayed dead.
+fn note_menu_pass(vk: u32, mask: u8, why: &'static str) {
+    if !why.contains("menu") {
+        return;
+    }
+    MENU_PASS.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() < MENU_PASS_MAX {
+            m.push((vk, mask));
+        }
+    });
+}
+
+/// Hands over, and forgets, everything `note_menu_pass` saw since the last call. Main
+/// thread only, like the tap itself.
+pub fn take_menu_pass_through() -> Vec<(u32, u8)> {
+    MENU_PASS.with(|m| std::mem::take(&mut *m.borrow_mut()))
+}
+
 /// One line per reason, at most every few seconds. See the call site for why it exists.
 fn report_gate_pass(vk: u32, mask: u8, why: &'static str) {
     const QUIET: std::time::Duration = std::time::Duration::from_secs(3);
@@ -650,6 +675,12 @@ fn report_gate_pass(vk: u32, mask: u8, why: &'static str) {
     }
 }
 
+/// The three conditions that have to hold together before a matched key is taken: in scope,
+/// no native menu, no plugin-drawn menu. `None` means take it, `Some(reason)` means let it
+/// past — and when it goes past, nothing is queued either.
+///
+/// Every one of them is an atomic read. Nothing in here reaches into another process, and
+/// that is a requirement rather than an optimisation — see the scope comparison.
 fn gate_closed() -> Option<&'static str> {
     if MENU_OPEN.load(Ordering::Relaxed) {
         return Some("a plugin menu is open");

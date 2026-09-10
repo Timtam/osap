@@ -344,6 +344,14 @@ impl Backend for MacBackend {
         ax::running_apps()
     }
 
+    fn windows_of(&self, pid: u32) -> Vec<crate::backend::WindowSpot> {
+        ax::windows_of(pid)
+    }
+
+    fn take_menu_pass_through(&self) -> Vec<(u32, u8)> {
+        tap::take_menu_pass_through()
+    }
+
     fn pump_pending(&self, events: &mut dyn HostEvents) {
         // Belt and braces. The tap re-enables itself from a run-loop observer, but the
         // moment it most needs to is the moment this thread was too busy to answer — so it

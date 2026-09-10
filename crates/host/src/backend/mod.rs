@@ -142,6 +142,26 @@ pub struct AppInfo {
     pub bundle_id: String,
 }
 
+/// One on-screen window of a process, as the window manager lists it — including the ones
+/// the accessibility tree never mentions, which is the point. A plugin's popup menu that is
+/// drawn as a window of its own shows up here the moment it opens and leaves the moment it
+/// closes; `host.window.windowsOf` is how the overlay runtime's menu watch sees that.
+#[derive(Clone, Debug)]
+pub struct WindowSpot {
+    /// The platform's own id: `CGWindowID` on macOS, the HWND on Windows. Stable for the
+    /// life of the window, which is all the comparison needs.
+    pub id: u64,
+    /// The window server's level. Menus sit above ordinary windows (101 for an `NSMenu`);
+    /// Windows has no such number and reports 0.
+    pub layer: i32,
+    /// The Win32 window class; empty on macOS, which has no such thing.
+    pub class: String,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
 /// A snapshot of a window's matchable properties (normalized across platforms).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WinInfo {
@@ -292,6 +312,21 @@ pub trait Backend {
             }
         }
         out
+    }
+
+    /// Every on-screen window this process owns, from the window manager rather than from
+    /// accessibility — see [`WindowSpot`]. Cheap (one system-wide list, no cross-process
+    /// call) and asked by the overlay runtime's menu watch only while a menu is plausible.
+    fn windows_of(&self, _pid: u32) -> Vec<WindowSpot> {
+        Vec::new()
+    }
+
+    /// The captured keys the hook let through to the application because a menu was open,
+    /// since the last call. Drained on read. Return and Escape are what the overlay runtime
+    /// wants: they are the keys that end a menu, and where nothing can see the menu itself,
+    /// one of them going through is the best available word that it is closing.
+    fn take_menu_pass_through(&self) -> Vec<(u32, u8)> {
+        Vec::new()
     }
 
     fn active_window(&self) -> Option<WinInfo>;
@@ -601,6 +636,37 @@ pub fn key_to_vk(name: &str) -> Option<u32> {
         "pagedown" => 0x22,
         _ => return None,
     })
+}
+
+/// The name `key_to_vk` would accept for a virtual key, for reporting a key back to a module
+/// in the spelling it registered it with. `None` for anything the spec grammar cannot name.
+pub fn vk_name(vk: u32) -> Option<String> {
+    if (b'A' as u32..=b'Z' as u32).contains(&vk) || (b'0' as u32..=b'9' as u32).contains(&vk) {
+        return char::from_u32(vk).map(|c| c.to_string());
+    }
+    if (0x70..=0x87).contains(&vk) {
+        return Some(format!("F{}", vk - 0x70 + 1));
+    }
+    Some(
+        match vk {
+            0x20 => "Space",
+            0x0D => "Return",
+            0x1B => "Escape",
+            0x09 => "Tab",
+            0x08 => "Backspace",
+            0x2E => "Delete",
+            0x26 => "Up",
+            0x28 => "Down",
+            0x25 => "Left",
+            0x27 => "Right",
+            0x24 => "Home",
+            0x23 => "End",
+            0x21 => "PageUp",
+            0x22 => "PageDown",
+            _ => return None,
+        }
+        .to_string(),
+    )
 }
 
 /// Modifier bitmask for `host.keys` (matches the pressed modifier state exactly).
