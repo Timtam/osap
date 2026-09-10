@@ -15,7 +15,8 @@ use wxdragon::prelude::*;
 
 use crate::settings;
 
-const MENU_SHOW: i32 = 1001;
+/// The tray's one Show/Close item. The window's own File menu keeps `MENU_HIDE` for Ctrl+W.
+const MENU_TOGGLE: i32 = 1001;
 const MENU_QUIT: i32 = 1002;
 const MENU_HIDE: i32 = 1003;
 
@@ -129,6 +130,21 @@ fn row_label(name: &str, version: &str, id: &str, unsupported: Option<&str>) -> 
 /// On macOS one more thing is needed: ordering a window in does not bring the PROCESS
 /// forward, and an agent application that is not frontmost puts its window up behind
 /// whatever is. The Dock-icon promotion is separate and optional — see the setting.
+///
+/// This and `hide_manager` are the only two places the window's visibility changes — the
+/// close box, Ctrl+W, the tray item, the Windows double-click and the guided start-up all
+/// land in one of them — so they are also where the tray item is re-labelled. A refresh
+/// anywhere else would be a third copy of the same fact, and the one that gets forgotten.
+fn show_manager(frame: &Frame) {
+    dock::want("manager", "showing the module window");
+    #[cfg(target_os = "macos")]
+    crate::backend::activate_self();
+    frame.show(true);
+    frame.centre();
+    frame.raise();
+    set_tray_label(frame.is_shown());
+}
+
 /// Puts the manager window away again — the counterpart to `show_manager`.
 ///
 /// It exists because on macOS there was no way to do this at all. An application with no
@@ -141,15 +157,43 @@ fn hide_manager(frame: &Frame) {
     // Demoted after hiding, never before: the window has to be off the screen before the
     // application stops being one that has windows.
     dock::release("manager", "hiding the module window");
+    set_tray_label(frame.is_shown());
 }
 
-fn show_manager(frame: &Frame) {
-    dock::want("manager", "showing the module window");
-    #[cfg(target_os = "macos")]
-    crate::backend::activate_self();
-    frame.show(true);
-    frame.centre();
-    frame.raise();
+thread_local! {
+    /// The tray's popup menu, held so its Show/Close item can be re-labelled after it has
+    /// been handed over. A NON-owning handle (`Menu::from(*const)` sets `owned: false`, and
+    /// `destroy_menu` does nothing for those), and that is what makes it safe to keep for
+    /// the life of the process: the owning wrapper is `mem::forget`-ed right after the tray
+    /// icon takes the menu, so the wxMenu is never destroyed and the pointer outlives the
+    /// application — even a thread-local destructor at exit would find nothing to free.
+    /// Borrowed rather than a `MenuItem`, because the help string lives on the menu
+    /// (`set_help_string`), and a screen reader that reads help should hear the same state
+    /// the label says.
+    static TRAY_MENU: RefCell<Option<Menu>> = const { RefCell::new(None) };
+}
+
+/// Makes the tray's Show/Close item say what pressing it will do NEXT.
+///
+/// One item rather than a Show and a Close side by side, because a blind tester found
+/// "Close the module window" offered while nothing was open — and to somebody who learns a
+/// menu by reading its items, an item that cannot do what it says is not harmless clutter,
+/// it is a wrong statement about the application. Called with what the frame reports,
+/// never with what the caller believes it just did.
+fn set_tray_label(shown: bool) {
+    let (label, help) = if shown {
+        ("Close the module window", "Put the module window away")
+    } else {
+        ("Show module manager", "Show the module window")
+    };
+    TRAY_MENU.with(|m| {
+        if let Some(menu) = m.borrow().as_ref() {
+            if let Some(item) = menu.find_item(MENU_TOGGLE) {
+                item.set_label(label);
+            }
+            menu.set_help_string(MENU_TOGGLE, help);
+        }
+    });
 }
 
 /// The Installed list, which is a different control on each platform.
@@ -1404,22 +1448,55 @@ pub fn run_gui(
         if let Some(icon) = make_icon() {
             taskbar.set_icon(&icon, "Automation Platform");
         }
-        // Three items rather than two. "Close the module window" is here because the
-        // keyboard route to it is not guaranteed: on macOS this application has no menu bar,
-        // so it has no Command-W, and a menu item is the one way out that cannot depend on
-        // a keystroke reaching the right window.
+        // One item for the window, which flips between "Show module manager" and "Close the
+        // module window" as the window comes and goes (`set_tray_label`). It used to be two,
+        // and the Close one was offered while nothing was open — see `set_tray_label` for why
+        // that is worse than clutter to the person it is for.
+        //
+        // A way to CLOSE from here still has to exist, and this item is it while the window
+        // is up: on macOS this application has no menu bar, so it has no Command-W, and a
+        // menu item is the one way out that cannot depend on a keystroke reaching the right
+        // window. What the toggle gives up is raising a window that is open but behind
+        // another application from the tray; that is what the Dock icon (macOS) and the
+        // taskbar button (Windows) exist for while the window is shown.
+        //
+        // Re-labelling THIS menu is enough — no rebuild, no second `set_popup_menu` — and that
+        // was read in the vendored sources rather than assumed. wxdragon-sys 0.9.16 keeps
+        // this menu only as a template: `wxdTaskBarIcon::CreatePopupMenu` (cpp/src/taskbar.cpp)
+        // builds a fresh copy item by item, `GetItemLabel()` and `GetHelp()` included, each
+        // time wxWidgets asks for the popup, and wxWidgets 3.3.2 asks on every click — from
+        // `wxTaskBarIconBase::OnRightButtonDown` (src/common/taskbarcmn.cpp) on Windows and
+        // from `-[wxOSXStatusItemTarget clickedAction:]` (src/osx/cocoa/taskbar.mm) for the
+        // status item on macOS — then deletes the copy. Both try `GetPopupMenu()` first, but
+        // wxdragon-sys declares its own as `const`, which does not override the non-const
+        // virtual, so the base's null answer sends both down the copying path. Either way,
+        // the next popup is made from this template as it is at that moment.
         let mut menu = Menu::builder()
-            .append_item(MENU_SHOW, "Show module manager", "Show the module window")
-            .append_item(MENU_HIDE, "Close the module window", "Put the module window away")
+            .append_item(MENU_TOGGLE, "Show module manager", "Show the module window")
             .append_separator()
             .append_item(MENU_QUIT, "Quit", "Quit Automation Platform")
             .build();
         taskbar.set_popup_menu(&mut menu);
+        // A non-owning handle to the same wxMenu, taken BEFORE the forget below (see
+        // `TRAY_MENU` for why it stays valid). Not `taskbar.get_popup_menu()` later: that
+        // wraps the pointer in an OWNING `Menu`, whose drop would destroy the tray's template.
+        TRAY_MENU.with(|m| *m.borrow_mut() = Some(Menu::from(menu.as_const_ptr())));
         std::mem::forget(menu); // the tray icon owns it for the app's lifetime
+        // The window starts hidden, so the label above is already right; asking the frame
+        // instead of assuming is what keeps it right if the start-up order ever changes.
+        set_tray_label(frame.is_shown());
 
         taskbar.on_menu(move |event| match event.get_id() {
-            MENU_SHOW => show_manager(&frame),
-            MENU_HIDE => hide_manager(&frame),
+            // Decided by what the frame reports, not by a mirrored flag: a flag updated on
+            // the same path as the label could only ever agree with the label, never with
+            // the window — and the label is exactly the thing that was wrong.
+            MENU_TOGGLE => {
+                if frame.is_shown() {
+                    hide_manager(&frame);
+                } else {
+                    show_manager(&frame);
+                }
+            }
             MENU_QUIT => app.exit_main_loop(),
             _ => {}
         });
