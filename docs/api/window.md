@@ -327,9 +327,9 @@ Implemented with `WindowFromPoint` + `GetAncestor(GA_ROOT)` on both sides. `Wind
 
 ### macOS
 
-Returns `nil` — not implemented. An overlay there behaves exactly as it did before this existed, and the probe records which answer it got, so a log says whether the check is live on that machine.
+`NSWindow.windowNumberAtPoint:belowWindowWithWindowNumber:` — the window server's own hit-test, which names the frontmost window that would receive a mouse-down at the point across every application and skips windows that let clicks through. That is the question a click asks, and the reason the cheap route was not taken: `CGWindowListCopyWindowInfo` answers what is *drawn* there, and a screen reader's cursor ring is drawn over the very control being operated while letting clicks pass, so the drawn-there answer would have refused essentially every press on the machines this exists for.
 
-It is unimplemented on purpose rather than by omission. The cheap route, `CGWindowListCopyWindowInfo`, answers *what is drawn* at a point, and a click is delivered by *what would be hit* — which is a different question wherever a window lets clicks through. A screen reader's cursor ring is exactly such a window, and it is drawn over the control being operated, so that implementation would refuse essentially every press with a spoken excuse, on the machines of the people this exists for. `NSWindow.windowNumberAtPoint:belowWindowWithWindowNumber:` asks the right question; it needs a Cargo feature, the main thread, and a bottom-left coordinate flip.
+The window is paired with its `CGWindowID` by owner and frame (`window_id`), once per window. Three answers: the pair matches, `true`; the point belongs to another application's window, `false` — with a log line naming that application and its window level, so a refused press can be explained; and `nil` wherever the question could not be put — no pairing yet, no window at the point, a window of VoiceOver's own that it did not mark click-through, or one of this application's (the announcement window sits over the plugin). Main thread only, which the pump is. Unverified on hardware as of 2026-09-10: the probe records which answer it got.
 
 `Overlay:addHotspotButton` and `addHotspotToggle` already ask this before every click; a module only needs it directly when it clicks a coordinate itself.
 

@@ -40,7 +40,7 @@ use objc2_app_kit::{
     NSAccessibilityParentAttribute, NSAccessibilityPositionAttribute, NSAccessibilityRoleAttribute,
     NSAccessibilitySizeAttribute, NSAccessibilitySubroleAttribute, NSAccessibilityTitleAttribute,
     NSAccessibilityValueAttribute, NSAccessibilityWindowsAttribute, NSApplicationActivationOptions,
-    NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace,
+    NSApplicationActivationPolicy, NSRunningApplication, NSWindow, NSWorkspace,
 };
 use objc2_application_services::{
     AXCopyMultipleAttributeOptions, AXError, AXUIElement, AXValue, AXValueType,
@@ -1273,6 +1273,103 @@ fn win_info(el: CFRetained<AXUIElement>, require_title: bool) -> Option<WinInfo>
     })
 }
 
+/// Is this window the one a click at the screen point would land in?
+///
+/// Asked of the window server the way a click asks it: `NSWindow`'s hit-test names the
+/// frontmost window that would receive a mouse-down at the point, across every application,
+/// and skips windows that let clicks through. That last part is why it is this and not
+/// `CGWindowList`, which answers what is DRAWN there: a screen reader's cursor ring is
+/// drawn over the very control being operated and lets clicks pass, so the drawn-there
+/// answer would have refused essentially every press on the machines this exists for.
+///
+/// AppKit's screen coordinates start at the bottom-left of the primary display, so y is
+/// flipped against that display's height in points; x is shared.
+///
+/// Three answers, and the third is the one that matters. Ours: `Some(true)`. Somebody
+/// else's — named in the log with its owner, so a refused press can be explained —
+/// `Some(false)`. And `None` wherever the question could not be put: no pairing between
+/// the accessibility window and a `CGWindowID` (see `window_id`), no window at the point,
+/// a window of VoiceOver's own that it did not mark click-through, or one of this
+/// application's (the announcement window sits over the plugin). A wrong "no" costs the
+/// user a press that would have worked, which is exactly what every click did before this
+/// existed; a wrong "yes" is the state before it.
+///
+/// Main thread only, which the pump is; anywhere else it answers `None` rather than
+/// touching AppKit from the wrong thread.
+pub(super) fn window_owns_point(hwnd: isize, x: i32, y: i32) -> Option<bool> {
+    let mtm = objc2::MainThreadMarker::new()?;
+    let ours = window_id(hwnd);
+    if ours == 0 {
+        return None;
+    }
+    let (_, height) = super::capture::screen_size();
+    if height <= 0 {
+        return None;
+    }
+    let point = CGPoint::new(x as f64, (height - y) as f64);
+    let hit = NSWindow::windowNumberAtPoint_belowWindowWithWindowNumber(point, 0, mtm);
+    if hit <= 0 {
+        return None;
+    }
+    if hit as u32 == ours {
+        return Some(true);
+    }
+    let Some((pid, layer)) = window_owner(hit as u32) else {
+        return None;
+    };
+    if pid == std::process::id() as i32 || is_voiceover(pid) {
+        return None;
+    }
+    // One line per couple of seconds: a hotspot asks before every click, and a window
+    // that stays in the way stays in the way for every one of them.
+    thread_local! {
+        static LAST: Cell<Option<Instant>> = const { Cell::new(None) };
+    }
+    let due = LAST.with(|l| l.get().is_none_or(|t| t.elapsed().as_secs() >= 2));
+    if due {
+        LAST.with(|l| l.set(Some(Instant::now())));
+        crate::logging::line(
+            "macos",
+            &format!(
+                "the point {x},{y} is under window {hit} of {} (pid {pid}, layer {layer}), not \
+                 under window {hwnd} — a click there would land in that application",
+                exe_for_pid(pid)
+            ),
+        );
+    }
+    Some(false)
+}
+
+/// Who owns a window number, and at what level. From the on-screen list; `None` for a
+/// number the list does not carry.
+fn window_owner(number: u32) -> Option<(i32, i32)> {
+    let list = CGWindowListCopyWindowInfo(
+        CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
+        0,
+    )?;
+    // SAFETY: CGWindowListCopyWindowInfo is documented to return an array of dictionaries.
+    let typed: &CFArray<CFDictionary> = unsafe { list.cast_unchecked::<CFDictionary>() };
+    for i in 0..typed.len().min(512) {
+        let Some(dict) = typed.get(i) else { continue };
+        if dict_i64(&dict, unsafe { kCGWindowNumber }).unwrap_or(0) as u32 != number {
+            continue;
+        }
+        let pid = dict_i64(&dict, unsafe { kCGWindowOwnerPID }).unwrap_or(0) as i32;
+        let layer = dict_i64(&dict, unsafe { kCGWindowLayer }).unwrap_or(0) as i32;
+        return Some((pid, layer));
+    }
+    None
+}
+
+/// VoiceOver's process, by bundle id — its cursor ring and caption panel are windows, and
+/// a press must never be refused on their account.
+fn is_voiceover(pid: i32) -> bool {
+    let id = NSString::from_str("com.apple.VoiceOver");
+    NSRunningApplication::runningApplicationsWithBundleIdentifier(&id)
+        .iter()
+        .any(|a| a.processIdentifier() == pid)
+}
+
 /// Every on-screen window a process owns, from the window server.
 ///
 /// This is the list the accessibility tree does not have. A popup menu drawn as a window of
@@ -1876,7 +1973,6 @@ pub fn focus_window(handle: isize) -> bool {
 /// platform uses; it is private, so this is the documented fallback — match the window list
 /// by owning process and by frame — and it is resolved lazily and remembered, because the
 /// window list is a whole-system query and no caller wants to pay for it on a focus change.
-#[allow(dead_code)]
 pub(super) fn window_id(handle: isize) -> u32 {
     let Some(entry) = handles::get(handle) else {
         return 0;

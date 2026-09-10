@@ -348,6 +348,10 @@ impl Backend for MacBackend {
         ax::windows_of(pid)
     }
 
+    fn window_owns_point(&self, hwnd: isize, x: i32, y: i32) -> Option<bool> {
+        ax::window_owns_point(hwnd, x, y)
+    }
+
     fn take_menu_pass_through(&self) -> Vec<(u32, u8)> {
         tap::take_menu_pass_through()
     }
