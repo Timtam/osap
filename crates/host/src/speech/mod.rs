@@ -415,25 +415,31 @@ impl Speech {
             let on = crate::appcfg::personal_voice();
             if on && !self.last_personal.replace(on) {
                 // What the status says decides whether there is anything to ask. Asking again
-                // when it is already granted would put a dialog up for nothing; asking again
-                // after a refusal does not bring the dialog back, so the log names the pane
-                // instead. Same shape as the VoiceOver Automation permission next door.
-                match self.av.personal_granted() {
-                    Some(true) => crate::logging::line(
+                // when it is already granted would put a dialog up for nothing, and macOS
+                // answers `denied` and `unsupported` without any dialog — so those two are
+                // explained instead, in the same words the settings switch puts in a dialog
+                // of its own. Same shape as the VoiceOver Automation permission next door.
+                //
+                // Read now rather than from a snapshot taken at launch, because the answer can
+                // change under a running session — a voice recorded, applications allowed to
+                // ask — and this edge is the one moment it decides anything. A property read,
+                // not the request: the request still goes to the worker.
+                let status = avspeech::personal_status();
+                if let Some(why) = status.explanation() {
+                    crate::logging::line("speech", &format!("Personal Voice: {why}"));
+                } else if status == avspeech::PersonalVoice::Granted {
+                    crate::logging::line(
                         "speech",
- "Personal Voice: already granted — it is among the voices a module can choose",
-                    ),
-                    Some(false) => crate::logging::line(
+                        "Personal Voice: already granted — it is among the voices a module can \
+                         choose",
+                    );
+                } else {
+                    crate::logging::line(
                         "speech",
- "Personal Voice: refused earlier, and macOS does not ask twice. System Settings > Privacy & Security > Speech Recognition is not it — a Personal Voice is allowed per application from the dialog alone, so the switch has to be turned off and on with the grant reset, or the voice re-shared in Accessibility settings.",
-                    ),
-                    None => {
-                        crate::logging::line(
-                            "speech",
- "Personal Voice was switched on — asking macOS, on the speech worker so the dialog cannot hold the event loop",
-                        );
-                        self.av.authorise_personal();
-                    }
+                        "Personal Voice was switched on — asking macOS, on the speech worker so \
+                         the dialog cannot hold the event loop",
+                    );
+                    self.av.authorise_personal();
                 }
             } else {
                 self.last_personal.set(on);
@@ -475,6 +481,17 @@ impl Speech {
 #[cfg(target_os = "macos")]
 pub fn personal_voice_supported() -> bool {
     avspeech::supported()
+}
+
+/// Why ticking the Personal Voice switch will put up no dialog, when it will not — see
+/// [`avspeech::PersonalVoice::explanation`]. `None` when a dialog is coming or the grant is
+/// already there, which is when the interface has nothing to add to what macOS does.
+///
+/// Free-standing for the reason `personal_voice_supported` is: the caller is the settings
+/// switch in `gui.rs`, which has no `Shared` in the closure that runs when a box is ticked.
+#[cfg(target_os = "macos")]
+pub fn personal_voice_explanation() -> Option<String> {
+    avspeech::personal_status().explanation()
 }
 
 #[cfg(all(test, windows))]

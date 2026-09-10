@@ -715,18 +715,29 @@ pub fn run_gui(
                 // right. A setting that is on and inert is indistinguishable from one that is
                 // broken, and he had no way to tell which he had. Said once, here, where he
                 // asked for it, and naming the version he would otherwise have to look up.
+                //
+                // The same report came back from macOS 14.5, where the version was not the
+                // reason: macOS answers `denied` and `unsupported` without any dialog, and the
+                // only feedback was a log line — which told him he had refused a dialog he
+                // never saw. So the second branch says in the interface what the log says,
+                // in the same words from the same place. When a dialog IS coming, the
+                // system's dialog is the feedback, and nothing is put in front of it.
                 #[cfg(target_os = "macos")]
-                if want && key == "personal_voice" && !crate::speech::personal_voice_supported() {
-                    modal_message(
-                        &frame,
-                        "Personal Voice",
-                        "This Mac cannot offer a Personal Voice: the feature arrived in macOS \
-                         14, and this system is older.\n\nThe setting stays on and changes \
-                         nothing. On a Mac running macOS 14 or later, ticking it asks macOS \
-                         for permission and your Personal Voice then appears among the \
-                         voices a module can choose.",
-                        false,
-                    );
+                if want && key == "personal_voice" {
+                    if !crate::speech::personal_voice_supported() {
+                        modal_message(
+                            &frame,
+                            "Personal Voice",
+                            "This Mac cannot offer a Personal Voice: the feature arrived in macOS \
+                             14, and this system is older.\n\nThe setting stays on and changes \
+                             nothing. On a Mac running macOS 14 or later, ticking it asks macOS \
+                             for permission and your Personal Voice then appears among the \
+                             voices a module can choose.",
+                            false,
+                        );
+                    } else if let Some(why) = crate::speech::personal_voice_explanation() {
+                        modal_message(&frame, "Personal Voice", &why, false);
+                    }
                 }
                 let now = crate::appcfg::get(key);
                 let mut store = settings::Store::load();

@@ -69,9 +69,6 @@ pub struct AvSpeech {
     /// Windows side uses, and for the same reason: enumerating voices is not free, and
     /// `engines()` is a question a module may ask on any tick.
     voices: Arc<Mutex<Vec<Voice>>>,
-    /// Whether Personal Voice has been granted. `None` where the question does not exist —
-    /// this macOS is too old for the API, or nobody has been asked and the system says so.
-    personal_granted: Arc<Mutex<Option<bool>>>,
 }
 
 impl AvSpeech {
@@ -80,16 +77,14 @@ impl AvSpeech {
         let pending = Arc::new(AtomicUsize::new(0));
         let healthy = Arc::new(AtomicBool::new(true));
         let voices = Arc::new(Mutex::new(Vec::new()));
-        let personal_granted = Arc::new(Mutex::new(None));
-        let (p, h, v, g) =
-            (pending.clone(), healthy.clone(), voices.clone(), personal_granted.clone());
+        let (p, h, v) = (pending.clone(), healthy.clone(), voices.clone());
         std::thread::Builder::new()
             .name("avspeech".into())
-            .spawn(move || run(rx, p, h, v, g))
+            .spawn(move || run(rx, p, h, v))
             .ok();
         // The list is wanted before anything is said — `engines()` may be the first call —
         // and reading it is what the worker can do while nothing else is happening.
-        let me = Self { to_worker, pending, healthy, voices, personal_granted };
+        let me = Self { to_worker, pending, healthy, voices };
         me.refresh();
         me
     }
@@ -127,11 +122,6 @@ impl AvSpeech {
         let _ = self.to_worker.send(Job::Refresh);
     }
 
-    /// Whether Personal Voice may be used. `None` means nobody has asked yet.
-    pub fn personal_granted(&self) -> Option<bool> {
-        self.personal_granted.lock().ok().and_then(|g| *g)
-    }
-
     /// Asks macOS for permission to use Personal Voice.
     ///
     /// Sent only when somebody has chosen one. The authorisation call can sit for a long time
@@ -150,7 +140,6 @@ fn run(
     pending: Arc<AtomicUsize>,
     healthy: Arc<AtomicBool>,
     voices: Arc<Mutex<Vec<Voice>>>,
-    personal_granted: Arc<Mutex<Option<bool>>>,
 ) {
     // Built on first use rather than here, and that is the point of the rewrite: `tts` cost
     // 2872 ms of blocking start-up on Windows for a voice that usually never spoke, and this
@@ -165,19 +154,17 @@ fn run(
                 if let Ok(mut v) = voices.lock() {
                     *v = list;
                 }
-                // Read, not asked: `personalVoiceAuthorizationStatus` is a property and
-                // raises nothing. Knowing the answer before anybody chooses is what lets
-                // `engines()` say honestly whether a Personal Voice is available, instead of
-                // guessing and finding out later.
-                if let Ok(mut g) = personal_granted.lock() {
-                    *g = personal_status();
-                }
+                // The authorisation status is deliberately NOT read into a snapshot here any
+                // more. It was, on every refresh, and its one reader — the rising edge of the
+                // switch in `Speech::pump` — could then act on an answer from launch: a
+                // `denied` read before the user recorded a voice or allowed applications to
+                // ask would have kept the dialog away for the rest of the session, with the
+                // switch on and nothing to show for it. `personal_status` is a property read
+                // that raises nothing, so whoever needs the answer asks at the moment it
+                // matters.
             }
             Job::AuthorisePersonal => {
                 let granted = request_personal_voice();
-                if let Ok(mut g) = personal_granted.lock() {
-                    *g = Some(granted);
-                }
                 // The voices change with the answer: a granted Personal Voice appears in the
                 // list that did not contain it a moment ago.
                 if granted {
@@ -286,6 +273,7 @@ fn installed_voices() -> Vec<Voice> {
         });
     }
     let personal = out.iter().filter(|v| v.personal).count();
+    PERSONAL_VOICES_SEEN.store(personal, Ordering::Relaxed);
     crate::logging::line(
         "speech",
         &format!(
@@ -316,31 +304,125 @@ pub fn supported() -> bool {
     AVSpeechSynthesizer::class().metaclass().responds_to(sel!(personalVoiceAuthorizationStatus))
 }
 
+/// How many Personal Voices the last read of the installed voices found — `usize::MAX` until
+/// the worker has read them once, which `personal_voices_seen` turns back into `None`.
+///
+/// A static rather than a field of `AvSpeech`, because the one reader that cannot reach the
+/// instance is the settings switch in `gui.rs`: `run_gui` is handed closures, not the host.
+/// The count is computed on every refresh anyway, for the log line beside it, so keeping it
+/// here costs nothing and asks nothing of the thread that reads it.
+static PERSONAL_VOICES_SEEN: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// The count `installed_voices` logged last, or `None` before it has run at all.
+pub fn personal_voices_seen() -> Option<usize> {
+    match PERSONAL_VOICES_SEEN.load(Ordering::Relaxed) {
+        usize::MAX => None,
+        n => Some(n),
+    }
+}
+
+/// Where this application stands with the user's Personal Voice, as macOS reports it.
+///
+/// Three answers that used to be two. `Denied` and `Unsupported` both arrived as the same
+/// `Some(false)`, and the log then told a tester who had never seen a dialog that he had
+/// refused one. His Mac gave one of these two without any dialog, and nothing here could say
+/// which — so the sentence in `explanation` is written for what is actually known.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PersonalVoice {
+    /// Granted from the dialog: a Personal Voice is among what `installed_voices` returns.
+    Granted,
+    /// macOS said no, and does not say why. Apple's documentation describes the answer as a
+    /// refusal by the user; developers report it coming with no dialog when there is nothing
+    /// to grant. Which of the two the tester's Mac gave is not known — the old `Some(false)`
+    /// could not tell this from `Unsupported`, and that is the question this split answers.
+    Denied,
+    /// This Mac cannot do it at all.
+    Unsupported,
+    /// Nobody has asked yet — or this macOS has no such API, which is the same answer to every
+    /// caller: there is nothing to know until somebody asks, and asking is what
+    /// `request_personal_voice` guards.
+    NotAsked,
+}
+
+impl PersonalVoice {
+    /// Why no dialog is going to come, when none is: `Denied` and `Unsupported` explained for
+    /// the user, `None` for the two answers that need no explaining.
+    ///
+    /// One sentence in one place. The log line in `Speech::pump` and the dialog the settings
+    /// switch puts up in `gui.rs` both say this, and a tester who reads the one after hearing
+    /// the other must not find them disagreeing. It names the count of Personal Voices this
+    /// application can see because that is the one measurement it has — and says what the
+    /// number cannot tell, because a voice this application is not allowed to use is not
+    /// expected in the list at all (see `Speech::use_engine`).
+    pub fn explanation(self) -> Option<String> {
+        match self {
+            PersonalVoice::Granted | PersonalVoice::NotAsked => None,
+            PersonalVoice::Unsupported => Some(
+                "macOS reports that this Mac does not support Personal Voice — it needs macOS \
+                 14 on a Mac with Apple silicon. The setting stays on and changes nothing."
+                    .to_string(),
+            ),
+            PersonalVoice::Denied => {
+                // Left out rather than said as zero before the worker has read the list once:
+                // "none" would be a measurement that was never made. And what the number
+                // cannot tell is said with it: a voice this application may not use is not
+                // expected in the list at all (see `Speech::use_engine`), so "none" is not
+                // evidence that none exists.
+                let seen = match personal_voices_seen() {
+                    None => String::new(),
+                    Some(0) => " Right now this application can see no Personal Voice, which \
+                                settles nothing: one only appears in its list once the \
+                                application is allowed to use it."
+                        .to_string(),
+                    Some(1) => " Right now this application can see one Personal Voice.".to_string(),
+                    Some(n) => format!(" Right now this application can see {n} Personal Voices."),
+                };
+                // Two causes, told apart by nothing macOS reports: Apple documents the
+                // answer as the user's refusal, and it also comes, with no dialog, while
+                // applications are not allowed to use a Personal Voice — a Mac with none
+                // recorded has nothing to allow. The option's name is quoted from Apple's
+                // macOS 14 guide, not from memory of a pane nobody here has seen.
+                Some(format!(
+                    "macOS answered 'denied' without showing a dialog. It gives that answer \
+                     after a refusal, and whenever applications are not allowed to use a \
+                     Personal Voice — the switch for that is in System Settings > \
+                     Accessibility > Personal Voice, named 'Allow applications to use your \
+                     Personal Voice', and a Mac with no Personal Voice recorded has nothing to \
+                     switch on.{seen} If you have one and the switch is on, quit this \
+                     application, open it again and tick this setting once more."
+                ))
+            }
+        }
+    }
+}
+
 /// The Personal Voice authorisation as it stands, without asking anybody.
 ///
-/// `Some(true)` granted, `Some(false)` refused, `None` never asked — or no such API on this
-/// macOS, which is the same answer to every caller: there is nothing to offer yet.
+/// A property read that raises nothing, cheap enough to make at the moment the answer is
+/// needed — see `Job::Refresh` for why it is no longer kept in a snapshot.
 ///
 /// Guarded by `respondsToSelector` on the CLASS, for the reason `installed_voices` gives:
 /// these bindings carry no availability information, and a selector that does not exist is
-/// not a `None` but a dead process.
-fn personal_status() -> Option<bool> {
+/// not a `NotAsked` but a dead process.
+pub fn personal_status() -> PersonalVoice {
     // The METACLASS, not the class: `personalVoiceAuthorizationStatus` is a class method, and
     // `responds_to` on a class object answers about its INSTANCE methods. Asking the wrong one
     // returns false for a selector that exists, which would have quietly reported "nobody has
     // been asked" on every macOS including the ones that can answer.
     if !AVSpeechSynthesizer::class().metaclass().responds_to(sel!(personalVoiceAuthorizationStatus))
     {
-        return None;
+        return PersonalVoice::NotAsked;
     }
     // SAFETY: a class property with no arguments, returning an enum by value.
     let status = unsafe { AVSpeechSynthesizer::personalVoiceAuthorizationStatus() };
     match status {
-        AVSpeechSynthesisPersonalVoiceAuthorizationStatus::Authorized => Some(true),
-        AVSpeechSynthesisPersonalVoiceAuthorizationStatus::Denied
-        | AVSpeechSynthesisPersonalVoiceAuthorizationStatus::Unsupported => Some(false),
+        AVSpeechSynthesisPersonalVoiceAuthorizationStatus::Authorized => PersonalVoice::Granted,
+        AVSpeechSynthesisPersonalVoiceAuthorizationStatus::Denied => PersonalVoice::Denied,
+        AVSpeechSynthesisPersonalVoiceAuthorizationStatus::Unsupported => {
+            PersonalVoice::Unsupported
+        }
         // NotDetermined, and anything a later macOS adds: nobody has been asked.
-        _ => None,
+        _ => PersonalVoice::NotAsked,
     }
 }
 
@@ -351,17 +433,17 @@ fn personal_status() -> Option<bool> {
 /// channel, because everything above it is written as "ask, then act on the answer" and a
 /// callback threaded through the queue would buy nothing.
 fn request_personal_voice() -> bool {
-    // The same metaclass check `personal_status` makes twenty lines above, for the reason it
-    // gives there: these bindings carry no availability information, and a selector that does
-    // not exist is not a `None` but a dead process.
+    // The same metaclass check `personal_status` makes above, for the reason it gives there:
+    // these bindings carry no availability information, and a selector that does not exist
+    // is not a `NotAsked` but a dead process.
     //
     // It was missing here, and the path that reaches this function is exactly the one the
-    // guard exists for. `personal_status` answers `None` on a macOS without the API; `None`
-    // is read by `Speech::pump` as "nobody has been asked yet"; and that is the arm that
-    // sends `Job::AuthorisePersonal`. So on any macOS before 14 — the tester's is 12.7.6 —
-    // ticking the Personal Voice switch would have sent an unrecognised selector to the
-    // class and taken the application down, at the moment somebody deliberately asked for
-    // something. Found by review before it reached him.
+    // guard exists for. `personal_status` answers `NotAsked` on a macOS without the API;
+    // `NotAsked` is read by `Speech::pump` as "nobody has been asked yet"; and that is the
+    // arm that sends `Job::AuthorisePersonal`. So on any macOS before 14 — the tester's is
+    // 12.7.6 — ticking the Personal Voice switch would have sent an unrecognised selector to
+    // the class and taken the application down, at the moment somebody deliberately asked
+    // for something. Found by review before it reached him.
     if !AVSpeechSynthesizer::class()
         .metaclass()
         .responds_to(sel!(requestPersonalVoiceAuthorizationWithCompletionHandler:))
