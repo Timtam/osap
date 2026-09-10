@@ -720,9 +720,11 @@ pub fn run_gui(
                     modal_message(
                         &frame,
                         "Personal Voice",
- "This Mac cannot offer a Personal Voice: the feature arrived in macOS 14, and this system is older.
-
-The setting stays on and                          changes nothing. On a Mac running macOS 14 or later, ticking it                          asks macOS for permission and your Personal Voice then appears                          among the voices a module can choose.",
+                        "This Mac cannot offer a Personal Voice: the feature arrived in macOS \
+                         14, and this system is older.\n\nThe setting stays on and changes \
+                         nothing. On a Mac running macOS 14 or later, ticking it asks macOS \
+                         for permission and your Personal Voice then appears among the \
+                         voices a module can choose.",
                         false,
                     );
                 }

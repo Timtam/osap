@@ -1965,7 +1965,8 @@ pub fn window_controls(hwnd: isize) -> Vec<ControlInfo> {
     } else if budget.nodes_left() <= 0 {
         " — STOPPED ON THE NODE BUDGET, so there may be more"
     } else {
-        " (neither bound was reached; anything below depth 8, or past 256 children of one          node, is still not looked at)"
+        " (neither bound was reached; anything below depth 8, or past 256 children of one \
+         node, is still not looked at)"
     };
     crate::logging::line(
         "macos",

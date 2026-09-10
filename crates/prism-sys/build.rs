@@ -403,12 +403,17 @@ mod windows {
         for runtime in ["LIBCMT", "LIBCMTD"] {
             assert!(
                 !claims(runtime),
-                "prism was built against the STATIC C runtime ({runtime}); rustc links the                  dynamic one. Two CRTs in one process is two heaps: memory allocated on one                  side and freed on the other corrupts the process, later and somewhere else.                  Check CMAKE_MSVC_RUNTIME_LIBRARY."
+                "prism was built against the STATIC C runtime ({runtime}); rustc links the \
+                 dynamic one. Two CRTs in one process is two heaps: memory allocated on one \
+                 side and freed on the other corrupts the process, later and somewhere else. \
+                 Check CMAKE_MSVC_RUNTIME_LIBRARY."
             );
         }
         assert!(
             claims("MSVCRT"),
-            "prism.lib claims no dynamic C runtime at all, so it was built in a way this              script does not understand. Compare `dumpbin -directives` against what              CMAKE_MSVC_RUNTIME_LIBRARY was set to."
+            "prism.lib claims no dynamic C runtime at all, so it was built in a way this \
+             script does not understand. Compare `dumpbin -directives` against what \
+             CMAKE_MSVC_RUNTIME_LIBRARY was set to."
         );
     }
 

@@ -642,7 +642,9 @@ mod engine_list {
             .iter()
             .find(|e| e.available && !e.screen_reader)
             .expect(
-                "no plain voice available — see the line above for how long this waited and                  what the list held; Windows always has sapi and onecore, so an empty list                  here means the speech worker had not finished opening them",
+                "no plain voice available — see the line above for how long this waited and \
+                 what the list held; Windows always has sapi and onecore, so an empty list \
+                 here means the speech worker had not finished opening them",
             )
             .id
             .clone();
