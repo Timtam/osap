@@ -1711,6 +1711,100 @@ lenses, adversarially refuted, eleven findings standing. The three criticals are
       the outside. Leaving a decoy of that shape in place for the one session that finally has
       a Retina display would have been the expensive choice.
 
+## The third macOS session (2026-09-10)
+
+The protocol is `docs/macos-session-three.md`; the results came back from a **different
+machine** — a Mac mini M1 (`Macmini9,1`), macOS 14.5, arm64 native, no Rosetta, backing scale
+1.00, run from the GitHub artifact (ad-hoc signed) by the tester over remote assistance on
+somebody else's account. Twelve findings were drawn from the log and put to 28 refuters; seven
+were wrong or too wide, and three of the corrections were defects in the backend nobody had
+seen. The fixes are in the commits of 2026-09-10; what follows is what the session settled and
+what it left open.
+
+**Settled.**
+
+- **Kontakt/KK on macOS publish no identifiers, and the walks were complete.** Kontakt 7's own
+  tree is 34 elements (28 at depth 1), no `AXIdentifier` anywhere, a handful of names (FILE,
+  LIBRARY, VIEW, SHOP, All Presets, the Brand/Sound Type/Character radio buttons, a Search
+  text field, and a button titled literally `Hide <font color="#ffffff">2702 Presets</font>`),
+  two scrollbars for the two lists, and none of the library tiles or preset rows. Inside REAPER
+  the identical 34 appear as depth-1 children of REAPER's FX window, offset (+246,+210), with
+  no container. Komplete Kontrol inside REAPER publishes nothing — 23 elements, all REAPER's,
+  with KK's whole interface on screen per OCR. Kontakt standalone's window is subrole
+  `AXDialog`, not `AXStandardWindow`. The design consequence is in
+  `docs/nested-overlays-design.md`.
+- **Both four-modifier chords registered and never arrived** (log 35/240/382/587; no
+  "arrived" line; the probe's Cmd+Shift+F9 arrived four of four). Moved to Cmd+Shift-F5/F6 on
+  macOS; registration warns about any chord on Control-Option while VoiceOver runs. The same
+  F6 chord had worked on the tester's own Air in sessions one and two, and he confirmed it
+  still does — the cause is machine-specific and NOT established; the VoiceOver modifier
+  setting (Caps Lock lets Control-Option chords through) is the likeliest difference.
+- **Launch 2 is the log the second session asked for**: with "Speak through VoiceOver" on, the
+  start-up announcement went through VoiceOver (log 592-594). That question is closed.
+- **The first launch spoke with the system voice because VoiceOver was running and the
+  Automation grant was not yet there**; a sighted user without a screen reader hears nothing
+  (`a_reader_is_present`, log 592). His question is answered by design, not by a change.
+
+**Fixed 2026-09-10, from what the log showed.**
+
+- [x] `content_rect` looked at 24 children and the title-bar buttons are the last ones: both
+      Kontakt windows had content == frame, 28 pt wrong, every call. Every child now.
+- [x] 2.0-2.3 s of every 3 s probe stall was `enumerate_windows` at the full timeout across
+      every process; the tap was switched off four times. Bounded per application, hidden and
+      background-only processes skipped, slow ones named; `find`/`findAll` ask only the
+      applications a matcher names (`host.window.apps()`, `host.window.list({pids})`).
+- [x] A busy refusal of the focus observer was retried only on the next application switch —
+      sforzando's restarted process (all seven menus) and REAPER (all of step 7) never got one.
+      Retried on a clock now, frontmost application only, never in quarantine.
+- [x] The menu hold: `host.window.windowsOf(pid)` sees a popup that is a window of its own;
+      `host.keys.passedThrough()` sees the Return/Escape that closed a menu nothing can see,
+      and cuts the hold to 300 ms. The expiry line says whether the window list moved.
+- [x] Personal Voice: denied and unsupported told apart, read live, one sentence in the log
+      and in a dialog on macOS 14 too.
+- [x] Five collapsed string literals; the probe's once-per-session error; the blank-OCR
+      "measured" sentence (`OcrText.skipped`); the dump note about content == frame; the
+      arbiter roster and idle observe lines (749 of 1985 lines); the read-out text logged.
+
+**Open.**
+
+- [ ] **Ask the tester**: the VoiceOver modifier setting on both Macs (VoiceOver Utility >
+      General); whether `~/Library/Application Support/AutomationPlatform/` holds the log of
+      the very first launch (the file he sent starts with Accessibility already granted, and
+      the logger appends — the first launch wrote somewhere else or the folder was
+      re-extracted); one Permissions-page row quoted back (he answered "yes." to the request
+      for a quote).
+- [ ] **The sforzando first-run dialog** is not accessible and sforzando refused accessibility
+      for ~4 minutes after install (log 742-808). The overlay did NOT activate while the
+      dialog was up — activation came the second the app first answered — so "DEF read as
+      550." is still unexplained; the read-out text is logged now, so next time it will be.
+      A probe press over that dialog would say what it is.
+- [ ] **Step 7 was structurally dead**: no F6, and REAPER without an observer, so the in-DAW
+      overlay (event-driven, no poll) could never re-evaluate. Both fixed; untested. The
+      VOCR-click route still cannot wake it — a keyboard moved into a view exposing no AX
+      element fires no notification (`daw-hosts` says so) — only F6's own recheck can.
+- [ ] **CI artifacts are ad-hoc signed** (`package-macos.sh` falls back when no identity is
+      in the keychain; the workflow has none). Every new download is a new identity and all
+      four grants are lost. A self-signed certificate exported once and kept as a GitHub
+      secret, imported by the workflow, would give artifacts one identity; needs the
+      maintainer's hand.
+- [ ] **ownsPoint is unanswerable on macOS** and nil is read as permission; unrelated
+      windows (a Software Update alert, a 1892x1055 Safari window, the remote-assist window)
+      overlapped every probed window's centre all session. Documented; not implemented.
+- [ ] ~16 sub-threshold pump blocks per session on focus changes — `[recheck] 'sforzando'`
+      re-asking `window.active` synchronously while Finder takes 106-229 ms to answer. Not
+      reported by the 250 ms line; the front memory covers the busy case, not the slow one.
+- [ ] The first Tab after a pause costs 134-166 ms against 30-58 otherwise, all in the value
+      read: Vision goes cold after a few seconds idle. Measured, not addressed.
+- [ ] The REAPER plugin-origin rule holds for Kontakt to 1-3 pt after the `content_rect`
+      fix, with x consistently 2 pt left of the logo; whether `REAPER_LIST_GAP` (9) is 2 pt
+      too wide for every plugin or REAPER's popup is inset cannot be told without a
+      sforzando-in-REAPER probe from the same build.
+- [ ] Protocol step 5 asked for "a Dock icon for the error window" — a window cannot have
+      its own on macOS; the application's icon while the window is up is the answer he gave.
+      Reword next time. Step 1 assumed a local build; the artifact route needs its own text.
+- [ ] `docs/macos-session-three.md` still names the old chords in its keys table; it is the
+      protocol as sent and carries a note now. The fourth protocol is the one to write fresh.
+
 ## The second macOS session (2026-09-04)
 
 The protocol is `docs/macos-session-two.md`; his answers and log came back the same evening.

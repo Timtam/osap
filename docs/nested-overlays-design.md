@@ -44,6 +44,26 @@ Identity is **not** OCR-of-a-name. Each level uses a different primitive:
 3. **OCR: only for transient pixel values** (snapshot/preset name), never for
    identity.
 
+### What the same three layers have on macOS (measured 2026-09-10)
+
+Layer 1 does not exist there. The third Mac session probed Kontakt 7 standalone, Kontakt
+inside REAPER and Komplete Kontrol inside REAPER on an M1 mini running macOS 14.5, with
+complete walks: **no element of any of them publishes an `AXIdentifier`**, so the Qt object
+names the Windows layer keys on never reach the accessibility tree. What Kontakt publishes is
+a flat list of 34 elements — a handful of named buttons (FILE, LIBRARY, VIEW, SHOP, All
+Presets, the Brand/Sound Type/Character radio group, a Search field, a button whose title
+carries the live preset count as literal HTML), two scrollbars that give the two lists'
+position and height, and none of the library tiles or preset rows. Inside REAPER those same
+34 appear as **direct children of REAPER's FX window** with no container for the plugin, at a
+fixed offset from the plugin's panel. Komplete Kontrol inside REAPER publishes **nothing** of
+its own. Kontakt standalone's window is subrole `AXDialog`.
+
+So on macOS the stack is: **REAPER's FX window by title, the plugin's panel by the
+`daw-hosts` origin rule (which the Kontakt probe confirmed to 1-3 pt), Kontakt's named AX
+buttons as anchors and click targets where they exist, image templates (layer 2) and OCR
+(layer 3) for everything else — and for Komplete Kontrol, image and OCR only.** The nested
+design ports; the identifiers do not. (`TODO.md`, "The third macOS session".)
+
 ## Provider stack + origin stacking + triggers
 
 - Resolve the nesting **top-down** into an explicit **provider stack**

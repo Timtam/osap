@@ -27,6 +27,11 @@ Where a step exists to check one of those things, it says so.
 | Put the keyboard back into a plugin window | **Control-Shift-Command-Option-F6** |
 | Reload every module | **Control-Shift-Command-Option-F5** |
 
+> **Superseded on 2026-09-10.** Both four-modifier chords sit on Control-Option, VoiceOver's
+> own modifier, and never arrived on the Mac this protocol was run on. In builds after that
+> date they are **Command-Shift-F6** and **Command-Shift-F5**. The table above is the protocol
+> as it was sent.
+
 ---
 
 ## 1. Setting the machine up
