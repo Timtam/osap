@@ -3254,7 +3254,17 @@ pub fn run(dirs: &[String]) -> Result<()> {
 /// Deliberately awkward. This rebuilds every module's VM while the user is working in some
 /// other application, so it must be impossible to hit by accident; and the modules themselves
 /// claim ordinary combinations, so it has to stay out of their way.
-const RELOAD_HOTKEY_SPEC: &str = "Ctrl+Shift+Win+Alt+F5";
+///
+/// Two spellings, because the awkward one cannot be pressed on a Mac. Win and Alt become
+/// Command and Option there, and Control-Option together is VoiceOver's own modifier:
+/// VoiceOver takes those chords in the window server, above anything an application can
+/// register or tap, and answers an unassigned one with its error sound. The third Mac session
+/// measured exactly that — registered on both launches, never delivered, a beep for every
+/// press — on a Mac with the default VoiceOver modifier, after two sessions on another Mac
+/// where the same chord had arrived. Command-Shift is what the probe's key uses, and that one
+/// arrived four times out of four on the same machine.
+const RELOAD_HOTKEY_SPEC: &str =
+    if cfg!(target_os = "macos") { "Cmd+Shift+F5" } else { "Ctrl+Shift+Win+Alt+F5" };
 
 /// Rebuild every module from source, dependencies before dependents.
 ///

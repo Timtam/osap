@@ -318,10 +318,23 @@ mod tests {
         assert_eq!(mask_to_carbon(0), 0);
     }
 
-    /// The reload key the host registers for itself, spelled out. If this one stops
+    /// The reload key the host registers for itself on a Mac, spelled out. If this one stops
     /// translating, the tester loses the only way to reload a module without a mouse.
+    ///
+    /// Command-Shift, not the four-modifier chord Windows uses: that one carries
+    /// Control-Option, VoiceOver's modifier, and the third Mac session measured it as
+    /// registered and never delivered. The old spelling still has to translate — a module
+    /// may spell a chord that way — it just must not be the host's own key any more.
     #[test]
     fn the_reload_hotkey_translates() {
+        let (vk, mask) = key_spec("Cmd+Shift+F5").unwrap();
+        assert_eq!(vk_to_keycode(vk), Some(0x60));
+        assert_eq!(mask_to_carbon(mask), 0x0300);
+        assert_eq!(
+            mask & (MASK_CTRL | MASK_ALT),
+            0,
+            "the Mac reload key must stay off VoiceOver's modifier"
+        );
         let (vk, mask) = key_spec("Ctrl+Shift+Win+Alt+F5").unwrap();
         assert_eq!(vk_to_keycode(vk), Some(0x60));
         assert_eq!(mask_to_carbon(mask), 0x1B00);

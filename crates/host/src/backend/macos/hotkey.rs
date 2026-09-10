@@ -65,6 +65,28 @@ pub fn register(id: i32, spec: &str) -> Result<(), String> {
     })?;
     let modifiers = keys::mask_to_carbon(mask);
 
+    // Said here, at registration, because a chord VoiceOver owns leaves no trace anywhere
+    // else: Carbon accepts it, no press ever arrives, and the only symptom is a sound the
+    // log cannot hear. Control-Option is VoiceOver's modifier on any Mac that keeps the
+    // default setting (Caps Lock is the alternative, and some long-time users choose it —
+    // which is why the same chord worked for two sessions on one tester's Mac and never
+    // once on another). Not an error: the registration is legal, the setting is the user's,
+    // and a chord that reaches nobody is still better explained than refused.
+    const VOICEOVER_PAIR: u8 = crate::backend::MASK_CTRL | crate::backend::MASK_ALT;
+    if mask & VOICEOVER_PAIR == VOICEOVER_PAIR && super::perm::voiceover_running() {
+        crate::logging::line(
+            "macos",
+            &format!(
+                "hotkey '{spec}' sits on Control-Option, which is VoiceOver's modifier, and \
+                 VoiceOver is running: with the default VoiceOver modifier this chord is taken \
+                 by VoiceOver before any application sees it, and pressing it plays \
+                 VoiceOver's error sound. It registers fine and never arrives. A chord without \
+                 both Control and Option — Command-Shift-<key> is measured to arrive — is the \
+                 fix; VoiceOver Utility > General > modifier set to Caps Lock is the workaround"
+            ),
+        );
+    }
+
     install_handler()?;
 
     // Re-registering an id replaces what was there, which is the documented behaviour on

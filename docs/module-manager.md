@@ -58,11 +58,12 @@ other modules. Useful while **developing** a module.
 - Other modules that **inherit this module's code** (`code_module` dependents)
   keep their old copy until restarted — the reload dialog names them.
 
-### Reload everything: Ctrl+Shift+Win+Alt+F5
+### Reload everything: Ctrl+Shift+Win+Alt+F5, or Command-Shift-F5 on a Mac
 
-> On macOS the same combination means Control-Shift-Command-Option-F5, and it needs
-> either "Use F1, F2, etc. as standard function keys" turned on in System Settings or
-> the `fn` key held down as well.
+> Not the same chord translated: the Windows one would carry Control-Option on a Mac, which
+> is VoiceOver's own modifier and never reaches an application while VoiceOver keeps its
+> default setting. Either way it uses an F-key, so on a Mac it needs "Use F1, F2, etc. as
+> standard function keys" turned on in System Settings or the `fn` key held down as well.
 
 The same rebuild for **every** loaded module at once, on a **system-wide** key — it
 works from inside the plugin you are testing, so you never have to leave it, find the

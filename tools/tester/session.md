@@ -104,7 +104,7 @@ TESTER FEEDBACK:
 ## 5. Getting into the plugin inside REAPER
 
 Load sforzando as an FX in REAPER, open its window, then move the focus away — into the track
-list or the FX list. Press Control-Shift-Command-Option-F6. Then press Tab.
+list or the FX list. Press Command-Shift-F6. Then press Tab.
 
 You told us this spoke the right title but usually did not really move you: Tab kept walking
 REAPER's own controls, and one Shift+Tab fixed it. That fits — bringing a window forward is

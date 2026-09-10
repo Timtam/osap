@@ -167,13 +167,20 @@ fixed in `package-macos.sh` and not to be edited casually.
 ## Keys, and where they land on a Mac
 
 **Control-Option is VoiceOver's own modifier**, so anything on it belongs to VoiceOver
-first. Two things in this project sit there, and neither is an overlay shortcut:
+first — on any Mac whose VoiceOver modifier is the default. (VoiceOver Utility > General
+offers Caps Lock instead, and a Mac set that way lets Control-Option chords through, which
+is how one chord can work for a tester on his own Mac and beep on somebody else's.) Two of
+this project's keys used to sit there, and the third Mac session measured what that costs:
+registered on both launches, never delivered, VoiceOver's error sound on every press.
 
-- the **calibrator's** `Ctrl+Alt+Shift+S/T/V`, which only exist in a run started with
-  `AUTOMATION_PLATFORM_CALIBRATE=1`, and
-- the application's own **reload-everything** key, `Ctrl+Shift+Win+Alt+F5`. It also uses an
-  F-key, so it additionally needs "Use F1, F2, etc. as standard function keys" turned on, or
-  the `fn` key held down.
+- The application's own **reload-everything** key is `Ctrl+Shift+Win+Alt+F5` on Windows
+  and **Command-Shift-F5** on a Mac; the `daw-hosts` key that puts the keyboard back into a
+  plugin window is `Ctrl+Shift+Win+Alt+F6` and **Command-Shift-F6** likewise. Both use an
+  F-key, so they additionally need "Use F1, F2, etc. as standard function keys" turned on,
+  or the `fn` key held down.
+- The **calibrator's** `Ctrl+Alt+Shift+S/T/V` still sit on Control-Option. They only exist
+  in a run started with `AUTOMATION_PLATFORM_CALIBRATE=1`, and the log now says at
+  registration when a chord is on VoiceOver's modifier while VoiceOver is running.
 
 The overlays themselves use `Alt+<key>`, `Ctrl+<key>` and `Ctrl+Shift+<key>`, and their
 macOS question is a different one:

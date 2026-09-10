@@ -841,7 +841,7 @@ fn backing_scale(cg_primary: Option<f64>) -> String {
 /// By bundle id rather than by walking every running application: this is a single lookup
 /// against the workspace's index instead of a list scan, and the id is stable across every
 /// macOS version we care about.
-fn voiceover_running() -> bool {
+pub(super) fn voiceover_running() -> bool {
     let id = NSString::from_str("com.apple.VoiceOver");
     !NSRunningApplication::runningApplicationsWithBundleIdentifier(&id).is_empty()
 }

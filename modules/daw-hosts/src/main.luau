@@ -88,7 +88,18 @@ local plugin_windows = {
 -- offers no command for it, and a plugin window opened inside a DAW is then genuinely hard to
 -- return to — which is what the tester ran into. Same shape as the platform's reload key, one
 -- function key along, because a global shortcut has to be one nothing else wants.
-local FOCUS_PLUGIN_WINDOW = "Ctrl+Shift+Win+Alt+F6"
+--
+-- Not the same chord on both platforms. The four-modifier one carries Control and Option
+-- together on a Mac, and that pair is VoiceOver's own modifier: on a Mac whose VoiceOver
+-- modifier is the default Control-Option, the chord is taken by VoiceOver before any
+-- application sees it and pressing it plays VoiceOver's error sound. The third Mac session
+-- measured that — registered, never delivered — on a machine where the probe's Command-Shift
+-- key arrived every time, so the Mac gets that shape instead.
+local FOCUS_PLUGIN_WINDOW = host.os.pick {
+  windows = "Ctrl+Shift+Win+Alt+F6",
+  macos = "Cmd+Shift+F6",
+  linux = "Ctrl+Shift+Win+Alt+F6",
+}
 
 -- Where the keyboard is, relative to the window we just asked for, as one of three words.
 --
