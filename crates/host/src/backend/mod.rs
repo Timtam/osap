@@ -132,6 +132,16 @@ pub(crate) fn ask_for(_name: &str) -> bool {
     false
 }
 
+/// One running application, as `host.window.apps()` lists them and as `find` narrows its
+/// search by. The same three identities a window table's `app` carries, so a matcher's `app`
+/// clause tests against either without knowing which.
+#[derive(Clone, Debug)]
+pub struct AppInfo {
+    pub pid: u32,
+    pub exe: String,
+    pub bundle_id: String,
+}
+
 /// A snapshot of a window's matchable properties (normalized across platforms).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WinInfo {
@@ -252,6 +262,38 @@ pub trait Backend {
     fn environment(&self) -> Vec<(String, String)>;
 
     fn enumerate_windows(&self) -> Vec<WinInfo>;
+
+    /// The windows of these processes only.
+    ///
+    /// The unfiltered listing asks every running application a question, and on macOS that
+    /// is a cross-process call per application with a timeout each; one wedged process
+    /// costs the whole timeout, on the thread that carries the event tap. The third Mac
+    /// session put a number on it: 2.0-2.3 s of a 3 s stall per press was this listing,
+    /// every press, because some unrelated application never answered. A matcher that
+    /// names an application — and every shipped one does — has no business asking the
+    /// others, so `find`/`findAll` resolve the named ones through `running_apps` (local,
+    /// cheap) and come here with the pids. The default filters the full listing, which is
+    /// right where enumeration is local (Windows); the macOS backend overrides it.
+    fn enumerate_windows_of(&self, pids: &[u32]) -> Vec<WinInfo> {
+        self.enumerate_windows().into_iter().filter(|w| pids.contains(&w.pid)).collect()
+    }
+
+    /// Every running application, without asking any of them anything.
+    ///
+    /// Local on every platform: the workspace's own list on macOS, and on Windows the
+    /// owners of the visible top-level windows, which is the same set of processes a window
+    /// search could ever find anything in. What a matcher's `app` clause is tested against
+    /// before any window is asked for.
+    fn running_apps(&self) -> Vec<AppInfo> {
+        let mut out: Vec<AppInfo> = Vec::new();
+        for w in self.enumerate_windows() {
+            if !out.iter().any(|a| a.pid == w.pid) {
+                out.push(AppInfo { pid: w.pid, exe: w.exe.clone(), bundle_id: w.bundle_id.clone() });
+            }
+        }
+        out
+    }
+
     fn active_window(&self) -> Option<WinInfo>;
 
     /// Brings a window to the front and gives it the keyboard.

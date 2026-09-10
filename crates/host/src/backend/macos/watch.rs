@@ -24,7 +24,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use objc2_app_kit::{
@@ -102,11 +102,43 @@ enum Watched {
 /// that genuinely has no accessibility to offer.
 const REFUSAL_RETRIES: u8 = 3;
 
+/// A BUSY refusal is asked again on a clock, not only on the next application switch.
+///
+/// The third Mac session showed what "only on the next switch" costs. The tester restarted
+/// sforzando; the new process refused its first subscription as busy, and the retry that
+/// would have come with the next activation never came, because he stayed inside sforzando
+/// for the rest of the session — every menu he opened ran in a process with no observer,
+/// so whether its menus post `AXMenuOpened` is still unknown. REAPER got the same
+/// treatment: refused once, frontmost until the end, never asked again, and the overlay that
+/// waits for REAPER's focus notifications could not wake. Both applications were frontmost
+/// the whole time, which is the one case a switch-driven retry cannot cover.
+///
+/// Doubling from two seconds and capped at a minute, ten times, so a plugin that takes a
+/// minute to load its samples is caught within a minute and a half and one that never answers
+/// costs a bounded handful of calls. Only the FRONTMOST application is retried — it is the
+/// one the user is in, and the only one whose notifications matter until they switch, at
+/// which point the activation path asks anyway — and never while it is in the busy
+/// quarantine, because a subscription attempt against a wedged process is a messaging
+/// timeout paid on the thread that carries the event tap.
+const RETRY_FIRST: Duration = Duration::from_secs(2);
+const RETRY_CAP: Duration = Duration::from_secs(60);
+const RETRY_MAX: u8 = 10;
+
+/// One application waiting to be asked again.
+struct Retry {
+    app: String,
+    due: Instant,
+    tries: u8,
+}
+
 thread_local! {
     /// pid to what we know about it. A `Refused` entry that has used up its retries is an
     /// application that will not be asked again, kept so a DAW that cannot be observed costs
     /// a few attempts rather than one per window switch for the rest of the session.
     static OBSERVERS: RefCell<HashMap<i32, Watched>> = RefCell::new(HashMap::new());
+
+    /// Applications that refused as busy and are owed another attempt. See [`RETRY_FIRST`].
+    static RETRY: RefCell<HashMap<i32, Retry>> = RefCell::new(HashMap::new());
 
     /// The two menu-tracking notification names.
     ///
@@ -353,23 +385,96 @@ fn ensure_observer(pid: i32, app: &str) {
 
     match create_observer(pid, app) {
         Ok(live) => {
-            crate::logging::line("macos", &format!("observing focus in {app} (pid {pid})"));
+            let after = RETRY.with(|r| r.borrow_mut().remove(&pid)).map(|r| r.tries);
+            crate::logging::line(
+                "macos",
+                &match after {
+                    Some(n) => format!("observing focus in {app} (pid {pid}), on retry {n}"),
+                    None => format!("observing focus in {app} (pid {pid})"),
+                },
+            );
             OBSERVERS.with(|o| o.borrow_mut().insert(pid, Watched::Live(live)));
         }
         Err(refusal) => {
-            crate::logging::line(
-                "macos",
-                &format!(
-                    "no focus observer for {app} (pid {pid}): {} — overlays inside this \
-                     application will only notice a change when it is brought to the front",
-                    refusal.reason
-                ),
-            );
             if refusal.permanent {
+                crate::logging::line(
+                    "macos",
+                    &format!(
+                        "no focus observer for {app} (pid {pid}): {} — overlays inside this \
+                         application will only notice a change when it is brought to the \
+                         front",
+                        refusal.reason
+                    ),
+                );
                 OBSERVERS.with(|o| o.borrow_mut().insert(pid, Watched::Refused(already_refused + 1)));
+            } else {
+                schedule_retry(pid, app, &refusal.reason);
             }
         }
     }
+}
+
+/// Puts a busy application on the clock, or gives up on it after [`RETRY_MAX`] attempts.
+fn schedule_retry(pid: i32, app: &str, reason: &str) {
+    RETRY.with(|r| {
+        let mut r = r.borrow_mut();
+        let tries = r.get(&pid).map(|e| e.tries).unwrap_or(0);
+        if tries >= RETRY_MAX {
+            r.remove(&pid);
+            crate::logging::line(
+                "macos",
+                &format!(
+                    "no focus observer for {app} (pid {pid}): {reason} — asked {tries} times \
+                     over a minute and a half; it will be asked again when it next comes to \
+                     the front, and until then overlays inside it only notice a change when \
+                     it is brought to the front"
+                ),
+            );
+            return;
+        }
+        let wait = RETRY_FIRST.saturating_mul(1u32 << tries.min(6)).min(RETRY_CAP);
+        crate::logging::line(
+            "macos",
+            &format!(
+                "no focus observer for {app} (pid {pid}): {reason} — asking again in {} s \
+                 (attempt {} of {RETRY_MAX})",
+                wait.as_secs(),
+                tries + 1
+            ),
+        );
+        r.insert(pid, Retry { app: app.to_string(), due: Instant::now() + wait, tries: tries + 1 });
+    });
+}
+
+/// Asks the frontmost application again if it refused as busy and its turn has come.
+///
+/// Called from the pump on every iteration; costs one map lookup when nothing is owed. Only
+/// the frontmost application, and never one in the busy quarantine — see [`RETRY_FIRST`]
+/// for why both.
+pub fn retry_refused() {
+    let front = FRONT_PID.load(Ordering::Relaxed);
+    let owed = RETRY.with(|r| {
+        r.borrow()
+            .get(&front)
+            .filter(|e| Instant::now() >= e.due)
+            .map(|e| e.app.clone())
+    });
+    let Some(app) = owed else {
+        return;
+    };
+    if super::ax::is_busy(front) {
+        // The due time stays in the past; the next iteration after the quarantine clears
+        // asks. Traced, not logged: this can be true on every iteration for five seconds.
+        crate::logging::trace("macos", || {
+            format!("not asking {app} (pid {front}) for notifications yet, it is in quarantine")
+        });
+        return;
+    }
+    if NSRunningApplication::runningApplicationWithProcessIdentifier(front).is_none() {
+        RETRY.with(|r| r.borrow_mut().remove(&front));
+        return;
+    }
+    ensure_observer(front, &app);
 }
 
 /// Creates the observer, subscribes it, and puts it on this thread's run loop.

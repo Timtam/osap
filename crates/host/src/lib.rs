@@ -4017,13 +4017,50 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         })?,
     )?;
 
+    // host.window.list(filter?) — every titled top-level window, or with `{ pids = {…} }`
+    // only those applications' windows. The prelude's `find`/`findAll` pass the pids of the
+    // applications a matcher names, because on macOS the unfiltered listing is a
+    // cross-process question per running application and the answer to "where is REAPER's
+    // FX window" should not wait on a process the matcher never mentioned.
     let sh = shared.clone();
     win.set(
         "list",
+        lua.create_function(move |lua, filter: Option<Table>| {
+            let pids: Option<Vec<u32>> = match filter {
+                Some(f) => f.get::<Option<Vec<u32>>>("pids")?,
+                None => None,
+            };
+            let t = lua.create_table()?;
+            let windows = match pids {
+                Some(p) => sh.backend.enumerate_windows_of(&p),
+                None => sh.backend.enumerate_windows(),
+            };
+            for w in windows {
+                t.push(win_to_table(lua, &w)?)?;
+            }
+            Ok(t)
+        })?,
+    )?;
+    // host.window.apps() — the running applications, as the `app` table of a window would
+    // describe them, without asking any of them anything. What a matcher's `app` clause is
+    // tested against before a single window is listed.
+    let sh = shared.clone();
+    win.set(
+        "apps",
         lua.create_function(move |lua, ()| {
             let t = lua.create_table()?;
-            for w in sh.backend.enumerate_windows() {
-                t.push(win_to_table(lua, &w)?)?;
+            for a in sh.backend.running_apps() {
+                let app = lua.create_table()?;
+                let name = a
+                    .exe
+                    .rsplit_once('.')
+                    .map(|(stem, _)| stem.to_string())
+                    .unwrap_or_else(|| a.exe.clone());
+                app.set("name", name)?;
+                app.set("exe", a.exe.clone())?;
+                app.set("bundleId", a.bundle_id.clone())?;
+                app.set("pid", a.pid)?;
+                t.push(app)?;
             }
             Ok(t)
         })?,

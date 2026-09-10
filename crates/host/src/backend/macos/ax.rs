@@ -40,8 +40,7 @@ use objc2_app_kit::{
     NSAccessibilityParentAttribute, NSAccessibilityPositionAttribute, NSAccessibilityRoleAttribute,
     NSAccessibilitySizeAttribute, NSAccessibilitySubroleAttribute, NSAccessibilityTitleAttribute,
     NSAccessibilityValueAttribute, NSAccessibilityWindowsAttribute, NSApplicationActivationOptions,
-    NSRunningApplication,
-    NSWorkspace,
+    NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace,
 };
 use objc2_application_services::{
     AXCopyMultipleAttributeOptions, AXError, AXUIElement, AXValue, AXValueType,
@@ -1105,20 +1104,32 @@ fn content_rect(el: &AXUIElement, snap: &Snap, frame: CGRect, hwnd: isize) -> CG
     }
     let mut best: Option<CGRect> = None;
     let mut button_centre: Option<f64> = None;
-    for child in children(el).into_iter().take(24) {
-        let Some(r) = element_rect_cg(&child) else {
+    // Every child, and one batched read each. This used to stop after 24, and the window's
+    // own close/zoom/minimise buttons — the measuring instrument below — are the LAST
+    // children in every dump this project holds: 11th of 13 for sforzando, 29th of 32 for
+    // Kontakt 7 standalone, 41st of 45 for Kontakt inside REAPER's FX window. The cap walked
+    // straight past them on both Kontakt windows, silently: content came back equal to the
+    // frame, nothing was remembered (a failure never is), and every authored Kontakt
+    // coordinate would have landed one title bar too high — on exactly the large plugin
+    // windows the port exists for, and only on those, because a small window keeps its
+    // buttons inside the first 24. `snapshot` reads subrole and rect in one call, so the
+    // cost is one call per child, once per window handle; `children` already caps at 256.
+    for child in children(el) {
+        let child_snap = snapshot(&child);
+        let Some(r) = child_snap.rect else {
             continue;
         };
         // The window's own buttons, which are the measuring instrument when there is no
         // content view to find. See below.
-        if let Some(s) = attribute_string(&child, a_subrole()) {
-            if matches!(s.as_str(), "AXCloseButton" | "AXMinimizeButton" | "AXZoomButton") {
-                let centre = r.origin.y + r.size.height / 2.0 - frame.origin.y;
-                if centre > 0.0 && button_centre.is_none_or(|c| centre < c) {
-                    button_centre = Some(centre);
-                }
-                continue;
+        if matches!(
+            child_snap.subrole.as_str(),
+            "AXCloseButton" | "AXMinimizeButton" | "AXZoomButton"
+        ) {
+            let centre = r.origin.y + r.size.height / 2.0 - frame.origin.y;
+            if centre > 0.0 && button_centre.is_none_or(|c| centre < c) {
+                button_centre = Some(centre);
             }
+            continue;
         }
         let inset = r.origin.y - frame.origin.y;
         let spans = r.size.width >= frame.size.width - 2.0;
@@ -1262,82 +1273,167 @@ fn win_info(el: CFRetained<AXUIElement>, require_title: bool) -> Option<WinInfo>
     })
 }
 
-/// Visible windows with a non-empty title.
+/// How long one application may take to list its windows when NOBODY asked for that
+/// application in particular.
 ///
-/// Cold: no shipped module calls `host.window.list`, and the prelude's `find`/`findAll`
-/// helpers are the only callers. Correctness over speed — but still bounded, because this
-/// asks every running application a question and one of them being wedged must not become
-/// our problem.
-pub fn enumerate_windows() -> Vec<WinInfo> {
-    let t = Instant::now();
+/// The process-wide timeout is a second, and the unfiltered listing asks every running
+/// application in turn, so one process that never answers costs the whole second on the
+/// thread that carries the event tap — measured on the third Mac session at 2.0-2.3 s of a
+/// 3 s stall per probe press, four presses out of four, each of them switching the tap off.
+/// A quarter second is what the messaging timeout used to be before a slow-but-alive plugin
+/// on a 2015 Air needed the full second, and that plugin is exactly the case this bound does
+/// NOT touch: an application a matcher names is asked through `enumerate_windows_of`, at the
+/// full timeout. Only the applications nobody asked about get the short one.
+const UNASKED_APP_TIMEOUT: f32 = 0.25;
+
+/// An application that takes this long to list its windows is named in the log. Not the
+/// timeout — a slow answer is the shape of the stall, and a second of it is invisible in a
+/// line that only says the whole listing took two.
+const SLOW_APP_MS: u128 = 100;
+
+/// Every running application that could own a window, without asking any of them anything.
+///
+/// Local: the workspace's list, plus the two per-pid lookups that are already cached on this
+/// thread. Background-only processes (`Prohibited` activation policy — helpers, agents,
+/// XPC services) are left out because they cannot have a window, and asking each of them
+/// for `AXWindows` is a cross-process call apiece; there are more of them than of everything
+/// else together.
+pub fn running_apps() -> Vec<crate::backend::AppInfo> {
     let mut out = Vec::new();
     let apps = NSWorkspace::sharedWorkspace().runningApplications();
-    for app in apps.iter().take(256) {
+    for app in apps.iter().take(512) {
         let pid = app.processIdentifier();
-        if pid <= 0 {
+        if pid <= 0 || app.activationPolicy() == NSApplicationActivationPolicy::Prohibited {
             continue;
         }
+        out.push(crate::backend::AppInfo {
+            pid: pid as u32,
+            exe: exe_for_pid(pid),
+            bundle_id: bundle_id_for_pid(pid),
+        });
+    }
+    out
+}
+
+/// Visible windows with a non-empty title, across every application.
+///
+/// The cold path: `host.window.list()` with no filter, and `find`/`findAll` for a matcher
+/// that names no application. Bounded per application rather than per listing — see
+/// [`UNASKED_APP_TIMEOUT`] — and hidden applications are skipped outright: their windows are
+/// not on screen, and a listing of what is on screen has no reason to wait on them.
+pub fn enumerate_windows() -> Vec<WinInfo> {
+    let mut pids = Vec::new();
+    let apps = NSWorkspace::sharedWorkspace().runningApplications();
+    for app in apps.iter().take(512) {
+        let pid = app.processIdentifier();
+        if pid <= 0
+            || app.isHidden()
+            || app.activationPolicy() == NSApplicationActivationPolicy::Prohibited
+        {
+            continue;
+        }
+        pids.push(pid as u32);
+    }
+    enumerate_windows_in(&pids, UNASKED_APP_TIMEOUT, "enumerate_windows")
+}
+
+/// The windows of the applications a matcher named, at the full messaging timeout.
+///
+/// These are the applications the caller is waiting for an answer about, so a slow one is
+/// given the whole second the process-wide setting allows — the 2015 Air's sforzando never
+/// answered inside a quarter of one, and a listing that left it out would have made the
+/// shortcut say "could not find a plugin window" about a window that was there.
+pub fn enumerate_windows_of(pids: &[u32]) -> Vec<WinInfo> {
+    enumerate_windows_in(pids, MESSAGING_TIMEOUT, "enumerate_windows_of")
+}
+
+fn enumerate_windows_in(pids: &[u32], timeout: f32, what: &str) -> Vec<WinInfo> {
+    let t = Instant::now();
+    let mut out = Vec::new();
+    let mut asked = 0usize;
+    for &pid in pids.iter().take(256) {
+        let pid = pid as i32;
         // The penalty box applies here too. The read below already RECORDS a timeout
         // (`attribute` marks the application busy on CannotComplete); this loop simply never
         // looked before asking, while `frontmost_window_element` has since the quarantine
         // was introduced.
         //
-        // What this buys is narrower than it first read. The tester's F6 — `host.window.find`,
-        // which lists every window — paid the full one-second messaging timeout on every one
-        // of five presses, because one application was not answering; the stalls were on the
-        // thread that carries the event tap, and the tap was switched off twice among them.
-        // This skip spares a press that comes within BUSY_PENALTY (five seconds) of the last
-        // timeout. His presses were 16 to 51 seconds apart, so it would have spared none of
-        // them, and it says nothing about why the key did not work (the focus stayed on the
-        // FX list, a different matter). The fix that would have helped is to ask only the
-        // applications a matcher names — `find` carries an `app` clause this loop never sees
-        // — and that is recorded in TODO.md rather than pretended here.
-        //
         // Logged at line level, not trace, because this is what makes a window vanish from
         // `find` for five seconds, and a module that then reports it could not find a window
-        // is saying something the log has to be able to explain. Bounded: `find`/`findAll`
-        // are the only callers, and the only shipped caller of those is the shortcut.
+        // is saying something the log has to be able to explain. Named, not numbered: a bare
+        // pid is a number the reader has to resolve themselves, and `exe_for_pid` is already
+        // cached on this thread.
         if is_busy(pid) {
-            // Named, not numbered. A module that finds nothing says so to somebody who
-            // cannot see the screen, and "could not find a plugin window" is only
-            // actionable if the log says which application was left out — a bare pid is a
-            // number the reader has to resolve themselves, and `exe_for_pid` is already
-            // cached on this thread.
             crate::logging::line(
                 "macos",
                 &format!(
-                    "enumerate_windows: not asking {} (pid {pid}) for its windows, it did \
-                     not answer a moment ago",
+                    "{what}: not asking {} (pid {pid}) for its windows, it did not answer a \
+                     moment ago",
                     exe_for_pid(pid)
                 ),
             );
             continue;
         }
         let app_el = app_element(pid);
+        // Per element, and this element is created for this call and not remembered — the
+        // window elements it hands back keep the process-wide timeout, because THOSE are
+        // interned and asked again later, and a remembered window that answers in half a
+        // second must not read as "did not answer" for the rest of the session.
+        let _ = unsafe { app_el.set_messaging_timeout(timeout) };
+        let started = Instant::now();
+        asked += 1;
         let Some(v) = attribute(&app_el, a_windows()) else {
-            continue; // no windows, or a process with no accessibility surface at all
+            // No windows, no accessibility surface — or the timeout, which `attribute` has
+            // already written into the quarantine. Named either way when it was slow.
+            name_if_slow(pid, started, what, 0);
+            continue;
         };
         let Some(arr) = v.downcast_ref::<CFArray>() else {
             continue;
         };
         // SAFETY: AXWindows is documented as an array of AXUIElementRef.
         let typed: &CFArray<AXUIElement> = unsafe { arr.cast_unchecked::<AXUIElement>() };
+        let mut listed = 0usize;
         for i in 0..typed.len().min(64) {
             if let Some(w) = typed.get(i) {
                 if let Some(info) = win_info(w, true) {
                     out.push(info);
+                    listed += 1;
                 }
             }
         }
+        name_if_slow(pid, started, what, listed);
     }
     let ms = t.elapsed().as_millis();
     crate::logging::trace("macos", || {
-        format!("enumerate_windows: {} window(s) in {ms} ms", out.len())
+        format!("{what}: {} window(s) from {asked} application(s) in {ms} ms", out.len())
     });
     if ms > SLOW_MS {
-        crate::logging::line("macos", &format!("enumerate_windows blocked the pump for {ms} ms"));
+        crate::logging::line(
+            "macos",
+            &format!(
+                "{what} blocked the pump for {ms} ms listing {asked} application(s) — the \
+                 slow ones are named above"
+            ),
+        );
     }
     out
+}
+
+/// One line per application that took its time, so a two-second listing says WHICH process
+/// the two seconds went to. The stall line alone never did, and the timeout line names an
+/// attribute, not a process.
+fn name_if_slow(pid: i32, started: Instant, what: &str, listed: usize) {
+    let ms = started.elapsed().as_millis();
+    if ms >= SLOW_APP_MS {
+        crate::logging::line(
+            "macos",
+            &format!(
+                "{what}: {} (pid {pid}) took {ms} ms to list its windows ({listed} listed)",
+                exe_for_pid(pid)
+            ),
+        );
+    }
 }
 
 /// Which application is in front. Asked of the workspace, which is local, cheap, and still

@@ -336,11 +336,22 @@ impl Backend for MacBackend {
         queue::run_event_loop(events)
     }
 
+    fn enumerate_windows_of(&self, pids: &[u32]) -> Vec<WinInfo> {
+        ax::enumerate_windows_of(pids)
+    }
+
+    fn running_apps(&self) -> Vec<crate::backend::AppInfo> {
+        ax::running_apps()
+    }
+
     fn pump_pending(&self, events: &mut dyn HostEvents) {
         // Belt and braces. The tap re-enables itself from a run-loop observer, but the
         // moment it most needs to is the moment this thread was too busy to answer — so it
         // is also asked here, where being busy has just finished. Rate-limited inside.
         tap::health_check();
+        // A busy application owed another subscription attempt gets it here, on the clock,
+        // rather than only when the user next switches applications — see watch.rs.
+        watch::retry_refused();
         queue::drain(events);
     }
 }

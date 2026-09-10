@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 116 entries.
+Every call the platform offers a module, in one place. 117 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -74,12 +74,13 @@ Finding windows and the surfaces inside them, and reacting when the focus moves.
 | | |
 |---|---|
 | [`host.window.active()`](window#host-window-active) | Returns the window table for the foreground window, or `nil` if there is none. |
+| [`host.window.apps()`](window#host-window-apps) | The running applications, described the way a window table's `app` field describes them |
 | [`host.window.controls(win?)`](window#host-window-controls) | Returns the child control tables of `win` (its `id` is used), or of the active window when omitted. |
-| [`host.window.find(matcher)`](window#host-window-find) | Returns the first window from `host.window.list()` that satisfies `matcher`, or `nil`. |
-| [`host.window.findAll(matcher)`](window#host-window-findall) | Returns all windows from `host.window.list()` that satisfy `matcher`. |
+| [`host.window.find(matcher)`](window#host-window-find) | Returns the first window that satisfies `matcher`, or `nil`. |
+| [`host.window.findAll(matcher)`](window#host-window-findall) | Returns all windows that satisfy `matcher`, listed the same narrowed way as `find`. |
 | [`host.window.focus(id)`](window#host-window-focus) | Brings the window with that handle to the front and gives it the keyboard. |
 | [`host.window.focusChain()`](window#host-window-focuschain) | Returns control tables from the currently focused element up to its top-level window. |
-| [`host.window.list()`](window#host-window-list) | Returns an array of window tables for all enumerable top-level windows. |
+| [`host.window.list(filter?)`](window#host-window-list) | Returns an array of window tables for all enumerable top-level windows |
 | [`host.window.onFocus(cb)`](window#host-window-onfocus) | Registers `cb` to fire whenever the keyboard focus moves — including within the same top-level window. |
 | [`host.window.onTrigger(matcher, opts, cb)`](window#host-window-ontrigger) | Registers `cb` to fire on every foreground change for which the new active window satisfies `matcher`. |
 | [`host.window.ownsPoint(id, x, y)`](window#host-window-ownspoint) | Whether the window `id` belongs to is the one drawn at that screen point. |

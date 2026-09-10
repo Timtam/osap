@@ -1,5 +1,5 @@
 -- host.window matcher prelude.
--- The native side (Rust) provides host.window.list()/active() and host.os.
+-- The native side (Rust) provides host.window.list()/apps()/active() and host.os.
 -- This adds the declarative, OS-gated matcher find()/findAll() on top, using
 -- Luau's native string patterns. See docs/window-matching.md.
 
@@ -139,8 +139,38 @@ local function matches(m, win)
   return true
 end
 
+-- The windows a matcher could possibly match, listed from the applications it names and
+-- from nobody else.
+--
+-- `W.list()` with no filter asks every running application for its windows, and on macOS
+-- each of those is a call into another process with a timeout of its own; one that never
+-- answers costs the whole timeout, on the thread that carries the keyboard. The third Mac
+-- session measured two seconds of every three-second stall going exactly there, for a
+-- matcher that had named its application all along. So the `app` clauses — the top-level one
+-- and the one in this platform's block, both of which `matches` will test again — are run
+-- over `W.apps()` first, which asks nobody anything, and only those applications' windows
+-- are listed. A matcher with no `app` clause gets the full listing, as before; a matcher
+-- whose application is not running gets an empty one without a single question asked.
+local function candidates(m)
+  local clauses = {}
+  if m.app ~= nil then clauses[#clauses + 1] = m.app end
+  local block = m[host.os.current]
+  if block ~= nil and block.app ~= nil then clauses[#clauses + 1] = block.app end
+  if #clauses == 0 then return W.list() end
+  local pids = {}
+  for _, app in ipairs(W.apps()) do
+    local ok = true
+    for _, spec in ipairs(clauses) do
+      if not match_app(spec, app) then ok = false break end
+    end
+    if ok then pids[#pids + 1] = app.pid end
+  end
+  if #pids == 0 then return {} end
+  return W.list({ pids = pids })
+end
+
 function W.find(m)
-  for _, win in ipairs(W.list()) do
+  for _, win in ipairs(candidates(m)) do
     if matches(m, win) then return win end
   end
   return nil
@@ -148,7 +178,7 @@ end
 
 function W.findAll(m)
   local out = {}
-  for _, win in ipairs(W.list()) do
+  for _, win in ipairs(candidates(m)) do
     if matches(m, win) then
       out[#out + 1] = win
     end

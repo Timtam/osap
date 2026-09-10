@@ -105,17 +105,49 @@ local matcher = {
 
 ---
 
-## host.window.list() {#host-window-list}
+## host.window.list(filter?) {#host-window-list}
 
-`host.window.list() -> { Window }`
+`host.window.list(filter: { pids: { number }? }?) -> { Window }`
 
-Returns an array of [window tables](#window-table) for all enumerable top-level windows.
+Returns an array of [window tables](#window-table) for all enumerable top-level windows — or, with `{ pids = {…} }`, only the windows of those processes. `find` and `findAll` pass the pids of the applications a matcher names, so a module rarely calls this directly; when it does, and it knows the application, it should narrow the same way.
 
 ```luau
 for _, w in ipairs(host.window.list()) do
   host.log.info(w.title .. " [" .. w.class .. "]")
 end
+
+-- Only REAPER's windows, without asking any other application anything.
+local reaper = host.window.list({ pids = { reaperPid } })
 ```
+
+### Windows
+
+`EnumWindows` — local, microseconds, and the filter merely drops entries. There is no cost to leaving it out.
+
+### macOS
+
+Every application listed is a call into that process for its `AXWindows`, each with its own timeout, on the thread that carries the event tap. Unfiltered, the listing asks every running application that is not hidden and could own a window, and gives each of them **a quarter of a second** rather than the process-wide second — the third Mac session measured 2.0–2.3 s of every 3 s probe stall going to one unrelated process that never answered, and the tap was switched off each time. With `pids`, the named applications are asked at the **full** timeout, because those are the ones the caller is waiting on and a slow-but-alive plugin must not read as absent. An application that takes 100 ms or more is named in the log either way, with how many windows it listed.
+
+## host.window.apps() {#host-window-apps}
+
+`host.window.apps() -> { { pid: number, name: string, exe: string, bundleId: string } }`
+
+The running applications, described the way a window table's `app` field describes them — so a matcher's `app` clause tests against either. Asks none of them anything: this is what lets `find` decide **which** applications to list windows from before a single cross-process question is put.
+
+```luau
+-- Which pid is Kontakt's, without listing a window.
+for _, a in ipairs(host.window.apps()) do
+  if a.bundleId == "com.native-instruments.Kontakt 7" then return a.pid end
+end
+```
+
+### Windows
+
+Derived from the visible top-level windows: their owning processes, one entry per pid. A process with no window is not a place a window search could find anything, so it is not listed.
+
+### macOS
+
+The workspace's own list of running applications, minus those whose activation policy is *prohibited* (helpers, agents, XPC services — more of them than everything else together, and none can own a window). Hidden applications are included here; `list()` skips them, `apps()` does not, because "is it running" and "are its windows on screen" are different questions.
 
 ## host.window.active() {#host-window-active}
 
@@ -286,7 +318,9 @@ host.input.click(x, y)
 
 `host.window.find(matcher: Matcher) -> Window?`
 
-(prelude) Returns the first window from `host.window.list()` that satisfies `matcher`, or `nil`.
+(prelude) Returns the first window that satisfies `matcher`, or `nil`.
+
+Only the applications the matcher names are asked for their windows: the `app` clauses (top level and this platform's block) are run over [`host.window.apps()`](#host-window-apps) first, and [`host.window.list()`](#host-window-list) is then called with those pids. A matcher with no `app` clause lists everything, as before; one whose application is not running returns `nil` without asking any process anything.
 
 ```luau
 local reaper = host.window.find({ app = { name = "reaper" } })
@@ -296,7 +330,7 @@ local reaper = host.window.find({ app = { name = "reaper" } })
 
 `host.window.findAll(matcher: Matcher) -> { Window }`
 
-(prelude) Returns all windows from `host.window.list()` that satisfy `matcher`.
+(prelude) Returns all windows that satisfy `matcher`, listed the same narrowed way as `find`.
 
 ```luau
 local editors = host.window.findAll({ title = { contains = "Notepad" } })
