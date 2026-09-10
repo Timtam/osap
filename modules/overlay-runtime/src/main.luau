@@ -2026,6 +2026,13 @@ function Overlay:_syncControlHotkeys()
   -- happened" has three causes that look identical from outside: we never asked for the key,
   -- we asked and the OS refused, or we had it and gave it up (see _suspendControlHotkeys).
   -- Only the middle one was ever logged.
+  --
+  -- Not said at all by an overlay that declares no hotkey control. `took` and `skipped`
+  -- partition its hotkey specs, so both are empty exactly when there are none — and then
+  -- there is nothing that a visible-set change could move between them. The only line such
+  -- an overlay could print is `holds:  | not taken: `, once, at its first sync: a change
+  -- from nothing to nothing, one per hotkey-less overlay in the start-up log.
+  if #specs == 0 then return end
   local line = table.concat(took, " ") .. " | not taken: " .. table.concat(skipped, " ")
   if line ~= self._hotkeyReport then
     self._hotkeyReport = line
@@ -3116,14 +3123,27 @@ function Overlay:_join(slot, specificity, pollMs)
       -- creates a private slot where this overlay wins every time, or never competes.
       -- A slot that stays at one participant while its sibling shows several is the only
       -- visible symptom, so make it visible.
+      --
+      -- One line per join, naming the newcomer and the count it makes — not the roster. The
+      -- roster used to be printed whole on every join, so a slot that ends at N participants
+      -- was listed N times with N(N+1)/2 names in all; in the tester's last session that was
+      -- 286 of 1985 lines, and lines with 36 names in them. Nor is a repeated name in it a
+      -- fault to be read out: a module id appearing many times in one slot is the design.
+      -- Every overlay is its own claim, Kontakt declares one per cell of
+      -- version-by-environment, and a library module one per cell PER PRODUCT — ten
+      -- products are forty claims all owned by com.platform.audio-imperia (see
+      -- kontakt/main.luau, `library`). A claim is registered once per overlay (`self._slot`
+      -- guards the re-join above), so a repeat is never the same overlay twice.
+      -- There is no moment to print the settled roster once instead: modules load one VM
+      -- at a time and nothing tells this one that the last has joined, so the sequence of
+      -- joins IS the roster. The newcomer is the last entry — the host appends claims in
+      -- registration order, and the register call above has just returned.
       if host.arbiter.participants then
-        local names = {}
-        for _, p in ipairs(host.arbiter.participants(self._slot)) do
-          names[#names + 1] = string.format("%s(%d)", p.module, p.specificity)
-        end
+        local roster = host.arbiter.participants(self._slot)
+        local me = roster[#roster]
         host.log.info(string.format(
-          "arbiter slot '%s': %d participant(s) — %s",
-          self._slot, #names, table.concat(names, ", ")
+          "arbiter slot '%s': +%s(%d) -> %d participant(s)",
+          self._slot, me and me.module or "?", self._specificity, #roster
         ))
       end
     elseif slot ~= self._slot then

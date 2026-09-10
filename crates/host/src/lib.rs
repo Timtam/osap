@@ -516,12 +516,27 @@ impl Shared {
     /// Reports the epoch it is discarding when that epoch did enough work to be worth
     /// knowing about — the ratio is the whole claim of this cache, and a claim about
     /// performance that nobody can check is just an assertion.
+    ///
+    /// "Enough work" was twenty questions in total, and that let the idle tick through:
+    /// every bound overlay asks `window.active` once per 500 ms poll, one of those reaches
+    /// the OS and the rest are served, so with 43 overlays bound the line read `served 42
+    /// of 43 OS question(s) from cache (1 actually asked), 0.0 ms rebuilding Lua tables …,
+    /// plus 0 screen pixel read(s) costing 0.0 ms` twice a second — 463 lines of the
+    /// tester's last log, each saying the cache works and nothing else. On an idle tick
+    /// the total is just the overlay count, a number the arbiter roster already prints,
+    /// so the total no longer decides. What earns an epoch a line is the OS actually
+    /// being interrogated (two or more distinct questions got past the cache), a rebuild
+    /// cost that a whole-millisecond clock can see, or any pixel read — each one a
+    /// compositor frame. The total keeps only a sanity bound: one question per overlay is
+    /// what an idle tick costs, and 251 was the most seen with every library loaded, so a
+    /// thousand in one epoch is somebody asking in a loop, whatever the cache made of it.
     fn observations(&self) -> std::cell::RefMut<'_, Observations> {
         let now = self.epoch.get();
         let now_input = self.input_epoch.get();
         let mut obs = self.observations.borrow_mut();
         if obs.epoch != now || obs.input_epoch != now_input {
-            if obs.asked >= 20 || obs.pixels > 0 {
+            let reached_os = obs.asked - obs.served;
+            if reached_os >= 2 || obs.binding_us >= 1000 || obs.pixels > 0 || obs.asked >= 1000 {
                 logging::line(
                     "observe",
                     &format!(

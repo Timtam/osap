@@ -294,14 +294,13 @@ platforms is that it does not have to.
 
 Every failure here is silent by nature: nothing errors, the overlay simply never activates. Three places tell you why.
 
-**The slot roster**, logged as each overlay binds:
+**The slot roster**, logged as each overlay binds — the newcomer and the count it makes:
 
 ```
-arbiter slot 'com.platform.kontakt': 11 participant(s) — komplete-kontrol(10),
-  kontakt(20), kontakt(20), …, cinematic-studio-strings(30)
+arbiter slot 'com.platform.kontakt': +com.platform.cinematic-studio-strings(30) -> 11 participant(s)
 ```
 
-If your overlay is the *only* participant in a slot that should have several, your slot string does not match the one the other module uses. A typo cannot error — it silently creates a private slot where you always win, or never compete.
+If your overlay arrives as `-> 1 participant(s)` in a slot that should have several, your slot string does not match the one the other module uses. A typo cannot error — it silently creates a private slot where you always win, or never compete.
 
 **The landmark log**, on every transition:
 
