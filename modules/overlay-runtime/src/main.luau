@@ -1494,8 +1494,32 @@ local function speakControl(self, index, moveMouse, withHint, queued)
       host.input.move(ox + math.floor((c.region[1] + c.region[3]) / 2),
         oy + math.floor((c.region[2] + c.region[4]) / 2))
     end
+    local t0 = host.now and host.now() or 0
     local r = host.ocr.recognize({ region = region })
+    local ms = (host.now and host.now() or 0) - t0
     parts[#parts + 1] = (r.text ~= "" and r.text) or c.fallback or "no text"
+    -- The words the recogniser returned, logged per read, for the same reason as the gbutton
+    -- line below. A read-out that said "550." where the screen showed "DEF" left only its
+    -- timing in the log, and timing cannot tell a dialog's pixels over the region from a
+    -- font-size change from the recogniser itself. The region is the authored one, in content
+    -- coordinates, so the line can be held against the module's source; an empty read is
+    -- logged as "" rather than skipped, because reading nothing is the case being reported.
+    -- Reads here follow a keystroke — a focus step or an activation — never a timer tick, so
+    -- one line per read is one line per key. A watcher re-reading the same region at 500 ms
+    -- would have to gate this on the text changing, or write two lines a second for nothing.
+    local shown = ((r.text or ""):gsub("[\r\n]+", " "))
+    if #shown > 80 then
+      -- Cut on a character, not a byte: a split UTF-8 sequence is not a string the log
+      -- binding accepts, and the log line must never be what breaks the announcement.
+      shown = shown:sub(1, 80):gsub("[\192-\255][\128-\191]*$", "") .. "…"
+    end
+    local words = r.words and #r.words or 0
+    host.log.info(string.format(
+      "[read] '%s' = \"%s\" (region %s,%s %sx%s, %d ms, %d %s)",
+      tostring(label), shown, tostring(c.region[1]), tostring(c.region[2]),
+      tostring(c.region[3] - c.region[1]), tostring(c.region[4] - c.region[2]),
+      ms, words, words == 1 and "word" or "words"
+    ))
     -- An OCREdit drops the caret into the real edit control on focus, so the user can type
     -- to change the value right away. Read first (clean), then click. `moveMouse` is true
     -- only on a focus read, so navigating away doesn't re-click.
