@@ -1547,8 +1547,19 @@ pub fn run_gui(
                 notebook.set_selection(page);
             }
             show_manager(&frame);
+            // The order matters and the tester found out how: on macOS 14.5 this application
+            // did not appear in the Screen Recording list at all until Accessibility had
+            // been granted, after which it was there. Said here, because the person setting
+            // this up is looking for a switch that is not on the pane yet.
+            let order = if missing.contains(&"Accessibility") && missing.len() > 1 {
+                " Grant Accessibility first: the Screen Recording list shows this \
+                 application only afterwards."
+            } else {
+                ""
+            };
             announce(&format!(
- "Automation Platform cannot work yet: {} {} not been granted. The Permissions page is open, and lists what to do.",
+                "Automation Platform cannot work yet: {} {} not been granted. The Permissions \
+                 page is open, and lists what to do.{order}",
                 missing.join(" and "),
                 if missing.len() == 1 { "has" } else { "have" }
             ));

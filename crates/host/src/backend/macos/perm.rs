@@ -262,7 +262,9 @@ pub fn permissions() -> Vec<Permission> {
             },
             without: "Captures do not fail. They come back as a picture of the desktop with \
                       every other application removed, so image search finds nothing and OCR \
-                      reads nothing, for ever, without an error. This is the dangerous one.",
+                      reads nothing, for ever, without an error. This is the dangerous one. \
+                      If this application is not in that list yet, grant Accessibility first: \
+                      it appears in the Screen Recording list only afterwards.",
             anchor: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
             can_ask: true,
             blocking: true,
