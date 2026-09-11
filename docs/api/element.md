@@ -327,3 +327,29 @@ Candidates are the descendants the provider reports as keyboard-focusable and no
 ### macOS
 
 Focus is moved by setting `AXFocused`, and a candidate qualifies when that attribute is *settable* and the element has a non-zero rectangle. The walk is bounded at **800 nodes and depth 20** — tighter than the other calls here, because it runs per keystroke. Elements below depth 20 are simply not in the ring, with nothing in the log to say so; running out of the 800-node budget does produce one line, once per session.
+
+## host.element.focusWithin(hwnd, rect) {#host-element-focuswithin}
+
+**Signature:** `host.element.focusWithin(hwnd: number, rect: { x: number, y: number, w: number, h: number }) -> { name: string, ctype: number } | nil`
+
+**This one writes.** It gives keyboard focus to the **first** keyboard-focusable element of `hwnd` whose centre lies inside `rect` (screen coordinates), and returns the element it landed on. It is the polite half of "put the keyboard back into the plug-in": focusing the *window* hands the keyboard to whatever that window last had focused — in REAPER, its FX list — and the only thing that moved it on from there used to be a click into the plug-in's panel. A plug-in that publishes its elements can simply be asked, which is what a screen reader's own navigation does, raises a real focus event, and presses nothing. `nil` means nothing inside the rectangle took focus — a plug-in that publishes no element has nothing to ask, and the caller falls back to what the platform does understand.
+
+Because it raises a real focus event, the screen reader announces the element; a caller that speaks afterwards should name the element rather than repeat it.
+
+```luau
+-- modules/daw-hosts/src/main.luau, the F6 shortcut on macOS: ask before clicking.
+local given = host.element.focusWithin(w.id, panel)
+if given then
+  host.speech.output(title .. ", on " .. given.name)
+else
+  host.input.click(panel.x + 3, panel.y + 3)   -- sforzando publishes nothing to ask
+end
+```
+
+### Windows
+
+Not implemented — returns `nil`. Screen-reader users have OSARA's F6 there, and the plug-in host's own controls are reachable by Tab.
+
+### macOS
+
+Walked from the window itself, not from its first child as `focusStep` is: inside REAPER's FX window Kontakt's elements *are* the window's children, with no content group to scope to. The rectangle is the scope instead. A candidate qualifies when `AXFocused` is settable and its centre is inside the rectangle; the first in tree order that actually takes the focus (read back from the system-wide focused element, not assumed) wins, so a text field near the top of a panel is what usually gets it. Same bounds as `focusStep`. One log line either way, naming the element and its role, or the number of candidates that accepted the question and then did not take the focus. Unverified on hardware as of 2026-09-11.

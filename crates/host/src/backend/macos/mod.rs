@@ -162,6 +162,10 @@ impl Backend for MacBackend {
         ax::focus_step(hwnd, direction)
     }
 
+    fn element_focus_within(&self, hwnd: isize, x: i32, y: i32, w: i32, h: i32) -> Option<(String, i32)> {
+        ax::focus_within(hwnd, x, y, w, h)
+    }
+
     fn screen_size(&self) -> (i32, i32) {
         capture::screen_size()
     }

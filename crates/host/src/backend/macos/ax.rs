@@ -2999,6 +2999,81 @@ pub fn focus_step(hwnd: isize, direction: i32) -> Option<(String, i32, i32, i32)
     None
 }
 
+/// Give keyboard focus to the first focusable element inside a rectangle of the window.
+///
+/// The polite half of "put the keyboard back into the plugin". Focusing the WINDOW (which
+/// `focus_window` does, three ways) hands the keyboard to whatever that window last had
+/// focused — REAPER's FX list, measured five times out of five — and the only thing that
+/// moved it on from there was a click into the plugin's panel. That click is right for a
+/// plugin that publishes no element at all; for one that does, it is a press on whatever
+/// sits at the corner. Setting `AXFocused` on one of the plugin's own elements is what a
+/// screen reader's navigation does, raises a real focus event, and presses nothing.
+///
+/// Walked from the window itself rather than from its first child, unlike `focus_step`:
+/// inside REAPER's FX window Kontakt's elements ARE the window's children, and there is no
+/// content group to scope to. The rectangle is the scope instead — the caller knows where
+/// the panel is — and the first candidate in tree order that takes focus (read back, not
+/// assumed) wins, so a text field near the top of a panel is what usually gets it.
+pub fn focus_within(hwnd: isize, x: i32, y: i32, w: i32, h: i32) -> Option<(String, i32)> {
+    let root = root_of(hwnd, "focus_within")?;
+    let t = Instant::now();
+    let inside = |r: &CGRect| {
+        let cx = r.origin.x + r.size.width / 2.0;
+        let cy = r.origin.y + r.size.height / 2.0;
+        cx >= x as f64 && cx <= (x + w) as f64 && cy >= y as f64 && cy <= (y + h) as f64
+    };
+    let mut items: Vec<(CFRetained<AXUIElement>, Snap)> = Vec::new();
+    let mut budget = Budget::new(FOCUS_NODES, HOT_DEADLINE);
+    walk(&root, 0, FOCUS_DEPTH, &mut budget, &mut |el, snap, depth| {
+        if depth == 0 {
+            return WalkStep::Descend;
+        }
+        let candidate = snap
+            .rect
+            .is_some_and(|r| r.size.width > 0.0 && r.size.height > 0.0 && inside(&r));
+        if candidate && is_focusable(el) {
+            items.push((el.retain(), snap.clone()));
+        }
+        WalkStep::Descend
+    });
+    let sw = system_wide();
+    for (el, snap) in &items {
+        let err = unsafe { el.set_attribute_value(a_focused(), CFBoolean::new(true).as_ref()) };
+        if err != AXError::Success {
+            note_error(err, "AXFocused");
+            continue;
+        }
+        if !attribute_element(&sw, a_focused_element()).is_some_and(|f| *f == **el) {
+            continue;
+        }
+        let name = if snap.title.is_empty() { snap.description.clone() } else { snap.title.clone() };
+        let ctype = ctype_for_role(&snap.role);
+        // Logged, not traced: this runs once per press of a key somebody chose to press, and
+        // which element took the keyboard is the whole answer.
+        crate::logging::line(
+            "macos",
+            &format!(
+                "focus_within({hwnd}): the keyboard is on '{name}' ({}) — the first of {} \
+                 focusable element(s) inside {x},{y} {w}x{h} to take it, in {} ms",
+                snap.role,
+                items.len(),
+                t.elapsed().as_millis()
+            ),
+        );
+        return Some((name, ctype));
+    }
+    crate::logging::line(
+        "macos",
+        &format!(
+            "focus_within({hwnd}): nothing inside {x},{y} {w}x{h} took keyboard focus ({} \
+             candidate(s) accepted the question) — a plugin that publishes no element has \
+             nothing to ask",
+            items.len()
+        ),
+    );
+    None
+}
+
 /// Can this element be given keyboard focus?
 ///
 /// Asking whether `AXFocused` is *settable* is the direct question — the AX equivalent of

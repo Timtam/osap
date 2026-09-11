@@ -459,6 +459,26 @@ pub trait Backend {
     /// index, count) to announce. None if the window has no focusable descendants.
     fn element_focus_step(&self, hwnd: isize, direction: i32) -> Option<(String, i32, i32, i32)>;
 
+    /// Give keyboard focus to the first focusable element of `hwnd` whose centre lies inside
+    /// the rectangle (screen coordinates), and say which — `(name, control type)`.
+    ///
+    /// What "put the keyboard back into the plugin" means where the plugin publishes
+    /// elements: asking one of them for focus is what a screen reader's own navigation does,
+    /// raises a real focus event, and presses nothing. A plugin that publishes nothing has no
+    /// element to ask, and the caller falls back to whatever the platform does understand.
+    /// `None` when nothing inside the rectangle accepts focus, or the platform has no way to
+    /// ask; the default is the latter.
+    fn element_focus_within(
+        &self,
+        _hwnd: isize,
+        _x: i32,
+        _y: i32,
+        _w: i32,
+        _h: i32,
+    ) -> Option<(String, i32)> {
+        None
+    }
+
     /// Size of the primary display in pixels.
     fn screen_size(&self) -> (i32, i32);
 

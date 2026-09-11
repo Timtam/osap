@@ -122,21 +122,37 @@ local FOCUS_PLUGIN_WINDOW = host.os.pick {
 --     is asynchronous, so the read can describe whatever was in front when the key was
 --     pressed. Nothing about that chain says anything about our window, and clicking on the
 --     strength of it would put a click into that other application.
--- So: "unknown" for both of those; "inside" when the chain is exactly the window; "chrome"
--- when it is our window with something under it. That last name is a reading, not a fact:
--- for sforzando it was measured as REAPER's FX list (AXTable, AXScrollArea, window), and it
--- is only right for a plug-in whose own view exposes nothing. A plug-in that DOES expose its
--- controls would put the keyboard several elements deep inside itself and be called "chrome"
--- here, so the shortcut would click at its corner and then report a failure that is not one.
--- The REAPER matcher is title-based and applies to every plug-in, so this will be met; what
--- to do about it needs a plug-in that exposes something to try it against.
-local function whereIsTheKeyboard(w)
+-- So: "unknown" for both of those; "inside" when the chain is exactly the window, OR when
+-- the focused element's centre lies inside the plugin's panel; "chrome" when it is our
+-- window with something OUTSIDE the panel under it. The second "inside" is the Kontakt case,
+-- met on the third Mac session: a plug-in that exposes its controls puts the keyboard
+-- several elements deep inside itself, and by depth alone that read as "chrome" — the
+-- shortcut would have clicked at its corner and then reported a failure that was not one.
+-- The panel is the rectangle the plug-in-window rule derives; a rule without one, or a
+-- caller that has none, gets the depth reading alone, which is right for sforzando.
+local function whereIsTheKeyboard(w, panel)
   local chain = host.window.focusChain()
   if not chain or #chain == 0 then return "unknown" end
   local last = chain[#chain]
   if not last or last.id ~= w.id then return "unknown" end
   if #chain == 1 then return "inside" end
+  local focused = chain[1]
+  if panel and focused and focused.bounds then
+    local cx = focused.bounds.x + focused.bounds.w / 2
+    local cy = focused.bounds.y + focused.bounds.h / 2
+    if cx >= panel.x and cx <= panel.x + panel.w and cy >= panel.y and cy <= panel.y + panel.h then
+      return "inside"
+    end
+  end
   return "chrome"
+end
+
+-- The plug-in's panel as a screen rectangle: from the rule's origin to the window's edges,
+-- because REAPER sizes the FX window to the plug-in (measured: 1023 wide for Kontakt 7 in
+-- both its standalone window and REAPER's).
+local function panelRect(w, p)
+  local x, y = w.client.x + p[1], w.client.y + p[2]
+  return { x = x, y = y, w = w.client.x + w.client.w - x, h = w.client.y + w.client.h - y }
 end
 
 -- Memoised per window, for as long as the window exists: the surface walk behind
@@ -173,6 +189,10 @@ local function focusPluginWindow()
         host.speech.output(title)
         return
       end
+      -- The panel is wanted before the first reading below, not only for the click: a
+      -- keyboard already inside Kontakt's search field is "inside" by geometry and would
+      -- otherwise be called "chrome" by depth.
+      local panelNow = panelRect(w, pluginOriginFor(matcher, w))
 
       -- On macOS, a window that accepted the focus has not necessarily taken the keyboard.
       --
@@ -192,7 +212,7 @@ local function focusPluginWindow()
       -- click and report the state from before it, every time the read won. So the second
       -- reading waits a quarter of a second, on a timer, and what is announced is what THAT
       -- reading says. Never the title before it, and never a second click.
-      local before = whereIsTheKeyboard(w)
+      local before = whereIsTheKeyboard(w, panelNow)
       if before == "inside" then
         host.speech.output(title)
         return
@@ -205,10 +225,33 @@ local function focusPluginWindow()
         return
       end
       local p = pluginOriginFor(matcher, w)
+      local panel = panelRect(w, p)
+      -- ASK FIRST. A plug-in that publishes its elements — Kontakt 7 publishes its header
+      -- buttons and a search field — can simply be handed the keyboard: `focusWithin` sets
+      -- the focused attribute on the first element inside the panel that takes it, which is
+      -- what a screen reader's own navigation does, and presses nothing. The click below is
+      -- for the plug-in that publishes nothing (sforzando), where there is no element to
+      -- ask; it used to be the only path, and at Kontakt's corner it would have pressed
+      -- Kontakt's logo button.
+      local given = host.element.focusWithin and host.element.focusWithin(w.id, panel)
+      if given then
+        host.timer.after(250, function()
+          local after = whereIsTheKeyboard(w, panel)
+          host.log.info(("[daw-hosts] keyboard was on the host's chrome after focusing '%s'; handed to '%s' by asking, it is now: %s"):format(
+            title, tostring(given.name), after))
+          if after == "inside" then
+            host.window.recheck()
+            host.speech.output(title .. ", on " .. (given.name ~= "" and given.name or "an unnamed control"))
+          else
+            host.speech.output("could not move the keyboard into " .. title)
+          end
+        end)
+        return
+      end
       host.input.click(w.client.x + p[1] + 3, w.client.y + p[2] + 3)
       host.timer.after(250, function()
-        local after = whereIsTheKeyboard(w)
-        host.log.info(("[daw-hosts] keyboard was on the host's chrome after focusing '%s'; after a click at content (%d,%d) it is: %s"):format(
+        local after = whereIsTheKeyboard(w, panel)
+        host.log.info(("[daw-hosts] keyboard was on the host's chrome after focusing '%s'; nothing in its panel took focus by asking; after a click at content (%d,%d) it is: %s"):format(
           title, p[1] + 3, p[2] + 3, after))
         if after == "inside" then
           -- Ask every overlay to look again. A keyboard that moved into a view exposing no

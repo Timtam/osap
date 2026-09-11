@@ -1803,7 +1803,15 @@ what it left open.
       its own on macOS; the application's icon while the window is up is the answer he gave.
       Reword next time. Step 1 assumed a local build; the artifact route needs its own text.
 - [ ] `docs/macos-session-three.md` still names the old chords in its keys table; it is the
-      protocol as sent and carries a note now. The fourth protocol is the one to write fresh.
+      protocol as sent and carries a note now. The fourth protocol is
+      `docs/macos-session-four.md`.
+- [x] **F6 asks before it clicks** — 2026-09-11. It used to click three points inside the
+      plugin panel's top-left corner, which for Kontakt 7 is its logo button (PROBE 3:
+      AXButton at 349,341, the panel corner at 347,338). `host.element.focusWithin` sets
+      `AXFocused` on the first focusable element inside the panel — the same API the
+      standalone Tab pass-through uses — and the click remains only for a plugin that
+      publishes nothing to ask (sforzando). Where nothing takes the focus and the plugin
+      does publish elements, F6 now says so instead of clicking. Unverified on hardware.
 
 ## The second macOS session (2026-09-04)
 

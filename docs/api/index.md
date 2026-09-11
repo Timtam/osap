@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 119 entries.
+Every call the platform offers a module, in one place. 120 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -124,6 +124,7 @@ Querying the accessibility tree an application publishes.
 | [`host.element.find(hwnd, name, controlType)`](element#host-element-find) | Returns `true` if the UI Automation subtree of the window `hwnd` contains at least one element whose Name equals `name`… |
 | [`host.element.findAny(hwnd, names, types)`](element#host-element-findany) | Answers "is any of these names present as any of these control types?" |
 | [`host.element.focusStep(hwnd, direction)`](element#host-element-focusstep) | **This one writes.** It enumerates the visible, keyboard-focusable descendants of `hwnd`'s content area and *moves keyboard… |
+| [`host.element.focusWithin(hwnd, rect)`](element#host-element-focuswithin) | **This one writes.** It gives keyboard focus to the **first** keyboard-focusable element of `hwnd` whose centre lies inside… |
 | [`host.element.locate(hwnd, name, controlType)`](element#host-element-locate) | Finds the first UIA element in window `hwnd` matching `name` + `controlType` and returns the screen-pixel centre of its… |
 | [`host.element.locateVia(hwnd, viaName, viaType, name, controlType)`](element#host-element-locatevia) | Like `locate`, but in two levels |
 | [`host.element.pluginLocate(hwnd, containerName, name, controlType)`](element#host-element-pluginlocate) | Like `locate`, but for a plugin hosted inside another application. |

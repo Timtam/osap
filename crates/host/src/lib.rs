@@ -4501,6 +4501,28 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             }
         })?,
     )?;
+    // host.element.focusWithin(hwnd, { x, y, w, h }) -> { name, ctype } | nil. Gives the
+    // keyboard to the first focusable element inside the rectangle — the way into a plugin
+    // that publishes elements, without pressing anything at its corner.
+    let sh = shared.clone();
+    uia.set(
+        "focusWithin",
+        lua.create_function(move |lua, (hwnd, rect): (isize, Table)| {
+            let x: i32 = rect.get("x")?;
+            let y: i32 = rect.get("y")?;
+            let w: i32 = rect.get("w")?;
+            let h: i32 = rect.get("h")?;
+            match sh.backend.element_focus_within(hwnd, x, y, w, h) {
+                Some((name, ctype)) => {
+                    let t = lua.create_table()?;
+                    t.set("name", name)?;
+                    t.set("ctype", ctype)?;
+                    Ok(Some(t))
+                }
+                None => Ok(None),
+            }
+        })?,
+    )?;
     host.set("element", uia)?;
 
     // host.screen.pixel / .size / .imageSearch
