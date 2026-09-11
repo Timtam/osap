@@ -277,6 +277,8 @@ O.embedded {
 }
 ```
 
+Where the Mac publishes nothing that *is* the plugin — Kontakt inside REAPER puts its elements straight into the FX window — the macOS entry can be a function that finds the panel from one of the plugin's own named buttons and returns it as a control; see [`O:attachEmbedded`](api/overlay#o-attachembedded).
+
 And for the genuine one-off, `host.os.is("macos")` and `host.os.current` are always there:
 
 ```luau

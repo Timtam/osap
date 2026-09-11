@@ -2107,6 +2107,13 @@ end
 local function windowIdsOf(o)
   local origin = o:origin()
   local pid = origin and origin.app and origin.app.pid
+  -- An embedded origin is a CONTROL, and a control table carries no application. The
+  -- plugin's popup is a window of the host's process all the same — the plugin draws inside
+  -- that process — so the active window's process is the one to list.
+  if not pid then
+    local a = host.window.active()
+    pid = a and a.app and a.app.pid
+  end
   if not pid then return nil end
   local ids = {}
   for _, w in ipairs(host.window.windowsOf(pid)) do ids[w.id] = w end
@@ -3376,6 +3383,18 @@ function Overlay:attachEmbedded(spec, opts)
   -- inert on a platform nobody has measured yet and one that throws on the first focus
   -- change; and an OS-keyed `control` with no entry for the current system is exactly how a
   -- module declares "not here, not yet".
+  --
+  -- A platform's entry may also be a FUNCTION: `(activeWindow) -> control | nil`. That is
+  -- the macOS answer for a plugin the host publishes no container for at all. The third Mac
+  -- session measured it for Kontakt 7 inside REAPER: the plugin's 34 accessibility
+  -- elements appear as direct children of REAPER's FX window, with nothing that IS the
+  -- plugin — no class, no group, no identifier — so there is nothing for a pattern to match,
+  -- while Kontakt's own FILE button sits at a fixed offset from its panel's corner and can
+  -- be found by name. The function returns a control table the way `host.window.controls`
+  -- would have — `id` (the window's, so element queries still work), `class`, `bounds` and
+  -- `client` set to the plugin's PANEL — and from there every authored coordinate,
+  -- `rawOrigin`, `fromRight` and `O.contentSize` behave exactly as they do against a real
+  -- control on Windows. `identify` still runs on what it returns.
   if pattern == nil then
     host.log.info(string.format(
       "[%s] embedded binding is inactive on %s: no control pattern for this platform",
@@ -3425,6 +3444,34 @@ function Overlay:attachEmbedded(spec, opts)
           if string.match(focused.class, pat) then return nil end
         end
       end
+    end
+    -- The function form: the platform has no control to enumerate, so the module says
+    -- where the plugin is. The chrome gate above cannot help here — it matches Win32
+    -- classes — so the same question is asked geometrically: a focused element that lies
+    -- OUTSIDE the panel the function returned is the host's own chrome (REAPER's FX list,
+    -- its preset popup), and the overlay stays out of the way exactly as the class gate
+    -- keeps it out on Windows. The window itself as the focused element — the only thing on
+    -- the chain when the keyboard is in a view that exposes nothing — counts as inside,
+    -- which is the rule sforzando's macOS binding settled on.
+    if type(pattern) == "function" then
+      local c = pattern(active)
+      if not c then return nil end
+      local focused = focusChain[1]
+      -- An empty chain is the backend saying it could not read where the keyboard is.
+      -- Unknown, not inside: the same reading sforzando's gate and daw-hosts' F6 make, and
+      -- an overlay that took it as "inside" would start capturing Tab and Return on a
+      -- guess — while the keyboard may well be in the host's FX list.
+      if not focused then return nil end
+      if focused.id ~= active.id and focused.bounds and c.bounds then
+        local fx = focused.bounds.x + focused.bounds.w / 2
+        local fy = focused.bounds.y + focused.bounds.h / 2
+        local b = c.bounds
+        if fx < b.x or fx > b.x + b.w or fy < b.y or fy > b.y + b.h then
+          return nil
+        end
+      end
+      if identify and identify(c) ~= true then return nil end
+      return c
     end
     -- Enumerate the active (plugin host) window's child controls — like
     -- ReaHotkey's WinGetControls — with the keyboard-focus chain as a fallback.

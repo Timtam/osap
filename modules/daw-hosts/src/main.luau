@@ -28,8 +28,16 @@ local reaper_chrome = {
   "^#32770$", -- the host (FX chain) dialog window itself
 }
 
+-- The macOS block on the first entry is what lets a plugin be embedded in REAPER there at
+-- all: a matcher with a platform block for one system and none for the other says "not
+-- here" on the other, so without it every embedded binding's host test failed before the
+-- platform's own control lookup was ever reached. REAPER's FX window on a Mac is a standard
+-- window titled `FX: Track N "<plugin>"`; the chrome list is Win32 classes and is simply
+-- inert there — the runtime asks the same question geometrically.
 local reaper = {
-  { app = { exe = { contains = "reaper" } }, windows = { class = { contains = "#32770" } }, chrome = reaper_chrome },
+  { app = { exe = { contains = "reaper" } }, windows = { class = { contains = "#32770" } },
+    macos = { title = { contains = "FX: " }, axSubrole = "AXStandardWindow" },
+    chrome = reaper_chrome },
   { app = { exe = { contains = "reaper" } }, windows = { class = { contains = "REAPERb32host" } }, chrome = reaper_chrome },
 }
 local ableton = {

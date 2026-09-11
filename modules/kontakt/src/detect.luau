@@ -39,6 +39,15 @@ for i, v in ipairs(VARIANTS) do VARIANT_NAMES[i] = v.name end
 -- "is this a Kontakt?" and "which one?" costs the same as the old "is this a Kontakt 8?"
 -- alone did — and this runs on every detection pass, per candidate control.
 local function variantIndex(c)
+  -- A control that already knows what it is. The macOS panel below is found by a title and
+  -- a button, not by an identity element — the FX window's title is `FX: Track 1 "Kontakt
+  -- 7"` and nothing inside it is NAMED Kontakt 7 — so the accessibility question has no
+  -- answer there, and the thing that found the panel says instead.
+  if c and c.variant then
+    for i, v in ipairs(VARIANTS) do
+      if v.name == c.variant then return i end
+    end
+  end
   return c and c.id and host.element.findAny(c.id, VARIANT_NAMES, IDENTITY_TYPES) or nil
 end
 local function anyKontakt(c)
@@ -230,6 +239,71 @@ end
 -- coincides with the Kontakt content control's, with no NI menu-bar chrome offset).
 local function constantFrame(vx, vy)
   return function() return vx, vy end
+end
+
+-- ── Kontakt's panel inside a host window, on macOS ───────────────────────────
+-- There is no control to find there. The third Mac session probed Kontakt 7 inside REAPER
+-- on an M1 mini: the plugin's 34 accessibility elements are direct children of REAPER's FX
+-- window, no container, no class, no identifier — the same 34 the standalone window
+-- publishes, shifted. What survives is Kontakt's own header buttons, by name, and the one
+-- measurement that makes them useful: FILE's centre sits at exactly the offset the Windows
+-- geometry gives it — (176,19) from the panel's corner standalone, (158+…) inside REAPER —
+-- against the authored {175,19}, in both windows, to 2 px. So the panel's corner is FILE
+-- minus the authored offset, and its right and bottom edges are the window's, because REAPER
+-- sizes the FX window to the plugin (measured: 1023 wide in both).
+--
+-- The function shape is the runtime's own: `attachEmbedded` accepts a platform entry that
+-- is a function of the active window and treats what it returns as the plugin control.
+-- What is remembered per window and size is the panel's OFFSET from the window's content
+-- origin, never its screen rectangle: the panel moves with the window, and REAPER re-lays
+-- it out only on a resize — the same rule `kkContentFrame` follows. A rectangle cached
+-- here would have put every click one window-move off. A miss is logged once per window
+-- rather than cached, because Kontakt refused every accessibility question for its first
+-- minutes in that session and would have been written off for good.
+--
+-- `name` and `at` come from the cell: the button to look for and where the authored geometry
+-- puts its centre. A version without a measured anchor passes nil and stays inert here.
+local function macosPanel(version, name, at)
+  if not (name and at) then return nil end
+  local offsets, missed = {}, {}
+  local function panel(active, dx, dy)
+    local x, y = active.client.x + dx, active.client.y + dy
+    local w, h = active.client.w - dx, active.client.h - dy
+    if w <= 0 or h <= 0 then return nil end
+    return {
+      id = active.id,
+      app = active.app,
+      class = "macos-anchor:" .. version,
+      variant = version,
+      bounds = { x = x, y = y, w = w, h = h },
+      client = { x = x, y = y, w = w, h = h },
+    }
+  end
+  return function(active)
+    if not (active and active.id and active.client and active.title) then return nil end
+    if not string.find(active.title, version, 1, true) then return nil end
+    local key = tostring(active.id) .. "|" .. tostring(active.client.w) .. "x" .. tostring(active.client.h)
+    local off = offsets[key]
+    if off then return panel(active, off[1], off[2]) end
+    local p = host.element.locate(active.id, name, host.element.type.Button)
+    if not p then
+      if not missed[key] then
+        missed[key] = true
+        host.log.info(string.format(
+          "[kontakt] '%s' publishes no button named %s — %s's panel cannot be anchored in it yet",
+          tostring(active.title), name, version))
+      end
+      return nil
+    end
+    local dx, dy = p.x - at[1] - active.client.x, p.y - at[2] - active.client.y
+    local c = panel(active, dx, dy)
+    if not c then return nil end
+    offsets[key] = { dx, dy }
+    host.log.info(string.format(
+      "[kontakt] %s panel in '%s': %s at %d,%d puts the corner %d,%d from the content origin — %dx%d to the window's edges",
+      version, tostring(active.title), name, p.x, p.y, dx, dy, c.bounds.w, c.bounds.h))
+    return c
+  end
 end
 
 -- Which VIEW Kontakt is in — the modern one, or the classic rack.
@@ -434,6 +508,7 @@ return {
   isPluginHostContainer = isPluginHostContainer,
   kkContentFrame = kkContentFrame,
   constantFrame = constantFrame,
+  macosPanel = macosPanel,
   kontaktPaneName = kontaktPaneName,
   isClassicView = isClassicView,
   isEditView = isEditView,

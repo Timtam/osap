@@ -126,7 +126,17 @@ for vIdx, v in ipairs(D.VARIANTS) do
     where = "in-daw",
     binding = O.embedded({
       hosts = HOSTS,
-      control = D.QT_PLUGIN,
+      -- On Windows the plugin is a Qt control of the host window. On macOS it is nothing
+      -- the host publishes — see detect.macosPanel — so Kontakt 7's panel is found from its
+      -- own FILE button, at the offset the geometry table already carries. Kontakt 8 has no
+      -- such button (its file menu is the wordmark) and no measurement, so it stays inert
+      -- there, and the runtime says so at load.
+      control = {
+        windows = D.QT_PLUGIN,
+        linux = D.QT_PLUGIN,
+        macos = v.name == "Kontakt 7" and D.macosPanel(v.name, geo.UIA_FILE_MENU[v.name], G.fileMenu)
+          or nil,
+      },
       identify = bareOfVersion(vIdx),
       -- Relational (it asks whether a KK is also present), so it must NOT be cached per
       -- HWND: a Kontakt's handle is stable while a KK is loaded around it.

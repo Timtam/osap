@@ -516,6 +516,25 @@ ov:attachEmbedded({
 
 There is no equivalent child control to match. A binding whose `control` table carries no entry for the running platform is **inert rather than broken** -- it logs and does nothing, and the module keeps working through whatever other bindings it has. That is why sforzando ships a separate standalone binding for the Mac rather than relying on this one.
 
+The platform's entry may instead be a **function** `(activeWindow) -> control | nil`, for a plugin the host publishes no container for at all. Measured on a real Mac: Kontakt 7 inside REAPER puts its 34 accessibility elements straight into REAPER's FX window — nothing that *is* the plugin, no class, no group, no identifier — while its own FILE button sits at a fixed offset from the panel's corner and can be found by name. The function returns a control table shaped like one from `host.window.controls()` — `id` (the window's, so element queries keep working), `class`, `bounds` and `client` set to the plugin's **panel** — and everything downstream (`rawOrigin`, `fromRight`, `O.contentSize`, every authored coordinate) behaves as it does against a real control on Windows. `identify` still runs on what it returns. The Win32 chrome gate cannot apply, so the runtime asks the same question geometrically: a focused element outside the returned panel is the host's own chrome and the overlay stays out; the window itself as the focused element counts as inside.
+
+```luau
+-- Kontakt 7 in a DAW: its panel found from its own FILE button (modules/kontakt).
+control = {
+  windows = "Qt%d+.-QWindowIcon",
+  macos = function(active)
+    if not string.find(active.title or "", "Kontakt 7", 1, true) then return nil end
+    local p = host.element.locate(active.id, "FILE", host.element.type.Button)
+    if not p then return nil end
+    local x, y = p.x - 175, p.y - 19               -- the authored FILE offset
+    local w = active.client.x + active.client.w - x  -- REAPER sizes the window to the plugin
+    local h = active.client.y + active.client.h - y
+    return { id = active.id, app = active.app, class = "macos-anchor", variant = "Kontakt 7",
+             bounds = { x = x, y = y, w = w, h = h }, client = { x = x, y = y, w = w, h = h } }
+  end,
+}
+```
+
 ## O\:gate(fn) / O\:landmark(image) {#o-gate}
 
 `gate(fn)` sets an extra activation condition ANDed onto the context match:
