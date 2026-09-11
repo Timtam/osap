@@ -39,6 +39,63 @@ thread_local! {
     /// hotkey stays claimed for the life of the process.
     static REGISTERED: RefCell<HashMap<i32, EventHotKeyRef>> = RefCell::new(HashMap::new());
     static HANDLER_INSTALLED: Cell<bool> = const { Cell::new(false) };
+    /// Chords already explained as VoiceOver's, by (vk, mask). Per-control hotkeys are
+    /// released and registered again on every focus move and tab switch, so a per-call line
+    /// would print tens of times per window switch for one chord.
+    static VOICEOVER_WARNED: RefCell<std::collections::HashSet<(u32, u8)>> =
+        RefCell::new(std::collections::HashSet::new());
+}
+
+/// Says once, per chord, when a key sits on Control-Option while VoiceOver is running.
+///
+/// A chord VoiceOver owns leaves no trace anywhere else: Carbon accepts it, the tap never
+/// sees it, no press ever arrives, and the only symptom is a sound the log cannot hear.
+/// Control-Option is VoiceOver's modifier on any Mac that keeps the default setting (Caps
+/// Lock is the alternative, and some long-time users choose it — which is why the same
+/// chord worked for two sessions on one tester's Mac and never once on another). Not an
+/// error: the registration is legal, the setting is the user's, and a chord that reaches
+/// nobody is still better explained than refused. `how` names the mechanism — registered
+/// through Carbon, or captured by the event tap — because the two are explained at
+/// different sites and a reader should not have to guess which one produced the line.
+pub(super) fn warn_if_voiceover_owns(vk: u32, mask: u8, how: &str) {
+    const VOICEOVER_PAIR: u8 = crate::backend::MASK_CTRL | crate::backend::MASK_ALT;
+    if mask & VOICEOVER_PAIR != VOICEOVER_PAIR {
+        return;
+    }
+    if VOICEOVER_WARNED.with(|w| w.borrow().contains(&(vk, mask))) {
+        return;
+    }
+    // Asked after the cheap checks and remembered only when it answered yes, so a chord
+    // registered before VoiceOver starts is still explained once it is running.
+    if !super::perm::voiceover_running() {
+        return;
+    }
+    VOICEOVER_WARNED.with(|w| w.borrow_mut().insert((vk, mask)));
+    let key = crate::backend::vk_name(vk).unwrap_or_else(|| format!("vk {vk:#04x}"));
+    let mut spec = String::new();
+    for (bit, name) in [
+        (crate::backend::MASK_CTRL, "Ctrl"),
+        (crate::backend::MASK_ALT, "Alt"),
+        (crate::backend::MASK_SHIFT, "Shift"),
+        (crate::backend::MASK_WIN, "Cmd"),
+    ] {
+        if mask & bit != 0 {
+            spec.push_str(name);
+            spec.push('+');
+        }
+    }
+    spec.push_str(&key);
+    crate::logging::line(
+        "macos",
+        &format!(
+            "the {how} key '{spec}' sits on Control-Option, which is VoiceOver's modifier, and \
+             VoiceOver is running: with the default VoiceOver modifier this chord is taken by \
+             VoiceOver before any application sees it, and pressing it plays VoiceOver's \
+             error sound. It is accepted here and never arrives. A chord without both Control \
+             and Option — Command-Shift-<key> is measured to arrive — is the fix; VoiceOver \
+             Utility > General > modifier set to Caps Lock is the workaround"
+        ),
+    );
 }
 
 pub fn register(id: i32, spec: &str) -> Result<(), String> {
@@ -65,27 +122,9 @@ pub fn register(id: i32, spec: &str) -> Result<(), String> {
     })?;
     let modifiers = keys::mask_to_carbon(mask);
 
-    // Said here, at registration, because a chord VoiceOver owns leaves no trace anywhere
-    // else: Carbon accepts it, no press ever arrives, and the only symptom is a sound the
-    // log cannot hear. Control-Option is VoiceOver's modifier on any Mac that keeps the
-    // default setting (Caps Lock is the alternative, and some long-time users choose it —
-    // which is why the same chord worked for two sessions on one tester's Mac and never
-    // once on another). Not an error: the registration is legal, the setting is the user's,
-    // and a chord that reaches nobody is still better explained than refused.
-    const VOICEOVER_PAIR: u8 = crate::backend::MASK_CTRL | crate::backend::MASK_ALT;
-    if mask & VOICEOVER_PAIR == VOICEOVER_PAIR && super::perm::voiceover_running() {
-        crate::logging::line(
-            "macos",
-            &format!(
-                "hotkey '{spec}' sits on Control-Option, which is VoiceOver's modifier, and \
-                 VoiceOver is running: with the default VoiceOver modifier this chord is taken \
-                 by VoiceOver before any application sees it, and pressing it plays \
-                 VoiceOver's error sound. It registers fine and never arrives. A chord without \
-                 both Control and Option — Command-Shift-<key> is measured to arrive — is the \
-                 fix; VoiceOver Utility > General > modifier set to Caps Lock is the workaround"
-            ),
-        );
-    }
+    // Said here, at registration, because this is the last place the chord is a chord and
+    // not a reference. See `warn_if_voiceover_owns` for why it is worth a line at all.
+    warn_if_voiceover_owns(vk, mask, "registered");
 
     install_handler()?;
 

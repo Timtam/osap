@@ -179,8 +179,9 @@ registered on both launches, never delivered, VoiceOver's error sound on every p
   F-key, so they additionally need "Use F1, F2, etc. as standard function keys" turned on,
   or the `fn` key held down.
 - The **calibrator's** `Ctrl+Alt+Shift+S/T/V` still sit on Control-Option. They only exist
-  in a run started with `AUTOMATION_PLATFORM_CALIBRATE=1`, and the log now says at
-  registration when a chord is on VoiceOver's modifier while VoiceOver is running.
+  in a run started with `AUTOMATION_PLATFORM_CALIBRATE=1`. The log says once per chord —
+  registered through Carbon or captured by the event tap, which is what the calibrator's
+  are — when a key is on VoiceOver's modifier while VoiceOver is running.
 
 The overlays themselves use `Alt+<key>`, `Ctrl+<key>` and `Ctrl+Shift+<key>`, and their
 macOS question is a different one:

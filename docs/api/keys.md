@@ -213,7 +213,7 @@ Because the answer depends on a close notification arriving, there is a safety v
 
 **Signature:** `host.keys.passedThrough()` → `{ { vk: number, mask: number, key: string } }`
 
-The captured keys the hook let through to the application because a menu was open, since the last call — drained on read, so each key is reported once. `key` is the spelling `host.keys.capture` would accept (`"Return"`, `"Escape"`, `"Tab"`, `"A"`, `"F5"`), or `"vk 0x.."` for a key the spec grammar cannot name.
+The keys the hook let through to the application because a menu was open, since the last call — drained on read, so each key is reported once. Two kinds: any **captured** key let past because a menu was open, and **Return or Escape, captured or not**, whenever `host.keys.menuOpen(true)` is in force — those two end a menu, no overlay captures Escape, and Return is captured only while the focused control wants it, so a record kept for captured keys alone would never hold the Escape that cancelled a menu. `key` is the spelling `host.keys.capture` would accept (`"Return"`, `"Escape"`, `"Tab"`, `"A"`, `"F5"`), or `"vk 0x.."` for a key the spec grammar cannot name.
 
 What it is for: **Return and Escape end a menu.** Where nothing can see a plugin's menu — no notification, no menu element, no window of its own — the overlay runtime's hold is a stopwatch, and the only word it can get that the menu has closed is one of those two keys going through to it. The menu watch asks this on its tick and cuts the hold to a short grace when it finds one, instead of leaving Tab and Return with the plugin for the rest of the stopwatch. Only for a hold no detector has confirmed: where a detector can see the menu, its word is better than a guess about what a key did.
 
@@ -227,8 +227,8 @@ end
 
 ### Windows
 
-Recorded by the low-level keyboard hook, on its own thread, for a captured key it let past because the foreground thread was in menu mode or `host.keys.menuOpen(true)` was in force. Only key-down events; the matching key-up is not reported.
+Recorded by the low-level keyboard hook, on its own thread: a captured key it let past because the foreground thread was in menu mode or `host.keys.menuOpen(true)` was in force, and an unmodified Return or Escape whenever `menuOpen(true)` is in force and the scoped window is foreground. Only key-down events; the matching key-up is not reported. Noted only — nothing here is suppressed that was not already.
 
 ### macOS
 
-Recorded by the event tap for a captured key it let past because a native menu was open or `host.keys.menuOpen(true)` was in force. Key-down only. A key that never reached the tap at all — VoiceOver's own chords, for instance — is not in here, because the tap never saw it.
+Recorded by the event tap: a captured key it let past because a native menu was open or `host.keys.menuOpen(true)` was in force, and an unmodified Return or Escape whenever `menuOpen(true)` is in force. Key-down only. A key that never reached the tap at all — VoiceOver's own chords, for instance — is not in here, because the tap never saw it.

@@ -126,7 +126,7 @@ local reaper = host.window.list({ pids = { reaperPid } })
 
 ### macOS
 
-Every application listed is a call into that process for its `AXWindows`, each with its own timeout, on the thread that carries the event tap. Unfiltered, the listing asks every running application that is not hidden and could own a window, and gives each of them **a quarter of a second** rather than the process-wide second — the third Mac session measured 2.0–2.3 s of every 3 s probe stall going to one unrelated process that never answered, and the tap was switched off each time. With `pids`, the named applications are asked at the **full** timeout, because those are the ones the caller is waiting on and a slow-but-alive plugin must not read as absent. An application that takes 100 ms or more is named in the log either way, with how many windows it listed.
+Every application listed is a call into that process for its `AXWindows`, each with its own timeout, on the thread that carries the event tap. Unfiltered, the listing asks every running application that could own a window, and gives each of them **a quarter of a second** rather than the process-wide second — the third Mac session measured 2.0–2.3 s of every 3 s probe stall going to one unrelated process that never answered, and the tap was switched off each time. An application that misses that short deadline is left out of the listing and **named in the log, but not quarantined**: only a miss at the full timeout marks an application as not answering for the paths that consult that. With `pids`, the named applications are asked at the **full** timeout, because those are the ones the caller is waiting on and a slow-but-alive plugin must not read as absent. An application that takes 100 ms or more is named in the log either way, with how many windows it listed.
 
 ## host.window.apps() {#host-window-apps}
 
@@ -147,7 +147,7 @@ Derived from the visible top-level windows: their owning processes, one entry pe
 
 ### macOS
 
-The workspace's own list of running applications, minus those whose activation policy is *prohibited* (helpers, agents, XPC services — more of them than everything else together, and none can own a window). Hidden applications are included here; `list()` skips them, `apps()` does not, because "is it running" and "are its windows on screen" are different questions.
+The workspace's own list of running applications, minus those whose activation policy is *prohibited* (helpers, agents, XPC services — more of them than everything else together, and none can own a window). Hidden applications (Command-H) are included, as they are in `list()`: a module that finds a hidden DAW's plugin window and focuses it is how that DAW comes back.
 
 ## host.window.windowsOf(pid) {#host-window-windowsof}
 
@@ -347,7 +347,7 @@ host.input.click(x, y)
 
 (prelude) Returns the first window that satisfies `matcher`, or `nil`.
 
-Only the applications the matcher names are asked for their windows: the `app` clauses (top level and this platform's block) are run over [`host.window.apps()`](#host-window-apps) first, and [`host.window.list()`](#host-window-list) is then called with those pids. A matcher with no `app` clause lists everything, as before; one whose application is not running returns `nil` without asking any process anything.
+Only the applications the matcher names are asked for their windows: the `app` clauses (top level and this platform's block) are run over [`host.window.apps()`](#host-window-apps) first, and [`host.window.list()`](#host-window-list) is then called with those pids. A matcher with no `app` clause lists every application that could own a window, at the short per-application bound described under `list()`; one whose application is not running returns `nil` without asking any process anything.
 
 ```luau
 local reaper = host.window.find({ app = { name = "reaper" } })

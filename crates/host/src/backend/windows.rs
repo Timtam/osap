@@ -809,6 +809,15 @@ impl Backend for WindowsBackend {
                 let mut cbuf = [0u16; 256];
                 let cn = GetClassNameW(hwnd, cbuf.as_mut_ptr(), cbuf.len() as i32);
                 let class = String::from_utf16_lossy(&cbuf[..cn.max(0) as usize]);
+                // A tooltip is a top-level window of the process too, and the consumer
+                // treats any newcomer during a hold as the menu: the click that opened the
+                // menu leaves the pointer on the control, and a toolkit that shows its tip
+                // anyway would confirm a menu that is not there and end the hold when the
+                // tip goes. Win32's class and WinForms' wrapper of it both carry the name;
+                // Qt's tooltip window class carries "ToolTip".
+                if class.contains("tooltips_class32") || class.contains("ToolTip") {
+                    continue;
+                }
                 let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
                 GetWindowRect(hwnd, &mut rect);
                 out.push(crate::backend::WindowSpot {
@@ -1228,6 +1237,17 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                             PostThreadMessageW(tid, WM_NULL, 0, 0);
                         }
                     }
+                }
+            }
+            // The two keys that END a menu, remembered whenever the runtime says a plugin
+            // menu is open — captured or not. Escape is captured by no overlay and Return
+            // only while the focused control wants it, so a record kept inside the
+            // captured-key branch below never held the Escape that cancelled a menu, and the
+            // runtime's hold ran its full course after it. Noted only; never suppressed.
+            if is_down && mask == 0 && (vk == 0x0D || vk == 0x1B) && MENU_OPEN.load(Ordering::Relaxed) {
+                let scope = KEY_SCOPE.load(Ordering::Relaxed);
+                if scope == 0 || GetForegroundWindow() as isize == scope {
+                    note_menu_pass(vk, mask);
                 }
             }
             // Match only the exact combo, so "Tab" (mask 0) leaves Alt+Tab alone.

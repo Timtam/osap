@@ -1457,17 +1457,18 @@ pub fn running_apps() -> Vec<crate::backend::AppInfo> {
 ///
 /// The cold path: `host.window.list()` with no filter, and `find`/`findAll` for a matcher
 /// that names no application. Bounded per application rather than per listing — see
-/// [`UNASKED_APP_TIMEOUT`] — and hidden applications are skipped outright: their windows are
-/// not on screen, and a listing of what is on screen has no reason to wait on them.
+/// [`UNASKED_APP_TIMEOUT`].
+///
+/// Hidden applications (Command-H) are asked like any other. They were skipped for a day,
+/// and that made the two listings disagree: `running_apps` keeps them, so a matcher that
+/// names one found its windows while a matcher that did not could not — and a module that
+/// finds a hidden DAW's plugin window and focuses it is exactly how that DAW comes back.
 pub fn enumerate_windows() -> Vec<WinInfo> {
     let mut pids = Vec::new();
     let apps = NSWorkspace::sharedWorkspace().runningApplications();
     for app in apps.iter().take(512) {
         let pid = app.processIdentifier();
-        if pid <= 0
-            || app.isHidden()
-            || app.activationPolicy() == NSApplicationActivationPolicy::Prohibited
-        {
+        if pid <= 0 || app.activationPolicy() == NSApplicationActivationPolicy::Prohibited {
             continue;
         }
         pids.push(pid as u32);
@@ -1520,11 +1521,41 @@ fn enumerate_windows_in(pids: &[u32], timeout: f32, what: &str) -> Vec<WinInfo> 
         let _ = unsafe { app_el.set_messaging_timeout(timeout) };
         let started = Instant::now();
         asked += 1;
-        let Some(v) = attribute(&app_el, a_windows()) else {
-            // No windows, no accessibility surface — or the timeout, which `attribute` has
-            // already written into the quarantine. Named either way when it was slow.
-            name_if_slow(pid, started, what, 0);
-            continue;
+        // Not through `attribute`, which on a timeout writes the five-second quarantine
+        // that every other path consults. That is right when the bound was the full second
+        // — the application really is not answering — and wrong at the short one: a plugin
+        // that lists its windows in half a second, asked here because nobody named it,
+        // would have been marked busy, and for the next five seconds `active_window` would
+        // serve its remembered window, `find` with its name would refuse to ask it, and the
+        // observer retry would wait — all for a deadline it was never expected to meet.
+        let read = attribute_checked(&app_el, a_windows());
+        let v = match read {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                name_if_slow(pid, started, what, 0);
+                continue; // no windows, or a process with no accessibility surface at all
+            }
+            Err(AXError::CannotComplete) if timeout < MESSAGING_TIMEOUT => {
+                crate::logging::line(
+                    "macos",
+                    &format!(
+                        "{what}: {} (pid {pid}) did not list its windows within {} ms — left \
+                         out of this listing, not quarantined; a matcher that names it is \
+                         asked at the full timeout",
+                        exe_for_pid(pid),
+                        (timeout * 1000.0) as u32
+                    ),
+                );
+                continue;
+            }
+            Err(err) => {
+                if err == AXError::CannotComplete {
+                    note_busy(pid);
+                }
+                note_error(err, "AXWindows");
+                name_if_slow(pid, started, what, 0);
+                continue;
+            }
         };
         let Some(arr) = v.downcast_ref::<CFArray>() else {
             continue;
@@ -1550,12 +1581,33 @@ fn enumerate_windows_in(pids: &[u32], timeout: f32, what: &str) -> Vec<WinInfo> 
         crate::logging::line(
             "macos",
             &format!(
-                "{what} blocked the pump for {ms} ms listing {asked} application(s) — the \
-                 slow ones are named above"
+                "{what} blocked the pump for {ms} ms listing {asked} application(s); any that \
+                 took {SLOW_APP_MS} ms or more is named above"
             ),
         );
     }
     out
+}
+
+/// An attribute read that reports the failure instead of filing it.
+///
+/// The funnel (`attribute`) classifies every failure into the log and quarantines the
+/// application on a timeout, and for every ordinary caller that is right. The window
+/// listing is not ordinary: it asks with a bound of its own, and what a miss at that bound
+/// means is the caller's to decide. `Ok(None)` is the API's own "no value" and the two
+/// absence errors the funnel treats the same way.
+fn attribute_checked(
+    el: &AXUIElement,
+    name: &CFString,
+) -> Result<Option<CFRetained<CFType>>, AXError> {
+    let mut raw: *const CFType = core::ptr::null();
+    let err = unsafe { el.copy_attribute_value(name, NonNull::from(&mut raw)) };
+    match err {
+        AXError::Success | AXError::NoValue | AXError::AttributeUnsupported => {
+            Ok(NonNull::new(raw.cast_mut()).map(|p| unsafe { CFRetained::from_raw(p) }))
+        }
+        other => Err(other),
+    }
 }
 
 /// One line per application that took its time, so a two-second listing says WHICH process

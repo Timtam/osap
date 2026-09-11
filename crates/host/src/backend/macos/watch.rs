@@ -129,6 +129,11 @@ struct Retry {
     app: String,
     due: Instant,
     tries: u8,
+    /// When the first busy refusal was recorded, so the line that gives up can say how long
+    /// the asking actually went on. It was "a minute and a half" — copied from the doc
+    /// comment's example of a plugin caught by its sixth try — while the ladder as written
+    /// sums to six minutes, and quarantine stretches it further.
+    since: Instant,
 }
 
 thread_local! {
@@ -374,7 +379,13 @@ fn ensure_observer(pid: i32, app: &str) {
         None => Some(0),
     }) {
         None => return,
-        Some(n) if n >= REFUSAL_RETRIES => return,
+        Some(n) if n >= REFUSAL_RETRIES => {
+            // Written off. A retry left on the clock from a busy refusal before the
+            // permanent ones would otherwise come due on every pump iteration for the rest
+            // of this process's life, each one paying a lookup to arrive here.
+            RETRY.with(|r| r.borrow_mut().remove(&pid));
+            return;
+        }
         Some(n) => n,
     };
 
@@ -407,6 +418,12 @@ fn ensure_observer(pid: i32, app: &str) {
                     ),
                 );
                 OBSERVERS.with(|o| o.borrow_mut().insert(pid, Watched::Refused(already_refused + 1)));
+                // A busy refusal may have put this application on the clock before it
+                // refused for good. Left there, the retry would come due on the next
+                // iteration and burn the remaining REFUSAL_RETRIES in three consecutive
+                // ticks — which were meant to be spread over application switches so a
+                // still-starting application gets time.
+                RETRY.with(|r| r.borrow_mut().remove(&pid));
             } else {
                 schedule_retry(pid, app, &refusal.reason);
             }
@@ -418,16 +435,22 @@ fn ensure_observer(pid: i32, app: &str) {
 fn schedule_retry(pid: i32, app: &str, reason: &str) {
     RETRY.with(|r| {
         let mut r = r.borrow_mut();
-        let tries = r.get(&pid).map(|e| e.tries).unwrap_or(0);
+        let (tries, since) = r
+            .get(&pid)
+            .map(|e| (e.tries, e.since))
+            .unwrap_or((0, Instant::now()));
         if tries >= RETRY_MAX {
             r.remove(&pid);
+            // Measured, not stated: quarantine and a change of frontmost application both
+            // stretch the schedule, so the only honest span is the one the clock read.
             crate::logging::line(
                 "macos",
                 &format!(
-                    "no focus observer for {app} (pid {pid}): {reason} — asked {tries} times \
-                     over a minute and a half; it will be asked again when it next comes to \
-                     the front, and until then overlays inside it only notice a change when \
-                     it is brought to the front"
+                    "no focus observer for {app} (pid {pid}): {reason} — asked again {tries} \
+                     times over {} s and refused every time; it will be asked again when it \
+                     next comes to the front, and until then overlays inside it only notice a \
+                     change when it is brought to the front",
+                    since.elapsed().as_secs()
                 ),
             );
             return;
@@ -442,7 +465,10 @@ fn schedule_retry(pid: i32, app: &str, reason: &str) {
                 tries + 1
             ),
         );
-        r.insert(pid, Retry { app: app.to_string(), due: Instant::now() + wait, tries: tries + 1 });
+        r.insert(
+            pid,
+            Retry { app: app.to_string(), due: Instant::now() + wait, tries: tries + 1, since },
+        );
     });
 }
 

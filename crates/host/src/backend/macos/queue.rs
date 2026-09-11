@@ -132,23 +132,20 @@ pub fn drain(events: &mut dyn HostEvents) {
     }
 }
 
-/// Used only in headless mode; the shipped path runs under wxWidgets, which owns the loop.
+/// One turn of the run loop, for headless mode; the shipped path runs under wxWidgets,
+/// which owns the loop. Blocks until something happens or the interval is up, whichever
+/// comes first, and returns after handling it — the OS callbacks queue while we are inside.
 ///
-/// A run loop with a repeating timer that drains at the same cadence the GUI tick would,
-/// so the two paths deliver events identically and headless stays a fair test of the rest.
-pub fn run_event_loop(events: &mut dyn HostEvents) -> Result<(), String> {
-    crate::logging::line("macos", "headless: running the CoreFoundation run loop");
-    loop {
-        // Blocks until something happens or the interval is up, whichever comes first, and
-        // returns after handling it — the OS callbacks queue while we are inside here.
-        unsafe {
-            objc2_core_foundation::CFRunLoop::run_in_mode(
-                objc2_core_foundation::kCFRunLoopDefaultMode,
-                0.015,
-                false,
-            );
-        }
-        drain(events);
-        events.on_tick();
+/// Only the turn, deliberately. What follows it — the tap's health check, the observer
+/// retries, the drain — is the pump, and the pump has ONE definition (`pump_pending`). This
+/// used to be a whole loop of its own that called `drain` directly, so everything the pump
+/// gained afterwards was missing from the headless run, which is the run CI reads.
+pub fn run_once() {
+    unsafe {
+        objc2_core_foundation::CFRunLoop::run_in_mode(
+            objc2_core_foundation::kCFRunLoopDefaultMode,
+            0.015,
+            false,
+        );
     }
 }

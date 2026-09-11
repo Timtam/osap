@@ -158,7 +158,7 @@ Claiming keys before the focused application sees them.
 | [`host.keys.menuOpen(open)`](keys#host-keys-menuopen) | Tells the hook a plugin's own (Qt/UIA) menu is open (`true`) or closed (`false`). |
 | [`host.keys.modifiersDown()`](keys#host-keys-modifiersdown) | True while any of Ctrl, Alt, Shift or Win — Control, Option, Shift or Command on macOS — is physically held. |
 | [`host.keys.nativeMenuOpen()`](keys#host-keys-nativemenuopen) | True while the application in front has a menu open that the operating system itself drew. |
-| [`host.keys.passedThrough()`](keys#host-keys-passedthrough) | The captured keys the hook let through to the application because a menu was open, since the last call |
+| [`host.keys.passedThrough()`](keys#host-keys-passedthrough) | The keys the hook let through to the application because a menu was open, since the last call |
 | [`host.keys.release(token)`](keys#host-keys-release) | Undoes the exact capture identified by the `token` `host.keys.capture` returned, recomputing the global captured set so the… |
 | [`host.keys.releaseAll()`](keys#host-keys-releaseall) | Removes **all** key captures owned by this module and refreshes the suppression set. |
 | [`host.keys.scope(toForeground)`](keys#host-keys-scope) | Scopes captured-key suppression. |

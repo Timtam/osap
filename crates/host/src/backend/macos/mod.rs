@@ -333,7 +333,14 @@ impl Backend for MacBackend {
     }
 
     fn run_event_loop(&self, events: &mut dyn HostEvents) -> Result<(), String> {
-        queue::run_event_loop(events)
+        // The same cadence the GUI tick would drain at, through the same pump, so headless
+        // stays a fair test of the rest — see `queue::run_once`.
+        crate::logging::line("macos", "headless: running the CoreFoundation run loop");
+        loop {
+            queue::run_once();
+            self.pump_pending(events);
+            events.on_tick();
+        }
     }
 
     fn enumerate_windows_of(&self, pids: &[u32]) -> Vec<WinInfo> {

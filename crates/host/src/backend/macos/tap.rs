@@ -256,6 +256,13 @@ pub fn set_captured_keys(keys: &[(u32, u8)]) {
     let n = held.len();
     drop(held);
     logging::trace("macos", || format!("tap: {n} captured key(s)"));
+    // A captured chord on VoiceOver's modifier fails the same way a registered one does —
+    // the tap never sees the press — and explained the same way, once per chord. The
+    // calibrator's three keys are captures, and the permissions page said the log would
+    // warn about them; until this, it only did so for registrations.
+    for &(vk, mask) in keys {
+        super::hotkey::warn_if_voiceover_owns(vk, mask, "captured");
+    }
 }
 
 /// Which window suppression applies to; 0 means everywhere. The value is a SNAPSHOT taken
@@ -455,6 +462,16 @@ unsafe extern "C-unwind" fn tap_callback(
         return pass;
     };
     let mask = mask_of(flags);
+    // The two keys that END a menu, remembered whenever the runtime says a plugin menu is
+    // open — captured or not. Escape is captured by no overlay, and Return only while the
+    // focused control wants it, so a record kept only for captured keys never held the one
+    // Escape that cancelled a menu, and the hold ran its full course after it.
+    if is_menu_key(vk) && mask == 0 && MENU_OPEN.load(Ordering::Relaxed) {
+        note_menu_pass(vk, mask, "a plugin menu is open");
+        if !captured(vk, mask) {
+            return pass;
+        }
+    }
     if !captured(vk, mask) {
         // Traced, because the alternative is a whole class of question nobody can answer.
         // "The overlay did not react to that key" has two causes that look identical from
@@ -639,6 +656,12 @@ fn note_menu_pass(vk: u32, mask: u8, why: &'static str) {
             m.push((vk, mask));
         }
     });
+}
+
+/// Return or Escape — the keys that end a menu, and the two the runtime's menu watch
+/// wants to hear about whether or not an overlay had claimed them.
+fn is_menu_key(vk: u32) -> bool {
+    vk == 0x0D || vk == 0x1B
 }
 
 /// Hands over, and forgets, everything `note_menu_pass` saw since the last call. Main
