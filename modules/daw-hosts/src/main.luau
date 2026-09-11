@@ -233,7 +233,7 @@ local function focusPluginWindow()
       -- for the plug-in that publishes nothing (sforzando), where there is no element to
       -- ask; it used to be the only path, and at Kontakt's corner it would have pressed
       -- Kontakt's logo button.
-      local given = host.element.focusWithin and host.element.focusWithin(w.id, panel)
+      local given = host.element and host.element.focusWithin and host.element.focusWithin(w.id, panel)
       if given then
         host.timer.after(250, function()
           local after = whereIsTheKeyboard(w, panel)

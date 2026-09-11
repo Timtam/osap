@@ -15,4 +15,8 @@ code_module = true
 # the plugin's panel when the window accepted the focus but kept the keyboard on its own FX
 # list, then asks a quarter of a second later where the keyboard actually is. Whether the
 # click achieves that is unmeasured; the module announces only what the later reading says.
-require = ["window", "hotkey", "speech", "log", "input", "timer"]
+# `element` for the one question the shortcut asks FIRST on macOS — the plugin's own
+# focusable elements inside its panel, handed the keyboard by asking — before it falls back
+# to the click. Without the capability the namespace is absent from this VM, and the
+# shortcut's first press would have raised a module error instead of moving anything.
+require = ["window", "hotkey", "speech", "log", "input", "timer", "element"]
