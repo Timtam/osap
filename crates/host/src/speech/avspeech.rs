@@ -69,6 +69,12 @@ pub struct AvSpeech {
     /// Windows side uses, and for the same reason: enumerating voices is not free, and
     /// `engines()` is a question a module may ask on any tick.
     voices: Arc<Mutex<Vec<Voice>>>,
+    /// What macOS answered to a Personal Voice request that showed no dialog, waiting to be
+    /// said. Written by the worker after the request, read by `Speech::pump` — the first
+    /// tick on a Mac that answers `denied` without asking got no feedback at all, because the
+    /// switch handler reads the status BEFORE the request and the request's own answer went
+    /// only to the log.
+    personal_note: Arc<Mutex<Option<String>>>,
 }
 
 impl AvSpeech {
@@ -77,16 +83,22 @@ impl AvSpeech {
         let pending = Arc::new(AtomicUsize::new(0));
         let healthy = Arc::new(AtomicBool::new(true));
         let voices = Arc::new(Mutex::new(Vec::new()));
-        let (p, h, v) = (pending.clone(), healthy.clone(), voices.clone());
+        let personal_note = Arc::new(Mutex::new(None));
+        let (p, h, v, n) = (pending.clone(), healthy.clone(), voices.clone(), personal_note.clone());
         std::thread::Builder::new()
             .name("avspeech".into())
-            .spawn(move || run(rx, p, h, v))
+            .spawn(move || run(rx, p, h, v, n))
             .ok();
         // The list is wanted before anything is said — `engines()` may be the first call —
         // and reading it is what the worker can do while nothing else is happening.
-        let me = Self { to_worker, pending, healthy, voices };
+        let me = Self { to_worker, pending, healthy, voices, personal_note };
         me.refresh();
         me
+    }
+
+    /// The explanation of a Personal Voice request that came back without a dialog, once.
+    pub fn take_personal_note(&self) -> Option<String> {
+        self.personal_note.lock().ok().and_then(|mut n| n.take())
     }
 
     /// Says `text` in `voice`, or in the system default when none is given.
@@ -140,6 +152,7 @@ fn run(
     pending: Arc<AtomicUsize>,
     healthy: Arc<AtomicBool>,
     voices: Arc<Mutex<Vec<Voice>>>,
+    personal_note: Arc<Mutex<Option<String>>>,
 ) {
     // Built on first use rather than here, and that is the point of the rewrite: `tts` cost
     // 2872 ms of blocking start-up on Windows for a voice that usually never spoke, and this
@@ -171,6 +184,13 @@ fn run(
                     let list = installed_voices();
                     if let Ok(mut v) = voices.lock() {
                         *v = list;
+                    }
+                } else if let Some(why) = personal_status().explanation() {
+                    // Not granted, and no dialog came — the status now says why, in the one
+                    // sentence the log and the settings dialog share. Handed to the pump to
+                    // say, because the user ticked a switch and heard nothing.
+                    if let Ok(mut n) = personal_note.lock() {
+                        *n = Some(why);
                     }
                 }
             }
@@ -379,17 +399,20 @@ impl PersonalVoice {
                 };
                 // Two causes, told apart by nothing macOS reports: Apple documents the
                 // answer as the user's refusal, and it also comes, with no dialog, while
-                // applications are not allowed to use a Personal Voice — a Mac with none
-                // recorded has nothing to allow. The option's name is quoted from Apple's
-                // macOS 14 guide, not from memory of a pane nobody here has seen.
+                // applications are not allowed to use a Personal Voice. Whether a Mac with
+                // none recorded answers the same way is not established, so the sentence
+                // says where a voice is recorded and stops there. The option's name is
+                // quoted from Apple's macOS 14 guide, not from memory of a pane nobody here
+                // has seen. And the remedy is the off-and-on of THIS switch — a relaunch
+                // would seed the switch as already on and never ask again.
                 Some(format!(
                     "macOS answered 'denied' without showing a dialog. It gives that answer \
                      after a refusal, and whenever applications are not allowed to use a \
                      Personal Voice — the switch for that is in System Settings > \
                      Accessibility > Personal Voice, named 'Allow applications to use your \
-                     Personal Voice', and a Mac with no Personal Voice recorded has nothing to \
-                     switch on.{seen} If you have one and the switch is on, quit this \
-                     application, open it again and tick this setting once more."
+                     Personal Voice', in the same pane where a Personal Voice is recorded.\
+                     {seen} Once that is allowed, turn this setting off and on again: every \
+                     time it is switched on, macOS is asked afresh."
                 ))
             }
         }

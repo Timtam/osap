@@ -433,6 +433,15 @@ impl Speech {
                         "Personal Voice: already granted — it is among the voices a module can \
                          choose",
                     );
+                } else if !avspeech::supported() {
+                    // The settings switch has already put up its dialog for this case; the
+                    // log must not then promise a system dialog the worker knows cannot come.
+                    crate::logging::line(
+                        "speech",
+                        "Personal Voice: this macOS has no such API — it arrived in macOS 14 — \
+                         so there is nothing to ask for. The switch stays on and changes \
+                         nothing.",
+                    );
                 } else {
                     crate::logging::line(
                         "speech",
@@ -444,6 +453,14 @@ impl Speech {
             } else {
                 self.last_personal.set(on);
             }
+        }
+        // The answer to a request that showed no dialog, said as well as logged: the user
+        // ticked a switch and would otherwise hear nothing — the same "checkbox ticked,
+        // nothing happens" two testers have now reported.
+        #[cfg(target_os = "macos")]
+        if let Some(why) = self.av.take_personal_note() {
+            crate::logging::line("speech", &format!("Personal Voice: {why}"));
+            self.av.say(&why, false, None);
         }
         #[cfg(target_os = "macos")]
         for text in self.vo.refused() {
