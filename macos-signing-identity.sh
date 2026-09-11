@@ -54,7 +54,7 @@ trap 'rm -rf "$tmp"' EXIT
 # Security framework can read. A Homebrew OpenSSL 3 earlier in PATH writes one with a SHA-256
 # MAC, which the framework rejects as "MAC verification failed during PKCS12 import (wrong
 # password?)" — a message about the password, for a fault that has nothing to do with it.
-# Scott hit exactly that. Choosing the reader's own implementation avoids the argument.
+# The tester hit exactly that. Choosing the reader's own implementation avoids the argument.
 OPENSSL=openssl
 [ -x /usr/bin/openssl ] && OPENSSL=/usr/bin/openssl
 
@@ -96,7 +96,7 @@ fi
 
 # A REAL PASSWORD and a SHA-1 MAC, because macOS is the reader and it is the older one.
 #
-# Scott's run got "SecKeychainItemImport: MAC verification failed during PKCS12 import (wrong
+# The tester's run got "SecKeychainItemImport: MAC verification failed during PKCS12 import (wrong
 # password?)". The password is a red herring — that message is what the Security framework
 # says when it cannot verify the container's MAC, and OpenSSL 3 writes one with SHA-256 by
 # default while the framework expects SHA-1. LibreSSL, which is what /usr/bin/openssl is,

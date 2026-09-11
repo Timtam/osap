@@ -1,10 +1,17 @@
 # Automation Platform (working title)
 
+> **Status: pre-alpha, and public mostly so that the macOS builds can run.** The Windows
+> side runs the shipped overlays daily. The macOS port is being tested blind, with a remote
+> VoiceOver user as the only tester, and does not yet work end to end there. The host API
+> changes without notice, the module format with it, and **the name — of the project and of
+> this repository — is a placeholder that will change.** Nothing here is a release; if you try
+> it anyway, `TODO.md` and `docs/` say what is known not to work.
+
 Cross-platform OS automation platform (AHK-/Keyboard-Maestro-class) with embeddable **Luau modules**. First concrete goal: make the [ReaHotkey](https://github.com/timtam/ReaHotkey) overlays macOS-capable; general automation (OCR, image detection, input, window control …) is the broader purpose and is scriptable from Luau **independently of any overlay**.
 
 ## Stack
 
-Rust · Luau (`mlua`) · wxDragon (native GUI) · tts-rs (`host.speech`) · native FFI (gated). Goal: **Windows + macOS first**, Linux later. License: still open (manifests currently `GPL-3.0-or-later` as a placeholder).
+Rust · Luau (`mlua`) · wxDragon (native GUI) · speech through the running screen reader (prism on Windows, VoiceOver on macOS) with the system voice as the fallback (`host.speech`) · native FFI (gated). Goal: **Windows + macOS first**, Linux later. License: **GPL-3.0-or-later** (`LICENSE`; the module manifests say the same).
 
 ## Build & Run
 
@@ -32,7 +39,7 @@ A module can be loaded either as an unpacked directory (dev) or as a **`.zip` pa
 ## Structure
 
 - `crates/module-manifest` — `module.toml` parsing + module loading (dev: unpacked directory).
-- `crates/host` — **module manager** + Luau runtime + `host` API (`log`/`speech`/`sound`/`hotkey`/`keys`/`timer`/`window`/`os`/`screen`/`ocr`/`input`/`overlay`/`path`/`resource`/`settings`/`uia`/`require`). Loads many modules concurrently (one VM each; shared backend/TTS/audio + one event loop, central event routing). The OS is reached through a `Backend` trait (`crates/host/src/backend/`, one impl per platform; Windows real, others stub); the window matcher + overlay runtime are Luau preludes. OCR uses `Windows.Media.Ocr` (fast, native) with an **embedded PaddleOCR recognition model run via ONNX Runtime** (`backend::paddle_ocr`, model baked in with `include_bytes!`) as a concurrent fallback for text WinRT can't read — notably isolated single digits. Overlays attach to standalone plugin windows *or* to plugins **embedded in a DAW host window** (REAPER/Ableton), detected by a child-control class on the keyboard-**focus chain** (`host.window.controls` / `focusChain`, driven by an `EVENT_OBJECT_FOCUS` hook).
+- `crates/host` — **module manager** + Luau runtime + `host` API (`log`/`speech`/`sound`/`hotkey`/`keys`/`timer`/`window`/`os`/`screen`/`ocr`/`input`/`overlay`/`path`/`resource`/`settings`/`uia`/`require`). Loads many modules concurrently (one VM each; shared backend/TTS/audio + one event loop, central event routing). The OS is reached through a `Backend` trait (`crates/host/src/backend/`, one impl per platform: Windows, macOS, and a stub for everything else); the window matcher + overlay runtime are Luau preludes. OCR uses `Windows.Media.Ocr` (fast, native) with an **embedded PaddleOCR recognition model run via ONNX Runtime** (`backend::paddle_ocr`, model baked in with `include_bytes!`) as a concurrent fallback for text WinRT can't read — notably isolated single digits. Overlays attach to standalone plugin windows *or* to plugins **embedded in a DAW host window** (REAPER/Ableton), detected by a child-control class on the keyboard-**focus chain** (`host.window.controls` / `focusChain`, driven by an `EVENT_OBJECT_FOCUS` hook).
 - `crates/app` — binary `automation-platform`, loads & runs one or more modules: `automation-platform <dir1> <dir2> …`. Embeds a Windows manifest (Common Controls v6 + DPI awareness) via `build.rs`.
 - `crates/host/src/gui.rs` — tray-resident wxDragon module manager: a system-tray icon + a window listing modules with **native** (`wxTreeCtrl` + `TVS_CHECKBOXES`) checkboxes to enable/disable them, plus a **per-module settings dialog** (native, screen-reader-labeled controls); hands wxWidgets the event loop and drains our OS events via a `Timer` tick (event-loop coexistence).
 - `modules/` — the **real** modules, the set you would actually run:
