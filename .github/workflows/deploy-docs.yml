@@ -1,12 +1,13 @@
 name: Deploy docs to GitHub Pages
 
-# Manual until the repository is public.
+# Manual until GitHub Pages is switched on for this repository.
 #
-# GitHub Pages does not serve a site from a private repository on the Free plan at all, and
-# even where it is available it has to be switched on in the repository's settings first. On
-# every push this would therefore fail rather than deploy — a red mark on each docs commit,
-# an email each time, and Actions minutes spent to produce it. Turn the push trigger back on
-# in the same change that makes the repository public.
+# The private-repository half of this is settled — the repository has been public since
+# 2026-09-12 — but Pages still has to be enabled in the repository's settings, with "GitHub
+# Actions" as the source, and it has not been. On every push this would therefore fail
+# rather than deploy: a red mark on each docs commit, an email each time, and a runner spent
+# to produce it. Turn the push trigger back on in the same change that enables Pages, and
+# say so in the README so the site's address is somewhere a reader can find it.
 on:
   workflow_dispatch:
 

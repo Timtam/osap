@@ -4,7 +4,8 @@ name: Documentation
 #
 # This runs on a push rather than manually, unlike the Pages deploy, because it needs nothing
 # from GitHub beyond a runner — no Pages, no plan, no repository setting. The deploy is manual
-# only because Pages will not serve a private repository, which is a different problem.
+# only because Pages has not been switched on in the repository's settings, which is a
+# different problem; the repository itself has been public since 2026-09-12.
 #
 # The trigger is narrow on purpose. The check compares two things: the examples in `docs/` and
 # the bindings the host registers. Nothing else can change its answer, so nothing else should

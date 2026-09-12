@@ -10,54 +10,29 @@
 # README beside it.
 name: macOS build
 
-# Deliberately narrow triggers, and the reason is money rather than taste.
+# Triggered like the Windows job, since 2026-09-12: whenever anything it builds changes.
 #
-# In a PRIVATE repository, Actions minutes come out of the account's monthly allowance and a
-# macOS minute costs about ten Linux minutes ($0.062 against $0.006 at the January 2026
-# prices). A Free plan's 2,000 included minutes are therefore around 200 minutes of macOS
-# time a month — and the first build of this project compiles wxWidgets from source, which
-# is the better part of that on its own. Public repositories pay nothing for standard
-# runners, so this gets less delicate the moment the repo is public.
+# It used to watch a hand-kept list of "the macOS code", and the reason was money rather
+# than taste. In a private repository Actions minutes come out of the account's monthly
+# allowance and a macOS minute costs about ten Linux minutes; a Free plan's 2,000 included
+# minutes are around 200 minutes of macOS time a month, and this project's first build
+# compiles wxWidgets from source. That list cost what such lists always cost: the speech
+# path shipped and was never linked on a Mac, because the only job that links lived behind
+# it, and `crates/host/src/lib.rs` — where every Lua binding is declared — was left out on
+# purpose, with the note that a change there needed a hand-dispatched run somebody would
+# have to remember. Public repositories pay nothing for standard runners, so the reason is
+# gone and so is the list.
 #
-# So: automatic only when the macOS code itself changes, plus a button. Widening this back
-# to every push is a decision about the month's budget, not a convenience.
+# What remains is wall-clock, and this job runs beside the others rather than ahead of them.
 on:
   push:
     branches: [main, master]
     paths:
-      # Everything `crates/macos-check` borrows by #[path], and nothing else. That list is
-      # the definition of "macOS code" in this repo, and it is easy to extend the borrow
-      # and forget this — which is exactly what happened to the speech path: it shipped and
-      # was never linked on a Mac, because the only job that links lives behind this list.
-      - 'crates/host/src/backend/macos/**'
-      - 'crates/host/src/speech/**'
-      # Not borrowed by macos-check (it cannot be — wxdragon), but it carries a macOS
-      # branch of its own now, and this job is the only place that ever compiles it.
-      #
-      # `crates/host/src/lib.rs` is deliberately NOT here, and the reasoning is worth keeping
-      # so nobody has to redo it. It is the biggest file in the crate and changes on most
-      # pushes, while a run of this job has cost anywhere between 1.6 and 15.7 minutes (the
-      # spread is unexplained — a warm rust-cache is not a reliable predictor), so listing it
-      # would spend a large and unpredictable share of the month's macOS minutes. What it buys
-      # is small: lib.rs holds exactly ONE macOS-gated block against ten in gui.rs, and the
-      # rest is plain Rust that compiles anywhere. When a change there touches something this
-      # job actually exercises — module loading, or the headless path it runs modules through
-      # — dispatch the job by hand. That is a real gap, chosen with the price in front of us
-      # rather than overlooked.
-      - 'crates/host/src/gui.rs'
-      - 'crates/host/src/appcfg.rs'
-      - 'crates/host/src/portable.rs'
-      - 'crates/host/src/logging.rs'
-      - 'crates/host/Cargo.toml'
-      - 'crates/macos-check/**'
-      # The Luau too, now that a Mac actually loads it: a module's macOS-only branch is
-      # never executed anywhere else, so this job is its only gate.
+      - 'crates/**'
       - 'modules/**'
-      # And the dev tools, because this job packages one of them into the bundle and loads
-      # it, and now runs a second by path. A job that does not watch what it runs is a gap
-      # this repo has found three times: the documentation job and its Python checker, the
-      # Windows job and its two probes, and now this one.
       - 'tools/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - 'package-macos.sh'
       - '.github/workflows/macos-build.yml'
   # No inputs any more. There used to be a choice of Mac, which was really a choice of which
