@@ -7,6 +7,10 @@
 > this repository — is a placeholder that will change.** Nothing here is a release; if you try
 > it anyway, `TODO.md` and `docs/` say what is known not to work.
 
+> **How it is written:** with AI assistance, throughout — and read, questioned and directed
+> by a human with software-development experience. The code, the commit messages and the
+> design documents are the product of that pairing, not of either half alone.
+
 Cross-platform OS automation platform (AHK-/Keyboard-Maestro-class) with embeddable **Luau modules**. First concrete goal: make the [ReaHotkey](https://github.com/timtam/ReaHotkey) overlays macOS-capable; general automation (OCR, image detection, input, window control …) is the broader purpose and is scriptable from Luau **independently of any overlay**.
 
 ## Stack
