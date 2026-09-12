@@ -346,11 +346,22 @@ local function snapshotAction(cell, fromRight, y, opensMenu)
 end
 
 -- A header control that acts through UIA where that works (a standalone Kontakt is fully
--- accessible) and falls back to this cell's coordinate for that control.
-local function headerAction(cell, uiaName, key)
+-- accessible) and falls back to this cell's coordinate for that control — unless `uiaOnly`,
+-- for a button no single coordinate is right for. There a miss is said, which is ReaHotkey's
+-- own default branch, instead of a silent click into whichever layout the number was not
+-- taken from: on the third Mac session's window the old fallback for SHOP landed on bare
+-- header, 375 points left of the button.
+local function headerAction(cell, uiaName, key, uiaOnly)
   return function(o)
     local ctrl = o:origin()
     if uiaClick(nil, uiaName, BUTTON) then return end
+    if uiaOnly then
+      host.log.info(("Kontakt: %s was not found by name — not clicking a coordinate for it")
+        :format(tostring(uiaName)))
+      local spoken = uiaName and (uiaName:sub(1, 1) .. uiaName:sub(2):lower()) or "That button"
+      host.speech.output(spoken .. " not found", { interrupt = true })
+      return
+    end
     local at = cell.geometry[key]
     if ctrl and ctrl.client and at then
       host.input.click(ctrl.client.x + at[1], ctrl.client.y + at[2])

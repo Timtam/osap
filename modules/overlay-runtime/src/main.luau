@@ -1436,7 +1436,7 @@ local function speakControl(self, index, moveMouse, withHint, queued)
   -- again at the end. Landing on it also restarts the ring, so entering it, leaving by
   -- hotkey and coming back walks the whole thing again rather than resuming mid-way.
   if c.kind == "passthrough" then
-    c._entry = nil
+    c._entry, c._count, c._leaveOn = nil, nil, nil
     host.speech.output((c.label or "") .. ", Tab to step through them", { interrupt = true })
     return
   end
@@ -1732,16 +1732,40 @@ function Overlay:_stepPassThrough(dir)
   if not (c and c.kind == "passthrough" and isVisible(self, c)) then return false end
   local ctrl = self:origin()
   if not (ctrl and ctrl.id) then return false end
-  local r = host.element.focusStep(ctrl.id, dir)
-  if not r then return false end -- nothing focusable in there: just move on
-  if c._entry == nil then
-    c._entry = r.index
-    return true
-  end
-  if r.index == c._entry then
-    c._entry = nil -- walked the ring; hand Tab back to the overlay
+  -- THE LAP ENDS BEFORE THE STEP THAT WOULD CLOSE IT, not after.
+  --
+  -- It used to be noticed afterwards: the press that came back round asked the backend to move
+  -- the plugin's focus onto the entry element AGAIN, and only then saw the index match and
+  -- handed Tab back. A real focus event had already gone out, so the screen reader named the
+  -- entry element a second time — over the overlay's own announcement of its next control —
+  -- and a tester counting the plugin's stops by ear counted one too many. So each press works
+  -- out whether the next step in its direction would land on the entry, and if it would, the
+  -- next press leaves without touching the plugin's focus at all. Keyed on the direction, so
+  -- reversing mid-lap does not end it early.
+  if c._leaveOn ~= nil and c._leaveOn == dir then
+    c._entry, c._count, c._leaveOn = nil, nil, nil
     return false
   end
+  local r = host.element.focusStep(ctrl.id, dir)
+  if not r then
+    c._entry, c._count, c._leaveOn = nil, nil, nil
+    return false -- nothing focusable in there: just move on
+  end
+  -- A ring that changed size is a different ring. Return pressed inside it can hide a whole
+  -- panel of the plugin — Kontakt's LIBRARY takes a dozen stops with it — and an entry index
+  -- from before could then never come round again, trapping Tab inside the plugin for good, or
+  -- could name a different element and hand back half-way. The lap starts afresh from here.
+  if c._entry == nil or r.count ~= c._count then
+    c._entry, c._count = r.index, r.count
+  elseif r.index == c._entry then
+    -- Came round without the look-ahead predicting it: a stop in between refused the focus and
+    -- was stepped over. Leave now.
+    c._entry, c._count, c._leaveOn = nil, nil, nil
+    return false
+  end
+  local step = dir >= 0 and 1 or -1
+  local nxt = ((r.index - 1 + step) % r.count) + 1
+  c._leaveOn = (nxt == c._entry) and dir or nil
   return true
 end
 

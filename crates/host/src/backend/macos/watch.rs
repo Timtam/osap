@@ -405,6 +405,17 @@ fn ensure_observer(pid: i32, app: &str) {
                 },
             );
             OBSERVERS.with(|o| o.borrow_mut().insert(pid, Watched::Live(live)));
+            // An application that has just started answering, while it is in front, gets one
+            // look from every overlay. The retry exists because this application refused while
+            // it was busy — Kontakt 7 refused for a minute at start-up in the third session — and
+            // an overlay that asked during that minute found no window and was not asked again:
+            // the re-check ladder ends ten seconds after the switch, and a window binding has no
+            // poll of its own. The subscription succeeding is the first sign the application
+            // answers again, so it is the moment to look. A first-time subscription needs no such
+            // nudge: it happens on the activation that already makes every overlay look.
+            if after.is_some() && pid == FRONT_PID.load(Ordering::Relaxed) {
+                super::queue::mark_focus_dirty();
+            }
         }
         Err(refusal) => {
             if refusal.permanent {

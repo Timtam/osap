@@ -109,10 +109,19 @@ local HEADER = {
 
 -- Single-click header controls Kontakt 7 has and Kontakt 8 does not (its chrome moved them
 -- into menus). `uia` is the button's UIA name, used where the plugin is accessible.
+--
+-- `opensMenu`: VIEW drops a menu, and a control that opens one has to say so — that is what
+-- hands the navigation keys to the menu. The file menu has always declared it; VIEW did not,
+-- and on a Mac nothing else would have noticed its menu at all.
+-- `uiaOnly`: no coordinate is right for SHOP in both of Kontakt's layouts — it moves with the
+-- library browser, 440 from the left with the browser closed and 815 with it open, the second
+-- measured on a Mac — so when it cannot be found by name the press is refused out loud rather
+-- than aimed at where it sits in one layout of the two. `shop` stays in GEOMETRY all the same:
+-- the standalone header offers a control only where the geometry has its key.
 local K7_CONTROLS = {
   { label = "Library on/off", key = "library", uia = "LIBRARY", hotkey = "Alt+L", embedded = true },
-  { label = "View menu", key = "viewMenu", uia = "VIEW", hotkey = "Alt+V" },
-  { label = "Shop", key = "shop", uia = "SHOP", hotkey = "Alt+S" },
+  { label = "View menu", key = "viewMenu", uia = "VIEW", hotkey = "Alt+V", opensMenu = true },
+  { label = "Shop", key = "shop", uia = "SHOP", hotkey = "Alt+S", uiaOnly = true },
 }
 
 -- The UIA name of the file-menu button, which is version-specific.

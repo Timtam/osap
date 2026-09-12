@@ -287,44 +287,53 @@ FILE, LIBRARY, VIEW and SHOP buttons **by name** and presses them directly, and 
 Tab key to **Kontakt's own controls**. Last session's probe measured that window whole; nobody
 has used an overlay on it yet. About ten minutes.
 
-**Do:** open **Kontakt 7 on its own**, not inside REAPER, and let it finish loading. Last time
-Kontakt did not answer the accessibility layer at all for about a minute after it came to the
-front — nothing will speak during that, and that is Kontakt, not a fault. Once it has loaded,
-**Command-Tab** away to any other application and straight back to Kontakt; coming to the front
-is what makes the overlay look.
+**Do:** open **Kontakt 7 on its own**, not inside REAPER. Last time Kontakt did not answer the
+accessibility layer at all for about a minute after it came to the front, and nothing tells you
+when that minute is over — so do not wait for it. **Command-Tab to Finder** (not to REAPER: its
+Kontakt window from step 4 has an overlay of its own) and straight back to Kontakt; coming to
+the front is what makes the overlay look. If "Kontakt file menu, button" has not been spoken
+within about fifteen seconds, do the Finder-and-back again, and keep doing it every half minute
+or so until it is. It may also come up on its own once Kontakt starts answering. Write down
+roughly how many round trips it took.
 
 **Should happen:** the overlay's first control is spoken — **"Kontakt file menu, button"**. Tab
 then gives "Library on/off", "View menu", "Shop" — each followed by "button" and its key in the
-Windows spelling — and then **"Kontakt controls, Tab to step through them"**, and round again.
-Five stops, and nothing else: the rack controls from step 4 are left out here on purpose,
-because on a Mac nothing can tell whether Kontakt's rack is on screen.
+Windows spelling — and then **"Kontakt controls, Tab to step through them"**. That is the last
+of ours: the Tab after it goes *into* Kontakt (item 2), and comes straight back to "Kontakt file
+menu" only if nothing in Kontakt takes the keyboard. Five stops of ours, and nothing else: the
+rack controls from step 4 are left out here on purpose, because on a Mac nothing can tell whether
+Kontakt's rack is on screen.
 
 **Do, in this order:**
 
-1. **Tab round once** and write down the five stops as you heard them.
+1. From "Kontakt file menu", press **Tab four times**, stopping on "Kontakt controls", and write
+   down the five stops as you heard them.
 2. On **"Kontakt controls"**, press **Tab** again. The keyboard should go *into Kontakt*, and
    **VoiceOver** — not our voice — should announce each of Kontakt's own controls as it
    arrives. Keep pressing Tab until our "Kontakt file menu" comes round again. Write down what
-   VoiceOver said at each stop, and roughly how many there were. Several of Kontakt's controls
+   VoiceOver said at each stop, and roughly how many there were — the log counts them too, so a
+   rough number is enough. Several of Kontakt's controls
    have no name, so "button" on its own is an expected answer. **Do not press Return or Space
    while you are inside Kontakt's controls** — on that stop those keys go to Kontakt, and
    nobody knows what its unnamed buttons do. If the first Tab simply moves on to "Kontakt file
    menu", nothing in Kontakt took the keyboard; write that down, the log says why.
-3. Go to **"Kontakt file menu"** and press **Return**. Kontakt's FILE menu should open, and the
-   keys belong to it now: use the arrows and listen — **does VoiceOver read the menu's items?**
+3. Go to **"Kontakt file menu"** and press **Return**. You hear "Kontakt file menu, activated" —
+   that is the press registering — and Kontakt's FILE menu should open, with the keys belonging
+   to it now: use the arrows and listen — **does VoiceOver read the menu's items?**
    Do not choose anything. Press **Escape**, count one, and press **Tab**: it should move to
    "Library on/off".
-4. **Only if item 2 stepped into Kontakt:** go to **"Library on/off"** and press **Return** once.
-   It presses Kontakt's LIBRARY button, which shows or hides the preset browser. Then go to
-   "Kontakt controls" and step through Kontakt once more: with the browser shown, VoiceOver reads
-   a "Search" field and the "Brand", "Sound Type" and "Character" buttons; with it hidden, those
-   are gone. Say which you heard — that is the only way anyone can tell here what the button
-   did. Then press "Library on/off" once more, to put Kontakt back as it was.
+4. Go to **"Library on/off"** and press **Return once**. You hear "Library on/off, activated";
+   do not press it again to check. It presses Kontakt's LIBRARY button, which shows or hides the
+   preset browser. Then press **Command-Shift-F9** over Kontakt: the probe's picture and its list
+   of Kontakt's elements show whether the browser went, which nobody can hear. If item 2 stepped
+   into Kontakt, also step through Kontakt once more and write down which of the stops from item
+   2 are now missing, or that they are all still there. Then press "Library on/off" once more, to
+   put Kontakt back as it was.
 5. Leave **"View menu"** and **"Shop"** alone: the first opens a second menu of the kind item 3
    has already measured, and the second opens Native Instruments' store.
 
-**Write down:** items 1 to 4, and — for item 3 — whether the arrows moved through the menu at
-all, and whether Tab after Escape moved on the first press.
+**Write down:** items 1 to 4, and — for item 3 — whether VoiceOver said anything at all when you
+pressed the arrows (even just "menu"), and whether Tab after Escape moved on the first press.
 
 ---
 
@@ -477,6 +486,7 @@ Nothing to do. Lines to know about:
 
 ## If you are on the old Air {#if-you-are-on-the-old-air}
 
-Skip **steps 4 and 5** (Kontakt does not run on macOS 12) and **step 8** (Personal Voice needs
-macOS 14 — the switch says so there). Steps 2, 3, 6 and 7 apply unchanged, and step 3 is the
-one carrying the fix for what you reported.
+Skip **steps 4 and 5** (no Kontakt has been set up on the Air) and **step 8** (Personal Voice
+needs macOS 14 — the switch says so there). Steps 2, 3, 6 and 7 apply, and step 3 is the one
+carrying the fix for what you reported. In step 6 there is no Kontakt to quit or close: start at
+"Then put **sforzando** on a new track of its own".

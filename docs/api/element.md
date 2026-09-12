@@ -300,23 +300,22 @@ Siblings are counted within the parent's own children, and a step off either end
 
 **This one writes.** It enumerates the visible, keyboard-focusable descendants of `hwnd`'s content area and *moves keyboard focus* to the next (`direction >= 0`) or previous one, wrapping at the ends, returning the element it landed on. It is the Tab pass-through for a standalone plug-in window that does not move focus on Tab by itself (Kontakt standalone), and it is the only way into such a window's native controls. Because it raises a real focus event, the screen reader announces the element — so the overlay must deliberately stay quiet rather than speaking `name` itself.
 
-Candidates are re-enumerated every step, since the tree changes shape as the user moves; and a candidate that accepts the focus request without actually taking it is skipped, verified by reading focus straight back. What the ring is scoped to differs by platform — see below. It **wraps**, so "the ring is finished" is not something it reports — the caller remembers the 1-based `index` it entered at and watches for it to come round again. `nil` means nothing in the scope accepted focus at all. A module normally gets this through `Overlay:addPassThrough`.
+Candidates are re-enumerated every step, since the tree changes shape as the user moves; and a candidate that accepts the focus request without actually taking it is skipped, verified by reading focus straight back. What the ring is scoped to differs by platform — see below. It **wraps**, so "the ring is finished" is not something it reports — the caller remembers the 1-based `index` it entered at and, from each result's `index` and `count`, works out whether the *next* step would land there again; if so it hands Tab back on that press **without** calling this, because calling it would move the plug-in's focus onto the entry element a second time and the screen reader would name it twice. A `count` that changes mid-lap means the plug-in's tree changed (a panel was shown or hidden), and the lap starts afresh. `nil` means nothing in the scope accepted focus at all. A module normally gets this through `Overlay:addPassThrough`.
 
 ```luau
--- One Tab inside the pass-through control. From modules/overlay-runtime/src/main.luau
--- (Overlay:_stepPassThrough). Entering at whatever the plug-in already has focused is what
--- makes the returned index a full-ring marker rather than the tail of one.
-local ctrl = self:origin()
-local r = ctrl and ctrl.id and host.element.focusStep(ctrl.id, dir)
-if not r then return false end        -- nothing focusable in there: let Tab carry on
-if c._entry == nil then
-  c._entry = r.index
-  return true
+-- One Tab inside the pass-through control, shortened from modules/overlay-runtime/src/main.luau
+-- (Overlay:_stepPassThrough). The lap ends BEFORE the step that would close it.
+if c._leaveOn == dir then               -- last press saw the entry come up next
+  c._entry, c._count, c._leaveOn = nil, nil, nil
+  return false                          -- hand Tab back without touching the plug-in's focus
 end
-if r.index == c._entry then
-  c._entry = nil                      -- ring walked; hand Tab back to the overlay
-  return false
+local r = host.element.focusStep(ctrl.id, dir)
+if not r then return false end          -- nothing focusable in there: let Tab carry on
+if c._entry == nil or r.count ~= c._count then
+  c._entry, c._count = r.index, r.count -- a new lap, or the tree changed under the old one
 end
+local nxt = ((r.index - 1 + (dir >= 0 and 1 or -1)) % r.count) + 1
+c._leaveOn = (nxt == c._entry) and dir or nil
 return true
 ```
 

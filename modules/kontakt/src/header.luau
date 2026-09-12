@@ -577,14 +577,27 @@ local function addStandaloneHeader(ov, cell, isLibrary)
     -- Unlike the three actions above, which drive the menu themselves and close it again,
     -- this one hands it to the user — so the overlay stops owning keys while it is up.
     opensMenu = true,
-    onActivate = function(o) A.openFileMenu(cell, o) end,
+    onActivate = function(o)
+      -- Acknowledged at PRESS time, as every hotspot and the snapshot controls are. It is also
+      -- what separates the two answers this press exists to get on a Mac: "the menu opened and
+      -- VoiceOver could not read it" from "the press never registered". Silence was both.
+      host.speech.output("Kontakt file menu, activated", { interrupt = true })
+      A.openFileMenu(cell, o)
+    end,
   })
   for _, h in ipairs(geo.K7_CONTROLS) do
     if cell.geometry[h.key] then
       ov:addCustomButton({
         label = h.label,
         hotkey = h.hotkey,
-        onActivate = A.headerAction(cell, h.uia, h.key),
+        opensMenu = h.opensMenu,
+        onActivate = function(o)
+          -- Same reason as the file menu above, and a sharper one for the toggle: in a DAW this
+          -- same "Library on/off" is a hotspot and says "activated", so its silence here would
+          -- read as a press that did not register — and a second press puts the browser back.
+          host.speech.output(h.label .. ", activated", { interrupt = true })
+          A.headerAction(cell, h.uia, h.key, h.uiaOnly)(o)
+        end,
       })
     end
   end

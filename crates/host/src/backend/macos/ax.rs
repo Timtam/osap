@@ -2286,6 +2286,20 @@ pub fn window_controls(hwnd: isize) -> Vec<ControlInfo> {
 /// it is empty, and the module treats empty as not knowing.
 pub fn window_focus_chain() -> Vec<ControlInfo> {
     let t = Instant::now();
+    // The quarantine applies here too, and this is the one read that could never record it.
+    // The question goes to the SYSTEM-WIDE element, whose pid is 0, so a timeout here marked
+    // nobody busy: while REAPER was not answering, every overlay recheck paid the full messaging
+    // timeout again — once per epoch, on the thread that carries the event tap, while the
+    // library overlays' 500 ms landmark polls turn epochs over constantly with a Kontakt window
+    // in front. The frontmost application is asked of the workspace, which is local, and it is
+    // the application the system-wide read would have been waiting on. Empty is the honest
+    // answer meanwhile: every caller reads an empty chain as "not known".
+    let front = frontmost_pid();
+    if let Some(p) = front {
+        if skip_busy(p, "focus_chain") {
+            return Vec::new();
+        }
+    }
     let sw = system_wide();
     // Where the frontmost window is asked for only when it is needed. This runs on every
     // overlay recheck, and resolving the frontmost application costs a workspace query plus
@@ -2300,7 +2314,12 @@ pub fn window_focus_chain() -> Vec<ControlInfo> {
             Some((w, p)) => (Some(w), p),
             None => (None, 0),
         },
-        Err(_) => {
+        Err(err) => {
+            if err == AXError::CannotComplete {
+                if let Some(p) = front {
+                    note_busy(p);
+                }
+            }
             crate::logging::trace("macos", || {
                 "focus chain: the focused element could not be read; answering empty".to_string()
             });
