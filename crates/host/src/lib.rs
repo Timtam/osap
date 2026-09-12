@@ -3238,6 +3238,19 @@ pub fn run(dirs: &[String]) -> Result<()> {
     let warmup = backend::warmup_ocr(); // preload the neural OCR model off the hot path
     let result = (|| -> Result<()> {
         let mut manager = Manager::new()?;
+        // Nothing to load is a legitimate state — it is how somebody installs their first
+        // module — and it is also what a translocated bundle, a moved folder or an empty
+        // `modules` directory look like. Those are indistinguishable from the outside and
+        // one of them wastes a remote tester's session, so the log says which state this is
+        // rather than leaving the reader to infer it from an absence of loading lines.
+        if dirs.is_empty() {
+            logging::line(
+                "manager",
+                "no modules to load — the `modules` folder beside the application is empty \
+                 or could not be read. Every overlay will be absent and nothing will say so \
+                 again; see the `translocated` line above if this is a fresh download.",
+            );
+        }
         for dir in dirs {
             if let Err(e) = manager.load(dir) {
                 manager.report_load_failure(dir, &e);

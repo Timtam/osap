@@ -12,9 +12,9 @@ Each step has **what to do**, **what should happen**, and **what to write down**
 nothing" and "it said the wrong thing" are different faults with different causes, and the
 difference is invisible from here.
 
-**If your time is short once it is set up:** step 3 and step 5, and count on half an hour for
+**If your time is short once it is set up:** step 3 and step 4, and count on half an hour for
 the two rather than twenty minutes — last time the sforzando part took ten minutes on its
-own, and step 5 has sixteen controls to hear and two to press on top of getting Kontakt into
+own, and step 4 has sixteen controls to hear and two to press on top of getting Kontakt into
 REAPER. Everything else can wait for another day; those two cannot be answered without you.
 
 Nearly everything in this protocol exists because of what you reported last time. Where a step
@@ -27,7 +27,7 @@ checks one of those things, it says so.
 | Record the window in front (the probe) | **Command-Shift-F9** |
 | Move between an overlay's controls | **Tab**, and **Shift-Tab** backwards |
 | Put the keyboard back into a plugin window | **Command-Shift-F6** |
-| Reload every module | **Command-Shift-F5** |
+| Reload every module | **Command-Shift-F5** — keep Shift; Command-F5 alone switches VoiceOver off |
 
 Two of these changed. Last time the last two were Control-Shift-Command-Option, and you
 reported that both beeped and did nothing. Control-Option together is VoiceOver's own
@@ -43,14 +43,23 @@ cannot hear a beep.
 
 ## 1. Setting up
 
-**Do:** download the artifact **AutomationPlatform-macos-universal** from the newest green
-run of the **macOS build** workflow on GitHub — it must be dated **11 September or later**;
-the run from the 10th is an older build without step 5 in it — and unzip it.
+**Do:** download the artifact **AutomationPlatform-macos-universal** from the newest **green**
+run of the **macOS build** workflow on GitHub — a red or cancelled run leaves a file behind
+too, and that one is missing what this session is about, so take a run with a tick. It is a
+zip inside a zip: unzip twice, until you have a folder called `AutomationPlatform` holding the
+`.app`, a `modules` folder and a `README.txt`. Move that whole folder somewhere you can write
+to.
+
+`README.txt` beside the `.app` has one command worth running before you open anything:
+`xattr -dr com.apple.quarantine AutomationPlatform.app`. Without it macOS may run the `.app`
+from a hidden read-only copy of itself, where the `modules` folder is not there — every
+overlay would then be silently absent, which sounds exactly like "nothing works". The log says
+`translocated: YES` when that has happened, and `no modules to load` underneath it.
 
 **Know before you start:** every download is a **new application** as far as macOS is
-concerned, so all four permissions have to be granted again. That is not a bug this time —
-the artifact carries no certificate, and we chose not to change that before this session —
-but it means step 2 happens on every new build, not once.
+concerned, so the permissions have to be granted again. That is not a bug — the artifact
+carries no certificate, and we chose not to change that before this session — but it means
+step 2 happens on every new build, not once.
 
 **Write down:** nothing, unless something stopped you.
 
@@ -96,6 +105,11 @@ there is nothing further to try.
 4. Did a system dialog about **Screen Recording** appear at all, and on which launch — the
    first, or the one after Accessibility was granted? The log cannot tell: the application
    only learns yes or no, not whether a dialog was shown.
+
+Only three of the four rows matter today: **Accessibility**, **Screen Recording** and **Input
+Monitoring**. The fourth, **Automation**, is asked for only by ticking "Speak through
+VoiceOver", which this session deliberately leaves off — so its row saying it cannot be
+determined is correct, and there is nothing to do about it.
 
 ---
 
@@ -158,42 +172,11 @@ It says "Recording. This can take a few seconds on a large plugin", then a summa
 seconds after the summary, the window titled "Module error: com.tool.probe" opens and takes the
 keyboard, as it did last time; VoiceOver reads it, and Escape closes it. There is nothing to
 answer about it this session. It comes **once per launch of the application, on the first press
-only** — the press in step 5 will not raise it again, and the log says so.
+only** — the press in step 4 will not raise it again, and the log says so.
 
 ---
 
-## 4. Personal Voice — now with an answer
-
-Last time: "the permissions dialog doesn't show, but the checkbox gets checked. Nothing happens
-otherwise." The log then claimed you had refused a dialog you never saw. That sentence is gone.
-
-**Do:** open the manager (menu-bar icon → **Show module manager**), go to the **Application
-settings** tab — the fourth of five — and tick **"Offer my Personal Voice to modules…"**.
-
-**Should happen, one of three things:**
-
-- **macOS shows its own permission dialog.** Then nothing of ours appears; the system's dialog
-  is the feedback.
-- **A dialog of ours opens, and the application itself says nothing.** VoiceOver reads the
-  dialog's text, which has the focus, as it read the probe's error window. This is what happens
-  when macOS had already answered before we asked, and your last log says that Mac answers that
-  way — so this is the likeliest of the three. The text says what macOS answered and, if the
-  answer was "denied", where the switch for it is (System Settings → Accessibility → Personal
-  Voice, "Allow applications to use your Personal Voice"). It does not say *why* your Mac
-  answers that way: whether a Mac with no Personal Voice recorded answers the same as one where
-  applications are not allowed to use it, nothing we have establishes, so the sentence names
-  the pane and stops.
-- **No dialog at all, and one sentence spoken in a system voice — not VoiceOver's.** This is
-  the case where macOS was asked for the first time and answered without showing a dialog.
-
-Last time you got none of these; that is the fault this step checks.
-
-**Write down:** which of the three happened, and — if it was ours, dialog or spoken — the
-sentence, as near to word for word as you can.
-
----
-
-## 5. Kontakt 7 inside REAPER — the first Kontakt overlay on a Mac
+## 4. Kontakt 7 inside REAPER — the first Kontakt overlay on a Mac
 
 **This is the most valuable thing in the session.** Last time the probe told us that Kontakt
 inside REAPER publishes its buttons by name — FILE, LIBRARY, VIEW, SHOP — and that they sit at
@@ -206,15 +189,18 @@ keyboard stays on REAPER's FX list, **asks** the first of Kontakt's own controls
 it — Kontakt publishes its header buttons and a search field. If one of them takes the
 keyboard, nothing is clicked, and about a quarter of a second later it says the window's title,
 then "on" and the name of that control: `FX: Track 1 "Kontakt 7", on Search`, or whichever
-control it was. If none of them takes it, F6 falls back to the click it has always made —
+control it was. That control may have no name of its own — the first thing inside Kontakt's
+panel is its logo button, which publishes none — so **"on an unnamed control" is a normal
+answer here, not a fault**; write it down and carry on. If none of them takes it, F6 falls back to the click it has always made —
 three points inside the panel's top-left corner, which in Kontakt 7 is Kontakt's own logo
 button — and then says the window's title alone. (For sforzando, which publishes nothing that
 can be asked, the click is the only path.)
 
-If F6 does nothing, click into the panel with VOCR the way you did for sforzando — and then
-press **Command-Tab** to any other application and **Command-Tab** straight back to REAPER. A
-click can move the keyboard without anything telling us; coming back to REAPER makes every
-overlay look again. Only then press Tab.
+If F6 does nothing, click into the panel with VOCR the way you did for sforzando, **then press
+Command-Shift-F6 once more**. A click can move the keyboard without anything telling us; the
+second press notices the keyboard is already inside and asks every overlay to look again,
+which is the only thing that wakes one. (Command-Tab away and back does the same, if the
+second press says nothing.) Only then press Tab.
 
 **Should happen:** the overlay activates. Its only sign is one phrase, shortly after F6's own
 sentence: **"Load instrument, button"** — the first of Kontakt's header controls, where the
@@ -251,12 +237,20 @@ is to learn which.
    button: it cannot tell whether the click opened the menu at all, whether the menu was still
    appearing when the screen was read, or whether it was there and reads differently on a Mac.
    The log keeps what was read, and that text is what tells those apart.
-4. **Leave "Instrument editor", "Increase plugin height" and "Decrease plugin height" alone.**
+4. **Tab past everything else without pressing it**, and these seven especially.
    "Instrument editor" clicks a point measured on Kontakt 8's header, which Kontakt 7 lays out
-   differently. The two height controls do not click at all: they search the plugin for a
-   picture of Kontakt 8's resize grip and drag whatever matches by a fixed step. Neither the
-   picture nor the step has been checked on Kontakt 7, and a drag that lands somewhere else
-   moves whatever is there.
+   differently. "Increase plugin height" and "Decrease plugin height" do not click at all:
+   they search the plugin for a picture of Kontakt 8's resize grip and drag whatever matches
+   by a fixed step, and a drag that lands somewhere else moves whatever is there. And
+   "Previous instrument", "Next instrument", "Snapshot menu", "Previous snapshot" and "Next
+   snapshot" are aimed at Kontakt's rack: with the preset browser open — which is how Kontakt
+   starts — those coordinates point into the browser instead, and one of them sits a few
+   pixels from a control that deletes a snapshot. None of the seven has been checked on a Mac.
+
+**If anything says "something else is covering …":** that is new, and it is the application
+refusing to click because another window is drawn over the spot it was about to press. Write
+down which control said it and what else was on screen; the log names the window and which
+application it belongs to. It has never run on a Mac before this session.
 
 **If F6 says "could not move the keyboard into …":** that sentence covers two different
 things, and only the log tells them apart. Either one of Kontakt's controls did take the
@@ -282,13 +276,13 @@ front — a line beginning `[kontakt] Kontakt 7 panel in 'FX: …'`, or one begi
 
 ---
 
-## 6. Back into a plugin window, second attempt
+## 5. Back into a plugin window, second attempt
 
 Last time this could not happen: the key never arrived, and REAPER had refused to let the
 application watch its focus, so the overlay could not have noticed the keyboard moving anyway.
 Both are changed.
 
-**Do:** first close the Kontakt track's FX window from step 5 — F6 takes the first FX window
+**Do:** first close the Kontakt track's FX window from step 4 — F6 takes the first FX window
 it finds, and with two open it may take Kontakt's. Then put **sforzando** on a **new track of
 its own** (Insert → Virtual instrument on new track; REAPER names the track after it, and the
 overlay finds sforzando by that name in the window's title — added to the Kontakt track it
@@ -303,20 +297,23 @@ path: it publishes nothing that could be asked for the keyboard, so F6 clicks ju
 panel, as it did last time.
 
 Last time you reported that the control cut the title off, "when speaking through VoiceOver".
-On our side the control's announcement no longer interrupts anything. But through VoiceOver
-each line is handed over the moment it arrives, and whether a new line cuts off the one
-VoiceOver is already saying is VoiceOver's decision, not ours — nothing here can promise the
-title is heard to its end. Through the system voice ("Speak through VoiceOver" off) the second
-line waits for the first.
+On our side the control's announcement no longer interrupts anything — and **that is the half
+this step can test**, because "Speak through VoiceOver" stays off for the whole session.
+Through the system voice the second line waits for the first, so if it is cut off here the
+fault is ours and we can fix it. The VoiceOver half stays open for another session: there each
+line is handed over the moment it arrives, and whether a new one cuts off what VoiceOver is
+already saying is VoiceOver's decision, not ours.
 
 **Write down:** what it said, in order; whether the title was heard to its end or cut off; and
 which voice was speaking — VoiceOver's or the system voice.
 
 ---
 
-## 7. Reload, and the tray
+## 6. Reload, and the tray
 
-**Do:** press **Command-Shift-F5**.
+**Do:** press **Command-Shift-F5** — and keep the Shift held. **Command-F5 on its own is
+macOS's own switch for turning VoiceOver off.** If you hear "VoiceOver off", press Command-F5
+again to bring it back and repeat the step; nothing is broken and nothing is lost.
 
 **Should happen:** after a moment, a spoken count. On the mini it should be **"12 modules
 reloaded"** — that is how many the log shows loading on each launch there; a module that is
@@ -330,13 +327,51 @@ module window" while it is on screen — on screen even if REAPER is in front of
 you found "Close the module window" offered while nothing was open.
 
 **Do:** open the menu-bar icon's menu and listen to the item's name. Choose it. Then open the
-menu again: the item should have the other name now. If step 4 left the manager open behind
+menu again: the item should have the other name now. If an earlier step left the manager open behind
 REAPER, the first name is "Close the module window" — that is right, and choosing it puts the
 window away; the second opening should then say "Show module manager".
 
 **Write down:** the reload sentence, word for word — or that there was none; the item's name at
 the first opening and at the second; and whether "Show module manager" and "Close the module
 window" were ever offered together.
+
+---
+
+## 7. Personal Voice — last, and for a reason
+
+Last time: "the permissions dialog doesn't show, but the checkbox gets checked. Nothing happens
+otherwise." The log then claimed you had refused a dialog you never saw. That sentence is gone.
+
+**Do:** open the manager (menu-bar icon → **Show module manager**), go to the **Application
+settings** tab — the fourth of five — and tick **"Offer my Personal Voice to modules…"**.
+
+**Should happen, one of three things:**
+
+- **macOS shows its own permission dialog.** Then nothing of ours appears; the system's dialog
+  is the feedback.
+- **A dialog of ours opens, and the application itself says nothing.** VoiceOver reads the
+  dialog's text, which has the focus, as it read the probe's error window. This is what happens
+  when macOS had already answered before we asked, and your last log says that Mac answers that
+  way — so this is the likeliest of the three. The text says what macOS answered and, if the
+  answer was "denied", where the switch for it is (System Settings → Accessibility → Personal
+  Voice, "Allow applications to use your Personal Voice"). It does not say *why* your Mac
+  answers that way: whether a Mac with no Personal Voice recorded answers the same as one where
+  applications are not allowed to use it, nothing we have establishes, so the sentence names
+  the pane and stops.
+- **No dialog at all, and one sentence spoken in a system voice — not VoiceOver's.** This is
+  the case where macOS was asked for the first time and answered without showing a dialog.
+
+Last time you got none of these; that is the fault this step checks.
+
+**Write down:** which of the three happened, and — if it was ours, dialog or spoken — the
+sentence, as near to word for word as you can.
+
+---
+
+**Why last:** the request and every spoken line go through one worker thread, in order, and
+the request waits up to two minutes for macOS to answer. If a dialog does appear and takes a
+moment, everything the application would have said meanwhile waits behind it. At the end of
+the session that costs nothing; before the Kontakt step it would have cost the session.
 
 ---
 
@@ -362,15 +397,21 @@ Nothing to do. Lines to know about:
   asked again on a clock instead of only when you switch applications. Last time sforzando's
   restarted process and REAPER were never asked again.
 - **`[kontakt] Kontakt 7 panel in 'FX: Track 1 "Kontakt 7"': FILE at … puts the corner …`** —
-  step 5's anchor.
+  step 4's anchor.
 - **`[daw-hosts] … handed to '…' by asking, it is now: …`** or **`… nothing in its panel took
   focus by asking; after a click at content (…)`** — which path F6 took, with a
   `focus_within` line just before it saying how many of the plugin's controls accepted the
   question.
 - **`Kontakt: no menu row starting with 'Load...' — read: …`** — what the file menu read as,
-  if step 5's item 3 said "Menu item not found".
+  if step 4's item 3 said "Menu item not found".
 - **`the point x,y is under window N of <application> …`** — a click was refused because
   another window covered the spot. New on the Mac; last time every click went wherever it went.
+- **`translocated: YES`**, with **`no modules to load`** under it — macOS was running a
+  read-only copy of the `.app` and nothing could load. If those are in the log, everything
+  else in the session is explained by them.
+- **`focus_within(…): nothing inside … took keyboard focus — N candidate(s), R refused the
+  write …`** — step 4's F6 when nothing in Kontakt's panel would take the keyboard, and which
+  of the two reasons it was.
 
 ## What to send
 
@@ -380,6 +421,6 @@ Nothing to do. Lines to know about:
 
 ## If you are on the old Air {#if-you-are-on-the-old-air}
 
-Skip **step 5** (Kontakt does not run on macOS 12) and **step 4** (Personal Voice needs
-macOS 14 — the switch says so there). Steps 2, 3, 6 and 7 apply unchanged, and step 3 is the
+Skip **step 4** (Kontakt does not run on macOS 12) and **step 7** (Personal Voice needs
+macOS 14 — the switch says so there). Steps 2, 3, 5 and 6 apply unchanged, and step 3 is the
 one carrying the fix for what you reported.

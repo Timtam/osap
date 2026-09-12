@@ -3396,9 +3396,12 @@ function Overlay:attachEmbedded(spec, opts)
   -- `rawOrigin`, `fromRight` and `O.contentSize` behave exactly as they do against a real
   -- control on Windows. `identify` still runs on what it returns.
   if pattern == nil then
+    -- `self.label`, not `self.name`: O.new sets `label` and nothing in this runtime ever
+    -- sets `name`, so every one of these lines said "[overlay]" and a log full of them could
+    -- not say WHICH cell had declared itself inert. Kontakt alone writes several.
     host.log.info(string.format(
       "[%s] embedded binding is inactive on %s: no control pattern for this platform",
-      self.name or "overlay", host.os.current
+      self.label or "overlay", host.os.current
     ))
     return self
   end

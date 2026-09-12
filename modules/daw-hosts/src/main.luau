@@ -214,6 +214,17 @@ local function focusPluginWindow()
       -- reading says. Never the title before it, and never a second click.
       local before = whereIsTheKeyboard(w, panelNow)
       if before == "inside" then
+        -- Already inside, so there is nothing to move — but the overlay may never have been
+        -- TOLD. A keyboard that arrived here by a click (the tester's VOCR route) or by
+        -- Shift-Tab fires no notification this runtime hears, and an in-DAW overlay has no
+        -- poll under it, so this press is the only free retry there is. The other two
+        -- branches both recheck for exactly that reason; this one returned silently, which
+        -- made it the one outcome that left no trace at all — and the outcome a tester
+        -- reaches by doing the obvious thing after a click that did not seem to work.
+        host.log.info(
+          ("[daw-hosts] the keyboard was already inside '%s'; nothing asked and nothing "
+            .. "clicked, asking every overlay to look again"):format(title))
+        host.window.recheck()
         host.speech.output(title)
         return
       end

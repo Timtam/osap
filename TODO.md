@@ -1711,6 +1711,54 @@ lenses, adversarially refuted, eleven findings standing. The three criticals are
       the outside. Leaving a decoy of that shape in place for the one session that finally has
       a Retina display would have been the expensive choice.
 
+## Before the fourth macOS session (2026-09-12)
+
+The protocol is `docs/macos-session-four.md`. Sixty-five risks were put to eight readers and
+two refuters each; twenty-six survived. What was changed before the session is in the commits
+of 2026-09-12. What was deliberately NOT changed, and why, is here — the reasoning is the
+point: a session that cannot be repeated is not the place to land everything at once.
+
+- [ ] **The Kontakt 7 STANDALONE cell is still Windows-only, and it is the first thing for
+      session five.** Its matcher carries a `windows` platform block and no `macos` one
+      (`modules/kontakt/src/cells.luau`, `standaloneWindow`), which the prelude reads as "not
+      here". PROBE 2 of the third session measured that window in full: title `Kontakt 7`,
+      class `AXWindow/AXDialog/`, FILE at centre (276,147) — content-relative (176,19) against
+      the authored (175,19) — and, unlike the DAW case, the window itself is NAMED "Kontakt 7",
+      so `kontaktPaneName` resolves and the whole UIA path (`openFileMenu`, `headerAction`,
+      `pluginLocate`) works rather than falling back to coordinates. That is the cell where
+      ReaHotkey offers the file menu and the Tab pass-through, so it is worth more than the
+      DAW cell, not less.
+      Two things have to come with it, or it ships six controls that click into the wrong
+      place: `isRackView` can only ever answer "rack" on macOS (it asks whether a VIEW button
+      exists, and PROBE 2 publishes one while the window is entirely given over to the preset
+      browser — ReaHotkey takes SHOP's previous sibling instead, which our raw walker cannot
+      do), so the standalone cell needs its own `inRack`/`inClassic` answering false there;
+      and `focus_step`, which `addPassThrough` drives, scopes its ring to the window's FIRST
+      CHILD, which in that dump is not a container — so the pass-through would be inert and
+      should be left off until measured.
+      Not done now because it is a new step in a protocol already over its time budget.
+- [ ] **`Cmd+Shift+F5` sits one modifier from `Cmd+F5`, which switches VoiceOver off.** The
+      protocol warns him and names the recovery. Moving the key would remove the hazard
+      outright, but every candidate replacement is chosen from a shortcut table nobody here
+      can read, so the move waits for a session that can check it.
+- [ ] **`ownsPoint` refuses clicks on macOS and has never run there.** A wrong refusal costs a
+      press and says so out loud ("something else is covering …"), which is a recorded failure
+      rather than a silent one, so it ships as it is and the protocol names the sentence. If
+      the session shows it refusing wrongly, the answer is to log the verdict and click
+      anyway for a session, then re-arm with evidence.
+- [ ] **The log's timestamps are whole seconds** (`logging.rs`, `epoch_secs`), so the one
+      measurement step 3 exists for — did the Tab half a second after Return reach the overlay
+      or the plugin — cannot be ordered from the log, only from the tester's ear. Milliseconds
+      are a one-line change; not made mid-protocol because every line of every log the project
+      has would change format in the same week a session runs.
+- [ ] **`prism-sys`' smoke tests crashed once in CI** (`STATUS_STACK_BUFFER_OVERRUN`, run
+      34638177265, 2026-09-12) and passed on re-run. The four tests that did not report all
+      share `any_working_backend`, which opens every backend in turn; cargo runs them in
+      parallel on a runner with no screen reader. The file's own header says these "run
+      wherever somebody runs them ... none of this is guarded by CI yet", which stopped being
+      true when the Windows job started running the whole workspace. Either serialise them or
+      find the race.
+
 ## The third macOS session (2026-09-10)
 
 The protocol is `docs/macos-session-three.md`; the results came back from a **different

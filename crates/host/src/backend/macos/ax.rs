@@ -3037,13 +3037,29 @@ pub fn focus_within(hwnd: isize, x: i32, y: i32, w: i32, h: i32) -> Option<(Stri
         WalkStep::Descend
     });
     let sw = system_wide();
+    // Counted, because the failure line below is the whole answer to the question this
+    // function was written for: will a plugin that publishes elements hand over the keyboard
+    // when asked? "Nothing took it" covers two different worlds — the accessibility layer
+    // refused the write (nothing more to try; the corner click stays the only route) and the
+    // write was accepted while the focus did not move (a fault on our side, and fixable).
+    // The per-candidate reason goes to `note_error`, which is trace-level for most errors
+    // and throttled to one line per five seconds for the rest, so with a dozen candidates it
+    // says nothing usable. These two numbers cost nothing and separate the worlds.
+    let mut refused = 0usize;
+    let mut first_refusal: Option<&'static str> = None;
+    let mut accepted_but_not_focused = 0usize;
     for (el, snap) in &items {
         let err = unsafe { el.set_attribute_value(a_focused(), CFBoolean::new(true).as_ref()) };
         if err != AXError::Success {
+            refused += 1;
+            if first_refusal.is_none() {
+                first_refusal = Some(err_name(err));
+            }
             note_error(err, "AXFocused");
             continue;
         }
         if !attribute_element(&sw, a_focused_element()).is_some_and(|f| *f == **el) {
+            accepted_but_not_focused += 1;
             continue;
         }
         let name = if snap.title.is_empty() { snap.description.clone() } else { snap.title.clone() };
@@ -3065,10 +3081,12 @@ pub fn focus_within(hwnd: isize, x: i32, y: i32, w: i32, h: i32) -> Option<(Stri
     crate::logging::line(
         "macos",
         &format!(
-            "focus_within({hwnd}): nothing inside {x},{y} {w}x{h} took keyboard focus ({} \
-             candidate(s) accepted the question) — a plugin that publishes no element has \
-             nothing to ask",
-            items.len()
+            "focus_within({hwnd}): nothing inside {x},{y} {w}x{h} took keyboard focus — {} \
+             focusable candidate(s), {refused} refused the write ({}), {accepted_but_not_focused} \
+             accepted it and did not become the focused element. A plugin that publishes no \
+             element at all has nothing to ask and reports 0 candidates.",
+            items.len(),
+            first_refusal.unwrap_or("none")
         ),
     );
     None

@@ -240,17 +240,26 @@ behave as if the application is broken, so please do them all.
 2. Remove the download quarantine flag, or macOS will refuse to open the app:
        xattr -dr com.apple.quarantine "$APP_NAME.app"
 
-3. Open $APP_NAME.app. Nothing visible happens: it is a menu-bar application, not a
-   window. With VoiceOver, press VO-M twice to reach the menu-bar extras.
+3. Open $APP_NAME.app. It is a menu-bar application, not a window — with VoiceOver,
+   press VO-M twice to reach the menu-bar extras. On a fresh copy it does not stay
+   quiet: with permissions still missing it opens its own window on a Permissions
+   page and says why.
 
-4. Grant two permissions in System Settings > Privacy & Security. Neither can be
-   granted by the application itself:
-     - Accessibility      — without it, nothing can be read or clicked.
+4. Grant the permissions in System Settings > Privacy & Security. None of them can be
+   granted by the application itself, and the Permissions page lists all four with
+   what each one costs while it is missing:
+     - Accessibility      — without it, nothing can be read or clicked. GRANT THIS
+                            FIRST: until it is granted, this application may not
+                            appear in the Screen Recording list at all.
      - Screen Recording   — without it, screen capture silently returns a picture of
                             the wallpaper instead of failing, so this one is worth
                             checking twice.
-   After granting either, QUIT AND REOPEN the application. macOS only hands the new
-   permission to a process that started after it was granted.
+     - Input Monitoring   — without it, the overlay's own keys reach the plugin
+                            instead of the overlay.
+     - Automation         — only asked for when you tick "Speak through VoiceOver"
+                            in Application settings; leave it alone otherwise.
+   After granting any of them, QUIT AND REOPEN the application. macOS only hands the
+   new permission to a process that started after it was granted.
 
 5. To record a plugin window for us: put it in front and press
        Command-Shift-F9

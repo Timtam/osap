@@ -714,6 +714,26 @@ pub fn environment_report() -> Vec<(String, String)> {
     let me = NSRunningApplication::currentApplication();
     let bundle_id = me.bundleIdentifier().map(|s| s.to_string());
     let bundle_path = me.bundleURL().and_then(|u| u.path()).map(|s| s.to_string());
+    // RUNNING FROM A RANDOMISED READ-ONLY COPY, which looks like nothing at all.
+    //
+    // macOS "translocates" a quarantined application launched from the Finder: it mounts a
+    // copy of the .app ALONE at a random path under /private/var/folders, so the folder the
+    // application thinks it is in contains no `modules` directory, no settings and no log.
+    // Everything then behaves correctly and uselessly — the manager starts with nothing
+    // loaded, because that is right for somebody installing their first module, and the log
+    // goes to Application Support because the app folder is not writable. To a tester it
+    // reads as "every overlay is broken", and it is the likeliest way a remote session is
+    // lost to something that is not a bug. The path is the only evidence, so here it is.
+    if bundle_path.as_deref().is_some_and(|p| p.contains("/AppTranslocation/")) {
+        push(
+            "translocated",
+            "YES — macOS is running a read-only copy of the .app from a random folder, so \
+             the modules beside the original are not there and none will load. Quit, run \
+             `xattr -dr com.apple.quarantine` on the .app (see README.txt beside it), and \
+             open it again."
+                .into(),
+        );
+    }
     match (&bundle_id, &bundle_path) {
         (Some(id), Some(path)) => push("bundle", format!("{id} at {path}")),
         (Some(id), None) => push("bundle", format!("{id} (no bundle path)")),
