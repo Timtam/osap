@@ -300,7 +300,7 @@ Siblings are counted within the parent's own children, and a step off either end
 
 **This one writes.** It enumerates the visible, keyboard-focusable descendants of `hwnd`'s content area and *moves keyboard focus* to the next (`direction >= 0`) or previous one, wrapping at the ends, returning the element it landed on. It is the Tab pass-through for a standalone plug-in window that does not move focus on Tab by itself (Kontakt standalone), and it is the only way into such a window's native controls. Because it raises a real focus event, the screen reader announces the element — so the overlay must deliberately stay quiet rather than speaking `name` itself.
 
-The ring is scoped to the window's first child, which drops the frame and menu bar without a control-type blocklist; candidates are re-enumerated every step, since the tree changes shape as the user moves; and a candidate that accepts the focus request without actually taking it is skipped, verified by reading focus straight back. It **wraps**, so "the ring is finished" is not something it reports — the caller remembers the 1-based `index` it entered at and watches for it to come round again. `nil` means nothing in the scope accepted focus at all. A module normally gets this through `Overlay:addPassThrough`.
+Candidates are re-enumerated every step, since the tree changes shape as the user moves; and a candidate that accepts the focus request without actually taking it is skipped, verified by reading focus straight back. What the ring is scoped to differs by platform — see below. It **wraps**, so "the ring is finished" is not something it reports — the caller remembers the 1-based `index` it entered at and watches for it to come round again. `nil` means nothing in the scope accepted focus at all. A module normally gets this through `Overlay:addPassThrough`.
 
 ```luau
 -- One Tab inside the pass-through control. From modules/overlay-runtime/src/main.luau
@@ -322,11 +322,11 @@ return true
 
 ### Windows
 
-Candidates are the descendants the provider reports as keyboard-focusable and not off-screen, and focus is moved with UIA's own `SetFocus`. No traversal budget of ours applies — the whole content subtree is enumerated however large it is.
+The ring is scoped to the window's first child — ReaHotkey's content area — which drops the frame and the menu bar without a control-type blocklist. Candidates are the descendants the provider reports as keyboard-focusable and not off-screen, and focus is moved with UIA's own `SetFocus`. No traversal budget of ours applies — the whole content subtree is enumerated however large it is.
 
 ### macOS
 
-Focus is moved by setting `AXFocused`, and a candidate qualifies when that attribute is *settable* and the element has a non-zero rectangle. The walk is bounded at **800 nodes and depth 20** — tighter than the other calls here, because it runs per keystroke. Elements below depth 20 are simply not in the ring, with nothing in the log to say so; running out of the 800-node budget does produce one line, once per session.
+The ring is the **whole window**, minus the window's own close, minimise, zoom and full-screen buttons, which are skipped by subrole along with anything under them. Not the first child, as on Windows: on macOS that is whatever the application published first, and in a standalone Kontakt 7 it is Kontakt's logo — a button with no children, which made the ring empty. The menu bar is not inside a window on this platform, so nothing else needs excluding. Focus is moved by setting `AXFocused`, and a candidate qualifies when that attribute is *settable* and the element has a non-zero rectangle. The walk is bounded at **800 nodes and depth 20** — tighter than the other calls here, because it runs per keystroke. Elements below depth 20 are simply not in the ring, with nothing in the log to say so; running out of the 800-node budget does produce one line, once per session.
 
 ## host.element.focusWithin(hwnd, rect) {#host-element-focuswithin}
 

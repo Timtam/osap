@@ -1718,25 +1718,22 @@ two refuters each; twenty-six survived. What was changed before the session is i
 of 2026-09-12. What was deliberately NOT changed, and why, is here — the reasoning is the
 point: a session that cannot be repeated is not the place to land everything at once.
 
-- [ ] **The Kontakt 7 STANDALONE cell is still Windows-only, and it is the first thing for
-      session five.** Its matcher carries a `windows` platform block and no `macos` one
-      (`modules/kontakt/src/cells.luau`, `standaloneWindow`), which the prelude reads as "not
-      here". PROBE 2 of the third session measured that window in full: title `Kontakt 7`,
-      class `AXWindow/AXDialog/`, FILE at centre (276,147) — content-relative (176,19) against
-      the authored (175,19) — and, unlike the DAW case, the window itself is NAMED "Kontakt 7",
-      so `kontaktPaneName` resolves and the whole UIA path (`openFileMenu`, `headerAction`,
-      `pluginLocate`) works rather than falling back to coordinates. That is the cell where
-      ReaHotkey offers the file menu and the Tab pass-through, so it is worth more than the
-      DAW cell, not less.
-      Two things have to come with it, or it ships six controls that click into the wrong
-      place: `isRackView` can only ever answer "rack" on macOS (it asks whether a VIEW button
-      exists, and PROBE 2 publishes one while the window is entirely given over to the preset
-      browser — ReaHotkey takes SHOP's previous sibling instead, which our raw walker cannot
-      do), so the standalone cell needs its own `inRack`/`inClassic` answering false there;
-      and `focus_step`, which `addPassThrough` drives, scopes its ring to the window's FIRST
-      CHILD, which in that dump is not a container — so the pass-through would be inert and
-      should be left off until measured.
-      Not done now because it is a new step in a protocol already over its time budget.
+- [x] **The Kontakt 7 STANDALONE cell matches on macOS** — 2026-09-13, before the session after
+      all: nothing in it needed the Mac first, because PROBE 2 of the third session measured the
+      window whole (title exactly `Kontakt 7`, `AXWindow/AXDialog/`, FILE at content (176,19)
+      against the authored (175,19)), and the window being NAMED "Kontakt 7" means the whole
+      UIA-by-name path works there rather than falling back to coordinates. Shipped with the two
+      things it needed: the standalone cell answers `inRack`/`inClassic`/`inEdit` false on macOS
+      (Kontakt 7's `isRackView` asks whether VIEW exists, and PROBE 2 publishes VIEW while the
+      window is all preset browser — six rack controls would have aimed into the search field),
+      and macOS `focus_step` walks the whole window minus its title-bar buttons instead of the
+      first child, which in that dump is Kontakt's logo, a button with no children. Kontakt 8
+      standalone stays Windows-only: unmeasured.
+      Open, and only the session answers them: whether Kontakt's Qt menus are readable by
+      VoiceOver on a Mac; whether Kontakt's elements accept `AXFocused` at all (the same question
+      F6 asks in the DAW step); and what the library overlays' 500 ms landmark polling costs on a
+      Mac while a Kontakt window is in front — they bind to every cell, so this cell brings them
+      along. Protocol four, step 5.
 - [ ] **`Cmd+Shift+F5` sits one modifier from `Cmd+F5`, which switches VoiceOver off.** The
       protocol warns him and names the recovery. Moving the key would remove the hazard
       outright, but every candidate replacement is chosen from a shortcut table nobody here

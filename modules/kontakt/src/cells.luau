@@ -66,12 +66,29 @@ end
 -- The Kontakt STANDALONE application window (Kontakt N.exe on its own): a top-level
 -- NINormalWindow titled "Kontakt N". Mirrors ReaHotkey's Standalone.Register criteria.
 -- Unlike a KK-nested Kontakt (a UIA leaf), a standalone Kontakt is fully UIA-accessible.
+--
+-- On macOS, for Kontakt 7 only, and from a measurement rather than by analogy. The third Mac
+-- session's probe recorded the window whole: title exactly "Kontakt 7", role AXWindow with
+-- subrole AXDialog (not AXStandardWindow, which is why a matcher copied from any other
+-- application's window would have missed it), executable "Kontakt 7". The title is matched
+-- EXACTLY there, because on this platform every dialog Kontakt opens is a window of the same
+-- process, and a prefix would let one titled "Kontakt 7 …" claim the header. The subrole is
+-- left out on purpose: one measurement of it is not enough to rule the other one out, and the
+-- exact title already says which window this is.
+--
+-- Kontakt 8 gets no block. Its file menu is the KONTAKT wordmark rather than a FILE button,
+-- and no Kontakt 8 has been measured on a Mac — a matcher for a window nobody has seen is a
+-- guess that would put a header over it.
 local function standaloneWindow(name)
-  return {
+  local m = {
     title = { pattern = "^" .. name },
     app = { exe = { contains = "Kontakt" } },
     windows = { class = { prefix = "NINormalWindow" } },
   }
+  if name == "Kontakt 7" then
+    m.macos = { title = { exact = name }, axRole = "AXWindow" }
+  end
+  return m
 end
 
 -- Build the cells. `where` drives what a cell contains:
@@ -162,12 +179,27 @@ for vIdx, v in ipairs(D.VARIANTS) do
     }, { __index = common })
   end
 
-  CELLS[#CELLS + 1] = setmetatable({
+  local standalone = {
     key = v.name .. " standalone",
     where = "standalone",
     binding = O.window(standaloneWindow(v.name), { slot = STANDALONE_SLOT, menus = true }),
     frame = D.constantFrame(ox, oy),
-  }, { __index = common })
+  }
+  -- On macOS the rack question has no honest answer, so the controls that depend on it are
+  -- not offered. Kontakt 7's `isRackView` asks whether a VIEW button exists inside the plugin,
+  -- and the probe of a standalone Kontakt 7 on a Mac shows VIEW published while the whole
+  -- window is given over to the preset browser — so it answers "rack" always, and the six
+  -- rack controls (both instrument arrows, the snapshot dropdown and its arrows, the
+  -- instrument editor) would be offered with right-anchored coordinates that land in the
+  -- browser's search field. ReaHotkey tells the two apart by SHOP's previous sibling, which
+  -- the raw walker cannot step to. Own keys, so they shadow `common` for this cell only; the
+  -- header's file menu, LIBRARY, VIEW and SHOP act by name and need no such question.
+  if host.os.is("macos") then
+    standalone.inRack = function() return false end
+    standalone.inClassic = function() return false end
+    standalone.inEdit = function() return false end
+  end
+  CELLS[#CELLS + 1] = setmetatable(standalone, { __index = common })
 end
 
 return {

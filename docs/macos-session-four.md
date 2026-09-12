@@ -15,7 +15,9 @@ difference is invisible from here.
 **If your time is short once it is set up:** step 3 and step 4, and count on half an hour for
 the two rather than twenty minutes — last time the sforzando part took ten minutes on its
 own, and step 4 has sixteen controls to hear and two to press on top of getting Kontakt into
-REAPER. Everything else can wait for another day; those two cannot be answered without you.
+REAPER. Step 5, Kontakt 7 on its own, comes next in value — about ten minutes, and it tests the
+same header by a different route. Everything else can wait for another day; those cannot be
+answered without you.
 
 Nearly everything in this protocol exists because of what you reported last time. Where a step
 checks one of those things, it says so.
@@ -260,11 +262,11 @@ fell back to the corner click, which in Kontakt is its logo. So if you hear it, 
 whether anything in Kontakt opened or changed and write that down; then click into the panel
 with VOCR as above.
 
-**Not covered, so do not spend time on them:** Kontakt **standalone** (macOS calls its window a
-dialog, and nothing matches it yet), **Kontakt 8** (its file menu is the KONTAKT wordmark
-rather than a FILE button, and no Kontakt 8 has been measured on a Mac yet — the overlay stays
-inert there and says so in the log at start-up), and **Komplete Kontrol** (it publishes
-nothing at all to the accessibility layer on a Mac, as last session's probe showed).
+**Not covered, so do not spend time on them:** **Kontakt 8** (its file menu is the KONTAKT
+wordmark rather than a FILE button, and no Kontakt 8 has been measured on a Mac yet — the
+overlay stays inert there and says so in the log at start-up), and **Komplete Kontrol** (it
+publishes nothing at all to the accessibility layer on a Mac, as last session's probe showed).
+Kontakt 7 **standalone** has a step of its own, next.
 
 **Then:** press **Command-Shift-F9** over the FX window, so we have this session's picture
 next to last session's.
@@ -276,13 +278,63 @@ front — a line beginning `[kontakt] Kontakt 7 panel in 'FX: …'`, or one begi
 
 ---
 
-## 5. Back into a plugin window, second attempt
+## 5. Kontakt 7 standalone — the same header, found by name
+
+**Why this step exists:** inside REAPER, nothing Kontakt publishes carries its own name, so step
+4's overlay works from coordinates measured off Kontakt's FILE button. A standalone Kontakt 7
+window *is* called "Kontakt 7", and that changes what the overlay can do: it finds Kontakt's
+FILE, LIBRARY, VIEW and SHOP buttons **by name** and presses them directly, and it can hand the
+Tab key to **Kontakt's own controls**. Last session's probe measured that window whole; nobody
+has used an overlay on it yet. About ten minutes.
+
+**Do:** open **Kontakt 7 on its own**, not inside REAPER, and let it finish loading. Last time
+Kontakt did not answer the accessibility layer at all for about a minute after it came to the
+front — nothing will speak during that, and that is Kontakt, not a fault. Once it has loaded,
+**Command-Tab** away to any other application and straight back to Kontakt; coming to the front
+is what makes the overlay look.
+
+**Should happen:** the overlay's first control is spoken — **"Kontakt file menu, button"**. Tab
+then gives "Library on/off", "View menu", "Shop" — each followed by "button" and its key in the
+Windows spelling — and then **"Kontakt controls, Tab to step through them"**, and round again.
+Five stops, and nothing else: the rack controls from step 4 are left out here on purpose,
+because on a Mac nothing can tell whether Kontakt's rack is on screen.
+
+**Do, in this order:**
+
+1. **Tab round once** and write down the five stops as you heard them.
+2. On **"Kontakt controls"**, press **Tab** again. The keyboard should go *into Kontakt*, and
+   **VoiceOver** — not our voice — should announce each of Kontakt's own controls as it
+   arrives. Keep pressing Tab until our "Kontakt file menu" comes round again. Write down what
+   VoiceOver said at each stop, and roughly how many there were. Several of Kontakt's controls
+   have no name, so "button" on its own is an expected answer. **Do not press Return or Space
+   while you are inside Kontakt's controls** — on that stop those keys go to Kontakt, and
+   nobody knows what its unnamed buttons do. If the first Tab simply moves on to "Kontakt file
+   menu", nothing in Kontakt took the keyboard; write that down, the log says why.
+3. Go to **"Kontakt file menu"** and press **Return**. Kontakt's FILE menu should open, and the
+   keys belong to it now: use the arrows and listen — **does VoiceOver read the menu's items?**
+   Do not choose anything. Press **Escape**, count one, and press **Tab**: it should move to
+   "Library on/off".
+4. **Only if item 2 stepped into Kontakt:** go to **"Library on/off"** and press **Return** once.
+   It presses Kontakt's LIBRARY button, which shows or hides the preset browser. Then go to
+   "Kontakt controls" and step through Kontakt once more: with the browser shown, VoiceOver reads
+   a "Search" field and the "Brand", "Sound Type" and "Character" buttons; with it hidden, those
+   are gone. Say which you heard — that is the only way anyone can tell here what the button
+   did. Then press "Library on/off" once more, to put Kontakt back as it was.
+5. Leave **"View menu"** and **"Shop"** alone: the first opens a second menu of the kind item 3
+   has already measured, and the second opens Native Instruments' store.
+
+**Write down:** items 1 to 4, and — for item 3 — whether the arrows moved through the menu at
+all, and whether Tab after Escape moved on the first press.
+
+---
+
+## 6. Back into a plugin window, second attempt
 
 Last time this could not happen: the key never arrived, and REAPER had refused to let the
 application watch its focus, so the overlay could not have noticed the keyboard moving anyway.
 Both are changed.
 
-**Do:** first close the Kontakt track's FX window from step 4 — F6 takes the first FX window
+**Do:** first quit the standalone Kontakt from step 5, and close the Kontakt track's FX window from step 4 — F6 takes the first FX window
 it finds, and with two open it may take Kontakt's. Then put **sforzando** on a **new track of
 its own** (Insert → Virtual instrument on new track; REAPER names the track after it, and the
 overlay finds sforzando by that name in the window's title — added to the Kontakt track it
@@ -309,7 +361,7 @@ which voice was speaking — VoiceOver's or the system voice.
 
 ---
 
-## 6. Reload, and the tray
+## 7. Reload, and the tray
 
 **Do:** press **Command-Shift-F5** — and keep the Shift held. **Command-F5 on its own is
 macOS's own switch for turning VoiceOver off.** If you hear "VoiceOver off", press Command-F5
@@ -337,7 +389,7 @@ window" were ever offered together.
 
 ---
 
-## 7. Personal Voice — last, and for a reason
+## 8. Personal Voice — last, and for a reason
 
 Last time: "the permissions dialog doesn't show, but the checkbox gets checked. Nothing happens
 otherwise." The log then claimed you had refused a dialog you never saw. That sentence is gone.
@@ -371,7 +423,7 @@ sentence, as near to word for word as you can.
 **Why last:** the request and every spoken line go through one worker thread, in order, and
 the request waits up to two minutes for macOS to answer. If a dialog does appear and takes a
 moment, everything the application would have said meanwhile waits behind it. At the end of
-the session that costs nothing; before the Kontakt step it would have cost the session.
+the session that costs nothing; before the Kontakt steps it would have cost the session.
 
 ---
 
@@ -412,6 +464,10 @@ Nothing to do. Lines to know about:
 - **`focus_within(…): nothing inside … took keyboard focus — N candidate(s), R refused the
   write …`** — step 4's F6 when nothing in Kontakt's panel would take the keyboard, and which
   of the two reasons it was.
+- **`focus_step(…): the ring has N focusable stop(s); the keyboard is on '…'`** — step 5's first
+  step into Kontakt's own controls, written once per window. When it could not step in, the
+  line says **`nothing in this window accepts keyboard focus`** or **`none of N candidate(s)
+  accepted focus`** instead.
 
 ## What to send
 
@@ -421,6 +477,6 @@ Nothing to do. Lines to know about:
 
 ## If you are on the old Air {#if-you-are-on-the-old-air}
 
-Skip **step 4** (Kontakt does not run on macOS 12) and **step 7** (Personal Voice needs
-macOS 14 — the switch says so there). Steps 2, 3, 5 and 6 apply unchanged, and step 3 is the
+Skip **steps 4 and 5** (Kontakt does not run on macOS 12) and **step 8** (Personal Voice needs
+macOS 14 — the switch says so there). Steps 2, 3, 6 and 7 apply unchanged, and step 3 is the
 one carrying the fix for what you reported.

@@ -2899,9 +2899,15 @@ pub fn class_nav_point(
 /// For a standalone plugin window that does not move focus on Tab by itself. Four things
 /// about it are load-bearing, all of them learned on the Windows side:
 ///
-/// 1. **The ring is scoped to the window's first child**, not the window. That drops the
-///    frame and the menu bar — which are siblings of the content, not inside it — without
-///    needing a list of roles to exclude.
+/// 1. **The ring is the whole window, minus the window's own title-bar buttons.** The
+///    Windows side scopes to the window's first child (ReaHotkey's `ElementFromPath(1)`),
+///    which there is the content area and drops the frame and menu bar for free. On macOS
+///    the first child is whatever the application published first: in the probe of a
+///    standalone Kontakt 7 it is Kontakt's logo, a button with no children, so a ring
+///    scoped to it was empty and the pass-through could never step anywhere. The menu bar
+///    is not inside a window on this platform at all; what the frame contributes is the
+///    close, minimise, zoom and full-screen buttons, and those are skipped by subrole —
+///    a Return on a close button that a Tab had just landed on would close the plugin.
 /// 2. **Candidates are re-enumerated on every step**, because a plugin's tree changes shape
 ///    as the user moves through it and a remembered list would step into elements that no
 ///    longer exist.
@@ -2915,15 +2921,23 @@ pub fn class_nav_point(
 pub fn focus_step(hwnd: isize, direction: i32) -> Option<(String, i32, i32, i32)> {
     let root = root_of(hwnd, "focus_step")?;
     let t = Instant::now();
-    // ReaHotkey's ElementFromPath(1): the content area. Falls back to the window when it has
-    // no children of its own.
-    let scope = children(&root).into_iter().next().unwrap_or_else(|| root.clone());
+    // The whole window — see point 1 above for why not its first child on this platform.
+    let scope = root.clone();
 
     let mut items: Vec<(CFRetained<AXUIElement>, Snap)> = Vec::new();
     let mut budget = Budget::new(FOCUS_NODES, HOT_DEADLINE);
     walk(&scope, 0, FOCUS_DEPTH, &mut budget, &mut |el, snap, depth| {
         if depth == 0 {
             return WalkStep::Descend; // the scope itself is not a stop on the ring
+        }
+        // The window's own frame buttons, and nothing under them (the zoom button carries a
+        // group of its own). Never a stop: landing on one puts a Return one key from closing
+        // or minimising the plugin, and none of them is the plugin's.
+        if matches!(
+            snap.subrole.as_str(),
+            "AXCloseButton" | "AXMinimizeButton" | "AXZoomButton" | "AXFullScreenButton"
+        ) {
+            return WalkStep::Skip;
         }
         // Off-screen and collapsed elements are not real stops: a hidden tab page keeps its
         // whole subtree, and tabbing into it would announce controls the user cannot see.
@@ -2990,6 +3004,27 @@ pub fn focus_step(hwnd: isize, direction: i32) -> Option<(String, i32, i32, i32)
                 t.elapsed().as_millis()
             )
         });
+        // Once per window, at line level. The failures above are already lines; success was
+        // only trace, so a pass-through that WORKED left nothing in the log, and whether a
+        // plugin's own controls took the keyboard would rest on the tester's notes alone. The
+        // count is the other half of the answer: a ring of three and a ring of thirty are
+        // different plugins to navigate.
+        thread_local! {
+            static RING_REPORTED: RefCell<std::collections::HashSet<isize>> =
+                RefCell::new(std::collections::HashSet::new());
+        }
+        if RING_REPORTED.with(|r| r.borrow_mut().insert(hwnd)) {
+            crate::logging::line(
+                "macos",
+                &format!(
+                    "focus_step({hwnd}): the ring has {count} focusable stop(s); the keyboard \
+                     is on '{name}' ({}), stop {} — in {} ms",
+                    snap.role,
+                    idx + 1,
+                    t.elapsed().as_millis()
+                ),
+            );
+        }
         return Some((name, ctype, idx + 1, count));
     }
     crate::logging::line(
