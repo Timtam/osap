@@ -317,6 +317,10 @@ host.hotkey.register(KEY, function()
         wd.text, wd.x - win.client.x, wd.y - win.client.y, wd.w, wd.h
       )
     end
+    local compared, err = pcall(answers.textAgainstElements, line, win, res.words)
+    if not compared then
+      line("  text against elements: FAILED (%s)", tostring(err))
+    end
   else
     line("ocr: failed (%s)", tostring(res))
   end

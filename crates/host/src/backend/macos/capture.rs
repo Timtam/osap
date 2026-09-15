@@ -113,6 +113,9 @@ static FLAT_WARNED: AtomicBool = AtomicBool::new(false);
 static FLAT_RUN: AtomicU32 = AtomicU32::new(0);
 static FIRST_CAPTURE_REPORTED: AtomicBool = AtomicBool::new(false);
 static SLOW_CAPTURE_REPORTED: AtomicBool = AtomicBool::new(false);
+/// The scale of the first capture OCR reads, said once. See `capture_backing`.
+static BACKING_REPORTED: AtomicBool = AtomicBool::new(false);
+static BACKING_TRIM_REPORTED: AtomicBool = AtomicBool::new(false);
 /// Said once: a capture reached past the edge of the desktop and was placed rather than
 /// stretched. Worth knowing, because it usually means a module's region arithmetic is off.
 static CLIPPED_REPORTED: AtomicBool = AtomicBool::new(false);
@@ -331,21 +334,64 @@ pub fn capture_backing(x: i32, y: i32, w: i32, h: i32) -> Option<(CFRetained<CGI
     if w <= 0 || h <= 0 {
         return None;
     }
-    // Refused rather than trimmed, unlike the image path. The caller maps recognised text
-    // back to screen coordinates by adding this region's origin to a box measured within the
-    // returned image; an image covering only part of the region would put every word out by
-    // the part that was cut, and a plausible wrong coordinate is worse than none. A region
-    // that hangs off the desktop is a module's arithmetic being wrong anyway, so it is said
-    // out loud.
-    if on_screen_part(x, y, w, h) != Some((x, y, w, h)) {
+    // Refused when the region's top or left edge is off the desktop, trimmed when only its
+    // right or bottom edge is. The caller maps recognised text back to screen coordinates by
+    // adding this region's origin to a box measured within the returned image, so an image
+    // that STARTS somewhere else would put every word out by the part that was cut — a
+    // plausible wrong coordinate, which is worse than none. Cutting the far edges moves
+    // nothing: every word keeps its true offset from the same origin, and the only words lost
+    // are ones that were not on the screen to be read.
+    //
+    // The second half is for laptops. A MacBook's desktop is 900-odd points tall against the
+    // mini's 1080, so a window placed the way it was on a desktop monitor can hang off the
+    // bottom, and a whole-window read — the probe's, or Kontakt's menu read reaching 460 points
+    // below FILE — came back empty with the text all there above the edge.
+    let Some((vx, vy, vw, vh)) = on_screen_part(x, y, w, h) else {
         crate::logging::line(
             "macos",
-            &format!("not reading text in {w}x{h} at {x},{y}: part of it is off the desktop"),
+            &format!("not reading text in {w}x{h} at {x},{y}: it is not on the desktop"),
+        );
+        return None;
+    };
+    if (vx, vy) != (x, y) {
+        crate::logging::line(
+            "macos",
+            &format!(
+                "not reading text in {w}x{h} at {x},{y}: its top or left edge is off the desktop"
+            ),
         );
         return None;
     }
+    if (vw, vh) != (w, h) && !BACKING_TRIM_REPORTED.swap(true, Ordering::Relaxed) {
+        crate::logging::line(
+            "macos",
+            &format!(
+                "reading text in the {vw}x{vh} part of a {w}x{h} region at {x},{y}; the rest hangs \
+                 off the right or bottom edge of the desktop. Logged once."
+            ),
+        );
+    }
     // The image is owned outright, so it outlives the pool; see `capture_rgba`.
-    objc2::rc::autoreleasepool(|_| grab(x, y, w, h, true))
+    let captured = objc2::rc::autoreleasepool(|_| grab(x, y, vw, vh, true));
+    // THE Retina measurement, at line level. The "first screen capture" line belongs to the
+    // pixel path, whose scale depends on which capture function served it and need not be the
+    // display's; this is the image OCR actually reads, and its scale is the one every word box
+    // is divided by. Before this line it was written only under trace, so a Retina session
+    // would have had to be run twice to learn what it measured.
+    if let Some((image, scale)) = &captured {
+        if !BACKING_REPORTED.swap(true, Ordering::Relaxed) {
+            crate::logging::line(
+                "macos",
+                &format!(
+                    "first capture for reading text: {vw}x{vh} points came back as {}x{} px — \
+                     {scale:.2}x, the factor every word box is divided by",
+                    CGImage::width(Some(image)),
+                    CGImage::height(Some(image))
+                ),
+            );
+        }
+    }
+    captured
 }
 
 /// One byte triple out of a tightly packed RGBA buffer.
@@ -499,7 +545,8 @@ fn capture_rgba(x: i32, y: i32, w: i32, h: i32) -> Option<Vec<u8>> {
 
     // What a capture costs on this platform is one of the numbers docs/macos-port.md lists as
     // unmeasured, and the tester's log is the only instrument that will ever measure it.
-    if !FIRST_CAPTURE_REPORTED.swap(true, Ordering::Relaxed) {
+    let first = !FIRST_CAPTURE_REPORTED.swap(true, Ordering::Relaxed);
+    if first {
         crate::logging::line(
             "macos",
             &format!(
@@ -509,7 +556,10 @@ fn capture_rgba(x: i32, y: i32, w: i32, h: i32) -> Option<Vec<u8>> {
             ),
         );
     }
-    if elapsed.as_millis() >= 50 && !SLOW_CAPTURE_REPORTED.swap(true, Ordering::Relaxed) {
+    // Not for the first capture, which carries its own time in the line above and pays what
+    // ScreenCaptureKit costs to start: the CI Mac measured 61 ms for it and 11 ms for the next,
+    // and a warning spent on start-up is one that cannot fire for a capture that is slow for real.
+    if !first && elapsed.as_millis() >= 50 && !SLOW_CAPTURE_REPORTED.swap(true, Ordering::Relaxed) {
         crate::logging::line(
             "macos",
             &format!(
@@ -953,7 +1003,8 @@ fn check_screen_recording(reason: &str) -> bool {
                  match and nothing else looks wrong. If image search and OCR are working, \
                  the report is wrong and there is nothing to do; this check has been \
                  observed answering 'no' for an application that could capture perfectly \
-                 well. Grant it in {} > Screen Recording and restart the application.",
+                 well. Grant it in {} > Screen Recording (called Screen & System Audio \
+                 Recording from macOS 15) and restart the application.",
                 super::perm::privacy_pane()
             ),
         );

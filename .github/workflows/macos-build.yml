@@ -423,4 +423,87 @@ jobs:
             echo "::warning::this runner's macOS has no captureImageInRect (older than 15.2), so the ScreenCaptureKit path was not exercised"
           fi
           echo "----- what served the captures -----"
-          grep "screen capture paths\|screen captures are coming from\|ScreenCaptureKit refused\|first screen capture\|CAPTURE PROBE:" automation-platform.log || true
+          grep "screen capture paths\|screen captures are coming from\|ScreenCaptureKit refused\|first screen capture\|first capture for reading text\|CAPTURE PROBE:" automation-platform.log || true
+
+  # The artifact above, run once on the newest macOS GitHub offers. Nothing is built here: this
+  # is the very file a tester downloads.
+  #
+  # The next tester's Mac is new enough to run a macOS no build of this has met, and what that
+  # risks does not compile away: whether the two older capture functions still exist there
+  # (capture.rs looks them up by name and says which it found), whether ScreenCaptureKit answers
+  # while the pump thread waits, whether a module or a speech call that works on 15 aborts on a
+  # newer system. A separate job, so a red result here is a finding about that macOS rather than
+  # a reason the download was not made.
+  newer-macos:
+    needs: build
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: AutomationPlatform-macos-universal
+          path: artifact
+
+      - name: Unpack it the way a tester does
+        run: |
+          sw_vers
+          zip=$(find artifact -name '*.zip' | head -n1)
+          [ -n "$zip" ] || { echo "::error::no zip in the artifact"; exit 1; }
+          mkdir -p dist
+          ditto -x -k "$zip" dist
+
+      - name: Load, capture and speak, on the newer macOS
+        run: |
+          cd dist/AutomationPlatform
+          # One launch per question, as in the build job: a fresh log each time, and the liveness
+          # question asked before the kill, because every grep afterwards reads lines already
+          # written.
+          launch() {
+            rm -f automation-platform.log
+            AUTOMATION_PLATFORM_HEADLESS=1 \
+              ./AutomationPlatform.app/Contents/MacOS/automation-platform "$@" &
+            pid=$!
+            for _ in $(seq 1 40); do
+              if grep -q "$WAIT_FOR\|fatal:" automation-platform.log 2>/dev/null; then
+                break
+              fi
+              sleep 1
+            done
+            alive=1
+            kill -0 "$pid" 2>/dev/null || alive=0
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            echo "----- automation-platform.log ($*) -----"
+            cat automation-platform.log || true
+            if [ "$alive" != 1 ]; then
+              echo "::error::the application died on macOS $(sw_vers -productVersion) ($*)"
+              exit 1
+            fi
+          }
+
+          WAIT_FOR="listening for events"
+          launch
+          grep -q "listening for events" automation-platform.log \
+            || { echo "::error::the event loop never started on the newer macOS"; exit 1; }
+          if grep -q "did not load" automation-platform.log; then
+            echo "::error::a module failed to load on the newer macOS"
+            exit 1
+          fi
+
+          WAIT_FOR="CAPTURE PROBE: still alive"
+          launch "$GITHUB_WORKSPACE/tools/capture-probe"
+          grep -q "CAPTURE PROBE: still alive after capturing" automation-platform.log \
+            || { echo "::error::the capture probe did not report back on the newer macOS"; exit 1; }
+          if grep -q "ScreenCaptureKit did not answer" automation-platform.log; then
+            echo "::error::ScreenCaptureKit did not answer while the pump thread waited, on the newer macOS"
+            exit 1
+          fi
+          echo "----- what served the captures -----"
+          grep "os macos\|screen recording:\|screen capture paths\|screen captures are coming from\|ScreenCaptureKit refused\|first screen capture\|first capture for reading text\|CAPTURE PROBE:" automation-platform.log || true
+
+          WAIT_FOR="SPEECH PROBE: still alive"
+          launch "$GITHUB_WORKSPACE/tools/speech-probe"
+          grep -q "SPEECH PROBE: still alive after speaking" automation-platform.log \
+            || { echo "::error::the speech probe did not report back on the newer macOS"; exit 1; }

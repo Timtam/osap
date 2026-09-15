@@ -129,7 +129,11 @@ pub fn request_screen_recording_once() {
         }
         crate::logging::line(
             "macos",
-            &format!("screen recording: {} > Screen Recording, {RESTART_NOTE}", privacy_pane()),
+            &format!(
+                "screen recording: {} > Screen Recording (Screen & System Audio Recording from \
+                 macOS 15), {RESTART_NOTE}",
+                privacy_pane()
+            ),
         );
     });
 }
@@ -264,7 +268,8 @@ pub fn permissions() -> Vec<Permission> {
                       every other application removed, so image search finds nothing and OCR \
                       reads nothing, for ever, without an error. This is the dangerous one. \
                       If this application is not in that list yet, grant Accessibility first: \
-                      it appears in the Screen Recording list only afterwards.",
+                      it appears in the Screen Recording list only afterwards. From macOS 15 \
+                      on, System Settings calls that list Screen & System Audio Recording.",
             anchor: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
             can_ask: true,
             blocking: true,
@@ -639,7 +644,11 @@ pub fn environment_report() -> Vec<(String, String)> {
         );
         push(
             "screen recording fix",
-            format!("{} > Screen Recording, {RESTART_NOTE}", privacy_pane()),
+            format!(
+                "{} > Screen Recording (Screen & System Audio Recording from macOS 15), \
+                 {RESTART_NOTE}",
+                privacy_pane()
+            ),
         );
     }
 

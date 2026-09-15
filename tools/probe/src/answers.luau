@@ -676,6 +676,56 @@ function M.provokeErrorWindow(line)
 end
 
 -- The whole section, in the order the answers are worth reading.
+-- == Is text drawn where the element carrying it says it is? =================
+--
+-- The one comparison here that a Retina mistake cannot pass by construction. `pointerSpace`
+-- compares two numbers that are both points, whatever the scale. This compares a word box that
+-- came out of a backing-resolution image — divided by the scale measured from that image —
+-- against the frame the accessibility API gives the button with the same name. Kontakt's header
+-- is what it was written for: FILE, LIBRARY, VIEW and SHOP are published by name and drawn as
+-- text.
+--
+-- Right, the two centres agree to a few points, and by about the same amount everywhere. A
+-- factor of two in the division puts each word at half or double its distance from the
+-- window's corner, so the gap GROWS with that distance instead of staying put — which is what
+-- tells a scale error from an offset, and why the content position is printed beside it.
+local TEXT_MATCH_MAX = 6
+local TEXT_LOOKUPS_MAX = 24
+function M.textAgainstElements(line, win, words)
+  line("----- text against elements -----")
+  if not (words and #words > 0) then
+    line("  no words were read, so there is nothing to compare")
+    return
+  end
+  local button = host.element.type and host.element.type.Button
+  local seen, looked, matched = {}, 0, 0
+  for _, wd in ipairs(words) do
+    if matched >= TEXT_MATCH_MAX or looked >= TEXT_LOOKUPS_MAX then break end
+    local text = wd.text
+    -- Single words of three letters or more: shorter ones match too much, and a phrase is never
+    -- a button's whole name the way OCR splits it.
+    if type(text) == "string" and #text >= 3 and not seen[text] and not string.find(text, "%s") then
+      seen[text] = true
+      looked = looked + 1
+      local p = host.element.locate(win.id, text, button)
+      if p then
+        matched = matched + 1
+        local cx = math.floor(wd.x + wd.w / 2)
+        local cy = math.floor(wd.y + wd.h / 2)
+        line(
+          "  '%s': text centre %d,%d, element centre %d,%d — off by %d,%d (element at content %d,%d)",
+          text, cx, cy, math.floor(p.x), math.floor(p.y),
+          cx - math.floor(p.x), cy - math.floor(p.y),
+          math.floor(p.x) - win.client.x, math.floor(p.y) - win.client.y
+        )
+      end
+    end
+  end
+  if matched == 0 then
+    line("  none of the first %d distinct word(s) is the name of a button in this window", looked)
+  end
+end
+
 function M.all(line, win)
   line("----- what this platform answers -----")
   guard(line, "pointer space", function() M.pointerSpace(line, win) end)

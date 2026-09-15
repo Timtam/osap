@@ -509,7 +509,7 @@ fn screen_capture_permitted() -> bool {
         if !allowed {
             crate::logging::line(
                 "macos",
-                "ocr: nothing can be read off the screen — grant this application Screen Recording in System Settings, Privacy & Security, then restart it",
+                "ocr: nothing can be read off the screen — grant this application Screen Recording (Screen & System Audio Recording from macOS 15) in System Settings, Privacy & Security, then restart it",
             );
         } else {
             crate::logging::trace("macos", || {

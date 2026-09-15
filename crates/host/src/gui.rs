@@ -1553,7 +1553,8 @@ pub fn run_gui(
             // this up is looking for a switch that is not on the pane yet.
             let order = if missing.contains(&"Accessibility") && missing.len() > 1 {
                 " Grant Accessibility first: the Screen Recording list shows this \
-                 application only afterwards."
+                 application only afterwards. On newer macOS that list is called Screen \
+                 and System Audio Recording."
             } else {
                 ""
             };
