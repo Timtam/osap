@@ -76,19 +76,20 @@ end
 -- left out on purpose: one measurement of it is not enough to rule the other one out, and the
 -- exact title already says which window this is.
 --
--- Kontakt 8 gets no block. Its file menu is the KONTAKT wordmark rather than a FILE button,
--- and no Kontakt 8 has been measured on a Mac — a matcher for a window nobody has seen is a
--- guess that would put a header over it.
+-- Kontakt 8 gets the same block, by analogy and not by measurement — no Kontakt 8 has been
+-- seen on a Mac. What makes the analogy cheap to be wrong about: the title is matched exactly,
+-- so nothing but a window called "Kontakt 8" is claimed, and everything its standalone header
+-- carries acts by NAME ("Kontakt File Menu", then Kontakt's own focus ring), so a Kontakt 8
+-- that publishes different names refuses the press out loud rather than clicking elsewhere.
+-- The next session's student Mac is new enough that Kontakt 8 is the likelier of the two, and
+-- without this block it would have been a session with no overlay on it at all.
 local function standaloneWindow(name)
-  local m = {
+  return {
     title = { pattern = "^" .. name },
     app = { exe = { contains = "Kontakt" } },
     windows = { class = { prefix = "NINormalWindow" } },
+    macos = { title = { exact = name }, axRole = "AXWindow" },
   }
-  if name == "Kontakt 7" then
-    m.macos = { title = { exact = name }, axRole = "AXWindow" }
-  end
-  return m
 end
 
 -- Build the cells. `where` drives what a cell contains:
@@ -144,15 +145,19 @@ for vIdx, v in ipairs(D.VARIANTS) do
     binding = O.embedded({
       hosts = HOSTS,
       -- On Windows the plugin is a Qt control of the host window. On macOS it is nothing
-      -- the host publishes — see detect.macosPanel — so Kontakt 7's panel is found from its
-      -- own FILE button, at the offset the geometry table already carries. Kontakt 8 has no
-      -- such button (its file menu is the wordmark) and no measurement, so it stays inert
-      -- there, and the runtime says so at load.
+      -- the host publishes — see detect.macosPanel — so the panel is found from Kontakt's own
+      -- file-menu button, at the offset the geometry table already carries. Measured for
+      -- Kontakt 7 (FILE, to 2 px). Kontakt 8's is the KONTAKT wordmark, published on Windows
+      -- only by a STANDALONE Kontakt 8 as "Kontakt File Menu" — embedded there it is a leaf —
+      -- so whether a Mac's Kontakt 8 publishes it inside REAPER is exactly what the next
+      -- session finds out: if not, the log says "publishes no button named Kontakt File Menu"
+      -- once and the cell stays inert, as before. If it does, the corner is the wordmark's
+      -- centre minus {86,19}, which was authored as a click point rather than measured as a
+      -- centre, and the anchor line in the log prints the corner that came out.
       control = {
         windows = D.QT_PLUGIN,
         linux = D.QT_PLUGIN,
-        macos = v.name == "Kontakt 7" and D.macosPanel(v.name, geo.UIA_FILE_MENU[v.name], G.fileMenu)
-          or nil,
+        macos = D.macosPanel(v.name, geo.UIA_FILE_MENU[v.name], G.fileMenu),
       },
       identify = bareOfVersion(vIdx),
       -- Relational (it asks whether a KK is also present), so it must NOT be cached per
