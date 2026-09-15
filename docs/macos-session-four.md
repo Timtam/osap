@@ -58,7 +58,8 @@ three at once:
 and F6 is Do Not Disturb. So step 3 finds out with the one harmless key: press Command-Shift-F9;
 if nothing at all happens, press **Command-Shift-fn-F9**. **If you needed fn, hold it for every
 F-key in this protocol from then on** — Command-Shift-fn-F6, Command-Shift-fn-F5, and fn on the
-VoiceOver key in step 7 too. Never try F6 or F5 without fn first. If Do Not Disturb or Dictation
+VoiceOver key in step 7 too. Press F6 and F5 only the way F9 worked: where F9 needed fn, F6 and F5 without it are Do Not
+Disturb and Dictation; where it did not, adding fn is what switches those on. If Do Not Disturb or Dictation
 switches on anyway, switch it back off and write it down.
 
 ---
@@ -179,7 +180,9 @@ That press does three jobs at once:
 
 - **The F-keys.** If nothing happens, press Command-Shift-**fn**-F9 (see "The keys"). If it is
   silent **both** ways, do not blame the keyboard yet: open the manager from the menu-bar icon
-  (**Show module manager**) and listen to the list of installed modules. If it is empty, macOS is
+  (**Show module manager**; if the item says **Close the module window** instead, the manager is
+  already open: choose that, open the menu again and choose **Show module manager**), go to its
+  **Installed** tab, and listen to the list of installed modules. If it is empty, macOS is
   running a read-only copy after all: quit, run the `xattr` command again, and reopen. If you
   cannot find the menu-bar icon, run `ls ~/AutomationPlatform/automation-platform.log` in Terminal
   instead: if it answers "No such file or directory", it is the read-only copy — quit with
@@ -294,15 +297,22 @@ press; the summary the probe spoke.
 the student's own project is not touched. If REAPER shows its evaluation reminder first, its
 button only works after a few seconds. Then **Insert → Virtual instrument on new track**, and
 choose Kontakt 7 or Kontakt 8 in the list. If it is listed more than once (AU, VST3, VST), take the
-**VST3** one, and write the entry down exactly as VoiceOver read it.
+**VST3** one, and write the entry down exactly as VoiceOver read it. **If REAPER then asks whether
+to add tracks or build routing for the instrument's outputs, choose No** — do not just press
+Return: Yes adds a dozen or more tracks to the tab. If Yes was already chosen, leave it and carry
+on (the track numbers in 6b will then differ, and the tab is closed unsaved in step 9). Write down
+that it asked.
 
 REAPER names the track after the plugin, and **the overlay recognises Kontakt only by that name in
 the FX window's title** — so never add it to a track that already exists. The window must be the
 one VoiceOver reads as `FX: Track 1 "Kontakt 8"` (or "Kontakt 7"), with REAPER's FX list on its
 left. If the window that opened has no FX list, or its title does not begin with "FX:", close it
 and open the track's FX chain instead; do not change REAPER's preferences. If the title does not
-end with the plugin's name in quotes, rename the track to exactly **Kontakt 8** (or Kontakt 7) —
-select the track and press F2 — and write down that you had to.
+contain **Kontakt 8** (or Kontakt 7) anywhere, rename the track — but not from inside the FX
+window, where F2 renames the plugin and the title stays as it was. Press **Escape** to close the FX
+window, then in REAPER's main window press **F2** (with fn if F9 needed fn) to rename the track you
+just made, type exactly **Kontakt 8** (or Kontakt 7), press Return, and open that track's FX chain
+again. Write down that you had to.
 
 With that FX window open, press **Command-Shift-F6**. It answers with one of these, and which one
 is worth writing down:
@@ -337,7 +347,8 @@ step 6.
 1. **Tab through all the controls once** and write down what you heard, starting with the very
    first words before you pressed anything. Most stops say their name, "button" and a key. Some
    put a state between the name and "button", such as "closed, press to open" or "collapsed, press
-   to expand". "Plugin size" says only its width and height. Roughly what to expect:
+   to expand". "Plugin size" says its width and height, and "at maximum height" after them when
+   the window already reaches near the bottom of the screen. Roughly what to expect:
    - **Kontakt 7:** "Load instrument", "Save multi as", "Reset multi", "Instrument editor",
      "Previous instrument", "Next instrument", "Snapshot menu", "Previous snapshot", "Next
      snapshot", "Side pane", "Info pane", "Keyboard panel", "Plugin size", "Increase plugin
@@ -356,7 +367,9 @@ step 6.
    editor sections, if you hear them. After each of these names listen for nothing, for **"not
    found"**, or, after "Increase plugin height" only, for **"at maximum height, unavailable"**
    (likely on a laptop screen: the window already reaches near the bottom, so no search was made).
-   Write down which you heard. None of these answers is your mistake.
+   After an editor section, **"collapsed, press to expand"** or **"expanded, press to
+   collapse"** means it was found. Write down which you heard. None of these answers is your
+   mistake.
 2. Go to **"Load instrument"** and press **Return**. It opens Kontakt's file menu, **reads the menu
    off the screen**, finds the row that begins with "Load", and presses it. Kontakt's own file
    dialog should open; close it with Escape. If you hear **"Menu item not found"** instead, do not
@@ -392,7 +405,12 @@ and straight back**, as in step 4.
 
 **Should happen:** it says "Instrument, button" and the instrument's value. **Tab** gives
 "Polyphony, button" and its value, and Tab again "Pitchbend range, button" and its value. **Note
-the value Pitchbend range reads now** — it is the student's, and you will put it back.
+the value Pitchbend range reads now** — it is the student's, and you will put it back. If it reads
+"no text", or a value you could not pick again in its menu, write down what it read and leave
+Pitchbend range alone: do everything below on **Polyphony** instead. Press Return on Polyphony, and
+the Tab a second later should say "Pitchbend range", not "Instrument". For Escape, Shift-Tab once
+to Polyphony, and after the Tab, Shift-Tab back to Polyphony. At the end, put Polyphony back to the
+value it read.
 
 **Then:** press **Return** on Pitchbend range, choose a different value the way you normally would,
 and press **Return** to commit it. Then count a full second — "one-and" — and press **Tab**. The
@@ -409,7 +427,7 @@ is noticed, and a menu that is a window of its own is seen the moment it opens.
 press **Down** once, and press **Escape**. Count a full second, press **Tab** (it should say
 "Instrument"), then **Shift-Tab** back to Pitchbend range and listen: if Escape cancelled the menu,
 it still reads the value you chose a moment ago, not the one below it. If it reads anything else,
-or nothing, press Escape once more and write down what it read.
+"no text", or nothing, press Escape once more and write down what it read.
 
 **Then:** press **Command-Shift-F9** over the sforzando window, and press nothing until its summary.
 
@@ -478,7 +496,10 @@ tab.
 
 - **macOS shows its own permission dialog.** If you allow it, nothing of ours follows; the
   system's dialog is the feedback. If you refuse it, a few sentences follow in the system voice,
-  beginning "macOS answered 'denied'" — that is correct, not a fault.
+  beginning "macOS answered 'denied' without showing a dialog". The words "without showing a
+  dialog" are wrong here, and that is known; it is not the old fault. Write down that you saw
+  macOS's dialog and refused it: the log gives the same lines as in the third case below, so only
+  your note tells them apart.
 - **A dialog of ours opens, and the application itself says nothing.** VoiceOver reads the
   dialog's text, which has the focus. This is what happens when macOS had already answered before
   we asked. The text says what macOS answered and, if the answer was "denied", where the switch
@@ -486,7 +507,7 @@ tab.
 - **No dialog at all, and a few sentences in a system voice — not VoiceOver's**, beginning either
   "macOS answered 'denied' without showing a dialog" or "macOS reports that this Mac does not
   support Personal Voice". This is the case where macOS was asked for the first time and answered
-  without showing a dialog.
+  without showing a dialog — but only if no dialog of macOS's came before those sentences.
 - **Nothing at all for thirty seconds** can also be correct: a grant macOS gives without asking.
   The log tells that apart from the old fault.
 
@@ -510,12 +531,12 @@ Keep these five minutes, whatever else did not get done.
    USB stick or the shared folder, not the student's mail. The simplest way is to copy the whole
    `AutomationPlatform` folder from the home folder: it holds the log and every probe picture. Then
    run `open ~/Library/Application\ Support/AutomationPlatform` in Terminal; if a Finder window
-   opens, copy that folder too. **Check on your own device that the copy arrived** before item 5
+   opens, copy that folder too. **Check on your own device that the copy arrived** before item 6
    deletes it.
 3. In **System Settings → Privacy & Security**, remove **AutomationPlatform** (it may be listed as
    **Automation Platform**, with a space) from **Accessibility**, **Screen Recording** (or **Screen
    & System Audio Recording**) and **Input Monitoring**: select it in each list and press the minus
-   button. This needs the student's password again. Quicker, in Terminal — and **before** item 5,
+   button. This needs the student's password again. Quicker, in Terminal — and **before** item 6,
    because the command only finds the application while it still exists — run exactly this line,
    the name at the end included:
 
@@ -586,7 +607,8 @@ Nothing to do. Lines worth knowing about, most of them new:
   corner is the Retina mistake this session exists to catch.
 - **`[macos] ocr: first recognition of a … pt region took N ms`**, **`… the slowest so far`**, and
   **`[macos] ocr: gave up on a … pt region after N ms …`** — how reading text at Retina size went.
-  A "gave up" next to a silent sforzando read-out means something was drawn in that field, two
+  A "gave up" next to a sforzando read-out that said "no text" (its `[read]` line shows `= ""`)
+  means something was drawn in that field, two
   readings found no text in it, and the slower readings were skipped so the keys would not stall;
   the value may still have been there, and the probe picture from step 6a shows the field.
 - **`[macos] reading text in the … part of a … region at …; the rest hangs off the right or bottom
