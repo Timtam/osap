@@ -233,9 +233,10 @@ Automation Platform — macOS test build
 FIRST RUN, in order. macOS will not tell you when a step is missing; it will just
 behave as if the application is broken, so please do them all.
 
-1. Move this whole folder somewhere you can write to (Documents or the Desktop).
-   The application writes its log and its settings NEXT TO the .app, and reads its
-   modules from the "modules" folder beside it, so keep the folder together.
+1. Move this whole folder into your home folder (in Finder, Command-Shift-H opens it).
+   Not the Desktop, Documents or Downloads: macOS guards those three with a permission
+   dialog of its own. The application writes its log and its settings NEXT TO the .app,
+   and reads its modules from the "modules" folder beside it, so keep the folder together.
 
 2. Remove the download quarantine flag, or macOS will refuse to open the app:
        xattr -dr com.apple.quarantine "$APP_NAME.app"
@@ -263,7 +264,7 @@ behave as if the application is broken, so please do them all.
 
 5. To record a plugin window for us: put it in front and press
        Command-Shift-F9
-   That writes everything about it to the log and a picture of it next to the .app,
+   That writes everything about it to the log and a picture of it into modules/probe/,
    which together are what we need to make the overlays work on macOS. Press it over
    a plugin you would want an overlay for.
 

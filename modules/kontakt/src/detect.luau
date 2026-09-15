@@ -265,7 +265,10 @@ end
 -- puts its centre. A version without a measured anchor passes nil and stays inert here.
 local function macosPanel(version, name, at)
   if not (name and at) then return nil end
-  local offsets, missed = {}, {}
+  -- `missed` and `outside` are separate on purpose: a window that publishes nothing during
+  -- Kontakt's silent first minute and later publishes a button that will not anchor has two
+  -- different stories, and one flag would keep the second one out of the log.
+  local offsets, missed, outside = {}, {}, {}
   local function panel(active, dx, dy)
     local x, y = active.client.x + dx, active.client.y + dy
     local w, h = active.client.w - dx, active.client.h - dy
@@ -298,11 +301,13 @@ local function macosPanel(version, name, at)
     local dx, dy = p.x - at[1] - active.client.x, p.y - at[2] - active.client.y
     local c = panel(active, dx, dy)
     if not c then
-      -- The one silent way out of this function, and the likeliest on a version whose anchor
-      -- was authored rather than measured: the button is there, but subtracting the authored
-      -- offset puts the corner outside the window.
-      if not missed[key] then
-        missed[key] = true
+      -- Refused only when the corner would leave the panel no width or height. Since the authored
+      -- offset is positive, that needs the button's reported centre to lie right of or below the
+      -- window by more than the offset: the button's position and the window's frame disagree
+      -- (another coordinate space, or a button outside the window). A merely wrong authored offset
+      -- does not end here — it still anchors, and shows only as an odd corner in the line below.
+      if not outside[key] then
+        outside[key] = true
         host.log.info(string.format(
           "[kontakt] %s at %d,%d in '%s' puts %s's panel corner at %d,%d, outside the window — not anchoring",
           name, p.x, p.y, tostring(active.title), version, dx, dy))
