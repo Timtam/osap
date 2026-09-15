@@ -26,11 +26,19 @@
 //! captures in a row come back a single flat colour, and either way the log says so in
 //! words the user can act on — once, not per call.
 
+use core::ffi::{c_void, CStr};
+use core::ptr::NonNull;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::mpsc::channel;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use objc2::runtime::AnyClass;
+use objc2::sel;
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
+use objc2_foundation::NSError;
+use objc2_screen_capture_kit::SCScreenshotManager;
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGDirectDisplayID, CGDisplayBounds, CGError,
     CGGetDisplaysWithPoint, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo,
@@ -38,18 +46,26 @@ use objc2_core_graphics::{
     CGWindowImageOption, CGWindowListOption,
 };
 
-// Both capture entry points are `#[deprecated = "Please use ScreenCaptureKit instead."]` and
-// both are used anyway, deliberately. ScreenCaptureKit is asynchronous: a capture is
-// delivered to a completion handler or a stream delegate, which needs a run loop turning on
-// the calling thread. `capture_region` is handed to the image worker as a bare `fn` and
-// called from a thread that has no run loop and must not acquire one, and every other caller
-// is on the pump thread, where waiting for a callback would mean blocking the thread that
-// also carries speech, hotkeys and the event tap. These two functions are synchronous
-// round-trips to the window server with no such requirement. They still work through
-// macOS 15; when they stop, the replacement is a ScreenCaptureKit session owned by a
-// dedicated thread with its own run loop, kept behind these same three functions.
-#[allow(deprecated)]
-use objc2_core_graphics::{CGDisplayCreateImageForRect, CGWindowListCreateImage};
+// WHERE A CAPTURE COMES FROM, in order: ScreenCaptureKit, then the two older functions —
+// and the older two are never LINKED, only looked up by name when they are needed.
+//
+// `CGWindowListCreateImage` and `CGDisplayCreateImageForRect` are marked obsoleted in the macOS
+// 15 SDK; C and Objective-C code no longer compiles against them. This file used them anyway
+// for as long as they ran, because they are synchronous and ScreenCaptureKit is not. What
+// ended that is not their behaviour but their existence: a symbol this binary imports and the
+// running macOS no longer exports does not fail a capture, it stops the application from
+// launching at all, before a line of the log is written — which, on a remote Mac with a blind
+// tester, is an hour with nothing in it. So they are resolved with `dlsym` at the first
+// capture that falls back to them, and a macOS without them simply answers "absent".
+//
+// `+[SCScreenshotManager captureImageInRect:completionHandler:]` (macOS 15.2) is the direct
+// replacement: a rectangle in points, in the same display-agnostic space the window-list
+// function took, and a `CGImage` back. It answers through a completion handler, and this file
+// turns that back into a straight answer by waiting on a channel with a deadline. Whether the
+// handler can arrive while the waiting thread is the main thread is not documented anywhere;
+// the CI job's capture probe asks exactly that on a Mac, and a capture that does not answer in
+// time switches ScreenCaptureKit off for the session rather than stalling every capture after
+// it.
 
 use crate::backend::CapturedImage;
 
@@ -102,6 +118,24 @@ static SLOW_CAPTURE_REPORTED: AtomicBool = AtomicBool::new(false);
 static CLIPPED_REPORTED: AtomicBool = AtomicBool::new(false);
 static FALLBACK_REPORTED: AtomicBool = AtomicBool::new(false);
 static FAILURE_REPORTED: AtomicBool = AtomicBool::new(false);
+/// Which capture paths exist on this macOS, said once, at the first capture.
+static PATHS_REPORTED: AtomicBool = AtomicBool::new(false);
+/// Which path first delivered an image, one bit per path, so each is named once.
+static PATH_USED: AtomicU32 = AtomicU32::new(0);
+static SCK_ERROR_REPORTED: AtomicBool = AtomicBool::new(false);
+/// ScreenCaptureKit did not answer within `SCK_TIMEOUT` once, and is not asked again this
+/// session: a capture that stalls is paid once, not on every keystroke that reads the screen.
+static SCK_DISABLED: AtomicBool = AtomicBool::new(false);
+static NO_CAPTURE_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// How long a ScreenCaptureKit capture may take before it is given up on.
+///
+/// A capture that returns normally costs tens of milliseconds; this bound is for the one that
+/// never returns, and it is the whole cost of finding that out — paid once, because the first
+/// timeout switches ScreenCaptureKit off for the session. A pump stalled this long can get the
+/// event tap switched off by the system; tap.rs re-enables it on the notice the system sends,
+/// so that too costs one line in the log rather than a dead overlay.
+const SCK_TIMEOUT: Duration = Duration::from_millis(1500);
 static OVERSIZE_REPORTED: AtomicBool = AtomicBool::new(false);
 
 /// Last reported primary-display size, so a change is a log line and a repeat is not.
@@ -245,11 +279,12 @@ pub fn pixel(x: i32, y: i32) -> (u8, u8, u8) {
 /// A region as an image. A bare `fn` on purpose: the image worker calls it from another
 /// thread, without the backend.
 ///
-/// Nothing in the path below needs the main thread, a run loop, an autorelease pool or any
-/// state of ours: `CGWindowListCreateImage` and `CGDisplayCreateImageForRect` are
-/// synchronous window-server calls, `CGImage` is documented `Send + Sync` in these bindings,
-/// and the bitmap context is created, used and dropped inside one call. The tile cache that
-/// `pixel()` keeps is thread-local, so a worker-thread capture neither reads nor disturbs it.
+/// Nothing in the path below needs a run loop or any state of ours on the calling thread:
+/// ScreenCaptureKit answers on a queue of its own and this thread waits on a channel for it,
+/// the older functions are synchronous window-server calls, `CGImage` is `Send + Sync` in
+/// these bindings, and the bitmap context is created, used and dropped inside one call. The
+/// tile cache that `pixel()` keeps is thread-local, so a worker-thread capture neither reads
+/// nor disturbs it.
 pub fn capture_region(x: i32, y: i32, w: i32, h: i32) -> Option<CapturedImage> {
     if w <= 0 || h <= 0 {
         crate::logging::trace("macos", || {
@@ -495,72 +530,246 @@ fn capture_rgba(x: i32, y: i32, w: i32, h: i32) -> Option<Vec<u8>> {
     Some(rgba)
 }
 
-/// One capture, as the window server hands it over, with the scale it came back at.
+/// One capture, as the system hands it over, with the scale it came back at.
 ///
-/// `CGWindowListCreateImage` first because its rect is in the same global point space
-/// everything else on this boundary uses — no per-display arithmetic, and a region that
-/// spans two displays is composed for us. It is asked for a nominal-resolution image, which
-/// is 1 pixel per point and halves what crosses the wire; whether that option is honoured is
-/// not relied on, because the caller draws whatever comes back into a destination of the
-/// requested size either way.
+/// ScreenCaptureKit first, where this macOS has its rectangle capture; then the window-list
+/// function and the display function, where this macOS still has them. See the note at the top
+/// of this file for why the older two are looked up rather than linked.
+///
+/// `best` asks the older functions for the backing-store resolution rather than one pixel per
+/// point. ScreenCaptureKit's rectangle capture takes no such option; whatever resolution it
+/// returns, the scale is MEASURED from the image, so the callers behave identically — the
+/// point-sized destination in `image_to_rgba` downsamples it, and OCR divides by it.
 ///
 /// A returned image whose two axes imply different scales has been clipped — the rect
 /// reached past the edge of the desktop — and is refused rather than stretched, because a
 /// stretched capture is a coordinate lie of exactly the kind this file exists to prevent,
 /// and the host handles `None` as "no match" everywhere.
-#[allow(deprecated)]
 fn grab(x: i32, y: i32, w: i32, h: i32, best: bool) -> Option<(CFRetained<CGImage>, f64)> {
     let rect = CGRect::new(
         CGPoint::new(x as f64, y as f64),
         CGSize::new(w as f64, h as f64),
     );
+    report_capture_paths();
+
+    if sck_rect_capture_available() && !SCK_DISABLED.load(Ordering::Relaxed) {
+        match sck_capture(rect) {
+            SckOutcome::Image(image) => {
+                if let Some(scale) = uniform_scale(&image, w, h) {
+                    note_path_used(PATH_SCK, "ScreenCaptureKit captureImageInRect");
+                    return Some((image, scale));
+                }
+                crate::logging::trace("macos", || {
+                    format!(
+                        "ScreenCaptureKit capture of {w}x{h} at {x},{y} came back {}x{} — clipped, \
+                         not a whole region; trying the older functions",
+                        CGImage::width(Some(&image)),
+                        CGImage::height(Some(&image))
+                    )
+                });
+            }
+            SckOutcome::Error(why) => {
+                if !SCK_ERROR_REPORTED.swap(true, Ordering::Relaxed) {
+                    crate::logging::line(
+                        "macos",
+                        &format!(
+                            "ScreenCaptureKit refused a {w}x{h} capture at {x},{y}: {why} — trying \
+                             the older capture functions, where this macOS still has them. \
+                             Logged once; if the reason is the Screen Recording permission, \
+                             every capture after this one is refused the same way."
+                        ),
+                    );
+                }
+            }
+            SckOutcome::TimedOut => {
+                SCK_DISABLED.store(true, Ordering::Relaxed);
+                crate::logging::line(
+                    "macos",
+                    &format!(
+                        "ScreenCaptureKit did not answer a {w}x{h} capture at {x},{y} within {} ms \
+                         — its answer may need the very thread that is waiting for it. It is not \
+                         asked again this session; captures go to the older functions, where \
+                         this macOS still has them.",
+                        SCK_TIMEOUT.as_millis()
+                    ),
+                );
+            }
+        }
+    }
+
     let resolution = if best {
         CGWindowImageOption::BestResolution
     } else {
         CGWindowImageOption::NominalResolution
     };
-
-    if let Some(image) = CGWindowListCreateImage(
-        rect,
-        CGWindowListOption::OptionOnScreenOnly,
-        0,
-        resolution,
-    ) {
-        if let Some(scale) = uniform_scale(&image, w, h) {
-            return Some((image, scale));
+    if let Some(create) = window_list_create_image() {
+        // SAFETY: the signature is the documented C one — CGRect by value, three uint32_t
+        // options — and the result follows the Create rule, so it is ours to release.
+        let raw = unsafe {
+            create(rect, CGWindowListOption::OptionOnScreenOnly.0, 0, resolution.0)
+        };
+        if let Some(p) = NonNull::new(raw) {
+            // SAFETY: a +1 reference from a Create function, owned from here on.
+            let image = unsafe { CFRetained::from_raw(p) };
+            if let Some(scale) = uniform_scale(&image, w, h) {
+                note_path_used(PATH_WINDOW_LIST, "CGWindowListCreateImage (looked up at run time)");
+                return Some((image, scale));
+            }
+            crate::logging::trace("macos", || {
+                format!(
+                    "window-list capture of {w}x{h} at {x},{y} came back {}x{} — clipped, not a \
+                     whole region; trying the display path",
+                    CGImage::width(Some(&image)),
+                    CGImage::height(Some(&image))
+                )
+            });
         }
-        crate::logging::trace("macos", || {
-            format!(
-                "window-list capture of {w}x{h} at {x},{y} came back {}x{} — clipped, not a whole \
-                 region; trying the display path",
-                CGImage::width(Some(&image)),
-                CGImage::height(Some(&image))
-            )
-        });
     }
 
-    // Fallback. Its rect is display-local, so the origin of the display the region starts on
-    // is subtracted first; on the primary display that subtraction is zero, which is the
-    // common case and the one that stays right even if this convention is the other way
-    // round. Anything that lands here is logged once, because it means the primary path has
-    // stopped answering and that is a finding, not a detail.
+    // Last. Its rect is display-local, so the origin of the display the region starts on is
+    // subtracted first; on the primary display that subtraction is zero, which is the common
+    // case and the one that stays right even if this convention is the other way round.
+    let Some(create) = display_create_image_for_rect() else {
+        if !sck_rect_capture_available() && window_list_create_image().is_none()
+            && !NO_CAPTURE_REPORTED.swap(true, Ordering::Relaxed)
+        {
+            crate::logging::line(
+                "macos",
+                "no screen capture is possible on this macOS: it has neither ScreenCaptureKit's \
+                 rectangle capture nor either of the older capture functions. Image search and \
+                 OCR will find nothing, for the whole session.",
+            );
+        }
+        return None;
+    };
     let (display, left, top, _, _) = display_at(x, y)?;
     let local = CGRect::new(
         CGPoint::new((x - left) as f64, (y - top) as f64),
         CGSize::new(w as f64, h as f64),
     );
-    let image = CGDisplayCreateImageForRect(display, local)?;
+    // SAFETY: as above — the documented C signature, and a Create-rule result.
+    let raw = unsafe { create(display, local) };
+    let image = unsafe { CFRetained::from_raw(NonNull::new(raw)?) };
     let scale = uniform_scale(&image, w, h)?;
     if !FALLBACK_REPORTED.swap(true, Ordering::Relaxed) {
         crate::logging::line(
             "macos",
-            "CGWindowListCreateImage returned nothing usable; captures are coming from \
-             CGDisplayCreateImageForRect instead. On a secondary display that path depends on the \
-             rect being display-local — if coordinates are wrong on the second monitor only, this \
-             line is why.",
+            "captures are coming from CGDisplayCreateImageForRect, the last of the three paths. \
+             On a secondary display that path depends on the rect being display-local — if \
+             coordinates are wrong on the second monitor only, this line is why.",
         );
     }
+    note_path_used(PATH_DISPLAY, "CGDisplayCreateImageForRect (looked up at run time)");
     Some((image, scale))
+}
+
+const PATH_SCK: u32 = 1;
+const PATH_WINDOW_LIST: u32 = 2;
+const PATH_DISPLAY: u32 = 4;
+
+/// Names the path that delivered an image, the first time each one does.
+fn note_path_used(bit: u32, name: &str) {
+    if PATH_USED.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+        crate::logging::line("macos", &format!("screen captures are coming from {name}"));
+    }
+}
+
+/// Which of the three capture paths this macOS has, said once. The line a remote session needs
+/// before any other capture line means anything: on a macOS that has dropped the older
+/// functions it is the difference between "capture is broken" and "capture was never possible".
+fn report_capture_paths() {
+    if PATHS_REPORTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let has = |b: bool| if b { "present" } else { "absent" };
+    crate::logging::line(
+        "macos",
+        &format!(
+            "screen capture paths on this macOS: ScreenCaptureKit captureImageInRect {}, \
+             CGWindowListCreateImage {}, CGDisplayCreateImageForRect {}",
+            has(sck_rect_capture_available()),
+            has(window_list_create_image().is_some()),
+            has(display_create_image_for_rect().is_some()),
+        ),
+    );
+}
+
+/// Whether `+[SCScreenshotManager captureImageInRect:completionHandler:]` exists here.
+///
+/// Asked of the runtime, never assumed. The class arrived in macOS 14 and this method in 15.2
+/// (Apple's SDK diff for it), the oldest Mac this has been tested on runs 12.7.6, and on this
+/// objc2 a selector that does not exist aborts the process rather than returning nothing. So
+/// the class is looked up by NAME first — `SCScreenshotManager::class()` would panic on a macOS
+/// without it — and the selector is asked of its metaclass, the way avspeech.rs guards Personal
+/// Voice.
+fn sck_rect_capture_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        AnyClass::get(c"SCScreenshotManager")
+            .is_some_and(|c| c.metaclass().responds_to(sel!(captureImageInRect:completionHandler:)))
+    })
+}
+
+enum SckOutcome {
+    Image(CFRetained<CGImage>),
+    Error(String),
+    TimedOut,
+}
+
+/// One rectangle through ScreenCaptureKit, turned back into a straight answer.
+fn sck_capture(rect: CGRect) -> SckOutcome {
+    let (tx, rx) = channel::<Result<CFRetained<CGImage>, String>>();
+    // Called once, on a queue of the framework's. The image belongs to the framework for the
+    // duration of the call, so it is retained before it crosses to the waiting thread; if that
+    // thread has already given up, the send fails and the retained image is released with it.
+    let handler = block2::RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
+        let outcome = match NonNull::new(image) {
+            // SAFETY: a live image for the duration of this call (Get rule).
+            Some(p) => Ok(unsafe { CFRetained::retain(p) }),
+            None => Err(
+                // SAFETY: nil or a live error for the duration of this call.
+                unsafe { error.as_ref() }
+                    .map(|e| e.localizedDescription().to_string())
+                    .unwrap_or_else(|| "no image and no error was returned".to_string()),
+            ),
+        };
+        let _ = tx.send(outcome);
+    });
+    // SAFETY: availability was checked by `sck_rect_capture_available` before this is called;
+    // the block outlives the call because the framework copies it.
+    unsafe { SCScreenshotManager::captureImageInRect_completionHandler(rect, Some(&*handler)) };
+    match rx.recv_timeout(SCK_TIMEOUT) {
+        Ok(Ok(image)) => SckOutcome::Image(image),
+        Ok(Err(why)) => SckOutcome::Error(why),
+        Err(_) => SckOutcome::TimedOut,
+    }
+}
+
+type WindowListCreateImageFn = unsafe extern "C" fn(CGRect, u32, u32, u32) -> *mut CGImage;
+type DisplayCreateImageForRectFn = unsafe extern "C" fn(u32, CGRect) -> *mut CGImage;
+
+/// A system function found by name at run time, or `None` where this macOS no longer has it.
+///
+/// Core Graphics is loaded anyway — everything else in this file comes from it — so the
+/// default search order finds its exports without opening anything.
+fn lookup(name: &CStr) -> Option<usize> {
+    // SAFETY: RTLD_DEFAULT with a NUL-terminated name; dlsym only reads.
+    let p = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) } as *mut c_void;
+    (!p.is_null()).then_some(p as usize)
+}
+
+fn window_list_create_image() -> Option<WindowListCreateImageFn> {
+    static F: OnceLock<Option<usize>> = OnceLock::new();
+    // SAFETY: the address of `CGWindowListCreateImage`, whose C signature is the type above.
+    F.get_or_init(|| lookup(c"CGWindowListCreateImage"))
+        .map(|p| unsafe { core::mem::transmute::<usize, WindowListCreateImageFn>(p) })
+}
+
+fn display_create_image_for_rect() -> Option<DisplayCreateImageForRectFn> {
+    static F: OnceLock<Option<usize>> = OnceLock::new();
+    // SAFETY: the address of `CGDisplayCreateImageForRect`, whose C signature is the type above.
+    F.get_or_init(|| lookup(c"CGDisplayCreateImageForRect"))
+        .map(|p| unsafe { core::mem::transmute::<usize, DisplayCreateImageForRectFn>(p) })
 }
 
 /// The scale an image came back at, or `None` if its two axes disagree about what that scale

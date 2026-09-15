@@ -351,3 +351,76 @@ jobs:
           name: AutomationPlatform-macos-universal
           path: dist/*.zip
           if-no-files-found: error
+
+      # The two capture steps run AFTER the upload, on purpose: either can go red on a finding
+      # about the next Mac rather than about this build, and that must not also cost the download.
+      #
+      # `CGWindowListCreateImage` and `CGDisplayCreateImageForRect` are obsoleted in the macOS 15
+      # SDK. capture.rs looks them up by name at run time instead of importing them, because an
+      # import the running macOS no longer exports stops the application from launching at all —
+      # before the log has a single line in it. This is the check that the lookup is the only
+      # way in: one ordinary call to either, anywhere, and the import is back.
+      - name: The binary does not import the obsoleted capture functions
+        run: |
+          exe=dist/AutomationPlatform/AutomationPlatform.app/Contents/MacOS/automation-platform
+          nm -u "$exe" > imports.txt
+          if grep -E '_CG(WindowListCreateImage|DisplayCreateImageForRect)$' imports.txt; then
+            echo "::error::the binary imports an obsoleted capture function — on a macOS that has dropped it, the application would not launch"
+            exit 1
+          fi
+          if ! grep -q '_CGPreflightScreenCaptureAccess$' imports.txt; then
+            echo "::error::the import list does not even contain a capture function that IS called — the check above is not looking at the right binary"
+            exit 1
+          fi
+          echo "neither obsoleted capture function is imported"
+
+      # The one question about ScreenCaptureKit no document answers and a runner can: does its
+      # completion handler arrive while the pump thread is the thread waiting for it? capture.rs
+      # gives up after a deadline, so a "no" hangs nothing — it silently moves every capture onto
+      # the older functions, which a newer macOS may not have. No Screen Recording grant is needed
+      # to ask: a refusal comes back through the same handler an image does.
+      - name: Screen capture, on a Mac
+        run: |
+          cd dist/AutomationPlatform
+          rm -f automation-platform.log
+          AUTOMATION_PLATFORM_HEADLESS=1 \
+            ./AutomationPlatform.app/Contents/MacOS/automation-platform \
+            "$GITHUB_WORKSPACE/tools/capture-probe" &
+          pid=$!
+          for _ in $(seq 1 40); do
+            if grep -q "CAPTURE PROBE: still alive\|fatal:" automation-platform.log 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          alive=1
+          kill -0 "$pid" 2>/dev/null || alive=0
+          kill "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          echo "----- automation-platform.log -----"
+          cat automation-platform.log || true
+          if [ "$alive" != 1 ]; then
+            echo "::error::the application is no longer running — it died during the capture probe"
+            exit 1
+          fi
+          if ! grep -q "CAPTURE PROBE: still alive after capturing" automation-platform.log; then
+            echo "::error::the capture probe did not report back after capturing"
+            exit 1
+          fi
+          if ! grep -q "screen capture paths on this macOS:" automation-platform.log; then
+            echo "::error::no capture ever reached capture.rs — the probe's reads were refused before asking the system"
+            exit 1
+          fi
+          if grep -q "CAPTURE PROBE: .*THREW" automation-platform.log; then
+            echo "::error::a capture call threw"
+            exit 1
+          fi
+          if grep -q "ScreenCaptureKit did not answer" automation-platform.log; then
+            echo "::error::ScreenCaptureKit's answer did not arrive while the pump thread waited for it — on a macOS without the older functions, nothing would read the screen"
+            exit 1
+          fi
+          if ! grep -q "ScreenCaptureKit captureImageInRect present" automation-platform.log; then
+            echo "::warning::this runner's macOS has no captureImageInRect (older than 15.2), so the ScreenCaptureKit path was not exercised"
+          fi
+          echo "----- what served the captures -----"
+          grep "screen capture paths\|screen captures are coming from\|ScreenCaptureKit refused\|first screen capture\|CAPTURE PROBE:" automation-platform.log || true

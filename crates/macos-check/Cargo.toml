@@ -54,6 +54,17 @@ features = ["CFBase", "CFString", "CFArray", "CFDictionary", "CFNumber", "CFRunL
 version = "0.3"
 features = ["CGBase", "CGEvent", "CGEventTypes", "CGEventSource", "CGDirectDisplay", "CGDisplayConfiguration", "CGWindow", "CGWindowLevel", "CGImage", "CGGeometry", "CGRemoteOperation", "CGColorSpace", "CGDataProvider", "CGContext", "CGBitmapContext", "CGError", "libc", "objc2"]
 
+# ScreenCaptureKit, for the one call that replaces CGWindowListCreateImage. That function is
+# marked obsoleted in the macOS 15 SDK — C and Objective-C projects no longer compile against
+# it — and a Mac on a newer macOS is where the next session runs. `captureImageInRect:` arrived
+# in macOS 15.2 and is asked of the runtime before it is used (see backend/macos/capture.rs);
+# the framework itself exists from macOS 12.3, so linking it costs the oldest supported Mac
+# nothing.
+[target.'cfg(target_os = "macos")'.dependencies.objc2-screen-capture-kit]
+version = "0.3"
+default-features = false
+features = ["std", "block2", "objc2-core-foundation", "objc2-core-graphics", "SCScreenshotManager"]
+
 [target.'cfg(target_os = "macos")'.dependencies.objc2-vision]
 version = "0.3"
 features = ["VNRequest", "VNRecognizeTextRequest", "VNObservation", "VNRequestHandler", "VNTypes", "VNGeometry", "VNError", "VNUtils", "VNRequestRevisionProviding", "objc2-core-graphics", "objc2-core-foundation"]

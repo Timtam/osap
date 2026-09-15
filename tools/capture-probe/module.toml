@@ -1,0 +1,10 @@
+id = "com.tool.captureprobe"
+name = "Capture smoke"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
+
+[capabilities]
+# The two routes into backend/macos/capture.rs from the pump thread — a pixel read and an OCR
+# read — plus the timer that lets the event loop turn first and the log that says what came
+# back. Deliberately nothing that needs an accessibility grant, which a CI runner does not have.
+require = ["screen", "ocr", "log", "timer"]
