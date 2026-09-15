@@ -173,6 +173,14 @@ local function openFileMenu(cell, o)
   end
   local at = cell.geometry.fileMenu
   if ctrl and ctrl.client and at then
+    -- Said, because on a Mac this is not the ordinary path it is in a Windows DAW: a Kontakt 8
+    -- window that does not publish its file-menu button by name gets a click at a point
+    -- measured on Windows, and without this line a menu that never opened reads the same as a
+    -- button that was found.
+    host.log.info(string.format(
+      "[kontakt] no button named '%s' could be pressed — clicking the authored file-menu point %d,%d instead",
+      tostring(cell.uiaFileMenu), ctrl.client.x + at[1], ctrl.client.y + at[2]
+    ))
     host.input.click(ctrl.client.x + at[1], ctrl.client.y + at[2])
     return ctrl, false
   end
@@ -227,9 +235,17 @@ local function invokeMenuItem(cell, o, item)
   local ctrl, uia = openFileMenu(cell, o)
   if not ctrl then return end
   host.timer.after(250, function()
-    if uia then
-      uiaClick(nil, item, MENUITEM)
+    -- By name first where the button was found by name — and when the ITEM is not, the menu
+    -- is read instead of giving up. It used to return here either way, so a menu whose items
+    -- publish no names (a Qt menu on a Mac need not) was left open with the keys handed to it
+    -- and nothing said: the file menu found by name, the press silent, the menu never read.
+    if uia and uiaClick(nil, item, MENUITEM) then
       return
+    end
+    if uia then
+      host.log.info(string.format(
+        "Kontakt: no menu item named '%s' could be pressed by name — reading the menu instead", item
+      ))
     end
     local base = cell.geometry.fileMenu
     if not (ctrl.client and base) then return end
@@ -255,6 +271,8 @@ local function invokeMenuItem(cell, o, item)
       ))
       host.speech.output("Menu item not found", { interrupt = true })
       host.input.send("Escape")
+      -- The by-name opening handed the keys to the menu; the Escape above closed it.
+      if uia then host.keys.menuOpen(false) end
       return
     end
     host.input.click(hit.x + 10, hit.y)

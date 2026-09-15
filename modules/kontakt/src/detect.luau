@@ -297,7 +297,18 @@ local function macosPanel(version, name, at)
     end
     local dx, dy = p.x - at[1] - active.client.x, p.y - at[2] - active.client.y
     local c = panel(active, dx, dy)
-    if not c then return nil end
+    if not c then
+      -- The one silent way out of this function, and the likeliest on a version whose anchor
+      -- was authored rather than measured: the button is there, but subtracting the authored
+      -- offset puts the corner outside the window.
+      if not missed[key] then
+        missed[key] = true
+        host.log.info(string.format(
+          "[kontakt] %s at %d,%d in '%s' puts %s's panel corner at %d,%d, outside the window — not anchoring",
+          name, p.x, p.y, tostring(active.title), version, dx, dy))
+      end
+      return nil
+    end
     offsets[key] = { dx, dy }
     host.log.info(string.format(
       "[kontakt] %s panel in '%s': %s at %d,%d puts the corner %d,%d from the content origin — %dx%d to the window's edges",

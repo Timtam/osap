@@ -203,6 +203,11 @@ for vIdx, v in ipairs(D.VARIANTS) do
     standalone.inRack = function() return false end
     standalone.inClassic = function() return false end
     standalone.inEdit = function() return false end
+    -- And Kontakt 8's view toggle, whose `when` is this. The classic/modern question is one
+    -- pixel measured on Windows, and on a Mac it answers "modern" whenever that pixel is not the
+    -- classic grey — so "Switch to classic view" would be offered, and a press would flip a view
+    -- nobody can hear, on a window no Kontakt 8 has been measured on.
+    standalone.inModern = function() return false end
   end
   CELLS[#CELLS + 1] = setmetatable(standalone, { __index = common })
 end
