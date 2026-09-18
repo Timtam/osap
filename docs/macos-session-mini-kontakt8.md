@@ -20,7 +20,8 @@ are both useful answers.
   it again to bring VoiceOver back)
 
 **After every Command-Shift-F9, press nothing until the summary ("Probe N written … N words") has
-been spoken.** Over Kontakt that can take up to half a minute.
+been spoken.** Over Kontakt that can take up to half a minute. No summary after a minute: note it
+and carry on.
 
 If F9 does nothing, try it with **fn** held; then press F6 and F5 the same way.
 
@@ -29,8 +30,9 @@ If F9 does nothing, try it with **fn** held; then press F6 and F5 the same way.
 - Download **AutomationPlatform-macos-universal** from the newest green run of the **macOS
   build** workflow.
 - The student is needed for the admin password in steps 3 and 9.
-- Tell the student that every probe saves a picture of the window and the text in it, and ask them
-  to quit mail, messages and their browser.
+- Tell the student that every probe saves a picture of the window (with any notification on top of
+  it), the text in it and the titles of other windows there, and ask them to quit mail, messages
+  and their browser.
 
 ## 2. Set up
 
@@ -65,8 +67,8 @@ If System Settings offers "Quit & Reopen", choose **Later** and quit and open it
 1. Open the app. macOS asks for Accessibility, maybe Screen Recording too: choose **Open System
    Settings**. Our manager opens on its Permissions page and says what is missing.
 2. Grant **Accessibility**, then quit and open.
-3. Grant **Screen Recording**, then quit and open. Entries appear switched off: switch them on,
-   never remove them.
+3. Grant **Screen Recording**, then quit and open. Our entry, "Automation Platform", appears
+   switched off: switch only it on, never remove it.
 4. **Input Monitoring** only if the Permissions page says NOT granted: switch it on (or add it with
    +), then quit and open.
 5. Finished when the app starts without opening the manager and says "Automation Platform is
@@ -91,7 +93,8 @@ Do this with **Kontakt 8** first, then quit it and do it again with **Kontakt 7*
    update or activation notice (choose Run Demo; never sign in to anyone's account).
 2. Command-Tab to Finder and straight back, every 15–30 seconds, until you hear **"Kontakt file
    menu, button"**. Stop after 4 minutes — or at once if the title is anything but "Kontakt 8" or
-   "Kontakt 7" — then press F9 over Kontakt and go on.
+   "Kontakt 7" (silence, "busy", or "window"/"dialog" after the title do not count) — then press
+   F9 over Kontakt and go on.
 3. **Tab** through our controls:
    - Kontakt 8: **"Kontakt controls, Tab to step through them"** — that is all.
    - Kontakt 7: "Library on/off", "View menu", "Shop", then **"Kontakt controls, Tab to step
@@ -99,9 +102,10 @@ Do this with **Kontakt 8** first, then quit it and do it again with **Kontakt 7*
 4. On "Kontakt controls", **Tab** again → VoiceOver reads Kontakt's own controls. Keep tabbing
    about once a second until "Kontakt file menu" comes back (at most 2 minutes). Note roughly how
    many and a few names. **No Return or Space in there.** If the first Tab goes straight back to
-   "Kontakt file menu": wait 10 seconds, Shift-Tab, Tab again.
+   "Kontakt file menu": wait 10 seconds, Shift-Tab, Tab again. Not back after 2 minutes: stop tabbing, note it, and go
+   straight to 7.
 5. On "Kontakt file menu" press **Return**: "activated", and Kontakt's file menu should open. Do
-   the arrows read its items? Escape, count one, Tab → it should say the next stop from 3.
+   the arrows read its items? Choose nothing. Escape, count one, Tab → it should say the next stop from 3.
 6. **Kontakt 7 only:** on "Library on/off" press **Return** once. Then do 7, and afterwards press
    "Library on/off" once more to put Kontakt back.
 7. **Command-Shift-F9** over Kontakt, wait for the summary.
@@ -114,7 +118,7 @@ moved on, the summary.
 Do this with **Kontakt 8** first, then with **Kontakt 7** — each on its own new track, and **close
 the Kontakt 8 FX window before starting Kontakt 7**.
 
-1. Quit the standalone Kontakt. In REAPER: **File → New project tab** (once, for both versions),
+1. Quit the standalone Kontakt. In REAPER: **File → New project tab** (once, for both versions; again if REAPER restarted),
    then **Insert → Virtual instrument on new track** → Kontakt 8 or Kontakt 7 (take VST3 if it is
    listed more than once; note the entry). If REAPER asks to build routing or add tracks: **No**.
 2. The FX window should read like `FX: Track 1 "Kontakt 8"` (or "Kontakt 7"), with the FX list on
@@ -124,7 +128,8 @@ the Kontakt 8 FX window before starting Kontakt 7**.
 3. **Command-Shift-F6**. Note its sentence. If it says "could not …", wait 5 seconds and press it
    again. If VoiceOver reads something new over Kontakt, press Escape once.
 4. Expected: **"Load instrument, button"** (it may already have come before F6; then Tab should say
-   "Save multi as"). If nothing: F9 over the FX window, then F6 once more. Still nothing → go on.
+   "Save multi as"). If nothing: F9 over the FX window, then F6 once more. Still nothing → close the FX window and go
+   on.
 5. Tab through once and note the stops. Roughly:
    - Kontakt 8: Load instrument, Save multi as, Reset multi, then either "Switch to classic view",
      Side pane, Info pane, Keyboard panel, Plugin size — or "Switch to play view", then
@@ -150,14 +155,16 @@ the Kontakt 8 FX window before starting Kontakt 7**.
 1. Open sforzando standalone (if silent after 10 seconds: Command-Tab to Finder and back).
    Expected: "Instrument, button" and its value; Tab: "Polyphony"; Tab: "Pitchbend range".
 2. Note Pitchbend range's value. You set it to 1 last time: if it reads 1, ask the student what it
-   was before (the default shows as DEF). If it reads "no text", use **Polyphony** instead below.
+   was before (the default shows as DEF). If it reads "no text" or a value its menu does not offer, use **Polyphony** instead below; then
+   the Tab in 3 says "Pitchbend range", not "Instrument".
 3. Return on Pitchbend range, choose another value, Return. Count a full second, Tab → it should
    say "Instrument" at the first press.
 4. Shift-Tab to Pitchbend range. Return, Down, Escape. Count a second, Tab, Shift-Tab → it should
-   still read the value from 3.
+   still read the value from 3. If it doesn't, press Escape once more.
 5. F9 over sforzando. Set the value back (the student's, or what you noted). Quit sforzando.
 
-**In REAPER** (same new project tab, all Kontakt FX windows closed): Insert → Virtual instrument on
+**In REAPER** (same new project tab — if there is none, File → New project tab first — and all
+Kontakt FX windows closed): Insert → Virtual instrument on
 new track → sforzando. The FX window should read like `FX: Track 3 "sforzando"` with the FX list.
 Put VoiceOver on the FX list and press VO-Space once (not twice). **Command-Shift-F6** → the title,
 then "Instrument, button". Is the title heard to its end? Then F9 over the FX window.
@@ -193,8 +200,10 @@ sentences with no dialog; nothing within 30 seconds. Note which, and the first w
    tccutil reset All com.automationplatform.app
    ```
 
+   If it does not answer "Successfully reset…", remove AutomationPlatform by hand as in step 2.
 4. REAPER, **only if you opened a project tab today**: VO-F2 — the title must not name a saved
-   project — then File → Close project → **don't save**. Quit Kontakt and sforzando.
+   project (if it does, leave REAPER alone and tell the student) — then File → Close project →
+   **don't save**. Quit Kontakt and sforzando.
 5. Finder: Command-Shift-H, select `AutomationPlatform`, Command-Delete. (Or in Terminal exactly
    `cd ~ && rm -rf AutomationPlatform`.) If there was an Application Support folder in 2:
    `cd ~/Library/"Application Support" && rm -rf AutomationPlatform`.
