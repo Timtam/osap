@@ -1,11 +1,12 @@
 ---
-title: Test protocol — the Mac mini, with Kontakt 8
+title: Test protocol — the Mac mini, with Kontakt 7 and 8
 ---
 
-# Mac mini, now with Kontakt 8
+# Mac mini, with Kontakt 7 and Kontakt 8
 
-Same Mac mini as last time (macOS 14.5), now with Kontakt 8. The steps are in order of importance:
-if time runs short, steps 3 and 4 matter most, then 5, then 6. **Always do step 9.**
+Same Mac mini as last time (macOS 14.5), now with Kontakt 8 as well as Kontakt 7. The steps are in
+order of importance: if time runs short, steps 3 and 4 matter most, then 5, then 6. Within steps 4
+and 5, do Kontakt 8 first, then Kontakt 7. **Always do step 9.**
 
 For every step, write down what you heard, word for word where you can. Silence and wrong words
 are both useful answers.
@@ -82,48 +83,65 @@ in front → quit and open. After any reopen, do the Finder F9 again.
 **Write down:** when the app appeared in the Screen Recording list; the word count of the
 summary; whether F9 needed fn.
 
-## 4. Kontakt 8 on its own — the most important step
+## 4. Kontakt on its own — the most important step
 
-1. Open Kontakt 8. Write down the window title VoiceOver reads, word for word. Close any What's New,
+Do this with **Kontakt 8** first, then quit it and do it again with **Kontakt 7**.
+
+1. Open Kontakt. Write down the window title VoiceOver reads, word for word. Close any What's New,
    update or activation notice (choose Run Demo; never sign in to anyone's account).
 2. Command-Tab to Finder and straight back, every 15–30 seconds, until you hear **"Kontakt file
-   menu, button"**. Stop after 4 minutes — or at once if the title is anything but "Kontakt 8" —
-   then press F9 over Kontakt and go to step 5.
-3. **Tab** → **"Kontakt controls, Tab to step through them"**. Those two are all of ours.
-4. **Tab** again → VoiceOver reads Kontakt's own controls. Keep tabbing about once a second until
-   "Kontakt file menu" comes back (at most 2 minutes). Note roughly how many and a few names.
-   **No Return or Space in there.** If the first Tab goes straight back to "Kontakt file menu":
-   wait 10 seconds, Shift-Tab, Tab again.
+   menu, button"**. Stop after 4 minutes — or at once if the title is anything but "Kontakt 8" or
+   "Kontakt 7" — then press F9 over Kontakt and go on.
+3. **Tab** through our controls:
+   - Kontakt 8: **"Kontakt controls, Tab to step through them"** — that is all.
+   - Kontakt 7: "Library on/off", "View menu", "Shop", then **"Kontakt controls, Tab to step
+     through them"**.
+4. On "Kontakt controls", **Tab** again → VoiceOver reads Kontakt's own controls. Keep tabbing
+   about once a second until "Kontakt file menu" comes back (at most 2 minutes). Note roughly how
+   many and a few names. **No Return or Space in there.** If the first Tab goes straight back to
+   "Kontakt file menu": wait 10 seconds, Shift-Tab, Tab again.
 5. On "Kontakt file menu" press **Return**: "activated", and Kontakt's file menu should open. Do
-   the arrows read its items? Escape, count one, Tab → should say "Kontakt controls".
-6. **Command-Shift-F9** over Kontakt, wait for the summary.
+   the arrows read its items? Escape, count one, Tab → it should say the next stop from 3.
+6. **Kontakt 7 only:** on "Library on/off" press **Return** once. Then do 7, and afterwards press
+   "Library on/off" once more to put Kontakt back.
+7. **Command-Shift-F9** over Kontakt, wait for the summary.
 
-**Write down:** the title, what you heard in 2 to 5, whether the Tab after Escape moved on, the
-summary.
+**Write down, for each version:** the title, what you heard in 2 to 5, whether the Tab after Escape
+moved on, the summary.
 
-## 5. Kontakt 8 in REAPER
+## 5. Kontakt in REAPER
 
-1. Quit the standalone Kontakt. In REAPER: **File → New project tab**, then **Insert → Virtual
-   instrument on new track** → Kontakt 8 (take VST3 if it is listed more than once; note the
-   entry). If REAPER asks to build routing or add tracks: **No**.
-2. The FX window should read like `FX: Track 1 "Kontakt 8"`, with the FX list on its left. No FX
-   list → close it and open the track's FX chain. No "Kontakt 8" in the title → Escape, press F2 in
-   REAPER's main window, rename the track "Kontakt 8", open its FX chain again.
+Do this with **Kontakt 8** first, then with **Kontakt 7** — each on its own new track, and **close
+the Kontakt 8 FX window before starting Kontakt 7**.
+
+1. Quit the standalone Kontakt. In REAPER: **File → New project tab** (once, for both versions),
+   then **Insert → Virtual instrument on new track** → Kontakt 8 or Kontakt 7 (take VST3 if it is
+   listed more than once; note the entry). If REAPER asks to build routing or add tracks: **No**.
+2. The FX window should read like `FX: Track 1 "Kontakt 8"` (or "Kontakt 7"), with the FX list on
+   its left. No FX list → close it and open the track's FX chain. No version name in the title →
+   Escape, press F2 in REAPER's main window, rename the track "Kontakt 8" or "Kontakt 7", open its
+   FX chain again.
 3. **Command-Shift-F6**. Note its sentence. If it says "could not …", wait 5 seconds and press it
    again. If VoiceOver reads something new over Kontakt, press Escape once.
 4. Expected: **"Load instrument, button"** (it may already have come before F6; then Tab should say
-   "Save multi as"). If nothing: F9 over the FX window, then F6 once more. Still nothing → step 6.
-5. Tab through once and note the stops. Roughly: Load instrument, Save multi as, Reset multi, then
-   either "Switch to classic view", Side pane, Info pane, Keyboard panel, Plugin size — or "Switch
-   to play view", then instrument, multi and snapshot controls, the panes, Plugin size, Increase and
-   Decrease plugin height. After Increase/Decrease note what follows: nothing, "not found", or "at
-   maximum height, unavailable".
+   "Save multi as"). If nothing: F9 over the FX window, then F6 once more. Still nothing → go on.
+5. Tab through once and note the stops. Roughly:
+   - Kontakt 8: Load instrument, Save multi as, Reset multi, then either "Switch to classic view",
+     Side pane, Info pane, Keyboard panel, Plugin size — or "Switch to play view", then
+     instrument, multi and snapshot controls, the panes, Plugin size, Increase and Decrease plugin
+     height.
+   - Kontakt 7: Load instrument, Save multi as, Reset multi, Instrument editor, Previous and Next
+     instrument, Snapshot menu, Previous and Next snapshot, Side pane, Info pane, Keyboard panel,
+     Plugin size, Increase and Decrease plugin height, Library on/off.
+
+   After Increase/Decrease plugin height note what follows: nothing, "not found", or "at maximum
+   height, unavailable".
 6. "Load instrument" → **Return**, then **press nothing for 5 seconds**. Kontakt's file dialog
    should open (close it with Escape). "Menu item not found" → do not press Escape. Nothing at all
    after 5 seconds → Escape, note "silent".
 7. **Press no other control.** F9 over the FX window, then close the FX window.
 
-**Write down:** the plugin entry, F6's sentence, 4 to 6.
+**Write down, for each version:** the plugin entry, F6's sentence, 4 to 6.
 
 ## 6. sforzando
 
@@ -139,10 +157,10 @@ summary.
    still read the value from 3.
 5. F9 over sforzando. Set the value back (the student's, or what you noted). Quit sforzando.
 
-**In REAPER** (same new project tab): Insert → Virtual instrument on new track → sforzando. The FX
-window should read `FX: Track 2 "sforzando"` with the FX list. Put VoiceOver on the FX list and
-press VO-Space once (not twice). **Command-Shift-F6** → the title, then "Instrument, button". Is the
-title heard to its end? Then F9 over the FX window.
+**In REAPER** (same new project tab, all Kontakt FX windows closed): Insert → Virtual instrument on
+new track → sforzando. The FX window should read like `FX: Track 3 "sforzando"` with the FX list.
+Put VoiceOver on the FX list and press VO-Space once (not twice). **Command-Shift-F6** → the title,
+then "Instrument, button". Is the title heard to its end? Then F9 over the FX window.
 
 **Write down:** the values read, whether Tab moved at the first press, what Escape left, and what
 F6 said in REAPER.
