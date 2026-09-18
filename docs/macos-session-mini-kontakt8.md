@@ -60,7 +60,8 @@ the same way F9 worked.
 **Do:** download the artifact **AutomationPlatform-macos-universal** from the newest **green**
 run of the **macOS build** workflow on GitHub, a run with a tick. A red run can still carry a
 file, but red can mean one of the checks on a Mac failed. Bring it to the mini the way you did last
-time, and keep that way at hand: step 9 takes the files back out the same way.
+time. Step 9 takes the files back out to you alone, so have AirDrop to your own device or a USB
+stick at hand — not the student's mail, and not a channel or server folder other people can open.
 
 **Know before you start:**
 
@@ -103,13 +104,16 @@ last time's entry, switched on. That entry belongs to the old build: it looks gr
 nothing, and switching it off and on again does not help. The line clears every entry of this one
 application, so that macOS asks afresh. **Type it whole and read it back (VO-L) before pressing
 Return:** `tccutil reset All` without the name at the end takes every permission away from every
-application on the student's Mac. If Terminal answers with an error, or a list still shows
-AutomationPlatform afterwards, remove that entry in the list with the minus button before you start
-step 3.
+application on the student's Mac. Terminal should answer "Successfully reset All approval status
+for com.automationplatform.app". If it does, do not open System Settings to check — go straight to
+step 3. The Automation Platform the lists show from then on is today's build asking, switched off:
+switch it on, and do not remove it. Only if Terminal answers anything else, for instance "No such
+bundle identifier", open System Settings → Privacy & Security and remove AutomationPlatform from
+Accessibility, Screen Recording and Input Monitoring with the minus button before step 3.
 
 Keep that Terminal window open: steps 3 and 9 use it.
 
-**Write down:** anything that stopped you, and whether any list still showed the old entry.
+**Write down:** anything that stopped you, and what Terminal answered to the tccutil line.
 
 ---
 
@@ -171,9 +175,12 @@ answer about it; it comes only after the first Command-Shift-F9 of each launch. 
 leave our application in front with no window, so **Command-Tab to Finder** before you press
 anything else.
 
-That press is the first picture this Mac takes the new way round (see "Why this session
-matters"), and its last number, the word count, says whether the picture saw anything: a picture
-of a bare desktop reads almost no words.
+That press is the first picture this Mac takes through the looked-up functions (see "Why this
+session matters"), and its last number, the word count, says whether the picture saw anything: a
+picture of a bare desktop reads almost no words. If it reads more than a handful of words,
+capturing works: go on. If it reads almost none, write that down and go on to step 4 anyway. Do not
+go back into System Settings for it, whatever the Permissions page said: the log records which way
+the picture was taken.
 
 If F9 is silent, do not blame the keyboard yet: open the manager from the menu-bar icon (**Show
 module manager**; if the item says **Close the module window** instead, the manager is already
@@ -191,7 +198,8 @@ Kontakt.
    straight after granting Accessibility, only after opening it again, or never?
 2. Anything the Permissions page said that sounded wrong, and whether it still named Screen
    Recording after you had reopened.
-3. The summary the Finder press spoke — above all its number of words.
+3. The summary the Finder press spoke — above all its number of words — and whether
+   Command-Shift-F9 needed **fn**.
 
 ---
 
@@ -215,6 +223,13 @@ Finder** and straight back to Kontakt; coming to the front is what makes the ove
 Finder-and-back again, every half minute or so. **If after four minutes it still has not been
 spoken, stop:** press Command-Shift-F9 over Kontakt, write down how long you tried, and go on to
 step 5.
+
+**Stop sooner in one case.** Once the notices above are closed, if coming back to Kontakt makes
+VoiceOver speak the window's title in words other than **"Kontakt 8"**, the overlay cannot come up
+on that window however long you wait. The "window" or "dialog" VoiceOver adds after a title does
+not count. Do not go round again: press Command-Shift-F9 over Kontakt and wait for its summary as in
+item 4 below, write the title down word for word, and go on to step 5. Silence, "busy", or only
+"Kontakt 8" means Kontakt is not answering yet, so keep going round as above.
 
 **Should happen:** the overlay's first control is spoken — **"Kontakt file menu, button"**, and
 nothing after it. **Tab** then gives **"Kontakt controls, Tab to step through them"**, and that is
@@ -250,7 +265,8 @@ probe press, item 4; its recording is what the next build is made from.
    summary has come after a minute, write that down and carry on.
 
 **Write down:** the window's title; items 1 to 3; for item 3, whether VoiceOver said anything at
-all when you pressed the arrows (even just "menu"); the summary the probe spoke.
+all when you pressed the arrows (even just "menu"), and whether the Tab after Escape moved on at
+the first press; the summary the probe spoke.
 
 ---
 
@@ -297,7 +313,11 @@ came, the overlay did not come up.
 
 **That phrase is the whole question of this step**: whether a Kontakt 8 inside a DAW publishes
 anything a Mac can find. On Windows it publishes nothing at all. If nothing comes up, write down
-exactly what F6 said, press **Command-Shift-F9** over the FX window, and move on to step 6.
+exactly what F6 said and press **Command-Shift-F9** over the FX window. When its summary has been
+spoken, press **Command-Shift-F6** once more: last time Kontakt was slow to answer at first on this
+Mac, and nothing else in this step makes the overlay look again. If VoiceOver then reads something
+new over Kontakt, press Escape once, as above. If **"Load instrument, button"** follows now, write
+down "came up on the second F6" and carry on with the list below. Otherwise move on to step 6.
 
 **Do, in this order, and only these:**
 
@@ -352,7 +372,9 @@ and straight back**, as in step 4.
 **Should happen:** it says "Instrument, button" and the instrument's value. **Tab** gives
 "Polyphony, button" and its value, and Tab again "Pitchbend range, button" and its value. **Note
 the value Pitchbend range reads now** — it is the student's, and you will put it back. Last time
-you set it to 1, which may be what it still is. If it reads "no text", or a value you could not
+you set it to 1 and nothing set it back. If it reads 1 now, ask the student what it was before
+(sforzando's default shows as DEF), and at the end put back the value they name, not 1; if they do
+not know, leave it at 1. If it reads "no text", or a value you could not
 pick again in its menu, write down what it read and leave Pitchbend range alone: do everything
 below on **Polyphony** instead. Press Return on Polyphony, and the Tab a second later should say
 "Pitchbend range", not "Instrument". For Escape, Shift-Tab once to Polyphony, and after the Tab,
@@ -373,7 +395,8 @@ it still reads the value you chose a moment ago, not the one below it. If it rea
 
 **Then:** press **Command-Shift-F9** over the sforzando window, and press nothing until its summary.
 
-**Finally, put the value back** to what you noted, the same way as before, and quit sforzando.
+**Finally, put the value back** to the one you noted (or the one the student named), the same way
+as before, and quit sforzando.
 
 **Write down:** the three values read on the first Tab round; whether the Tab a second after
 Return moved on at the first press; what the control read after Escape.
@@ -394,6 +417,10 @@ once** — once, not twice: a double-click opens sforzando in a window of its ow
 was still open: close it and press again — and, about a third of a second later, sometimes more,
 the sforzando overlay's first control: **"Instrument, button"** and the instrument's value. Through
 the system voice the second line waits for the first, so **the title should be heard to its end**.
+
+**Then:** press **Command-Shift-F9** over that FX window, and press nothing until its summary.
+Together with step 5's probe of Kontakt, it shows where REAPER puts a plugin inside its FX window
+on this screen.
 
 **Write down:** what it said, in order; whether the title was heard to its end or cut off.
 
@@ -458,10 +485,11 @@ whole text.
 
 1. **Quit the application** from its menu-bar icon's menu (**Quit**), or `pkill -f
    AutomationPlatform.app` in Terminal.
-2. **Copy the files off this Mac** (see "What to send") the way the artifact came in — the
-   simplest is to copy the whole `AutomationPlatform` folder from the home folder. Then run
+2. **Copy the files off this Mac** (see "What to send") to yourself alone — AirDrop to your own
+   device, or a USB stick; not the student's mail, and not a channel or server folder other people
+   can open, because the pictures show the student's screen. The simplest is to copy the whole `AutomationPlatform` folder from the home folder. Then run
    `open ~/Library/Application\ Support/AutomationPlatform` in Terminal; if a Finder window opens,
-   copy that folder too. **Check that the copy arrived** before item 6 deletes it.
+   copy that folder too. **Check on your own device that the copy arrived** before item 6 deletes it.
 3. **Take the permissions back**, and **before** item 6, because the command only finds the
    application while it still exists. Run exactly this line, the name at the end included, and read
    it back (VO-L) before pressing Return:
@@ -474,7 +502,8 @@ whole text.
    shows the application afterwards, remove it there with the minus button.
 4. If step 8 granted Personal Voice, tell the student; the switch is in **System Settings →
    Accessibility → Personal Voice**.
-5. In REAPER, check that the project in front is the one from step 5: **VO-F2** reads REAPER's
+5. In REAPER — **only if you opened a new project tab in step 5 or 6b**; if you did neither, leave
+   REAPER exactly as it is — check that the project in front is that tab: **VO-F2** reads REAPER's
    window title, and that project was never saved, so the title should not name a saved project.
    If it does, leave REAPER as it is and tell the student about the extra unsaved tab. Otherwise
    choose **File → Close project**, and when it asks whether to save, choose **not to save** — do
@@ -504,7 +533,7 @@ Nothing to do. Lines worth knowing about:
 - **`[host] os macos … — macOS 14.5`** — the version.
 - **`[macos] screen capture paths on this macOS: ScreenCaptureKit captureImageInRect absent,
   CGWindowListCreateImage present, CGDisplayCreateImageForRect present`** — expected on 14.5. If
-  either older function says `absent`, nothing on this Mac can photograph the screen, and a line
+  both older functions say `absent`, nothing on this Mac can photograph the screen, and a line
   saying so follows.
 - **`[macos] screen captures are coming from CGWindowListCreateImage (looked up at run time)`** —
   the way this Mac took its pictures. It is the first time that way has served a tester.
@@ -516,7 +545,12 @@ Nothing to do. Lines worth knowing about:
   In step 5 it is expected on every "Load instrument" press.
 - **`[kontakt] Kontakt 8 panel in 'FX: …': Kontakt File Menu at …`** — step 5's anchor: Kontakt 8
   inside REAPER was found. **`[kontakt] 'FX: …' publishes no button named Kontakt File Menu`** —
-  why it did not come up. Either line is the answer this step exists for.
+  nothing by that name was there when the window was looked at. It is written once per window and
+  size, and the first look can come before Kontakt has drawn itself, so it is often followed by a
+  `panel in` line for the same window: any `panel in` line for that window is the answer, and only
+  a window with `publishes no button` and no `panel in` line at all never anchored. **`[kontakt]
+  Kontakt File Menu at … puts Kontakt 8's panel corner at …, outside the window — not anchoring`**
+  — the button was found, but its position and the window's frame disagree.
 - **`focus_step(…): the ring has N focusable stop(s)`** — step 4's first step into Kontakt's own
   controls. Its failures read **`nothing in this window accepts keyboard focus`** or **`none of N
   candidate(s) accepted focus`**.
@@ -529,8 +563,13 @@ Nothing to do. Lines worth knowing about:
   the menu`** — sforzando's menu is a window of its own. **`… Return went through to the menu; the
   hold ends in 300 ms …`** followed by **`… the plugin's window list did not change …`** — it is
   not.
-- **`[daw-hosts] …`** — which way F6 took in steps 5 and 6b; a line ending in `it is now: inside` is
-  success.
+- **`[daw-hosts] keyboard was on the host's chrome after focusing '…'; handed to '…' by asking, it
+  is now: …`** or **`… after a click at content (…) it is: …`** — which way F6 took in steps 5 and
+  6b; the click is sforzando's usual way in 6b, because it publishes nothing to ask. In both, only a
+  last word of `inside` is success. **`[daw-hosts] the keyboard was already inside '…'; nothing
+  asked and nothing clicked`** — it was already there, which is success too. **`[daw-hosts] the
+  focus chain after focusing '…' was empty or belonged elsewhere; not clicking`** — F6's "could
+  not tell whether the keyboard is in …", before anything was tried.
 - **`[speech] Personal Voice was switched on — asking macOS…`**, then **`Personal Voice
   authorisation: … after N ms`** — step 8's answer. **`Personal Voice: …`** with no `asking` line
   before it — macOS had answered before we asked.
