@@ -1011,3 +1011,63 @@ fn check_screen_recording(reason: &str) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The path a Mac on macOS 14 takes for every capture, and the one no CI run had called:
+    // every runner so far answered from ScreenCaptureKit's rectangle capture, so the two older
+    // functions were looked up and never used. Called here exactly as `grab` calls them — the
+    // address from dlsym, the C signature by transmute, the result adopted under the Create rule
+    // — so a wrong signature or a wrong ownership rule fails on a build machine rather than on a
+    // tester's. A runner without Screen Recording still gets an image (the desktop with the
+    // other windows removed), which is all these ask for.
+    #[test]
+    fn the_looked_up_window_list_capture_answers() {
+        let Some(create) = window_list_create_image() else {
+            eprintln!("CGWindowListCreateImage is absent on this macOS; nothing to call");
+            return;
+        };
+        let rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(64.0, 32.0));
+        // SAFETY: the documented C signature, as in `grab`.
+        let raw = unsafe {
+            create(
+                rect,
+                CGWindowListOption::OptionOnScreenOnly.0,
+                0,
+                CGWindowImageOption::NominalResolution.0,
+            )
+        };
+        let p = NonNull::new(raw).expect("CGWindowListCreateImage returned no image for 64x32 at 0,0");
+        // SAFETY: a +1 reference from a Create function.
+        let image = unsafe { CFRetained::from_raw(p) };
+        assert!(
+            uniform_scale(&image, 64, 32).is_some(),
+            "a 64x32 point capture came back {}x{}",
+            CGImage::width(Some(&image)),
+            CGImage::height(Some(&image))
+        );
+    }
+
+    #[test]
+    fn the_looked_up_display_capture_answers() {
+        let Some(create) = display_create_image_for_rect() else {
+            eprintln!("CGDisplayCreateImageForRect is absent on this macOS; nothing to call");
+            return;
+        };
+        let (display, ..) = display_at(0, 0).expect("no display contains 0,0");
+        let rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(64.0, 32.0));
+        // SAFETY: the documented C signature, as in `grab`.
+        let raw = unsafe { create(display, rect) };
+        let p = NonNull::new(raw).expect("CGDisplayCreateImageForRect returned no image for 64x32 at 0,0");
+        // SAFETY: a +1 reference from a Create function.
+        let image = unsafe { CFRetained::from_raw(p) };
+        assert!(
+            uniform_scale(&image, 64, 32).is_some(),
+            "a 64x32 point capture came back {}x{}",
+            CGImage::width(Some(&image)),
+            CGImage::height(Some(&image))
+        );
+    }
+}

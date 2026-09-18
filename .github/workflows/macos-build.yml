@@ -434,9 +434,18 @@ jobs:
   # while the pump thread waits, whether a module or a speech call that works on 15 aborts on a
   # newer system. A separate job, so a red result here is a finding about that macOS rather than
   # a reason the download was not made.
+  #
+  # And on macOS 14, for the opposite reason: it is the one system here WITHOUT ScreenCaptureKit's
+  # rectangle capture (that arrived in 15.2), so it is where every capture goes through the two
+  # older functions looked up by name. Every other runner answers from ScreenCaptureKit and never
+  # calls them — and the Mac mini the tester uses runs 14.5.
   newer-macos:
     needs: build
-    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-26]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
