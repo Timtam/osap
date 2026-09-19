@@ -20,3 +20,11 @@ dist/
 # hand once cost the measurement it was taken for.
 probe-*.png
 voiceover.sdef
+
+# Test protocols and the tester briefing: working papers for ONE session with one tester —
+# which keys to press, in which order, on a machine nobody here owns. They change for every
+# session, they are sent to one person by hand, and on the documentation site they would read
+# as instructions to whoever finds them. The design and reference pages beside them stay.
+docs/macos-session-*.md
+docs/macos-tester-briefing.md
+docs/macos-test-protocol*.md

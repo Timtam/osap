@@ -34,8 +34,8 @@ What is worth reporting is anything the log cannot explain.
 ```
 
 Installs whatever is missing, builds, packages, and prints what to do next. Safe to run
-again. Someone who is testing rather than developing needs that command and
-[macos-tester-briefing.md](macos-tester-briefing.md), and nothing else on this page.
+again. Someone who is testing rather than developing needs that command and the tester briefing they
+were sent, and nothing else on this page.
 
 ## Intel or Apple silicon
 

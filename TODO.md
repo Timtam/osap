@@ -1713,7 +1713,9 @@ lenses, adversarially refuted, eleven findings standing. The three criticals are
 
 ## The Mac mini session with Kontakt 7 and 8 (2026-09-18)
 
-The protocol was `docs/macos-session-mini-kontakt8.md`; the machine the Mac mini M1 of the
+The protocol was `docs/macos-session-mini-kontakt8.md` (the protocols are working papers and
+are no longer in git — see .gitignore; they live in `docs/` on the maintainer's machine); the
+machine the Mac mini M1 of the
 third session (macOS 14.5, 1.00x), the build 839b211 from CI. Six analyses of the log, each
 finding put to a refuter; what was fixed is in the commits of 2026-09-19. **Settled:**
 Kontakt 8 inside REAPER anchors on its `Kontakt File Menu` button exactly where the Windows
@@ -1813,7 +1815,9 @@ control that has hidden itself acts on its hotkey sibling or says "not available
 
 ## Before the fourth macOS session (2026-09-12)
 
-The protocol is `docs/macos-session-four.md`. Sixty-five risks were put to eight readers and
+The protocol was `docs/macos-session-four.md`, replaced on 2026-09-20 by the compact
+`docs/macos-test-protocol.md` (English) and `docs/macos-test-protocol.de.md` (German), which
+cover both machines. Sixty-five risks were put to eight readers and
 two refuters each; twenty-six survived. What was changed before the session is in the commits
 of 2026-09-12. What was deliberately NOT changed, and why, is here — the reasoning is the
 point: a session that cannot be repeated is not the place to land everything at once.
@@ -1947,9 +1951,9 @@ what it left open.
 - [ ] Protocol step 5 asked for "a Dock icon for the error window" — a window cannot have
       its own on macOS; the application's icon while the window is up is the answer he gave.
       Reword next time. Step 1 assumed a local build; the artifact route needs its own text.
-- [ ] `docs/macos-session-three.md` still names the old chords in its keys table; it is the
-      protocol as sent and carries a note now. The fourth protocol is
-      `docs/macos-session-four.md`.
+- [x] `docs/macos-session-three.md` still names the old chords in its keys table; it is the
+      protocol as sent and carries a note. Closed on 2026-09-20: the protocols left git, and the
+      one that is current is `docs/macos-test-protocol.md`.
 - [x] **F6 asks before it clicks** — 2026-09-11. It used to click three points inside the
       plugin panel's top-left corner, which for Kontakt 7 is its logo button (PROBE 3:
       AXButton at 349,341, the panel corner at 347,338). `host.element.focusWithin` sets
