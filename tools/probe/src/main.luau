@@ -165,7 +165,85 @@ local function dumpTree(label, id)
   return #elements
 end
 
+-- Runs `steps` one event-loop tick apart, then `done`.
+--
+-- The probe used to do everything inside its hotkey callback, and that callback runs on the
+-- thread that also carries macOS's event tap. On the Mac mini it took 1.2 s, and both times the
+-- system switched the tap off: the chord's own key-ups were waiting behind it. A tick apart,
+-- the run loop turns between steps and the tap is answered each time. Each step is timed on a
+-- line of its own, so the next log says which one is heavy on which machine.
+--
+-- A step's `run` is handed `resume`; one that returns `answers.WAIT` calls it itself when its
+-- own timers are done. The first link is 20 ms, not 0: a zero-delay timer set from a hotkey
+-- callback is already due when the same pump iteration fires its timers, while one set from a
+-- timer callback waits for the next tick — which is what every later link relies on.
+--
+-- `token` is the run's entry in `busy` below. Each step stamps it, so "stuck" means no step for
+-- two minutes rather than a run slower than that in all; and a run a newer press has given up
+-- on (`token.dropped`) stops at its next step instead of weaving into the new one.
+local function runSteps(steps, done, token)
+  if not (host.timer and host.timer.after) then
+    -- Nothing to spread them over: all at once, as the probe always used to.
+    for _, s in ipairs(steps) do
+      local ok, err = pcall(s.run, function() end)
+      if not ok then line("  %s: FAILED (%s)", s.name, tostring(err)) end
+    end
+    done()
+    return
+  end
+  local i = 0
+  local advance
+  local function schedule()
+    host.timer.after(0, advance)
+  end
+  advance = function()
+    if token then
+      if token.dropped then return end
+      token.since = host.now()
+    end
+    i = i + 1
+    local s = steps[i]
+    if not s then
+      done()
+      return
+    end
+    local t0 = host.now()
+    local resumed, waiting = false, false
+    local function resume()
+      if resumed then return end
+      resumed = true
+      if waiting then schedule() end
+    end
+    local ok, r = pcall(s.run, resume)
+    line("probe step '%s': %d ms", s.name, host.now() - t0)
+    if not ok then line("  %s: FAILED (%s)", s.name, tostring(r)) end
+    if ok and r == answers.WAIT and not resumed then
+      waiting = true -- `resume` schedules the next step
+    else
+      schedule()
+    end
+  end
+  host.timer.after(20, advance)
+end
+
+-- The run in progress, so a second press cannot interleave a second run with it — two PROBE
+-- sections, two pictures and two summaries woven together. Not permanent: a run that has made
+-- no step for two minutes is taken to be stuck (a timer that never fired), and the next press
+-- starts afresh, says so, and stops the old one at its next step.
+local busy = nil
+local STUCK_MS = 120000
+
 host.hotkey.register(KEY, function()
+  if busy and host.now() - busy.since < STUCK_MS then
+    say(string.format("Still recording probe %d.", busy.run))
+    return
+  end
+  if busy then
+    line("PROBE %d made no progress for %d ms — giving it up and starting a new one",
+      busy.run, host.now() - busy.since)
+    busy.dropped = true
+    busy = nil
+  end
   run = run + 1
   local win = host.window.active()
   if not win then
@@ -173,6 +251,13 @@ host.hotkey.register(KEY, function()
     line("PROBE %d: no active window", run)
     return
   end
+  -- The window's identity, geometry, surfaces and focus chain are read NOW, at the press, and
+  -- the tree dumps and name lookups that follow go by that window's id. The picture, the OCR
+  -- reads, the pointer and the window list are read when their own step runs, inside the
+  -- rectangle read here — so something raised over the plug-in in the meantime (a notification,
+  -- another application, the previous run's error window) is what they record. The picture
+  -- step says so in the log when the window in front is no longer this one.
+  local thisRun = run
 
   line("===== PROBE %d =====", run)
   line("platform: %s", host.os.current)
@@ -254,7 +339,11 @@ host.hotkey.register(KEY, function()
   -- response to a hang — which would lose the press this whole session is for.
   say("Recording. This can take a few seconds on a large plugin.")
 
-  local total = dumpTree(string.format("window '%s'", win.title or ""), win.id)
+  local total, words = 0, 0
+  local steps = {}
+  steps[#steps + 1] = { name = "window tree", run = function()
+    total = total + dumpTree(string.format("window '%s'", win.title or ""), win.id)
+  end }
 
   -- The loop is bounded, and it was not.
   --
@@ -265,75 +354,101 @@ host.hotkey.register(KEY, function()
   -- five seconds each — twenty minutes of frozen application and a log large enough to rotate
   -- the session away — for a press whose only spoken confirmation comes at the end.
   --
-  -- It has never been exercised: the only Mac this has ever run on could not run a plug-in
-  -- with any sub-surfaces at all (`surfaces inside it: 0`), and Kontakt is the first tree with
-  -- them. Same shape as the fault fixed in the backend an hour earlier, one level up: that one
-  -- bounded a walk, and nothing bounded the loop around it.
-  --
   -- The surfaces are also descendants of the window, so in the good case their subtrees are
   -- already in the dump above; these exist for the case where that one was truncated, or where
   -- a surface turns out to be a separate hierarchy. That is worth some duplication, not
-  -- unbounded duplication.
+  -- unbounded duplication. One surface per step, so a large plug-in's many small trees are no
+  -- longer one long stall.
   local DUMP_BUDGET_MS = 20000
   local MAX_SURFACES = 24
-  local started = host.now()
+  local started
   local dumped, skipped = 0, 0
   for i, c in ipairs(controls) do
-    if dumped >= MAX_SURFACES or (host.now() - started) > DUMP_BUDGET_MS then
-      skipped = skipped + 1
-    else
+    steps[#steps + 1] = { name = string.format("surface %d tree", i), run = function()
+      started = started or host.now()
+      if dumped >= MAX_SURFACES or (host.now() - started) > DUMP_BUDGET_MS then
+        skipped = skipped + 1
+        return
+      end
       total = total + dumpTree(string.format("surface %d [%s]", i, c.class or ""), c.id)
       dumped = dumped + 1
-    end
-  end
-  if skipped > 0 then
-    line(
-      "  trees: %d of %d surface(s) dumped, %d SKIPPED after %d ms — this recording is "
-        .. "partial by design rather than by accident, and the window's own tree above is "
-        .. "the complete one to read",
-      dumped, #controls, skipped, host.now() - started
-    )
+    end }
   end
 
   -- A picture of the window, next to the application. The one artefact a sighted helper can
   -- check in seconds, and the only way to tell a real capture from the wallpaper that macOS
   -- hands back when Screen Recording was never granted.
-  local shot = string.format("probe-%d.png", run)
-  local saved = host.screen.save(shot, {
-    region = { win.bounds.x, win.bounds.y, win.bounds.x + win.bounds.w, win.bounds.y + win.bounds.h },
-  })
-  line("capture: %s (%dx%d points requested)", saved and shot or "FAILED", win.bounds.w, win.bounds.h)
-
-  local ok, res = pcall(function()
-    return host.ocr.recognize({
-      region = { win.bounds.x, win.bounds.y, win.bounds.x + win.bounds.w, win.bounds.y + win.bounds.h },
-    })
-  end)
-  if ok and res then
-    line("ocr: %d word(s)", #res.words)
-    for _, wd in ipairs(res.words) do
+  steps[#steps + 1] = { name = "picture", run = function()
+    local front = host.window.active()
+    if not (front and front.id == win.id) then
       line(
-        "  '%s' @ content (%d,%d) %dx%d",
-        wd.text, wd.x - win.client.x, wd.y - win.client.y, wd.w, wd.h
+        "  NOTE: the window in front is no longer the one being recorded (now '%s') — the "
+          .. "picture and the text read below show what covers its rectangle, not it",
+        tostring(front and front.title or "nothing")
       )
     end
-    local compared, err = pcall(answers.textAgainstElements, line, win, res.words)
-    if not compared then
-      line("  text against elements: FAILED (%s)", tostring(err))
+    if skipped > 0 then
+      line(
+        "  trees: %d of %d surface(s) dumped, %d SKIPPED after %d ms — this recording is "
+          .. "partial by design rather than by accident, and the window's own tree above is "
+          .. "the complete one to read",
+        dumped, #controls, skipped, host.now() - (started or host.now())
+      )
     end
-  else
-    line("ocr: failed (%s)", tostring(res))
+    local shot = string.format("probe-%d.png", thisRun)
+    local saved = host.screen.save(shot, {
+      region = { win.bounds.x, win.bounds.y, win.bounds.x + win.bounds.w, win.bounds.y + win.bounds.h },
+    })
+    line("capture: %s (%dx%d points requested)", saved and shot or "FAILED", win.bounds.w, win.bounds.h)
+  end }
+
+  local read
+  steps[#steps + 1] = { name = "text", run = function()
+    local ok, res = pcall(function()
+      return host.ocr.recognize({
+        region = { win.bounds.x, win.bounds.y, win.bounds.x + win.bounds.w, win.bounds.y + win.bounds.h },
+      })
+    end)
+    if ok and res then
+      read = res.words
+      words = #res.words
+      line("ocr: %d word(s)", #res.words)
+      for _, wd in ipairs(res.words) do
+        line(
+          "  '%s' @ content (%d,%d) %dx%d",
+          wd.text, wd.x - win.client.x, wd.y - win.client.y, wd.w, wd.h
+        )
+      end
+    else
+      line("ocr: failed (%s)", tostring(res))
+    end
+  end }
+  steps[#steps + 1] = { name = "text against elements", run = function(resume)
+    if not read then return end
+    -- Its own hops, one lookup a tick; the chain goes on when it calls back.
+    answers.textAgainstElements(line, win, read, resume)
+    return answers.WAIT
+  end }
+
+  for _, s in ipairs(answers.steps(line, win)) do
+    steps[#steps + 1] = s
   end
 
-  answers.all(line, win)
-
-  line("===== end of probe %d =====", run)
-  line("(the timer line above arrives a second later, after this marker — its ABSENCE means "
-    .. "the timer never fired, which is itself the answer)")
-  say(string.format(
-    "Probe %d written. %d surfaces, %d accessibility elements, %d words.",
-    run, #controls, total, (ok and res and #res.words) or 0
-  ))
+  -- Held from here, not from the press: the part above is synchronous, so nothing can
+  -- interleave with it, and a throw in it would otherwise leave the key refusing for two
+  -- minutes.
+  local token = { run = thisRun, since = host.now() }
+  busy = token
+  runSteps(steps, function()
+    line("===== end of probe %d =====", thisRun)
+    -- Only its own: a run that was given up on must not release the guard of the one that
+    -- replaced it.
+    if busy == token then busy = nil end
+    say(string.format(
+      "Probe %d written. %d surfaces, %d accessibility elements, %d words.",
+      thisRun, #controls, total, words
+    ))
+  end, token)
 end)
 
 host.log.info(string.format("[probe] ready — press %s over the window you want recorded", KEY))

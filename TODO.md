@@ -1760,28 +1760,42 @@ control that has hidden itself acts on its hotkey sibling or says "not available
       Only after that: a viewport filter for macOS `focus_step` — clip by ancestors that SCROLL
       (AXScrollArea, AXList, AXTable, AXOutline, a group with an AXScrollBar child), never by
       every AXGroup, ignoring ancestors with no rectangle.
-- [ ] **The event tap on its own thread.** Both switch-offs were the probe's ~1.2 s synchronous
-      hotkey callback, not focus handling; the ~1 s focus stalls did not trip it because no key
-      was waiting. Before moving the tap (tap.rs's escape hatch, which needs queue.rs's
-      pump-thread queues to become cross-thread): log in the tap callback when an event's
-      timestamp is more than 250 ms old, and see whether keys are ever delayed in real use.
-- [ ] **The probe in timer hops, with a busy guard.** Keep the press-time part synchronous
-      (window, controls, focus chain, dumps, capture, OCR); chain `ownsPoint`, the blank-OCR
-      check and the batching rounds one per tick (the first link `after(20)`, since a 0 ms timer
-      from a hotkey callback fires in the same pump iteration), then timer cadence; the summary
-      as the `done` callback that clears `busy`; `probe step X: N ms` per step.
-- [ ] **CI signing with a stable identity**, only for a tester who keeps grants across builds on
-      their own Mac — the borrowed Macs reset TCC on purpose, so they gain nothing. Done so it
-      cannot fail without a word: the p12 made with `openssl pkcs12 -export -legacy`; a keychain
-      created, unlocked and put on the search list; a step after Package that fails when the
-      secret is set and `codesign -dv` shows no `Authority=OSAP Local Signing`; the workflow
-      file added to the reuse diff; the secret in an Environment limited to main. The key IS the
-      privilege — anyone holding it ships a binary that inherits the grants.
-- [ ] **The menu watch's backstop honours a menu for 150 ms of every 1.2 s.** A menu the
-      accessibility check sees with no hold running (Kontakt 8's own File menu, opened by
-      VoiceOver) gave the keys up and took them back four times in five seconds. Let a sighting
-      extend `menuPlausibleUntil` while the check keeps seeing it, log the first sighting and the
-      close once. Measure the flicker first (open Kontakt 8's own menu with VoiceOver for 5 s).
+- [ ] **The event tap on its own thread** — waits for the measurement, which is built
+      (2026-09-19). Both switch-offs were the probe's ~1.2 s synchronous hotkey callback, not
+      focus handling; the ~1 s focus stalls did not trip it because no key was waiting. The tap
+      now notes every key-down that reaches it 250 ms or more after it was pressed, and the
+      run-loop watchdog writes `N key press(es) reached the event tap late, the worst M ms …`
+      at most once a second. Only if a session shows those lines in ordinary use is the move
+      worth making (tap.rs's escape hatch, which needs queue.rs's pump-thread queues to become
+      cross-thread). The timestamp's unit on Apple silicon is read two ways (`key_age.rs`,
+      tested on Windows); if the line reports absurd ages, that reading is the first suspect.
+- [x] **The probe in timer hops, with a busy guard** — 2026-09-19. The press-time part stays
+      synchronous (window, surfaces, focus chain); every tree dump, the picture, the OCR, the
+      text comparison and each answer run one event-loop tick apart, the three OCR-batching
+      rounds each in its own; timer cadence and window.active cost AFTER the heavy steps, and
+      the summary waits for them. `probe step 'X': N ms` per step. A second press while a run
+      is going says "Still recording probe N"; a run that makes no step for two minutes is given up
+      and stopped. The picture step notes when the window in front is no longer the one recorded.
+- [ ] **CI signing with a stable identity — the maintainer's, at release.** Done by the
+      maintainer, last, before the official release; not a task for a session. Only a tester
+      who keeps grants across builds on their own Mac would gain before then — the borrowed Macs
+      reset TCC on purpose. The recipe, so it cannot fail without a word: the p12 made with
+      `openssl pkcs12 -export -legacy`; a keychain created, unlocked and put on the search list;
+      a step after Package that fails when the secret is set and `codesign -dv` shows no
+      `Authority=OSAP Local Signing`; the workflow file added to the reuse diff; the secret in an
+      Environment limited to main. The key IS the privilege — anyone holding it ships a binary
+      that inherits the grants.
+- [x] **The menu watch's backstop honoured a menu for 150 ms of every 1.2 s** — 2026-09-19. A
+      menu the accessibility check sees now keeps the check running every tick (each sighting
+      extends `menuPlausibleUntil` by three ticks), so the keys stay with it while it is seen and
+      come back once two ticks in a row no longer see it; a first sighting with no control's
+      menu plausible, and the close, are logged once each. Capped at 30 s of continuous sighting,
+      then back to the backstop cadence, because on Windows the check is a whole-tree walk and a
+      plug-in whose tree always holds a menu element would otherwise walk every tick. To confirm
+      on a Mac: open Kontakt 8's own File menu with VoiceOver from the pass-through for five
+      seconds — one "sees a menu" line, one "has closed" line, and exactly one "gave up" /
+      "took back" pair around them, not a pair every 1.2 s as before. One read that misses is
+      tolerated (the keys stay with the menu), so a real close gives them back two ticks later.
 - [ ] **`[observe] epoch served` is still a line per tick on a Mac** (3437 in the session): every
       steady epoch reaches the OS 2-5 times there. Line level only for `binding_us >= 1000`,
       pixels, or `reached_os >= 6`; replace `asked >= 1000` (which flags every long idle epoch,

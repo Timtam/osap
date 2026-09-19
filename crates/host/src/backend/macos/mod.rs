@@ -41,6 +41,7 @@ mod front_memory;
 mod handles;
 mod hotkey;
 mod input;
+mod key_age;
 mod keys;
 mod ocr;
 pub(crate) mod perm;

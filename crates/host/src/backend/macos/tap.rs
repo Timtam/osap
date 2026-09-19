@@ -32,7 +32,7 @@ use objc2_core_graphics::{
     CGGetEventTapList,
 };
 
-use super::{keys, queue, watch};
+use super::{key_age, keys, queue, watch};
 use crate::backend::{MASK_ALT, MASK_CTRL, MASK_SHIFT, MASK_TAP, MASK_WIN};
 use crate::logging;
 
@@ -129,6 +129,77 @@ static REENABLES: AtomicU32 = AtomicU32::new(0);
 
 static LAST_HEALTH_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_LOCK_FAIL_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Key presses that reached this callback late, and how late the worst of them was.
+///
+/// The question behind it: does a busy main thread delay keys? The tap runs on the main run
+/// loop, and the pump that also runs there stalls for about a second at a time against an
+/// application that does not answer. The fifth session's two switch-offs were the probe's own
+/// long hotkey callback; during the ordinary one-second stalls the system did not switch the tap
+/// off, and nothing could say whether keys arrived late meanwhile. Moving the tap to its own
+/// thread is a real rebuild (the pump's queues are thread-local), so it waits for this answer.
+///
+/// Recorded in the callback — three relaxed atomic writes and a keycode lookup, nothing that
+/// locks, allocates or logs — and written by the run-loop observer
+/// once the loop is idle again, because a log line from inside the callback is exactly the kind
+/// of slowness that gets a tap switched off.
+static LATE_KEYS: AtomicU32 = AtomicU32::new(0);
+static LATE_WORST_MS: AtomicU64 = AtomicU64::new(0);
+static LATE_LAST_VK: AtomicU32 = AtomicU32::new(0);
+static LAST_LATE_REPORT_MS: AtomicU64 = AtomicU64::new(0);
+
+/// A key press this much older than the callback is reported. Well above a normal run-loop
+/// turn and well below the ~1 s at which the system gives up on a tap.
+const LATE_KEY_MS: u64 = 250;
+
+// The two clocks an event timestamp can be in; see `key_age`. Declared here rather than taken
+// from `libc`, which marks the mach one deprecated in favour of a crate this needs nothing else
+// from. Both are in libSystem, which every process links.
+extern "C" {
+    fn mach_absolute_time() -> u64;
+    fn clock_gettime_nsec_np(clock_id: u32) -> u64;
+}
+/// `CLOCK_UPTIME_RAW`: `mach_absolute_time` in nanoseconds, not counting sleep.
+const CLOCK_UPTIME_RAW: u32 = 8;
+
+/// Notes a key press that reached the callback late. Called for every key-down; when the key
+/// was on time it costs the event's timestamp, two clock reads and the age arithmetic.
+fn note_lateness(ev: &CGEvent, keycode: u16) {
+    let ts = CGEvent::timestamp(Some(ev));
+    // SAFETY: neither takes arguments that could be wrong; both read a clock.
+    let (ticks, ns) = unsafe { (mach_absolute_time(), clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) };
+    let Some(age) = key_age::age_ns(ts, ticks, ns) else {
+        return;
+    };
+    let ms = age / 1_000_000;
+    if ms < LATE_KEY_MS {
+        return;
+    }
+    LATE_KEYS.fetch_add(1, Ordering::Relaxed);
+    LATE_WORST_MS.fetch_max(ms, Ordering::Relaxed);
+    LATE_LAST_VK.store(keys::keycode_to_vk(keycode).unwrap_or(0), Ordering::Relaxed);
+}
+
+/// Writes what `note_lateness` gathered, at most once a second, from the idle run loop.
+fn report_lateness() {
+    if LATE_KEYS.load(Ordering::Relaxed) == 0 || !due(&LAST_LATE_REPORT_MS, 1000) {
+        return;
+    }
+    let n = LATE_KEYS.swap(0, Ordering::Relaxed);
+    let worst = LATE_WORST_MS.swap(0, Ordering::Relaxed);
+    let vk = LATE_LAST_VK.load(Ordering::Relaxed);
+    if n == 0 {
+        return;
+    }
+    logging::line(
+        "macos",
+        &format!(
+            "{n} key press(es) reached the event tap late, the worst {worst} ms after it was \
+             pressed (last vk {vk:#04x}) — the main thread was busy; the pump line nearby says \
+             with what"
+        ),
+    );
+}
 
 /// Milliseconds since the first call, for rate limiting. `Instant` cannot be a `const`
 /// initialiser and the callback must not allocate or lock to find out what time it is.
@@ -390,6 +461,7 @@ unsafe extern "C-unwind" fn watchdog_observer(
     _info: *mut c_void,
 ) {
     health_check();
+    report_lateness();
 }
 
 /// Everything the callback is allowed to do, and no more: match a table, push, return.
@@ -452,6 +524,9 @@ unsafe extern "C-unwind" fn tap_callback(
     if etype != CGEventType::KeyDown {
         return pass;
     }
+    // Every key-down, captured or not: the question is whether the THREAD delays keys, and a
+    // key the overlay does not want waits in the same queue as one it does.
+    note_lateness(ev, keycode);
 
     // Any ordinary key ends a pending modifier tap: "pressed and released with nothing in
     // between" is the whole definition, and this is the "in between".

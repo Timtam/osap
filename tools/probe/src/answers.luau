@@ -393,9 +393,11 @@ end
 --
 -- Ten hops of 100 ms, measured against the clock. Read-only, costs a second, and its ABSENCE
 -- from the log is itself an answer — it would mean the timer never fired at all.
-function M.timerCadence(line, hops)
+function M.timerCadence(line, hops, done)
+  done = done or function() end
   if not (host.timer and host.timer.after and host.now) then
     line("  timers: host.timer or host.now unavailable")
+    done()
     return
   end
   hops = hops or 10
@@ -426,6 +428,7 @@ function M.timerCadence(line, hops)
     end
     if #samples == 0 then
       line("  timers: no interval was measured")
+      done()
       return
     end
     table.sort(samples)
@@ -436,6 +439,7 @@ function M.timerCadence(line, hops)
         .. "be an interval that landed behind other work rather than a slow timer",
       #samples, samples[1], median, samples[#samples], floor(9 * median)
     )
+    done()
   end
   host.timer.after(100, hop)
 end
@@ -466,9 +470,11 @@ end
 -- backend's memory of a wedged application is fast BY DESIGN — the log line "serving the
 -- window it last described" is what tells those apart, so read this next to the log rather
 -- than on its own.
-function M.activeWindowCost(line, hops)
+function M.activeWindowCost(line, hops, done)
+  done = done or function() end
   if not (host.window and host.window.active and host.now and host.timer and host.timer.after) then
     line("  window.active cost: host.window.active, host.now or host.timer unavailable")
+    done()
     return
   end
   hops = hops or 40
@@ -513,6 +519,7 @@ function M.activeWindowCost(line, hops)
           .. "described\" before reading that as healthy"
         or "  <- this is the stall"
     )
+    done()
   end
   host.timer.after(20, ask)
 end
@@ -536,15 +543,23 @@ end
 -- underneath compared the two totals with no margin at all, so five per cent read as "worth
 -- building". The rule it applies now is written into the line it prints, so a reader can
 -- disagree with the threshold instead of only with the conclusion.
-function M.ocrBatching(line, win)
+--
+-- ONE ROUND PER STEP. The three rounds used to run back to back inside the probe's hotkey
+-- callback, 320-450 ms of Vision on the thread that also carries the event tap, and together
+-- with the rest of the run that was over a second — long enough, with the probe's own key-ups
+-- waiting, for macOS to switch the tap off (both switch-offs of the fifth session). Returned as
+-- steps, the probe runs them a tick apart and the tap is serviced in between.
+function M.ocrBatchingSteps(line, win)
   if not (host.ocr and host.ocr.recognize and win and win.client) then
-    line("  ocr batching: host.ocr or the window's client area unavailable")
-    return
+    return { { name = "ocr batching", run = function()
+      line("  ocr batching: host.ocr or the window's client area unavailable")
+    end } }
   end
   local c = win.client
   if c.w < 240 or c.h < 120 then
-    line("  ocr batching: the window is too small to split meaningfully (%dx%d)", c.w, c.h)
-    return
+    return { { name = "ocr batching", run = function()
+      line("  ocr batching: the window is too small to split meaningfully (%dx%d)", c.w, c.h)
+    end } }
   end
   -- A band across the top of the content, where a plugin's read-outs usually sit, and three
   -- strips inside that same band. Same pixels either way, so the comparison is honest.
@@ -558,7 +573,7 @@ function M.ocrBatching(line, win)
   local ROUNDS = 3
   local oneMs, manyMs = math.huge, math.huge
   local oneWords, manyWords, failed = 0, 0, 0
-  for _ = 1, ROUNDS do
+  local function round()
     local t0 = host.now()
     local okOne, one = pcall(function() return host.ocr.recognize({ region = band }) end)
     local ms = host.now() - t0
@@ -585,42 +600,51 @@ function M.ocrBatching(line, win)
     end
   end
 
-  -- The number that actually decides, rather than the two it is derived from. Batching would
-  -- replace up to three reads with one, so what it saves is two EXTRA requests — and that is
-  -- the figure to compare against the cost of building it.
-  local extra = floor((manyMs - oneMs) / 2)
-  line(
-    "  ocr batching: one %dx%d region took %d ms and read %d word(s); the same band as three "
-      .. "strips took %d ms and read %d word(s); best of %d round(s)%s",
-    band[3] - band[1], band[4] - band[2], oneMs, oneWords,
-    manyMs, manyWords, ROUNDS,
-    failed > 0 and string.format(" (%d strip(s) failed or timed out)", failed) or ""
-  )
-  -- The rule is stated so it can be disagreed with, which is the whole difference between a
-  -- measurement and a verdict.
-  --
-  -- It used to be `manyMs > oneMs`: ANY difference at all read as "worth building". The first
-  -- run of this on a real Mac returned 354 ms against 374 — five per cent — and duly declared
-  -- a change to the runtime worth making, days before a session that could not be repeated.
-  -- An instrument whose threshold is zero cannot tell its finding from its noise, and this one
-  -- was about to cost a feature nobody needed.
-  --
-  -- WORTH_MS is what one extra Vision request has to cost before removing two of them is worth
-  -- a change to shared runtime code. Fifty, because an announcement on that machine already
-  -- costs 90 to 250 ms: saving a hundred is something a person notices, and saving twenty is
-  -- not. A guess, said out loud, with the number beside it so the next reader can pick another.
-  local WORTH_MS = 50
-  line(
-    "  ocr batching: an extra read costs about %d ms — %s",
-    extra,
-    extra >= WORTH_MS
-      and ("that is more than the " .. WORTH_MS
-        .. " ms this is worth building for, so batching a row of read-outs into one region "
-        .. "would pay for itself")
-      or ("that is under the " .. WORTH_MS
-        .. " ms this would be worth building for, so leave the runtime alone — three reads "
-        .. "are barely dearer than one here, and the per-request cost is not the thing to fix")
-  )
+  local function verdict()
+    -- The number that actually decides, rather than the two it is derived from. Batching would
+    -- replace up to three reads with one, so what it saves is two EXTRA requests — and that is
+    -- the figure to compare against the cost of building it.
+    local extra = floor((manyMs - oneMs) / 2)
+    line(
+      "  ocr batching: one %dx%d region took %d ms and read %d word(s); the same band as three "
+        .. "strips took %d ms and read %d word(s); best of %d round(s)%s",
+      band[3] - band[1], band[4] - band[2], oneMs, oneWords,
+      manyMs, manyWords, ROUNDS,
+      failed > 0 and string.format(" (%d strip(s) failed or timed out)", failed) or ""
+    )
+    -- The rule is stated so it can be disagreed with, which is the whole difference between a
+    -- measurement and a verdict.
+    --
+    -- It used to be `manyMs > oneMs`: ANY difference at all read as "worth building". The first
+    -- run of this on a real Mac returned 354 ms against 374 — five per cent — and duly declared
+    -- a change to the runtime worth making, days before a session that could not be repeated.
+    -- An instrument whose threshold is zero cannot tell its finding from its noise, and this one
+    -- was about to cost a feature nobody needed.
+    --
+    -- WORTH_MS is what one extra Vision request has to cost before removing two of them is worth
+    -- a change to shared runtime code. Fifty, because an announcement on that machine already
+    -- costs 90 to 250 ms: saving a hundred is something a person notices, and saving twenty is
+    -- not. A guess, said out loud, with the number beside it so the next reader can pick another.
+    local WORTH_MS = 50
+    line(
+      "  ocr batching: an extra read costs about %d ms — %s",
+      extra,
+      extra >= WORTH_MS
+        and ("that is more than the " .. WORTH_MS
+          .. " ms this is worth building for, so batching a row of read-outs into one region "
+          .. "would pay for itself")
+        or ("that is under the " .. WORTH_MS
+          .. " ms this would be worth building for, so leave the runtime alone — three reads "
+          .. "are barely dearer than one here, and the per-request cost is not the thing to fix")
+    )
+  end
+
+  local steps = {}
+  for r = 1, ROUNDS do
+    steps[#steps + 1] = { name = "ocr batching, round " .. r, run = round }
+  end
+  steps[#steps + 1] = { name = "ocr batching, verdict", run = verdict }
+  return steps
 end
 
 -- == Does the module-error window work on a Mac? ==============================
@@ -697,51 +721,142 @@ end
 -- tells a scale error from an offset, and why the content position is printed beside it.
 local TEXT_MATCH_MAX = 6
 local TEXT_LOOKUPS_MAX = 24
-function M.textAgainstElements(line, win, words)
+--
+-- With `done`, ONE LOOKUP PER TICK, and `done` is called when the comparison is over. Each
+-- lookup is a walk of the window — up to 300 ms on a Mac against a busy plug-in — and 24 of
+-- them in one tick was the longest single stretch the probe had (1.8 s on Windows, debug
+-- build). Without `done`, all at once, as before.
+function M.textAgainstElements(line, win, words, done)
   line("----- text against elements -----")
   if not (words and #words > 0) then
     line("  no words were read, so there is nothing to compare")
+    if done then done() end
     return
   end
   local button = host.element.type and host.element.type.Button
   local seen, looked, matched = {}, 0, 0
-  for _, wd in ipairs(words) do
-    if matched >= TEXT_MATCH_MAX or looked >= TEXT_LOOKUPS_MAX then break end
+  local spent, slowest = 0, 0
+  local idx = 0
+  local hops = done and host.timer and host.timer.after and host.now
+  local function finish()
+    if matched == 0 then
+      line("  none of the first %d distinct word(s) is the name of a button in this window", looked)
+    end
+    if hops then
+      line("  (%d lookup(s), one per tick, %d ms in all, the slowest %d ms)", looked, spent, slowest)
+    end
+    if done then done() end
+  end
+  -- One word; true when it made a lookup, so the caller knows whether to wait a tick.
+  local function one(wd)
     local text = wd.text
     -- Single words of three letters or more: shorter ones match too much, and a phrase is never
     -- a button's whole name the way OCR splits it.
-    if type(text) == "string" and #text >= 3 and not seen[text] and not string.find(text, "%s") then
-      seen[text] = true
-      looked = looked + 1
-      local p = host.element.locate(win.id, text, button)
-      if p then
-        matched = matched + 1
-        local cx = math.floor(wd.x + wd.w / 2)
-        local cy = math.floor(wd.y + wd.h / 2)
-        line(
-          "  '%s': text centre %d,%d, element centre %d,%d — off by %d,%d (element at content %d,%d)",
-          text, cx, cy, math.floor(p.x), math.floor(p.y),
-          cx - math.floor(p.x), cy - math.floor(p.y),
-          math.floor(p.x) - win.client.x, math.floor(p.y) - win.client.y
-        )
+    if not (type(text) == "string" and #text >= 3 and not seen[text] and not string.find(text, "%s")) then
+      return false
+    end
+    seen[text] = true
+    looked = looked + 1
+    local t0 = hops and host.now() or 0
+    local p = host.element.locate(win.id, text, button)
+    if hops then
+      local ms = host.now() - t0
+      spent = spent + ms
+      if ms > slowest then slowest = ms end
+    end
+    if p then
+      matched = matched + 1
+      local cx = math.floor(wd.x + wd.w / 2)
+      local cy = math.floor(wd.y + wd.h / 2)
+      line(
+        "  '%s': text centre %d,%d, element centre %d,%d — off by %d,%d (element at content %d,%d)",
+        text, cx, cy, math.floor(p.x), math.floor(p.y),
+        cx - math.floor(p.x), cy - math.floor(p.y),
+        math.floor(p.x) - win.client.x, math.floor(p.y) - win.client.y
+      )
+    end
+    return true
+  end
+  local function nextWord()
+    -- Guarded here, because a hop runs from a timer: an error that escaped would never call
+    -- `done`, and the probe would wait for it until its two-minute give-up.
+    local ok, err = pcall(function()
+      while true do
+        idx = idx + 1
+        local wd = words[idx]
+        if not wd or matched >= TEXT_MATCH_MAX or looked >= TEXT_LOOKUPS_MAX then
+          finish()
+          return
+        end
+        if one(wd) and hops then
+          host.timer.after(0, nextWord)
+          return
+        end
       end
+    end)
+    if not ok then
+      line("  text against elements: FAILED (%s)", tostring(err))
+      if done then done() end
     end
   end
-  if matched == 0 then
-    line("  none of the first %d distinct word(s) is the name of a button in this window", looked)
-  end
+  nextWord()
 end
 
-function M.all(line, win)
-  line("----- what this platform answers -----")
-  guard(line, "pointer space", function() M.pointerSpace(line, win) end)
-  guard(line, "ownsPoint", function() M.ownsPoint(line, win) end)
-  guard(line, "blank OCR", function() M.blankOcr(line, win) end)
-  guard(line, "timers", function() M.timerCadence(line) end)
-  guard(line, "window.active cost", function() M.activeWindowCost(line) end)
-  guard(line, "ocr batching", function() M.ocrBatching(line, win) end)
+-- The whole section as STEPS, in the order the answers are worth reading. Each is
+-- `{ name, run }`; the probe runs them one event-loop tick apart (see `runSteps` in
+-- main.luau), so no single tick carries more than one of them.
+--
+-- A `run` that returns `M.WAIT` has taken the `resume` it was handed and calls it itself once
+-- its own timers are done. The timer cadence and the window.active cost are those: they are
+-- measured AFTER the heavy steps rather than in the middle of them, where their hops used to
+-- land behind a synchronous OCR comparison and measure it instead of the timer.
+M.WAIT = {}
+
+function M.steps(line, win)
+  local steps = {
+    { name = "pointer space", run = function()
+      line("----- what this platform answers -----")
+      guard(line, "pointer space", function() M.pointerSpace(line, win) end)
+    end },
+    { name = "ownsPoint", run = function()
+      guard(line, "ownsPoint", function() M.ownsPoint(line, win) end)
+    end },
+    { name = "blank OCR", run = function()
+      guard(line, "blank OCR", function() M.blankOcr(line, win) end)
+    end },
+  }
+  for _, s in ipairs(M.ocrBatchingSteps(line, win)) do
+    local run = s.run
+    steps[#steps + 1] = { name = s.name, run = function()
+      guard(line, s.name, run)
+    end }
+  end
+  -- Both at once, as before, and the chain waits for the second of them to finish.
+  steps[#steps + 1] = { name = "timers and window.active cost", run = function(resume)
+    local left = 2
+    local function one()
+      left = left - 1
+      if left == 0 then resume() end
+    end
+    local started = 0
+    guard(line, "timers", function()
+      M.timerCadence(line, nil, one)
+      started = started + 1
+    end)
+    guard(line, "window.active cost", function()
+      M.activeWindowCost(line, nil, one)
+      started = started + 1
+    end)
+    -- One that threw before it could schedule anything never calls back; count it as finished
+    -- so the run still ends.
+    for _ = started + 1, 2 do one() end
+    return M.WAIT
+  end }
   -- Last, because it raises a window: everything above wants to be in the log first.
-  guard(line, "error window", function() M.provokeErrorWindow(line) end)
+  steps[#steps + 1] = { name = "error window", run = function()
+    guard(line, "error window", function() M.provokeErrorWindow(line) end)
+  end }
+  return steps
 end
 
 return M

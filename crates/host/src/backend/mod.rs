@@ -57,6 +57,12 @@ mod macos_front_memory;
 #[path = "macos/budget.rs"]
 mod macos_budget;
 
+/// And how late a key reached the event tap: a timestamp in units nobody here has seen, read
+/// two ways, which is exactly the kind of arithmetic that should run before a Mac relies on it.
+#[cfg(all(test, not(target_os = "macos")))]
+#[path = "macos/key_age.rs"]
+mod macos_key_age;
+
 /// Where a permission stands, for something that has to SHOW it rather than log it.
 ///
 /// `Missing` and `Unknown` are constructed on macOS only, which is the whole point of the

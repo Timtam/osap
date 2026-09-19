@@ -3740,6 +3740,26 @@ local menuTimer = false
 -- 100 %+ duty cycle it cost before.
 local MENU_BACKSTOP_TICKS = 8
 local menuTick = 0
+-- A menu the expensive check SAW, with no control of ours having opened it: when it was first
+-- seen, and whether the check has been sent back to the backstop cadence (see below).
+--
+-- Without this, such a menu was honoured for one tick in eight. The backstop asks every eighth
+-- tick; the tick that sees the menu gives the keys to it, and the next one — which does not
+-- ask — takes them back. The Mac mini session logged exactly that on Kontakt 8 standalone:
+-- Kontakt's own File menu, opened with VoiceOver from the pass-through, and "gave up" / "took
+-- back" four times in five seconds while it stayed open. Now each sighting keeps the check
+-- running every tick for a little longer, so the keys stay with the menu while it is seen and
+-- come back once two ticks in a row no longer see it (one miss is tolerated; see below).
+local menuSeen = nil
+-- How long each sighting keeps the check running every tick: three ticks, so that after one
+-- read that misses (tolerated below, the keys staying with the menu) the check still asks on
+-- the next tick rather than waiting for the backstop.
+local MENU_SEEN_KEEP_MS = 3 * 150
+-- And for how long in all. On Windows the check is a walk of the plug-in's whole tree (50-194
+-- ms, on a 150 ms timer), so a plug-in whose tree ALWAYS contains a menu element would turn the
+-- backstop into a permanent walk. After this long of continuous sighting it goes back to the
+-- backstop's cadence, which is what such a plug-in had before.
+local MENU_SEEN_CAP_MS = 30000
 function Overlay:watchMenus()
   for _, o in ipairs(menuWatched) do
     if o == self then return self end
@@ -3755,7 +3775,11 @@ function Overlay:watchMenus()
     for _, o in ipairs(menuWatched) do
       if o.active then anyActive = true break end
     end
-    if not anyActive then return end
+    if not anyActive then
+      -- Nothing here is in front any more, so whatever the check saw is not ours to report.
+      menuSeen = nil
+      return
+    end
     -- THE CHEAP QUESTION FIRST: is a native popup menu on screen? One window-class lookup.
     -- Every menu these overlays open themselves turns out to be a native one — u-he's preset
     -- menu (verified live), Komplete Kontrol's menu bar, and the plug-in menus generally —
@@ -3776,6 +3800,7 @@ function Overlay:watchMenus()
       menuTick = menuTick + 1
       local plausible = host.now() < menuPlausibleUntil
       if plausible or menuTick % MENU_BACKSTOP_TICKS == 0 then
+        local seenBy
         for _, o in ipairs(menuWatched) do
           if o.active then
             local ctrl = o:origin()
@@ -3783,9 +3808,41 @@ function Overlay:watchMenus()
               and host.element.find(ctrl.id, "", host.element.type.Menu) == true
             then
               open = true
+              seenBy = o
               break
             end
           end
+        end
+        local now = host.now()
+        if seenBy then
+          if menuSeen then menuSeen.missed = false end
+          if not menuSeen then
+            menuSeen = { since = now, capped = false, missed = false }
+            if not plausible then
+              host.log.info(("[overlay] '%s': the accessibility check sees a menu the overlay "
+                .. "did not open — the keys go to it until it closes"):format(tostring(seenBy.label)))
+            end
+          end
+          if now - menuSeen.since < MENU_SEEN_CAP_MS then
+            menuPlausibleUntil = math.max(menuPlausibleUntil, now + MENU_SEEN_KEEP_MS)
+          elseif not menuSeen.capped then
+            menuSeen.capped = true
+            host.log.info(("[overlay] '%s': the accessibility check has seen a menu for %d s "
+              .. "without a break — asking only every %d ticks again, as if it were not there")
+              :format(tostring(seenBy.label), math.floor(MENU_SEEN_CAP_MS / 1000), MENU_BACKSTOP_TICKS))
+          end
+        elseif menuSeen and not menuSeen.capped and not menuSeen.missed then
+          -- One read that misses is not a close. On a Mac the check comes back empty while the
+          -- application is in the busy quarantine (Kontakt, slow to answer VoiceOver, is the
+          -- case), and a single miss used to hand the keys back, log a close and restart the
+          -- 30 s count. The keep window above guarantees the next tick asks again; a menu that
+          -- really closed gives the keys back then, one tick later than it would have.
+          menuSeen.missed = true
+          open = true
+        elseif menuSeen then
+          host.log.info(("[overlay] the menu the accessibility check saw has closed after %d ms")
+            :format(now - menuSeen.since))
+          menuSeen = nil
         end
       end
     end
