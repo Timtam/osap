@@ -69,11 +69,11 @@ pub struct AvSpeech {
     /// Windows side uses, and for the same reason: enumerating voices is not free, and
     /// `engines()` is a question a module may ask on any tick.
     voices: Arc<Mutex<Vec<Voice>>>,
-    /// What macOS answered to a Personal Voice request that showed no dialog, waiting to be
-    /// said. Written by the worker after the request, read by `Speech::pump` — the first
-    /// tick on a Mac that answers `denied` without asking got no feedback at all, because the
-    /// switch handler reads the status BEFORE the request and the request's own answer went
-    /// only to the log.
+    /// Why a Personal Voice request was not granted — refused, unsupported, or no answer
+    /// before the timeout — waiting for `Speech::pump`, which switches `personal_voice` off,
+    /// says it, and lets the settings box untick. Written by the worker after the request; the
+    /// request's own answer used to go only to the log, so a refusal left a ticked box and
+    /// silence.
     personal_note: Arc<Mutex<Option<String>>>,
 }
 
@@ -96,7 +96,7 @@ impl AvSpeech {
         me
     }
 
-    /// The explanation of a Personal Voice request that came back without a dialog, once.
+    /// The reason the last Personal Voice request was not granted, once.
     pub fn take_personal_note(&self) -> Option<String> {
         self.personal_note.lock().ok().and_then(|mut n| n.take())
     }
@@ -177,7 +177,11 @@ fn run(
                 // matters.
             }
             Job::AuthorisePersonal => {
-                let granted = request_personal_voice();
+                // A grant made outside the request counts as one — in System Settings while the
+                // dialog was up, or answered after the 120 s timeout — so it takes the path that
+                // re-reads the voices rather than being told "no answer" and unticked.
+                let granted =
+                    request_personal_voice() || personal_status() == PersonalVoice::Granted;
                 // The voices change with the answer: a granted Personal Voice appears in the
                 // list that did not contain it a moment ago.
                 if granted {
@@ -185,12 +189,22 @@ fn run(
                     if let Ok(mut v) = voices.lock() {
                         *v = list;
                     }
-                } else if let Some(why) = personal_status().explanation() {
-                    // Not granted, and no dialog came — the status now says why, in the one
-                    // sentence the log and the settings dialog share. Handed to the pump to
-                    // say, because the user ticked a switch and heard nothing.
+                } else {
+                    // Not granted. Handed to the pump, which unticks the switch and says this,
+                    // because the user ticked a box and would otherwise hear nothing. Short, and
+                    // not `explanation()`: this comes after macOS's own dialog, often refused a
+                    // moment ago, and that text is written for the moment before one. A
+                    // timeout or a dropped handler leaves the status at "not asked", and is said
+                    // as what it is rather than left silent with the box still ticked.
+                    let why = match personal_status() {
+                        PersonalVoice::Unsupported => "This Mac does not support Personal Voice.",
+                        PersonalVoice::Denied => "Personal Voice was not allowed.",
+                        PersonalVoice::NotAsked | PersonalVoice::Granted => {
+                            "macOS gave no answer about Personal Voice."
+                        }
+                    };
                     if let Ok(mut n) = personal_note.lock() {
-                        *n = Some(why);
+                        *n = Some(why.to_string());
                     }
                 }
             }
@@ -293,7 +307,6 @@ fn installed_voices() -> Vec<Voice> {
         });
     }
     let personal = out.iter().filter(|v| v.personal).count();
-    PERSONAL_VOICES_SEEN.store(personal, Ordering::Relaxed);
     crate::logging::line(
         "speech",
         &format!(
@@ -324,23 +337,6 @@ pub fn supported() -> bool {
     AVSpeechSynthesizer::class().metaclass().responds_to(sel!(personalVoiceAuthorizationStatus))
 }
 
-/// How many Personal Voices the last read of the installed voices found — `usize::MAX` until
-/// the worker has read them once, which `personal_voices_seen` turns back into `None`.
-///
-/// A static rather than a field of `AvSpeech`, because the one reader that cannot reach the
-/// instance is the settings switch in `gui.rs`: `run_gui` is handed closures, not the host.
-/// The count is computed on every refresh anyway, for the log line beside it, so keeping it
-/// here costs nothing and asks nothing of the thread that reads it.
-static PERSONAL_VOICES_SEEN: AtomicUsize = AtomicUsize::new(usize::MAX);
-
-/// The count `installed_voices` logged last, or `None` before it has run at all.
-pub fn personal_voices_seen() -> Option<usize> {
-    match PERSONAL_VOICES_SEEN.load(Ordering::Relaxed) {
-        usize::MAX => None,
-        n => Some(n),
-    }
-}
-
 /// Where this application stands with the user's Personal Voice, as macOS reports it.
 ///
 /// Three answers that used to be two. `Denied` and `Unsupported` both arrived as the same
@@ -368,53 +364,41 @@ impl PersonalVoice {
     /// Why no dialog is going to come, when none is: `Denied` and `Unsupported` explained for
     /// the user, `None` for the two answers that need no explaining.
     ///
-    /// One sentence in one place. The log line in `Speech::pump` and the dialog the settings
-    /// switch puts up in `gui.rs` both say this, and a tester who reads the one after hearing
-    /// the other must not find them disagreeing. It names the count of Personal Voices this
-    /// application can see because that is the one measurement it has — and says what the
-    /// number cannot tell, because a voice this application is not allowed to use is not
-    /// expected in the list at all (see `Speech::use_engine`).
+    /// One sentence in one place: the dialog the settings switch puts up in `gui.rs` and the
+    /// log line beside it both say this, and a tester who reads the one after hearing the
+    /// other must not find them disagreeing. SHORT, because it is read out: the first version
+    /// was about 140 words of diagnosis, the tester spent 46 seconds in front of it, and his
+    /// note was "could be shorter/simpler". What he needed was the option's name, which is
+    /// what he then followed and what got the grant — so that stays word for word. The count
+    /// of Personal Voices this application can see is left to the log line `installed_voices`
+    /// writes on every read.
+    ///
+    /// It says nothing about whether a dialog was shown, because it is not only read before
+    /// one: `Denied` also comes after the user has refused macOS's own dialog. Nor does it say
+    /// what became of the box — the caller that unticks it says that.
     pub fn explanation(self) -> Option<String> {
         match self {
             PersonalVoice::Granted | PersonalVoice::NotAsked => None,
             PersonalVoice::Unsupported => Some(
-                "macOS reports that this Mac does not support Personal Voice — it needs macOS \
-                 14 on a Mac with Apple silicon. The setting stays on and changes nothing."
+                "This Mac does not support Personal Voice. It needs macOS 14 on a Mac with \
+                 Apple silicon."
                     .to_string(),
             ),
-            PersonalVoice::Denied => {
-                // Left out rather than said as zero before the worker has read the list once:
-                // "none" would be a measurement that was never made. And what the number
-                // cannot tell is said with it: a voice this application may not use is not
-                // expected in the list at all (see `Speech::use_engine`), so "none" is not
-                // evidence that none exists.
-                let seen = match personal_voices_seen() {
-                    None => String::new(),
-                    Some(0) => " Right now this application can see no Personal Voice, which \
-                                settles nothing: one only appears in its list once the \
-                                application is allowed to use it."
-                        .to_string(),
-                    Some(1) => " Right now this application can see one Personal Voice.".to_string(),
-                    Some(n) => format!(" Right now this application can see {n} Personal Voices."),
-                };
-                // Two causes, told apart by nothing macOS reports: Apple documents the
-                // answer as the user's refusal, and it also comes, with no dialog, while
-                // applications are not allowed to use a Personal Voice. Whether a Mac with
-                // none recorded answers the same way is not established, so the sentence
-                // says where a voice is recorded and stops there. The option's name is
-                // quoted from Apple's macOS 14 guide, not from memory of a pane nobody here
-                // has seen. And the remedy is the off-and-on of THIS switch — a relaunch
-                // would seed the switch as already on and never ask again.
-                Some(format!(
-                    "macOS answered 'denied' without showing a dialog. It gives that answer \
-                     after a refusal, and whenever applications are not allowed to use a \
-                     Personal Voice — the switch for that is in System Settings > \
-                     Accessibility > Personal Voice, named 'Allow applications to use your \
-                     Personal Voice', in the same pane where a Personal Voice is recorded.\
-                     {seen} Once that is allowed, turn this setting off and on again: every \
-                     time it is switched on, macOS is asked afresh."
-                ))
-            }
+            // Two causes, told apart by nothing macOS reports: a refusal of its dialog, and
+            // applications not being allowed to use a Personal Voice at all. The second was
+            // measured on the tester's Mac: the status read 'denied' before anything had been
+            // asked, and 'not asked' once he had turned that option on — after which macOS showed
+            // its dialog and granted. The option's name is quoted from
+            // Apple's macOS 14 guide and was confirmed by the tester following it. "If it is
+            // listed there" covers the refusal: after one, the switch is already on, and what
+            // is left is this application's own entry — which nobody here has seen yet.
+            PersonalVoice::Denied => Some(
+                "macOS does not allow this application to use your Personal Voice yet. In \
+                 System Settings > Accessibility > Personal Voice, turn on 'Allow applications \
+                 to use your Personal Voice', and this application too if it is listed there. \
+                 Then tick this box again."
+                    .to_string(),
+            ),
         }
     }
 }
@@ -473,7 +457,8 @@ fn request_personal_voice() -> bool {
     {
         crate::logging::line(
             "speech",
- "Personal Voice: this macOS has no such API — it arrived in macOS 14 — so there is nothing to ask for. The switch stays on and changes nothing.",
+            "Personal Voice: this macOS has no such API — it arrived in macOS 14 — so there is \
+             nothing to ask for.",
         );
         return false;
     }

@@ -293,8 +293,9 @@ fn note_remembered(pid: i32, age: Duration) {
 /// deadline it could never have met.
 pub(super) const BUSY_PENALTY: Duration = Duration::from_millis(5000);
 
-/// Note that an application is not answering.
-fn note_busy(pid: i32) {
+/// Note that an application is not answering. Also fed by a refused observer subscription
+/// (`watch::create_observer`), which asks the same process the same way.
+pub(super) fn note_busy(pid: i32) {
     if pid > 0 {
         BUSY_UNTIL.with(|b| b.borrow_mut().insert(pid, Instant::now() + BUSY_PENALTY));
     }
@@ -376,8 +377,10 @@ fn note_error(err: AXError, what: &str) {
                 crate::logging::line(
                     "macos",
                     &format!(
-                        "accessibility timed out reading {what} after {MESSAGING_TIMEOUT}s — the \
-                         target application is busy or not responding; the answer was dropped"
+                        "accessibility could not complete reading {what} — the target \
+                         application is busy, starting or not responding (it is waited for at \
+                         most {MESSAGING_TIMEOUT}s, but one not ready to answer refuses at \
+                         once); the answer was dropped"
                     ),
                 );
             }
@@ -1142,6 +1145,19 @@ fn content_rect(el: &AXUIElement, snap: &Snap, frame: CGRect, hwnd: isize) -> CG
                 best = Some(r);
             }
         }
+    }
+
+    // A full-width child that stops short of the bottom is a strip across the top of the
+    // content, not the content view — its TOP is where the content starts, and the content
+    // runs to the frame's bottom edge, which is what the close-button measure below assumes as
+    // well. Kontakt 8 standalone on a Mac is the case: its only full-width child is the 38 pt
+    // 'Kontakt Header' group, so the client came back 1010x38 of a 1010x675 frame, and every
+    // height-dependent read (bottom-anchored probes, the probe's own OCR checks) saw a strip.
+    // Extended rather than rejected, because rejecting falls back to the whole frame on a
+    // window with no buttons to measure by, and that would move the origin a title bar up. Every
+    // other derivation logged so far already reaches the bottom and is unchanged.
+    if let Some(r) = best.as_mut() {
+        r.size.height = frame.origin.y + frame.size.height - r.origin.y;
     }
 
     // No content view — and that is the common case, not the exception.
@@ -2233,7 +2249,8 @@ pub fn window_controls(hwnd: isize) -> Vec<ControlInfo> {
         },
     );
     let ms = t.elapsed().as_millis();
-    // At LINE level, and saying whether that count is all of them.
+    // Saying whether that count is all of them — at LINE level when it is not, or when the walk
+    // was slow, and traced otherwise.
     //
     // The probe prints this number as "surfaces inside it: N" and SPEAKS it — it is the
     // tester's confirmation that the press landed — and the Kontakt window is the first one
@@ -2243,6 +2260,12 @@ pub fn window_controls(hwnd: isize) -> Vec<ControlInfo> {
     // announced only by a once-per-session flag that an earlier walk in the same session will
     // already have spent. So a partial count read exactly like a complete one, which is the
     // same fault `dump()` had and was given its own line for.
+    //
+    // It used to be written on every call, and this runs on every recheck: 2615 of the fifth
+    // session's 16839 lines, all but four of them "neither bound" and under 25 ms. A line that
+    // says the ordinary thing thousands of times buries the four that matter.
+    let bounded =
+        budget.ran_out_of_time() || out.len() >= CONTROL_MAX || budget.nodes_left() <= 0;
     let cut = if budget.ran_out_of_time() {
         " — STOPPED ON TIME, so there may be more"
     } else if out.len() >= CONTROL_MAX {
@@ -2253,14 +2276,16 @@ pub fn window_controls(hwnd: isize) -> Vec<ControlInfo> {
         " (neither bound was reached; anything below depth 8, or past 256 children of one \
          node, is still not looked at)"
     };
-    crate::logging::line(
-        "macos",
-        &format!(
-            "window_controls({hwnd}): {} surface(s), {} node(s) visited, {ms} ms{cut}",
-            out.len(),
-            CONTROL_NODES - budget.nodes_left()
-        ),
+    let report = format!(
+        "window_controls({hwnd}): {} surface(s), {} node(s) visited, {ms} ms{cut}",
+        out.len(),
+        CONTROL_NODES - budget.nodes_left()
     );
+    if bounded || ms >= 25 {
+        crate::logging::line("macos", &report);
+    } else {
+        crate::logging::trace("macos", || report);
+    }
     if ms > SLOW_MS {
         crate::logging::line(
             "macos",
@@ -2658,10 +2683,42 @@ pub fn plugin_locate(
     let t = Instant::now();
     let containers = plugin_containers(&root, container_name);
     if containers.is_empty() {
+        // No element IS the plugin, so ask the whole window — what `state_probe` below already
+        // does, for the same reason: on Windows the container is the fragment boundary the
+        // search cannot cross, and macOS has no such boundary.
+        //
+        // Measured inside REAPER on a Mac: Kontakt 8's groups hang straight off the FX window
+        // ('FX: Track 1 "Kontakt 8"'), and nothing in it is called "Kontakt 8". So every header
+        // action missed by name — the status-bar toggles said "not found", and the file menu
+        // worked only because its fallback point happened to be the button's own centre —
+        // while the panel anchor, which looks the same button up on the whole window, found it.
+        //
+        // Only for a NAME. Empty means "any element of this role", and on a whole DAW window
+        // that is the DAW's own first button (REAPER's 'Add'). A container that exists and
+        // lacks the target still answers None: that is a real "not here" (Kontakt 7's VIEW
+        // button, which decides its rack view), not a missing container.
+        if name.is_empty() {
+            crate::logging::trace("macos", || {
+                format!("plugin_locate({hwnd}): no container named '{container_name}'")
+            });
+            return None;
+        }
+        let point = first_match(&root, name, roles, QUERY_DEPTH, QUERY_NODES)
+            .and_then(|(_, snap)| snap.rect.and_then(centre));
+        let ms = t.elapsed().as_millis();
         crate::logging::trace("macos", || {
-            format!("plugin_locate({hwnd}): no container named '{container_name}'")
+            format!(
+                "plugin_locate({hwnd}, '{container_name}', '{name}', {control_type}) = {point:?} \
+                 on the whole window (no container of that name) in {ms} ms"
+            )
         });
-        return None;
+        if ms > SLOW_MS {
+            crate::logging::line(
+                "macos",
+                &format!("uia.pluginLocate('{name}') blocked the pump for {ms} ms"),
+            );
+        }
+        return point;
     }
     let mut point = None;
     for container in &containers {
@@ -2932,8 +2989,11 @@ pub fn class_nav_point(
 ///    longer exist.
 /// 3. **Focus is read back to confirm it landed.** Plenty of elements accept the request and
 ///    do nothing; those are skipped rather than silently announced.
-/// 4. **The index is 1-based**, because the caller uses "the index I entered at has come
-///    round again" as its ring-completed signal, and a 0 would fire that on the first step.
+/// 4. **The index is 1-based**, to match Luau and the Windows backend. The caller
+///    (`Overlay:_stepPassThrough`) counts a lap from the distance between successive indices
+///    while `count` holds, so what it needs is an index that is stable for an element in an
+///    unchanged ring — not any particular base. (It used to wait for the index it entered at to
+///    come round again; that ring trapped a tester in Kontakt 8's 90 stops.)
 ///
 /// It also has to raise a real focus event, which setting `AXFocused` does — the screen
 /// reader announces the element and the overlay deliberately stays quiet.

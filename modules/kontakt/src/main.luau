@@ -66,6 +66,7 @@ end
 return {
   -- Standalone side effect, run only in Kontakt's own VM: one header overlay per cell.
   activate = function()
+    D.setLogAnchors() -- this VM writes the macOS anchor lines; the dependents' copies stay quiet
     for _, cell in ipairs(C.all) do
       overlayFor(cell, { layer = O.layer.base })
     end

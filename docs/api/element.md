@@ -144,6 +144,8 @@ A hand-rolled walk of its own, bounded at 4000 nodes and depth 40 — deliberate
 
 The general **1500 node / depth 24** budget applies here too; there is no larger allowance for this call. A plug-in tree that this reaches on Windows can be out of reach here, and the miss looks identical to a genuine one.
 
+When **no** element named `containerName` exists at all, a non-empty `name` is looked up on the whole window instead, as `locate` would. There is no fragment boundary to cross on this platform, and a plug-in hosted in a DAW need not publish an element named after itself: inside REAPER, Kontakt 8's groups hang straight off the FX window, whose title is `FX: Track 1 "Kontakt 8"`. Two cases still answer `nil`: a container that exists but does not hold the target, and an empty `name`, which on a whole DAW window would mean the DAW's own first button.
+
 ## host.element.rawDump(hwnd) {#host-element-rawdump}
 
 **Signature:** `host.element.rawDump(hwnd: number) -> { { depth: number, name: string, class: string, ctype: number }, … }`
@@ -300,22 +302,26 @@ Siblings are counted within the parent's own children, and a step off either end
 
 **This one writes.** It enumerates the visible, keyboard-focusable descendants of `hwnd`'s content area and *moves keyboard focus* to the next (`direction >= 0`) or previous one, wrapping at the ends, returning the element it landed on. It is the Tab pass-through for a standalone plug-in window that does not move focus on Tab by itself (Kontakt standalone), and it is the only way into such a window's native controls. Because it raises a real focus event, the screen reader announces the element — so the overlay must deliberately stay quiet rather than speaking `name` itself.
 
-Candidates are re-enumerated every step, since the tree changes shape as the user moves; and a candidate that accepts the focus request without actually taking it is skipped, verified by reading focus straight back. What the ring is scoped to differs by platform — see below. It **wraps**, so "the ring is finished" is not something it reports — the caller remembers the 1-based `index` it entered at and, from each result's `index` and `count`, works out whether the *next* step would land there again; if so it hands Tab back on that press **without** calling this, because calling it would move the plug-in's focus onto the entry element a second time and the screen reader would name it twice. A `count` that changes mid-lap means the plug-in's tree changed (a panel was shown or hidden), and the lap starts afresh. `nil` means nothing in the scope accepted focus at all. A module normally gets this through `Overlay:addPassThrough`.
+Candidates are re-enumerated every step, since the tree changes shape as the user moves; and a candidate that accepts the focus request without actually taking it is skipped, verified by reading focus straight back. What the ring is scoped to differs by platform — see below. It **wraps**, so "every stop has been visited" is not something it reports — the caller counts it. `Overlay:addPassThrough` counts net steps forward since Tab went in, taking the distance between two results' 1-based `index` values while `count` holds (so stops that refused the focus and were stepped over still count — except any skipped by the very first step, since this call does not say where it started from, which can cost one repeat of the entry element), and hands Tab back once that reaches `count`. It hands the key back **without** calling this, because calling it would move the plug-in's focus again and the screen reader would name an element over the overlay's own announcement. Shift+Tab comes back out the way Tab went in: on the element Tab went in on, it returns to the pass-through stop without calling this either. A `count` that changes mid-lap means the plug-in's tree changed (a panel was shown or hidden); the lap is measured against the latest `count`, so it can end early but never go on for ever. `nil` means nothing in the scope accepted focus at all. A module normally gets this through `Overlay:addPassThrough`.
 
 ```luau
--- One Tab inside the pass-through control, shortened from modules/overlay-runtime/src/main.luau
--- (Overlay:_stepPassThrough). The lap ends BEFORE the step that would close it.
-if c._leaveOn == dir then               -- last press saw the entry come up next
-  c._entry, c._count, c._leaveOn = nil, nil, nil
-  return false                          -- hand Tab back without touching the plug-in's focus
+-- One press inside the pass-through control, shortened from modules/overlay-runtime/src/main.luau
+-- (Overlay:_stepPassThrough). c._net is nil until Tab goes in.
+if c._net == nil and dir < 0 then return false end    -- Shift+Tab on the stop: back through the overlay
+if c._leaveOn == dir then                              -- every stop visited
+  c._net, c._at, c._n, c._leaveOn = nil, nil, nil, nil
+  return false                                         -- hand Tab back, the plug-in's focus untouched
 end
 local r = host.element.focusStep(ctrl.id, dir)
-if not r then return false end          -- nothing focusable in there: let Tab carry on
-if c._entry == nil or r.count ~= c._count then
-  c._entry, c._count = r.index, r.count -- a new lap, or the tree changed under the old one
+if not r then return false end                         -- nothing focusable in there: let Tab carry on
+local d = 1
+if c._net and r.count == c._n then
+  d = ((r.index - c._at) * dir) % r.count              -- stops that refused the focus count too
+  if d == 0 then d = r.count end                       -- nothing else took it: a whole lap
 end
-local nxt = ((r.index - 1 + (dir >= 0 and 1 or -1)) % r.count) + 1
-c._leaveOn = (nxt == c._entry) and dir or nil
+c._net = c._net and (c._net + (dir >= 0 and d or -d)) or 1
+c._at, c._n = r.index, r.count
+c._leaveOn = (dir >= 0 and c._net >= r.count) and 1 or nil
 return true
 ```
 
@@ -333,13 +339,13 @@ The ring is the **whole window**, minus the window's own close, minimise, zoom a
 
 **This one writes.** It gives keyboard focus to the **first** keyboard-focusable element of `hwnd` whose centre lies inside `rect` (screen coordinates), and returns the element it landed on. It is the polite half of "put the keyboard back into the plug-in": focusing the *window* hands the keyboard to whatever that window last had focused — in REAPER, its FX list — and the only thing that moved it on from there used to be a click into the plug-in's panel. A plug-in that publishes its elements can simply be asked, which is what a screen reader's own navigation does, raises a real focus event, and presses nothing. `nil` means nothing inside the rectangle took focus — a plug-in that publishes no element has nothing to ask, and the caller falls back to what the platform does understand.
 
-Because it raises a real focus event, the screen reader announces the element; a caller that speaks afterwards should name the element rather than repeat it.
+Because it raises a real focus event, the screen reader announces the element; a caller that speaks afterwards should not name it again. Named after a comma, a button called 'Play View' sounded to a tester like a state the plug-in was in.
 
 ```luau
 -- modules/daw-hosts/src/main.luau, the F6 shortcut on macOS: ask before clicking.
 local given = host.element.focusWithin(w.id, panel)
 if given then
-  host.speech.output(title .. ", on " .. given.name)
+  host.speech.output(title)                     -- the screen reader names the element itself
 else
   host.input.click(panel.x + 3, panel.y + 3)   -- sforzando publishes nothing to ask
 end

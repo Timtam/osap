@@ -203,12 +203,12 @@ host.hotkey.register(KEY, function()
   )
 
   local controls = host.window.controls()
-  -- The count is a bounded walk's result, and the backend now says on its own line whether it
-  -- was cut short. Pointing at that line rather than repeating a bare number: this one is
-  -- spoken aloud as the confirmation that the press landed, and a partial count sounds exactly
-  -- like a complete one.
+  -- The count is a bounded walk's result, and the Mac backend says on a line of its own when it
+  -- was cut short (and only then, or when the walk was slow). Pointing at that line rather than
+  -- repeating a bare number: this one is spoken aloud as the confirmation that the press
+  -- landed, and a partial count sounds exactly like a complete one.
   line(
-    "surfaces inside it: %d (the window_controls line above says whether that is all of them)",
+    "surfaces inside it: %d (on a Mac: cut short if a window_controls line above says STOPPED, and 0 can mean the application was not answering; nothing below depth 8, or past 256 children of one node, is looked at)",
     #controls
   )
   for i, c in ipairs(controls) do

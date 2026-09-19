@@ -231,7 +231,13 @@ end
 -- which is what ReaHotkey does through UIA ("menu item not found") where it can see the
 -- menu at all. An embedded Kontakt's menu carries no accessibility information whatsoever,
 -- so OCR is the only way to know what is actually on screen.
-local function invokeMenuItem(cell, o, item)
+--
+-- `item` may be a LIST, tried in order, for a menu whose entry has two wordings depending on
+-- a state we cannot read reliably — the view toggle on a Mac, where the view probe is a pixel
+-- measured on Windows. `onDone(chosen)` runs after a click, with the entry that was clicked,
+-- so the caller can say what actually happened rather than what it asked for.
+local function invokeMenuItem(cell, o, item, onDone)
+  local items = type(item) == "table" and item or { item }
   local ctrl, uia = openFileMenu(cell, o)
   if not ctrl then return end
   host.timer.after(250, function()
@@ -239,12 +245,16 @@ local function invokeMenuItem(cell, o, item)
     -- is read instead of giving up. It used to return here either way, so a menu whose items
     -- publish no names (a Qt menu on a Mac need not) was left open with the keys handed to it
     -- and nothing said: the file menu found by name, the press silent, the menu never read.
-    if uia and uiaClick(nil, item, MENUITEM) then
-      return
-    end
     if uia then
+      for _, it in ipairs(items) do
+        if uiaClick(nil, it, MENUITEM) then
+          if onDone then onDone(it) end
+          return
+        end
+      end
       host.log.info(string.format(
-        "Kontakt: no menu item named '%s' could be pressed by name — reading the menu instead", item
+        "Kontakt: no menu item named '%s' could be pressed by name — reading the menu instead",
+        table.concat(items, "' or '")
       ))
     end
     local base = cell.geometry.fileMenu
@@ -253,21 +263,25 @@ local function invokeMenuItem(cell, o, item)
     -- Generously around where the menu drops from its button; the exact bounds do not
     -- matter, only that the menu is inside them.
     local seen = host.ocr.recognize({ region = { bx - 80, by + 14, bx + 170, by + 460 } })
-    local want = string.lower(string.gsub(item, "%.%.%.$", ""))
-    local hit
-    for _, r in ipairs(ocrRows(seen and seen.words)) do
-      -- The row must CONTAIN the wanted text and not be a longer, different entry:
-      -- "save multi as" must not match "save as default multi". Anchoring at the start
-      -- and allowing only a trailing shortcut column does that.
-      if string.sub(r.text, 1, #want) == want then
-        hit = r
-        break
+    local rows = ocrRows(seen and seen.words)
+    local hit, chosen
+    for _, it in ipairs(items) do
+      local want = string.lower(string.gsub(it, "%.%.%.$", ""))
+      for _, r in ipairs(rows) do
+        -- The row must CONTAIN the wanted text and not be a longer, different entry:
+        -- "save multi as" must not match "save as default multi". Anchoring at the start
+        -- and allowing only a trailing shortcut column does that.
+        if string.sub(r.text, 1, #want) == want then
+          hit, chosen = r, it
+          break
+        end
       end
+      if hit then break end
     end
     if not hit then
       host.log.info(string.format(
         "Kontakt: no menu row starting with '%s' — read: %s",
-        item, string.gsub(tostring(seen and seen.text or ""), "%s+", " ")
+        table.concat(items, "' or '"), string.gsub(tostring(seen and seen.text or ""), "%s+", " ")
       ))
       host.speech.output("Menu item not found", { interrupt = true })
       host.input.send("Escape")
@@ -275,7 +289,12 @@ local function invokeMenuItem(cell, o, item)
       if uia then host.keys.menuOpen(false) end
       return
     end
+    -- Which row, in the log. A hit used to leave no line at all, so a session where Load and
+    -- Save worked recorded nothing of the Mac menu they worked in.
+    host.log.info(string.format("Kontakt: menu row '%s' at %d,%d — clicking",
+      hit.text, hit.x + 10, hit.y))
     host.input.click(hit.x + 10, hit.y)
+    if onDone then onDone(chosen) end
   end)
 end
 

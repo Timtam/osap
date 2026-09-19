@@ -1482,7 +1482,11 @@ impl Shared {
             // twelve of them together still cost ~470 ms before any overlay could answer.
             // The batch is the unit somebody actually waits for. Deduped on the first
             // result of each batch so one line is logged, not twelve.
-            if res.first_of_batch && res.capture_ms + res.match_ms >= 25 {
+            //
+            // 50 ms, the same bar as a slow observation. It was 25, below what a Mac pays for
+            // every batch (capture ~19 ms plus match ~17), so all 3909 batches of the fifth
+            // session were logged and the 57 slow ones were lost among them.
+            if res.first_of_batch && res.capture_ms + res.match_ms >= 50 {
                 logging::line(
                     "image",
                     &format!(

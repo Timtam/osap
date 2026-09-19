@@ -158,6 +158,11 @@ local function addChrome(ov)
   ov:addCustomButton({
     label = "Search library browser",
     hotkey = "Alt+S",
+    -- A control's hotkey moves the overlay's focus to it, but not this one: focus on a button
+    -- holds Space and Return, and Alt+S exists to type into KK's search field — every space
+    -- in "string ensemble" would have pressed this button again, and Return picked nothing.
+    -- Alt+S leaves the user where they were, as it always did.
+    hotkeyKeepsFocus = true,
     onActivate = function(o)
       local hwnd = o:hwnd()
       if not hwnd then return end

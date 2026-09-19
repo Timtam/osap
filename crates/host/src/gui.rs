@@ -695,6 +695,11 @@ pub fn run_gui(
             SizerFlag::All,
             12,
         );
+        // The Personal Voice box, for the timer below: macOS's answer to a request arrives on
+        // the speech worker long after the click, and when it is not a grant the pump turns the
+        // switch off — which the box has to show.
+        #[cfg(target_os = "macos")]
+        let mut personal_cb: Option<CheckBox> = None;
         for sw in crate::appcfg::SWITCHES.iter().filter(|s| s.applies_here()) {
             // A variable set in the environment forces its setting on and nothing here can
             // undo that until the application is started without it. So the box is shown
@@ -723,9 +728,34 @@ pub fn run_gui(
             // nameless control. Label plus name is one announcement on both.
             let cb = CheckBox::builder(&app_tab).with_label(&label).build();
             cb.set_name(&label);
+            // A stored "on" that macOS will not honour is put right once, at start: the old
+            // flow stored it on over a refusal ("the setting stays on and changes nothing"), the
+            // settings live beside the application so a new build inherits them, and a grant
+            // can be withdrawn in System Settings. The rising edge that would notice never
+            // comes for a switch that starts on, so it would stay a ticked box over nothing.
+            // A property read; it raises no dialog.
+            #[cfg(target_os = "macos")]
+            if sw.key == "personal_voice" && !forced && crate::appcfg::personal_voice() {
+                let refused = !crate::speech::personal_voice_supported()
+                    || crate::speech::personal_voice_explanation().is_some();
+                if refused {
+                    crate::appcfg::set("personal_voice", false);
+                    let mut store = settings::Store::load();
+                    store.set_app_flag("personal_voice", false);
+                    store.save();
+                    crate::logging::line(
+                        "settings",
+                        "personal_voice was stored on, but macOS does not allow it — switched off",
+                    );
+                }
+            }
             cb.set_value(crate::appcfg::get(sw.key));
             if forced {
                 cb.enable(false);
+            }
+            #[cfg(target_os = "macos")]
+            if sw.key == "personal_voice" {
+                personal_cb = Some(cb);
             }
             as_.add(&cb, 0, SizerFlag::Left | SizerFlag::All, 8);
             // The explanation under the control rather than in it: it is a sentence, not a
@@ -743,6 +773,47 @@ pub fn run_gui(
                 // can already disagree (an environment variable forces one on regardless of
                 // what is stored), and then every click would flip the wrong way.
                 let want = event.is_checked();
+                // Personal Voice: the answer is known BEFORE the switch is stored, and a switch
+                // macOS will not honour is not stored at all. The tester ticked it, read a
+                // refusal, closed the dialog — and the box stayed ticked, stored "on", over
+                // nothing granted; he unticked it by hand twice before going to System
+                // Settings. Now the box is unticked before the dialog opens, so focus comes
+                // back to a box that says what is true, and nothing is saved: the stored value
+                // stays off, and ticking it again after allowing access in System Settings is
+                // the rising edge that asks macOS (the switch gates nothing but that edge).
+                //
+                // The older-Mac case is the same shape. Personal Voice arrived in macOS 14; a
+                // tester on 12.7.6 reported "the checkbox appears to be ticked but nothing
+                // happens", which was right — a setting that is on and inert is
+                // indistinguishable from one that is broken.
+                //
+                // When a dialog IS coming (nobody asked yet), macOS's dialog is the feedback and
+                // nothing is put in front of it; the answer to it comes back through the speech
+                // pump, which unticks the switch if it was not granted.
+                #[cfg(target_os = "macos")]
+                if want && key == "personal_voice" {
+                    let refusal = if !crate::speech::personal_voice_supported() {
+                        Some("Personal Voice needs macOS 14 or later, and this Mac is older.".to_string())
+                    } else {
+                        crate::speech::personal_voice_explanation()
+                    };
+                    if let Some(why) = refusal {
+                        cb.set_value(false); // SetValue sends no toggle event, so no re-entry
+                        crate::logging::line("speech", &format!("Personal Voice: {why}"));
+                        crate::logging::line(
+                            "settings",
+                            "personal_voice stays off — macOS has not allowed it, so the box was \
+                             unticked again",
+                        );
+                        modal_message(
+                            &frame,
+                            "Personal Voice",
+                            &format!("{why}\n\nThe box has been unticked."),
+                            false,
+                        );
+                        return;
+                    }
+                }
                 crate::appcfg::set(key, want);
                 // Switching the VoiceOver transport on is the one moment where asking for the
                 // Automation permission is obviously about what the user just did. Every line
@@ -751,37 +822,6 @@ pub fn run_gui(
                 #[cfg(target_os = "macos")]
                 if want && key == "voiceover_speech" {
                     crate::backend::request_voiceover_automation();
-                }
-                // And the opposite case for the switch next to it. Personal Voice arrived in
-                // macOS 14; on anything older the code correctly notices and carries on, and
-                // the interface said nothing at all — which the tester reported as its own
-                // fault: "the checkbox appears to be ticked but nothing happens". He is
-                // right. A setting that is on and inert is indistinguishable from one that is
-                // broken, and he had no way to tell which he had. Said once, here, where he
-                // asked for it, and naming the version he would otherwise have to look up.
-                //
-                // The same report came back from macOS 14.5, where the version was not the
-                // reason: macOS answers `denied` and `unsupported` without any dialog, and the
-                // only feedback was a log line — which told him he had refused a dialog he
-                // never saw. So the second branch says in the interface what the log says,
-                // in the same words from the same place. When a dialog IS coming, the
-                // system's dialog is the feedback, and nothing is put in front of it.
-                #[cfg(target_os = "macos")]
-                if want && key == "personal_voice" {
-                    if !crate::speech::personal_voice_supported() {
-                        modal_message(
-                            &frame,
-                            "Personal Voice",
-                            "This Mac cannot offer a Personal Voice: the feature arrived in macOS \
-                             14, and this system is older.\n\nThe setting stays on and changes \
-                             nothing. On a Mac running macOS 14 or later, ticking it asks macOS \
-                             for permission and your Personal Voice then appears among the \
-                             voices a module can choose.",
-                            false,
-                        );
-                    } else if let Some(why) = crate::speech::personal_voice_explanation() {
-                        modal_message(&frame, "Personal Voice", &why, false);
-                    }
                 }
                 let now = crate::appcfg::get(key);
                 let mut store = settings::Store::load();
@@ -852,10 +892,12 @@ pub fn run_gui(
             ps.add(
                 &StaticText::builder(&perm_tab)
                     .with_label(
-                        "After granting one, quit and open the application again. macOS \
-                         hands a new permission only to a process that started after it \
-                         was granted, which is the commonest reason a grant looks like it \
-                         did nothing.",
+                        "Accessibility takes effect at once: grant it, then press Re-check \
+                         now. Screen Recording does not: after granting it, quit the \
+                         application and open it again, because macOS hands that one only \
+                         to a process that started after the grant. Input Monitoring usually \
+                         follows Accessibility by itself; if it still reads as missing after \
+                         Re-check now, quit and open the application again.",
                     )
                     .build(),
                 0,
@@ -1601,6 +1643,22 @@ pub fn run_gui(
                 }
                 let _reset = Reset(&in_tick);
                 pump();
+                // Only ever unticks: the speech pump switched Personal Voice off after macOS did
+                // not grant it, and the box and the stored value follow here. Ticking is the
+                // user's, and a two-way sync could fight a click.
+                #[cfg(target_os = "macos")]
+                if let Some(c) = personal_cb {
+                    if c.get_value() && !crate::appcfg::personal_voice() {
+                        c.set_value(false);
+                        let mut store = settings::Store::load();
+                        store.set_app_flag("personal_voice", false);
+                        store.save();
+                        crate::logging::line(
+                            "settings",
+                            "personal_voice is now off — macOS did not grant it",
+                        );
+                    }
+                }
                 // Surface any module callback failures collected during pump() in an
                 // accessible dialog (deduped + queued host-side), so a faulting module
                 // is visible (and isolated) rather than silently logged or a crash.

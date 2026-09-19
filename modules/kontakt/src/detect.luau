@@ -263,6 +263,18 @@ end
 --
 -- `name` and `at` come from the cell: the button to look for and where the authored geometry
 -- puts its centre. A version without a measured anchor passes nil and stays inert here.
+-- Whether this VM writes the anchor lines. Kontakt's code runs in its own VM and again inside
+-- every library module that depends on it (four today), each with its own copy of this memo, so
+-- one window change wrote every anchor line five times. Only Kontakt's own VM logs — see
+-- `setLogAnchors`, called from its `activate`, which no dependent runs.
+--
+-- The cost, stated so nobody reads silence as "nothing changed": while a LIBRARY overlay holds
+-- the slot, Kontakt's own overlays are outranked and skip their rechecks, so a panel that is
+-- re-anchored then (the FX window resized under a loaded library) is anchored by the library's
+-- VM, which does not log. The line comes once Kontakt's VM evaluates that window again. Telling
+-- the winner apart would need `host.arbiter`, which this module does not declare.
+local logAnchors = false
+
 local function macosPanel(version, name, at)
   if not (name and at) then return nil end
   -- `missed` and `outside` are separate on purpose: a window that publishes nothing during
@@ -292,9 +304,13 @@ local function macosPanel(version, name, at)
     if not p then
       if not missed[key] then
         missed[key] = true
-        host.log.info(string.format(
-          "[kontakt] '%s' publishes no button named %s — %s's panel cannot be anchored in it yet",
-          tostring(active.title), name, version))
+        -- With the size, because the memo is keyed on it: two miss lines for one window mean
+        -- it changed size in between, and the log could not say so.
+        if logAnchors then
+          host.log.info(string.format(
+            "[kontakt] '%s' (%dx%d) publishes no button named %s — %s's panel cannot be anchored in it yet",
+            tostring(active.title), active.client.w, active.client.h, name, version))
+        end
       end
       return nil
     end
@@ -308,16 +324,20 @@ local function macosPanel(version, name, at)
       -- does not end here — it still anchors, and shows only as an odd corner in the line below.
       if not outside[key] then
         outside[key] = true
-        host.log.info(string.format(
-          "[kontakt] %s at %d,%d in '%s' puts %s's panel corner at %d,%d, outside the window — not anchoring",
-          name, p.x, p.y, tostring(active.title), version, dx, dy))
+        if logAnchors then
+          host.log.info(string.format(
+            "[kontakt] %s at %d,%d in '%s' puts %s's panel corner at %d,%d, outside the window — not anchoring",
+            name, p.x, p.y, tostring(active.title), version, dx, dy))
+        end
       end
       return nil
     end
     offsets[key] = { dx, dy }
-    host.log.info(string.format(
-      "[kontakt] %s panel in '%s': %s at %d,%d puts the corner %d,%d from the content origin — %dx%d to the window's edges",
-      version, tostring(active.title), name, p.x, p.y, dx, dy, c.bounds.w, c.bounds.h))
+    if logAnchors then
+      host.log.info(string.format(
+        "[kontakt] %s panel in '%s': %s at %d,%d puts the corner %d,%d from the content origin — %dx%d to the window's edges",
+        version, tostring(active.title), name, p.x, p.y, dx, dy, c.bounds.w, c.bounds.h))
+    end
     return c
   end
 end
@@ -511,6 +531,7 @@ local function isRackView()
 end
 
 return {
+  setLogAnchors = function() logAnchors = true end,
   VARIANTS = VARIANTS,
   VARIANT_NAMES = VARIANT_NAMES,
   QT_PLUGIN = QT_PLUGIN,

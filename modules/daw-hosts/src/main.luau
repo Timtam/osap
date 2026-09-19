@@ -252,7 +252,11 @@ local function focusPluginWindow()
             title, tostring(given.name), after))
           if after == "inside" then
             host.window.recheck()
-            host.speech.output(title .. ", on " .. (given.name ~= "" and given.name or "an unnamed control"))
+            -- The title alone, as the other two ways in say it. Naming the element as well
+            -- ("…, on Play View") read like a view state to the tester, when it is Kontakt 8's
+            -- button of that name; VoiceOver names the element itself, and an overlay that
+            -- comes up names its own control — which is the one the keyboard then works.
+            host.speech.output(title)
           else
             host.speech.output("could not move the keyboard into " .. title)
           end

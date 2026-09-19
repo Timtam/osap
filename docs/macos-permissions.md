@@ -35,10 +35,17 @@ frequently raises no dialog and adds no entry. Measured, and reported independen
 second person for a different permission on the same OS version. Add it by hand: unlock the
 padlock, press **+**, choose `AutomationPlatform.app`.
 
-After granting any of them, **quit and reopen the application**. macOS only hands a newly
-granted permission to a process that started *after* it was granted; the running one keeps
-the old answer until it is restarted. This is the single most common reason a permission
-appears not to have worked.
+Whether the application has to be restarted afterwards depends on the permission, and both
+halves were measured on a Mac mini with macOS 14.5 on 2026-09-18:
+
+- **Accessibility takes effect in the running application**, within a few seconds. Press
+  *Re-check now* on the Permissions page to confirm it; no restart.
+- **Screen Recording does not.** macOS hands it only to a process that started *after* it was
+  granted, so **quit and reopen the application** after granting it. The running one keeps
+  the old answer; this is the most common reason a permission appears not to have worked.
+- **Input Monitoring** usually follows Accessibility by itself. If *Re-check now* still shows
+  it missing, quit and reopen — this one has not been measured either way.
+- **Automation** (VoiceOver speech) needs no restart.
 
 ## Checking, without being able to see
 

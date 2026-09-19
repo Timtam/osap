@@ -107,6 +107,10 @@ end)
 
 A `when` predicate must return exactly `true`; anything else counts as hidden. A hidden control is not Tab-reachable, its hotkey does nothing, and it does not claim a key combination that a visible sibling wants.
 
+A control's `hotkey` also **moves the overlay's focus** to that control, silently, before activating it — ReaHotkey's `TriggerHotkey` does the same. So after Ctrl+L for "Load instrument" and a dialog closed again, the overlay comes back on "Load instrument", and Tab carries on from there. The control then holds the keys a focused control holds (Space and Return for a button). `hotkeyKeepsFocus = true`, accepted by every constructor that takes a `hotkey`, opts out: Melodyne's "Menu bar" uses it, because focus on a button would take Space, which is Melodyne's play/stop. This changed on 2026-09-19 and affects every overlay with hotkeys on Windows as well (Kontakt, Komplete Kontrol, Soundiron, u-he).
+
+Space or Return on a focused control that has **hidden itself** since focus reached it acts on the visible control that shares its hotkey — Kontakt's "Switch to classic view" and "Switch to play view" share Alt+V and swap places on every press. With no such control, the overlay says "… is not available now" instead of doing nothing without a word.
+
 ## Bindings — O.window / O.embedded / \:with / O.hosts / O\:bind {#bindings}
 
 **Signatures:**

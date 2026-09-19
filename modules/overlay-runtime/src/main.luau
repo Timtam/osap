@@ -365,7 +365,7 @@ function Overlay:addHotspotButton(opts)
     at = opts.at,
     points = opts.points,
     settle = opts.settle,
-    hotkey = opts.hotkey,
+    hotkey = opts.hotkey, hotkeyKeepsFocus = opts.hotkeyKeepsFocus == true,
     opensMenu = opts.opensMenu,
     rawOrigin = opts.rawOrigin,
     fromRight = opts.fromRight,
@@ -399,7 +399,7 @@ function Overlay:addStepper(opts)
     onActivate = opts.onActivate,
     settle = opts.settle,
     typeLabel = opts.typeLabel,
-    hotkey = opts.hotkey,
+    hotkey = opts.hotkey, hotkeyKeepsFocus = opts.hotkeyKeepsFocus == true,
     when = opts.when,
   })
 end
@@ -417,7 +417,7 @@ function Overlay:addCustomButton(opts)
     -- announces only its name leaves the user to press it and find out, which for a collapse
     -- means losing the panel to learn that it was open.
     text = opts.text,
-    hotkey = opts.hotkey, opensMenu = opts.opensMenu, when = opts.when,
+    hotkey = opts.hotkey, hotkeyKeepsFocus = opts.hotkeyKeepsFocus == true, opensMenu = opts.opensMenu, when = opts.when,
   })
 end
 
@@ -428,7 +428,7 @@ function Overlay:addOCRButton(opts)
   -- It is also announced without the word "button" (see speakControl) — a control that
   -- cannot be pressed must not describe itself as one.
   return add(self, {
-    kind = "ocr", label = opts.label, region = opts.region, hotkey = opts.hotkey,
+    kind = "ocr", label = opts.label, region = opts.region, hotkey = opts.hotkey, hotkeyKeepsFocus = opts.hotkeyKeepsFocus == true,
     readOnly = opts.readOnly, opensMenu = opts.opensMenu, when = opts.when,
     -- `text = function(overlay) -> string`: announced between the label and the value, the
     -- same as on a custom button. A read-out whose MEANING changes needs it — Melodyne's
@@ -456,7 +456,7 @@ end
 function Overlay:addOCREdit(opts)
   return add(self, {
     kind = "ocredit", label = opts.label, region = opts.region,
-    hotkey = opts.hotkey, when = opts.when,
+    hotkey = opts.hotkey, hotkeyKeepsFocus = opts.hotkeyKeepsFocus == true, when = opts.when,
   })
 end
 
@@ -470,7 +470,7 @@ function Overlay:addGraphicalToggle(opts)
     region = opts.region,
     onImage = opts.onImage,
     offImage = opts.offImage,
-    hotkey = opts.hotkey,
+    hotkey = opts.hotkey, hotkeyKeepsFocus = opts.hotkeyKeepsFocus == true,
     hint = opts.hint,
     -- `reveal`: this control lives inside a panel that can be COLLAPSED, and while it is,
     -- the control is not on screen at all. { at = {x,y}, closedColor = {r,g,b}, settle = ms }
@@ -506,7 +506,7 @@ function Overlay:addGraphicalButton(opts)
     label = opts.label,
     region = opts.region,
     image = opts.image,
-    hotkey = opts.hotkey,
+    hotkey = opts.hotkey, hotkeyKeepsFocus = opts.hotkeyKeepsFocus == true,
     opensMenu = opts.opensMenu,
     -- `dragBy = {dx, dy}`: DRAG from where the template was found instead of clicking it.
     -- For a handle rather than a button — a window's resize grip, a splitter, a fader — where
@@ -563,7 +563,7 @@ function Overlay:addSlider(opts)
     thumbImage = opts.thumbImage,
     from = opts.from,
     to = opts.to,
-    hotkey = opts.hotkey,
+    hotkey = opts.hotkey, hotkeyKeepsFocus = opts.hotkeyKeepsFocus == true,
     tolerance = opts.tolerance,
     scales = opts.scales,
     when = opts.when,
@@ -589,7 +589,7 @@ function Overlay:addHotspotToggle(opts)
     at = opts.at,
     onColor = opts.onColor,
     offColor = opts.offColor,
-    hotkey = opts.hotkey,
+    hotkey = opts.hotkey, hotkeyKeepsFocus = opts.hotkeyKeepsFocus == true,
     hint = opts.hint,
     rawOrigin = opts.rawOrigin,
     fromRight = opts.fromRight,
@@ -1433,10 +1433,11 @@ local function speakControl(self, index, moveMouse, withHint, queued)
   -- A pass-through announces that Tab goes INTO the plugin from here, because nothing else
   -- would tell the user that: what follows is the plugin's own focus ring, announced by
   -- the screen reader rather than by us, and it is not obvious that Tab will come back out
-  -- again at the end. Landing on it also restarts the ring, so entering it, leaving by
-  -- hotkey and coming back walks the whole thing again rather than resuming mid-way.
+  -- again at the end. Landing on it also restarts the lap, so entering it, leaving by
+  -- hotkey and coming back walks the whole thing again rather than resuming mid-way — and
+  -- Shift+Tab from here goes back through the overlay, never into the plugin.
   if c.kind == "passthrough" then
-    c._entry, c._count, c._leaveOn = nil, nil, nil
+    c._net, c._at, c._n, c._leaveOn = nil, nil, nil, nil
     host.speech.output((c.label or "") .. ", Tab to step through them", { interrupt = true })
     return
   end
@@ -1700,11 +1701,11 @@ end
 -- A control you cannot find is a control you do not have.
 --
 -- As a control: Tab reaches it like any other and announces it; Tab again enters the
--- plugin's OWN focus ring and walks it (host.element.focusStep, which raises a real UIA focus
--- event, so the screen reader announces each element and we deliberately do not); and
--- when that ring returns to where it was entered, Tab carries on through the rest of the
--- overlay's controls. For a plugin window that does not move focus on Tab by itself
--- (Kontakt standalone), this is the only way into its native controls.
+-- plugin's OWN focus ring and walks it (host.element.focusStep, which raises a real focus
+-- event, so the screen reader announces each element and we deliberately do not); once
+-- every stop has been visited, Tab carries on through the rest of the overlay's controls,
+-- and Shift+Tab walks back out the way it came. For a plugin window that does not move
+-- focus on Tab by itself (Kontakt standalone), this is the only way into its native controls.
 function Overlay:addPassThrough(opts)
   return add(self, {
     kind = "passthrough",
@@ -1721,51 +1722,83 @@ function Overlay:enableUiaPassThrough(opts)
 end
 
 -- One Tab inside the focused pass-through control. True when it consumed the key (focus
--- moved within the plugin), false to let Tab carry on through the overlay's controls.
+-- moved within the plugin, or back out onto this stop), false to let the key carry on
+-- through the overlay's controls.
 --
--- focusStep WRAPS at the ends, so "we are done" is not something it reports; what it does
--- report is a 1-based index, and coming back to the index we entered at means the ring has
--- been walked once. Entering at whatever the plugin happens to have focused (rather than
--- at element 1) is what makes that the full ring rather than the tail of it.
+-- The plugin's controls are a LINE hung off this stop, not a ring: Tab goes in, Shift+Tab
+-- comes back out the way it went in, and Tab leaves forwards once every stop has been
+-- visited. The lap is counted in STEPS (`_net`, net steps forward since going in), not by
+-- waiting for an index to come round again.
+--
+-- It was a ring whose only exit was coming back round to the entry index, and on a Mac
+-- Kontakt 8 standalone that trapped the tester for ten minutes. Its ring has 90 stops, and
+--   * Shift+Tab on this stop went INTO the plugin from its far end, so from 'Kontakt
+--     controls' there was no way back to 'Kontakt file menu' — the only other stop — short
+--     of a whole lap;
+--   * Shift+Tab straight after going in wrapped round to stop 90, the long way;
+--   * every return to the window re-announces this stop, which restarted the lap, and at
+--     one press a second a lap of 90 never fitted between two of them;
+--   * a count that changed restarted the lap as well.
+-- ReaHotkey's own Kontakt 8 pass-through is linear (Kontakt8.ahk HandlePassThrough), and so
+-- is this now. Leaving never touches the plugin's focus, so the screen reader never names a
+-- plugin element over the overlay's own announcement of where the key went.
 function Overlay:_stepPassThrough(dir)
   local c = self.controls[self.focus]
   if not (c and c.kind == "passthrough" and isVisible(self, c)) then return false end
   local ctrl = self:origin()
   if not (ctrl and ctrl.id) then return false end
-  -- THE LAP ENDS BEFORE THE STEP THAT WOULD CLOSE IT, not after.
-  --
-  -- It used to be noticed afterwards: the press that came back round asked the backend to move
-  -- the plugin's focus onto the entry element AGAIN, and only then saw the index match and
-  -- handed Tab back. A real focus event had already gone out, so the screen reader named the
-  -- entry element a second time — over the overlay's own announcement of its next control —
-  -- and a tester counting the plugin's stops by ear counted one too many. So each press works
-  -- out whether the next step in its direction would land on the entry, and if it would, the
-  -- next press leaves without touching the plugin's focus at all. Keyed on the direction, so
-  -- reversing mid-lap does not end it early.
-  if c._leaveOn ~= nil and c._leaveOn == dir then
-    c._entry, c._count, c._leaveOn = nil, nil, nil
+  local inside = c._net ~= nil
+  local key = dir >= 0 and "Tab" or "Shift+Tab"
+  local function clear()
+    c._net, c._at, c._n, c._leaveOn = nil, nil, nil, nil
+  end
+  -- On the stop itself, Shift+Tab is an ordinary step back through the overlay's controls.
+  if not inside and dir < 0 then return false end
+  -- Every stop visited: the next Tab leaves, without touching the plugin's focus.
+  if c._leaveOn == dir then
+    host.log.info(string.format("[passthrough] %s: %s leaves after %d stop(s) of %d",
+      tostring(self.label), key, c._net or 0, c._n or 0))
+    clear()
     return false
+  end
+  -- Shift+Tab on the element Tab went in on (or before it, if a stop that refused the focus
+  -- was stepped over on the way back) comes back out onto this stop. The plugin keeps its
+  -- focus, so the next Tab goes in one element further on; that is cosmetic, not a trap.
+  if inside and dir < 0 and c._net <= 1 then
+    host.log.info(string.format("[passthrough] %s: Shift+Tab backs out onto '%s'",
+      tostring(self.label), tostring(c.label)))
+    speakControl(self, self.focus, true) -- clears the lap and says "…, Tab to step through them"
+    return true
   end
   local r = host.element.focusStep(ctrl.id, dir)
   if not r then
-    c._entry, c._count, c._leaveOn = nil, nil, nil
+    host.log.info(string.format("[passthrough] %s: %s found nothing that takes the focus",
+      tostring(self.label), key))
+    clear()
     return false -- nothing focusable in there: just move on
   end
-  -- A ring that changed size is a different ring. Return pressed inside it can hide a whole
-  -- panel of the plugin — Kontakt's LIBRARY takes a dozen stops with it — and an entry index
-  -- from before could then never come round again, trapping Tab inside the plugin for good, or
-  -- could name a different element and hand back half-way. The lap starts afresh from here.
-  if c._entry == nil or r.count ~= c._count then
-    c._entry, c._count = r.index, r.count
-  elseif r.index == c._entry then
-    -- Came round without the look-ahead predicting it: a stop in between refused the focus and
-    -- was stepped over. Leave now.
-    c._entry, c._count, c._leaveOn = nil, nil, nil
-    return false
+  -- How far that step went. Normally one; more when stops in between refused the focus and
+  -- were stepped over, which keeps such a lap from repeating stops — with one exception: stops
+  -- skipped by the FIRST step, on the way in, are not counted (focusStep does not say where it
+  -- started from), so a refusing stop just before the entry element costs one repeat of the
+  -- entry element before Tab leaves. Harmless, and bounded. Only
+  -- while the count holds: a count that changed means the plugin's tree changed shape (a panel
+  -- shown or hidden), the old index means nothing in the new one, and one is the honest guess.
+  -- Landing where it already was means nothing else would take the focus, which is a whole
+  -- lap — counted as one, it would never end.
+  local d = 1
+  if inside and r.count == c._n then
+    d = ((r.index - c._at) * dir) % r.count
+    if d == 0 then d = r.count end
   end
-  local step = dir >= 0 and 1 or -1
-  local nxt = ((r.index - 1 + step) % r.count) + 1
-  c._leaveOn = (nxt == c._entry) and dir or nil
+  c._net = inside and (c._net + (dir >= 0 and d or -d)) or 1
+  c._at, c._n = r.index, r.count
+  -- Measured against the LATEST count, so a ring that shrinks can only end the lap early and
+  -- one that grows can only make it longer — never endless.
+  c._leaveOn = (dir >= 0 and c._net >= r.count) and 1 or nil
+  host.log.info(string.format("[passthrough] %s: %s -> stop %d of %d '%s', %d into the lap%s",
+    tostring(self.label), key, r.index, r.count, tostring(r.name), c._net,
+    c._leaveOn and ", the next Tab leaves" or ""))
   return true
 end
 
@@ -1773,7 +1806,30 @@ function Overlay:activate(index)
   local i = index or self.focus
   local c = self.controls[i]
   if not c then return end
-  if not isVisible(self, c) then return end -- a hidden control's hotkey no-ops
+  if not isVisible(self, c) then
+    if index ~= nil then return end -- a hidden control's hotkey no-ops
+    -- Space or Return on the focused control, which has hidden itself since focus came to it:
+    -- a view toggle does exactly that (Kontakt's 'Switch to classic view' and 'Switch to play
+    -- view' share one hotkey, and pressing either hides it and shows the other), and now that
+    -- a hotkey moves the focus, it is where the focus is after every such press. The control
+    -- that took its place under the same key is the one meant; with none, say so — this used
+    -- to return without a word, which from the keyboard is a key that does nothing.
+    local found = false
+    if c.hotkey then
+      for j, d in ipairs(self.controls) do
+        if j ~= i and d.hotkey == c.hotkey and isVisible(self, d) then
+          i, c, found = j, d, true
+          self.focus = j
+          self:_syncNativeKeys()
+          break
+        end
+      end
+    end
+    if not found then
+      host.speech.output((c.label or "That control") .. " is not available now", { interrupt = true })
+      return
+    end
+  end
   -- Before the click, not after: the menu can be up by the time the click returns, and from
   -- that instant the keys belong to it.
   if c.opensMenu then self:_menuOpening() end
@@ -1984,6 +2040,25 @@ function Overlay:_visibleClaimant(candidates)
   return nil
 end
 
+-- A control's hotkey also puts the overlay's focus on that control, silently — ReaHotkey's
+-- TriggerHotkey does the same (ActivateControlByID sets the current control, then activates
+-- it). Without it, Ctrl+L for 'Load instrument' opened the dialog, and closing the dialog
+-- brought the overlay back on whatever the tester had been on before ('Plugin size'), so a
+-- second go needed Tab first. Silent, because the activation says what happened; the new
+-- focus is heard when the window comes back, or on the next Tab.
+--
+-- `hotkeyKeepsFocus` opts out, for a hotkey that should act without moving the user —
+-- Melodyne's 'Menu bar': focus on it would hold Space, which is Melodyne's play/stop.
+function Overlay:_focusForHotkey(i)
+  local c = self.controls[i]
+  if not (self.active and c) or i == self.focus or c.hotkeyKeepsFocus then return end
+  local was = self.controls[self.focus]
+  host.log.info(string.format("[focus] '%s': a hotkey moved focus from '%s' to '%s'",
+    tostring(self.label), tostring(was and was.label), tostring(c.label)))
+  self.focus = i
+  self:_syncNativeKeys()
+end
+
 -- Runs `fn` once the modifier keys are up, or after a short grace period regardless.
 --
 -- A hotkey callback fires while its own combination is still HELD — you are still holding Alt
@@ -2061,7 +2136,9 @@ function Overlay:_syncControlHotkeys()
         -- The claimant is resolved AFTER the wait, not before: the point of resolving at press
         -- time is that the visible set can have changed, and waiting is time in which it can.
         afterModifiersReleased(function()
-          self:activate(self:_visibleClaimant(candidates) or candidates[1])
+          local i = self:_visibleClaimant(candidates)
+          if i then self:_focusForHotkey(i) end -- visible already, so its `when` is not asked again
+          self:activate(i or candidates[1])
         end)
       end)
     else
@@ -2754,6 +2831,7 @@ function Overlay:_activate()
   -- STATIC TEXT three stops away, which no focus-scoped capture can explain. Whatever holds
   -- them is elsewhere, and moving the arrival position only hid the question.
   if self.focus == 0 then self.focus = firstFocusable(self) end
+  self:_refocusIfHidden()
   self:_registerHotkeys()
   -- Scope key suppression to this (now-foreground) window: when a control opens a menu
   -- (another window comes forward), Tab/Enter pass to it natively, and resume here once
@@ -2789,14 +2867,53 @@ function Overlay:_activate()
         end
       end
       -- Queued, not interrupting: see `speakControl`. Nobody pressed a key to hear this.
-      if self.active then speakControl(self, self.focus, false, false, true) end
+      if self.active then
+        -- Again, for a view that changed during the delay.
+        if self:_refocusIfHidden() then self:_syncNativeKeys() end
+        if self.focus > 0 then speakControl(self, self.focus, false, false, true) end
+      end
     end)
   end
+end
+
+-- A RESUMED focus on a control that has hidden itself since: moved to the visible control that
+-- shares its hotkey, else to the first focusable one. True when it moved.
+--
+-- Now that a hotkey moves the focus, this is the ordinary state after a view toggle: Alt+V
+-- leaves focus on 'Switch to classic view', Kontakt switches, and that control is hidden a
+-- moment later. Alt+Tab out and back then announced the hidden control — "Switch to classic
+-- view" while Kontakt was already in classic view — and Return on it ran the other one.
+function Overlay:_refocusIfHidden()
+  if self.focus <= 0 or isFocusable(self, self.focus) then return false end
+  local c = self.controls[self.focus]
+  local to
+  if c and c.hotkey then
+    for j, d in ipairs(self.controls) do
+      if j ~= self.focus and d.hotkey == c.hotkey and isFocusable(self, j) then
+        to = j
+        break
+      end
+    end
+  end
+  local was = c and c.label
+  self.focus = to or firstFocusable(self)
+  local now = self.controls[self.focus]
+  host.log.info(string.format("[focus] '%s': '%s' is hidden now; resuming on '%s'",
+    tostring(self.label), tostring(was), tostring(now and now.label or "nothing")))
+  return true
 end
 
 function Overlay:_deactivate()
   if not self.active then return end
   self.active = false
+  -- One line, naming what took over. A Mac Kontakt 8 session came back to the overlay seven
+  -- times in ten minutes, each return restarting the pass-through's lap, and nothing in the
+  -- log said what had taken it away in between — the tester switching apps, or the overlay
+  -- losing its own window.
+  local a = host.window.active()
+  host.log.info(string.format("[deactivate] '%s' — in front now: '%s' (%s)",
+    tostring(self.label), tostring(a and a.title or "nothing"),
+    tostring(a and a.app and a.app.exe or "?")))
   host.keys.scope(false)
   host.keys.menuOpen(false)
   self:_unregisterHotkeys()
@@ -2822,6 +2939,14 @@ end
 -- where the work actually divides: finding the window this overlay lives in, and deciding
 -- whether what is loaded inside it is ours.
 local RECHECK_SLOW_MS = 15
+-- The bar for a recheck made by the landmark POLL rather than by an event. 15 ms is what the
+-- dispatch measurement above was made to catch, and it stays for focus- and key-driven
+-- rechecks. A poll tick is nobody's keystroke, and on a Mac every Kontakt poll recheck cost
+-- 21-41 ms — so at 15 all of them were logged, 1869 lines in one session, and the slow ones
+-- that matter (up to a second against a hung application) were lost among them.
+local RECHECK_SLOW_POLL_MS = 50
+-- Set only while the poll loop runs its overlays' rechecks; see joinPoll.
+local inPoll = false
 
 function Overlay:_recheck()
   -- Nothing to learn: something at least as specific already holds the slot (see
@@ -2861,7 +2986,7 @@ function Overlay:_recheck()
   end
   if t0 then
     local total = host.now() - t0
-    if total >= RECHECK_SLOW_MS then
+    if total >= (inPoll and RECHECK_SLOW_POLL_MS or RECHECK_SLOW_MS) then
       host.log.info(string.format(
         "[recheck] '%s' %d ms (context %d, gate %d) over %d context(s)",
         tostring(self.label), total, tCtx - t0, host.now() - tCtx, #self.contexts
@@ -3129,11 +3254,18 @@ local function joinPoll(self, ms)
       -- tick spreads over more than a few ms the landmark searches it starts no longer
       -- arrive together — which is exactly what "batch of 1" was telling us.
       local t0 = host.now and host.now() or 0
+      -- Not guarded: a recheck that throws leaves this set until the next tick ends, which only
+      -- moves a log threshold for half a second, where a pcall would cost the error its
+      -- traceback.
+      inPoll = true
       for _, o in ipairs(group) do
         o:_recheck()
       end
+      inPoll = false
       local dt = (host.now and host.now() or 0) - t0
-      if dt >= 25 then
+      -- 50 ms, not 25: on a Mac every Kontakt tick costs 25-41 ms, so at 25 this was a line
+      -- per tick (1178 in one session) and said nothing the slow ones did not.
+      if dt >= 50 then
         host.log.info(string.format(
           "[poll] %d ms rechecking %d overlay(s) on the %d ms poll", dt, #group, ms
         ))

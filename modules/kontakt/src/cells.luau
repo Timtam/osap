@@ -107,8 +107,9 @@ for vIdx, v in ipairs(D.VARIANTS) do
   -- which knows its version from the moment the window opened.
   --
   --   Kontakt 8  modern ↔ classic, read from a pixel of its own top bar. It also offers a
-  --              toggle (F10), which is the only way back from the modern view without
-  --              reading a menu that carries no accessibility information.
+  --              toggle: F10 on Windows, the only way back from the modern view without
+  --              reading a menu that carries no accessibility information; on a Mac, where
+  --              F10 is not Kontakt's key, the entry in that menu, read by OCR (header.luau).
   --   Kontakt 7  single ↔ rack, read from UIA (detect.isRackView). No toggle: F10 is a
   --              Kontakt 8 command, and offering it here pressed a key that does nothing.
   --

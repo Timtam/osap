@@ -394,12 +394,48 @@ fn ensure_observer(pid: i32, app: &str) {
     // since exited.
     reap_dead();
 
-    match create_observer(pid, app) {
+    // Not while it is in the busy quarantine. The activation path reads the frontmost window
+    // first, and when that times out, subscribing straight after is a second messaging timeout
+    // against the same wedged process on the thread that carries the event tap. It also spent
+    // the retry budget: Kontakt 8 at start-up went from attempt 1 to attempt 8 of 10 almost
+    // entirely on activations, not on the clock. So the application is put on the clock
+    // WITHOUT using an attempt, and `retry_refused` asks once the quarantine has cleared.
+    // After `reap_dead`, which makes no accessibility call and is where a previous instance's
+    // exit is noticed.
+    if super::ax::is_busy(pid) {
+        let fresh = RETRY.with(|r| {
+            let mut r = r.borrow_mut();
+            if r.contains_key(&pid) {
+                return false;
+            }
+            let now = Instant::now();
+            r.insert(pid, Retry { app: app.to_string(), due: now + RETRY_FIRST, tries: 0, since: now });
+            true
+        });
+        if fresh {
+            crate::logging::line(
+                "macos",
+                &format!(
+                    "not subscribing to {app} (pid {pid}) yet — it did not answer a moment ago; \
+                     asked again when that clears"
+                ),
+            );
+        }
+        return;
+    }
+
+    let started = Instant::now();
+    let made = create_observer(pid, app);
+    let took = started.elapsed().as_millis();
+    match made {
         Ok(live) => {
             let after = RETRY.with(|r| r.borrow_mut().remove(&pid)).map(|r| r.tries);
             crate::logging::line(
                 "macos",
                 &match after {
+                    Some(0) => format!(
+                        "observing focus in {app} (pid {pid}), once it answered again"
+                    ),
                     Some(n) => format!("observing focus in {app} (pid {pid}), on retry {n}"),
                     None => format!("observing focus in {app} (pid {pid})"),
                 },
@@ -418,14 +454,17 @@ fn ensure_observer(pid: i32, app: &str) {
             }
         }
         Err(refusal) => {
+            // How long the attempt took, in every refusal line: a refusal from an application
+            // not ready to answer comes back at once, a wedged one costs the whole messaging
+            // timeout, and the log could not tell the two apart.
+            let reason = format!("{} (after {took} ms)", refusal.reason);
             if refusal.permanent {
                 crate::logging::line(
                     "macos",
                     &format!(
-                        "no focus observer for {app} (pid {pid}): {} — overlays inside this \
-                         application will only notice a change when it is brought to the \
-                         front",
-                        refusal.reason
+                        "no focus observer for {app} (pid {pid}): {reason} — overlays inside \
+                         this application will only notice a change when it is brought to the \
+                         front"
                     ),
                 );
                 OBSERVERS.with(|o| o.borrow_mut().insert(pid, Watched::Refused(already_refused + 1)));
@@ -436,7 +475,7 @@ fn ensure_observer(pid: i32, app: &str) {
                 // still-starting application gets time.
                 RETRY.with(|r| r.borrow_mut().remove(&pid));
             } else {
-                schedule_retry(pid, app, &refusal.reason);
+                schedule_retry(pid, app, &reason);
             }
         }
     }
@@ -609,7 +648,22 @@ fn create_observer(pid: i32, app: &str) -> Result<Live, Refusal> {
         // remaining five subscriptions would each cost the full messaging timeout, which is
         // the difference between one second and six on the tick a window comes forward.
         if matches!(err, AXError::CannotComplete | AXError::Failure) {
+            // And into the busy quarantine, which a refused subscription did not feed. So the
+            // focus dispatch in the same pump iteration walked straight into `active_window`
+            // against the same process and paid a second timeout: 2006 ms in one iteration
+            // against a busy REAPER, where one second was all the answer there was to get.
+            // Only on CannotComplete, the one that means "no answer in time"; Failure is not
+            // established to mean the same.
+            if err == AXError::CannotComplete {
+                super::ax::note_busy(pid);
+            }
             busy = true;
+            break;
+        }
+        // Without the permission, the other five would be refused the same way; they cost a
+        // round trip each for nothing (about 270 ms per attempt while nothing was granted).
+        // Not permanent: a grant made mid-session still gets its retry.
+        if disabled {
             break;
         }
     }
@@ -617,6 +671,8 @@ fn create_observer(pid: i32, app: &str) -> Result<Live, Refusal> {
         return Err(Refusal {
             reason: if busy {
                 "it was too busy to answer — it may have been starting up".into()
+            } else if disabled {
+                "the Accessibility permission is not granted (yet)".into()
             } else {
                 "it accepted no notifications at all".into()
             },
@@ -738,7 +794,18 @@ fn on_notification(pid: i32, name: &CFString) {
         // sticky: nothing else is due to correct it while the user stays in the plugin, and
         // every scoped hotkey stops matching in the meantime. `active_window` refreshes the
         // same fact from the pump, which is what closes the gap this leaves open.
-        match super::ax::foreground_window_id() {
+        // Timed like the same read in `on_app_activated`: it runs inside the run loop that
+        // also carries the event tap, and was the one call on this path nobody measured.
+        let started = Instant::now();
+        let answered = super::ax::foreground_window_id();
+        let took = started.elapsed().as_millis();
+        if took >= 50 {
+            crate::logging::line(
+                "macos",
+                &format!("resolving the focused window of pid {pid} after it changed took {took} ms"),
+            );
+        }
+        match answered {
             Some(w) => super::tap::note_foreground(w),
             None => crate::logging::trace("macos", || {
                 format!("focused window changed in pid {pid}, which did not say to what")

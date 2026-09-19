@@ -245,8 +245,9 @@ spelling ("Alt+L" and so on). **Tab** gives:
 - on **Kontakt 8**: straight to **"Kontakt controls, Tab to step through them"**. Kontakt 8 moved
   the other three into its menus, so two stops of ours are all there is.
 
-The Tab after "Kontakt controls" goes *into* Kontakt, and comes back to "Kontakt file menu" only
-when Kontakt's own controls have all been visited.
+The Tab after "Kontakt controls" goes *into* Kontakt, and comes back to "Kontakt file menu" once
+Kontakt's own controls have all been visited. Shift-Tab walks back out the way you came: on the
+first Kontakt control it returns to "Kontakt controls".
 
 **If nothing is ever spoken on Kontakt 8:** that is a real answer, not a failure of yours — its
 overlay has never met a Kontakt 8 on a Mac. Go straight to the probe press, item 5; its recording
@@ -258,9 +259,10 @@ is what the next build is made from.
    as you heard them.
 2. On **"Kontakt controls"**, press **Tab** again. The keyboard should go *into Kontakt*, and
    **VoiceOver** — not our voice — should announce each of Kontakt's own controls. Keep pressing
-   Tab until "Kontakt file menu" comes round again; that is the only way back to our controls
-   (Shift-Tab walks the same round backwards, and Command-Tab away and back puts you where you
-   were). You need not let VoiceOver finish each name: press Tab about once a second, write down
+   Tab until "Kontakt file menu" comes round again. (The quick way back is Shift-Tab: it walks
+   back through what you visited, and one more Shift-Tab on the first of Kontakt's controls says
+   "Kontakt controls" again; Command-Tab away and back puts you where you were.) You need not let
+   VoiceOver finish each name: press Tab about once a second, write down
    the first five names you catch and a rough count — the log records the exact number. "Button"
    on its own is an expected answer. **Do not press Return or Space while inside Kontakt's
    controls** — nobody knows what its unnamed buttons do. **If it has not come round after two
@@ -317,12 +319,12 @@ again. Write down that you had to.
 With that FX window open, press **Command-Shift-F6**. It answers with one of these, and which one
 is worth writing down:
 
-- the window's title, then "on" and a control's name — "on an unnamed control" is normal: the
-  keyboard was handed to one of Kontakt's own elements;
-- the window's title alone: the keyboard was already inside, or nothing in Kontakt took it and the
-  application clicked just inside the panel's top-left corner. On Kontakt that corner is its logo
-  button: if VoiceOver then reads anything new over Kontakt (an About screen, a splash, a menu),
-  press Escape once and write down what it read, before anything else in this step;
+- the window's title alone: the keyboard is inside — handed to one of Kontakt's own elements
+  (VoiceOver may then name it, for example "Play View, button": that is the success case, not
+  something new on screen), already there, or moved by a click just inside the panel's top-left
+  corner; the log says which. On Kontakt that corner is its logo button: if VoiceOver reads
+  something new OVER Kontakt (an About screen, a splash, a menu), press Escape once and write down
+  what it read, before anything else in this step;
 - **"could not switch to …"**, **"could not move the keyboard into …"** or **"could not tell whether
   the keyboard is in …"**: count five seconds and press Command-Shift-F6 once more; if it says the
   same again, press Command-Shift-F9 over the FX window and go on to step 6;
@@ -495,21 +497,23 @@ tab.
 **Should happen, one of these:**
 
 - **macOS shows its own permission dialog.** If you allow it, nothing of ours follows; the
-  system's dialog is the feedback. If you refuse it, a few sentences follow in the system voice,
-  beginning "macOS answered 'denied' without showing a dialog". The words "without showing a
-  dialog" are wrong here, and that is known; it is not the old fault. Write down that you saw
-  macOS's dialog and refused it: the log gives the same lines as in the third case below, so only
-  your note tells them apart.
+  system's dialog is the feedback, and the box stays ticked. If you refuse it, the system voice
+  says **"Personal Voice was not allowed. The box has been unticked."**, and the box is unticked
+  when you next reach it. Write down that you saw macOS's dialog and refused it.
 - **A dialog of ours opens, and the application itself says nothing.** VoiceOver reads the
   dialog's text, which has the focus. This is what happens when macOS had already answered before
-  we asked. The text says what macOS answered and, if the answer was "denied", where the switch
-  for it is (System Settings → Accessibility → Personal Voice).
-- **No dialog at all, and a few sentences in a system voice — not VoiceOver's**, beginning either
-  "macOS answered 'denied' without showing a dialog" or "macOS reports that this Mac does not
-  support Personal Voice". This is the case where macOS was asked for the first time and answered
-  without showing a dialog — but only if no dialog of macOS's came before those sentences.
+  we asked. It is two or three sentences, ending **"The box has been unticked."** — for "denied" it
+  names the switch to turn on (System Settings → Accessibility → Personal Voice, "Allow
+  applications to use your Personal Voice"). When you close it, the box should read as unticked.
+- **No dialog at all, and one sentence in a system voice — not VoiceOver's** — "This Mac does not
+  support Personal Voice." or "Personal Voice was not allowed.", each followed by "The box has
+  been unticked."
+- **After up to two minutes with no answer:** "macOS gave no answer about Personal Voice. The box
+  has been unticked."
 - **Nothing at all for thirty seconds** can also be correct: a grant macOS gives without asking.
   The log tells that apart from the old fault.
+
+Write down, in every case, whether the box is ticked afterwards.
 
 **Why last:** the request and every spoken line go through one worker thread, in order, and the
 request waits up to two minutes for macOS to answer. If a dialog does appear and takes a moment,
@@ -631,17 +635,19 @@ Nothing to do. Lines worth knowing about, most of them new:
 - **`[kontakt] no button named '…' could be pressed — clicking the authored file-menu point …`** —
   the file menu was opened by a click, not by pressing the button by name; the name in quotes is
   `Kontakt File Menu` on Kontakt 8 and `FILE` on Kontakt 7. In step 4 item 3 the click went to a
-  point measured on Windows. **In step 5 this line is expected on every "Load instrument" press**:
-  nothing inside REAPER's FX window is named after Kontakt, so the menu is opened by a click at the
-  anchored spot, which is the button's own centre, and then read off the screen without saying so.
+  point measured on Windows. In step 5 it should now be rare: nothing inside REAPER's FX window is
+  named after Kontakt, but a button that is not found inside Kontakt is looked for on the whole
+  window, which found `Kontakt File Menu` in the Mac mini session. When it does appear, the click
+  goes to the anchored spot, which is the button's own centre.
 - **`[kontakt] Kontakt 8 panel in 'FX: …': Kontakt File Menu at …`**, or the same with **`Kontakt
   7`** and **`FILE`** — step 5's anchor. **`… publishes no button named …`** — why it did not come
   up. **`… puts …'s panel corner at …, outside the window — not anchoring`** — the button's
   position and the window's frame disagree.
 - **`Kontakt: no menu row starting with 'Load...' — read: …`** — step 5's "Load instrument" read
   the menu off the screen and found no row starting with "Load"; after "read:" comes every word it
-  read. When a row matches, no line is written. **`Kontakt: no menu item named 'Load...' could be
-  pressed by name — reading the menu instead`** should not appear inside REAPER.
+  read. When a row matches: **`Kontakt: menu row '…' at x,y — clicking`**. **`Kontakt: no menu item
+  named 'Load...' could be pressed by name — reading the menu instead`** is expected inside REAPER
+  whenever the menu's rows publish no names; the menu is then read off the screen.
 - **`[gbutton] 'Increase plugin height' …`** — the result of the picture search you listened for in
   step 5, one line per arrival.
 - **`[read] 'Pitchbend range' = "…" (region …, N ms, N word)`** — every sforzando read-out, with the

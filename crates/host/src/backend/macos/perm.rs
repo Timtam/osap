@@ -10,7 +10,8 @@
 //! The startup block is written for one reader: someone on a Mac we cannot see, who will
 //! send us a log file and nothing else. Every value is therefore one short greppable line
 //! rather than a sentence, and every state that is *wrong* is followed by a `… fix` line
-//! saying which pane to open and that the application has to be restarted afterwards.
+//! saying which pane to open and whether the application has to be restarted afterwards
+//! (Screen Recording yes, Accessibility no — both measured).
 
 use std::ffi::CString;
 use std::sync::Once;
@@ -36,9 +37,26 @@ use objc2_foundation::{MainThreadMarker, NSProcessInfo, NSString};
 /// which a blind tester has no way of discovering: the switch takes effect for the *next*
 /// process, not this one. Repeated verbatim next to every permission that is missing,
 /// because a tester greps for the permission name, not for a note further up the file.
+///
+/// Screen Recording only, now. It was attached to all three, and the fifth session measured
+/// Accessibility otherwise: observation began in the running process within seconds of the
+/// switch (focus notifications from System Settings, then Finder), no restart involved —
+/// while Screen Recording, still "not granted" after the grant, read "granted" only in the
+/// next launch. Telling the tester to quit after every grant cost him a launch each time.
 const RESTART_NOTE: &str =
-    "then quit this application completely and open it again — macOS only hands a newly \
-     granted permission to a process that started after the grant";
+    "then quit this application completely and open it again — macOS only hands this \
+     permission to a process that started after the grant";
+
+/// Accessibility, measured on macOS 14.5: it reaches the running process.
+const ACCESSIBILITY_NOTE: &str =
+    "it takes effect in the running application within a few seconds — no need to quit; \
+     'Re-check now' on the Permissions page confirms it";
+
+/// Input Monitoring has not been measured either way. It usually follows the Accessibility
+/// grant by itself (see `environment_report`), so the restart is the fallback, not the rule.
+const INPUT_MONITORING_NOTE: &str =
+    "and if it still reads as missing after 'Re-check now', quit this application completely \
+     and open it again";
 
 /// Asks for Accessibility once, with the system prompt.
 pub fn request_accessibility_once() {
@@ -46,9 +64,10 @@ pub fn request_accessibility_once() {
     ONCE.call_once(|| {
         // The prompting form is the only way an application can raise the Accessibility
         // dialog at all; there is no API that grants it. It also answers the question, so
-        // this doubles as the first check. Note that it returns the state as it was *at
-        // process start*: a user who grants it in response to this very prompt still gets
-        // `false` here, which is exactly why the restart note has to be logged either way.
+        // this doubles as the first check. A user who grants it in response to this very
+        // prompt still gets `false` here — the answer is read before they could act — so what
+        // to do next is logged either way. No restart, though: the grant reaches this process
+        // (see ACCESSIBILITY_NOTE).
         let trusted = is_trusted(true);
         if trusted {
             crate::logging::line("macos", "accessibility: granted");
@@ -70,7 +89,7 @@ pub fn request_accessibility_once() {
                 privacy_pane()
             ),
         );
-        crate::logging::line("macos", &format!("accessibility: {RESTART_NOTE}"));
+        crate::logging::line("macos", &format!("accessibility: {ACCESSIBILITY_NOTE}"));
     });
 }
 
@@ -623,7 +642,7 @@ pub fn environment_report() -> Vec<(String, String)> {
         );
         push(
             "accessibility fix",
-            format!("{} > Accessibility, {RESTART_NOTE}", privacy_pane()),
+            format!("{} > Accessibility; {ACCESSIBILITY_NOTE}", privacy_pane()),
         );
     }
 
@@ -674,7 +693,7 @@ pub fn environment_report() -> Vec<(String, String)> {
             push("input monitoring symptom", INPUT_MONITORING_SYMPTOM.into());
             push(
                 "input monitoring fix",
-                format!("{} > Input Monitoring, {RESTART_NOTE}", privacy_pane()),
+                format!("{} > Input Monitoring, {INPUT_MONITORING_NOTE}", privacy_pane()),
             );
         }
         other => {

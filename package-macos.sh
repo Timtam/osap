@@ -259,8 +259,10 @@ behave as if the application is broken, so please do them all.
                             instead of the overlay.
      - Automation         — only asked for when you tick "Speak through VoiceOver"
                             in Application settings; leave it alone otherwise.
-   After granting any of them, QUIT AND REOPEN the application. macOS only hands the
-   new permission to a process that started after it was granted.
+   Accessibility takes effect at once: press "Re-check now" on the Permissions page.
+   After granting Screen Recording, QUIT AND REOPEN the application: macOS hands that one
+   only to a process that started after it was granted. Input Monitoring usually follows
+   Accessibility; if Re-check still shows it missing, quit and reopen as well.
 
 5. To record a plugin window for us: put it in front and press
        Command-Shift-F9

@@ -93,9 +93,16 @@ local STATUS_TOGGLES = {
   -- HINT TEXT rather than a panel, and its content depends on whatever the mouse is over. There
   -- is nothing stable to read, which is a different answer from "not measured yet" and worth
   -- the distinction: this one is closed, not open.
+  -- Its NAME differs on a Mac, where NI moved the shortcut: 'Cmd+I', read off Kontakt 8's status
+  -- bar inside REAPER. The other two names are the same on both. Kontakt 7's Mac names have
+  -- never been recorded; they are assumed to follow Kontakt 8's.
   { label = "Info pane", hotkey = "Alt+2",
     classic = { probe = { 43, -16 }, open = 131, shut = 240 },
-    name = "Info Pane (F9): Toggles the visibility of the information hint." },
+    name = host.os.pick({
+      windows = "Info Pane (F9): Toggles the visibility of the information hint.",
+      macos = "Info Pane (Cmd+I): Toggles the visibility of the information hint.",
+      linux = "Info Pane (F9): Toggles the visibility of the information hint.",
+    }) },
   -- Which state is which was settled by looking for the keyboard rather than by assuming
   -- brighter means open — the info pane runs the other way round, so that assumption had
   -- already been wrong once. The band above the bar is 55% near-white in one shot and 0% in
@@ -171,7 +178,17 @@ local function addStatusToggles(ov, cell)
         if host.timer then
           host.timer.after(250, function()
             local state = panelState(o, t, cell)
-            if state then host.speech.output(t.label .. " " .. state, { interrupt = true }) end
+            if state then
+              host.speech.output(t.label .. " " .. state, { interrupt = true })
+            elseif host.os.is("macos") then
+              -- The state references were measured on Windows, and on a Mac they mostly miss:
+              -- Kontakt 8's status bar in REAPER sits a point or two off the Windows probe
+              -- points, and its buttons carry no AXValue for the fallback to read. Silence
+              -- after a press is the one answer that cannot be told from a press that did
+              -- nothing, so the Mac at least says the press went out. Windows keeps its
+              -- measured silence, where a nil reading means the panel really carries no state.
+              host.speech.output(t.label .. ", pressed", { interrupt = true })
+            end
           end)
         end
       end,
@@ -432,18 +449,40 @@ local function addRackControls(ov, cell)
   -- could not get out of with no way to tell which change caused it. Kontakt's own published
   -- shortcut is the more conservative dependency anyway: it cannot drift the way a measured
   -- coordinate can, and unlike the button it is documented to toggle both ways.
+  --
+  -- EXCEPT ON A MAC, where F10 is not Kontakt's key. Sent to Kontakt 8 inside REAPER it went
+  -- out (the input counter moved), the view stayed put, and macOS beeped — the key fell through
+  -- unhandled. NI moved at least one other shortcut there (the info pane is Cmd+I, not F9). So
+  -- the Mac goes through the menu instead, read by OCR, the path Load and Save already take
+  -- successfully on that Mac. Both wordings are tried, the expected one first: the view probe
+  -- is a pixel measured on Windows, and if it misreads the view, the other entry is the one on
+  -- the menu — pressing it at least leaves the user in a view they can name, where refusing
+  -- would leave them in one they cannot leave. "Switch to Play View" has never been seen on
+  -- either platform; only "Switch to Classic View   F10" was photographed, on Windows.
   if cell.hasViewToggle then
+    local mac = host.os.is("macos")
+    local ROWS = { classic = "Switch to Classic View", play = "Switch to Play View" }
+    local function toggle(o, first, second)
+      if not mac then
+        host.input.send("F10")
+        return
+      end
+      host.log.info(string.format("[kontakt] view toggle: reading Kontakt's menu for '%s'", first))
+      A.invokeMenuItem(cell, o, { first, second }, function(chosen)
+        host.speech.output(chosen .. ", activated", { interrupt = true })
+      end)
+    end
     ov:addCustomButton({
       label = "Switch to classic view",
       hotkey = "Alt+V",
       when = cell.inModern,
-      onActivate = function() host.input.send("F10") end,
+      onActivate = function(o) toggle(o, ROWS.classic, ROWS.play) end,
     })
     ov:addCustomButton({
       label = "Switch to play view",
       hotkey = "Alt+V",
       when = cell.inClassic,
-      onActivate = function() host.input.send("F10") end,
+      onActivate = function(o) toggle(o, ROWS.play, ROWS.classic) end,
     })
   end
   -- KONTAKT'S OWN INSTRUMENT EDITOR, by COORDINATE rather than by image.

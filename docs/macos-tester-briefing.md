@@ -78,9 +78,11 @@ if the application is broken**:
    open, in the wording your macOS version actually uses — Monterey and earlier call it
    *System Preferences → Security & Privacy → Privacy*, Ventura and later *System Settings →
    Privacy & Security*.
-4. **Quit the application and open it again.** macOS only hands a newly granted permission
-   to a process that started *after* it was granted. This is the single most common reason
-   a permission appears not to have worked.
+4. **After Screen Recording, quit the application and open it again.** macOS hands that
+   permission only to a process that started *after* it was granted — the most common reason
+   a permission appears not to have worked. Accessibility does not need this: it reaches the
+   running application within a few seconds (press *Re-check now* on the Permissions page).
+   Input Monitoring usually follows Accessibility; reopen only if it still reads as missing.
 
 ## The things worth doing, in order
 

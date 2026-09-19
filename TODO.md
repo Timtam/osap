@@ -1199,7 +1199,7 @@ Kontrol, standalone}, with Cinematic Studio Strings inheriting on top. What is l
 - [ ] **Kontakt 7's single-instrument view is unverified.** `detect.isRackView` ports ReaHotkey's test (`GetPluginView`: find the SHOP button, its previous sibling is "VIEW" ⇒ rack) as a UIA lookup for the VIEW button, and deliberately FAILS OPEN — "the plugin does not answer UIA" counts as rack, because a wrong "no" silently hides all seven rack controls, which is the bug that made this necessary. Only ever seen in the rack state; nobody has looked at what Kontakt 7 shows in the single view.
 - [ ] **Previous/Next snapshot cannot confirm they did anything.** They acknowledge the press, and the dropdown checks that a menu actually opened, but the arrows have no post-condition. Reading the snapshot name field by OCR before and after would both confirm the step and let the control announce the new snapshot's name — which is the announcement a screen-reader user actually wants. Needs one look at what Kontakt puts in that field when an instrument has no snapshots.
 - [ ] **`daw-hosts` accepts any `#32770` of reaper.exe as a plugin host,** because REAPER's FX window is one. So is every dialog a natively-hosted plugin opens: Kontakt's "Content Missing" passed as a host, and the Qt window drawing it passed as the plugin, until `detect.inOwnDialog` shut that door for Kontakt specifically (by title, as ReaHotkey does). The same mechanism is still open for every other module on `daw.all` — Komplete Kontrol has its own dialogs. Unverified, but it is the same mechanism, not a different one.
-- [ ] **Kontakt 8's view toggle could use UIA where it is reachable.** Standalone, a raw walk lists "Play View" as a real Button; we send F10 everywhere instead. F10 works and cannot drift the way a measured menu row can, so this is a nicety, not a fix.
+- [ ] **Kontakt 8's view toggle could use UIA where it is reachable.** Standalone, a raw walk lists "Play View" as a real Button; Windows sends F10 instead, which works there and cannot drift the way a measured menu row can. On a Mac F10 is not Kontakt's key (measured 2026-09-18: the key went out, the view stayed, macOS beeped), so the toggle reads Kontakt's menu by OCR (header.luau) — and there, pressing the published 'Play View' button by name would remove both the OCR dependency and the never-seen "Switch to Play View" wording. On Windows a nicety; on a Mac more than that, once a classic-view capture shows how that button behaves.
 
 ## Speech through prism (2026-09-01)
 
@@ -1710,6 +1710,92 @@ lenses, adversarially refuted, eleven findings standing. The three criticals are
       wrong by a CONSTANT, which is exactly what a points-versus-pixels fault looks like from
       the outside. Leaving a decoy of that shape in place for the one session that finally has
       a Retina display would have been the expensive choice.
+
+## The Mac mini session with Kontakt 7 and 8 (2026-09-18)
+
+The protocol was `docs/macos-session-mini-kontakt8.md`; the machine the Mac mini M1 of the
+third session (macOS 14.5, 1.00x), the build 839b211 from CI. Six analyses of the log, each
+finding put to a refuter; what was fixed is in the commits of 2026-09-19. **Settled:**
+Kontakt 8 inside REAPER anchors on its `Kontakt File Menu` button exactly where the Windows
+geometry puts it (corner 238,52, centre 86,19), Load instrument and Save multi as work through
+the menu read by OCR, sforzando works throughout, macOS 14 captures through the looked-up
+legacy call, and Kontakt 8's own header File menu is an `AXMenuButton` whose menu a detector
+sees. **Fixed:** the pass-through is a line, not a ring (Shift+Tab backs out, `[passthrough]`
+per step, `[deactivate]` per loss); a hotkey moves the overlay's focus (`hotkeyKeepsFocus`
+opts out; Melodyne's Menu bar does); by-name lookups inside REAPER fall back to the whole window
+(`plugin_locate`); Info pane's Mac name; the view toggle goes through Kontakt's menu on a Mac;
+F6 says the title only; Personal Voice unticks when not granted and says so in two sentences;
+Accessibility no longer tells anyone to restart; the content rect of a window whose only
+full-width child is a strip; busy subscriptions feed the quarantine; ~12,000 per-tick log lines
+a session are gone.
+
+Changes that reach **Windows** too, and want one check there: a hotkey now moves the focus
+(Kontakt, Komplete Kontrol, Soundiron, u-he — ReaHotkey's own behaviour); Shift+Tab on Kontakt
+standalone's "Kontakt controls" no longer enters Kontakt from its last element; Return on a
+control that has hidden itself acts on its hotkey sibling or says "not available now"; the
+`[image]`/`[poll]`/`[recheck]` log thresholds.
+
+- [ ] **Why Kontakt 7 inside REAPER published nothing** (19 nodes, all REAPER's; in session
+      three the same window had 47). Three candidates the log cannot separate: Kontakt 7 was the
+      second NI Kontakt in that REAPER process, after a Kontakt 8 that published 73; the plugin
+      format (VST3 or AU, unrecorded both times); a page drawn over its header. Measurement, two
+      minutes: quit REAPER, start it fresh, insert Kontakt 7 FIRST and note VST3i/AUi, wait a
+      minute, Cmd+Shift+F9 over the FX window BEFORE any F6 (F6's fallback click lands on
+      Kontakt 7's logo button, top edge). Then Kontakt 8 into the same REAPER, Kontakt 7's window
+      again, F9 again.
+- [ ] **Kontakt 8's classic view has never been captured on a Mac.** Its view toggle now reads
+      Kontakt's menu for "Switch to Classic View" / "Switch to Play View"; the second wording has
+      never been seen on either platform, and whether the Windows view pixel reads classic on a
+      Mac is unknown (a miss logs every word the menu read). One press, then Cmd+Shift+F9 in
+      classic view: header composition, whether 'Play View' keeps its name, where the status bar
+      sits, and whether the `[view]` line flips.
+- [ ] **The Kontakt 8 status toggles' state on a Mac.** The Windows probe points miss by a point
+      or two (the status bar ends 2 pt above the panel's bottom), and the buttons carry no
+      `AXValue`; the Mac says "pressed" meanwhile. Re-measure the points from a Mac capture with
+      VoiceOver's caption panel off.
+- [ ] **Does Kontakt 8's standalone ring change size step to step?** 90 stops at entry; the tree
+      changed while he walked it (78→77→75 nodes). The `[passthrough]` lines now give index and
+      count per press. Also whether `AXFocused` on a preset row below its list's viewport
+      scrolls the list (16 of 2708 presets are exposed, rows below the viewport are admitted).
+      Only after that: a viewport filter for macOS `focus_step` — clip by ancestors that SCROLL
+      (AXScrollArea, AXList, AXTable, AXOutline, a group with an AXScrollBar child), never by
+      every AXGroup, ignoring ancestors with no rectangle.
+- [ ] **The event tap on its own thread.** Both switch-offs were the probe's ~1.2 s synchronous
+      hotkey callback, not focus handling; the ~1 s focus stalls did not trip it because no key
+      was waiting. Before moving the tap (tap.rs's escape hatch, which needs queue.rs's
+      pump-thread queues to become cross-thread): log in the tap callback when an event's
+      timestamp is more than 250 ms old, and see whether keys are ever delayed in real use.
+- [ ] **The probe in timer hops, with a busy guard.** Keep the press-time part synchronous
+      (window, controls, focus chain, dumps, capture, OCR); chain `ownsPoint`, the blank-OCR
+      check and the batching rounds one per tick (the first link `after(20)`, since a 0 ms timer
+      from a hotkey callback fires in the same pump iteration), then timer cadence; the summary
+      as the `done` callback that clears `busy`; `probe step X: N ms` per step.
+- [ ] **CI signing with a stable identity**, only for a tester who keeps grants across builds on
+      their own Mac — the borrowed Macs reset TCC on purpose, so they gain nothing. Done so it
+      cannot fail without a word: the p12 made with `openssl pkcs12 -export -legacy`; a keychain
+      created, unlocked and put on the search list; a step after Package that fails when the
+      secret is set and `codesign -dv` shows no `Authority=OSAP Local Signing`; the workflow
+      file added to the reuse diff; the secret in an Environment limited to main. The key IS the
+      privilege — anyone holding it ships a binary that inherits the grants.
+- [ ] **The menu watch's backstop honours a menu for 150 ms of every 1.2 s.** A menu the
+      accessibility check sees with no hold running (Kontakt 8's own File menu, opened by
+      VoiceOver) gave the keys up and took them back four times in five seconds. Let a sighting
+      extend `menuPlausibleUntil` while the check keeps seeing it, log the first sighting and the
+      close once. Measure the flicker first (open Kontakt 8's own menu with VoiceOver for 5 s).
+- [ ] **`[observe] epoch served` is still a line per tick on a Mac** (3437 in the session): every
+      steady epoch reaches the OS 2-5 times there. Line level only for `binding_us >= 1000`,
+      pixels, or `reached_os >= 6`; replace `asked >= 1000` (which flags every long idle epoch,
+      one key asked thousands of times) with a rate; and fix the comment at lib.rs:514-533 —
+      image drains bump the epoch, recurring timers do not.
+- [ ] **The pump line calls its residue "mostly key and hotkey dispatch"** and never measures it
+      (`ev_counts.3` is documented as key-dispatch ms and written by nobody). Time on_hotkey and
+      on_key, print keys/hotkeys and "outside the handlers" separately.
+- [ ] **`host.element.locate` is not epoch-cached**, so on a miss each of the five VMs that carry
+      Kontakt's code walks the window. macOS-only `located()` routing first; on every platform
+      only after checking ON:EAR's polls on Windows don't start logging `[observe]` per tick.
+- [ ] **Personal Voice after a grant listed 0 personal voices.** Ask whether that Mac has one
+      recorded; if so, relaunch and read the startup voice line. And what the status reads right
+      after refusing macOS's own dialog (the pump now unticks either way).
 
 ## Before the fourth macOS session (2026-09-12)
 

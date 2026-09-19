@@ -426,12 +426,19 @@ impl Speech {
                 // not the request: the request still goes to the worker.
                 let status = avspeech::personal_status();
                 if let Some(why) = status.explanation() {
-                    crate::logging::line("speech", &format!("Personal Voice: {why}"));
+                    // Rare since the settings switch reads the status itself before turning
+                    // on (gui.rs), and refuses to on these two answers: this runs only when the
+                    // status changed between that click and this pump.
+                    crate::logging::line("speech", &format!("Personal Voice: {status:?} — {why}"));
                 } else if status == avspeech::PersonalVoice::Granted {
+                    // Re-read, because the grant may have come from somewhere the list was not
+                    // re-read after: System Settings, while the switch was off. The list is read
+                    // at start and after a grant from the dialog, and nowhere else.
+                    self.av.refresh();
                     crate::logging::line(
                         "speech",
-                        "Personal Voice: already granted — it is among the voices a module can \
-                         choose",
+                        "Personal Voice: already granted — re-reading the voices, so it is among \
+                         those a module can choose",
                     );
                 } else if !avspeech::supported() {
                     // The settings switch has already put up its dialog for this case; the
@@ -439,8 +446,7 @@ impl Speech {
                     crate::logging::line(
                         "speech",
                         "Personal Voice: this macOS has no such API — it arrived in macOS 14 — \
-                         so there is nothing to ask for. The switch stays on and changes \
-                         nothing.",
+                         so there is nothing to ask for.",
                     );
                 } else {
                     crate::logging::line(
@@ -454,13 +460,28 @@ impl Speech {
                 self.last_personal.set(on);
             }
         }
-        // The answer to a request that showed no dialog, said as well as logged: the user
-        // ticked a switch and would otherwise hear nothing — the same "checkbox ticked,
-        // nothing happens" two testers have now reported.
+        // A request that was not granted: the switch goes back off, and that is said as well as
+        // logged. The user ticked a box and would otherwise hear nothing — the same "checkbox
+        // ticked, nothing happens" two testers have reported — and a box left ticked over no
+        // grant was the other half of that report. Off is safe to store: the switch gates
+        // nothing but its own rising edge, so ticking it again asks macOS again. The visible
+        // checkbox follows on the settings window's next tick, which also stores the "off"
+        // (gui.rs) — the settings store is the interface's, not this module's.
         #[cfg(target_os = "macos")]
         if let Some(why) = self.av.take_personal_note() {
-            crate::logging::line("speech", &format!("Personal Voice: {why}"));
-            self.av.say(&why, false, None);
+            // An environment variable that forces the switch on also keeps it on (`set` cannot
+            // turn it off), and then the sentence must not claim otherwise.
+            if crate::appcfg::forced_by_env("personal_voice") {
+                crate::logging::line("speech", &format!("Personal Voice: {why}"));
+                self.av.say(why.as_str(), false, None);
+            } else {
+                crate::appcfg::set("personal_voice", false);
+                crate::logging::line(
+                    "speech",
+                    &format!("Personal Voice: {why} The switch is off again."),
+                );
+                self.av.say(&format!("{why} The box has been unticked."), false, None);
+            }
         }
         #[cfg(target_os = "macos")]
         for text in self.vo.refused() {

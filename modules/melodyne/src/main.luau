@@ -461,6 +461,10 @@ end
 ov:addCustomButton({
   label = "Menu bar",
   hotkey = "Alt+F",
+  -- A control's hotkey moves the overlay's focus to it, but not this one: focus on a button
+  -- holds Space, and Space is Melodyne's play/stop. Alt+F from a read-out must leave the user
+  -- on the read-out.
+  hotkeyKeepsFocus = true,
   onActivate = engageMenuBar,
 })
 
