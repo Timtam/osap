@@ -255,7 +255,7 @@ host.hotkey.register(KEY, function()
   -- the tree dumps and name lookups that follow go by that window's id. The picture, the OCR
   -- reads, the pointer and the window list are read when their own step runs, inside the
   -- rectangle read here — so something raised over the plug-in in the meantime (a notification,
-  -- another application, the previous run's error window) is what they record. The picture
+  -- another application, a dialog of the plug-in itself) is what they record. The picture
   -- step says so in the log when the window in front is no longer this one.
   local thisRun = run
 

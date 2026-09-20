@@ -647,65 +647,6 @@ function M.ocrBatchingSteps(line, win)
   return steps
 end
 
--- == Does the module-error window work on a Mac? ==============================
---
--- Not a measurement the probe can take: it needs a person to say what they heard and whether
--- the window could be reached. So the probe does the one part a person cannot do reliably —
--- provoke a real module error at a known moment — and the briefing asks the three questions.
---
--- A real error rather than a simulated one: this raises it from inside a timer callback,
--- which is the path `report_callback_error` actually takes, so what appears is the genuine
--- article and not something shaped like it.
---
--- Deliberately LAST in the run, and behind its own delay: it puts a window on screen, and
--- everything above should be in the log before anything steals the focus.
---
--- And ONCE per session, which is what the briefing promised and what the code did not do:
--- the tester's third session had the window after every one of four presses, each stealing
--- the focus from the plug-in the run had just finished describing. "Session" here means the
--- module's VM, which lives until the module is reloaded — the manager's hot-load, a disable
--- and enable, or a restart of the host — and a reload starts a fresh VM with this flag clear,
--- so the first press after one raises the error again. That is the right behaviour, since a
--- reload is also when the error window is worth looking at anew.
-local errorRaised = false
-
-function M.provokeErrorWindow(line)
-  if not (host.timer and host.timer.after) then
-    line("  error window: host.timer unavailable, cannot provoke one")
-    return
-  end
-  if errorRaised then
-    -- Said so the log explains the absence: a reader who missed the first window would
-    -- otherwise take this section's silence for the error never firing.
-    line("  error window: already raised once this session, not again")
-    return
-  end
-  errorRaised = true
-  line("  error window: raising a real module error in eight seconds — expect a window titled")
-  line("  error window: 'Module error: com.tool.probe'. Three things to report:")
-  line("     1. does it have a Dock icon and an entry in the app switcher (Cmd-Tab)")
-  line("     2. does VoiceOver read the message when it opens")
-  line("     3. with the module manager ALSO open, close the manager — does the error window")
-  line("        keep its Dock icon (that is the refcount, and it is the bug this was written")
-  line("        to prevent)")
-  -- Three seconds, not one. Two of the answers above run on timer hops of their own — the
-  -- timer cadence takes about a second, and window.active cost about 1.2, because it now
-  -- deliberately crosses a tick boundary per ask — and a window appearing on screen while
-  -- their lines are still arriving makes the run harder to read and harder to describe.
-  -- Raising the error does NOT stop them (a callback error is logged and shown, the module
-  -- stays loaded), so this is about the order things reach the tester, not about losing them.
-  --
-  -- Eight, not three, since the summary. The run ends by SPEAKING its summary — "Probe N
-  -- written. … N words." — and the word count at its very end is the number the protocol asks
-  -- for. A timer set here fires three seconds later whatever the run has been doing, which is
-  -- while that sentence is still being said, and VoiceOver starts reading the error window over
-  -- the number.
-  host.timer.after(8000, function()
-    error("this is the probe, raising an error on purpose so the error window can be looked at")
-  end)
-end
-
--- The whole section, in the order the answers are worth reading.
 -- == Is text drawn where the element carrying it says it is? =================
 --
 -- The one comparison here that a Retina mistake cannot pass by construction. `pointerSpace`
@@ -851,10 +792,6 @@ function M.steps(line, win)
     -- so the run still ends.
     for _ = started + 1, 2 do one() end
     return M.WAIT
-  end }
-  -- Last, because it raises a window: everything above wants to be in the log first.
-  steps[#steps + 1] = { name = "error window", run = function()
-    guard(line, "error window", function() M.provokeErrorWindow(line) end)
   end }
   return steps
 end

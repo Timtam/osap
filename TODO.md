@@ -1948,9 +1948,10 @@ what it left open.
       fix, with x consistently 2 pt left of the logo; whether `REAPER_LIST_GAP` (9) is 2 pt
       too wide for every plugin or REAPER's popup is inset cannot be told without a
       sforzando-in-REAPER probe from the same build.
-- [ ] Protocol step 5 asked for "a Dock icon for the error window" — a window cannot have
+- [x] Protocol step 5 asked for "a Dock icon for the error window" — a window cannot have
       its own on macOS; the application's icon while the window is up is the answer he gave.
-      Reword next time. Step 1 assumed a local build; the artifact route needs its own text.
+      Closed 2026-09-20: the error window is answered (see below) and the step is gone from the
+      protocol. Step 1 assumed a local build; the artifact route has its own text now.
 - [x] `docs/macos-session-three.md` still names the old chords in its keys table; it is the
       protocol as sent and carries a note. Closed on 2026-09-20: the protocols left git, and the
       one that is current is `docs/macos-test-protocol.md`.
@@ -2248,13 +2249,19 @@ serious one.
       NVDA in one sitting: does the FIRST report read its own title, and does a SECOND one —
       which retitles the window "Automation Platform — N problems" and puts each report's own
       heading at the top of its own entry — read the new report rather than the old text.
-- [ ] **The error window on macOS is written and unrun.** It compiles and links (the macOS CI
-      builds `gui.rs`), and nothing beyond that is known. Three things only a Mac can answer:
-      does the agent promotion actually produce a Dock icon and an app-switcher entry for it;
-      does VoiceOver read the text control when it opens; and does the refcount hold — open
-      the manager, make a module fault, close the manager, and check the error window still
-      has its Dock icon. That last one is the bug this window was written to prevent, so it is
-      the one worth doing first.
+- [x] **The error window on macOS — confirmed on a Mac**, in the session before the Mac mini
+      one of 2026-09-18 (reported by the tester; no log of that session is in this repository).
+      All three answers came back good: the application is promoted while the window is up (the
+      log says "activation policy set to regular (Dock icon, in the app switcher) … accepted:
+      true", and back to
+      accessory on close), VoiceOver reads the message, and the window keeps the application's
+      Dock icon when the module manager is closed underneath it — the refcount, which is the
+      bug it was written to prevent. Note for the wording: a window has no Dock icon of its own
+      on this platform; what appears is the application's, for as long as the window is open.
+      The probe no longer raises a module error on purpose (removed 2026-09-20): it put a
+      window on screen and took the focus off the plug-in just recorded, once per launch, for
+      questions that are now answered. `git show 228029d:tools/probe/src/answers.luau` has the
+      code if it is ever wanted again.
 - [ ] **A failing code dependency reports once per dependent.** `report_load_failure` pushes
       straight onto the error queue rather than through `queue_dialog`, so it is not deduped:
       if `com.platform.overlay` ever failed to load, each of the eight modules that depend on
