@@ -10,6 +10,11 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.102"
+# The commit this executable is compiled from (see BUILT_FROM in main.rs). A proc macro that
+# runs `git describe` and makes the crate depend on `.git/logs/HEAD` and `.git/index`, so a new
+# commit rebuilds this crate even when no Rust changed. Here rather than in `host` on purpose:
+# this crate is the small one, and a commit then costs a relink rather than a host rebuild.
+git-version = "0.3.9"
 host = { path = "../host" }
 
 # Only to re-attach the parent terminal when the management subcommands are run from one —

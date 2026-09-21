@@ -15,6 +15,32 @@ use std::io::Write;
 use anyhow::Result;
 use host::registry;
 
+/// The commit this executable was compiled from: seven characters of it (more only where
+/// seven would be ambiguous), with `-modified` after them when the working tree had
+/// uncommitted changes at the time (a local build), and `unknown` where there was no git to
+/// ask (a source archive). `host::build_info` puts it into the log header.
+///
+/// `--exclude=*` keeps it a bare commit even once the repository has tags, where
+/// `git describe` would otherwise answer `v0.2.0-5-g6c95c8b`. A shallow clone, which is what
+/// the Windows CI job checks out, answers the same as a full one.
+///
+/// Refreshed without a Rust change: the macro makes this crate depend on the reflog and the
+/// index, so a commit, a checkout or a reset recompiles it. And since this crate depends on
+/// `host`, any change there recompiles it too and asks again whether the tree is modified.
+/// Only an edit outside the Rust (a module, a document) leaves the marker as it was, which
+/// is right: the executable is the same either way.
+///
+/// Two ways it goes stale on a development machine, both cured by touching this file: when
+/// git could not be asked at all, the macro records no dependency, so `unknown` stays until
+/// this crate compiles again for another reason; and with a target folder shared between
+/// checkouts (worktrees), the dependency points into the checkout that built it last, so
+/// another checkout's build can reuse it and name that one's commit. CI builds from a fresh
+/// checkout and is affected by neither.
+const BUILT_FROM: &str = git_version::git_version!(
+    args = ["--always", "--abbrev=7", "--dirty=-modified", "--exclude=*"],
+    fallback = "unknown"
+);
+
 /// Re-attach to the terminal that launched us, if there was one.
 ///
 /// The subsystem above means the process starts with no console at all — which is the point
@@ -97,6 +123,9 @@ fn log_panics() {
 }
 
 fn main() -> Result<()> {
+    // First, so that no log header can be written without it: the panic hook below opens the
+    // log too, and may do so before `run` does.
+    host::build_info::set_binary_commit(BUILT_FROM);
     attach_parent_console();
     log_panics();
     let args: Vec<String> = std::env::args().skip(1).collect();

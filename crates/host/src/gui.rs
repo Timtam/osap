@@ -585,8 +585,14 @@ pub fn run_gui(
         // app — only the tray "Quit" does.
         app.set_exit_on_frame_delete(false);
 
+        // The build at the end of the title, so a screen reader says it whenever the window
+        // gets focus, and after the part that tells the user which window this is.
+        let title = format!(
+            "Automation Platform — Modules ({})",
+            crate::build_info::short(env!("CARGO_PKG_VERSION"))
+        );
         let frame = Frame::builder()
-            .with_title("Automation Platform — Modules")
+            .with_title(&title)
             .with_size(Size::new(560, 470))
             .build();
 

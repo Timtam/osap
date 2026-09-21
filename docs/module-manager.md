@@ -25,6 +25,12 @@ are read silently by the screen reader — the app never speaks over it.
 > Closing the window **hides it to the tray**; modules keep running. Use the
 > tray icon's **Quit** to actually exit.
 
+The window's title ends with the version and the build, for example
+`Automation Platform — Modules (0.1.0, build 6c95c8b)`, so the build can be heard without
+opening the log: on Windows a screen reader reads it whenever the window gets focus. The log
+names the same build at the start of every session (`[host] version 0.1.0, build 6c95c8b`);
+quote it when you report a problem.
+
 ## Installed tab
 
 Lists every loaded module with a native checkbox. Below the list: **Settings…**,

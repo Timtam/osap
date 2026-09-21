@@ -83,11 +83,18 @@ jobs:
   #
   # The commit is the first seven characters of the one this run builds. Seven, not whatever
   # `git rev-parse --short` would choose, so the name has one shape from run to run.
+  #
+  # The same seven characters are also handed over on their own, as `commit`: both packaging
+  # scripts write them into the package (build-info.txt), and the application names that build
+  # in its log header and its window title, so a report can be matched to the download it came
+  # from. They matter most on macOS, where the job may reuse an earlier run's executable; the
+  # executable then knows only its own commit, and the package is what says it is this one.
   version:
     name: Name the downloads
     runs-on: ubuntu-latest
     outputs:
       prefix: ${{ steps.name.outputs.prefix }}
+      commit: ${{ steps.name.outputs.commit }}
     steps:
       # Only the four files a version is written in: this job reads them and nothing else, and
       # both platform jobs are waiting for it.
@@ -132,9 +139,11 @@ jobs:
           if [ "$manifest" != "${app%%[-+]*}.0" ]; then
             echo "::warning::crates/app/windows/automation-platform.exe.manifest gives the assembly version '$manifest', but the downloads are named $app."
           fi
-          prefix="automation-platform-$app-${GITHUB_SHA:0:7}"
+          commit="${GITHUB_SHA:0:7}"
+          prefix="automation-platform-$app-$commit"
           echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
-          echo "this run's downloads: $prefix-windows and $prefix-macos"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "this run's downloads: $prefix-windows and $prefix-macos, both build $commit"
 
   windows:
     name: Windows
@@ -142,6 +151,7 @@ jobs:
     uses: ./.github/workflows/windows-build.yml
     with:
       artifact-prefix: ${{ needs.version.outputs.prefix }}
+      commit: ${{ needs.version.outputs.commit }}
 
   macos:
     name: macOS
@@ -155,3 +165,4 @@ jobs:
       actions: read
     with:
       artifact-prefix: ${{ needs.version.outputs.prefix }}
+      commit: ${{ needs.version.outputs.commit }}

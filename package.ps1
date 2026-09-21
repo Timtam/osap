@@ -4,6 +4,9 @@
 #   .\package.ps1 -Version 0.3.0  name the zip for that version instead of the date
 #   .\package.ps1 -NoZip          stage only, for looking at what would ship
 #   .\package.ps1 -NoBuild        package whatever is already in target\release
+#   .\package.ps1 -Commit 6c95c8b name the build for that commit (CI passes the run's own);
+#                                 left out, it is this checkout's, marked -modified when the
+#                                 working tree has uncommitted changes
 #
 # The layout is the one the app already expects when it is started with no arguments: it
 # looks for `modules` NEXT TO THE EXECUTABLE (registry::modules_dir), so a tester runs the
@@ -14,12 +17,32 @@
 param(
   [string]$Version,
   [switch]$NoZip,
-  [switch]$NoBuild
+  [switch]$NoBuild,
+  [string]$Commit
 )
 
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 $rel = Join-Path $root "target\release"
+
+# The build this package is, so that a report can be matched to the download it came from. The
+# application reads it from build-info.txt (written below) into the header every session writes
+# to its log, and into the title of its Modules window; see crates/host/src/build_info.rs.
+#
+# Asked the same way the executable asks when it is compiled (crates/app/src/main.rs), so a
+# package made here from a clean checkout names the same build as the executable inside it.
+if (-not $Commit) {
+  try { $Commit = (git -C $root describe --always --abbrev=7 --dirty=-modified '--exclude=*' 2>$null) } catch { $Commit = $null }
+  if (-not $Commit) { $Commit = "unknown" }
+  # A failed lookup is allowed; see the prism tag below for why the exit code is reset.
+  $global:LASTEXITCODE = 0
+}
+$Commit = "$Commit".Trim()
+# It goes into a file the application reads and into a window title, and the application
+# ignores anything else, so a bad value is refused here rather than shipped unread.
+if ($Commit -notmatch '^[A-Za-z0-9._+-]{1,64}$') {
+  throw "-Commit '$Commit' is not a commit: letters, digits and -._+ only, at most 64"
+}
 
 if (-not $NoBuild) {
   # wxDragon needs this; set here rather than expecting a configured shell, exactly as
@@ -148,10 +171,24 @@ simdutf 9.0.0, concurrentqueue, dr_wav, moderncom, djinni, NVGT, and NV Access's
 controller RPC definitions — and its own NOTICE is in prism-NOTICE.txt.
 "@ | Set-Content (Join-Path $licences "README.txt") -Encoding UTF8
 
+# Beside the executable, where the application looks for it. Plain ASCII, so no editor or
+# PowerShell version adds a byte-order mark it would have to skip (it skips one anyway).
+@"
+# The commit this package was made from. Automation Platform reads it at start and names it
+# in every session's header in automation-platform.log and in the title of its Modules window.
+commit=$Commit
+"@ | Set-Content (Join-Path $stage "build-info.txt") -Encoding ascii
+
 # A note for whoever unpacks it. Short on purpose: the two things that actually go wrong are
-# extracting somewhere unwritable and expecting a console window.
+# extracting somewhere unwritable and expecting a console window. The build comes first,
+# because it is what a report has to name.
 @"
 Automation Platform — test build
+
+Build: $Commit
+The application names the same build at the start of every session in its log,
+automation-platform.log, and in the title of its Modules window. Please mention it
+when you report something.
 
 To run: extract this folder somewhere you can write to (Documents or the Desktop —
 NOT Program Files) and start automation-platform.exe.
@@ -174,7 +211,7 @@ $shipped module(s) included.
 
 $label = if ($Version) { $Version } else { Get-Date -Format "yyyy-MM-dd" }
 $size = "{0:N1} MB" -f ((Get-ChildItem $stage -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
-Write-Host "Staged $shipped module(s) into $stage  ($size)"
+Write-Host "Staged $shipped module(s) into $stage  ($size), build $Commit"
 
 if (-not $NoZip) {
   $zip = Join-Path $root "dist\AutomationPlatform-$label.zip"

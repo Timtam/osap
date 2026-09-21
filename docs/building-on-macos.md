@@ -171,3 +171,21 @@ AUTOMATION_PLATFORM_TRACE=1 open AutomationPlatform.app
 
 The first block of the log is an account of the machine as the application sees it. Most
 questions we would ask are already answered there.
+
+Its second line, after `session start`, is the build, which is how a report is matched to the
+download it came from:
+
+```text
+[host] version 0.1.0, build 6c95c8b
+```
+
+The same build is at the end of the Modules window's title
+(`Automation Platform — Modules (0.1.0, build 6c95c8b)`) and near the top of the package's
+`README.txt`. It is the commit in the download's name, which
+`package-macos.sh` writes into `build-info.txt` beside the `.app` (`--commit`, or this
+checkout's commit when left out). When the CI job reused an earlier run's executable because
+no Rust had changed, the log adds `(binary built from <commit>)`. A binary run straight from
+`target/` has no `build-info.txt` and names the commit it was compiled from, with `-modified`
+when the working tree had uncommitted changes. A packaged `.app` that cannot find the file
+says so on the next line: it has been moved away from its folder, or macOS is running a
+translocated copy, and the build named is then only the executable's own.

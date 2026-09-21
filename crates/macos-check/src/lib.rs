@@ -16,6 +16,10 @@ pub mod portable;
 #[path = "../../host/src/logging.rs"]
 pub mod logging;
 
+/// Borrowed because `logging` writes the build into its header.
+#[path = "../../host/src/build_info.rs"]
+pub mod build_info;
+
 #[path = "../../host/src/backend/mod.rs"]
 pub mod backend;
 

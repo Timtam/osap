@@ -6,6 +6,8 @@
 //! bound to that module's root + the shared services.
 
 mod backend;
+/// Which build is running: the executable's commit and the package's. See the file.
+pub mod build_info;
 mod capture_source;
 mod gui;
 mod image_search;

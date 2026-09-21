@@ -26,6 +26,10 @@ on:
         description: 'automation-platform-<version>-<commit>, worked out by build.yml; this workflow adds -macos'
         required: true
         type: string
+      commit:
+        description: 'the seven-character commit in that name, which the package records as its build'
+        required: true
+        type: string
 
 # `actions: read` is for looking up an earlier run and downloading its build; see "Reuse the
 # last build" below. `build.yml` grants the same two to this call; asking here for more than
@@ -110,6 +114,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ github.ref_name }}
+          COMMIT: ${{ inputs.commit }}
         run: |
           set -u
           # Newest first. This very run is on the list too. On its first attempt it has no macOS
@@ -146,6 +151,18 @@ jobs:
           mkdir -p dist
           ditto -x -k "$zip" dist || { echo "could not unpack it"; exit 0; }
           if [ ! -d dist/AutomationPlatform ]; then echo "unfamiliar layout"; exit 0; fi
+          # Which commit the executable in it was built from: that package's `binary=` line when
+          # it was itself a reuse, its `commit=` otherwise (a package this job built names its
+          # own commit, and the executable was compiled from the same checkout). Read before
+          # the file is rewritten below.
+          info=dist/AutomationPlatform/build-info.txt
+          if [ ! -f "$info" ]; then echo "that build carries no build-info.txt"; exit 0; fi
+          # Its Build: line is rewritten below, and under `bash -e` a missing file would fail the
+          # job there rather than fall through to a build.
+          if [ ! -f dist/AutomationPlatform/README.txt ]; then echo "that build has no README.txt"; exit 0; fi
+          from=$(sed -n 's/^binary=//p' "$info" | head -n1)
+          [ -n "$from" ] || from=$(sed -n 's/^commit=//p' "$info" | head -n1)
+          if [ -z "$from" ]; then echo "that build's build-info.txt names no commit"; exit 0; fi
           # The binary is the old one; the MODULES are this commit's, which is the whole point
           # of the run. Staged the same way package-macos.sh stages them.
           rm -rf dist/AutomationPlatform/modules
@@ -164,13 +181,36 @@ jobs:
           if [ -d tools/probe ]; then
             cp -R tools/probe dist/AutomationPlatform/modules/probe
           fi
+          # And the build it is: this run's commit, because the download is named for it and its
+          # modules are its. The old file would name the earlier run, and the tester would quote
+          # a build whose modules he does not have. The executable's own commit is kept beside
+          # it and in the README; the application says it too, as "binary built from", since
+          # the commit is compiled into it. Beside the .app, so the signed bundle is untouched
+          # and stays the application the tester has already granted permissions to.
+          if [ "$from" = "$COMMIT" ]; then
+            # A re-run of this same run, reusing what its first attempt uploaded.
+            printf '%s\n' \
+              "# The commit this package was made from. Automation Platform reads it at start and names it" \
+              "# in every session's header in automation-platform.log and in the title of its Modules window." \
+              "commit=$COMMIT" > "$info"
+          else
+            printf '%s\n' \
+              "# The commit this package was made from. Automation Platform reads it at start and names it" \
+              "# in every session's header in automation-platform.log and in the title of its Modules window." \
+              "# Its executable is an earlier build's, reused because no Rust had changed since:" \
+              "commit=$COMMIT" \
+              "binary=$from" > "$info"
+            sed -i '' "s/^Build: .*/Build: $COMMIT (the application itself was built from $from)/" \
+              dist/AutomationPlatform/README.txt
+          fi
+          grep '^Build: ' dist/AutomationPlatform/README.txt || echo "::warning::the reused README has no Build: line"
           # Re-zipped so the artifact a tester downloads carries today's modules rather than
           # the ones the binary happened to ship with.
           rm -f dist/*.zip
           (cd dist && ditto -c -k --sequesterRsrc --keepParent AutomationPlatform \
             "AutomationPlatform-macos-$(date +%Y-%m-%d)-modules.zip")
           echo "reused=true" >> "$GITHUB_OUTPUT"
-          echo "reused the build from $prev"
+          echo "reused the build from $prev: the package is build $COMMIT, its executable was built from $from"
 
       - uses: dtolnay/rust-toolchain@stable
         if: steps.reuse.outputs.reused != 'true' 
@@ -213,8 +253,12 @@ jobs:
         # one-word step. arm64 because that is the slice this runner can also execute.
         run: cargo test --release --target aarch64-apple-darwin
 
+      # With this run's commit as the build, which package-macos.sh writes into build-info.txt
+      # beside the .app and into the README.
       - name: Package
-        run: ./package-macos.sh --universal
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: ./package-macos.sh --universal --commit "$COMMIT"
         if: steps.reuse.outputs.reused != 'true'
 
       # `package-macos.sh` prints `lipo -archs` and carries on regardless, so a half-universal
@@ -248,8 +292,12 @@ jobs:
       # difference matters, because it means timers fire here and a module can be given real
       # work rather than merely being loaded. The step below is the first thing to use that.
       #
-      # This one still asks a single question: did every module load.
+      # This one still asks a single question: did every module load. And, in passing, whether
+      # the log names this run's build, which is what a tester's report will be matched by.
       - name: Load the modules once, on a Mac
+        env:
+          COMMIT: ${{ inputs.commit }}
+          REUSED: ${{ steps.reuse.outputs.reused }}
         run: |
           cd dist/AutomationPlatform
           AUTOMATION_PLATFORM_HEADLESS=1 \
@@ -300,6 +348,27 @@ jobs:
             echo "::error::the game-controller watcher did not start — see the gamepad lines above"
             exit 1
           fi
+          # The build the tester will quote: this run's commit, read from build-info.txt beside
+          # the .app, followed by "(binary built from …)" when the executable was reused. A
+          # warning rather than a failure: a wrong build number is worth seeing, not worth the
+          # download. `-modified` would mean the checkout had changed before the compile: this
+          # run's checkout when it compiled, the earlier run's when it reused that executable, and
+          # only in the first case does this checkout's status say anything about it.
+          header=$(grep '\[host\] version' automation-platform.log | tail -n1 || true)
+          echo "log header: $header"
+          case "$header" in
+            *", build $COMMIT"*) ;;
+            *) echo "::warning::the log does not name this run's commit ($COMMIT) as the build: $header" ;;
+          esac
+          case "$header" in
+            *-modified*)
+              if [ "$REUSED" = "true" ]; then
+                echo "::warning::the reused executable was compiled from a checkout with uncommitted changes, in the run that built it: $header"
+              else
+                echo "::warning::the executable was compiled from a checkout with uncommitted changes: $header"
+                git -C "$GITHUB_WORKSPACE" status --short || true
+              fi ;;
+          esac
 
       # Speech, which is the one new subsystem a runner can actually exercise.
       #
@@ -493,6 +562,8 @@ jobs:
           ditto -x -k "$zip" dist
 
       - name: Load, capture and speak, on the newer macOS
+        env:
+          COMMIT: ${{ inputs.commit }}
         run: |
           cd dist/AutomationPlatform
           # One launch per question, as in the build job: a fresh log each time, and the liveness
@@ -529,6 +600,15 @@ jobs:
             echo "::error::a module failed to load on the newer macOS"
             exit 1
           fi
+          # The build as the downloaded zip names it. The build job reads build-info.txt from the
+          # folder it zipped; this is the only place that reads it from the zip itself. A warning,
+          # as there: a wrong build number is worth seeing, not worth a red mark.
+          header=$(grep '\[host\] version' automation-platform.log | tail -n1 || true)
+          echo "log header: $header"
+          case "$header" in
+            *", build $COMMIT"*) ;;
+            *) echo "::warning::the downloaded package does not name this run's commit ($COMMIT) as its build: $header" ;;
+          esac
 
           WAIT_FOR="CAPTURE PROBE: still alive"
           launch "$GITHUB_WORKSPACE/tools/capture-probe"

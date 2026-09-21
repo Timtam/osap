@@ -30,6 +30,10 @@ on:
         description: 'automation-platform-<version>-<commit>, worked out by build.yml; this workflow adds -windows'
         required: true
         type: string
+      commit:
+        description: 'the seven-character commit in that name, which the package records as its build'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -82,6 +86,8 @@ jobs:
       # table one handed the other — so only a real load of a real module can see it.
       - name: The capability gate still holds
         shell: pwsh
+        env:
+          COMMIT: ${{ inputs.commit }}
         run: |
           $env:AUTOMATION_PLATFORM_HEADLESS = '1'
           $log = 'target/release/automation-platform.log'
@@ -103,6 +109,21 @@ jobs:
           # everything a real overlay does until 2026-09-03.
           if (-not (Select-String -Path $log -Pattern 'HEADLESS TIMER: fired' -Quiet)) {
             throw 'host.timer did not fire in headless mode — the event loop is not ticking'
+          }
+          # Which build the executable says it is. target/release has no build-info.txt, so
+          # this is the commit compiled into it (crates/app/src/main.rs), and it should be this
+          # run's, unmodified. A warning rather than a failure: a wrong build number is worth
+          # seeing, not worth the download. `-modified` would mean something in the checkout
+          # had changed before the executable was compiled; the status below says what.
+          $header = Select-String -Path $log -Pattern '\[host\] version' | Select-Object -Last 1
+          Write-Host "log header: $($header.Line)"
+          if (-not $header -or $header.Line -notmatch ", build $env:COMMIT") {
+            Write-Host "::warning::the executable does not name this run's commit ($env:COMMIT) as its build: $($header.Line)"
+          } elseif ($header.Line -match '-modified') {
+            Write-Host "::warning::the executable was compiled from a checkout with uncommitted changes: $($header.Line)"
+            git status --short
+            # Its exit code would be the step's, and this is only a diagnostic.
+            $global:LASTEXITCODE = 0
           }
 
       # The instrument the macOS tester works with. It is not built here — it is Luau — so
@@ -220,8 +241,16 @@ jobs:
           npm ci
           npm run build
 
+      # With this run's commit as the build, which package.ps1 writes into build-info.txt beside
+      # the executable and into the README. Checked, because the download's name promises it.
       - name: Package
-        run: ./package.ps1 -NoBuild
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          ./package.ps1 -NoBuild -Commit $env:COMMIT
+          if (-not (Select-String -Path dist/AutomationPlatform/build-info.txt -Pattern "^commit=$env:COMMIT$" -Quiet)) {
+            throw "build-info.txt in the package does not say commit=$env:COMMIT"
+          }
 
       # What a tester downloads. The same staging `package.ps1` produces locally, so a problem
       # in it shows up here rather than in somebody's hands.

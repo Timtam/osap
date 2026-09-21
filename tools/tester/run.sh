@@ -25,6 +25,13 @@ out="$here/out.txt"
   echo "=== run.sh $(date '+%Y-%m-%d %H:%M:%S') ==="
   echo "macOS: $(sw_vers -productVersion) ($(sw_vers -buildVersion))"
   echo "hardware: $(sysctl -n hw.model), $(uname -m)"
+  # The build the last session ran, from the log's header, so this output can be matched to
+  # the download it came from without anybody reading anything out.
+  if [ -f "$here/automation-platform.log" ]; then
+    echo "application: $(grep '\[host\] version' "$here/automation-platform.log" | tail -1 | sed 's/^[0-9]* \[host\] //')"
+  else
+    echo "application: no automation-platform.log beside this script"
+  fi
   echo
 
   # ---- PAYLOAD: replace everything between these two lines --------------------------

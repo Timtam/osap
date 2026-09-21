@@ -29,6 +29,19 @@ pub fn base_dir() -> &'static Path {
     })
 }
 
+/// Whether the executable is inside a `.app`, i.e. whether [`base_dir`] is the folder
+/// around a bundle rather than the executable's own.
+///
+/// For the log header: a bundle is always a package, so a package file missing beside it
+/// means the `.app` was moved away from its folder, or macOS is running a translocated copy
+/// of it, rather than that this is a development run.
+pub fn in_bundle() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().and_then(strip_bundle))
+        .is_some()
+}
+
 /// Given the directory an executable sits in, the directory the surrounding `.app` sits in.
 ///
 /// Matched by shape (`…/Something.app/Contents/MacOS`) rather than by asking the OS,

@@ -29,6 +29,10 @@ Either way, the permissions are per code identity. A downloaded build is a diffe
 application to macOS than one you built, so it asks for Accessibility and Screen Recording
 again the first time.
 
+Which build you are testing is written into the log for us, so there is nothing to note down.
+If you want to hear it: it is at the end of the Modules window's title, "build" and a short
+code of letters and digits, and on the third line of the README.txt beside the app.
+
 
 ## 1. Launching should not take your cursor
 

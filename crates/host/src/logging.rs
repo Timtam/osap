@@ -76,7 +76,26 @@ pub fn init() {
 /// looking in the right place for modules.
 fn header() {
     line("host", "session start");
-    line("host", &format!("version {}", env!("CARGO_PKG_VERSION")));
+    // `version 0.1.0, build 6c95c8b`: the build is the commit the download was made from, so a
+    // report can be matched to it. See build_info for when a second commit follows it.
+    line("host", &crate::build_info::log_line(env!("CARGO_PKG_VERSION")));
+    if let Some(problem) = crate::build_info::package_problem() {
+        line("host", &format!("{problem}; the build above is the executable's own"));
+    } else if crate::build_info::package_commit().is_none() && portable::in_bundle() {
+        // Not a development run (those are never inside a .app), so the package's file is
+        // missing, and the executable's own commit is all there is. On macOS that can be an
+        // earlier run's, when CI reused its executable, so it must not pass for the download's.
+        line(
+            "host",
+            &format!(
+                "no {} beside the .app (it was moved away from its folder, or macOS is running \
+                 a translocated copy, which a `translocated` line below would say): the build above \
+                 is the executable's own, which is older than the download when CI reused an \
+                 earlier executable",
+                crate::build_info::FILE_NAME
+            ),
+        );
+    }
     line(
         "host",
         &format!(

@@ -7,6 +7,10 @@
 #   ./package-macos.sh --no-build      package whatever is already in target/release
 #   ./package-macos.sh --universal     join an Intel and an Apple-silicon build into one
 #                                      binary (both must already exist — see below)
+#   ./package-macos.sh --commit 6c95c8b
+#                                      name the build for that commit (CI passes the run's
+#                                      own); left out, it is this checkout's, marked
+#                                      -modified when the working tree has uncommitted changes
 #
 # This has to run ON a Mac (it compiles). Nobody on the project owns one, so it is also run
 # by .github/workflows/macos-build.yml on a GitHub runner, as the macOS half of every Build
@@ -20,15 +24,34 @@ version=""
 do_zip=1
 do_build=1
 universal=0
+commit=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --version) version="$2"; shift 2 ;;
     --no-zip)  do_zip=0; shift ;;
     --no-build) do_build=0; shift ;;
     --universal) universal=1; do_build=0; shift ;;
+    --commit) commit="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+# The build this package is, so that a report can be matched to the download it came from. The
+# application reads it from build-info.txt (written below) into the header every session writes
+# to its log, and into the title of its Modules window; see crates/host/src/build_info.rs.
+# Asked the same way the executable asks when it is compiled (crates/app/src/main.rs), so a
+# package made here from a clean checkout names the same build as the executable inside it.
+if [ -z "$commit" ]; then
+  commit="$(git -C "$root" describe --always --abbrev=7 --dirty=-modified --exclude='*' 2>/dev/null || true)"
+  [ -n "$commit" ] || commit="unknown"
+fi
+# It goes into a file the application reads and into a window title, and the application
+# ignores anything else, so a bad value is refused here rather than shipped unread.
+case "$commit" in
+  ''|*[!A-Za-z0-9._+-]*)
+    echo "--commit '$commit' is not a commit: letters, digits and -._+ only" >&2; exit 2 ;;
+esac
+[ "${#commit}" -le 64 ] || { echo "--commit '$commit' is longer than 64 characters" >&2; exit 2; }
 
 # The bundle identifier is the single most consequential string in this file.
 #
@@ -228,8 +251,26 @@ if command -v codesign >/dev/null 2>&1; then
   codesign -dv --verbose=2 "$app" 2>&1 | grep -E "^(Authority|Signature)=" | sed 's/^/  /' || true
 fi
 
+# Beside the .app, where the application looks for it, and NOT inside it: the CI job writes
+# this file again when it reuses an earlier build's executable, and a file added to the bundle
+# after signing would break the signature. Re-signing would give an ad-hoc signed app a new
+# identity, and with it cost the tester every permission he has granted.
+cat > "$stage/build-info.txt" <<INFO
+# The commit this package was made from. Automation Platform reads it at start and names it
+# in every session's header in automation-platform.log and in the title of its Modules window.
+commit=$commit
+INFO
+
+# The build comes first, because it is what a report has to name. The "Build:" line is also
+# rewritten by the CI job when it reuses an executable (.github/workflows/macos-build.yml), so
+# its shape is not to be changed on its own.
 cat > "$stage/README.txt" <<TXT
 Automation Platform — macOS test build
+
+Build: $commit
+The application names the same build at the start of every session in its log,
+automation-platform.log, and in the title of its Modules window. Please mention it
+when you report something.
 
 FIRST RUN, in order. macOS will not tell you when a step is missing; it will just
 behave as if the application is broken, so please do them all.
@@ -284,7 +325,7 @@ TXT
 
 label="${version:-$(date +%Y-%m-%d)}"
 size="$(du -sh "$stage" | cut -f1)"
-echo "Staged $shipped module(s) into $stage  ($size)"
+echo "Staged $shipped module(s) into $stage  ($size), build $commit"
 
 if [ "$do_zip" = "1" ]; then
   zip="$dist/$APP_NAME-macos-$label.zip"

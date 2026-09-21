@@ -2924,6 +2924,28 @@ shows them:
 The earlier runs of "Windows build" and "macOS build" keep their history and their downloads until
 those expire. Nothing triggers the two files on their own any more.
 
+## Build numbers (2026-09-21)
+
+The executable carries the commit it was compiled from (`git-version`, in `crates/app`), and
+each package carries the commit it was made from in `build-info.txt` beside the executable or
+the `.app`, written by `package.ps1 -Commit` / `package-macos.sh --commit`, which CI passes from
+the naming job in `build.yml`. The log header says `version 0.1.0, build <commit>`, plus
+`(binary built from <commit>)` when the two differ, and the Modules window's title ends with
+`(0.1.0, build <commit>)`. Checked locally (unit tests, a headless run, `package.ps1` into a
+scratch folder); these only a real run can show:
+
+- [ ] The Windows job's capability step prints `log header: ... build <this run's commit>` with
+      no warning. A `-modified` warning there means the runner's checkout changed before the
+      compile; the `git status` below it says which file.
+- [ ] The macOS job's module load prints the same, read from `build-info.txt` beside the `.app`.
+- [ ] The first Luau-only push after this: the reuse step says "the package is build X, its
+      executable was built from Y", the log header says `build X (binary built from Y)`, and
+      the downloaded README's `Build:` line says both.
+- [ ] Whether a reused macOS download keeps the permissions a tester granted to the build it
+      reuses. Never observed either way. The bundle is left untouched for that reason (only
+      `build-info.txt` and `README.txt` beside it change); a file inside it would need a new
+      signature, and an ad-hoc signature is a new identity.
+
 ## Dev tools
 
 - [x] **OCR window inspector (first version):** `tools/inspect` — **Ctrl+Alt+I** OCRs the focused window's client area and logs every recognized word with its **client-relative coordinates** (+ saves the capture with `AUTOMATION_PLATFORM_OCR_DEBUG=1`). Calibrates overlay regions and reveals where hardcoded (e.g. ReaHotkey) coordinates land vs the real controls. Resolved the sforzando polyphony case (the region was correct; the failures were the hover scrub-value — fixed by `hoverToRead`-off — and UWP OCR being blind to *single* digits). ✓ (2026-06-21)
