@@ -1,16 +1,24 @@
-//! XInput, loaded at run time.
+//! XInput, through the `rusty-xinput` crate.
 //!
 //! **Not linked.** windows-sys can import `XInputGetState` for us, and that import would be a
 //! LOAD-TIME dependency on `xinput1_4.dll`: a machine without it (Server Core, a stripped
 //! image) would then refuse to start the whole application, keyboard overlays and all, for the
-//! sake of a feature nobody there uses. `LoadLibraryW` makes it a feature that is simply
-//! absent. Only windows-sys's constants are used, and those cost nothing at run time.
+//! sake of a feature nobody there uses. `rusty-xinput` loads the DLL at run time instead — the
+//! loader under gilrs and Bevy — so a missing XInput is a feature that is simply absent. Its
+//! handle is never freed, which is what a library used for the life of the process wants: a
+//! library freed under a function pointer is how a crash at exit happens.
 //!
 //! **Ordinal 100.** `xinput1_4.dll` exports an unnamed `XInputGetStateEx` at ordinal 100 that
-//! also reports the Guide button (bit 0x0400), and SDL has read it for years. It is optional:
-//! where it is missing — `xinput9_1_0.dll` has no such export — the pad simply has no `guide`.
+//! also reports the Guide button (bit 0x0400), and SDL has read it for years. The crate reads it
+//! into a plain `XINPUT_STATE`, which is right: the `dwPaddingReserved` some headers add after
+//! it is never written by Microsoft's DLLs (Wine found this when writing it broke programs that
+//! had not allocated it). It is optional: where it is missing the pad simply has no `guide`.
+//!
+//! **Vendor and product.** The crate also reads the undocumented `XInputGetCapabilitiesEx`,
+//! which gives the USB vendor and product id of the pad in a slot. Also optional: where it is
+//! missing, `vendor` and `product` stay nil.
 
-use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use rusty_xinput::{XInputHandle, XInputUsageError};
 use windows_sys::Win32::UI::Input::XboxController as xc;
 
 use super::{names, Family, PadDesc, Snapshot, Source};
@@ -32,19 +40,14 @@ const _: () = {
     assert!(names::xinput::DPAD_DOWN == xc::XINPUT_GAMEPAD_DPAD_DOWN);
     assert!(names::xinput::DPAD_LEFT == xc::XINPUT_GAMEPAD_DPAD_LEFT);
     assert!(names::xinput::DPAD_RIGHT == xc::XINPUT_GAMEPAD_DPAD_RIGHT);
+    assert!(names::xinput::GUIDE == rusty_xinput::XINPUT_GAMEPAD_GUIDE);
     assert!(xc::XUSER_MAX_COUNT == SLOTS as u32);
-    // The documented struct is the first 16 bytes of ours; the extended call writes 4 more.
-    assert!(std::mem::size_of::<xc::XINPUT_STATE>() == 16);
-    assert!(std::mem::size_of::<StateEx>() == 20);
 };
 
 /// XInput has four user slots, and that is the limit for Xbox-type pads on Windows.
 pub const SLOTS: usize = 4;
 
-/// `XINPUT_STATE` followed by the reserved DWORD that ordinal 100 writes (SDL's
-/// `XINPUT_STATE_EX`). Used for BOTH calls: the documented one fills the first 16 bytes and
-/// leaves the last four alone, so one buffer shape serves either function.
-#[repr(C)]
+/// What the thread keeps of one reading: the parts of `XINPUT_STATE` it uses.
 #[derive(Default, Clone, Copy)]
 pub struct StateEx {
     pub packet: u32,
@@ -53,47 +56,31 @@ pub struct StateEx {
     pub right_trigger: u8,
     /// Left x, left y, right x, right y — XInput's order, y positive UP.
     pub thumbs: [i16; 4],
-    pub reserved: u32,
 }
 
-type GetState = unsafe extern "system" fn(u32, *mut StateEx) -> u32;
+/// `ERROR_DEVICE_NOT_CONNECTED`: what an empty slot answers.
+const NOT_CONNECTED: u32 = 1167;
 
 pub struct XInput {
-    /// The call that is actually made: ordinal 100 when there is one, `XInputGetState`
-    /// otherwise.
-    get_state: GetState,
+    handle: XInputHandle,
     guide: bool,
     pub dll: &'static str,
 }
 
 impl XInput {
-    /// The newest XInput the machine has. The module handle is never freed: the library is
-    /// used for the life of the process, and freeing it under a function pointer is how a
-    /// crash at exit happens.
+    /// The newest XInput the machine has, in the crate's own order. It is asked one DLL at a
+    /// time, rather than through `load_default`, only so the log can say which one answered.
     pub fn load() -> Result<XInput, String> {
-        for dll in ["xinput1_4.dll", "xinput9_1_0.dll"] {
-            let wide: Vec<u16> = dll.encode_utf16().chain(Some(0)).collect();
-            // SAFETY: a NUL-terminated wide string that outlives the call.
-            let module = unsafe { LoadLibraryW(wide.as_ptr()) };
-            if module.is_null() {
-                continue;
-            }
-            // SAFETY: a NUL-terminated name, and a module that is loaded and stays loaded.
-            let named = unsafe { GetProcAddress(module, b"XInputGetState\0".as_ptr()) };
-            let Some(named) = named else { continue };
-            // An ordinal is passed where the name would be, as MAKEINTRESOURCEA does.
-            // SAFETY: GetProcAddress accepts an ordinal in the low word of the name pointer.
-            let ordinal = unsafe { GetProcAddress(module, 100usize as *const u8) };
-            let (f, guide) = match ordinal {
-                Some(f) => (f, true),
-                None => (named, false),
-            };
-            // SAFETY: both exports have the signature `DWORD (DWORD, XINPUT_STATE*)`; the
-            // extended one writes 4 bytes more, which `StateEx` has room for.
-            let get_state: GetState = unsafe { std::mem::transmute(f) };
-            return Ok(XInput { get_state, guide, dll });
+        const DLLS: [&str; 5] =
+            ["xinput1_4.dll", "xinput1_3.dll", "xinput1_2.dll", "xinput1_1.dll", "xinput9_1_0.dll"];
+        for dll in DLLS {
+            let Ok(handle) = XInputHandle::load(dll) else { continue };
+            // Slot 0 answers whether the extended call exists: "not loaded" is the crate's word
+            // for a DLL without ordinal 100; an empty slot or a pad means it is there.
+            let guide = !matches!(handle.get_state_ex(0), Err(XInputUsageError::XInputNotLoaded));
+            return Ok(XInput { handle, guide, dll });
         }
-        Err("neither xinput1_4.dll nor xinput9_1_0.dll could be loaded".to_string())
+        Err(format!("none of {} could be loaded", DLLS.join(", ")))
     }
 
     /// Whether the Guide button can be read (ordinal 100 was found).
@@ -104,14 +91,32 @@ impl XInput {
     /// One slot's state, or the error code — `ERROR_DEVICE_NOT_CONNECTED` (1167) for an
     /// empty slot, which is the common case and not a fault.
     pub fn read(&self, slot: usize) -> Result<StateEx, u32> {
-        let mut s = StateEx::default();
-        // SAFETY: a valid out pointer to a buffer as large as either export writes.
-        let r = unsafe { (self.get_state)(slot as u32, &mut s) };
-        if r == 0 {
-            Ok(s)
+        let got = if self.guide {
+            self.handle.get_state_ex(slot as u32)
         } else {
-            Err(r)
+            self.handle.get_state(slot as u32)
+        };
+        match got {
+            Ok(s) => {
+                let g = &s.raw.Gamepad;
+                Ok(StateEx {
+                    packet: s.raw.dwPacketNumber,
+                    buttons: g.wButtons,
+                    left_trigger: g.bLeftTrigger,
+                    right_trigger: g.bRightTrigger,
+                    thumbs: [g.sThumbLX, g.sThumbLY, g.sThumbRX, g.sThumbRY],
+                })
+            }
+            Err(XInputUsageError::UnknownError(code)) => Err(code),
+            Err(_) => Err(NOT_CONNECTED),
         }
+    }
+
+    /// The pad's USB vendor and product id, where the extended capabilities call exists and
+    /// answers for this slot.
+    pub fn ids(&self, slot: usize) -> Option<(u16, u16)> {
+        let c = self.handle.get_capabilities_ex(slot as u32).ok()?;
+        (c.vendor_id != 0 || c.product_id != 0).then_some((c.vendor_id, c.product_id))
     }
 }
 
@@ -119,18 +124,18 @@ pub fn snapshot(s: &StateEx, guide: bool) -> Snapshot {
     names::xinput::snapshot(s.buttons, s.left_trigger, s.right_trigger, s.thumbs, guide)
 }
 
-/// What the hub is told about a pad in slot `slot`. XInput says nothing about which pad it
-/// is — no name, no vendor or product id without another undocumented export — so every one
-/// is an Xbox controller, which is what XInput pads present themselves as anyway.
-pub fn desc(slot: usize, guide: bool) -> PadDesc {
+/// What the hub is told about a pad in slot `slot`. XInput gives no name, so every one is an
+/// Xbox controller, which is what XInput pads present themselves as anyway; the vendor and
+/// product id come from the extended capabilities call where it answers.
+pub fn desc(slot: usize, guide: bool, ids: Option<(u16, u16)>) -> PadDesc {
     PadDesc {
         id: format!("xinput:{slot}"),
         name: "Xbox controller".to_string(),
         family: Family::Xbox,
         source: Source::XInput,
         mapped: true,
-        vendor: None,
-        product: None,
+        vendor: ids.map(|(v, _)| v),
+        product: ids.map(|(_, p)| p),
         buttons: names::xinput::buttons(guide),
         axes: names::AXES.to_vec(),
     }

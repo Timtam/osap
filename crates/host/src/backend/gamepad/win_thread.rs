@@ -441,7 +441,7 @@ impl Source {
             Ok(s) => {
                 let snap = xinput::snapshot(&s, x.guide());
                 if !self.slots[i].connected {
-                    if self.hub.connect(key, xinput::desc(i, x.guide()), &snap, now).is_some() {
+                    if self.hub.connect(key, xinput::desc(i, x.guide(), x.ids(i)), &snap, now).is_some() {
                         self.slots[i] = Slot { connected: true, packet: s.packet };
                     }
                 } else if rebase {

@@ -35,6 +35,9 @@ windows = { version = "0.58", features = ["Media_Ocr", "Graphics_Imaging", "Glob
 # Runtime, used as a fallback for text Windows.Media.Ocr won't read (lone digits).
 ort = { version = "=2.0.0-rc.10", features = ["download-binaries", "copy-dylibs", "ndarray"] }
 ndarray = "0.16"
+# XInput, loaded at run time, with the ordinal-100 Guide read and the vendor and product ids
+# of XInputGetCapabilitiesEx: the loader under gilrs and Bevy (backend/gamepad/xinput.rs).
+rusty-xinput = "1.3"
 # Gamepad (backend/gamepad): `Win32_UI_Input_XboxController` for XInput's constants only — the
 # DLL itself is loaded at run time, never linked — and `Win32_Security`, without which
 # windows-sys hides `CreateWaitableTimerExW`, the high-resolution timer the 4 ms poll needs.

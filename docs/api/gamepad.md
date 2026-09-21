@@ -51,7 +51,7 @@ end
 
 ### Windows
 
-Xbox-type pads, through XInput, which allows at most four; their `family` is `xbox`. Their `id` is XInput's slot, `xinput:0` to `xinput:3`: a different pad plugged into the same slot gets the same `id`. `guide` is in `buttons` only when the system's XInput has the extended entry point that reports it. PlayStation, Nintendo and other controllers are not listed on Windows yet.
+Xbox-type pads, through XInput, which allows at most four; their `family` is `xbox`. Their `id` is XInput's slot, `xinput:0` to `xinput:3`: a different pad plugged into the same slot gets the same `id`. `guide` is in `buttons` only when the system's XInput has the extended entry point that reports it. `vendor` and `product` are the pad's USB ids where XInput's extended capabilities call answers for the slot, and `nil` otherwise. PlayStation, Nintendo and other controllers are not listed on Windows yet.
 
 The first call waits up to 250 ms for the first reading of the four slots, so a pad that is plugged in is normally already listed. When no module listens for `down`, `up` or `axis`, `list()` asks for a fresh reading, waits up to 50 ms for it, and keeps the pads read for five seconds afterwards.
 
