@@ -2761,6 +2761,34 @@ Everything below needs a controller in a hand.
       reason its thread-local queues work — and the reason the pad source uses a `Mutex` hub
       instead.
 
+## Driver-based features — ideas, to be decided later (2026-09-21)
+
+Nothing here is planned yet. Each needs a driver or a system extension, which a portable,
+unzip-and-run application does not have, so each is a deliberate decision of its own.
+
+- [ ] **Taking gamepad input away from the game** (`host.gamepad.capture`, the counterpart of
+      `host.keys.capture`). Gamepad input is observe-only by design: XInput, Raw Input and Apple's
+      GameController only read a device, and no operating system offers a hook through which one
+      application removes a button press before another sees it — unlike the keyboard, where the
+      low-level hook (Windows) and the event tap (macOS) can drop a key. An overlay driven by the
+      gamepad would need what remapping tools do (DS4Windows, reWASD, Steam Input): hide the real
+      pad from the game and give the game a virtual one that receives everything the overlay does
+      not consume.
+  - Windows: a filter driver (HidHide) plus a virtual-pad bus (ViGEmBus, no longer maintained):
+        kernel drivers, an administrator install, and a game without a pad if we crash.
+  - macOS: seizing the device (`kIOHIDOptionsTypeSeizeDevice`) takes the pad from the game
+        entirely; handing the rest on needs a virtual HID device through DriverKit, which needs an
+        Apple entitlement.
+  - Until then the hub is observe-only and the API reserves nothing for it; a later capture layer
+        would sit on the same event hub.
+- [ ] **A virtual MIDI device** that sends and receives chosen MIDI messages. To check first:
+      macOS can create virtual MIDI sources and destinations through CoreMIDI without any driver;
+      Windows traditionally needed a loopback driver (loopMIDI / teVirtualMIDI), and Windows MIDI
+      Services (Windows 11) is said to add app-to-app endpoints — not verified here.
+- [ ] **A virtual USB/HID device**, to emulate hardware. Windows needs a virtual-HID driver (a UMDF
+      driver, or a third-party bus); macOS needs a DriverKit system extension with Apple's
+      entitlement. The largest of the three.
+
 ## Dev tools
 
 - [x] **OCR window inspector (first version):** `tools/inspect` — **Ctrl+Alt+I** OCRs the focused window's client area and logs every recognized word with its **client-relative coordinates** (+ saves the capture with `AUTOMATION_PLATFORM_OCR_DEBUG=1`). Calibrates overlay regions and reveals where hardcoded (e.g. ReaHotkey) coordinates land vs the real controls. Resolved the sforzando polyphony case (the region was correct; the failures were the hover scrub-value — fixed by `hoverToRead`-off — and UWP OCR being blind to *single* digits). ✓ (2026-06-21)

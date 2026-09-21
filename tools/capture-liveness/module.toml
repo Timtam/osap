@@ -1,0 +1,11 @@
+id = "com.tool.captureliveness"
+name = "Capture liveness"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
+
+[capabilities]
+# Two keys, one window, forty screen reads, one spoken verdict. Nothing is clicked or typed:
+# it only answers whether the picture this application captures of a window keeps changing
+# while the window itself visibly changes. One key goes through the keyboard hook ("keys"), the
+# other is a registered hotkey ("hotkey"), so the log shows which way a game lets through.
+require = ["screen", "window", "keys", "hotkey", "timer", "speech", "log"]
