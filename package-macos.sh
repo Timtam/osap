@@ -9,7 +9,8 @@
 #                                      binary (both must already exist — see below)
 #
 # This has to run ON a Mac (it compiles). Nobody on the project owns one, so it is also run
-# by .github/workflows/macos-build.yml on a GitHub runner — that is currently the only way
+# by .github/workflows/macos-build.yml on a GitHub runner, as the macOS half of every Build
+# run (.github/workflows/build.yml) — that is currently the only way
 # the macOS code gets LINKED rather than merely type-checked, and it is the thing to look at
 # first when something here stops working.
 set -euo pipefail

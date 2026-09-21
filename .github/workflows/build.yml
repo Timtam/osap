@@ -1,0 +1,157 @@
+# One run per push, Windows and macOS side by side, and both downloads in that one run.
+#
+# The two platforms used to be two workflows, "Windows build" and "macOS build", each with its
+# own trigger and so its own run. Every commit had two entries in the Actions tab, the pair of
+# downloads for one version had to be found by matching commits between them, and sometimes
+# there was no pair at all, because one path filter fired and the other did not. Now this file
+# is the only thing a push triggers. It calls the two platform workflows as jobs of THIS run:
+# both start once the naming job below has finished (a small Linux job that reads two files),
+# and neither waits for the other.
+#
+# Called rather than copied into one file. Each platform's file is mostly the explanation of why
+# its steps exist, and that stays next to the steps, in `windows-build.yml` and
+# `macos-build.yml`. What the two now share is here: the trigger, the permissions and the name
+# the downloads carry. Neither file triggers on its own any more. A manual run is this
+# workflow's "Run workflow" button, and it builds both.
+name: Build
+
+# Whenever anything either platform builds, loads or packages changes. This is the union of the
+# two lists the separate workflows had, so a change that only one platform uses (a packaging
+# script, say) now builds both. That is deliberate: every run that succeeds carries both
+# downloads.
+#
+# The macOS half used to watch a hand-kept list of "the macOS code", and the reason was money
+# rather than taste. In a private repository Actions minutes come out of the account's monthly
+# allowance and a macOS minute costs about ten Linux minutes; a Free plan's 2,000 included
+# minutes are around 200 minutes of macOS time a month, and this project's first build compiles
+# wxWidgets from source. That list cost what such lists always cost: the speech path shipped
+# and was never linked on a Mac, because the only job that links lived behind it, and
+# `crates/host/src/lib.rs` (where every Lua binding is declared) was left out on purpose, with
+# the note that a change there needed a hand-dispatched run somebody would have to remember.
+# Public repositories pay nothing for standard runners, so the reason is gone and so is the
+# list (since 2026-09-12).
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'crates/**'
+      - 'modules/**'
+      # The dev tools the jobs LOAD, not only the code they compile. Watching what a job runs is
+      # not automatic: the documentation job ran a Python checker it did not watch until
+      # 2026-09-03, and the Windows job had the same gap. `tools/capability-probe` is its gate,
+      # `tools/probe` is the only instrument the macOS tester has, and `tools/capture-probe` and
+      # `tools/speech-probe` are what the smoke steps load. A syntax error in any of them would
+      # ship unnoticed and cost him a session.
+      - 'tools/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'package.ps1'
+      - 'package-macos.sh'
+      - '.github/workflows/build.yml'
+      - '.github/workflows/windows-build.yml'
+      - '.github/workflows/macos-build.yml'
+  workflow_dispatch:
+
+# No concurrency group, on purpose: every push runs to the end, so every commit that builds gets
+# both downloads, even when the next push lands while it is still building. The macOS workflow used
+# to cancel a superseded run to save allowance, which a public repository no longer spends; with
+# both platforms in one run, that cancel would now take the Windows download with it too.
+# `cancel-in-progress: false` would not help either: a group holds at most one waiting run, and
+# a newer push replaces the one that waits.
+#
+# If a group is ever wanted, it goes here or on a calling job below, never inside the two called
+# files. They see THIS run's `github` context, so a group there is not per-platform the way it
+# reads, and one equal to a group of this run's would cancel the run it belongs to.
+
+# The least a job needs. The macOS job is given one more below; a called workflow can only
+# narrow what its caller grants, never widen it.
+permissions:
+  contents: read
+
+jobs:
+  # The name both downloads carry: automation-platform-<version>-<commit>-windows and
+  # automation-platform-<version>-<commit>-macos. Worked out once, here, so the two cannot
+  # disagree, and handed to each platform as the part before its suffix.
+  #
+  # The version is the application's, from crates/app/Cargo.toml, the package that builds the
+  # executable. Neither packaging script reads a version (both take one as an argument and fall
+  # back to the date), and it is written down in three more places that nothing keeps in step:
+  # the log's `version` line is the host crate's, the Info.plist that package-macos.sh writes
+  # falls back to a fixed version (this run does not pass one), and the Windows application
+  # manifest has its own. Each is compared, and a disagreement is said out loud: it would mean a
+  # download named one version whose application says another.
+  #
+  # The commit is the first seven characters of the one this run builds. Seven, not whatever
+  # `git rev-parse --short` would choose, so the name has one shape from run to run.
+  version:
+    name: Name the downloads
+    runs-on: ubuntu-latest
+    outputs:
+      prefix: ${{ steps.name.outputs.prefix }}
+    steps:
+      # Only the four files a version is written in: this job reads them and nothing else, and
+      # both platform jobs are waiting for it.
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            crates/app/Cargo.toml
+            crates/host/Cargo.toml
+            crates/app/windows/automation-platform.exe.manifest
+            package-macos.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Read the version
+        id: name
+        run: |
+          set -eu
+          version() {
+            python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["package"]["version"])' "$1"
+          }
+          app=$(version crates/app/Cargo.toml)
+          # Refused here rather than at the upload, which rejects a name with `:` or `/` in it but
+          # says so only after both platforms have built. `version.workspace = true`, for one,
+          # reads back as a table, not a version.
+          case "$app" in
+            ''|*[!A-Za-z0-9.+-]*)
+              echo "::error::crates/app/Cargo.toml's version '$app' cannot go into a download's name"
+              exit 1 ;;
+          esac
+          host=$(version crates/host/Cargo.toml)
+          if [ "$app" != "$host" ]; then
+            echo "::warning::crates/app/Cargo.toml says $app but crates/host/Cargo.toml says $host. The downloads are named $app; the application's log will say $host."
+          fi
+          # What Finder shows as the Mac app's version: the fallback in package-macos.sh's
+          # Info.plist, since this run calls it without --version.
+          plist=$(sed -n 's/.*CFBundleShortVersionString<\/key><string>\${version:-\([^}]*\)}.*/\1/p' package-macos.sh)
+          if [ "$plist" != "$app" ]; then
+            echo "::warning::package-macos.sh writes '$plist' into the Info.plist as the app's version, but the downloads are named $app."
+          fi
+          # Four numbers, so 0.1.0 is 0.1.0.0, and a pre-release or build suffix has no place in it.
+          manifest=$(python3 -c 'import sys, xml.etree.ElementTree as E; print(E.parse(sys.argv[1]).getroot().find("{urn:schemas-microsoft-com:asm.v1}assemblyIdentity").get("version"))' \
+            crates/app/windows/automation-platform.exe.manifest) || manifest="(unreadable)"
+          if [ "$manifest" != "${app%%[-+]*}.0" ]; then
+            echo "::warning::crates/app/windows/automation-platform.exe.manifest gives the assembly version '$manifest', but the downloads are named $app."
+          fi
+          prefix="automation-platform-$app-${GITHUB_SHA:0:7}"
+          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+          echo "this run's downloads: $prefix-windows and $prefix-macos"
+
+  windows:
+    name: Windows
+    needs: version
+    uses: ./.github/workflows/windows-build.yml
+    with:
+      artifact-prefix: ${{ needs.version.outputs.prefix }}
+
+  macos:
+    name: macOS
+    needs: version
+    uses: ./.github/workflows/macos-build.yml
+    # `actions: read` is for finding an earlier run of THIS workflow and downloading its macOS
+    # build; see "Reuse the last build" in macos-build.yml. The called workflow asks for the
+    # same two, and a call that grants less than it asks for does not start.
+    permissions:
+      contents: read
+      actions: read
+    with:
+      artifact-prefix: ${{ needs.version.outputs.prefix }}

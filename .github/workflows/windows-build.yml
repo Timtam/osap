@@ -16,28 +16,23 @@
 # same one prism itself builds on): prism-sys alone, cold, from clone to green tests, 209 s.
 # The rest of this job is wxWidgets, which wxdragon compiles from source and which the cache
 # below exists for.
+#
+# Not triggered on its own. `build.yml` calls this beside `macos-build.yml`, so one push is one
+# run with both platforms' downloads in it. The trigger (including why the dev tools under
+# `tools/` are watched) and the download's name live there, and so does the reason a newer push
+# does not cancel a run.
 name: Windows build
 
 on:
-  push:
-    branches: [main, master]
-    paths:
-      - 'crates/**'
-      - 'modules/**'
-      # The dev tools this job LOADS. Watching what a job runs is not automatic — the
-      # documentation job ran a Python checker it did not watch until 2026-09-03, and this is
-      # the same gap on a different job: `tools/capability-probe` is the gate below, and
-      # `tools/probe` is the only instrument the macOS tester has. A syntax error in either
-      # would ship unnoticed and cost him a session.
-      - 'tools/capability-probe/**'
-      - 'tools/probe/**'
-      # And the capture smoke module, which the two capture steps below load.
-      - 'tools/capture-probe/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'package.ps1'
-      - '.github/workflows/windows-build.yml'
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      artifact-prefix:
+        description: 'automation-platform-<version>-<commit>, worked out by build.yml; this workflow adds -windows'
+        required: true
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -230,8 +225,16 @@ jobs:
 
       # What a tester downloads. The same staging `package.ps1` produces locally, so a problem
       # in it shows up here rather than in somebody's hands.
+      #
+      # Named for the version and the commit, e.g. automation-platform-0.1.0-865c4a3-windows,
+      # beside the run's -macos download of the same name.
+      #
+      # `overwrite`, because the name belongs to the run, not to the attempt: re-running this job
+      # would otherwise stop right here on the download the first attempt already left in the
+      # run, having built everything again for nothing.
       - uses: actions/upload-artifact@v4
         with:
-          name: AutomationPlatform-windows
+          name: ${{ inputs.artifact-prefix }}-windows
           path: dist/AutomationPlatform
           if-no-files-found: error
+          overwrite: true

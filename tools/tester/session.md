@@ -15,7 +15,9 @@ unchanged. Steps 6 to 8 are newer.
 **You can download a build now instead of making one.** The macOS build runs on every push
 again — it had been failing since 31 August for a billing reason on our side, not a code one —
 so the Actions tab has a finished `.app` for the current commit, already carrying the current
-modules. That saves the 10-to-25 minute first build entirely.
+modules. It is in the newest **Build** run that lists a download whose name ends in `-macos`
+(`automation-platform-<version>-<commit>-macos`); a run that is still building, or whose macOS
+half failed, has none. That saves the 10-to-25 minute first build entirely.
 
 Building yourself still works and is still the surer path if anything looks wrong:
 

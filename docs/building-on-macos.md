@@ -131,9 +131,13 @@ knowing which one catches what:
   front end only — it never links — and it covers the **backend** and its two support
   files. It catches wrong signatures and missing feature flags within minutes.
 - `.github/workflows/macos-build.yml` builds and links the **whole thing** on a real Mac
-  runner — Intel by default, see above — and uploads the packaged app. That is the only place a missing framework, a bad
+  runner — both slices, on Apple silicon, see above — and uploads the packaged app. That is the only place a missing framework, a bad
   `#[link]`, or an undefined Carbon symbol shows up — and the only place the GUI layer is
   compiled for macOS at all, since the check crate deliberately excludes it.
+  It does not run on its own: every push to `main` that touches code runs the **Build** workflow
+  (`.github/workflows/build.yml`), which runs it beside the Windows build, so a run that
+  succeeds holds both downloads — `automation-platform-<version>-<commit>-macos` and
+  `…-windows`.
 
 If you are changing macOS code, assume the check is necessary and the CI run is the proof.
 

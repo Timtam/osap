@@ -8,44 +8,28 @@
 #
 # It also produces the artifact a tester downloads: a zipped .app with the modules and a
 # README beside it.
+#
+# Not triggered on its own. `build.yml` calls this beside `windows-build.yml`, so one push is one
+# run with both platforms' downloads in it. The trigger (and the history of why it is no longer
+# a hand-kept list of "the macOS code": money was the reason, and it is gone) and the download's
+# name live there, and so does the reason a newer push no longer cancels a superseded run. What
+# remains is wall-clock, and this job runs beside the Windows one rather than ahead of it.
 name: macOS build
 
-# Triggered like the Windows job, since 2026-09-12: whenever anything it builds changes.
-#
-# It used to watch a hand-kept list of "the macOS code", and the reason was money rather
-# than taste. In a private repository Actions minutes come out of the account's monthly
-# allowance and a macOS minute costs about ten Linux minutes; a Free plan's 2,000 included
-# minutes are around 200 minutes of macOS time a month, and this project's first build
-# compiles wxWidgets from source. That list cost what such lists always cost: the speech
-# path shipped and was never linked on a Mac, because the only job that links lived behind
-# it, and `crates/host/src/lib.rs` — where every Lua binding is declared — was left out on
-# purpose, with the note that a change there needed a hand-dispatched run somebody would
-# have to remember. Public repositories pay nothing for standard runners, so the reason is
-# gone and so is the list.
-#
-# What remains is wall-clock, and this job runs beside the others rather than ahead of them.
 on:
-  push:
-    branches: [main, master]
-    paths:
-      - 'crates/**'
-      - 'modules/**'
-      - 'tools/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'package-macos.sh'
-      - '.github/workflows/macos-build.yml'
-  # No inputs any more. There used to be a choice of Mac, which was really a choice of which
-  # architecture the artifact would run on; a universal build makes the question go away.
-  workflow_dispatch:
+  workflow_call:
+    # No choice of Mac any more. There used to be one on the manual trigger, which was really a
+    # choice of which architecture the artifact would run on; a universal build makes the
+    # question go away.
+    inputs:
+      artifact-prefix:
+        description: 'automation-platform-<version>-<commit>, worked out by build.yml; this workflow adds -macos'
+        required: true
+        type: string
 
-# A superseded run is wasted allowance.
-concurrency:
-  group: macos-build-${{ github.ref }}
-  cancel-in-progress: true
-
-# `actions: read` is for looking up the last successful run and downloading its build; see
-# "Reuse the last build" below.
+# `actions: read` is for looking up an earlier run and downloading its build; see "Reuse the
+# last build" below. `build.yml` grants the same two to this call; asking here for more than
+# it grants would stop the run before it starts.
 permissions:
   contents: read
   actions: read
@@ -100,11 +84,23 @@ jobs:
       # source, which is the better part of a month's included macOS allowance.
       #
       # The question is deliberately NOT "did this push touch crates/". A push's own diff says
-      # nothing about the Rust that changed in the pushes before it which did not trigger this
-      # job at all — this workflow only fires on a narrow set of paths, so `lib.rs` can move
-      # several times without ever being compiled here. What matters is whether anything under
-      # `crates/` differs from the commit the reusable build was actually made from, and git
-      # can answer exactly that.
+      # nothing about the Rust that changed in the pushes before it whose runs never produced a
+      # build (one still building has uploaded nothing yet; a failed or cancelled one never
+      # will), so `lib.rs` can move several times without ever being compiled here. What
+      # matters is whether anything under `crates/` differs from the commit the reusable build
+      # was actually made from, and git can answer exactly that.
+      #
+      # WHICH earlier build: the newest run of `build.yml` (the workflow that calls this one;
+      # runs belong to the caller, never to this file) that still holds a macOS download. Not
+      # the newest SUCCESSFUL run, which is what this asked while macOS was a workflow of its
+      # own. A run is now Windows and macOS together, so a Windows test going red would make
+      # the whole run a failure and send every later push back to a full macOS build, over a
+      # Mac binary nothing was wrong with. The download is the better witness anyway: it is
+      # uploaded only after the build, the tests, both slices, the module load and the speech
+      # run have all passed, which is exactly what makes a build worth reusing. The steps
+      # after it (the import check, the capture probe, newer-macos) run again on a reused
+      # binary, so a finding of theirs is found again rather than hidden. Matched by its
+      # suffix, because the name carries the version and commit of the run that made it.
       #
       # Every failure here falls through to building. A missing run, an expired artifact, an
       # unfamiliar layout: none of them are worth a red mark, and all of them are worth a
@@ -113,12 +109,24 @@ jobs:
         id: reuse
         env:
           GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.ref_name }}
         run: |
           set -u
-          run_id=$(gh run list --workflow macos-build.yml --status success \
-            --branch "${{ github.ref_name }}" --limit 1 --json databaseId \
-            -q '.[0].databaseId' 2>/dev/null || true)
-          if [ -z "${run_id:-}" ]; then echo "no earlier successful run"; exit 0; fi
+          # Newest first. This very run is on the list too. On its first attempt it has no macOS
+          # download yet and is passed over like any other run without one. On a re-run it can
+          # hold the one an earlier attempt uploaded, which is then reused: harmless, since it
+          # was built from this same commit and passed the same checks, and the upload below
+          # replaces it (`overwrite`).
+          run_id="" artifact=""
+          for id in $(gh run list --workflow build.yml --branch "$BRANCH" --limit 20 \
+              --json databaseId -q '.[].databaseId' 2>/dev/null || true); do
+            found=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts" \
+              -q '[.artifacts[] | select(.expired | not) | .name | select(endswith("-macos"))] | first // empty' \
+              2>/dev/null || true)
+            if [ -n "${found:-}" ]; then run_id=$id; artifact=$found; break; fi
+          done
+          if [ -z "$run_id" ]; then echo "no earlier run with a macOS download still in it"; exit 0; fi
+          echo "the newest earlier macOS build is $artifact, from run $run_id"
           prev=$(gh run view "$run_id" --json headSha -q .headSha 2>/dev/null || true)
           if [ -z "${prev:-}" ]; then echo "cannot read that run's commit"; exit 0; fi
           if ! git cat-file -e "$prev^{commit}" 2>/dev/null; then
@@ -131,7 +139,8 @@ jobs:
           fi
           echo "no Rust change since $prev; trying to reuse its build"
           mkdir -p reuse
-          gh run download "$run_id" --dir reuse --name AutomationPlatform-macos-universal             2>/dev/null || { echo "no universal artifact in that run"; exit 0; }
+          gh run download "$run_id" --dir reuse --name "$artifact" \
+            2>/dev/null || { echo "could not download $artifact"; exit 0; }
           zip=$(find reuse -name '*.zip' | head -n1)
           if [ -z "${zip:-}" ]; then echo "no zip in that artifact"; exit 0; fi
           mkdir -p dist
@@ -353,12 +362,24 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          # Named by the machine it runs on, because the two are not interchangeable and a
-          # download called "macos" that will not launch is a bad half hour for whoever
-          # tries it.
-          name: AutomationPlatform-macos-universal
+          # Named for the version and the commit, e.g. automation-platform-0.1.0-865c4a3-macos,
+          # beside the run's -windows download of the same name. "Reuse the last build" above
+          # finds earlier ones by that -macos ending, so it is not to be changed on its own.
+          #
+          # Just "macos", with no architecture. It used to be named by the machine it runs on,
+          # because an Intel and an arm64 build are not interchangeable and a download called
+          # "macos" that will not launch is a bad half hour for whoever tries it. This one is
+          # universal, and "It has to actually contain both" above refuses it otherwise, so
+          # there is one Mac download and it runs on either.
+          #
+          # `overwrite`, because the name belongs to the run, not to the attempt. The import
+          # check and the capture probe below run after this upload and can go red on their
+          # own; without it, "Re-run failed jobs" would stop here on the download the first
+          # attempt left behind and never reach them again.
+          name: ${{ inputs.artifact-prefix }}-macos
           path: dist/*.zip
           if-no-files-found: error
+          overwrite: true
 
       # The two capture steps run AFTER the upload, on purpose: either can go red on a finding
       # about the next Mac rather than about this build, and that must not also cost the download.
@@ -460,7 +481,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: AutomationPlatform-macos-universal
+          name: ${{ inputs.artifact-prefix }}-macos
           path: artifact
 
       - name: Unpack it the way a tester does

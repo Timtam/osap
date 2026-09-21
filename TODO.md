@@ -2897,6 +2897,33 @@ unzip-and-run application does not have, so each is a deliberate decision of its
       driver, or a third-party bus); macOS needs a DriverKit system extension with Apple's
       entitlement. The largest of the three.
 
+## One build run for both systems (2026-09-21)
+
+`.github/workflows/build.yml` ("Build") is now the only build workflow a push triggers. It calls
+`windows-build.yml` and `macos-build.yml`, both `on: workflow_call` now, as parallel jobs of one
+run, and names the downloads `automation-platform-<version>-<commit>-windows` and `-macos` (the
+version from `crates/app/Cargo.toml`, the commit's first seven characters; the naming job warns
+when the host crate, the Info.plist fallback in `package-macos.sh` or the Windows manifest says
+otherwise). The YAML parses, and the calls, inputs, permissions, `needs` and outputs were
+checked by script. Written without a run, though, so these are open until the first push
+shows them:
+
+- [ ] The run starts at all. A call that grants less than the called workflow asks for, or
+      passes an input it does not declare, is refused before any job runs.
+- [ ] Both downloads are in the one run, named as above, and `newer-macos` finds the macOS one
+      by that name.
+- [ ] The macOS reuse finds the previous Build run's `-macos` download. The first Build run has
+      none and builds, since runs of the old `macos-build.yml` are not looked at. After that, a
+      Luau-only push should log "reused the build from …".
+- [ ] Two pushes in quick succession each get a complete run with both downloads. Nothing
+      cancels a run any more; the old macOS workflow cancelled a superseded one.
+- [ ] "Re-run failed jobs" after a red import check or capture probe (both run after the macOS
+      upload) gets past the upload, which now overwrites the download the first attempt left in
+      the run instead of failing on its name. The same for re-running the Windows job.
+
+The earlier runs of "Windows build" and "macOS build" keep their history and their downloads until
+those expire. Nothing triggers the two files on their own any more.
+
 ## Dev tools
 
 - [x] **OCR window inspector (first version):** `tools/inspect` — **Ctrl+Alt+I** OCRs the focused window's client area and logs every recognized word with its **client-relative coordinates** (+ saves the capture with `AUTOMATION_PLATFORM_OCR_DEBUG=1`). Calibrates overlay regions and reveals where hardcoded (e.g. ReaHotkey) coordinates land vs the real controls. Resolved the sforzando polyphony case (the region was correct; the failures were the hover scrub-value — fixed by `hoverToRead`-off — and UWP OCR being blind to *single* digits). ✓ (2026-06-21)
