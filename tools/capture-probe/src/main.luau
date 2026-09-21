@@ -65,5 +65,24 @@ host.timer.after(1500, function()
   -- A line only a live process can write, after every call that could have stopped it.
   host.timer.after(1500, function()
     report("still alive after capturing")
+
+    -- Late reads, for the Windows job's copy of this probe that declares desktop duplication.
+    -- The reads above come while duplication is still opening, so they go the standard way;
+    -- these come once it is open, and are the ones that show the path itself works. The
+    -- macOS jobs stop the process at the line above, before these run.
+    host.timer.after(5000, function()
+      local t3 = now()
+      local ok4, px3 = pcall(host.screen.pixel, 10, 10)
+      report("late pixel(10,10) %s in %d ms: %s", ok4 and "returned" or "THREW", now() - t3, describe(px3))
+      local t4 = now()
+      local ok5, res2 = pcall(host.ocr.recognize, { region = { 0, 0, 200, 60 } })
+      report("late recognize 200x60 %s in %d ms",
+        (ok5 and type(res2) == "table") and "returned" or "THREW", now() - t4)
+      -- One more turn of the loop, so the observation line counting these reads is written.
+      host.timer.after(500, function()
+        pcall(host.screen.pixel, 600, 400)
+        report("late reads done")
+      end)
+    end)
   end)
 end)

@@ -8,4 +8,6 @@ license = "GPL-3.0-or-later"
 # somebody's real plugin and never posts an event; see src/answers.luau.
 # `resource` is for ONE thing: asking whether `probe-N.png` already exists, so the numbering
 # resumes across launches instead of overwriting the previous run's picture. Reading only.
-require = ["window", "screen", "ocr", "element", "input", "timer", "speech", "log", "hotkey", "resource"]
+# `gamepad` is for src/gamepad.luau: it listens to game controllers and logs every event with
+# how late it arrived. Observing only — nothing is ever sent to a pad or a game.
+require = ["window", "screen", "ocr", "element", "input", "timer", "speech", "log", "hotkey", "resource", "gamepad"]

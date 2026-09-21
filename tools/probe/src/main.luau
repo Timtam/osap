@@ -451,4 +451,13 @@ host.hotkey.register(KEY, function()
   end, token)
 end)
 
-host.log.info(string.format("[probe] ready — press %s over the window you want recorded", KEY))
+-- The game controllers have a file of their own (src/gamepad.luau), and the ready line waits
+-- for them: it reports how many pads were found and how each source came up, which is only
+-- true once the sources have acted on the listeners that file registers.
+local gamepad = host.include("src/gamepad.luau")
+gamepad.start(function(pads)
+  host.log.info(string.format(
+    "[probe] ready — press %s over the window you want recorded, %s for the game controllers; %s",
+    KEY, gamepad.KEY, pads
+  ))
+end)

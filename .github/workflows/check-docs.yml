@@ -16,6 +16,7 @@ on:
     paths:
       - 'docs/**'
       - 'crates/host/src/lib.rs'
+      - 'crates/host/src/gamepad_api.rs'
       - 'crates/host/src/window_prelude.luau'
       - 'check-docs.ps1'
       # The checkers' own source. Without this, a change to the scraper could break the check
@@ -26,6 +27,7 @@ on:
     paths:
       - 'docs/**'
       - 'crates/host/src/lib.rs'
+      - 'crates/host/src/gamepad_api.rs'
       - 'crates/host/src/window_prelude.luau'
       - 'check-docs.ps1'
       - 'tools/api-index.py'

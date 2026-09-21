@@ -283,6 +283,14 @@ jobs:
             echo "::error::the window probe is not in this build — the tester's instrument is missing"
             exit 1
           fi
+          # The probe starts the game-controller watcher while it loads, so this padless runner
+          # is where the GameController source failing to start — a panic in it is caught into
+          # this line — would first show. (A missing selector aborts instead; the "no longer
+          # running" check above is what catches that.)
+          if grep -q "gamepad watcher failed" automation-platform.log; then
+            echo "::error::the game-controller watcher did not start — see the gamepad lines above"
+            exit 1
+          fi
 
       # Speech, which is the one new subsystem a runner can actually exercise.
       #

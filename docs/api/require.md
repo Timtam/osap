@@ -31,7 +31,11 @@ dependency that may be absent.
 ```luau
 -- a code_module dependency exposing functions:
 local kontakt = host.require("com.platform.kontakt")
-kontakt.library({ name = "Cinematic Studio Strings", image = host.path("css.png") })
+-- library(name, landmark, build): the landmark must be an ABSOLUTE path, because the search
+-- runs in Kontakt's identity and a relative one would resolve under Kontakt's root.
+kontakt.library("Cinematic Studio Strings", host.path("images/css.png"), function(ov)
+  ov:addStaticText("Cinematic Studio Strings")
+end)
 
 -- a legacy data dependency: `return { presets = {...}, version = 3 }`
 local lib = host.require("com.example.preset-library")

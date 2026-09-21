@@ -6,27 +6,34 @@
 //! bound to that module's root + the shared services.
 
 mod backend;
+mod capture_source;
 mod gui;
+mod image_search;
+mod json;
 pub mod logging;
 mod appcfg;
 mod portable;
 pub mod registry;
 mod settings;
 mod speech;
+mod template;
+/// `host.gamepad`: listeners, dispatch rules and bindings — see the file.
+mod gamepad_api;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use rayon::prelude::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use mlua::{Function, Lua, LuaSerdeExt, RegistryKey, Table};
 
-use backend::{Backend, CapturedImage, ControlInfo, HostEvents, MouseButton, WinInfo};
+use backend::{Backend, ControlInfo, HostEvents, MouseButton, WinInfo};
+use image_search::{ImageResult, ImageTask, PendingImage};
 use module_manifest::LoadedModule;
+use template::Decoded;
 
 const WINDOW_PRELUDE: &str = include_str!("window_prelude.luau");
 // The overlay runtime is the code module `com.platform.overlay`
@@ -153,10 +160,12 @@ struct Shared {
     /// Answers the OS gave us during the CURRENT epoch (see `Observations`).
     observations: RefCell<Observations>,
     /// Per-pump-iteration accounting for the OS-event phase: (activate dispatches,
-    /// ms in activate, ms in focus-change, ms in key dispatch). Reset each iteration and
-    /// reported when one overruns — "os events 446 ms" names no cause on its own, and this
-    /// phase is three different fan-outs with very different multiplicities.
-    ev_counts: Cell<(u32, u128, u128, u128)>,
+    /// ms in activate, ms in focus-change, ms in key dispatch, ms in gamepad dispatch). Reset
+    /// each iteration and reported when one overruns — "os events 446 ms" names no cause on
+    /// its own, and this phase is several different fan-outs with very different multiplicities.
+    ev_counts: Cell<(u32, u128, u128, u128, u128)>,
+    /// `host.gamepad`'s listeners — see gamepad_api.rs.
+    pads: gamepad_api::Pads,
     epoch: Cell<u64>,
     /// See bump_input_epoch: turns over only when something ACTED on the screen.
     input_epoch: Cell<u64>,
@@ -181,8 +190,12 @@ struct Shared {
     /// touched only on the main thread.
     image_tasks: std::sync::mpsc::Sender<ImageTask>,
     image_results: std::sync::mpsc::Receiver<ImageResult>,
-    pending_image: RefCell<HashMap<u64, (Lua, RegistryKey, usize)>>,
+    pending_image: RefCell<HashMap<u64, PendingImage>>,
     next_image_id: Cell<u64>,
+    /// module_idx → the generation of the VM it runs now (see `image_search::VmOwner`). A map,
+    /// not a fifth parallel vector: `populate_vm` overwrites the entry for its index, so a
+    /// rollback has nothing here to keep aligned.
+    vm_gens: RefCell<HashMap<usize, u64>>,
     /// Decoded-template cache (path → (mtime, RGBA, last-used seq)); avoids re-reading +
     /// re-decoding a PNG on every imageSearch / imageSearchAsync / imageSearchMulti call,
     /// including the recurring landmark poll. Invalidated per-entry when the file's mtime
@@ -208,193 +221,6 @@ struct Shared {
 /// Max distinct template PNGs kept decoded in the cache before least-recently-used
 /// eviction. Far above any real module's fixed template count — purely a growth cap.
 const TEMPLATE_CACHE_CAP: usize = 64;
-
-/// A decoded template image (RGBA), shared behind an `Arc` and cached by path+mtime so
-/// repeated searches (e.g. the recurring landmark poll, a toggle's on/off pair) don't
-/// re-read and re-decode the PNG on every call.
-struct Decoded {
-    w: u32,
-    h: u32,
-    rgba: Vec<u8>,
-    /// Template pixel indices to compare FIRST, rarest colour first — see `probe_order`.
-    probes: Vec<u32>,
-}
-
-/// The order in which a template's pixels should be compared, most discriminating first.
-///
-/// `matches_at` rejects a candidate position at its first mismatching pixel, so which
-/// pixel it looks at first decides how much work the ~700k rejections cost. Row-major
-/// order starts at (0,0), which on a wordmark or a label is plain background — measured
-/// against a real plugin frame, the top-left pixel of a Cerberus landmark survives at
-/// 68.8 % of all candidate positions, while a pixel on a glyph stroke survives at 0.49 %.
-/// Testing the second one first is 139x fewer positions that need any further comparison.
-///
-/// The template alone tells us which pixels those are: its own rarest colours are its
-/// content, its commonest is its background. So order by ascending frequency of the
-/// coarsely-quantised colour and keep the front of that list. Wildcard (alpha 0) pixels
-/// are skipped — they match everything by definition.
-///
-/// This changes NOTHING about the verdict. It is the same conjunction over the same
-/// pixels, evaluated in a better order.
-fn probe_order(w: u32, h: u32, rgba: &[u8]) -> Vec<u32> {
-    const PROBES: usize = 12;
-    let n = (w as usize) * (h as usize);
-    let mut hist = std::collections::HashMap::<u32, u32>::new();
-    for i in 0..n {
-        let o = i * 4;
-        if rgba[o + 3] == 0 {
-            continue;
-        }
-        let key = ((rgba[o] as u32 >> 4) << 8) | ((rgba[o + 1] as u32 >> 4) << 4) | (rgba[o + 2] as u32 >> 4);
-        *hist.entry(key).or_insert(0) += 1;
-    }
-    let mut idx: Vec<u32> = (0..n as u32)
-        .filter(|i| rgba[(*i as usize) * 4 + 3] != 0)
-        .collect();
-    idx.sort_by_key(|i| {
-        let o = (*i as usize) * 4;
-        let key = ((rgba[o] as u32 >> 4) << 8) | ((rgba[o + 1] as u32 >> 4) << 4) | (rgba[o + 2] as u32 >> 4);
-        hist.get(&key).copied().unwrap_or(0)
-    });
-    idx.truncate(PROBES);
-    idx
-}
-
-/// A queued async template match. The worker CAPTURES `region` itself (off the main
-/// thread) then matches `tmpls` against it; `region` = (x, y, w, h) in screen coords,
-/// whose (x, y) is added back into the reported hit.
-///
-/// `tmpls` holds ONE OR MORE templates tried in order against the SAME captured frame,
-/// first hit wins — several renderings of the same thing (a dialog's close glyph as two
-/// plugin versions draw it). Chaining single-template searches instead would pay a fresh
-/// region capture (~1 compositor frame) per template.
-struct ImageTask {
-    id: u64,
-    region: (i32, i32, i32, i32),
-    tmpls: Vec<Arc<Decoded>>,
-    tol: u8,
-    scales: Vec<f32>,
-}
-
-/// The worker's answer: the hit rect in screen coords plus the 1-based index of the
-/// template that matched, or None.
-struct ImageResult {
-    id: u64,
-    hit: Option<(i32, i32, u32, u32, usize)>,
-    /// How long this search actually took, split into the shared capture and this
-    /// task's own matching. Reported so a slow search is a NUMBER in the log rather
-    /// than an inference from the gap between two events — the landmark poll is
-    /// invisible otherwise, and "my overlay takes 16 seconds to appear" has to be
-    /// diagnosable without rebuilding the host.
-    capture_ms: u32,
-    match_ms: u32,
-    /// Tasks sharing this batch — the fan-out that the capture was shared across.
-    batch: u32,
-    /// Set on exactly one result per batch, so the timing is logged once rather than
-    /// once per task (they all carry the same batch figures).
-    first_of_batch: bool,
-}
-
-/// The image-search worker: CAPTURES each task's region and runs the CPU-heavy
-/// template match, both off the main thread, so neither the ~1-frame capture nor the
-/// match blocks the event loop. `capture` is the backend's stateless capture routine
-/// (a plain `fn` pointer, hence `Send`). Exits when the task sender is dropped (app
-/// teardown). Touches only owned data — safe to leave running across process exit.
-///
-/// FAN-OUT SHARING: after the first task, it briefly collects any others queued in the
-/// same tick (several libraries' landmark polls fire together, staggered by a few ms)
-/// into one batch, then CAPTURES EACH DISTINCT REGION ONCE and matches every task's
-/// template against its region's shared frame. So N libraries polling the same plugin
-/// region cost 1 capture per tick, not N — "one frame, many comparisons" over
-/// simultaneous consumers. Landmark polling isn't latency-critical, so the tiny
-/// collection wait is invisible; results are byte-for-byte what per-task capture gave.
-fn spawn_image_worker(
-    capture: fn(i32, i32, i32, i32) -> Option<CapturedImage>,
-    tasks: std::sync::mpsc::Receiver<ImageTask>,
-    results: std::sync::mpsc::Sender<ImageResult>,
-) {
-    std::thread::spawn(move || {
-        let batch_window = Duration::from_millis(5);
-        while let Ok(first) = tasks.recv() {
-            // Collect this tick's batch: the first task, plus any queued within a short
-            // window (same-tick polls arrive microseconds-to-ms apart).
-            let mut batch = vec![first];
-            let deadline = Instant::now() + batch_window;
-            loop {
-                let now = Instant::now();
-                if now >= deadline {
-                    break;
-                }
-                match tasks.recv_timeout(deadline - now) {
-                    Ok(t) => batch.push(t),
-                    Err(_) => break, // window elapsed (batch complete) or sender dropped
-                }
-            }
-            // Capture each DISTINCT region once; match every task's template against its
-            // region's shared frame. The batch is small (one task per active library), so
-            // a linear region lookup is fine.
-            //
-            // The captures stay SERIAL on purpose: each is a compositor-synchronised screen
-            // read, so running them together would contend rather than overlap, and the
-            // whole point of the batch is that there is only one per region anyway. The
-            // MATCHING is what gets spread across cores — see below.
-            let mut frames: Vec<((i32, i32, i32, i32), Option<CapturedImage>, u32)> = Vec::new();
-            let batch_len = batch.len() as u32;
-            let mut plan: Vec<(&ImageTask, usize)> = Vec::with_capacity(batch.len());
-            for t in &batch {
-                let idx = match frames.iter().position(|(r, _, _)| *r == t.region) {
-                    Some(i) => i,
-                    None => {
-                        let (rx, ry, rw, rh) = t.region;
-                        let t0 = Instant::now();
-                        let cap = capture(rx, ry, rw, rh);
-                        let ms = t0.elapsed().as_millis() as u32;
-                        frames.push((t.region, cap, ms));
-                        frames.len() - 1
-                    }
-                };
-                plan.push((t, idx));
-            }
-            // MATCH IN PARALLEL. Every candidate position is independent of every other, so
-            // this is the shape a thread pool is actually for; the tasks in a batch are
-            // independent too. Sequentially, twelve installed libraries cost twelve full
-            // scans back to back before any of them can answer — each one comfortably under
-            // the logging threshold and therefore invisible, while together they were the
-            // several seconds before the right overlay appeared.
-            let t1 = Instant::now();
-            let hits: Vec<Option<(i32, i32, u32, u32, usize)>> = plan
-                .par_iter()
-                .map(|(t, idx)| {
-                    let (rx, ry, _, _) = t.region;
-                    frames[*idx].1.as_ref().and_then(|cap| {
-                        // Templates in order against this one frame; first hit wins.
-                        t.tmpls.iter().enumerate().find_map(|(n, tm)| {
-                            find_template_scaled(
-                                cap, tm.w, tm.h, &tm.rgba, t.tol, &t.scales, &tm.probes,
-                            )
-                            .map(|(ox, oy, mw, mh)| (rx + ox as i32, ry + oy as i32, mw, mh, n + 1))
-                        })
-                    })
-                })
-                .collect();
-            let match_ms = t1.elapsed().as_millis() as u32;
-            let capture_ms: u32 = frames.iter().map(|f| f.2).sum();
-            for (i, ((t, _), hit)) in plan.iter().zip(hits).enumerate() {
-                let res = ImageResult {
-                    id: t.id,
-                    hit,
-                    capture_ms,
-                    match_ms,
-                    batch: batch_len,
-                    first_of_batch: i == 0,
-                };
-                if results.send(res).is_err() {
-                    return; // main thread gone
-                }
-            }
-        }
-    });
-}
 
 /// One cached UIA element lookup. `key` renders the arguments; `go` does the traversal.
 fn located(
@@ -536,13 +362,22 @@ impl Shared {
         let mut obs = self.observations.borrow_mut();
         if obs.epoch != now || obs.input_epoch != now_input {
             let reached_os = obs.asked - obs.served;
-            if reached_os >= 2 || obs.binding_us >= 1000 || obs.pixels > 0 || obs.asked >= 1000 {
+            // Taken at every turnover so each epoch's line counts its own; empty — and the line
+            // unchanged — until a module reads through desktop duplication.
+            let duplication =
+                capture_source::duplication_clause(backend::take_duplication_counters());
+            if reached_os >= 2
+                || obs.binding_us >= 1000
+                || obs.pixels > 0
+                || obs.asked >= 1000
+                || !duplication.is_empty()
+            {
                 logging::line(
                     "observe",
                     &format!(
                         "epoch served {} of {} OS question(s) from cache ({} actually \
                          asked), {:.1} ms rebuilding Lua tables in window.controls and \
-                         window.focusChain, plus {} screen pixel read(s) costing {:.1} ms",
+                         window.focusChain, plus {} screen pixel read(s) costing {:.1} ms{duplication}",
                         obs.served,
                         obs.asked,
                         obs.asked - obs.served,
@@ -621,9 +456,7 @@ impl Shared {
             })?
             .to_rgba8();
         let (dw, dh) = (img.width(), img.height());
-        let raw = img.into_raw();
-        let probes = probe_order(dw, dh, &raw);
-        let dec = Arc::new(Decoded { w: dw, h: dh, rgba: raw, probes });
+        let dec = Arc::new(Decoded::from_png_rgba(dw, dh, img.into_raw()));
         if let Some(mt) = mtime {
             let seq = self.template_seq.get() + 1;
             self.template_seq.set(seq);
@@ -985,9 +818,10 @@ impl Shared {
 
     /// Removes every registration owned by module `idx` (hotkeys + their OS
     /// registration, captured keys, settings `onChange`, timers, arbiter claims,
-    /// data export) WITHOUT touching the parallel vectors — for an in-place reload
-    /// that rebuilds the same index. Unlike `rollback_to` (a suffix truncation) this
-    /// targets a single module and leaves its roots/ids/enabled/schemas slots.
+    /// image searches still in flight, gamepad listeners, data export) WITHOUT
+    /// touching the parallel vectors — for an in-place reload that rebuilds the same
+    /// index. Unlike `rollback_to` (a suffix truncation) this targets a single module
+    /// and leaves its roots/ids/enabled/schemas slots.
     fn purge_module(&self, idx: usize) {
         let stale: Vec<i32> = self
             .hotkeys
@@ -1007,6 +841,8 @@ impl Shared {
         self.on_change.borrow_mut().retain(|(i, _), _| *i != idx);
         self.timers.borrow_mut().retain(|(_, i, ..)| *i != idx);
         self.recurring.borrow_mut().retain(|(_, _, i, ..)| *i != idx);
+        self.purge_pending_images(idx);
+        self.drop_pad_listeners(|i| i == idx);
         let mut to_resolve: Vec<String> = Vec::new();
         let mut deactivations: Vec<Function> = Vec::new();
         {
@@ -1082,6 +918,7 @@ impl Shared {
         // of the enabled set, so it is recomputed rather than nudged.
         self.refresh_hotkeys();
         self.refresh_captured();
+        self.refresh_gamepad();
         // A disabled module must not stay the active overlay (and an enabled one
         // may now win): re-elect every arbiter slot it participates in.
         let slots: Vec<String> = self
@@ -1093,6 +930,10 @@ impl Shared {
             .collect();
         for slot in slots {
             self.arbiter_resolve(&slot);
+        }
+        // Searches answered while it was off are asked again, so their callbacks still come.
+        if enabled {
+            self.resume_held_images(idx);
         }
         logging::line(
             "manager",
@@ -1126,6 +967,7 @@ impl Shared {
         self.on_change.borrow_mut().retain(|(idx, _), _| *idx < n);
         self.timers.borrow_mut().retain(|(_, idx, ..)| *idx < n);
         self.recurring.borrow_mut().retain(|(_, _, idx, ..)| *idx < n);
+        self.drop_pad_listeners(|idx| idx >= n);
         {
             // Drop arbiter claims owned by the rolled-back modules; clear a now-
             // dangling active winner and re-elect that slot, so a surviving lower-
@@ -1454,89 +1296,6 @@ impl Shared {
         }
     }
 
-    /// Delivers finished async image-search results to their callbacks (driven by
-    /// the loop tick): each fires its stored callback with the hit table `{x,y,w,h}`
-    /// or nil, then drops the one-shot registry value.
-    fn fire_image_results(&self) {
-        // ONE epoch for the whole drain, not one per result.
-        //
-        // The bump used to sit next to each callback, which reads correctly on its own — a
-        // result IS a fresh observation — and is wrong for a batch. Every search in a batch
-        // was answered from ONE captured frame, so the batch is one observation, not eighty-
-        // four; and the epoch is what every memo is keyed on. Turning it over per result
-        // meant that during the delivery of an 84-result batch, the shared per-(spec, epoch)
-        // origin memo was invalidated eighty-four times — cold on exactly the tick that had
-        // the most callers to share it with, each re-resolving what the one before it had
-        // just worked out. Bumped once, before the first callback runs, so they all see the
-        // same new world. Fewer invalidations AND a truer statement about what changed.
-        let mut bumped = false;
-        while let Ok(res) = self.image_results.try_recv() {
-            // A search nobody can see taking long is a bug nobody can diagnose. The
-            // landmark poll is entirely invisible from Luau — it runs on a worker and only
-            // its verdict is observable — so a slow one gets a line naming both halves,
-            // capture and match, and how many tasks shared the capture. Only when it is
-            // actually slow: the steady state stays silent.
-            // Reported per BATCH, not per search, and that distinction was itself a
-            // measurement bug: with twelve libraries each search sat at ~39 ms — just under
-            // a 40 ms per-search threshold, so the log fell completely silent while the
-            // twelve of them together still cost ~470 ms before any overlay could answer.
-            // The batch is the unit somebody actually waits for. Deduped on the first
-            // result of each batch so one line is logged, not twelve.
-            //
-            // 50 ms, the same bar as a slow observation. It was 25, below what a Mac pays for
-            // every batch (capture ~19 ms plus match ~17), so all 3909 batches of the fifth
-            // session were logged and the 57 slow ones were lost among them.
-            if res.first_of_batch && res.capture_ms + res.match_ms >= 50 {
-                logging::line(
-                    "image",
-                    &format!(
-                        "batch of {} search(es) took {} ms (capture {}, match {} across {} thread-pool tasks)",
-                        res.batch,
-                        res.capture_ms + res.match_ms,
-                        res.capture_ms,
-                        res.match_ms,
-                        res.batch
-                    ),
-                );
-            }
-            let entry = self.pending_image.borrow_mut().remove(&res.id);
-            if let Some((lua, cb, idx)) = entry {
-                // A result arriving is a fresh observation of the screen, and its callback
-                // may re-check an overlay — so the epoch turns once here, rather than on
-                // every (mostly empty) poll tick. See the note above for why once per DRAIN.
-                if !bumped {
-                    self.bump_epoch();
-                    bumped = true;
-                }
-                if self.enabled.borrow().get(idx).copied().unwrap_or(false) {
-                    if let Ok(f) = lua.registry_value::<Function>(&cb) {
-                        // The hit table carries `n`, the 1-based index of the template
-                        // that matched — meaningful for a multi-template search, and
-                        // always 1 for a single-template one.
-                        let arg = match res.hit {
-                            Some((x, y, w, h, n)) => match lua.create_table() {
-                                Ok(t) => {
-                                    let _ = t.set("x", x);
-                                    let _ = t.set("y", y);
-                                    let _ = t.set("w", w);
-                                    let _ = t.set("h", h);
-                                    let _ = t.set("n", n);
-                                    mlua::Value::Table(t)
-                                }
-                                Err(_) => mlua::Value::Nil,
-                            },
-                            None => mlua::Value::Nil,
-                        };
-                        if let Err(e) = call_guarded(&f, arg) {
-                            self.report_callback_error(idx, "imageSearchAsync", &e);
-                        }
-                    }
-                }
-                let _ = lua.remove_registry_value(cb);
-            }
-        }
-    }
-
     /// Applies a setting change from the GUI: validates against the schema,
     /// updates the store (auto-persisted on the next tick), and fires onChange.
     fn set_setting(&self, idx: usize, key: &str, value: settings::Value) {
@@ -1616,7 +1375,7 @@ fn collect_code_deps(
     parent: &Path,
     dep_ids: &[String],
     optional_dep_ids: &[String],
-    out: &mut Vec<(String, std::path::PathBuf)>,
+    out: &mut Vec<capture_source::CodeDep>,
     seen: &mut HashSet<String>,
 ) -> Result<()> {
     for spec in dep_ids {
@@ -1634,13 +1393,15 @@ fn collect_one_code_dep(
     parent: &Path,
     spec: &str,
     optional: bool,
-    out: &mut Vec<(String, std::path::PathBuf)>,
+    out: &mut Vec<capture_source::CodeDep>,
     seen: &mut HashSet<String>,
 ) -> Result<()> {
     let dep_id = module_manifest::dep_id(spec);
     if !seen.insert(dep_id.to_string()) {
         return Ok(()); // already visited
     }
+    // The pre-order position, in manifest order: the tie-break of the capture resolution.
+    let order = seen.len() as u32;
     let dir = match find_module_dir(parent, dep_id) {
         Some(d) => d,
         None if optional => return Ok(()), // absent optional dependency — skip
@@ -1655,7 +1416,18 @@ fn collect_one_code_dep(
     }
     // Its own code-module deps first (required + optional), so they're registered before it.
     collect_code_deps(parent, &lm.manifest.dependencies, &lm.manifest.optional_dependencies, out, seen)?;
-    out.push((dep_id.to_string(), lm.entry_path()));
+    let entry = lm.entry_path();
+    let deps: Vec<String> =
+        lm.manifest.dependencies.iter().chain(&lm.manifest.optional_dependencies).cloned().collect();
+    out.push(capture_source::CodeDep {
+        id: dep_id.to_string(),
+        entry,
+        reads_screen: capture_source::reads_screen(&lm.manifest.capabilities.require),
+        screen: lm.manifest.screen,
+        deps,
+        order,
+        depth: 0, // settled by capture_source::apply
+    });
     Ok(())
 }
 
@@ -1792,6 +1564,39 @@ fn panic_text(p: &Box<dyn std::any::Any + Send>) -> String {
         .or_else(|| p.downcast_ref::<String>().cloned())
         .map(|s| format!("Rust panic: {s}"))
         .unwrap_or_else(|| "Rust panic (no message)".into())
+}
+
+/// The start of a panic message a test raises on purpose; see `quiet_expected_panics`.
+#[cfg(test)]
+pub(crate) const EXPECTED_PANIC: &str = "expected by a test: ";
+
+/// Keeps the panics tests raise on purpose out of the test output.
+///
+/// Installed ONCE for the whole test binary and never taken down. The tests used to swap the
+/// process-wide hook for a silent one and put the old one back afterwards, and tests run in
+/// parallel: one test's silent hook swallowed another's failure message, and a restore could
+/// put back a hook that was itself another test's silent one. A hook nobody swaps cannot
+/// race. It is silent for exactly two kinds of panic — one inside `logging::contain`, as the
+/// application's own hook is, and one whose message starts with `EXPECTED_PANIC` — and hands
+/// every other to the default hook.
+#[cfg(test)]
+pub(crate) fn quiet_expected_panics() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let p = info.payload();
+            let msg = p
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| p.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("");
+            if msg.starts_with(EXPECTED_PANIC) || logging::hold_contained_panic(|| info.to_string()) {
+                return;
+            }
+            default(info);
+        }));
+    });
 }
 
 #[cfg(test)]
@@ -2166,11 +1971,9 @@ mod guard_tests {
         // A clean callback succeeds.
         let ok: Function = lua.load("return function() end").eval().unwrap();
         assert!(call_guarded(&ok, ()).is_ok());
-        // A Rust panic is caught too (silence the hook so the test output is clean).
-        let saved = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let p = guard(|| panic!("kaboom")).unwrap_err();
-        std::panic::set_hook(saved);
+        // A Rust panic is caught too (kept out of the test output).
+        quiet_expected_panics();
+        let p = guard(|| panic!("{EXPECTED_PANIC}kaboom")).unwrap_err();
         assert!(p.contains("kaboom"));
     }
 
@@ -2182,10 +1985,8 @@ mod guard_tests {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(body))
                 .unwrap_or_else(|p| Err(anyhow::anyhow!("panic while loading: {}", panic_text(&p))))
         };
-        let saved = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let panicked = run(|| panic!("load boom"));
-        std::panic::set_hook(saved);
+        quiet_expected_panics();
+        let panicked = run(|| panic!("{EXPECTED_PANIC}load boom"));
         assert!(panicked.unwrap_err().to_string().contains("load boom"));
         assert!(run(|| Err(anyhow::anyhow!("lua err"))).unwrap_err().to_string().contains("lua err"));
         assert!(run(|| Ok(())).is_ok());
@@ -2227,6 +2028,10 @@ fn populate_vm(
     lua: &Lua,
 ) -> Result<()> {
     let id = &module.manifest.id;
+    // Recorded before anything runs in it: whose VM this is. An image search asked for by any
+    // code in it, a code dependency's too, is then answered while THIS module is enabled — and
+    // never into an older VM that once stood at the same index.
+    image_search::register_vm(shared, lua, idx);
     // This VM's host: identity (settings/resource/path) + ownership (hotkeys/timers/
     // keys/arbiter) scoped to the module (idx). Set as the global so its entry + the
     // host's dispatch resolve it; code dependencies get an identity-scoped variant.
@@ -2271,7 +2076,7 @@ end"))
     // functions. Legacy (non-code) dependencies stay on the data path.
     let reg = lua.create_table()?;
     lua.set_named_registry_value("__module_exports", reg.clone())?;
-    let mut code_deps: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut code_deps: Vec<capture_source::CodeDep> = Vec::new();
     collect_code_deps(
         parent,
         &module.manifest.dependencies,
@@ -2279,7 +2084,10 @@ end"))
         &mut code_deps,
         &mut HashSet::new(),
     )?;
-    for (dep_id, dep_entry) in &code_deps {
+    // Which picture this VM's screen and OCR reads see, from the manifests just read — so a
+    // reload after editing `[screen]` needs nothing else refreshed. Before any code runs.
+    capture_source::apply(lua, id, &module.manifest, &mut code_deps);
+    for capture_source::CodeDep { id: dep_id, entry: dep_entry, .. } in &code_deps {
         let dep_code = std::fs::read_to_string(dep_entry).with_context(|| {
             format!("dependency '{dep_id}' entry not readable: {}", dep_entry.display())
         })?;
@@ -2792,6 +2600,9 @@ pub struct Manager {
 
 impl Manager {
     pub fn new() -> Result<Self> {
+        // Fixes the origin of `host.now()` — and of every gamepad event's `time` — before
+        // anything can read it. See `clock_origin`.
+        clock_origin();
         let backend = backend::platform();
         // Timed because it is not free and it is not obvious: building the fallback speech
         // engine measured 3.1 seconds in a test, and this call is synchronous — that is
@@ -2816,7 +2627,7 @@ impl Manager {
         let (image_result_tx, image_results) = std::sync::mpsc::channel::<ImageResult>();
         // Capture fn pointer taken before `backend` is moved into Shared — it's `Copy`
         // and `Send`, so the worker can capture without the non-`Send` Rc backend.
-        spawn_image_worker(backend.capture_fn(), image_task_rx, image_result_tx);
+        image_search::spawn_image_worker(backend.capture_fn(), image_task_rx, image_result_tx);
         let shared = Rc::new(Shared {
             backend,
             speech,
@@ -2839,7 +2650,8 @@ impl Manager {
             exports: RefCell::new(HashMap::new()),
             arbiter: RefCell::new(HashMap::new()),
             observations: RefCell::new(Observations::default()),
-            ev_counts: Cell::new((0, 0, 0, 0)),
+            ev_counts: Cell::new((0, 0, 0, 0, 0)),
+            pads: gamepad_api::Pads::default(),
             epoch: Cell::new(0),
             input_epoch: Cell::new(0),
             next_arbiter: Cell::new(0),
@@ -2851,6 +2663,7 @@ impl Manager {
             image_results,
             pending_image: RefCell::new(HashMap::new()),
             next_image_id: Cell::new(0),
+            vm_gens: RefCell::new(HashMap::new()),
             template_cache: RefCell::new(HashMap::new()),
             template_seq: Cell::new(0),
             recheck_requested: Cell::new(false),
@@ -2938,7 +2751,8 @@ impl Manager {
         // to be alive are not only the ones the OS delivers.
         let has_own_work = !self.shared.timers.borrow().is_empty()
             || !self.shared.recurring.borrow().is_empty()
-            || !self.shared.pending_image.borrow().is_empty();
+            || !self.shared.pending_image.borrow().is_empty()
+            || self.shared.pads.has_listeners();
         let headless = appcfg::headless();
 
         // The tray manager is shown whenever there's a window (non-headless), even
@@ -3110,10 +2924,10 @@ impl Manager {
                         // symptom and no cause — and the cause moved once already: the poll
                         // was the whole story until the observation cache took it out, after
                         // which the overruns lined up with window switches instead.
-                        shared.ev_counts.set((0, 0, 0, 0));
+                        shared.ev_counts.set((0, 0, 0, 0, 0));
                         backend.pump_pending(&mut dispatcher);
                         let events_ms = pump_started.elapsed().as_millis();
-                        let (act_n, act_ms, focus_ms, _) = shared.ev_counts.get();
+                        let (act_n, act_ms, focus_ms, _, pad_ms) = shared.ev_counts.get();
                         // What the two named phases do NOT account for, printed rather than
                         // left to be inferred as zero.
                         //
@@ -3125,9 +2939,13 @@ impl Manager {
                         // thirty-one stalls in the macOS tester's log read "= 0x
                         // window-activate 0 + focus-change 0", which reads as "the cause is
                         // none of these" when it means "the cause is not measured".
-                        let other_ms = events_ms.saturating_sub(act_ms).saturating_sub(focus_ms);
+                        let other_ms = events_ms
+                            .saturating_sub(act_ms)
+                            .saturating_sub(focus_ms)
+                            .saturating_sub(pad_ms);
                         let t = std::time::Instant::now();
                         shared.fire_due_timers();
+                        shared.fire_pad_replays();
                         let timers_ms = t.elapsed().as_millis();
                         let t = std::time::Instant::now();
                         shared.fire_image_results();
@@ -3155,9 +2973,9 @@ impl Manager {
                                 &format!(
                                     "one iteration took {pump_ms} ms (os events {events_ms} \
                                      = {act_n}x window-activate {act_ms} + focus-change \
-                                     {focus_ms} + everything else {other_ms}, which is \
-                                     mostly key and hotkey dispatch; timers {timers_ms}, \
-                                     image results {images_ms}) — {hazard}"
+                                     {focus_ms} + gamepad {pad_ms} + everything else \
+                                     {other_ms}, which is mostly key and hotkey dispatch; \
+                                     timers {timers_ms}, image results {images_ms}) — {hazard}"
                                 ),
                             );
                         }
@@ -3262,6 +3080,10 @@ pub fn run(dirs: &[String]) -> Result<()> {
         }
         manager.run()
     })();
+    // The desktop duplication thread, if a module ever started it: out of the graphics driver
+    // before the process tears down, for the reason the OCR warmup is joined below. A no-op
+    // everywhere else and in every session that never used it.
+    backend::shutdown_capture();
     // Join the OCR warmup before returning: otherwise its background thread can be
     // mid native ONNX-Runtime init when the process tears down, racing ort's static
     // cleanup → an access violation that surfaces as the headless / fast-exit
@@ -3419,7 +3241,12 @@ impl HostEvents for Dispatcher<'_> {
     fn on_tick(&mut self) {
         self.shared.speech.pump();
         self.shared.fire_due_timers();
+        self.shared.fire_pad_replays();
         self.shared.fire_image_results();
+    }
+
+    fn on_gamepad(&mut self, events: Vec<backend::gamepad::PadEvent>) {
+        self.shared.dispatch_gamepad(events);
     }
 
     fn on_hotkey(&mut self, id: i32) {
@@ -3519,7 +3346,12 @@ impl HostEvents for Dispatcher<'_> {
                 let host: Table = m.lua.globals().get("host")?;
                 let window: Table = host.get("window")?;
                 let dispatch: Function = window.get("_dispatchActivate")?;
-                dispatch.call::<()>(table)
+                // For a module that reads the screen through desktop duplication, a hook the
+                // dispatch runs before the first matching trigger's callback: its window has
+                // just come forward, and that callback's detection read is what opening the
+                // duplication ahead of time is for. `nil` for every other module.
+                let before = capture_source::prewarm_hook(&m.lua)?;
+                dispatch.call::<()>((table, before))
             }) {
                 self.shared.report_callback_error(idx, "window trigger", &e);
             }
@@ -3555,9 +3387,10 @@ impl HostEvents for Dispatcher<'_> {
 /// Which `host.<key>` a manifest's capability name unlocks.
 ///
 /// Everything not in here is free: `os`, `require`, `tryRequire`, `include`, `epoch`, `now`,
-/// `inputEpoch`, `calibrating`, `match`. A clock, a counter, a platform name and a way to
-/// reach a declared dependency are not worth asking permission for, and gating them would
-/// mean every manifest names them, which is the same as naming none.
+/// `inputEpoch`, `calibrating`, `match`, `json`. A clock, a counter, a platform name, a way to
+/// reach a declared dependency and a parser of strings the module already holds are not worth
+/// asking permission for, and gating them would mean every manifest names them, which is the
+/// same as naming none.
 ///
 /// `config` is the second name of the settings table, so it answers to the same capability
 /// rather than to one of its own — nothing declares `"config"` and nothing should have to.
@@ -3569,6 +3402,7 @@ const GATED: &[(&str, &str)] = &[
     ("input", "input"),
     ("keys", "keys"),
     ("hotkey", "hotkey"),
+    ("gamepad", "gamepad"),
     ("speech", "speech"),
     ("sound", "sound"),
     ("timer", "timer"),
@@ -3658,6 +3492,21 @@ fn gated_view(lua: &Lua, full: &Table, caps: &HashSet<String>, id: &str) -> Resu
     Ok(view)
 }
 
+/// Where `host.now()` counts from, and the `time` of every gamepad event with it.
+///
+/// One origin for the whole process, fixed in `Manager::new`. It used to be taken in each
+/// `install_host_api` call, which is once per module VM: two modules' clocks disagreed by
+/// however far apart their VMs were built, while the reference promised "since the application
+/// started". (A code dependency always shared its owner's clock — `now` is not one of the
+/// identity facilities `build_dep_host` copies, so it falls through to the owner's table.) What
+/// makes it matter now is a pad event's `time`, which a module compares with `host.now()`, and
+/// that only means something if both count from the same moment.
+static CLOCK_ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+fn clock_origin() -> Instant {
+    *CLOCK_ORIGIN.get_or_init(Instant::now)
+}
+
 fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table> {
     let host = lua.create_table()?;
 
@@ -3671,6 +3520,12 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         })?,
     )?;
     host.set("log", log)?;
+
+    // host.json.decode(text) — see json.rs. Ungated, like host.os: it reads nothing but the
+    // string it is handed.
+    let json = lua.create_table()?;
+    json.set("decode", lua.create_function(json::decode)?)?;
+    host.set("json", json)?;
 
     // host.require(id) — access a declared dependency. A `code_module` dependency
     // is evaluated *inside this VM* (top-down loading), so this returns its module
@@ -3975,12 +3830,15 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     )?;
     host.set("keys", keys)?;
 
+    // host.gamepad — game controllers, observed only. Its own file, gamepad_api.rs.
+    gamepad_api::install(lua, &host, shared, idx)?;
+
     // host.now() -> milliseconds since the app started. A CLOCK, not a date: the only
     // thing modules need it for is measuring their own hot paths, and "how long did that
     // take" is exactly what nobody could answer about the overlay runtime — every
     // performance question so far had to be answered from Rust or from log timestamps a
     // second apart. Monotonic, so it cannot go backwards mid-measurement.
-    let started = Instant::now();
+    let started = clock_origin();
     host.set(
         "now",
         lua.create_function(move |_, ()| Ok(started.elapsed().as_millis() as i64))?,
@@ -4548,23 +4406,29 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     screen.set(
         "pixel",
         lua.create_function(move |lua, (x, y): (i32, i32)| {
+            // The source first, outside the timing below: in a module that reads through
+            // desktop duplication, the first read also compares the two sources, once.
+            let src = capture_source::read_source(lua, &*sh.backend, (x, y, 1, 1));
             // Timed and counted: a single pixel read is a GDI screen touch, and this project
             // has already measured one at a fixed ~16.7 ms — one compositor frame, whatever
             // the size. Sixty of them is a second, and nothing in the log said they were
             // happening.
             let t0 = Instant::now();
-            let (r, g, b) = sh.backend.pixel(x, y);
+            let px = sh.backend.pixel(x, y, src);
             {
                 let mut obs = sh.observations();
                 obs.pixels += 1;
                 obs.pixel_us += t0.elapsed().as_micros();
             }
+            // nil only for a module that declared `fallback = "none"` while desktop
+            // duplication could not answer: no colour is better than the frozen one.
+            let Some((r, g, b)) = px else { return Ok(mlua::Value::Nil) };
             let t = lua.create_table()?;
             t.set("r", r)?;
             t.set("g", g)?;
             t.set("b", b)?;
             t.set("hex", format!("#{r:02X}{g:02X}{b:02X}"))?;
-            Ok(t)
+            Ok(mlua::Value::Table(t))
         })?,
     )?;
     let sh = shared.clone();
@@ -4624,7 +4488,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 }
             };
             let t0 = Instant::now();
-            let cap = match sh.backend.capture(rx, ry, rw, rh) {
+            let cap = match sh.backend.capture(rx, ry, rw, rh, capture_source::read_source(lua, &*sh.backend, (rx, ry, rw, rh))) {
                 Some(c) => c,
                 None => return Ok(mlua::Value::Nil),
             };
@@ -4755,127 +4619,15 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             Ok(mlua::Value::Table(out))
         })?,
     )?;
-    let sh = shared.clone();
-    screen.set(
-        "imageSearch",
-        lua.create_function(move |lua, (template, opts): (String, Option<Table>)| {
-            let tmpl = sh.load_template(&sh.root(idx).join(&template))?;
-            let (sw, sh_) = sh.backend.screen_size();
-            let (rx, ry, rw, rh) = read_region(opts.as_ref(), sw, sh_);
-            let cap = match sh.backend.capture(rx, ry, rw, rh) {
-                Some(c) => c,
-                None => return Ok(None),
-            };
-            let tol: u8 = opts.as_ref().and_then(|o| o.get::<u8>("tolerance").ok()).unwrap_or(0);
-            let scales = read_scales(opts.as_ref());
-            match find_template_scaled(&cap, tmpl.w, tmpl.h, &tmpl.rgba, tol, &scales, &tmpl.probes) {
-                Some((ox, oy, mw, mh)) => {
-                    let t = lua.create_table()?;
-                    t.set("x", rx + ox as i32)?;
-                    t.set("y", ry + oy as i32)?;
-                    t.set("w", mw)?;
-                    t.set("h", mh)?;
-                    Ok(Some(t))
-                }
-                None => Ok(None),
-            }
-        })?,
-    )?;
-
-    // host.screen.imageSearchMulti(templates, opts?) -> (index, {x,y,w,h}) | (nil, nil)
-    // Captures the region ONCE and tries each template path in order, returning the
-    // 1-based index of the first match plus its hit rect. One capture serves many
-    // comparisons (e.g. a toggle's on/off pair) — half the ~1-frame screen touches of
-    // two imageSearch calls, and both templates are matched against the SAME frame, so
-    // a state change mid-repaint can't fall between two separate captures. Sync, like
-    // imageSearch (AHK-style). Templates share the decode cache.
-    let sh = shared.clone();
-    screen.set(
-        "imageSearchMulti",
-        lua.create_function(move |lua, (templates, opts): (Table, Option<Table>)| {
-            let (sw, sh_) = sh.backend.screen_size();
-            let (rx, ry, rw, rh) = read_region(opts.as_ref(), sw, sh_);
-            let cap = match sh.backend.capture(rx, ry, rw, rh) {
-                Some(c) => c,
-                None => return Ok((mlua::Value::Nil, mlua::Value::Nil)),
-            };
-            let tol: u8 = opts.as_ref().and_then(|o| o.get::<u8>("tolerance").ok()).unwrap_or(0);
-            let scales = read_scales(opts.as_ref());
-            let mut i = 0i64;
-            for entry in templates.sequence_values::<String>() {
-                i += 1;
-                let tmpl = sh.load_template(&sh.root(idx).join(&entry?))?;
-                if let Some((ox, oy, mw, mh)) =
-                    find_template_scaled(&cap, tmpl.w, tmpl.h, &tmpl.rgba, tol, &scales, &tmpl.probes)
-                {
-                    let t = lua.create_table()?;
-                    t.set("x", rx + ox as i32)?;
-                    t.set("y", ry + oy as i32)?;
-                    t.set("w", mw)?;
-                    t.set("h", mh)?;
-                    return Ok((mlua::Value::Integer(i), mlua::Value::Table(t)));
-                }
-            }
-            Ok((mlua::Value::Nil, mlua::Value::Nil))
-        })?,
-    )?;
-    // host.screen.imageSearchAsync(image | {image, …}, opts, cb) — offloads BOTH the
-    // region capture (the ~1-frame DWM-compositor cost) and the template match to a
-    // worker thread, calling cb({x,y,w,h,n}) | cb(nil) on a later tick, so a detection
-    // poll (e.g. the 500 ms landmark poll) never blocks the event loop on either. Only
-    // the template decode happens here, and it is cached.
-    //
-    // Given a LIST of images, they are tried in order against the SAME captured frame and
-    // the first hit wins, with `n` reporting which one matched — for a thing with several
-    // renderings (a dialog's close glyph as two plugin versions draw it). Chaining
-    // separate searches instead costs a fresh capture per template.
-    let sh = shared.clone();
-    screen.set(
-        "imageSearchAsync",
-        lua.create_function(
-            move |lua, (template, opts, cb): (mlua::Value, Option<Table>, Function)| {
-                let mut tmpls = Vec::new();
-                match &template {
-                    mlua::Value::Table(list) => {
-                        for p in list.clone().sequence_values::<String>() {
-                            tmpls.push(sh.load_template(&sh.root(idx).join(&p?))?);
-                        }
-                    }
-                    _ => {
-                        let p: String = lua.from_value(template.clone())?;
-                        tmpls.push(sh.load_template(&sh.root(idx).join(&p))?);
-                    }
-                }
-                if tmpls.is_empty() {
-                    return Err(mlua::Error::external(
-                        "imageSearchAsync: no template given".to_string(),
-                    ));
-                }
-                let (sw, sh_) = sh.backend.screen_size();
-                let (rx, ry, rw, rh) = read_region(opts.as_ref(), sw, sh_);
-                let tol: u8 = opts.as_ref().and_then(|o| o.get::<u8>("tolerance").ok()).unwrap_or(0);
-                let scales = read_scales(opts.as_ref());
-                // The worker captures the region itself and ALWAYS posts a result (a
-                // capture failure becomes a no-match on the tick), so the pending
-                // callback is always drained.
-                let id = sh.next_image_id.get() + 1;
-                sh.next_image_id.set(id);
-                let key = lua.create_registry_value(cb)?;
-                sh.pending_image.borrow_mut().insert(id, (lua.clone(), key, idx));
-                if sh
-                    .image_tasks
-                    .send(ImageTask { id, region: (rx, ry, rw, rh), tmpls, tol, scales })
-                    .is_err()
-                {
-                    // Worker thread gone (should never happen — it's panic-proof): drop
-                    // the pending entry we just inserted so it can't leak (its registry
-                    // value is freed with it), instead of a callback that never fires.
-                    sh.pending_image.borrow_mut().remove(&id);
-                }
-                Ok(())
-            },
-        )?,
-    )?;
+    // The image-search bindings and template handles live in image_search.rs, with the rules
+    // that belong to them: who an async answer is delivered to, what a module may hold in
+    // handles, and what a panic on the worker turns into. Registered HERE, by name, because
+    // this file is what check-docs.ps1 and tools/api-index.py read to learn what exists.
+    screen.set("template", image_search::template(lua, shared, idx)?)?;
+    screen.set("imageSearch", image_search::image_search(lua, shared, idx)?)?;
+    screen.set("imageSearchMulti", image_search::image_search_multi(lua, shared, idx)?)?;
+    screen.set("imageSearchAsync", image_search::image_search_async(lua, shared, idx)?)?;
+    screen.set("imageSearchEach", image_search::image_search_each(lua, shared, idx)?)?;
     // host.screen.saveMarked(path, opts) — like save, but draws a crosshair (and an index
     // tick) at each point in `opts.marks` = { {x, y}, … } in SCREEN coordinates.
     //
@@ -4892,7 +4644,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             let full = sh.root(idx).join(&path);
             let (sw, sh_) = sh.backend.screen_size();
             let (rx, ry, rw, rh) = read_region(Some(&opts), sw, sh_);
-            let Some(cap) = sh.backend.capture(rx, ry, rw, rh) else { return Ok(false) };
+            let Some(cap) = sh.backend.capture(rx, ry, rw, rh, capture_source::read_source(lua, &*sh.backend, (rx, ry, rw, rh))) else {
+                return Ok(false);
+            };
             let Some(mut img) = image::RgbaImage::from_raw(cap.w, cap.h, cap.rgba) else {
                 return Ok(false);
             };
@@ -4934,49 +4688,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             Ok(true)
         })?,
     )?;
-    // host.screen.imageSearchAll(image, opts?) -> { {x,y,w,h}, … } — EVERY match of the
-    // template in the region, not just the first.
-    //
-    // For deciding whether a template is safe to click blindly. A close-glyph template
-    // that matches twice will eventually click the wrong one, and a template that matches
-    // nowhere is a control that silently never fires; "matched exactly once, here" is the
-    // answer you want before shipping either.
-    let sh = shared.clone();
-    screen.set(
-        "imageSearchAll",
-        lua.create_function(move |lua, (template, opts): (String, Option<Table>)| {
-            let tmpl = sh.load_template(&sh.root(idx).join(&template))?;
-            let (sw, sh_) = sh.backend.screen_size();
-            let (rx, ry, rw, rh) = read_region(opts.as_ref(), sw, sh_);
-            let tol: u8 = opts.as_ref().and_then(|o| o.get::<u8>("tolerance").ok()).unwrap_or(0);
-            let out = lua.create_table()?;
-            let Some(cap) = sh.backend.capture(rx, ry, rw, rh) else { return Ok(out) };
-            let mut n = 0;
-            // Non-overlapping: after a hit, resume past its right edge on that row, so one
-            // match is reported once rather than once per pixel of slop.
-            let (tw, th) = (tmpl.w, tmpl.h);
-            let mut y = 0;
-            while y + th <= cap.h {
-                let mut x = 0;
-                while x + tw <= cap.w {
-                    if matches_at(&cap, x, y, tw, th, &tmpl.rgba, tol, &tmpl.probes) {
-                        let t = lua.create_table()?;
-                        t.set("x", rx + x as i32)?;
-                        t.set("y", ry + y as i32)?;
-                        t.set("w", tw)?;
-                        t.set("h", th)?;
-                        n += 1;
-                        out.set(n, t)?;
-                        x += tw;
-                    } else {
-                        x += 1;
-                    }
-                }
-                y += 1;
-            }
-            Ok(out)
-        })?,
-    )?;
+    // In image_search.rs too; see the note above imageSearch.
+    screen.set("imageSearchAll", image_search::image_search_all(lua, shared, idx)?)?;
     // host.screen.save(path, opts?) — capture a screen region (opts.region, else the
     // full screen) and write it to `path` (relative to the calling module's root; an
     // absolute path is used as-is) as a PNG. Returns true on success. A calibration
@@ -4984,11 +4697,14 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     screen.set(
         "save",
-        lua.create_function(move |_, (path, opts): (String, Option<Table>)| {
+        lua.create_function(move |lua, (path, opts): (String, Option<Table>)| {
             let full = sh.root(idx).join(&path);
             let (sw, sh_) = sh.backend.screen_size();
             let (rx, ry, rw, rh) = read_region(opts.as_ref(), sw, sh_);
-            match sh.backend.capture(rx, ry, rw, rh) {
+            // Through the module's own source, like every other read. In a module that reads
+            // through duplication, a shot taken before it has opened is the standard picture
+            // (or `false` under fallback = "none") — docs/api/screen.md says so.
+            match sh.backend.capture(rx, ry, rw, rh, capture_source::read_source(lua, &*sh.backend, (rx, ry, rw, rh))) {
                 Some(cap) => match image::RgbaImage::from_raw(cap.w, cap.h, cap.rgba) {
                     Some(img) => {
                         if let Some(dir) = full.parent() {
@@ -5016,10 +4732,22 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             let (sw, shh) = sh.backend.screen_size();
             let (rx, ry, rw, rh) = read_region(opts.as_ref(), sw, shh);
             let lang: Option<String> = opts.as_ref().and_then(|o| o.get::<String>("lang").ok());
-            let res = sh
-                .backend
-                .ocr(rx, ry, rw, rh, lang.as_deref())
-                .map_err(mlua::Error::external)?;
+            let src = capture_source::read_source(lua, &*sh.backend, (rx, ry, rw, rh));
+            let res = match sh.backend.ocr(rx, ry, rw, rh, lang.as_deref(), src) {
+                Ok(r) => r,
+                // `recognizeMany`'s shape, for a picture a `fallback = "none"` module could not
+                // get: routine there, and a raised error would put a dialog in front of the
+                // game. See capture_source::answers_instead_of_raising.
+                Err(e) if capture_source::answers_instead_of_raising(src, &e) => {
+                    let t = lua.create_table()?;
+                    t.set("text", "")?;
+                    t.set("words", lua.create_table()?)?;
+                    t.set("skipped", false)?;
+                    t.set("error", e)?;
+                    return Ok(t);
+                }
+                Err(e) => return Err(mlua::Error::external(e)),
+            };
             let t = lua.create_table()?;
             t.set("text", res.text)?;
             let words = lua.create_table()?;
@@ -5074,7 +4802,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 let y2: i32 = r.get("y2").or_else(|_| r.get(4)).unwrap_or(shh);
                 rects.push((x1, y1, (x2 - x1).max(0), (y2 - y1).max(0)));
             }
-            let results = sh.backend.ocr_regions(&rects, lang.as_deref());
+            let src = capture_source::read_source(lua, &*sh.backend, rects.first().copied().unwrap_or_default());
+            let results = sh.backend.ocr_regions(&rects, lang.as_deref(), src);
             let out = lua.create_table()?;
             for (i, res) in results.into_iter().enumerate() {
                 let (rx, ry) = rects.get(i).map(|r| (r.0, r.1)).unwrap_or((0, 0));
@@ -5697,136 +5426,6 @@ fn read_scales(opts: Option<&Table>) -> Vec<f32> {
         }
     }
     v
-}
-
-/// Naive template search over a captured region (early-out per position; compares
-/// RGB and honors the template's alpha as a mask). Returns the top-left offset.
-fn find_template(
-    hay: &CapturedImage,
-    tw: u32,
-    th: u32,
-    tmpl: &[u8],
-    tol: u8,
-    probes: &[u32],
-) -> Option<(u32, u32)> {
-    if tw == 0 || th == 0 || tw > hay.w || th > hay.h {
-        return None;
-    }
-    for oy in 0..=(hay.h - th) {
-        for ox in 0..=(hay.w - tw) {
-            if matches_at(hay, ox, oy, tw, th, tmpl, tol, probes) {
-                return Some((ox, oy));
-            }
-        }
-    }
-    None
-}
-
-/// True if the template sits at (ox, oy) with every non-wildcard pixel inside `tol`.
-///
-/// `probes` are template pixel indices to test FIRST (see `probe_order`). They are a
-/// subset of the same conjunction, so testing them early cannot change the verdict — it
-/// only decides how fast the overwhelming majority of positions, which do NOT match, are
-/// rejected. Row-major order begins at (0,0), which on a wordmark is background and
-/// therefore agrees almost everywhere; measured on a real frame, that first comparison
-/// eliminated 31 % of positions where a glyph pixel eliminates 99.5 %.
-fn matches_at(
-    hay: &CapturedImage,
-    ox: u32,
-    oy: u32,
-    tw: u32,
-    th: u32,
-    tmpl: &[u8],
-    tol: u8,
-    probes: &[u32],
-) -> bool {
-    let tol = tol as i16;
-    let px = |i: u32| -> bool {
-        let ti = (i as usize) * 4;
-        let (tx, ty) = (i % tw, i / tw);
-        let hi = (((oy + ty) * hay.w + (ox + tx)) * 4) as usize;
-        for c in 0..3 {
-            if (hay.rgba[hi + c] as i16 - tmpl[ti + c] as i16).abs() > tol {
-                return false;
-            }
-        }
-        true
-    };
-    for &i in probes {
-        if !px(i) {
-            return false;
-        }
-    }
-    for ty in 0..th {
-        for tx in 0..tw {
-            let ti = ((ty * tw + tx) * 4) as usize;
-            if tmpl[ti + 3] == 0 {
-                continue; // transparent template pixel = wildcard
-            }
-            let hi = (((oy + ty) * hay.w + (ox + tx)) * 4) as usize;
-            for c in 0..3 {
-                if (hay.rgba[hi + c] as i16 - tmpl[ti + c] as i16).abs() > tol {
-                    return false;
-                }
-            }
-        }
-    }
-    true
-}
-
-/// Resizes an RGBA template (`tw`×`th`) to `sw`×`sh` (bilinear), returning the new
-/// raw RGBA bytes. Falls back to the original bytes if the buffer can't be wrapped.
-fn resize_rgba(tmpl: &[u8], tw: u32, th: u32, sw: u32, sh: u32) -> Vec<u8> {
-    match image::RgbaImage::from_raw(tw, th, tmpl.to_vec()) {
-        Some(img) => {
-            image::imageops::resize(&img, sw, sh, image::imageops::FilterType::Triangle).into_raw()
-        }
-        None => tmpl.to_vec(),
-    }
-}
-
-/// Multi-scale template search: tries each factor in `scales` (the needle resized to
-/// factor·{tw,th}; 1.0 uses it as-is), returning the first match's top-left AND the
-/// matched (scaled) size. Empty `scales` = a single 1.0 pass (the plain search). 1.0,
-/// when present, is tried first, so an exact hit costs nothing extra and the other
-/// scales are only reached when it misses. Resized needles rely on `tol` (bilinear
-/// interpolation perturbs pixels), so pair scaling with a non-zero colour tolerance.
-fn find_template_scaled(
-    hay: &CapturedImage,
-    tw: u32,
-    th: u32,
-    tmpl: &[u8],
-    tol: u8,
-    scales: &[f32],
-    probes: &[u32],
-) -> Option<(u32, u32, u32, u32)> {
-    let one = [1.0f32];
-    let list: &[f32] = if scales.is_empty() { &one } else { scales };
-    for &s in list {
-        if s <= 0.0 {
-            continue;
-        }
-        let (sw, sh) = if (s - 1.0).abs() < 1e-4 {
-            (tw, th)
-        } else {
-            (((tw as f32) * s).round() as u32, ((th as f32) * s).round() as u32)
-        };
-        if sw == 0 || sh == 0 || sw > hay.w || sh > hay.h {
-            continue;
-        }
-        let hit = if sw == tw && sh == th {
-            find_template(hay, tw, th, tmpl, tol, probes)
-        } else {
-            // A resized needle has different pixels, so the precomputed probe indices no
-            // longer point at the same content — fall back to the plain scan for those.
-            let scaled = resize_rgba(tmpl, tw, th, sw, sh);
-            find_template(hay, sw, sh, &scaled, tol, &[])
-        };
-        if let Some((ox, oy)) = hit {
-            return Some((ox, oy, sw, sh));
-        }
-    }
-    None
 }
 
 /// Converts a native window snapshot into the Lua table modules see:

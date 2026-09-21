@@ -469,19 +469,12 @@ impl Speech {
         // (gui.rs) — the settings store is the interface's, not this module's.
         #[cfg(target_os = "macos")]
         if let Some(why) = self.av.take_personal_note() {
-            // An environment variable that forces the switch on also keeps it on (`set` cannot
-            // turn it off), and then the sentence must not claim otherwise.
-            if crate::appcfg::forced_by_env("personal_voice") {
-                crate::logging::line("speech", &format!("Personal Voice: {why}"));
-                self.av.say(why.as_str(), false, None);
-            } else {
-                crate::appcfg::set("personal_voice", false);
-                crate::logging::line(
-                    "speech",
-                    &format!("Personal Voice: {why} The switch is off again."),
-                );
-                self.av.say(&format!("{why} The box has been unticked."), false, None);
-            }
+            crate::appcfg::set("personal_voice", false);
+            crate::logging::line(
+                "speech",
+                &format!("Personal Voice: {why} The switch is off again."),
+            );
+            self.av.say(&format!("{why} The box has been unticked."), false, None);
         }
         #[cfg(target_os = "macos")]
         for text in self.vo.refused() {

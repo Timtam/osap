@@ -28,8 +28,12 @@ $root = $PSScriptRoot
 # Forward slashes in the paths: this runs on a Linux CI runner as well as on Windows, and .NET
 # accepts them on both. A backslash passes locally and fails in CI, which is the worst order to
 # find that out in.
+#
+# gamepad_api.rs registers `host.gamepad` from a file of its own, so it is read beside lib.rs;
+# without it every documented `host.gamepad.*` call would be reported as one the host lacks.
 $sources = @(
   (Get-Content (Join-Path $root "crates/host/src/lib.rs") -Raw),
+  (Get-Content (Join-Path $root "crates/host/src/gamepad_api.rs") -Raw),
   (Get-Content (Join-Path $root "crates/host/src/window_prelude.luau") -Raw)
 ) -join "`n"
 

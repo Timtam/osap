@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 120 entries.
+Every call the platform offers a module, in one place. 130 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -28,7 +28,7 @@ Ownership is unaffected, and deliberately so. A hotkey or a timer that a depende
 
 **A callback you register is your code.** That is why a module whose own file never writes `host.window` still declares `window` if it attaches an overlay: the gate and the matcher it supplied are called during a focus change, and they are yours.
 
-Nothing is gated on `host.os`, `host.require`, `host.tryRequire`, `host.include`, `host.epoch`, `host.now`, `host.inputEpoch` or `host.calibrating`. A clock, a counter, a platform name and a way to reach a declared dependency are not worth asking permission for, and gating them would mean every manifest names them — which is the same as naming none.
+Nothing is gated on `host.os`, `host.require`, `host.tryRequire`, `host.include`, `host.epoch`, `host.now`, `host.inputEpoch`, `host.calibrating` or `host.json`. A clock, a counter, a platform name, a way to reach a declared dependency and a parser of strings the module already holds are not worth asking permission for, and gating them would mean every manifest names them — which is the same as naming none.
 
 The list is also shown to the user before installing a module from GitHub. It is not a security boundary on its own — a module still runs arbitrary Luau, and the declaration is the module's own word — but it is now the word the platform holds it to.
 
@@ -94,15 +94,17 @@ Reading pixels, profiling a region, and finding an image within one.
 
 | | |
 |---|---|
-| [`host.screen.imageSearch(template, opts?)`](screen#host-screen-imagesearch) | Searches the screen for the first occurrence of the image at path `template` and returns its match rectangle in **screen pixels** |
-| [`host.screen.imageSearchAll(template, opts?)`](screen#host-screen-imagesearchall) | Returns **every** match of `template` in the region, as an array of rectangles in screen pixels, rather than stopping at the first one like `imageSearch`. |
+| [`host.screen.imageSearch(template, opts?)`](screen#host-screen-imagesearch) | Searches the screen for the first occurrence of `template` |
+| [`host.screen.imageSearchAll(template, opts?)`](screen#host-screen-imagesearchall) | Returns **every** match of `template` in the region, as an array of hits in screen pixels, rather than stopping at the first one like `imageSearch`. |
 | [`host.screen.imageSearchAsync(template, opts?, cb)`](screen#host-screen-imagesearchasync) | Like `imageSearch`, but the region capture **and** the match both run on a worker thread; `cb` fires on a later tick. |
-| [`host.screen.imageSearchMulti(templates, opts?)`](screen#host-screen-imagesearchmulti) | Captures the region **once** and tries each template path against that one frame, returning two values |
+| [`host.screen.imageSearchEach(entries, opts?, cb)`](screen#host-screen-imagesearcheach) | **One** capture of `opts.region` on the worker thread, and an answer for **every** entry |
+| [`host.screen.imageSearchMulti(templates, opts?)`](screen#host-screen-imagesearchmulti) | Captures the region **once** and tries each template against that one frame, returning two values |
 | [`host.screen.pixel(x, y)`](screen#host-screen-pixel) | Reads the colour of the screen pixel at `(x, y)`. |
-| [`host.screen.profile(opts?)`](screen#host-screen-profile) | where `Axis = { min: number[], max: number[], mean: number[], r: number[], g: number[], b: number[] }` |
+| [`host.screen.profile(opts?)`](screen#host-screen-profile) | Takes **one** capture of `region` (see Region form |
 | [`host.screen.save(path, opts?)`](screen#host-screen-save) | Captures `opts.region` (see Region form |
 | [`host.screen.saveMarked(path, opts)`](screen#host-screen-savemarked) | Everything `save` does, plus a magenta crosshair drawn at every point in `opts.marks`, given in **screen** coordinates. |
 | [`host.screen.size()`](screen#host-screen-size) | Returns the primary screen dimensions in pixels as `{ w, h }`. |
+| [`host.screen.template(spec)`](screen#host-screen-template) | Builds a template in memory, for every search below to take wherever it takes a path. |
 
 ## host.ocr
 
@@ -172,6 +174,18 @@ Claiming a combination system-wide.
 |---|---|
 | [`host.hotkey.register(spec, callback)`](hotkey#host-hotkey-register) | Registers a **global** OS hotkey (active regardless of foreground window) for the key spec and returns an integer `id`. |
 | [`host.hotkey.unregister(id)`](hotkey#host-hotkey-unregister) | Releases the OS hotkey and forgets the callback for the `id` returned by `register`. |
+
+## host.gamepad
+
+Watching game controllers while a game is in front — observed only, never taken from the game.
+
+| | |
+|---|---|
+| [`host.gamepad.list()`](gamepad#host-gamepad-list) | The pads connected now, sorted by `index`; an empty table when there are none. |
+| [`host.gamepad.off(token)`](gamepad#host-gamepad-off) | Removes the listener `on` returned `token` for, and says whether there was one. |
+| [`host.gamepad.on(event, callback, opts?)`](gamepad#host-gamepad-on) | Calls `callback` for every matching event while the module is enabled, until `off` or until the module is reloaded. |
+| [`host.gamepad.state(pad)`](gamepad#host-gamepad-state) | What pad number `pad` is doing now, or `nil` when there is no pad with that index. |
+| [`host.gamepad.status()`](gamepad#host-gamepad-status) | What the controller watching is doing, as readable text, for a diagnostic line in a log. |
 
 ## host.speech
 
@@ -243,6 +257,14 @@ Writing to the log file beside the application.
 | [`host.resource.exists(rel)`](resource#host-resource-exists) | Whether a file exists under this module's own root, without reading it. |
 | [`host.resource.read(rel)`](resource#host-resource-read) | Reads a package-relative file as a UTF-8 string (`string`) from the calling |
 
+## host.json
+
+Turning JSON text a module ships into Luau values.
+
+| | |
+|---|---|
+| [`host.json.decode(text)`](json#host-json-decode) | Parses `text` as one JSON document and returns it as Luau values |
+
 ## host.require
 
 | | |
@@ -304,9 +326,11 @@ The shapes and grammars the calls above are written in.
 
 | | |
 |---|---|
+| [`Button and axis names`](gamepad#button-and-axis-names) | Every name a filter accepts, beside what SDL3, pygame and XInput call it and what is printed on each family's pads. |
 | [`Key spec string format`](keys#key-spec-string-format) | Two namespaces parse `+`-joined spec strings; segments are trimmed and case-insensitive. |
 | [`Matchers`](window#matchers) | A *matcher* is a declarative table passed to `host.window.find/findAll/test/onTrigger`. |
 | [`Plugin base + library overlays (the cell model)`](overlay#plugin-base-library-overlays) | A plugin is not one overlay. |
-| [`Region form`](screen#region-form) | Several functions (`host.screen.imageSearch`, `host.screen.profile`, `host.ocr.recognize`, and each entry of… |
+| [`Region form`](screen#region-form) | Several functions (`host.screen.imageSearch` and the other searches, `host.screen.profile`, `host.ocr.recognize`, and each… |
 | [`Table shapes`](window#table-shapes) | Returned by `host.window.list()`, `host.window.active()`, `host.window.find()`, `host.window.findAll()`, and passed to trigger/test callbacks. |
+| [`Which picture a read sees`](screen#which-picture-a-read-sees) | Every call on this page, and `host.ocr.recognize` / `recognizeMany`, reads the screen one way for the whole module, chosen in its manifest rather than per call. |
 | [`ocrLabel — reading a control's name off the screen`](overlay#ocrlabel) | Any hotspot or hotspot-toggle may carry `ocrLabel = {x1, y1, x2, y2}` (origin-relative) |

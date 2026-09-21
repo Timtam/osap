@@ -16,11 +16,12 @@
 //! that is set FORCES the setting on for that run, and the tab says so rather than
 //! pretending it can turn it off. New settings, though, go here and not there.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// One switch: how it is stored, how it is named to a person, and when it starts to matter.
 pub struct Switch {
-    /// Key in the `[app]` table of `settings.toml`, and the suffix of its variable.
+    /// Key in the `[app]` table of `settings.toml` — and, for the five in `LEGACY_ENV` only,
+    /// the suffix of its environment variable.
     pub key: &'static str,
     /// What the tab calls it. Carries the "when does this take effect" note, because a
     /// setting that appears to do nothing is worse than one that says it needs a restart.
@@ -53,6 +54,18 @@ static PERSONAL_VOICE: AtomicBool = AtomicBool::new(false);
 static SCREEN_READER_SPEECH: AtomicBool = AtomicBool::new(true);
 static BRAILLE: AtomicBool = AtomicBool::new(true);
 static DOCK_WHILE_OPEN: AtomicBool = AtomicBool::new(true);
+static DESKTOP_DUPLICATION: AtomicBool = AtomicBool::new(true);
+/// How many times the desktop-duplication switch has gone from off to on — see `set`.
+static DESKTOP_DUPLICATION_GEN: AtomicU32 = AtomicU32::new(0);
+
+/// The only switches an environment variable can force, and the list is closed.
+///
+/// `load` and `set` used to OR every switch with its `AUTOMATION_PLATFORM_<KEY>` variable, so
+/// each new setting silently brought a new environment variable with it — five of them already
+/// had, and nothing documents or uses those. These five are the ones CI jobs and the tester's
+/// scripts set, and they stay for the launches that have no window to click in. Everything
+/// newer is configured in the Application settings tab, full stop.
+const LEGACY_ENV: [&str; 5] = ["trace", "calibrate", "ocr_debug", "ignore_supported_os", "headless"];
 
 /// Every application setting, in the order the tab shows them: the ones that take effect
 /// immediately first, so the two that need a restart are not the first thing read out.
@@ -193,9 +206,29 @@ pub const SWITCHES: &[Switch] = &[
         default_on: true,
         state: &DOCK_WHILE_OPEN,
     },
+    Switch {
+        key: "desktop_duplication",
+        label: "Let modules that ask for it read the screen through the graphics card — takes \
+                effect immediately",
+        help: "The ordinary way of reading the screen may see some games as a frozen or black \
+               picture. A module written for such a game can ask for desktop duplication \
+               instead, a second way of reading the screen that may see what the ordinary one \
+               misses; whether it does has to be tried with each game. Turn this off if such a \
+               module misbehaves on this computer — with a screen recorder or a screen-sharing \
+               call running, on a laptop with two graphics chips, or over Remote Desktop. \
+               Turning it off and on again also gives duplication another try after it stopped \
+               answering. Modules that did not ask are not affected either way.",
+        os: Some("windows"),
+        // On, because it does nothing until a module asks for it: a module that declares it
+        // was written for an application the ordinary path cannot read. This is the way out
+        // for a machine where it misbehaves, not a way in.
+        default_on: true,
+        state: &DESKTOP_DUPLICATION,
+    },
 ];
 
 /// The environment variable that forces a switch on, for the launches that have no window.
+/// Only honoured for the keys in `LEGACY_ENV` — see `forced_by_env`.
 pub fn env_name(key: &str) -> String {
     format!("AUTOMATION_PLATFORM_{}", key.to_ascii_uppercase())
 }
@@ -205,8 +238,18 @@ pub fn env_name(key: &str) -> String {
 /// Reported by the tab, which must not offer to turn off something it cannot: the
 /// variable wins until the process is restarted without it, and saying so is the difference
 /// between a control that lies and one that explains.
+///
+/// Only the five in [`LEGACY_ENV`] can be forced; for every other key this is false whatever
+/// the environment says.
 pub fn forced_by_env(key: &str) -> bool {
-    std::env::var_os(env_name(key)).is_some_and(|v| v != "0")
+    forced_in(key, |name| std::env::var_os(name))
+}
+
+/// [`forced_by_env`] with the environment passed in, so the test can say "every variable is
+/// set" without setting one: `set_var` in a test binary whose other tests run on other threads
+/// is unsound outside Windows, and the macOS CI job runs this binary.
+fn forced_in(key: &str, lookup: impl Fn(&str) -> Option<std::ffi::OsString>) -> bool {
+    LEGACY_ENV.contains(&key) && lookup(&env_name(key)).is_some_and(|v| v != "0")
 }
 
 impl Switch {
@@ -234,7 +277,14 @@ pub fn get(key: &str) -> bool {
 /// then be undone by the next read of an environment nobody can see.
 pub fn set(key: &str, on: bool) {
     if let Some(s) = switch(key) {
-        s.state.store(s.applies_here() && (on || forced_by_env(key)), Ordering::Relaxed);
+        let now = s.applies_here() && (on || forced_by_env(key));
+        let was = s.state.swap(now, Ordering::Relaxed);
+        // Off and on again is how a person asks desktop duplication for another try after it
+        // gave up. Counted here, where the edge happens, and read by the capture path at its
+        // next read — so this file needs to know nothing about the capture path.
+        if key == "desktop_duplication" && now && !was {
+            DESKTOP_DUPLICATION_GEN.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -291,6 +341,16 @@ pub fn screen_reader_speech() -> bool {
 pub fn braille() -> bool {
     BRAILLE.load(Ordering::Relaxed)
 }
+/// Only asked on Windows, by the desktop duplication path — everywhere else there is none.
+#[cfg(windows)]
+pub fn desktop_duplication() -> bool {
+    DESKTOP_DUPLICATION.load(Ordering::Relaxed)
+}
+/// Changes each time the switch goes from off to on; see `set`.
+#[cfg(windows)]
+pub fn desktop_duplication_generation() -> u32 {
+    DESKTOP_DUPLICATION_GEN.load(Ordering::SeqCst)
+}
 /// Only asked on macOS — everywhere else `applies_here` has already pinned it off.
 #[cfg(target_os = "macos")]
 pub fn voiceover_speech() -> bool {
@@ -332,6 +392,35 @@ mod tests {
         assert!(ocr_debug());
         set("ocr_debug", false);
         assert!(!ocr_debug());
+    }
+
+    #[test]
+    fn only_the_five_legacy_switches_can_be_forced_by_a_variable() {
+        // The project's rule is no new environment variables, and the generic OR in `load` and
+        // `set` broke it silently for every switch added after the five. An environment in
+        // which every variable is set, passed in rather than made with `set_var` (see
+        // `forced_in`): the newer switches stay unforced, and a legacy one is forced.
+        let all_set = |_: &str| Some(std::ffi::OsString::from("1"));
+        assert!(!forced_in("desktop_duplication", all_set));
+        assert!(!forced_in("screen_reader_speech", all_set));
+        assert!(forced_in("trace", all_set));
+        // Every legacy name is a real switch, so the list cannot rot into naming nothing.
+        for key in LEGACY_ENV {
+            assert!(switch(key).is_some(), "{key} is in LEGACY_ENV but is not a switch");
+        }
+        // And the documented five are exactly these.
+        assert_eq!(LEGACY_ENV.len(), 5);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn switching_duplication_off_and_on_again_is_a_new_generation() {
+        // Other tests in this binary call `load`, which may turn the switch off in between;
+        // that can only add a rising edge, never remove the one made here, hence `>`.
+        let before = desktop_duplication_generation();
+        set("desktop_duplication", false);
+        set("desktop_duplication", true);
+        assert!(desktop_duplication_generation() > before);
     }
 
     #[test]

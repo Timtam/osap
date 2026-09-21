@@ -226,12 +226,19 @@ end
 -- out differently again from all nine sharing the load.
 local SLOW_DISPATCH_MS = 40
 
-function W._dispatchActivate(win)
+-- `beforeFirst`, when the host passes one, runs once before the first matching callback:
+-- the host's preparation for the reads that callback is about to make (opening desktop
+-- duplication for a module that reads through it — see capture_source.rs). Before it, not
+-- after them all, because by then that first read has already paid for the opening.
+function W._dispatchActivate(win, beforeFirst)
   local started = host.now and host.now() or nil
   local fired = 0
   for _, t in ipairs(triggers) do
     if t.on == "activate" and matches(t.matcher, win) then
       fired = fired + 1
+      if fired == 1 and beforeFirst then
+        beforeFirst()
+      end
       t.cb(win)
     end
   end

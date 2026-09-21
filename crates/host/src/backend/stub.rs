@@ -1,7 +1,10 @@
 //! Fallback backend for platforms without a real implementation yet.
 //! Window queries return empty; hotkey registration returns an error.
 
-use super::{Backend, CapturedImage, ControlInfo, DumpNode, HostEvents, MouseButton, OcrText, WinInfo};
+use super::{
+    Backend, CaptureFn, CaptureSource, CapturedImage, ControlInfo, DumpNode, HostEvents,
+    MouseButton, OcrText, WinInfo,
+};
 
 pub struct StubBackend;
 
@@ -25,16 +28,18 @@ impl Backend for StubBackend {
         (0, 0)
     }
 
-    fn pixel(&self, _x: i32, _y: i32) -> (u8, u8, u8) {
-        (0, 0, 0)
+    // The source is accepted and ignored here, as on macOS: there is only one way of reading
+    // nothing.
+    fn pixel(&self, _x: i32, _y: i32, _src: CaptureSource) -> Option<(u8, u8, u8)> {
+        Some((0, 0, 0))
     }
 
-    fn capture(&self, _x: i32, _y: i32, _w: i32, _h: i32) -> Option<CapturedImage> {
+    fn capture(&self, _x: i32, _y: i32, _w: i32, _h: i32, _src: CaptureSource) -> Option<CapturedImage> {
         None
     }
 
-    fn capture_fn(&self) -> fn(i32, i32, i32, i32) -> Option<CapturedImage> {
-        |_, _, _, _| None
+    fn capture_fn(&self) -> CaptureFn {
+        |regions, _| regions.iter().map(|_| None).collect()
     }
 
     fn ocr(
@@ -44,6 +49,7 @@ impl Backend for StubBackend {
         _w: i32,
         _h: i32,
         _lang: Option<&str>,
+        _src: CaptureSource,
     ) -> Result<OcrText, String> {
         Err("OCR is not implemented on this platform yet".to_string())
     }
@@ -160,5 +166,9 @@ impl Backend for StubBackend {
         Ok(())
     }
 
-    fn pump_pending(&self, _events: &mut dyn HostEvents) {}
+    fn pump_pending(&self, events: &mut dyn HostEvents) {
+        // Never anything to drain here — the stub has no pad source and `ensure_started`
+        // refuses — but called anyway, so the pump has the same shape on every platform.
+        super::gamepad::drain_into(events);
+    }
 }

@@ -76,7 +76,7 @@ Deliberately **not** time-based, and it does not advance on an idle tick. A stal
 
 **Signature:** `host.now() -> number`
 
-Milliseconds since the application started, monotonic, so it cannot go backwards in the middle of a measurement.
+Milliseconds since the application started, monotonic, so it cannot go backwards in the middle of a measurement. It is one clock for the whole application: every module counts from the same moment, and so does the `time` a [game-controller event](gamepad#host-gamepad-on) carries, so the two can be compared.
 
 It exists for one thing: measuring your own hot paths. Every performance question in this project up to its arrival had to be answered from Rust or from log timestamps a second apart, neither of which can say what a single focus step cost.
 

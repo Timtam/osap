@@ -53,6 +53,10 @@ require = ["window.read", "input.click", "screen.imagesearch", "ocr", "speech"]
 [native]                        # optional, only with ffi.native
 "windows-x64" = "native/windows-x64/foo.dll"
 "macos-arm64" = "native/macos-arm64/libfoo.dylib"
+
+[screen]                        # optional: which picture host.screen and host.ocr read
+capture  = "duplication"        # "standard" (default) | "duplication" (Windows only)
+fallback = "none"               # with "duplication": "standard" (default) | "none"
 ```
 
 TOML, because it is declarative and **readable without code execution** — the host can check capabilities/trust *before* Luau runs.
@@ -88,6 +92,45 @@ in a file nobody reads. So:
 Names are `windows`, `macos`, `linux` — Rust's `std::env::consts::OS` values — matched
 case-insensitively, because the file is written by hand and `"Windows"` is what a person
 types.
+
+### `[screen]`, and why it is declared per module
+
+`[screen]` chooses the picture every `host.screen` and `host.ocr` read of the module sees. The
+default, `standard`, is how every module has always read the screen. `duplication` reads it
+through DXGI Desktop Duplication on Windows, for an application whose picture the standard
+path reads frozen or black; `fallback = "none"` makes a read that duplication cannot answer
+fail instead of returning the standard picture, for an application where that picture is
+wrong rather than slow. The API reference has the details:
+[Which picture a read sees](api/screen.md#which-picture-a-read-sees).
+
+It is a declaration in the manifest, not a per-call option and not something the host
+detects, for three reasons:
+
+- **Whether the standard picture is wrong is a property of the target application**, and the
+  module's author is the one who has tested that application. The person using the module —
+  often blind — cannot see a frozen picture to report it.
+- **One declaration covers every call.** A template cut from one picture is never matched
+  against the other, which matters because the two can differ (HDR is converted for
+  duplication, for one).
+- **A frozen frame cannot be told from a still screen**, and a menu waiting for input is still
+  by design. A host that switched sources by guessing would make the same template match and
+  stop matching for no reason anyone could hear.
+
+**Who decides for a VM:** the module's own `[screen]` if it has one; otherwise the nearest
+`code_module` dependency that declares one — smallest depth first, then the earliest in
+manifest order (`dependencies` before `optional_dependencies`) — counting only dependencies
+that themselves require `screen` or `ocr`; otherwise `standard`. So a runtime that every game
+module is built on declares it once, and a single module can still override it. Resolved each
+time the VM is built, from the manifests as they are on disk then: reloading a module after
+editing its table applies it, and reloading a runtime after editing ITS table applies it to
+every module that lists the runtime under `dependencies`, because those are rebuilt with it. A
+module that has the runtime only under `optional_dependencies` is not rebuilt with it; reload
+that module itself. Unknown values are named in the log and read as `standard` (for `capture`) or the standard fallback (for
+`fallback`); the module still loads. Hosts that predate the table ignore it.
+
+On macOS the table is accepted and ignored. A switch in the Application settings tab ("Let
+modules that ask for it read the screen through the graphics card", on by default) turns
+duplication off for every module on a Windows machine where it misbehaves.
 
 ## Multi-file code (fixed entry point, no mono-file)
 

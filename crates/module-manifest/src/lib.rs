@@ -67,6 +67,32 @@ pub struct ModuleManifest {
     pub supported_os: Vec<String>,
     #[serde(default)]
     pub capabilities: Capabilities,
+    /// `[screen]`: which picture this module's screen and OCR reads see. Absent for every
+    /// module written before it existed, and absent means the standard way — see
+    /// [`ScreenDecl`].
+    #[serde(default)]
+    pub screen: ScreenDecl,
+}
+
+/// `[screen]` block: how the screen is read for this module's VM.
+///
+/// Kept as the strings the author wrote rather than parsed into an enum here, and on purpose.
+/// A value this crate does not know must not fail the whole manifest — a module written for a
+/// newer host has to keep loading on an older one, reading the standard way — and the host is
+/// the one that can say, in the log and by name, which value it did not understand. So the
+/// judgement lives in the host (`capture_source.rs`), and this is only the carrier.
+///
+/// ```toml
+/// [screen]
+/// capture = "duplication"   # "standard" (the default) or "duplication"
+/// fallback = "none"         # with "duplication": "standard" (the default) or "none"
+/// ```
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+pub struct ScreenDecl {
+    #[serde(default)]
+    pub capture: Option<String>,
+    #[serde(default)]
+    pub fallback: Option<String>,
 }
 
 impl ModuleManifest {
@@ -236,6 +262,61 @@ version = \"1.0.0\"
         assert!(m.runs_on("windows"));
         assert!(m.runs_on("macos"));
         assert!(!m.runs_on("linux"));
+    }
+
+    #[test]
+    fn a_manifest_without_a_screen_table_declares_nothing() {
+        // Every module written before `[screen]` existed: it must parse exactly as before and
+        // leave the choice to the host's default.
+        let m: ModuleManifest = toml::from_str(
+            "id = \"com.x.y\"
+name = \"X\"
+version = \"1.0.0\"
+",
+        )
+        .expect("manifest parses");
+        assert_eq!(m.screen, ScreenDecl::default());
+        assert!(m.screen.capture.is_none() && m.screen.fallback.is_none());
+    }
+
+    #[test]
+    fn a_screen_table_is_carried_as_written() {
+        let m: ModuleManifest = toml::from_str(
+            "id = \"com.x.y\"
+name = \"X\"
+version = \"1.0.0\"
+
+[capabilities]
+require = [\"screen\"]
+
+[screen]
+capture = \"duplication\"
+fallback = \"none\"
+",
+        )
+        .expect("manifest parses");
+        assert_eq!(m.screen.capture.as_deref(), Some("duplication"));
+        assert_eq!(m.screen.fallback.as_deref(), Some("none"));
+        assert_eq!(m.capabilities.require, vec!["screen".to_string()]);
+    }
+
+    #[test]
+    fn an_unknown_screen_value_still_parses() {
+        // Refusing the manifest would make a module written for a newer host fail to load on
+        // this one; the host names the value it does not know and reads the standard way.
+        let m: ModuleManifest = toml::from_str(
+            "id = \"com.x.y\"
+name = \"X\"
+version = \"1.0.0\"
+
+[screen]
+capture = \"window\"
+some_later_key = 3
+",
+        )
+        .expect("an unknown value and an unknown key must not fail the manifest");
+        assert_eq!(m.screen.capture.as_deref(), Some("window"));
+        assert!(m.screen.fallback.is_none());
     }
 
     #[test]

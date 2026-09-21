@@ -2461,6 +2461,306 @@ wrapper rather than with prism.
       made and accepted, which is all the smoke test can show, but that the announcements
       actually arrive on the braille line.
 
+## In-memory templates for image search (2026-09-21)
+
+The design, what was built and why: [`docs/in-memory-templates-design.md`](docs/in-memory-templates-design.md).
+Built this round, uncommitted, pure Rust plus bindings: the matcher moved to
+`crates/host/src/template.rs` with a verbatim copy of the old one as the reference its
+equivalence test compares against (step 1); a per-template cache of scaled variants, bounded
+by the haystack before anything is built, 16 entries and 16 MiB (step 2); `catch_unwind` per
+entry and per batch on the image worker (step 2); `host.screen.template` with `rgba`, `rgb`,
+`capture` and `file` sources, a 32 MiB per-VM budget and the `VmOwner` owner/generation fix
+(steps 4–5); `host.screen.imageSearchEach` and handles in every search (step 6); alpha forced
+to 255 in the Windows capture; `host.json.decode`; the doc bugs in `resource.md`, `require.md`
+and `screen.md`. Bindings and worker are in `crates/host/src/image_search.rs`.
+
+- [ ] **Step 3 waits for the developer's answer: what is one cell of his signatures?** A pixel
+      at a fixed place, or the mean of a block. Until he says, none of this is built: sparse
+      point templates, `lo`/`hi` ranges, `outside` checks, template-level `tolerance`,
+      `maxMiss` and the ±2 px refinement after a first hit with misses, nor the
+      `host.screen.cells{ region, cols, rows }` block-mean reducer that replaces them if a cell
+      is a mean. `template::Body` has one variant so the sparse one is an addition, and
+      `host.screen.template` refuses `points`, `tolerance` and `maxMiss` as unknown fields
+      today, so adding them later changes no existing behaviour. If a cell is a mean, give the
+      colour test a `kind` byte (critique issue 1) so a channel-difference predicate can follow
+      without an API change.
+- [ ] **Measure the variant cache (step 2).** `match_ms` from the `[image]` batch line on the
+      Kontakt and Soundiron landmark polls and on the gtoggle scale ladder, before and after
+      this change. Expected: scaled scans faster (probes again, no resize per call); unscaled
+      ones unchanged. Not measured — it needs the real libraries on screen.
+- [ ] **The live self-test (step 8), on Windows, needing nobody to set up a screen:** capture a
+      24x24 patch from the middle of the manager window (reject flat patches with a `profile`
+      min/max check), search a region 200 px larger on each side — the hit must be the capture
+      origin, and `imageSearchAll` must find exactly one — and log and speak the results.
+- [ ] **Confirm the owner fix live:** with a Kontakt library loaded and its overlay active,
+      (a) disable the overlay runtime (`com.platform.overlay`) in the manager and re-enable it,
+      and (b) disable the LIBRARY module itself and re-enable it. Both times the library's
+      landmark gate must keep searching, and after (b) its overlay must come back only while
+      that library is really loaded. Before the fix, (a) stopped the gate for good, silently;
+      with the first version of the fix, (b) did, and left it claiming its last answer.
+- [ ] **Confirm alpha on Windows:** `host.screen.save` of any region now writes a PNG whose
+      alpha is 255 throughout (the measurement that prompted it found 255 already; the forcing
+      is for the machines where it is not). Duplication now does the same off the desktop: the
+      canvas starts as opaque black (`dxgi.rs`, `capture`), so both paths give the same bytes
+      there (decided 2026-09-21). A point on no monitor reads black on both paths too
+      (`colorref_rgb` maps CLR_INVALID to black; it used to be white). Unmeasured on a real
+      multi-monitor setup.
+- [ ] **Optional hardening: a time-based in-flight stamp in the overlay runtime** (critique R7).
+      No longer needed for a disable: an answer that arrives while its owner is disabled is
+      now held and the search sent again on re-enable (`image_search::Fate::Hold`), so the
+      landmark gate's `pending` flag is always cleared by a callback while the VM lives. A stamp
+      (`host.now()` instead of a boolean, as the `imageSearchEach` doc example does) would still
+      guard against a callback lost some other way.
+- [ ] **Call-level `tolerance` outside 0–255 silently becomes 0, an exact match.** Every search
+      reads it through `image_search::read_tol`, unchanged on purpose because changing it
+      changes what existing modules get; clamp numbers to 0–255 and raise on anything else,
+      as its own step.
+- [ ] **macOS, never run on a Mac:** the template and JSON code is platform-free and its unit
+      tests run in the macOS CI job's `cargo test`, but nothing of `host.screen.template{
+      capture = … }` or `imageSearchEach` has run against a real Mac screen. Whether the
+      capture's downsample from backing pixels to points is a box average is NOT established
+      (`capture.rs` asks for `CGInterpolationQuality::Low`; Apple does not specify the kernel):
+      add a measurement to `tools/capture-probe` — a known 2x2 checker at backing resolution,
+      read back at point resolution — before the docs say anything about it.
+- [ ] **`host.resource.readBytes`**, so a packed binary template can be shipped as a file and
+      handed to `rgba` without a detour through JSON numbers.
+- [ ] **A `capture` template must stay a live read when DXGI capture lands**: never served from
+      a frame cache (`docs/screen-frame-sharing-design.md` on calibration paths). Holds by
+      construction after the merge with desktop duplication (2026-09-21): `template{ capture =
+      … }` reads through the module's source on the event loop, every call, and duplication
+      answers with the most recently composed frame, not a cached one. Unchecked on a real
+      duplication module.
+- [x] **Porting the capture feature onto this** (2026-09-21, the merge of both features). Its
+      design edited image-search code that lives in `crates/host/src/image_search.rs`, not
+      `lib.rs`, so its hunks were ported by hand: one `backend::CaptureFn` alias, the capture
+      feature's (several regions and a `CaptureSource`); `ImageTask` carries `source`, set in
+      `enqueue` from `capture_source::read_source`; `run_batch` keys a frame on `(region, source)`
+      through `capture_source::frame_keys` and `capture_frames`; `imageSearch`,
+      `imageSearchMulti` and `imageSearchAll` capture through `read_source`, which also makes
+      the VM's once-per-VM comparison line; `imageSearchAsync` and `imageSearchEach` put the
+      source into the task; and `template{ capture = … }` reads through it too, still live.
+      Tested by `each_task_is_answered_from_a_frame_read_through_its_own_source`. Not yet seen
+      in the application with a module that declares `[screen] capture = "duplication"`.
+
+## Desktop duplication — what only a real machine can answer (2026-09-21)
+
+Built: `[screen] capture = "duplication"` / `fallback = "none"` in `module.toml`, resolved per
+VM (`crates/host/src/capture_source.rs`); the engine on its own `dxgi-capture` thread
+(`crates/host/src/backend/dxgi.rs`), dormant unless a loaded module resolves to it; the
+Application settings switch `desktop_duplication` (Windows, on by default); prewarm when a
+declaring module's window trigger fires; shutdown on exit. Design: the revised design of the
+2026-09-21 critique; API: `docs/api/screen.md#which-picture-a-read-sees`. Every verified
+plug-in overlay declares nothing and reads through GDI exactly as before. Nothing is committed
+until the maintainer confirms.
+
+**Measured so far** (2026-09-21, reference machine: GTX 1060 6GB, 1920x1080 at 60 Hz, one
+monitor; `cargo test -p host dxgi_ -- --ignored --nocapture`, a test build, not the app):
+release build, median of 15 — 1x1 0.30 ms (GDI 15.35), 55x27 1.02 ms (GDI 15.83), 633x418
+1.04 ms (GDI 15.68), 1920x1080 5.40 ms (GDI 28.27), every size byte-identical to GDI on the
+ordinary desktop; `DuplicateOutput` 0-1 ms; first picture 9-12 ms after opening on a static
+desktop; a 240x120 window of four known colours read identically by both paths. Direct3D
+device creation 178-227 ms in seven runs (three test runs, four runs of the debug application
+headless with `tools/capture-probe` and a late-reading variant) and **3505, 4271 and 3968 ms
+in three runs of the debug test binary** straight after it was rebuilt; the cause is not
+known. In the application: `pixel`, `profile`, `imageSearchAsync` (the capture build's worker
+in `lib.rs`; since the merge the search paths live in `image_search.rs` and have not run
+through duplication, see the port item under in-memory templates), `save`, `recognize` and
+`recognizeMany` all answered through duplication under both fallbacks, the first-read
+comparison line said the pictures agree, and under `fallback = "none"` the reads made while it
+was still opening returned `nil` / the `error` table without raising. Those numbers are a
+first data point for M1-M3 and M16, not their answer: the pump under a real overlay's load and
+a GPU busy with a game are not in them.
+
+**Seen by chance** (2026-09-21, same machine, after the review fixes): `dxgi_live` and
+`dxgi_measure` ran while a D3D fullscreen game (SDL) was in front
+(`SHQueryUserNotificationState` = 3). GDI read the test window's four colours, drawn topmost
+over the game; duplication read a dark picture without them (mean luminance 14.7 against GDI's
+105.6) — presumably the game, which suggests the display showed the game and not the composed
+desktop GDI read. Duplication reads took about 33 ms at every size and GDI's full screen 240
+ms, so the GPU was busy (M9). One run, not checked by looking at the screen: a lead for step 0
+and M4, not an answer.
+
+- [ ] **Step 0 — is OUR GDI path frozen for the game at all?** Nobody has measured it. His
+      finding came from his Python reader, whose GDI path may be a window DC, PrintWindow or
+      mss; ours is a screen-DC BitBlt of the composed image. Tool first, no sight needed: a
+      probe module that logs `host.screen.profile` means of the game window every 250 ms while
+      the title screen animates (changing = live, constant = frozen), plus the PresentMon
+      present mode. If our GDI path is live, duplication is a speed feature and the
+      `fallback = "none"` mode loses its reason.
+- [ ] **M1** A read's cost inside the app: the pump round trip, small regions and full screen,
+      with the observation line's duplication clause. (Test-build figures above.)
+- [ ] **M2** Device creation and `DuplicateOutput` inside the app, the memory the driver adds,
+      and above all whether the first picture after opening arrives at once and is complete.
+      Explain the 3.5-4.3 s device creations above — cold driver, the new executable, or a
+      debug build — and whether the app sees them.
+- [ ] **M3** The same RGB bytes from both paths on Kontakt, Melodyne and the desktop, so
+      existing templates would keep matching (temporarily add `[screen] capture =
+      "duplication"` to their manifests; read the first-read comparison line).
+- [ ] **M4** With our implementation, the game is frozen through GDI and live through
+      duplication; its present mode (PresentMon) with and without a duplication held — does
+      holding one force composition or add latency?
+- [ ] **M5** Recovery after the game's fullscreen toggle, a resolution change, UAC, Win+L,
+      sleep and resume, and a hot-plugged monitor; what the fallback returns meanwhile.
+- [ ] **M6** NVDA Screen Curtain (and Magnifier colour filters): what GDI and duplication each
+      return. NVDA documents that screenshots see black with the curtain on, so today's GDI
+      path is affected already; the result could argue for duplication or against it. Part of
+      the step-3 gate.
+- [ ] **M7** HDR: duplication colours against GDI's.
+- [ ] **M8** A hybrid (Optimus) laptop: `DXGI_ERROR_UNSUPPORTED`, a clean fallback, and a log
+      line that names the remedy (Graphics settings, the application, Power saving).
+- [ ] **M9** `Map` latency with a game holding the GPU at 100 %: are the pump's 60 ms, the
+      worker's 250 ms and the 60 ms-per-300 ms budget (charged only beyond 5 ms per answered
+      read) right? The chance run above saw 33 ms per read.
+- [ ] **M10** Several monitors, negative coordinates, mixed DPI: coordinates and pixels match
+      GDI; a region across two outputs is stitched correctly (the code path is unit-tested,
+      never run on two monitors).
+- [ ] **M11** The cost of reopening after the 30 s idle release (the device is kept), and
+      after the device's own release at 5 minutes without a read.
+- [ ] **M12** Whether duplication works at all on a GitHub Windows runner (Basic Display
+      Adapter) — the CI live-test step prints it.
+- [ ] **M13** With OBS display capture and his Python reader running, `DuplicateOutput` gets
+      `NOT_CURRENTLY_AVAILABLE` and the fallback is clean.
+- [ ] **M14** `WAIT_TIMEOUT` never hides a changed screen: a game whose frames bypass
+      composition (independent flip, MPO) would be frozen for duplication too, which is the
+      case for Windows.Graphics.Capture (design section 7).
+- [ ] **M15** (WGC only) Whether an unpackaged app can turn the yellow border off —
+      probably not: `IsBorderRequired` needs 10.0.20348+, a consent prompt and a package
+      capability.
+- [ ] **M16** The first frame after opening or reopening on a STATIC screen (a menu waiting
+      for input): does a real picture arrive, or only pointer updates until something
+      repaints? The engine takes a picture only from a frame whose `LastPresentTime` is not
+      zero and otherwise answers `NoFrameYet` (then 250 ms of back-off). If this fails, hold
+      the duplication while a declaring module's window is in front instead of releasing it
+      after 30 s.
+- [ ] **M17** A software, enlarged or coloured pointer: is it in the duplicated picture? The
+      engine logs once when Windows shows a pointer that duplication does not report
+      separately.
+- [ ] **M18** Stability with RTSS/Afterburner, the Discord overlay or the Steam overlay, which
+      inject on device creation.
+- [ ] **M19** Whether GDI capture works at all in the GitHub runner's session. The CI live
+      test and the second capture-probe run are informational (`::warning::`) until they have
+      passed a few times; then make them assertions.
+- [ ] Set the constants at the top of `dxgi.rs` from M1, M2, M9, M11 and M16 (they are the
+      design's estimates).
+- [ ] `tools/inspect` OCRs through GDI whatever the module being inspected declares, so an
+      author inspecting a game that GDI reads frozen reads the frozen picture. Say so in its
+      output, or let it take the source of the module it inspects.
+- [ ] Later (design step 9): `Req::WaitChange` — a dirty-rectangle watch for short-lived help
+      bubbles and for announcing a toggle when it actually repaints; Windows.Graphics.Capture
+      per window if M4/M14 show duplication misses the game's frames; rotated monitors; the
+      phase-2 question (duplication by default for every module), which needs M6 and a
+      decision about holding one of a session's four duplication slots all day.
+- [ ] macOS: `[screen]` is accepted and ignored there. Whether ScreenCaptureKit (or the
+      CoreGraphics fallback) sees a game's frames the way duplication does on Windows — the
+      design assumed it reads the compositor's output — has never been checked, so the API
+      page says nothing about it.
+- [x] Decided by the maintainer (2026-09-21): `GetPixel`'s `CLR_INVALID` off the desktop now
+      decodes as black, like every region read there, on both paths (`colorref_rgb`).
+- [ ] **A `template{ capture = … }` made at load in a duplication module is cut from the
+      standard picture**, or is `nil` under `fallback = "none"`: nothing opens duplication at
+      load (`prewarm_hook` runs only before a window trigger's callback, on purpose), and the
+      first read of a session spends the pump's one wait on the comparison read, so the
+      template's own read finds the engine still opening. A search read that falls back is
+      corrected by the next poll; a template keeps its picture for the session, and where GDI
+      reads the application frozen or black it then never matches, silently. The same holds
+      for one made just after the window came forward, and for `host.screen.save`. The API
+      page says so (`screen.md`, `host.screen.template` and `save`). Check it live with a
+      declaring module, then decide: return `nil` from the constructor when the fallback was
+      `Fallback::Opening` (the switched-off, too-large and rotated-monitor fallbacks must
+      still read the standard way, or the template would be `nil` for good), or give this one
+      read a longer wait on the pump (changes the pump budget, and still does not cover a cold
+      driver open of seconds).
+- [ ] In the application, not yet seen: the prewarm running before a declaring module's first
+      trigger callback (headless runs have no window trigger); the per-module first-read
+      comparison line; the settings checkbox's off-and-on replacing a stopped or stuck capture
+      thread; the device released after 5 minutes idle; the image-search paths as ported into
+      `image_search.rs` — `imageSearch`, `imageSearchMulti`, `imageSearchAll`,
+      `imageSearchAsync`, `imageSearchEach` and `template{ capture = … }` — with a module that
+      declares `[screen] capture = "duplication"` (one headless capture-probe run under each
+      fallback).
+
+## Game controllers (2026-09-21)
+
+`host.gamepad` exists: the hub and its names (`backend/gamepad/mod.rs`, `names.rs`), the host
+wiring (`gamepad_api.rs`: listeners, `pad_deliveries`, replays, demand, epochs, the
+process-wide `host.now()` origin), the Windows XInput source (`win_thread.rs`, `xinput.rs`), the
+macOS GameController source (`apple.rs`, type-checked through `crates/macos-check` only), the
+reference page `docs/api/gamepad.md`, and the probe's controller half (`tools/probe/src/
+gamepad.luau`, Ctrl+Shift+F10 / Cmd+Shift+F10). **Nobody has pressed a real pad against any of
+it.** What runs is the fake-driven unit tests and a headless start on a padless Windows 11
+machine: `xinput1_4.dll` with ordinal 100, a high-resolution timer, probing every 2 s with a
+listener, parked 5 s after the last `list()`, a parked `list()` answered in 3 ms. After the
+review round (2026-09-21) a unit test also runs the poll timer itself — armed one-shot the way
+the thread arms it, inside `MsgWaitForMultipleObjectsEx` — and on that machine 25 of 25 fired,
+4.35 ms apart on average, longest 4.77 ms; the XInput read it drives still has never run.
+Everything below needs a controller in a hand.
+
+- [ ] **Windows, with an Xbox pad and a game in front** (the design's step 0, now
+      against the real code): does `XInputGetState` return live data while the game has the
+      focus, headless and with the manager window? The probe logs every event with its `age`;
+      a press that never appears while the game is in front is the one finding that sinks the
+      Windows half.
+- [ ] **The real poll period and its cost.** With trace on, the pad thread logs once a minute
+      "last 60 s of polling: … intervals <=4.5 ms …, longest …, thread CPU … ms". Read it with
+      the game in front, on AC and on battery, and once with the power-throttling opt-out
+      disabled (comment out the `throttling(true)` call) to see whether the opt-out is doing
+      anything.
+- [ ] **`age` from press to callback**, GUI and headless, from the probe's per-event lines.
+      The design's estimate is 2 ms detection plus up to one 15 ms tick in GUI mode.
+- [ ] **Hot-plug and sleep/resume**: unplug with a button held (the probe must log synthetic
+      ups, then `disconnected`), plug back in (logged at once through the arrival notice, or
+      only by the 2 s probe — the log's timestamps say which), sleep and resume with a
+      wireless pad. The arrival notice is now `RegisterDeviceNotificationW` for
+      `GUID_DEVINTERFACE_HID` on the thread's message-only window (SDL's way), no longer Raw
+      Input: check it fires for a wired Xbox 360 pad, an Xbox One/Series pad over USB and
+      over Bluetooth — each should announce its `IG_` HID collection — and that the status
+      line says `arrival HID device notifications`.
+- [ ] **Guide**: whether ordinal 100 reports it on this Windows, and whether Xbox Game Bar
+      opening takes the focus from the game in a way that matters to a module.
+- [ ] **The thresholds feel right**: Microsoft's dead zones (0.24 / 0.27 / 0.12), stick
+      directions at 0.5 released below 0.35, triggers at 0.12 released below 0.08. Tuned on
+      paper only.
+- [x] ~~Raw Input's cost with a PlayStation pad attached~~ — gone with Raw Input: the arrival
+      notice is a device notification now, which delivers no reports (review round,
+      2026-09-21). Step 5's HID source will bring the question back, for the pads it reads.
+- [ ] **The stick halves as a pair**: a listener now gets the partner half of a stick when the
+      radial dead zone moves it (x back to the middle takes a y resting inside the dead zone to
+      0 with it). Check with a real stick that the extra events read as right rather than as
+      noise in the probe's axis lines.
+- [ ] **Steam and DS4Windows**: Steam's desktop configuration turning pad presses into
+      keystrokes, and DS4Windows' exclusive mode hiding the device, both change what we see.
+- [ ] **The pygame 2 `joystick` column** in `docs/api/gamepad.md` (buttons 0–10, hat 0, axes
+      0–5 for an Xbox 360 pad) is copied from pygame's own documentation, not from a run with
+      pygame and a pad; the GameMenuReader port is where it gets checked.
+- [ ] **macOS, on the next Mac session, with a pad**: background delivery while an emulator is
+      frontmost and we are an accessory app; the log line "background monitoring was …,
+      requested, and macOS now reports …" (and that setting it on the first connect does not
+      crash — SDL's reason for doing it there); no TCC prompt appears; the bundle-identifier
+      line, and whether `run-dev.sh`'s bare binary sees any controller at all (Apple forum
+      667832: an empty bundle identifier left `controllers` empty); GameController with
+      VoiceOver on (the macOS 15.4 notes list controllers going unresponsive with VoiceOver
+      as fixed — the tester always runs VoiceOver); whether GameController applies a dead zone
+      of its own, so ours comes on top; what `buttonHome` does; the labels and positions per
+      family — above all whether a Nintendo pad's `buttonA` is the bottom button; the Elite
+      paddles' order (`paddleButton1…4` mapped to P1, P2, P3, P4 = right_paddle1,
+      right_paddle2, left_paddle1, left_paddle2); and `age` with the App Nap activity held.
+- [ ] **Not built this round** (design steps 5, 7, 8): the Raw Input HID source for
+      PlayStation, Nintendo and generic pads and its `gamepad_hid` switch in
+      `appcfg::SWITCHES` — with the corrected precedent: SDL's RAWINPUT driver keeps only
+      XInput-capable (`IG_`) devices, so background delivery of DS4/DualSense reports through
+      `RIDEV_INPUTSINK` has no SDL backing and needs its own spike with a DS4 or DualSense,
+      HID `ReadFile` (non-exclusive, never writing) being the fallback before SDL3. Then
+      `O:onGamepad` in the overlay runtime (register on activation, release on deactivation).
+      Later: chords (left out of v1 on purpose — the game gets the chord too, and a hold is
+      `down` + `host.timer.after` + `state()`), an SDL `gamecontrollerdb.txt` import, an
+      IOHIDManager source on macOS for pads GameController does not list, and a capture
+      triggered by DXGI's next frame after a press. (The macOS CI job now fails on "gamepad
+      watcher failed" like the Windows probe step.)
+- [ ] **A comment to correct** (design side finding): `backend/windows.rs` says the low-level
+      keyboard hook "runs on its own thread". It runs on the pump thread, which is the only
+      reason its thread-local queues work — and the reason the pad source uses a `Mutex` hub
+      instead.
+
 ## Dev tools
 
 - [x] **OCR window inspector (first version):** `tools/inspect` — **Ctrl+Alt+I** OCRs the focused window's client area and logs every recognized word with its **client-relative coordinates** (+ saves the capture with `AUTOMATION_PLATFORM_OCR_DEBUG=1`). Calibrates overlay regions and reveals where hardcoded (e.g. ReaHotkey) coordinates land vs the real controls. Resolved the sforzando polyphony case (the region was correct; the failures were the hover scrub-value — fixed by `hoverToRead`-off — and UWP OCR being blind to *single* digits). ✓ (2026-06-21)

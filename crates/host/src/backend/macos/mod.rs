@@ -25,7 +25,8 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{
-    Backend, CapturedImage, ControlInfo, DumpNode, HostEvents, MouseButton, OcrText, WinInfo,
+    Backend, CaptureFn, CaptureSource, CapturedImage, ControlInfo, DumpNode, HostEvents,
+    MouseButton, OcrText, WinInfo,
 };
 
 /// Whether a scroll has been sent yet in this run — so the first one is always recorded and
@@ -171,19 +172,31 @@ impl Backend for MacBackend {
         capture::screen_size()
     }
 
-    fn pixel(&self, x: i32, y: i32) -> (u8, u8, u8) {
-        capture::pixel(x, y)
+    // The capture source is accepted and ignored on this platform. `[screen] capture =
+    // "duplication"` names a Windows mechanism; here every read keeps going through
+    // ScreenCaptureKit or CoreGraphics exactly as it did before the key existed, and the host
+    // resolves such a module to the standard source before it ever gets this far.
+    fn pixel(&self, x: i32, y: i32, _src: CaptureSource) -> Option<(u8, u8, u8)> {
+        Some(capture::pixel(x, y))
     }
 
-    fn capture(&self, x: i32, y: i32, w: i32, h: i32) -> Option<CapturedImage> {
+    fn capture(&self, x: i32, y: i32, w: i32, h: i32, _src: CaptureSource) -> Option<CapturedImage> {
         capture::capture_region(x, y, w, h)
     }
 
-    fn capture_fn(&self) -> fn(i32, i32, i32, i32) -> Option<CapturedImage> {
-        capture::capture_region
+    fn capture_fn(&self) -> CaptureFn {
+        capture_many
     }
 
-    fn ocr(&self, x: i32, y: i32, w: i32, h: i32, lang: Option<&str>) -> Result<OcrText, String> {
+    fn ocr(
+        &self,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        lang: Option<&str>,
+        _src: CaptureSource,
+    ) -> Result<OcrText, String> {
         ocr::recognize(x, y, w, h, lang)
     }
 
@@ -263,6 +276,7 @@ impl Backend for MacBackend {
         &self,
         regions: &[(i32, i32, i32, i32)],
         lang: Option<&str>,
+        _src: CaptureSource,
     ) -> Vec<Result<OcrText, String>> {
         ocr::recognize_regions(regions, lang)
     }
@@ -378,6 +392,13 @@ impl Backend for MacBackend {
         watch::retry_refused();
         queue::drain(events);
     }
+}
+
+/// The image worker's capture routine: each region captured on its own, in order, exactly as
+/// the worker did one at a time before it was handed several. The source is ignored — see
+/// `pixel` above.
+fn capture_many(regions: &[(i32, i32, i32, i32)], _src: CaptureSource) -> Vec<Option<CapturedImage>> {
+    regions.iter().map(|&(x, y, w, h)| capture::capture_region(x, y, w, h)).collect()
 }
 
 /// The backend, as `platform()` hands it out.

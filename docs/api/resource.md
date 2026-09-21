@@ -25,9 +25,11 @@ Reads a package-relative file as a UTF-8 string (`string`) from the calling
 module's root; raises a Luau error if the file is missing or not valid UTF-8.
 
 ```luau
-local json = host.resource.read("data/layout.json")
-local layout = parse(json)
+local layout = host.json.decode(host.resource.read("data/layout.json"))
+host.log.info("layout has " .. #layout.controls .. " controls")
 ```
+
+A data file is read by the module that ships it. In a `code_module` dependency, `resource` resolves under the dependency's own root, so a game module that feeds a shared runtime reads its own file and hands the runtime the decoded table — see [`host.json.decode`](./json.md#host-json-decode).
 
 ## host.resource.exists(rel) {#host-resource-exists}
 

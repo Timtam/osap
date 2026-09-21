@@ -88,12 +88,15 @@ fn arm_recheck_ladder() {
 
 /// Hands everything queued since the last call to the host, in the order the host needs.
 ///
-/// 1. hotkeys, 2. window activations, 3. captured keys, 4. **one** focus change if anything
-/// dirtied it, 5. any re-check that has come due.
+/// 1. hotkeys, 2. window activations, 3. captured keys, 4. game-controller events, 5. **one**
+/// focus change if anything dirtied it, 6. any re-check that has come due.
 ///
 /// Activations must precede the keys that arrived in that window: an activation invalidates
 /// every cached coordinate in the host, a key does not, and a key handled against stale
-/// coordinates clicks where the plugin used to be. The focus dispatch is coalesced to one
+/// coordinates clicks where the plugin used to be. Pad events follow the keys for the same
+/// reason, and they come from the gamepad hub rather than from a thread-local here: they are
+/// pushed from GameController's own dispatch queue, which is not this thread. The Windows
+/// pump drains in the same order. The focus dispatch is coalesced to one
 /// per drain because it fans out to every module VM and every overlay each of them owns —
 /// it is the most expensive thing the host does, and delivering it twice does nothing twice.
 pub fn drain(events: &mut dyn HostEvents) {
@@ -115,6 +118,8 @@ pub fn drain(events: &mut dyn HostEvents) {
     for (vk, mods) in KEYS.with(|q| std::mem::take(&mut *q.borrow_mut())) {
         events.on_key(vk, mods);
     }
+
+    crate::backend::gamepad::drain_into(events);
 
     if FOCUS_DIRTY.with(|f| f.replace(false)) {
         events.on_focus_change();

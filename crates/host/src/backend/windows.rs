@@ -1,14 +1,16 @@
 //! Windows implementation of the platform [`Backend`](super::Backend):
 //! window enumeration (Win32), global hotkeys (`RegisterHotKey` + `GetMessage`),
-//! foreground-change events (`SetWinEventHook`), and screen capture (GDI).
+//! foreground-change events (`SetWinEventHook`), and screen capture (GDI, or desktop
+//! duplication for the modules that declare it — see `dxgi.rs`).
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicI32, AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::Mutex;
 
+use super::dxgi::{self, Caller, Fallback};
 use super::{
-    Backend, CapturedImage, ControlInfo, DumpNode, HostEvents, MouseButton, OcrText, OcrWord,
-    WinInfo,
+    Backend, CaptureFn, CaptureSource, CapturedImage, ControlInfo, DumpNode, HostEvents,
+    MouseButton, OcrText, OcrWord, WinInfo, CAPTURE_FAILED, DUPLICATION_UNANSWERED,
 };
 
 use windows_sys::Win32::Foundation::{CloseHandle, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -132,7 +134,10 @@ impl WindowsBackend {
 /// without holding the non-`Send` `Rc<dyn Backend>`; `WindowsBackend::capture` and
 /// `capture_fn` both route through it. GDI screen reads are thread-safe; the ~1-frame
 /// DWM-compositor cost then lands on the worker, not the event loop.
-fn capture_screen(x: i32, y: i32, w: i32, h: i32) -> Option<CapturedImage> {
+///
+/// The standard source, unchanged, and still the fallback of the duplication path. Visible
+/// to `dxgi.rs` for its live tests, which compare the two.
+pub(super) fn capture_screen(x: i32, y: i32, w: i32, h: i32) -> Option<CapturedImage> {
     if w <= 0 || h <= 0 {
         return None;
     }
@@ -202,9 +207,15 @@ fn capture_screen(x: i32, y: i32, w: i32, h: i32) -> Option<CapturedImage> {
             return None;
         }
 
-        // GDI returns BGRA; swap to RGBA.
+        // GDI returns BGRA; swap to RGBA. Alpha is forced opaque in the same pass, as the macOS
+        // capture does. A BitBlt of the screen measured on the development machine gave 255
+        // for all 20,000 pixels read, but nothing in GDI promises it, and a capture with alpha
+        // 0 is dangerous twice over: `host.screen.save` writes an invisible PNG, and a template
+        // built from it (`host.screen.template{ capture = … }`) would be all wildcards,
+        // matching everywhere.
         for px in buf.chunks_exact_mut(4) {
             px.swap(0, 2);
+            px[3] = 255;
         }
         Some(CapturedImage {
             w: w as u32,
@@ -212,6 +223,179 @@ fn capture_screen(x: i32, y: i32, w: i32, h: i32) -> Option<CapturedImage> {
             rgba: buf,
         })
     }
+}
+
+/// Every region from `src`, one answer each, in order — the one place that decides between
+/// the two ways of reading the screen.
+///
+/// Standard is `capture_screen` per region, exactly as before this existed. Duplication sends
+/// every region in one request (one GPU sync for all of them) and, when it cannot answer,
+/// either reads the standard way or fails each region with the reason, as the module's
+/// `fallback` says. The error is a sentence that begins with [`CAPTURE_FAILED`]; the OCR
+/// binding answers instead of raising only for the one that begins with
+/// [`DUPLICATION_UNANSWERED`] (see `capture_source::answers_instead_of_raising`).
+fn capture_all(
+    regions: &[(i32, i32, i32, i32)],
+    src: CaptureSource,
+    caller: Caller,
+) -> Vec<Result<CapturedImage, String>> {
+    let CaptureSource::Duplication { or_standard } = src else {
+        // Exactly the read every module has always had.
+        return regions
+            .iter()
+            .map(|&(x, y, w, h)| capture_screen(x, y, w, h).ok_or_else(|| CAPTURE_FAILED.to_string()))
+            .collect();
+    };
+    match duplicate(regions, caller) {
+        Ok(images) => images,
+        Err(why) => {
+            dxgi::note_fallback(why, or_standard);
+            regions
+                .iter()
+                .map(|r| if or_standard { standard_instead(r) } else { Err(unanswered(why)) })
+                .collect()
+        }
+    }
+}
+
+/// The standard read of one region, standing in for duplication.
+fn standard_instead(&(x, y, w, h): &(i32, i32, i32, i32)) -> Result<CapturedImage, String> {
+    // Too large for the duplication path is too large for its fallback too: GDI is protected
+    // from a 14 GB allocation only by its bitmap creation happening to fail first. (A module
+    // that reads the standard way keeps exactly the read it always had, without this limit.)
+    if w > 0 && h > 0 && !dxgi::fits(w, h) {
+        return Err(format!("{CAPTURE_FAILED}: {}", Fallback::TooLarge.describe()));
+    }
+    capture_screen(x, y, w, h).ok_or_else(|| CAPTURE_FAILED.to_string())
+}
+
+/// The error a read gets when duplication could not answer and the module forbade the
+/// fallback. It begins with [`DUPLICATION_UNANSWERED`], which is how the OCR binding tells it
+/// from every other failure — a degenerate or oversized region still raises.
+fn unanswered(why: Fallback) -> String {
+    format!("{DUPLICATION_UNANSWERED} — {}", why.describe())
+}
+
+/// Every region through desktop duplication in ONE request — or the reason nothing came back.
+fn duplicate(
+    regions: &[(i32, i32, i32, i32)],
+    caller: Caller,
+) -> Result<Vec<Result<CapturedImage, String>>, Fallback> {
+    duplicate_with(regions, |rects| dxgi::capture(rects, caller))
+}
+
+/// [`duplicate`] with the engine call passed in, so the mapping can be tested.
+///
+/// A degenerate region fails on its own, as `capture_screen` fails it, and so does one too
+/// large to allocate for; neither reaches the engine or spoils the rest of the batch. The
+/// engine gets the others in order, and its answers go back to the places they were asked
+/// from.
+fn duplicate_with(
+    regions: &[(i32, i32, i32, i32)],
+    read: impl FnOnce(&[(i32, i32, i32, i32)]) -> Result<Vec<CapturedImage>, Fallback>,
+) -> Result<Vec<Result<CapturedImage, String>>, Fallback> {
+    let mut out: Vec<Result<CapturedImage, String>> = regions
+        .iter()
+        .map(|&(_, _, w, h)| {
+            Err(if w > 0 && h > 0 {
+                format!("{CAPTURE_FAILED}: {}", Fallback::TooLarge.describe())
+            } else {
+                CAPTURE_FAILED.to_string()
+            })
+        })
+        .collect();
+    let asked: Vec<usize> =
+        (0..regions.len()).filter(|&i| dxgi::fits(regions[i].2, regions[i].3)).collect();
+    if asked.is_empty() {
+        return Ok(out);
+    }
+    let rects: Vec<(i32, i32, i32, i32)> = asked.iter().map(|&i| regions[i]).collect();
+    let images = read(&rects)?;
+    for (i, img) in asked.into_iter().zip(images) {
+        out[i] = Ok(img);
+    }
+    Ok(out)
+}
+
+/// The image worker's capture routine (`Backend::capture_fn`): a plain `fn`, so it is `Send`,
+/// and the duplication state it reaches is the engine thread's, not this backend's.
+fn capture_on_worker(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Option<CapturedImage>> {
+    capture_all(regions, src, Caller::Worker).into_iter().map(Result::ok).collect()
+}
+
+/// A pixel through `src`: `GetPixel` for the standard source, a 1x1 region of the duplicated
+/// picture otherwise. `None` only when duplication could not answer and the module forbade
+/// the fallback.
+fn pixel_through(x: i32, y: i32, src: CaptureSource) -> Option<(u8, u8, u8)> {
+    let CaptureSource::Duplication { or_standard } = src else {
+        return Some(pixel_gdi(x, y));
+    };
+    // A point on no monitor has no picture in either path. `GetPixel` says CLR_INVALID there,
+    // which `colorref_rgb` turns into black, the same black a region read gives off the
+    // desktop — so the answer is the standard one, and the engine is not started for it.
+    if off_every_monitor(x, y) {
+        return Some(pixel_gdi(x, y));
+    }
+    // Its fallback is `GetPixel`, not a 1x1 blit, so a module that allows the standard way
+    // gets exactly the answer it got before.
+    match dxgi::capture(&[(x, y, 1, 1)], Caller::Pump) {
+        Ok(images) => images.first().map(|c| (c.rgba[0], c.rgba[1], c.rgba[2])),
+        Err(why) => {
+            dxgi::note_fallback(why, or_standard);
+            or_standard.then(|| pixel_gdi(x, y))
+        }
+    }
+}
+
+/// Whether `(x, y)` lies on no monitor at all.
+fn off_every_monitor(x: i32, y: i32) -> bool {
+    use windows_sys::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONULL};
+    unsafe { MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONULL) }.is_null()
+}
+
+/// The foreground window's client area in screen pixels, for the first-read comparison.
+fn foreground_client() -> Option<(i32, i32, i32, i32)> {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_null() {
+            return None;
+        }
+        let mut rc: RECT = std::mem::zeroed();
+        let mut origin = POINT { x: 0, y: 0 };
+        if GetClientRect(hwnd, &mut rc) == 0 || ClientToScreen(hwnd, &mut origin) == 0 {
+            return None;
+        }
+        Some((origin.x, origin.y, rc.right - rc.left, rc.bottom - rc.top))
+    }
+}
+
+/// The standard pixel read, unchanged: `GetPixel` on the screen DC.
+fn pixel_gdi(x: i32, y: i32) -> (u8, u8, u8) {
+    // The SCREEN, deliberately, and with a caveat the callers have to know: this is what is
+    // composited at that point, which after a focus change is briefly still the window that
+    // used to be there. Measured — with REAPER behind a browser, the same point reads
+    // 255,255,255 from the screen and 99,99,99 from PrintWindow(PW_RENDERFULLCONTENT) on the
+    // window itself. A probe that runs at the moment an overlay activates can therefore read
+    // the previous window. Rendering the window instead would be immune, and is not done
+    // here because it renders the WHOLE window per call; the callers re-ask instead.
+    unsafe {
+        let dc = GetDC(std::ptr::null_mut());
+        let c = GetPixel(dc, x, y); // COLORREF = 0x00BBGGRR
+        ReleaseDC(std::ptr::null_mut(), dc);
+        colorref_rgb(c)
+    }
+}
+
+/// A COLORREF (0x00BBGGRR) as (r, g, b). CLR_INVALID, what `GetPixel` answers off the
+/// desktop, comes out as black: that is what every region read gives there (BitBlt and the
+/// duplication canvas alike), and a point should not read white where the region around it
+/// reads black.
+fn colorref_rgb(c: u32) -> (u8, u8, u8) {
+    const CLR_INVALID: u32 = 0xFFFF_FFFF;
+    if c == CLR_INVALID {
+        return (0, 0, 0);
+    }
+    ((c & 0xFF) as u8, ((c >> 8) & 0xFF) as u8, ((c >> 16) & 0xFF) as u8)
 }
 
 /// What `DllGetVersion` fills in. Declared here because `windows-sys` does not carry it:
@@ -458,28 +642,40 @@ impl Backend for WindowsBackend {
         unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
     }
 
-    fn pixel(&self, x: i32, y: i32) -> (u8, u8, u8) {
-        // The SCREEN, deliberately, and with a caveat the callers have to know: this is what is
-        // composited at that point, which after a focus change is briefly still the window that
-        // used to be there. Measured — with REAPER behind a browser, the same point reads
-        // 255,255,255 from the screen and 99,99,99 from PrintWindow(PW_RENDERFULLCONTENT) on the
-        // window itself. A probe that runs at the moment an overlay activates can therefore read
-        // the previous window. Rendering the window instead would be immune, and is not done
-        // here because it renders the WHOLE window per call; the callers re-ask instead.
-        unsafe {
-            let dc = GetDC(std::ptr::null_mut());
-            let c = GetPixel(dc, x, y); // COLORREF = 0x00BBGGRR
-            ReleaseDC(std::ptr::null_mut(), dc);
-            ((c & 0xFF) as u8, ((c >> 8) & 0xFF) as u8, ((c >> 16) & 0xFF) as u8)
-        }
+    fn pixel(&self, x: i32, y: i32, src: CaptureSource) -> Option<(u8, u8, u8)> {
+        pixel_through(x, y, src)
     }
 
-    fn capture(&self, x: i32, y: i32, w: i32, h: i32) -> Option<CapturedImage> {
-        capture_screen(x, y, w, h)
+    fn compare_capture_sources(&self, who: &str, read: (i32, i32, i32, i32)) -> bool {
+        let Some((region, window)) = dxgi::comparison_region(read, foreground_client()) else {
+            return true; // nothing this path could read, so nothing to compare
+        };
+        // Its own duplication read, so the module's read is not held up or changed by it —
+        // and when duplication cannot answer yet (still opening, backing off), a later read
+        // asks again.
+        let dup = match dxgi::capture(&[region], Caller::Pump) {
+            Ok(mut images) => match images.pop() {
+                Some(img) => img,
+                None => return true,
+            },
+            Err(_) => return false,
+        };
+        let (x, y, w, h) = region;
+        let what = if window {
+            format!("the foreground window's {w}x{h} client area at {x},{y} (the read itself was {}x{})", read.2, read.3)
+        } else {
+            format!("the {w}x{h} region it read at {x},{y}")
+        };
+        dxgi::log_comparison(who, &what, &dup, capture_screen(x, y, w, h).as_ref());
+        true
     }
 
-    fn capture_fn(&self) -> fn(i32, i32, i32, i32) -> Option<CapturedImage> {
-        capture_screen
+    fn capture(&self, x: i32, y: i32, w: i32, h: i32, src: CaptureSource) -> Option<CapturedImage> {
+        capture_all(&[(x, y, w, h)], src, Caller::Pump).pop().and_then(Result::ok)
+    }
+
+    fn capture_fn(&self) -> CaptureFn {
+        capture_on_worker
     }
 
     fn ocr(
@@ -489,10 +685,11 @@ impl Backend for WindowsBackend {
         w: i32,
         h: i32,
         lang: Option<&str>,
+        src: CaptureSource,
     ) -> Result<OcrText, String> {
-        let cap = self
-            .capture(x, y, w, h)
-            .ok_or_else(|| "screen capture failed".to_string())?;
+        let cap = capture_all(&[(x, y, w, h)], src, Caller::Pump)
+            .pop()
+            .unwrap_or_else(|| Err(CAPTURE_FAILED.to_string()))?;
         recognize_image(&cap, lang)
     }
 
@@ -501,9 +698,30 @@ impl Backend for WindowsBackend {
         &self,
         regions: &[(i32, i32, i32, i32)],
         lang: Option<&str>,
+        src: CaptureSource,
     ) -> Vec<Result<OcrText, String>> {
+        // Duplication reads N small rectangles out of ONE acquired frame, one GPU sync for all
+        // of them — its cost grows with area, unlike GDI's, so the bounding box below would be
+        // the expensive way round. When it cannot answer and the module allows it, this falls
+        // through to the standard path, bounding box and all.
+        if let CaptureSource::Duplication { or_standard } = src {
+            match duplicate(regions, Caller::Pump) {
+                Ok(caps) => {
+                    return caps.into_iter().map(|c| c.and_then(|img| recognize_image(&img, lang))).collect();
+                }
+                Err(why) => {
+                    dxgi::note_fallback(why, or_standard);
+                    if !or_standard {
+                        return regions.iter().map(|_| Err(unanswered(why))).collect();
+                    }
+                }
+            }
+        }
         let one_each = |b: &Self| -> Vec<Result<OcrText, String>> {
-            regions.iter().map(|(x, y, w, h)| b.ocr(*x, *y, *w, *h, lang)).collect()
+            regions
+                .iter()
+                .map(|(x, y, w, h)| b.ocr(*x, *y, *w, *h, lang, CaptureSource::Standard))
+                .collect()
         };
         if regions.len() < 2 || regions.iter().any(|(_, _, w, h)| *w <= 0 || *h <= 0) {
             return one_each(self);
@@ -513,7 +731,7 @@ impl Backend for WindowsBackend {
         let x1 = regions.iter().map(|r| r.0 + r.2).max().unwrap_or(0);
         let y1 = regions.iter().map(|r| r.1 + r.3).max().unwrap_or(0);
         let (bw, bh) = (x1 - x0, y1 - y0);
-        let big = match self.capture(x0, y0, bw, bh) {
+        let big = match self.capture(x0, y0, bw, bh, CaptureSource::Standard) {
             Some(c) => c,
             None => return one_each(self),
         };
@@ -920,6 +1138,10 @@ impl Backend for WindowsBackend {
         for (vk, mask) in pending_keys {
             events.on_key(vk, mask);
         }
+        // Game controllers, from the hub their own thread feeds (never a thread-local: that
+        // thread is not this one). After the activations, so a press is handled against the
+        // window that is in front now.
+        super::gamepad::drain_into(events);
         if FOCUS_DIRTY.with(|f| f.replace(false)) {
             events.on_focus_change();
         }
@@ -1604,7 +1826,10 @@ fn run_ocr(img: &CapturedImage, lang: Option<&str>) -> windows::core::Result<(St
         let _ = unsafe { RoInitialize(RO_INIT_MULTITHREADED) };
     });
 
-    // SoftwareBitmap wants BGRA; GDI leaves alpha at zero, so force it opaque.
+    // SoftwareBitmap wants BGRA, opaque. `capture_screen` and duplication both deliver alpha
+    // 255 now, off the desktop included, but this also receives crops of a capture and the
+    // `tighten` (upscaled) copies, which are built elsewhere — so the alpha is forced here too
+    // rather than trusted.
     let mut bgra = img.rgba.clone();
     for px in bgra.chunks_exact_mut(4) {
         px.swap(0, 2);
@@ -1818,4 +2043,64 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
             }
         }
         Ok(OcrText { text, words, skipped: false })
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    fn img(w: i32, h: i32) -> CapturedImage {
+        CapturedImage { w: w as u32, h: h as u32, rgba: vec![7; (w * h * 4) as usize] }
+    }
+
+    #[test]
+    fn a_batch_sends_only_the_readable_regions_and_puts_each_answer_back_in_its_place() {
+        let regions = [(0, 0, 10, 10), (5, 5, 0, 4), (0, 0, 60_000, 60_000), (1, 2, 3, 4)];
+        let mut sent = Vec::new();
+        let out = duplicate_with(&regions, |rects| {
+            sent = rects.to_vec();
+            Ok(rects.iter().map(|&(_, _, w, h)| img(w, h)).collect())
+        })
+        .unwrap();
+        assert_eq!(sent, vec![(0, 0, 10, 10), (1, 2, 3, 4)], "only the readable ones, in order");
+        assert_eq!(out.len(), 4);
+        assert_eq!(out[0].as_ref().map(|i| (i.w, i.h)).ok(), Some((10, 10)));
+        assert_eq!(out[3].as_ref().map(|i| (i.w, i.h)).ok(), Some((3, 4)));
+        // The two it could not send fail on their own, the way the standard path fails them —
+        // and neither reads as "duplication could not answer", so neither answers an OCR call
+        // with an error table instead of raising.
+        let degenerate = out[1].as_ref().err().unwrap();
+        let too_large = out[2].as_ref().err().unwrap();
+        assert_eq!(degenerate, CAPTURE_FAILED);
+        assert!(too_large.starts_with(CAPTURE_FAILED) && too_large.contains("40 million"));
+        assert!(!degenerate.starts_with(DUPLICATION_UNANSWERED));
+        assert!(!too_large.starts_with(DUPLICATION_UNANSWERED));
+    }
+
+    #[test]
+    fn a_batch_with_nothing_readable_never_asks_the_engine() {
+        let out = duplicate_with(&[(0, 0, 0, 0)], |_| panic!("the engine was asked")).unwrap();
+        assert_eq!(out[0].as_ref().err().map(String::as_str), Some(CAPTURE_FAILED));
+    }
+
+    #[test]
+    fn an_engine_that_cannot_answer_fails_the_batch_with_its_reason() {
+        let got = duplicate_with(&[(0, 0, 4, 4)], |_| Err(Fallback::SecureDesktop));
+        assert_eq!(got.err(), Some(Fallback::SecureDesktop));
+        assert!(unanswered(Fallback::SecureDesktop).starts_with(DUPLICATION_UNANSWERED));
+    }
+
+    #[test]
+    fn a_point_on_no_monitor_reads_the_same_through_both_sources() {
+        // GetPixel answers CLR_INVALID there, which reads as black, as a region read does.
+        // Both sources must give that answer, and neither may need the engine for it — this
+        // test never starts one.
+        assert_eq!(colorref_rgb(0xFFFF_FFFF), (0, 0, 0));
+        assert_eq!(colorref_rgb(0x00FF_FFFF), (255, 255, 255));
+        let (x, y) = (-30_000, -30_000);
+        assert!(off_every_monitor(x, y));
+        let standard = pixel_through(x, y, CaptureSource::Standard);
+        assert_eq!(pixel_through(x, y, CaptureSource::Duplication { or_standard: false }), standard);
+        assert_eq!(pixel_through(x, y, CaptureSource::Duplication { or_standard: true }), standard);
+    }
 }

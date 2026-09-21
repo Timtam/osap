@@ -27,7 +27,7 @@ See [what that list is and is not](./index.md#capabilities).
 
 Recognizes text inside a screen region and returns the full text plus per-word bounding boxes.
 
-**Signature:** `host.ocr.recognize(opts: { region?: { x1, y1, x2, y2 }, lang?: string }?) -> { text: string, words: { { text: string, x: number, y: number, w: number, h: number } }, skipped: boolean }`
+**Signature:** `host.ocr.recognize(opts: { region?: { x1, y1, x2, y2 }, lang?: string }?) -> { text: string, words: { { text: string, x: number, y: number, w: number, h: number } }, skipped: boolean, error?: string }`
 
 `opts` is optional. The `region` is given as corner coordinates `{ x1, y1, x2, y2 }` (also accepted positionally as `{ [1]=x1, [2]=y1, [3]=x2, [4]=y2 }`); missing corners default to `x1=0, y1=0` and `x2/y2` = screen width/height, so omitting `region` scans the whole primary display. `lang` is an optional OCR language hint (e.g. `"en"`). The internal capture rectangle is `(x1, y1, x2-x1, y2-y1)`.
 
@@ -52,6 +52,17 @@ end
 ### Windows
 
 A failed capture and an unavailable OCR language both come back as errors and are **raised into Lua**, so `pcall` is a meaningful guard.
+
+One exception, for a module that declared `[screen] capture = "duplication"` with `fallback = "none"` (see [Which picture a read sees](./screen.md#which-picture-a-read-sees)): when duplication has no picture to give — a fullscreen switch, a UAC prompt, the moment it is still opening — the call does **not** raise but returns `{ text = "", words = {}, skipped = false, error = "screen capture failed: …" }`, the shape `recognizeMany` uses for a failed region. For such a module a missing picture is routine, and a raised error would put a module-error dialog in front of the application it is reading. A region that can never be read — an empty one, or one larger than 40 million pixels — and a recognition that fails still raise.
+
+```luau
+-- In a module with [screen] capture = "duplication", fallback = "none":
+local res = host.ocr.recognize({ region = { 300, 200, 620, 240 } })
+if res.error then
+  return   -- no picture this time; ask again on the next tick
+end
+host.speech.output(res.text)
+```
 
 For a region of 400x200 or less a second recogniser runs alongside the system one and its answer is used when the system engine returns nothing — which is the lone-digit case, the thing `Windows.Media.Ocr` refuses. That fallback recognises without locating, so when it answers it sets `text` and leaves **`words` empty**.
 
@@ -91,7 +102,7 @@ host.log.info(r[1].text .. " / " .. r[2].text)
 
 ### Windows
 
-As documented: one capture of the bounding box of every region, cropped per region — falling back to one capture each when a region is degenerate or the capture came back clipped.
+As documented: one capture of the bounding box of every region, cropped per region — falling back to one capture each when a region is degenerate or the capture came back clipped. A module that reads through [desktop duplication](./screen.md#which-picture-a-read-sees) gets each region read separately from one frame instead, because there the cost grows with the area and the bounding box would be the expensive way round.
 
 ### macOS
 

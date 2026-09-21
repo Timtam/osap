@@ -88,3 +88,11 @@ features = ["std", "block2", "AVSpeechSynthesis"]
 [target.'cfg(target_os = "macos")'.dependencies.objc2-application-services]
 version = "0.3"
 features = ["AXUIElement", "AXValue", "AXError", "AXAttributeConstants", "AXRoleConstants", "AXNotificationConstants", "AXActionConstants", "AXValueConstants", "HIServices", "Processes"]
+
+# Game controllers, observed from the background (backend/gamepad/apple.rs). `dispatch2` is
+# what exposes `handlerQueue`, and the three subclasses are for the touchpad, the paddles and
+# the share button, which the extended profile does not carry.
+[target.'cfg(target_os = "macos")'.dependencies.objc2-game-controller]
+version = "0.3"
+default-features = false
+features = ["std", "block2", "dispatch2", "GCController", "GCExtendedGamepad", "GCControllerElement", "GCControllerButtonInput", "GCControllerAxisInput", "GCControllerDirectionPad", "GCPhysicalInputProfile", "GCDevice", "GCDualShockGamepad", "GCDualSenseGamepad", "GCXboxGamepad"]

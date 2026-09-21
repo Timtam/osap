@@ -82,6 +82,12 @@ fn attach_parent_console() {}
 fn log_panics() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        // A panic the host catches and reports itself (the image worker's, which answers it
+        // and carries on) is left to that report, which is throttled. Written here as well, a
+        // template that panics on every poll would cost a line per poll for as long as it did.
+        if host::logging::hold_contained_panic(|| info.to_string()) {
+            return;
+        }
         // Best effort: if run() has not opened the log yet, `line` is a no-op, so make sure
         // there is a file to write to.
         host::logging::init();

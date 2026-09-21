@@ -27,12 +27,20 @@ wxdragon = "0.9.15"
 # docs/prism-speech-design.md. Windows only: macOS reaches VoiceOver through
 # speech/voiceover.rs, which is better than prism's own VoiceOver backend.
 prism-sys = { path = "../prism-sys" }
-windows = { version = "0.58", features = ["Media_Ocr", "Graphics_Imaging", "Globalization", "Foundation", "Foundation_Collections", "Security_Cryptography", "Win32_System_WinRT", "Storage_Streams", "Win32_UI_Accessibility", "Win32_System_Com", "Win32_System_Variant"] }
+windows = { version = "0.58", features = ["Media_Ocr", "Graphics_Imaging", "Globalization", "Foundation", "Foundation_Collections", "Security_Cryptography", "Win32_System_WinRT", "Storage_Streams", "Win32_UI_Accessibility", "Win32_System_Com", "Win32_System_Variant",
+    # Desktop duplication (backend/dxgi.rs), for the modules that declare `[screen] capture =
+    # "duplication"`. Gdi is here because the crate gates DXGI_OUTPUT_DESC on it (its HMONITOR).
+    "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11"] }
 # Secondary OCR engine (in-process, FFI): PaddleOCR recognition model via ONNX
 # Runtime, used as a fallback for text Windows.Media.Ocr won't read (lone digits).
 ort = { version = "=2.0.0-rc.10", features = ["download-binaries", "copy-dylibs", "ndarray"] }
 ndarray = "0.16"
-windows-sys = { version = "0.61.2", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Threading", "Win32_UI_Accessibility", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_HiDpi"] }
+# Gamepad (backend/gamepad): `Win32_UI_Input_XboxController` for XInput's constants only — the
+# DLL itself is loaded at run time, never linked — and `Win32_Security`, without which
+# windows-sys hides `CreateWaitableTimerExW`, the high-resolution timer the 4 ms poll needs.
+windows-sys = { version = "0.61.2", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Threading", "Win32_UI_Accessibility", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_HiDpi", "Win32_UI_Input_XboxController", "Win32_Security",
+    # Only for the live duplication test's window (DwmFlush, transitions off); see backend/dxgi.rs.
+    "Win32_Graphics_Dwm"] }
 
 # --- macOS ---------------------------------------------------------------------------
 # Kept identical to crates/macos-check/Cargo.toml, which is what type-checks this code
@@ -94,3 +102,11 @@ features = ["std", "block2", "AVSpeechSynthesis"]
 [target.'cfg(target_os = "macos")'.dependencies.objc2-application-services]
 version = "0.3"
 features = ["AXUIElement", "AXValue", "AXError", "AXAttributeConstants", "AXRoleConstants", "AXNotificationConstants", "AXActionConstants", "AXValueConstants", "HIServices", "Processes"]
+
+# Game controllers, observed from the background (backend/gamepad/apple.rs). `dispatch2` is
+# what exposes `handlerQueue`, and the three subclasses are for the touchpad, the paddles and
+# the share button, which the extended profile does not carry.
+[target.'cfg(target_os = "macos")'.dependencies.objc2-game-controller]
+version = "0.3"
+default-features = false
+features = ["std", "block2", "dispatch2", "GCController", "GCExtendedGamepad", "GCControllerElement", "GCControllerButtonInput", "GCControllerAxisInput", "GCControllerDirectionPad", "GCPhysicalInputProfile", "GCDevice", "GCDualShockGamepad", "GCDualSenseGamepad", "GCXboxGamepad"]

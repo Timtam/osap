@@ -2,11 +2,22 @@
 //! trait; one implementation per platform, selected at compile time: Windows,
 //! macOS, and a stub that answers nothing anywhere else. See `docs/macos-port.md`
 //! for the second one, which was written without a Mac to run it on.
+//!
+//! Game controllers are the one OS input that does NOT go through the trait: they live in
+//! [`gamepad`], beside it, with a hub of their own that a thread or a dispatch queue feeds
+//! and every backend's `pump_pending` drains. See that module for why.
 
 use std::rc::Rc;
 
+/// Game controllers, observed from the background. Outside the [`Backend`] trait on purpose.
+pub mod gamepad;
+
 #[cfg(windows)]
 mod windows;
+/// DXGI Desktop Duplication, the second way of reading the screen on Windows — for the modules
+/// that declare `[screen] capture = "duplication"`, and for nothing else. See the file.
+#[cfg(windows)]
+mod dxgi;
 #[cfg(windows)]
 mod paddle_ocr;
 #[cfg(windows)]
@@ -228,6 +239,81 @@ pub struct CapturedImage {
     pub w: u32,
     pub h: u32,
     pub rgba: Vec<u8>,
+}
+
+/// How a read looks at the screen. Chosen per module VM from its manifest's `[screen]` table
+/// (see `capture_source.rs`), never per call.
+///
+/// A parameter rather than a thread-local "current source" set by each binding, although
+/// `docs/screen-frame-sharing-design.md` expected the Windows duplication path to fit behind
+/// the unchanged `capture()` signature. The choice is per module, and the image worker needs it
+/// too, on another thread; a thread-local is an implicit parameter that one forgotten reset
+/// leaks into the next module's call, while this one is checked by the compiler at every call
+/// site. That deviation is recorded in the design document.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CaptureSource {
+    /// The way every module has always read the screen: GDI (`BitBlt`, `GetPixel`) on Windows;
+    /// ScreenCaptureKit or CoreGraphics on macOS.
+    #[default]
+    Standard,
+    /// Windows: DXGI Desktop Duplication. `or_standard` says what happens when it cannot
+    /// answer — read the standard way instead (true), or fail the read (false, the manifest's
+    /// `fallback = "none"`). Every other platform reads the standard way whatever this says.
+    Duplication { or_standard: bool },
+}
+
+/// The capture routine the image worker holds ([`Backend::capture_fn`]): several regions from
+/// one source, one answer per region in the same order.
+///
+/// Several rather than one, because that is what the worker has in hand — every distinct
+/// region of a batch — and a duplication read of three regions is one request and one GPU
+/// sync where three single calls would be three. A plain `fn`, as before, so it is `Send`
+/// and the worker never touches the `Rc` backend. Named once, so that everything which passes
+/// it along — the image worker, its batch runner, their tests — says `CaptureFn` and nothing
+/// more.
+pub type CaptureFn = fn(&[(i32, i32, i32, i32)], CaptureSource) -> Vec<Option<CapturedImage>>;
+
+/// The first words of every error the Windows capture path gives when the screen could not
+/// be read — a degenerate region, one too large, a failed read, and
+/// [`DUPLICATION_UNANSWERED`] too. The OCR binding does not decide by it: only
+/// `DUPLICATION_UNANSWERED` answers with an `error` field under `fallback = "none"`, and every
+/// other failure still raises (see `capture_source::answers_instead_of_raising`). Used by the
+/// Windows backend alone outside the tests, hence the allow elsewhere.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub const CAPTURE_FAILED: &str = "screen capture failed";
+
+/// The first words of the one capture error a `fallback = "none"` module is answered for
+/// rather than raised at: desktop duplication had no picture to give. Every other capture
+/// failure — a degenerate region, one too large to read — is a mistake in the call and still
+/// raises, whatever the module declared.
+pub const DUPLICATION_UNANSWERED: &str = "screen capture failed: desktop duplication could not answer";
+
+/// Tells the Windows duplication engine a module that reads through it has just come to the
+/// front, so the first read does not also pay for opening it. Nothing anywhere else, and
+/// nothing on Windows either unless duplication is switched on and has not given up.
+pub fn prewarm_capture() {
+    #[cfg(windows)]
+    dxgi::prewarm();
+}
+
+/// What the duplication path did since the last call — reads, microseconds spent in them,
+/// and reads it could not answer — for the observation log line. Zeros where it does not
+/// exist, and zeros on Windows while no module has asked for it.
+pub fn take_duplication_counters() -> (u64, u64, u64) {
+    #[cfg(windows)]
+    let c = dxgi::take_counters();
+    #[cfg(not(windows))]
+    let c = (0, 0, 0);
+    c
+}
+
+/// Stops the duplication engine's thread, if it was ever started, before the process exits —
+/// a thread still inside a graphics driver call while the process tears down is the same
+/// class of fault as the OCR warm-up race `warmup_ocr` documents. Bounded: it waits half a
+/// second and then leaves the thread to the process exit.
+pub fn shutdown_capture() {
+    #[cfg(windows)]
+    dxgi::shutdown();
 }
 
 /// A recognized word with its bounding box (in capture-region coordinates).
@@ -489,17 +575,41 @@ pub trait Backend {
     fn screen_size(&self) -> (i32, i32);
 
     /// Color (r, g, b) of the pixel at screen coordinates.
-    fn pixel(&self, x: i32, y: i32) -> (u8, u8, u8);
+    ///
+    /// `None` only where the source can fail without a fallback — a Windows module that
+    /// declared `fallback = "none"` while duplication could not answer. The standard path
+    /// always has an answer, and the other backends always give one.
+    fn pixel(&self, x: i32, y: i32, src: CaptureSource) -> Option<(u8, u8, u8)>;
     /// Captures a screen region into an RGBA image.
-    fn capture(&self, x: i32, y: i32, w: i32, h: i32) -> Option<CapturedImage>;
+    fn capture(&self, x: i32, y: i32, w: i32, h: i32, src: CaptureSource) -> Option<CapturedImage>;
 
     /// A pointer to the stateless screen-capture routine, so a worker thread can
     /// capture without holding the (`Rc`, non-`Send`) backend. Same result as
-    /// `capture`, callable off the main thread (used by the async image worker).
-    fn capture_fn(&self) -> fn(i32, i32, i32, i32) -> Option<CapturedImage>;
+    /// `capture` per region, callable off the main thread (used by the async image worker).
+    fn capture_fn(&self) -> CaptureFn;
 
     /// Recognizes text in a screen region.
-    fn ocr(&self, x: i32, y: i32, w: i32, h: i32, lang: Option<&str>) -> Result<OcrText, String>;
+    fn ocr(
+        &self,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        lang: Option<&str>,
+        src: CaptureSource,
+    ) -> Result<OcrText, String>;
+
+    /// Reads `region` through both sources — the region a module just read, or the
+    /// foreground window when that region is too small to say anything — and logs whether
+    /// the two pictures agree, naming the module `who`. The first-read comparison of a module
+    /// that declared `[screen] capture = "duplication"`, taken once per VM build.
+    ///
+    /// `false` when it could not be made yet (duplication still opening, backing off), so the
+    /// caller asks again at the module's next read. Everywhere but Windows there is only one
+    /// source and nothing to compare.
+    fn compare_capture_sources(&self, _who: &str, _region: (i32, i32, i32, i32)) -> bool {
+        true
+    }
 
     /// Several regions, ONE screen touch.
     ///
@@ -523,10 +633,11 @@ pub trait Backend {
         &self,
         regions: &[(i32, i32, i32, i32)],
         lang: Option<&str>,
+        src: CaptureSource,
     ) -> Vec<Result<OcrText, String>> {
         regions
             .iter()
-            .map(|(x, y, w, h)| self.ocr(*x, *y, *w, *h, lang))
+            .map(|(x, y, w, h)| self.ocr(*x, *y, *w, *h, lang, src))
             .collect()
     }
 
@@ -626,6 +737,10 @@ pub trait HostEvents {
     fn on_focus_change(&mut self);
     /// A captured key fired; `mods` is the pressed modifier bitmask (MASK_*).
     fn on_key(&mut self, vk: u32, mods: u8);
+    /// What the game-controller sources saw since the last drain, in order — see
+    /// [`gamepad::drain_into`]. A default body, so a sink that does not care about pads
+    /// (a test's) need not say so.
+    fn on_gamepad(&mut self, _events: Vec<gamepad::PadEvent>) {}
     /// One turn of the event loop has finished delivering events.
     ///
     /// The GUI path has a timer tick for the work that has to happen whether or not anything

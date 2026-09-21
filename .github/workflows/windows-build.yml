@@ -31,6 +31,8 @@ on:
       # would ship unnoticed and cost him a session.
       - 'tools/capability-probe/**'
       - 'tools/probe/**'
+      # And the capture smoke module, which the two capture steps below load.
+      - 'tools/capture-probe/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'package.ps1'
@@ -132,6 +134,79 @@ jobs:
           }
           if (-not (Select-String -Path $log -Pattern '\[probe\] ready' -Quiet)) {
             throw 'the probe loaded but never said it was ready'
+          }
+          # The probe starts the game-controller watcher, so this runner — which has no pad — is
+          # where a dynamic XInput load or the gamepad thread's window failing would first show.
+          # "0 pads" is the expected answer here.
+          if (Select-String -Path $log -Pattern 'gamepad watcher failed' -Quiet) {
+            throw 'the game-controller watcher did not start — see the gamepad lines above'
+          }
+
+      # Desktop duplication on the runner: a window painted in four known colours, read through
+      # GDI and through duplication (crates/host/src/backend/dxgi.rs, `dxgi_live`).
+      #
+      # INFORMATIONAL for now, twice over: the test itself only fails on what would be our own
+      # fault (a picture of the wrong size) and prints `::warning::` for everything the
+      # environment decides, and the step may fail without failing the job. Whether GDI capture
+      # works in this runner's session at all has never been seen (TODO.md, M19), nor whether
+      # duplication works on its display adapter (M12). After a few green runs this becomes
+      # an assertion.
+      - name: Desktop duplication, live (informational)
+        continue-on-error: true
+        run: cargo test --release -p host dxgi_live -- --ignored --nocapture
+
+      # The capture smoke module twice: as it is (GDI), and from a copy whose manifest asks for
+      # desktop duplication — the whole path from the manifest through the resolution, the
+      # bindings and the capture thread, in the real application. Informational like the step
+      # above, for the same two reasons: the warnings say what would have failed.
+      #
+      # The probe's first reads come while duplication is still opening (device creation on a
+      # cold runner may take seconds) and so go the standard way; its late reads, five seconds
+      # on, are the ones that show duplication itself answered. Hence the wait for "late reads
+      # done", and the warning when the log shows no read that duplication answered.
+      - name: The capture probe, both ways (informational)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $env:AUTOMATION_PLATFORM_HEADLESS = '1'
+          $log = 'target/release/automation-platform.log'
+          $dup = Join-Path $env:RUNNER_TEMP 'capture-probe-duplication'
+          Remove-Item $dup -Recurse -Force -ErrorAction SilentlyContinue
+          Copy-Item tools/capture-probe $dup -Recurse
+          Add-Content (Join-Path $dup 'module.toml') "`n[screen]`ncapture = `"duplication`"`n"
+          foreach ($run in @(@{ Name = 'standard'; Dir = "$PWD/tools/capture-probe" }, @{ Name = 'duplication'; Dir = $dup })) {
+            Remove-Item $log -ErrorAction SilentlyContinue
+            $p = Start-Process -FilePath 'target/release/automation-platform.exe' -ArgumentList $run.Dir -PassThru
+            for ($i = 0; $i -lt 40; $i++) {
+              if ((Test-Path $log) -and (Select-String -Path $log -Pattern 'CAPTURE PROBE: late reads done' -Quiet)) { break }
+              Start-Sleep -Milliseconds 500
+            }
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            Write-Host "---- capture probe, $($run.Name) ----"
+            if (-not (Test-Path $log)) { Write-Host "::warning::capture probe ($($run.Name)): no log at all"; continue }
+            Get-Content $log | Select-String -Pattern 'CAPTURE PROBE|\[capture\]|\[pump\]' | ForEach-Object { $_.Line }
+            if (-not (Select-String -Path $log -Pattern 'still alive after capturing' -Quiet)) {
+              Write-Host "::warning::capture probe ($($run.Name)): it never said it was still alive after capturing"
+            }
+            if (-not (Select-String -Path $log -Pattern 'CAPTURE PROBE: late reads done' -Quiet)) {
+              Write-Host "::warning::capture probe ($($run.Name)): it never finished its late reads"
+            }
+            if (Select-String -Path $log -Pattern 'CAPTURE PROBE:.*THREW' -Quiet) {
+              Write-Host "::warning::capture probe ($($run.Name)): a capture call raised"
+            }
+            if (Select-String -Path $log -Pattern '\[pump\] one iteration took' -Quiet) {
+              Write-Host "::warning::capture probe ($($run.Name)): the pump stalled"
+            }
+            if ($run.Name -eq 'duplication' -and -not (Select-String -Path $log -Pattern 'reads the screen through desktop duplication' -Quiet)) {
+              Write-Host "::warning::capture probe (duplication): the log never says the module resolved to desktop duplication"
+            }
+            # Resolving to it is not reading through it: every read may still have fallen back.
+            # Either line below is only written for a read duplication actually answered.
+            $compared = Select-String -Path $log -Pattern 'first desktop duplication read compared with the standard way' -Quiet
+            $counted = Select-String -Path $log -Pattern 'and [1-9][0-9]* desktop duplication read\(s\)' -Quiet
+            if ($run.Name -eq 'duplication' -and -not ($compared -or $counted)) {
+              Write-Host "::warning::capture probe (duplication): no read was answered through desktop duplication; every one fell back to the standard way"
+            }
           }
 
       # The documentation ships inside the artifact and works offline from the folder, so a

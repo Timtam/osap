@@ -169,3 +169,49 @@ pub fn report(scope: &str, pairs: &[(String, String)]) {
         line(scope, &format!("{k}: {v}"));
     }
 }
+
+// ── Panics that are caught and reported by the code they happen in ──────────────────────
+
+thread_local! {
+    /// Whether this thread is inside [`contain`].
+    static CONTAINING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The panic hook's report of a panic inside `contain`, kept for `contain` to answer with.
+    static HELD: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f`, catching a panic in it and answering with the panic's report — message and
+/// place, as the application's panic hook would have written it — instead.
+///
+/// For code that survives its own panics and reports them itself, at a rate it chooses: the
+/// image worker, where one template that trips something would otherwise panic on every
+/// 500 ms poll. The application's panic hook asks [`hold_contained_panic`] first and writes
+/// nothing for these. Without that, the hook logged every one of them in full, so a fault the
+/// worker had survived cost a log line per poll for as long as it lasted, whatever the worker's
+/// own throttle said.
+pub fn contain<R>(f: impl FnOnce() -> R) -> Result<R, String> {
+    let was = CONTAINING.with(|c| c.replace(true));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    CONTAINING.with(|c| c.set(was));
+    // Taken either way, so a report can never be left over for a later `contain` to answer.
+    let held = HELD.with(|h| h.borrow_mut().take());
+    r.map_err(|p| {
+        held.unwrap_or_else(|| {
+            p.downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| p.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "a panic with no message".into())
+        })
+    })
+}
+
+/// For the application's panic hook: `true` when the panicking thread is inside [`contain`],
+/// which will report the panic itself. The report (`report` is called only then) is kept for
+/// it, and the hook should write nothing.
+pub fn hold_contained_panic(report: impl FnOnce() -> String) -> bool {
+    // `try_with`: a panic during thread teardown must not panic again in the hook.
+    if !CONTAINING.try_with(|c| c.get()).unwrap_or(false) {
+        return false;
+    }
+    let _ = HELD.try_with(|h| *h.borrow_mut() = Some(report()));
+    true
+}

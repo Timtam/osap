@@ -33,8 +33,10 @@ INDEX = os.path.join(API, 'index.md')
 # them in, and it puts the two things every module touches first.
 NS_ORDER = [
     'Overlay', 'host.window', 'host.screen', 'host.ocr', 'host.element', 'host.input',
-    'host.keys', 'host.hotkey', 'host.speech', 'host.sound', 'host.timer', 'host.settings',
-    'host.config', 'host.os', 'host.log', 'host.path', 'host.resource', 'host.require',
+    'host.keys', 'host.hotkey', 'host.gamepad', 'host.speech', 'host.sound', 'host.timer',
+    'host.settings',
+    'host.config', 'host.os', 'host.log', 'host.path', 'host.resource', 'host.json',
+    'host.require',
     'host.tryRequire', 'host.include', 'host.epoch', 'host.now', 'host.inputEpoch',
     'host.arbiter', 'host.calibrating', 'Concepts',
 ]
@@ -50,10 +52,13 @@ NS_BLURB = {
     'host.input': 'Synthesising mouse and keyboard input.',
     'host.keys': 'Claiming keys before the focused application sees them.',
     'host.hotkey': 'Claiming a combination system-wide.',
+    'host.gamepad': 'Watching game controllers while a game is in front — observed only, never '
+                    'taken from the game.',
     'host.arbiter': 'Deciding which of several overlays owns a contested slot.',
     'host.timer': 'Waiting without blocking, and knowing when a cached reading went stale.',
     'host.settings': 'Typed, per-module settings, edited by the user in the module manager.',
     'host.log': 'Writing to the log file beside the application.',
+    'host.json': 'Turning JSON text a module ships into Luau values.',
     'Concepts': 'The shapes and grammars the calls above are written in.',
 }
 
@@ -249,10 +254,10 @@ CAPABILITIES = [
     'matcher it supplied are called during a focus change, and they are yours.',
     '',
     'Nothing is gated on `host.os`, `host.require`, `host.tryRequire`, `host.include`, '
-    '`host.epoch`, `host.now`, `host.inputEpoch` or `host.calibrating`. A clock, a counter, a '
-    'platform name and a way to reach a declared dependency are not worth asking permission '
-    'for, and gating them would mean every manifest names them — which is the same as naming '
-    'none.',
+    '`host.epoch`, `host.now`, `host.inputEpoch`, `host.calibrating` or `host.json`. A clock, a '
+    'counter, a platform name, a way to reach a declared dependency and a parser of strings the '
+    'module already holds are not worth asking permission for, and gating them would mean every '
+    'manifest names them — which is the same as naming none.',
     '',
     'The list is also shown to the user before installing a module from GitHub. It is not a '
     'security boundary on its own — a module still runs arbitrary Luau, and the declaration is '
@@ -345,10 +350,19 @@ def without_test_modules(src):
     return ''.join(out)
 
 
+# The Rust files that register `host.*` bindings. lib.rs holds nearly all of them; a namespace
+# big enough to deserve a file of its own is listed here, or its calls would be invisible to the
+# check below — a call a module can make and nobody would be told is undocumented.
+BINDING_SOURCES = [
+    os.path.join('crates', 'host', 'src', 'lib.rs'),
+    os.path.join('crates', 'host', 'src', 'gamepad_api.rs'),
+]
+
+
 def public_names():
     """Every `host.*` a module can call, from the Rust bindings and the Luau prelude."""
-    lib = without_test_modules(
-        open(os.path.join('crates', 'host', 'src', 'lib.rs'), encoding='utf-8').read()
+    lib = '\n'.join(
+        without_test_modules(open(path, encoding='utf-8').read()) for path in BINDING_SOURCES
     )
     pre = open(os.path.join('crates', 'host', 'src', 'window_prelude.luau'),
                encoding='utf-8').read()
