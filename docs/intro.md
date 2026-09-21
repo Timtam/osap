@@ -11,10 +11,11 @@ the class of AutoHotkey / Keyboard Maestro, built in **Rust** with **Luau**
 modules. Its first product goal is porting [ReaHotkey](reahotkey-port-analysis.md)'s
 accessible plugin overlays as macOS-capable modules.
 
-- **Modules** are sandboxed Luau scripts, each in its own VM (capability
-  isolation). A module can **depend on** others: a `code_module` dependency's code
-  runs inside the dependent's VM so its functions are reachable via `host.require`
-  (the inheritance model); a plain data dependency exports only data.
+- **Modules** are Luau scripts, each in its own VM, that may call only the host
+  namespaces their manifest declares. All of them run on one thread, with no time
+  or memory limit. A module can **depend on** others: a `code_module` dependency's
+  code runs inside the dependent's VM so its functions are reachable via
+  `host.require` (the inheritance model); a plain data dependency exports only data.
 - The **host API** (`host.*`) exposes the primitives — window/control
   introspection, input, screen capture + image search, OCR, UI Automation,
   speech, hotkeys, timers, persistence — directly scriptable from Luau.
@@ -29,8 +30,10 @@ accessible plugin overlays as macOS-capable modules.
 - **[Module Manager](module-manager.md)** — install, configure, update, and reload
   modules from the tray.
 - **[Module package format](module-package-format.md)** — the `module.toml` manifest
-  (entry, capabilities, dependencies, `code_module`).
-- **[API Reference](api/window.md)** — every `host.*` function + the overlay API.
+  (entry, capabilities, dependencies, `code_module`) and where modules are found.
+- **[API Reference](api/index.md)** — every `host.*` function + the overlay API; if you
+  are porting from another tool, start with
+  [Coming from another tool](api/index.md#coming-from).
 - **[Architecture feasibility study](architecture-feasibility-study.md)** — the
   design rationale.
 - **[Nested overlays design](nested-overlays-design.md)** — the plugin-in-plugin

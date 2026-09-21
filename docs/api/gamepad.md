@@ -4,11 +4,15 @@ sidebar_position: 3.5
 toc_max_heading_level: 2
 ---
 
-A game played with a controller has no keyboard focus to hang an overlay on and usually no accessibility tree either, so the press itself is the only event there is. This namespace hands that press to a module while the game stays in front: which button went down on which pad, where the sticks are, and when a pad arrives or leaves. A module reading a game's menu listens for the D-pad, looks at the screen the moment after, and says what the cursor moved to.
+A game played with a controller has no keyboard focus to hang an overlay on and usually no accessibility tree either, so the press itself is the only event there is. This namespace hands that press to a module without taking anything from the game: which button went down on which pad, where the sticks are, and when a pad arrives or leaves. A module reading a game's menu listens for the D-pad, looks at the screen the moment after, and says what the cursor moved to.
+
+**Nothing here looks at which window is in front.** A listener gets every matching event the platform delivers while its module is enabled, whatever application has the focus; whether the platform delivers input while this application is in the background is in the platform sections of [`on`](#host-gamepad-on). Deciding that a press is meant for your game is the module's job: check `host.window.active()` in the callback, or register the listener when your game comes forward and remove it with [`off`](#host-gamepad-off) when it leaves.
+
+**Which pads are seen depends on the platform**: see the platform sections of [`list`](#host-gamepad-list).
 
 **It observes and nothing more.** Every press reaches the game as well as your module, and nothing here can stop that — on Windows that would take a filter driver and a virtual controller, on macOS seizing the device away from the game, and neither fits an application that installs by unzipping. There is therefore no claim and no conflict the way `host.hotkey` has them: every enabled module with a matching listener gets every event. A command of your own belongs on the keyboard, through `host.hotkey`; a button combination on the pad would reach the game too.
 
-**Names are positional.** `south` is the bottom face button whatever is printed on it — A on an Xbox pad, Cross on a PlayStation pad, B on a Nintendo pad — so a module written for "the confirm button" works on every family. What is printed on the pad arrives as `label`, in English, for speech. The full list and a table for porting from SDL, pygame and XInput are [at the end](#button-and-axis-names).
+**Names are positional.** `south` is the bottom face button whatever is printed on it — A on an Xbox pad, Cross on a PlayStation pad, B on a Nintendo pad — so a module written for "the confirm button" works on every family the platform reports (on Windows, that is XInput pads only). What is printed on the pad arrives as `label`, in English, for speech. The full list and a table for porting from SDL, pygame and XInput are [at the end](#button-and-axis-names).
 
 **Values.** Sticks run from -1 to 1 with `y` positive **down**, as in SDL and on the screen; triggers run from 0 to 1. `state()` gives the raw values. Listeners get dead-zoned values instead — radially over the two halves of a stick, with Microsoft's defaults (0.24 left, 0.27 right, 0.12 triggers) — and the hub also turns each stick direction and each trigger into a button of its own (`left_stick_down`, `right_trigger`), pressed at half deflection and released below 0.35 (triggers: 0.12 and 0.08), so a menu can be walked with the stick the same way as with the D-pad.
 
@@ -51,7 +55,7 @@ end
 
 ### Windows
 
-Xbox-type pads, through XInput, which allows at most four; their `family` is `xbox`. Their `id` is XInput's slot, `xinput:0` to `xinput:3`: a different pad plugged into the same slot gets the same `id`. `guide` is in `buttons` only when the system's XInput has the extended entry point that reports it. `vendor` and `product` are the pad's USB ids where XInput's extended capabilities call answers for the slot, and `nil` otherwise. PlayStation, Nintendo and other controllers are not listed on Windows yet.
+Xbox-type pads, through XInput, which allows at most four; their `family` is `xbox`. Their `id` is XInput's slot, `xinput:0` to `xinput:3`: a different pad plugged into the same slot gets the same `id`. `guide` is in `buttons` only when the system's XInput has the extended entry point that reports it. `vendor` and `product` are the pad's USB ids where XInput's extended capabilities call answers for the slot, and `nil` otherwise. PlayStation, Nintendo and other controllers are not listed on Windows unless they present themselves through XInput.
 
 The first call waits up to 250 ms for the first reading of the four slots, so a pad that is plugged in is normally already listed. When no module listens for `down`, `up` or `axis`, `list()` asks for a fresh reading, waits up to 50 ms for it, and keeps the pads read for five seconds afterwards.
 
@@ -156,7 +160,7 @@ A help bubble that appears after a press is the same call with `before = nil`: a
 
 ### Windows
 
-While a `down`, `up` or `axis` listener exists, XInput pads are read every 4 ms, so a press is detected up to 4 ms after it happened and a press shorter than that can be missed. With only `connected` and `disconnected` listeners the four slots are looked at every two seconds, and with no listener nothing is read at all. While anybody listens, a new pad is also looked for as soon as Windows announces a HID device arriving. Windows opens Xbox Game Bar on the Guide button by default (Settings, Gaming), which takes the focus from the game.
+While a `down`, `up` or `axis` listener exists, XInput pads are read every 4 ms, so a press is detected up to 4 ms after it happened and a press shorter than that can be missed. With only `connected` and `disconnected` listeners the four slots are looked at every two seconds, and with no listener nothing is read at all. While anybody listens, a new pad is also looked for as soon as Windows announces a HID device arriving. The pads are read the same way whichever application is in front. Windows opens Xbox Game Bar on the Guide button by default (Settings, Gaming), which takes the focus from the game.
 
 ### macOS
 

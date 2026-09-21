@@ -10,7 +10,9 @@ A hotkey is claimed from the operating system and fires wherever the user is, wh
 
 A claim also outranks the application, which is a hazard as much as a feature: with Kontakt's file or snapshot menu open, Alt+P and Alt+M never reached the menu at all until the overlay learned to give its registrations back for as long as a menu is up. And the callback runs while the combination is still physically down, so a key or click synthesised inside it carries those modifiers unless you wait for them to be released.
 
-The spec grammar is shared with `host.keys` and documented there, including the `"<modifier> tap"` form, which is a capture only and is refused here.
+The spec grammar is shared with `host.keys` and documented there, including the `"<modifier> tap"` form, which is a capture only and can never be held here (see below).
+
+A combination that is also captured with [`host.keys.capture`](./keys.md#host-keys-capture) is a platform question: see the Windows section of [`register`](#host-hotkey-register).
 
 ## What to declare {#declare}
 
@@ -27,7 +29,9 @@ See [what that list is and is not](./index.md#capabilities).
 
 **Signature:** `host.hotkey.register(spec: string, callback: () -> ()) ` → `id: number`
 
-Registers a **global** OS hotkey (active regardless of foreground window) for the [key spec](keys#key-spec-string-format) and returns an integer `id`. The callback is invoked with no arguments each time the hotkey fires (only while the owning module is enabled). Raises an error if the spec is invalid.
+Registers a **global** OS hotkey (active regardless of foreground window) for the [key spec](keys#key-spec-string-format) and returns an integer `id`. The callback is invoked with no arguments each time the hotkey fires (only while the owning module is enabled); what a held-down combination does is in the platform sections.
+
+It raises only for a spec the shared parser cannot read at all (an unknown modifier or key name). A spec that parses but that the operating system cannot register — a `"<modifier> tap"`, or a key the platform has no code for (see the platform sections) — does **not** raise: `register` returns an `id`, the refusal happens when the claim is made, and it reaches the user as the "Binding unavailable" dialog, whose text blames another application that already uses the combination. The real reason is only in the log. The claim is tried again, and refused again, whenever the set of enabled modules changes.
 
 ```luau
 local id = host.hotkey.register("Ctrl+Alt+P", function()
@@ -56,7 +60,11 @@ because `register` returned an id.** It returns one either way.
 
 ### Windows
 
-`RegisterHotKey`, with auto-repeat suppressed. A combination held by another **application**
+`RegisterHotKey`, with auto-repeat suppressed: the callback fires once per press, and holding the combination does not fire it again.
+
+A key captured with [`host.keys.capture`](./keys.md#host-keys-capture) by any enabled module is swallowed by the keyboard hook before the hotkey handling sees it, so a hotkey on the same combination does not fire while the hook swallows it, and nothing reports it. The hook lets a captured key through — and the hotkey then fires — while the capture scope pins another window, while a menu is open or declared open, and while a screen reader's modifier (Insert, numpad zero, Caps Lock) is held; see [`host.keys`](./keys.md#host-keys-capture).
+
+A combination held by another **application**
 (rather than by another module) cannot be taken, and that refusal is surfaced to the user by
 name and logged. The claim still stands, and it is tried again on the next change to the
 enabled set — so quitting the application that holds the key can be enough, where it used to
@@ -66,7 +74,9 @@ take a restart of this one.
 
 A Carbon event hotkey — deliberately **not** an event tap, so this needs no Input Monitoring grant even though `host.keys` does.
 
-A `"<modifier> tap"` spec is **refused outright here**, with a message pointing at `host.keys`: Carbon has no notion of a bare modifier press, and registering something plausible instead would fire on the wrong key. Windows rejects it too, but only incidentally — its hotkey parser has no tap branch at all, so the refusal reads as an unknown key rather than as an explanation.
+A `"<modifier> tap"` spec is refused when the claim is made, with a log line pointing at `host.keys`: Carbon has no notion of a bare modifier press, and registering something plausible instead would fire on the wrong key. Windows refuses it too, but only incidentally — its hotkey parser has no tap branch at all, so the log reads as an unknown key rather than as an explanation. On both, `register` itself has returned an `id` by then (see above). `F21`–`F24` are refused the same way here, because macOS has no key code for them.
+
+Letters, digits and F-keys are US keyboard positions here, as for every spec on macOS: see [the key spec](./keys.md#key-spec-string-format).
 
 ## host.hotkey.unregister(id) {#host-hotkey-unregister}
 

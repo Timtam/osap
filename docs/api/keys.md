@@ -6,9 +6,13 @@ toc_max_heading_level: 2
 
 Claims a key so that the focused application does not receive it. Where a hotkey fires wherever the user happens to be, a capture **takes the key away**: while a capture holds, the keystroke arrives at your callback and the focused plug-in never sees it.
 
+**There is no listen-only mode.** A captured key never reaches the application, except the `"<modifier> tap"` form below, which only watches. Sending the key on yourself does not help: [`host.input.send`](./input.md#host-input-send) goes through the same hook as a real key and is caught by your own capture again, and [`host.input.post`](./input.md#host-input-post) reaches the window's message queue only, which a game reading DirectInput or Raw Input never looks at. For a game played with a controller, [`host.gamepad`](./gamepad.md) is the observer: it sees every press and takes none.
+
+**A key goes to one callback.** The captured set is shared by the whole application: while any enabled module captures a combination, the hook suppresses it, and the press is handed to exactly one callback — the earliest capture of that combination still standing among enabled modules. (A module that captures a combination again replaces its own earlier capture and moves to the back of that order.) Nothing routes a key by which window is in front, and a second module's capture of the same combination is neither dispatched to nor reported as a conflict: it simply never fires while the first one holds. With trace logging on, the log's `captured set:` line names every module holding each key.
+
 That is what makes an overlay navigable — Tab and Shift+Tab walk the control ring, Space and Return activate what is focused, Left and Right belong to a focused slider or tab control — and it is why the discipline is to hold only what the control in focus actually needs and hand everything else straight back. A key held is a key the plug-in does not get, and from the outside that is indistinguishable from the plug-in ignoring it: a tab control that claimed the arrow keys statically cost Melodyne's editor its arrows entirely, and Space in Melodyne is transport play and stop.
 
-Matching is exact on the modifier state, so a bare key never fires for its modified form and the two Tab directions are two separate captures. Suppression can be pinned to the window that was in front when the scope was set, and a plug-in's own menu can be declared open so navigation keys fall through to it — both exist so that a menu coming forward is driven by the operating system instead of being eaten by the overlay.
+Matching is exact on the modifier state, so a bare key never fires for its modified form and the two Tab directions are two separate captures. Whether a held key fires the callback again is platform-specific: see [`capture`](#host-keys-capture). Suppression can be pinned to the window that was in front when the scope was set, and a plug-in's own menu can be declared open so navigation keys fall through to it — both exist so that a menu coming forward is driven by the operating system instead of being eaten by the overlay. Both are **switches for the whole application**, not for your module: see [`scope`](#host-keys-scope).
 
 On macOS the hook is an event tap, and the failure is asymmetric: without the Accessibility grant the call **raises**, while with Input Monitoring missing it returns a token, reports itself enabled, and never delivers a key.
 
@@ -32,13 +36,13 @@ Two namespaces parse `+`-joined spec strings; segments are trimmed and case-inse
 
 **Modifiers** (any combination): `Ctrl`/`Control`, `Alt`/`Option`, `Shift`, `Win`/`Super`/`Cmd`/`Command`/`Meta`.
 
-**Key names** (`key_to_vk`): single ASCII letter `A`–`Z` (case-insensitive) or digit `0`–`9`; function keys `F1`–`F24`; and the named keys `Space`, `Enter`/`Return`, `Esc`/`Escape`, `Tab`, `Backspace`, `Delete`/`Del`, `Up`, `Down`, `Left`, `Right`, `Home`, `End`, `PageUp`, `PageDown`. An unknown modifier or key makes the call raise an error.
+**Key names** (`key_to_vk`): single ASCII letter `A`–`Z` (case-insensitive) or digit `0`–`9`; function keys `F1`–`F24`; and the named keys `Space`, `Enter`/`Return`, `Esc`/`Escape`, `Tab`, `Backspace`, `Delete`/`Del`, `Up`, `Down`, `Left`, `Right`, `Home`, `End`, `PageUp`, `PageDown`. That is the whole list, here and for [`host.input.send`](./input.md#host-input-send) and [`post`](./input.md#host-input-post): there are no numpad keys, no punctuation, no `Insert` and no media keys. An unknown modifier or key makes `host.keys.capture` and `host.input.send` raise an error; for `host.hotkey.register`, see [its page](./hotkey.md#host-hotkey-register).
 
 Examples: `"Ctrl+Alt+P"`, `"Tab"`, `"Shift+Tab"`, `"Ctrl+Right"`, `"F5"`.
 
 ---
 
-There is a third form the prose above does not mention: **`"<modifier> tap"`** — a modifier pressed and released on its own, with no other key in between. It is a `host.keys` capture only, never a global hotkey; macOS refuses it outright with a message pointing at `host.keys`, because Carbon has no notion of it.
+There is a third form the prose above does not mention: **`"<modifier> tap"`** — a modifier pressed and released on its own, with no other key in between. The modifier is `Alt`/`Option`, `Ctrl`/`Control`, `Shift` or `Win`/`Cmd` (or their other names), and the suffix is written ` tap` or ` Tap` — `"Alt TAP"` is not a tap and raises as an unknown key. It is a `host.keys` capture only, never a global hotkey (see [`host.hotkey.register`](./hotkey.md#host-hotkey-register) for what happens if you try). The parser accepts any key name before ` tap`, but only the four modifiers are ever seen as taps: `"Space tap"` returns a token and never fires.
 
 ```luau
 -- A global hotkey: modifiers first, the key last. Ctrl+Option belongs to VoiceOver on
@@ -57,23 +61,27 @@ host.keys.capture("Alt tap", function() ov:activate() end)
 
 ### Windows
 
-Modifier names are the Windows ones and mean what they say.
+Modifier names are the Windows ones. Letters and digits are virtual keys, which Windows assigns by the current keyboard layout, so `"Z"` is the key labelled Z on a German keyboard as on a US one.
+
+The modifier state is read from the generic Ctrl and Alt keys, and **AltGr is Ctrl+Alt** to Windows. So a capture of `"Ctrl+Alt+Q"` also matches, and swallows, AltGr+Q — the `@` of a German layout — and `"Ctrl+Alt+E"` takes the `€`. A hotkey registered on the same combination matches AltGr the same way. Avoid Ctrl+Alt+letter wherever the user may type.
+
+Only the matched key is suppressed; the modifiers themselves still reach the application. After a captured `"Alt+X"` the application has seen Alt go down and up with nothing in between, which is what a bare Alt press looks like; a standard Win32 window answers that by activating its menu bar, and a bare Win key opens Start. Nothing here hides it, the way AutoHotkey sends a masking key around its hook hotkeys. It has not been observed in this project, but a capture of Alt or Win plus a key is where to look if the focus jumps to a menu bar.
 
 ### macOS
 
 Modifiers map **by position, not by name**: Ctrl is Control, Alt is Option, and Win/Cmd is Command. A spec written for one platform therefore names a different physical key here, which matters most for `Alt` — on macOS that key also composes characters, so claiming `Alt+E` or `Alt+N` takes the acute and tilde dead keys away from any text field while the overlay is up.
 
+Letters, digits and function keys are **positions on a US keyboard** as well, not the characters printed on the keys: every spec is translated through a US-ANSI keycode table, for `host.keys`, `host.hotkey`, `host.input.send` and `host.input.post` alike. On a German (QWERTZ) Mac `"Cmd+Z"` is the key labelled Y, so `host.input.send("Cmd+Z")` arrives as Cmd+Y. `F21`–`F24` have no macOS key code at all.
+
 ### Both
 
-The tap form behaves the same on either platform: armed when a modifier goes down from rest, dropped by anything at all in between — an ordinary key, a second modifier, Caps Lock — and fired on the release. It is never suppressed, so the modifier keeps working as a modifier.
-
-Until recently only `"Alt tap"` was armed on Windows, and `"Ctrl tap"`, `"Shift tap"` and `"Cmd tap"` were accepted, returned a token and could never fire. All four work now.
+The tap form behaves the same on either platform: armed when a modifier goes down from rest, dropped by anything at all in between — an ordinary key, a second modifier, Caps Lock — and fired on the release. It is never suppressed, so the modifier keeps working as a modifier. All four modifiers are armed; a tap of any other key is accepted and can never fire.
 
 ## host.keys.capture(spec, callback) {#host-keys-capture}
 
 **Signature:** `host.keys.capture(spec: string, callback: (mods: { shift: boolean, ctrl: boolean, alt: boolean, win: boolean }) -> ())` → `number` (a release token)
 
-Begins intercepting the [key spec](#key-spec-string-format): the keypress is swallowed (not passed to the underlying app) and `callback` is invoked with a `mods` table describing the modifier state at press time. Re-capturing the same `(vk, mask)` for this module replaces the previous callback (and mints a new token). Installs the low-level keyboard hook on first use (idempotent). Raises an error for an unknown spec. **Returns a token** to pass to [`host.keys.release`](#host-keys-release); keep it if you'll release this specific capture (two overlays in one module can each capture the same key, so releasing by spec would be ambiguous).
+Begins intercepting the [key spec](#key-spec-string-format): the keypress is swallowed (not passed to the underlying app) and `callback` is invoked with a `mods` table describing the modifier state at press time. The callback runs on the next pump tick, for a key-down; the key-up is never reported. What auto-repeat does, and whether the key-up reaches the application, are in the platform sections. Re-capturing the same `(vk, mask)` for this module replaces the previous callback (and mints a new token) — a module holds one capture per combination. Across modules the earliest standing capture gets the key (see the top of this page). Installs the low-level keyboard hook on first use (idempotent). Raises an error for an unknown spec. **Returns a token** to pass to [`host.keys.release`](#host-keys-release); keep it if you'll release this specific capture: when two overlays in one module capture the same key one after the other, the later capture has replaced the earlier, and the earlier overlay's token no longer releases anything.
 
 ```luau
 host.keys.capture("Tab", function(mods)
@@ -87,11 +95,17 @@ host.keys.capture("Shift+Tab", function() moveFocus(-1) end)
 
 A low-level keyboard hook. It needs no permission and installs essentially always.
 
+A capture fires on **every** key-down, auto-repeat included: holding an arrow runs the callback at the keyboard's repeat rate, and with it any screen read inside.
+
+The key-up is not tied to its key-down: the hook matches it again on its own, against the modifiers held, the scope and the menu state at the moment of release, and swallows it only if that matches too. So after a captured `"Ctrl+Right"`, letting go of Ctrl before Right hands the application a bare Right key-up; the same happens when the scoped window lost the foreground, or a menu opened or was declared open, while the key was down.
+
 While a **screen reader's own modifier** is physically down — Insert, numpad zero or Caps Lock — a matched key is passed through instead of swallowed. None of those is a Windows modifier, so without that rule NVDA+Space would arrive as a bare Space and be eaten by any overlay claiming `"Space"`.
 
 ### macOS
 
-This call **can raise**. Without the Accessibility grant the event tap is refused and the error reaches Lua. Worse is the case where only Input Monitoring is missing: the tap is created, reports itself as enabled, and never fires — `capture` returns a token, no key ever arrives, and nothing errors. A module that announces "overlay ready" on a successful return can be announcing it into a session where no key will ever reach it. (Only the first capture in a process can raise; later ones reuse the installed tap.)
+This call **can raise**. Without the Accessibility grant the event tap is refused and the error reaches Lua. Worse is the case where only Input Monitoring is missing: the tap is created, reports itself as enabled, and never fires — `capture` returns a token, no key ever arrives, and nothing errors. A module that announces "overlay ready" on a successful return can be announcing it into a session where no key will ever reach it.
+
+A refused tap is not remembered as installed, so **every** later capture tries again, and raises again, until the tap can be created. A capture that raised is nevertheless registered — the key is entered in the captured set before the tap is asked for — and its token is lost with the error: once a later capture installs the tap, that key is suppressed and handed to the callback passed to the `capture` call that raised. [`releaseAll`](#host-keys-releaseall), the same module capturing the same combination again, or a reload of the module replaces or removes it; disabling the module stops the suppression for as long as it is disabled.
 
 There is **no screen-reader pass-through rule**. Caps Lock contributes no modifier bit at all, so with VoiceOver's modifier set to Caps Lock, VO+Space arrives as a bare Space, mask 0, and an overlay claiming Space will capture and suppress it. With the default Ctrl+Option the mask is non-zero and a bare-key capture does not match, so this bites only on the Caps Lock setting.
 
@@ -123,6 +137,8 @@ host.keys.releaseAll()
 
 Scopes captured-key suppression. `true` pins it to the **current foreground window** (captured via `GetForegroundWindow` at call time) — the hook then only intercepts keys while that window is foreground, so a menu/popup that brings another window forward receives keys natively (ReaHotkey's `HotIf WinActive` model). `false` makes capture global again.
 
+**One switch for the whole application.** The scope, the [`menuOpen`](#host-keys-menuopen) flag and the [`passedThrough`](#host-keys-passedthrough) record are each a single value shared by every module, not a setting of yours: the last caller wins, so one module's `scope(false)` unpins every other module's captures, and a `scope(true)` pins them all to its window. Disabling a module does not undo what it set. The overlay runtime sets and clears them as its overlays activate and deactivate; a module that also drives `host.keys` directly shares them with it.
+
 ```luau
 host.keys.scope(true)   -- only suppress while the plugin window is focused
 ```
@@ -139,7 +155,7 @@ The comparison is against a value **cached from notifications** — application 
 
 **Signature:** `host.keys.menuOpen(open: boolean)` → `nil`
 
-Tells the hook a plugin's own (Qt/UIA) menu is open (`true`) or closed (`false`). While open, captured navigation keys (e.g. `Tab`/`Enter`) **pass through** to that menu instead of being consumed by the overlay — covering plugin menus the Win32 menu-state check can't see.
+Tells the hook a plugin's own (Qt/UIA) menu is open (`true`) or closed (`false`). While open, captured navigation keys (e.g. `Tab`/`Enter`) **pass through** to that menu instead of being consumed by the overlay — covering plugin menus the Win32 menu-state check can't see. Like [`scope`](#host-keys-scope), this is one flag for the whole application: `menuOpen(true)` lets **every** module's captured keys through until somebody sets it back.
 
 ```luau
 host.keys.menuOpen(true)
@@ -213,7 +229,7 @@ Because the answer depends on a close notification arriving, there is a safety v
 
 **Signature:** `host.keys.passedThrough()` → `{ { vk: number, mask: number, key: string } }`
 
-The keys the hook let through to the application because a menu was open, since the last call — drained on read, so each key is reported once. Two kinds: any **captured** key let past because a menu was open, and **Return or Escape, captured or not**, whenever `host.keys.menuOpen(true)` is in force — those two end a menu, no overlay captures Escape, and Return is captured only while the focused control wants it, so a record kept for captured keys alone would never hold the Escape that cancelled a menu. `key` is the spelling `host.keys.capture` would accept (`"Return"`, `"Escape"`, `"Tab"`, `"A"`, `"F5"`), or `"vk 0x.."` for a key the spec grammar cannot name.
+The keys the hook let through to the application because a menu was open, since the last call — drained on read, so each key is reported once, to whichever module asks first: the record is one for the whole application, and it holds at most 32 keys until it is read. Two kinds: any **captured** key let past because a menu was open, and **Return or Escape, captured or not**, whenever `host.keys.menuOpen(true)` is in force — those two end a menu, no overlay captures Escape, and Return is captured only while the focused control wants it, so a record kept for captured keys alone would never hold the Escape that cancelled a menu. `key` is the spelling `host.keys.capture` would accept (`"Return"`, `"Escape"`, `"Tab"`, `"A"`, `"F5"`), or `"vk 0x.."` for a key the spec grammar cannot name.
 
 What it is for: **Return and Escape end a menu.** Where nothing can see a plugin's menu — no notification, no menu element, no window of its own — the overlay runtime's hold is a stopwatch, and the only word it can get that the menu has closed is one of those two keys going through to it. The menu watch asks this on its tick and cuts the hold to a short grace when it finds one, instead of leaving Tab and Return with the plugin for the rest of the stopwatch. Only for a hold no detector has confirmed: where a detector can see the menu, its word is better than a guess about what a key did.
 

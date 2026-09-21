@@ -12,7 +12,9 @@ Nothing here touches the screen, so one call is cheap — but every overlay make
 
 The same call answers with different things per platform, so read the platform sections: `controls()` yields every visible child window on Windows and container elements only on macOS, and a focus chain's links are windows there and accessibility elements here — test what a chain contains rather than how deep it is. Believe what you are told rather than what you assume: `focus` can be declined by either platform, and `ownsPoint` answers `nil` on macOS, which a caller must read as permission rather than refusal.
 
-All coordinates are screen pixels on Windows and **points** on macOS (i32 → Luau `number`) unless noted — see [`host.screen.size()`](screen#host-screen-size) for why that distinction costs a day when it is missed. `id` fields are native window handles on Windows (a Win32 `HWND` as a Luau integer) and interned counters on macOS; see the platform sections under [Table shapes](#table-shapes).
+**Some answers are kept for the rest of the epoch.** `active()`, `controls()` and `focusChain()` — like `host.element.find`, `findAny` and `pluginLocate` — ask the operating system once per [epoch](./timer.md#host-epoch) and hand every later call in the same epoch the same answer, a `nil` included. The epoch turns over on OS events (a hotkey, a captured key, a foreground or focus change, a controller event), on a [`host.timer.after`](./timer.md#host-timer-after) callback coming due, on an image result arriving, on input the platform drives, and on `host.window.focus`, so a callback normally sees the world as it was when the callback started. It does **not** turn over on a [`host.timer.every`](./timer.md#host-timer-every) tick: a poll is handed whatever was asked in the current epoch, which may be from before the last tick, unless something else turned it over. Nor does [`host.input.post`](./input.md#host-input-post) turn it over: a `focusChain()` read after a post in the same callback is the answer from before the key. `list`, `find`, `findAll`, `apps` and `windowsOf` are asked afresh on every call.
+
+All coordinates are physical device pixels on Windows and **points** on macOS (i32 → Luau `number`) unless noted; the two agree only at 100 % scaling — see [`host.screen.size()`](screen#host-screen-size) for why that distinction costs a day when it is missed. `id` fields are native window handles on Windows (a Win32 `HWND` as a Luau integer) and interned counters on macOS; see the platform sections under [Table shapes](#table-shapes).
 
 `list`, `active`, `controls`, `focusChain` and `ownsPoint` are native bindings; `find`, `findAll`, `test`, `onTrigger` and `onFocus` are added on top of them by the Luau prelude.
 
@@ -44,11 +46,11 @@ Returned by `host.window.list()`, `host.window.active()`, `host.window.find()`, 
     pid  = 12345,          -- process id
   },
   bounds = { x = 0, y = 0, w = 1920, h = 1040 },  -- window rect (screen px)
-  client = { x = 8, y = 31 },                      -- client-area top-left (screen px)
+  client = { x = 8, y = 31, w = 1904, h = 1001 },  -- client area (screen px)
 }
 ```
 
-`client` is the screen-pixel origin of the window's client area; overlay regions are expressed relative to it.
+`client` is the window's client area in screen pixels: `x`/`y` its origin, which overlay regions are expressed relative to, and `w`/`h` its size.
 
 ### Control table
 
@@ -59,7 +61,7 @@ Returned by `host.window.controls()` and `host.window.focusChain()`. Built by `c
   id     = 0x001B44,                            -- control handle (HWND), integer
   class  = "Qt5152QWindowIcon",                 -- control window class
   bounds = { x = 100, y = 200, w = 640, h = 480 }, -- control rect (screen px)
-  client = { x = 108, y = 231 },                -- control client-area top-left (screen px)
+  client = { x = 108, y = 231, w = 624, h = 441 }, -- control client area (screen px)
 }
 ```
 
@@ -79,19 +81,24 @@ Note: a control table has no `title` / `app` fields — only `id`, `class`, `bou
 
 ## Matchers {#matchers}
 
-A *matcher* is a declarative table passed to `host.window.find/findAll/test/onTrigger`. Fields (all optional; all must match):
+A *matcher* is a declarative table passed to `host.window.find/findAll/test/onTrigger`, and to the overlay's bindings. It is a plain Luau table — there is no constructor for it — and these are **all the keys that are read** (all optional; all must match):
 
 - `title` — a **field matcher** tested against the window title.
-- `app` — table with any of `name` / `exe` (field matchers) and `pid` (exact number).
-- `windows` / `macos` / `linux` — per-OS blocks. If any platform block is present but the current OS is not among them, the matcher fails. The current-OS block may contain `class` (a field matcher against the window class).
+- `app` — table with any of `name` / `exe` / `bundleId` (field matchers) and `pid` (exact number). `bundleId` is empty on Windows, so asking for it there never matches; put it in the `macos` block.
+- `os` — a list of platform names, `{ "windows", "macos" }`; on any other platform the matcher fails.
+- `windows` / `macos` / `linux` — per-OS blocks. If any platform block is present but the current OS is not among them, the matcher fails. The current-OS block may contain `title` and `app` (as above), `class` (a field matcher against the window class), and on macOS `axRole`, `axSubrole` and `axIdentifier` (field matchers against the three parts of the macOS `class` string).
 - `where` — a `function(win) -> boolean` escape-hatch predicate, evaluated last.
 
-A **field matcher** is either a string (case-insensitive equality) or a table with exactly one of:
+**Every other key is ignored without an error.** That includes a `class` at the top level, outside a platform block: `{ app = { name = "reaper" }, class = "REAPERwnd" }` matches every window REAPER has. The window class lives in the `windows` or `macos` block, where AutoHotkey's `ahk_class` would be. Keys from other designs — `controlClass`, `wmClass`, `exe` at the top level — are ignored the same way. A window table is plain data too: it has fields and no methods.
+
+A **field matcher** is either a string (case-insensitive equality) or a table with one of:
 
 - `exact` — case-insensitive equality
 - `contains` / `prefix` / `suffix` — case-insensitive substring/edge match
 - `pattern` / `regex` — Luau string pattern (both evaluated as Luau patterns; **case-sensitive**)
 - `not` — negates a nested field matcher
+
+A table with none of these keys — a misspelt `{ equals = "REAPER" }` — matches nothing, silently. A table with several uses the first one present in the order `not`, `exact`, `contains`, `prefix`, `suffix`, `pattern`, `regex`, and ignores the rest. A field matcher may itself be keyed by platform — `title = { windows = "REAPER", macos = { prefix = "REAPER" } }` — and then matches nothing on a platform it does not name.
 
 ```luau
 -- Match REAPER's main window on Windows only, title containing "REAPER".
@@ -123,6 +130,8 @@ local reaper = host.window.list({ pids = { reaperPid } })
 ### Windows
 
 `EnumWindows` — local, microseconds, and the filter merely drops entries. There is no cost to leaving it out.
+
+Only **visible windows with a title** are listed, so `find` and `findAll` never return an untitled window — Komplete Kontrol's untitled `#32770` save dialog, for one. `active()` is the one call that also returns an untitled window.
 
 ### macOS
 
@@ -378,17 +387,36 @@ if w and host.window.test({ windows = { class = "REAPERwnd" } }, w) then ... end
 
 `host.window.onTrigger(matcher: Matcher, opts: { on: string? }?, cb: (win: Window) -> ()) -> ()`
 
-(prelude) Registers `cb` to fire on every foreground change for which the new active window satisfies `matcher`. `opts.on` defaults to `"activate"` (the only event dispatched). The callback receives the matched [window table](#window-table). An empty matcher `{}` matches every window.
+(prelude) Registers `cb` to fire on every foreground change for which the new active window satisfies `matcher`. The callback receives the matched [window table](#window-table). An empty matcher `{}` matches every window.
+
+What it does **not** do:
+
+- **It is not called for the window already in front** when the module loads, is enabled or is reloaded — only for a foreground change after that. At load, look yourself, as the example does. (The overlay's bindings are different: they evaluate at once when they bind.)
+- **Only `"activate"` is dispatched.** `opts.on` defaults to it; any other value — `"open"`, `"close"`, `"focus"`, `"titleChange"` — is accepted and never fires. Focus moves inside a window go to [`onFocus`](#host-window-onfocus).
+- **There is no handle.** `onTrigger` returns nothing, and a trigger cannot be removed; it stays until the module is reloaded. While the module is disabled it simply is not called.
+- **One failing callback stops the rest.** A module's triggers are called one after another in registration order, with no protection between them: an error in one skips the module's later triggers for that foreground change. The error is logged every time and shown to the user once.
 
 ```luau
-host.window.onTrigger({ app = { name = "reaper" } }, { on = "activate" }, function(w)
+local REAPER = { app = { name = "reaper" } }
+local function start(w)
   host.speech.output("REAPER focused")
+end
+host.window.onTrigger(REAPER, { on = "activate" }, start)
+-- Not called for a REAPER window that is already in front: check once at load, from a
+-- timer ("timer" declared too), because the entry file also runs for a disabled module.
+host.timer.after(0, function()
+  local w = host.window.active()
+  if w and host.window.test(REAPER, w) then start(w) end
 end)
 ```
 
+The load-time check goes through [`host.timer.after`](./timer.md#host-timer-after) for a reason. The entry file runs even when the module is loaded disabled, and speech is not gated for a disabled module, so a check made straight from the top level would announce "REAPER focused" for a module the user switched off; an `after` that comes due while the module is disabled is discarded instead. In a `code_module` the top level also runs once in its own VM and once in every dependent's, so the check runs that many times too — arm the `after` from `activate`, which runs once, in the module's own VM (see [`host.require`](./require.md#host-require)).
+
 ### Windows
 
-Three system-wide hooks — foreground change, focus change, and name change — registered for **every process**, whether or not it cooperates with accessibility.
+A system-wide foreground hook, registered for **every process**, whether or not it cooperates with accessibility, is what fires this. A foreground window **without a title** is never handed to a trigger: it runs a focus round (the `onFocus` callbacks) instead. The focus and name-change hooks beside it only ever run a focus round, so a window whose title becomes matchable after it came forward does not fire `onTrigger` either — re-check such a window from `onFocus`.
+
+No focus round is run when watching starts. The window already in front is seen by `onFocus` only when the foreground or the focus next changes, or when a module calls [`host.window.recheck()`](#host-window-recheck).
 
 ### macOS
 
@@ -396,11 +424,13 @@ Only *application* activation is system-wide. Focus-within-an-application, windo
 
 The consequence lands exactly on the embedded-plug-in case: a plug-in window opening inside a DAW that is **already** frontmost raises no application activation, so the event depends entirely on that per-process observer. In a host that refuses accessibility, the overlay never activates even though the same module works on Windows.
 
+When watching first starts, one focus round is run for the application already in front, so `onFocus` callbacks registered by then see it; `onTrigger` still does not.
+
 ## host.window.onFocus(cb) {#host-window-onfocus}
 
 `host.window.onFocus(cb: () -> ()) -> ()`
 
-(prelude) Registers `cb` to fire whenever the keyboard focus moves — including within the same top-level window. Takes no arguments; the callback typically re-reads `host.window.active()` / `focusChain()`. Used to catch focus entering an embedded plugin without a foreground change.
+(prelude) Registers `cb` to fire whenever the keyboard focus moves — including within the same top-level window. Takes no arguments; the callback typically re-reads `host.window.active()` / `focusChain()`. Used to catch focus entering an embedded plugin without a foreground change. Like `onTrigger` it returns no handle, stays until the module is reloaded, and a callback that raises skips the module's later `onFocus` callbacks for that focus change.
 
 ```luau
 host.window.onFocus(function()

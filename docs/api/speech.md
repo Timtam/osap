@@ -29,7 +29,7 @@ See [what that list is and is not](./index.md#capabilities).
 
 **Signature:** `host.speech.output(text: string, opts: { interrupt: boolean? }?)` → `nil`
 
-Speaks `text`; `opts.interrupt` defaults to `true` (omitting `opts` also means interrupt). Output is **not** echoed to the console — a screen reader reading the terminal would double the speech.
+Speaks `text`; `opts.interrupt` defaults to `true` (omitting `opts` also means interrupt). Output is **not** echoed to the console — a screen reader reading the terminal would double the speech. The call itself does not check whether the module is enabled: a disabled module's callbacks are not called, but its entry file still runs at load, and a line spoken there is heard.
 
 ```luau
 host.speech.output("Reverb enabled")

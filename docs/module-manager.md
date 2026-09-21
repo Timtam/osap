@@ -32,10 +32,18 @@ Lists every loaded module with a native checkbox. Below the list: **Settings…*
 
 ### Enable / disable
 
-Unchecking a module disables it **at runtime** — its hotkeys, captured keys, and
-window triggers are revoked immediately, its overlays deactivated. Re-checking
-re-registers them. The enabled set is **persisted** (next to the executable, in
-`settings.toml`), so a disabled module stays disabled across restarts.
+Unchecking a module disables it **at runtime** — its hotkeys are released at the
+OS, its captured keys stop being suppressed, its overlays deactivate (an active
+overlay's `onDeactivate` runs once, so it can tear down), and its callbacks
+(triggers, timers, keys, controller events) are not called any more — except
+`host.settings.onChange`, which still fires when a setting changes. Re-checking
+delivers them again. Disabling does not unload the module: its VM and
+everything it registered stay, and its entry file does not run again when it is
+re-enabled (see [the lifecycle](module-runtime-and-lifecycle.md#lifecycle--states)).
+The enabled set is **persisted** in `settings.toml` beside the application (next
+to the `.exe` on Windows, in the folder that holds the `.app` on macOS), so a
+disabled module stays disabled across restarts — and is still loaded at start-up,
+with its callbacks switched off.
 
 ### Settings…
 
@@ -43,20 +51,26 @@ Opens a per-module dialog built from the settings the module declared via
 [`host.settings.define`](api/settings.md#host-settings-define): a native control per
 setting (checkbox / number field / dropdown / text), each labelled for the screen
 reader. Changes are validated and persisted; a module can react live via
-`host.settings.onChange`.
+`host.settings.onChange`. **OK applies every field**, changed or not, so every
+setting's `onChange` callbacks fire — and the button works for a disabled module
+too, whose `onChange` callbacks then fire as well.
 
 ### Reload
 
 Rebuilds the selected module's VM **in place** from its source directory — edit a
 module's code and reload it in the running app, no restart, without disturbing the
-other modules. Useful while **developing** a module.
+modules that do not depend on it. Its state starts afresh: the new VM runs the entry
+file again. Useful while **developing** a module.
 
 - A broken `module.toml` leaves the running module intact (the manifest is
   re-read before anything is torn down).
 - A broken rebuild reports the error and leaves the module inactive until you fix
   it and reload again; persisted settings are preserved.
-- Other modules that **inherit this module's code** (`code_module` dependents)
-  keep their old copy until restarted — the reload dialog names them.
+- Every module that depends on this one through `dependencies` — directly, or
+  through other modules — is **rebuilt with it**, after it, in dependency order, so
+  a module holding a copy of its code takes up the new one; the result names them.
+  A module that reaches it only through `optional_dependencies` keeps the old copy
+  until it is reloaded itself.
 
 ### Reload everything: Ctrl+Shift+Win+Alt+F5, or Command-Shift-F5 on a Mac
 
@@ -94,6 +108,13 @@ Searches the public module ecosystem — GitHub repositories tagged with the mod
 topic — and installs by `owner/repo`. There is **no central registry**; discovery
 is by topic (HFS-style).
 
+**One repository is one module**, with its `module.toml` at the repository root.
+It is installed as a plain folder, `modules/<repository name>/` beside the
+application. A pack of many modules cannot be installed from one repository: put
+each module's folder directly under `modules/` instead, and it loads at the next
+start. A folder there whose `module.toml` does not parse is skipped without a
+message. See [where modules are found](module-package-format.md#where-modules-are-found).
+
 Before installing, the module's **requested capabilities** are shown for review
 (default-deny — a module only gets what it asks for). Installing pulls the **whole
 dependency tree**: each declared dependency is resolved to its repo via the topic
@@ -111,9 +132,10 @@ Omitting the field means no claim and no exclusion; see
 **Check for updates** compares each remotely-installed module against its upstream
 `module.toml` `version` (semver). An update is offered **only when the version is
 bumped** — commits *between* releases don't trigger one. Each entry shows the
-transition, e.g. `v0.1.0 → v0.2.0`. **Update selected** re-fetches and reinstalls;
-modules that inherit an updated module's code pick up the change on the next start
-(the message names them — *restart to apply*).
+transition, e.g. `v0.1.0 → v0.2.0`. **Update selected** re-fetches and reinstalls,
+then reloads the updated module together with every module that depends on it
+through `dependencies`, directly or not, as **Reload** does; the message names them. (A version that is not
+semver on either side falls back to comparing the latest commit.)
 
 ## The Installed list is a different control on each platform
 
@@ -131,10 +153,34 @@ seam that shows the rest of the window nothing but a row index.
 
 ## Application settings tab
 
-The platform's own settings — the ones about the application rather than about any module:
-detailed (trace) logging, saving the images OCR was given, the calibration keys inside
-overlays, loading modules not meant for this system, running without a window, and on macOS
-whether what the overlays say goes through VoiceOver.
+The platform's own settings — the ones about the application rather than about any module.
+On every system:
+
+- **Detailed (trace) logging** — takes effect immediately.
+- **Save the images OCR was given** — takes effect immediately.
+- **Calibration keys in overlays** — reload modules to apply.
+- **Load modules not meant for this system** (their `supported_os` excludes it) — restart to
+  apply.
+- **Run without a window** — restart to apply.
+
+On Windows only:
+
+- **Speak through the screen reader** (NVDA, JAWS…) instead of a separate voice — on by
+  default.
+- **Also send what is said to a braille display** — on by default.
+- **Let modules that ask for it read the screen through the graphics card** — desktop
+  duplication, for the modules that declare `[screen] capture = "duplication"` (see
+  [Which picture a read sees](api/screen.md#which-picture-a-read-sees)). On by default; it does
+  nothing for a module that did not ask. Turning it off makes those modules read the standard
+  way (or get no picture, under `fallback = "none"`); turning it off and on again gives
+  duplication another try after it stopped answering.
+
+On macOS only:
+
+- **Speak through VoiceOver** instead of a separate voice.
+- **Offer my Personal Voice to modules** — asks macOS for permission when ticked.
+- **Show a Dock icon while the module manager is open**, so Command-Tab can reach it — on by
+  default.
 
 **A setting that does not exist on this system is not shown.** The VoiceOver one appears on a
 Mac and nowhere else, because a checkbox somebody can tick and that then changes nothing is
@@ -177,18 +223,33 @@ disable, uninstall or reload the module holding it and the hotkey passes over by
 itself. Nothing needs restarting. (Before 2026-09-03 it did: a claim that lost was
 not recorded at all, so there was nothing left to hand the key to.)
 
-(Captured keys are *not* flagged — window-scoped overlays legitimately share keys
-like Tab/Enter for their own windows, and the hook suppresses a key for the whole
-process rather than granting it to one module.)
+(Captured keys are *not* flagged, and they are not shared either. While any enabled
+module captures a key, the hook suppresses it for the whole application — within the
+limits [`host.keys`](api/keys.md) describes: the capture scope, an open menu, and on
+Windows a held screen-reader modifier let it through — and each press it swallows goes
+to **one** callback: the earliest capture of that key still standing
+among enabled modules. Nothing routes it by which window is in front, and a module
+that captured the same key later simply never hears it — without a dialog. Overlays
+avoid the clash by capturing only while they are active; see
+[`host.keys`](api/keys.md).)
 
 ## Crash protection
 
 A bug in a module — a Luau error or even a Rust panic in one of its callbacks —
 **never takes down the app or the other modules**. The faulting callback is
 caught and isolated, and the concrete Luau error (with its traceback) is surfaced
-in an accessible dialog, attributed to the module, so the author can debug it. The
-same error is also written to the log file (`automation-platform.log`, next to the
-executable).
+in an accessible dialog, attributed to the module, so the author can debug it —
+once per module and kind of callback, until the module is disabled and enabled
+again. Every occurrence is also written to the log file
+(`automation-platform.log` beside the application, or in
+`%LOCALAPPDATA%\AutomationPlatform` / `~/Library/Application Support/AutomationPlatform`
+when that folder cannot be written). A module that keeps failing is **not**
+disabled automatically.
+
+What this does not cover is a callback that never returns. There is no time or
+memory limit on a module's code, so a loop that does not end holds the one thread
+everything runs on — every module, speech and the keyboard hook — until the
+application is ended.
 
 ## Headless mode
 

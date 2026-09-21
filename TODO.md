@@ -2761,6 +2761,114 @@ Everything below needs a controller in a hand.
       reason its thread-local queues work — and the reason the pad source uses a `Mutex` hub
       instead.
 
+## From the porting review of the documentation (2026-09-21)
+
+A game-module port and two outside readings of `docs/` found places where the documentation
+promised more than the host does. The pages now describe what happens; what follows is what
+was planned, or found, and is not built.
+
+Planned — the API pages say these do not exist:
+
+- [ ] **Threaded OCR.** `host.ocr.recognize` and `recognizeMany` capture and recognise on the
+      event loop (`lib.rs`, the `recognize` binding; `RecognizeAsync(…).get()` and the untimed
+      join of the Paddle thread in `backend/windows.rs`; the synchronous `performRequests`
+      ladder in `backend/macos/ocr.rs`), which holds the keyboard hook for the whole read —
+      estimated at 50–200 ms for a control label in `docs/screen-frame-sharing-design.md`, a
+      cost ranking rather than a recorded measurement. Move recognition to a worker with a callback form, the way
+      `imageSearchAsync` did for search, and keep the synchronous call for one-shots.
+- [ ] **OCR language normalisation**, with the threaded OCR: the module names a language once
+      (`"de"`), and the host maps it to each engine's identifier. Today `lang` goes to
+      `Windows.Media.Ocr` and Vision unchanged (`docs/api/ocr.md`, Recognition language). On
+      Windows, ask `OcrEngine::IsLanguageSupported` instead of letting `TryCreateFromLanguage`
+      fail, and keep one engine per language instead of creating one per call.
+- [ ] **Measure: does either engine take a bare `"de"` or `"en"`?** Never observed — no module
+      in the repo passes `lang`. Windows: `Language::CreateLanguage("de")` and
+      `TryCreateFromLanguage` on a machine with the German OCR component; macOS:
+      `setRecognitionLanguages(["de"])` against `supportedRecognitionLanguages`. The docs make
+      no claim about it until then. On the Mac, also pass an identifier Vision does not list
+      and see what comes back: `docs/api/ocr.md` says only that a refused request is logged
+      once and returns empty (`backend/macos/ocr.rs`, `warn_once("ocr-perform", …)`).
+- [ ] **Cancellable timers.** `host.timer.after` and `every` return nothing and cannot be
+      stopped; a poll can only return early, and a runtime that N game modules depend on arms
+      N+1 polls — one in its own VM and one in every dependent's. Return a handle that
+      cancels.
+- [ ] **`host.window.onTrigger` for the window already in front** (`initial = true` in `opts`):
+      call the trigger at once when a matching window is in front at load, enable or reload.
+      Today `window_prelude.luau` only stores the trigger, and modules check
+      `host.window.active()` by hand.
+- [ ] **`host.json.encode`**, the counterpart of `decode`, for a converter written in Luau and
+      for structured log lines. Decide what a table with both an array and a hash part becomes.
+- [ ] **Screen snapshots**: an explicit frame handle — one capture, then several `pixel` reads
+      and searches against it — idea B of `docs/screen-frame-sharing-design.md`. Today on
+      Windows every `host.screen.pixel` call is a screen read of its own (about 16.7 ms on the
+      standard path), on macOS only reads inside the last 256×96 tile within 5 ms share one,
+      and no call reads several points from one capture. `host.screen.cells`
+      (step 3 of the in-memory templates section above) covers the block-statistics half.
+
+Found while documenting — the behaviour is written down now, and wants fixing:
+
+- [ ] **`host.include` does not reject `..` on macOS.** The check is
+      `std::path::absolute(root.join(rel)).starts_with(root_abs)` (`lib.rs`,
+      `install_include`); on Unix `absolute` keeps `..`, so `"../other/x.luau"` passes and runs
+      code from outside the module, and a second spelling of one file is cached under a second
+      key and runs twice in one VM. Normalise the path lexically before the check, on both
+      platforms.
+- [ ] **A `"<modifier> tap"` hotkey — and `F21`–`F24` on macOS — is reported as held by
+      "another application".** `host.hotkey.register` returns an id because `key_spec` parses
+      the spec; the platform refuses it later in `refresh_hotkeys`, `report_os_conflict`'s
+      dialog blames another application, and the claim is retried on every change to the
+      enabled set. Raise at `register` for a spec the platform can never hold.
+- [ ] **A capture whose hook or tap could not be installed stays registered.**
+      `host.keys.capture` pushes its entry and refreshes the captured set before
+      `watch_keys()`; when that raises (macOS without the Accessibility grant), the token is
+      lost with the error, and the key is suppressed and dispatched once a later capture
+      installs the tap. Register the entry only after `watch_keys()` succeeded.
+- [ ] **The keyboard hook is installed once and never checked.** Windows documents that a
+      low-level hook that keeps timing out can be removed without notice; `KEY_HOOK_INSTALLED`
+      would stay true and every capture would stop for the session with nothing logged. Not
+      observed; worth a check after a long pump stall.
+- [ ] **A module without the `window` capability breaks window delivery for itself.**
+      `on_window_activate`, `on_focus_change` and `window_has_triggers` (`lib.rs`) reach the
+      prelude through `lua.globals().get("host")`, which after load is the module's GATED view
+      (`populate_vm` sets it to the `gated_view`), so `host.window` raises for a module that
+      did not declare `window`. For an overlay module that relies on the runtime's manifest
+      (the old `examples/overlay-attach`, `require = ["speech"]`), `window_has_triggers` is
+      false and the foreground watch is never started on its behalf, so the overlay never
+      activates. And while any other module keeps the watch running, every enabled module
+      without `window` — a plain hotkey module included — gets a "window trigger" and a
+      "focus change" error on every foreground and focus change: logged each time, shown once.
+      Dispatch through the ungated table (`host_m`), which the prelude is already bound to,
+      and skip a module that registered no triggers. The docs tell every module to declare
+      `window` until then (`docs/api/index.md`, What to declare).
+- [ ] **A dependency's `host.settings.onChange` outlives its owner's reload.** Dependency code
+      gets the dependency's own settings table (`build_dep_host`), so a callback it registers
+      is stored under `(dep_idx, key)` (`lib.rs`, the `onChange` binding), while
+      `purge_module(owner)` removes only `(owner, …)` entries. After the owner is reloaded, the
+      old VM's callbacks stay registered, keep that VM alive, and fire beside the new ones
+      whenever the dependency's setting changes. Purge by the VM that registered them, not by
+      the settings owner.
+- [ ] **Stale code comments.** `Shared::report_conflict` (`lib.rs`) says every enabled module
+      that captured a key is dispatched to — `on_key` dispatches to the first. The doc comment
+      of `reload_module` (`lib.rs`) and the Reload button's comment in `gui.rs` say dependents
+      keep the old copy until restarted — `reload_module_tree` rebuilds them. The comment on
+      `GATED` lists `match` as a free namespace; there is no `host.match`.
+
+Verify on a Mac — the pages state these from the code, or no longer state them:
+
+- [ ] **Key positions.** Every spec goes through the US-layout keycode table in
+      `backend/macos/keys.rs`, so on a German (QWERTZ) Mac `host.input.send("Cmd+Z")` should
+      arrive as Cmd+Y, and a capture or hotkey of `"Z"` should answer to the key labelled Y.
+      `docs/api/keys.md` and `docs/api/input.md` say so; send one letter on a German layout and
+      read what arrives.
+- [ ] **Auto-repeat of a captured key.** Holding a captured arrow should fire the callback at
+      the keyboard's repeat rate, as it does on Windows; the event tap matches every key-down
+      and nothing filters repeats. `docs/api/keys.md` states it for Windows only.
+- [ ] **Auto-repeat of a hotkey.** `backend/macos/hotkey.rs` expects Carbon to fire once per
+      press and marks it unverified on hardware; `docs/api/hotkey.md` states once-per-press for
+      Windows only. One deliberate press-and-hold.
+- Background delivery of a game controller is already listed under "Game controllers"
+  above; `docs/api/gamepad.md` no longer promises it for macOS.
+
 ## Driver-based features — ideas, to be decided later (2026-09-21)
 
 Nothing here is planned yet. Each needs a driver or a system extension, which a portable,

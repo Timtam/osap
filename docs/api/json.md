@@ -8,6 +8,8 @@ Turns JSON text into Luau values.
 
 For data files a module ships — a layout, a pack of signatures a converter wrote — and reads with [`host.resource.read`](./resource.md#host-resource-read). Luau has no JSON parser of its own, and a module that carried one would parse on every load in a scripting language what the host parses natively.
 
+**Decode only.** There is no `encode`: nothing here turns a Luau value into JSON text, and no call writes a file anyway (see [`host.resource`](./resource.md)). Values a module has to keep go into [`host.settings`](./settings.md).
+
 ## What to declare {#declare}
 
 Nothing — this is available to every module. It reads nothing but the string it is handed. See [what the capability list is and is not](./index.md#capabilities).

@@ -4,7 +4,7 @@ sidebar_position: 15
 toc_max_heading_level: 2
 ---
 
-Typed, validated settings, declared by the module and edited by the user in the module manager. For the few choices a module should not make on somebody's behalf — Komplete Kontrol has exactly one, an opt-out for automatically closing KK's library browser. Held per module and persisted in `settings.toml` beside the executable, so they survive a restart.
+Typed, validated settings, declared by the module and edited by the user in the module manager. For the few choices a module should not make on somebody's behalf — Komplete Kontrol has exactly one, an opt-out for automatically closing KK's library browser. Held per module and persisted in `settings.toml` beside the application (for where that is on each platform, see the platform sections of [`set`](#host-settings-set)), so they survive a restart. There is no fallback location: if that folder cannot be written, settings do not persist, and the log says so once.
 
 `define` is the load-bearing call: it fixes the setting's kind from its default and carries the label, the bounds and the permitted choices, and **the module manager builds the settings dialog out of precisely that** — one native checkbox, number field or dropdown per setting, for a screen reader to read. Everything else works only on what was defined: `get` raises for a key that never was, and `onChange` fires for the dialog as well as for `set`, so nothing has to poll its own settings.
 
@@ -39,6 +39,12 @@ Returns a persisted value if one exists *and* its kind matches the default;
 otherwise it writes `default` to the store and returns it. Other value types
 (table, nil) raise an error.
 
+Neither value is checked against `min`, `max` or `oneOf` here: those are enforced
+on `set` and in the settings dialog only. A persisted value of the right kind is
+returned as it was stored, so after you narrow a `oneOf` list or tighten a range,
+a value stored under the old schema comes back unchanged; and a `default` outside
+its own bounds is accepted. Check the returned value yourself if that matters.
+
 ```luau
 local speed = host.settings.define("speed", 1.0, {
   label = "Playback speed", min = 0.25, max = 4.0,
@@ -71,14 +77,30 @@ host.settings.set("speed", 2.0)
 host.settings.set("mode", "safe")
 ```
 
+### Windows
+
+`settings.toml` is next to the `.exe`.
+
+### macOS
+
+`settings.toml` is in the folder that holds the `.app`.
+
 ## host.settings.onChange(key, callback) {#host-settings-onchange}
 
-Registers `callback` to run whenever this setting changes (via `set` or the
+Registers `callback` to run whenever this setting is set (via `set` or the
 settings GUI). Returns `nil`. Multiple callbacks may be registered per key.
 
 - `key: string` — the setting to watch.
 - `callback: (new, old) -> ()` — called with the new value and the previous
-  value (the previous value is `nil` on the first set).
+  stored value.
+
+It fires on **every** `set`, including one that stores the value already there,
+so compare `new` with `old` if only a real change matters. The settings dialog's OK
+applies every field, changed or not, so it fires the callbacks of every setting the
+dialog shows. Unlike the module's other callbacks, these also fire while the module
+is disabled — the dialog can be opened for a disabled module too. `old` is not `nil` in
+practice: `define` stores the default when nothing is stored, so the first change
+after load reports the default (or the persisted value) as `old`, never `nil`.
 
 ```luau
 host.settings.onChange("speed", function(new, old)

@@ -15,7 +15,11 @@ ahead of the implementation. The plan stands; what follows describes where it is
   runs, while ownership stays with the VM. Names are still not validated against a known set —
   a manifest may declare `"telepathy"` and load — and a handful of namespaces are ungated
   because gating them would mean every manifest names them: `os`, `require`, `tryRequire`,
-  `include`, `epoch`, `now`, `inputEpoch`, `calibrating`.
+  `include`, `epoch`, `now`, `inputEpoch`, `calibrating`, `json`. The names that count are
+  the namespaces' own — `window`, `screen`, `element`, … ([the full list](api/index.md#capabilities));
+  the finer-grained names this catalogue sketches, such as `window.read`, were never built
+  and unlock nothing. Nothing is granted per capability by the user: the list is shown once,
+  at install.
 - **`host.<ns>.available()` is not built.** No namespace has one.
 
 Four namespaces are planned rather than present: `host.gui`, `host.clipboard`, `host.app`
@@ -124,7 +128,7 @@ This catalog is the **single machine-readable source** from which the following 
 **Design principle — primitives are first-class and overlay-independent.** Every capability (`host.ocr`, `host.screen`, `host.input`, `host.window`, `host.hotkey`, `host.speech` …) is **directly scriptable from Luau, without the overlay.** The overlay is *one* optional high-level layer — accessible, self-voicing control rings in the style of ReaHotkey — built on the same primitives rather than a mandatory funnel. It shipped as a module rather than a namespace, which is exactly what that independence looks like in practice. General automation (the AHK / Keyboard Maestro class) uses the primitives directly; the overlays are merely the first use case, not the only one.
 
 - **Namespaced:** every capability is `host.<namespace>.<function>`.
-- **Default-deny + manifest gating:** a module may only use a namespace if it is listed in `module.toml` under `[capabilities].require` and the user has granted it (study §7).
+- **Default-deny + manifest gating:** a module may only use a namespace if it is listed in `module.toml` under `[capabilities].require` (study §7). *There is no per-capability grant by the user: the list is shown for review once, before a GitHub install, and the tiers below are not enforced — a module that reads its own package declares `path` and `resource` like any other namespace.*
 - **Risk tiers:**
   - **low** — only affects the module's own package / its own output → granted by default.
   - **medium** — reads/controls foreign windows, screen, input → one-time user grant per module; on macOS bound to TCC permissions.
@@ -155,7 +159,7 @@ Tier = risk level · MVP = required for the ReaHotkey vertical slice · Feasibil
 
 The overlay module itself only speaks and reacts to its own hotkeys, which is a low tier; its
 *control actions* — click, image search, OCR, reading the accessibility tree — use `input`,
-`screen`, `ocr` and `uia`, and inherit their tier.
+`screen`, `ocr` and `element`, and inherit their tier.
 
 ## 3. ReaHotkey Backends → Capabilities
 
@@ -180,7 +184,7 @@ offers, and the two differ in places. Some calls below sit inside a namespace th
 were themselves never written — `host.speech.stop`, `setRate`, `setVoice` and `voices` are the
 whole of that set today.*
 
-> Signatures are a draft. `?` = optional. Paths are always **package-relative** (the host resolves them).
+> Signatures are a draft. `?` = optional. Paths are always **package-relative** (the host resolves them) — *as built, relative to the package whose code makes the call, and not confined to it; see [Paths](api/index.md#paths).*
 
 ### The overlay — shipped as a module, not a namespace
 
@@ -207,25 +211,30 @@ Win: Tolk→NVDA/JAWS (+ Braille) or WinRT · macOS: AVFoundation (direct TTS). 
 local h = host.sound.play("assets/sounds/focus.ogg", { volume = 0.8 })
 h:stop()
 ```
+*As built, `host.sound.play(path)` takes no options and returns nothing: there is no volume and no handle to stop — see the [reference](api/sound.md).*
 
 ### host.resource — package resources
 ```luau
-local bytes = host.resource.read("assets/data/profiles.json")  -- bytes/string from the package
+local text  = host.resource.read("assets/data/profiles.json")  -- UTF-8 text from the package
 local p     = host.path("assets/images/serum2/preset.png")     -- real path (escape hatch)
 ```
+*As built, `host.resource.read` returns text only and raises on a file that is not UTF-8; nothing reads bytes, and the only files the host writes for a module are the PNGs of `host.screen.save` and `saveMarked` ([reference](api/resource.md)).*
 
 ### host.settings — per-module settings (persisted)
 ```luau
 -- declare + read in one line; the type is pinned from the default. opts (optional):
 -- { label = "…", min = N, max = N, oneOf = { … } }. A persisted value wins over the default.
 local rate = host.settings.define("speechRate", 50, { label = "Speech rate", min = 0, max = 100 })
-local lang = host.settings.define("ocrLanguage", "eng", { label = "OCR language", oneOf = { "eng", "deu" } })
+local lang = host.settings.define("ocrLanguage", "German", { label = "OCR language", oneOf = { "German", "English" } })
+-- (a name for the user, not an identifier: OCR's `lang` takes each platform engine's own
+-- identifier, so the module maps the choice per platform with host.os.pick before it reads —
+-- not Tesseract's "eng"/"deu"; see api/ocr.md, Recognition language)
 host.settings.set("imageSearch", true)        -- validated against the schema; auto-persisted
 local on = host.settings.get("imageSearch")    -- errors if the key was never define()d
 host.settings.onChange("speechRate", function(new, old) end)
 -- host.config is an alias of host.settings (catalog-compat).
 ```
-Each module sees only its own settings (keyed by module id; isolation is structural). Scalars only (boolean / number / string). Persisted in a portable `<exe_dir>/settings.toml` next to the executable — one record per module (a host-owned `enabled` flag + the `settings` map); supersedes the old `disabled-modules.txt` (auto-migrated). Auto-saved (coalesced to the event loop + on shutdown, atomic write). The tray manager renders a native, accessible settings form per module from the registered schema.
+Each module sees only its own settings (keyed by module id; isolation is structural). Scalars only (boolean / number / string). Persisted in a portable `settings.toml` beside the application (next to the executable on Windows, beside the `.app` on macOS) — one record per module (a host-owned `enabled` flag + the `settings` map); supersedes the old `disabled-modules.txt` (auto-migrated). Auto-saved (coalesced to the event loop + on shutdown, atomic write). The tray manager renders a native, accessible settings form per module from the registered schema.
 
 ### host.hotkey — hotkeys with context
 ```luau
@@ -249,15 +258,16 @@ host.window.onTrigger(matcher, { on = "activate" }, fn)   -- "trigger-like" auto
 local c = w:focusedControl() ; w:listViewContent("SysListView321")
 host.os.current  -- "windows"|"macos"|"linux" for imperative OS gating
 ```
+*As built, window tables are plain data with no methods (`focusedControl`, `listViewContent` do not exist), `bundleId` belongs in the `app` table of the `macos` block, and only `on = "activate"` is ever dispatched — see [Matchers](api/window.md#matchers) and [`onTrigger`](api/window.md#host-window-ontrigger).*
 Win: Win32/UIA + `SetWinEventHook` · macOS: AXUIElement/CGWindowList + `NSWorkspace`/`AXObserver` (Accessibility permission).
 
 ### host.input — mouse/keyboard
 ```luau
 host.input.click(x, y, { button="left", relativeTo="pluginControl" })
 host.input.move(x, y) ; host.input.drag(x1,y1, x2,y2) ; host.input.scroll(x,y, dy)
-host.input.send("^s") ; host.input.text("Hallo")
+host.input.send("Ctrl+S") ; host.input.text("Hallo")
 ```
-`drag` for GraphicalSlider (ReaHotkey `MouseClickDrag`), `scroll` for mouse-wheel-based plugins (Zampler). Win: SendInput · macOS: CGEvent (`…MouseEvent`/`…ScrollWheelEvent`, Accessibility permission).
+`drag` for GraphicalSlider (ReaHotkey `MouseClickDrag`), `scroll` for mouse-wheel-based plugins (Zampler). Win: SendInput · macOS: CGEvent (`…MouseEvent`/`…ScrollWheelEvent`, Accessibility permission). *As built, `send` takes `+`-joined names (`"Ctrl+S"`), not AutoHotkey's `^s`, and on Windows sends virtual-key codes only — no scan codes, no hold time ([reference](api/input.md#host-input-send)); `click` has no `relativeTo`.*
 
 ### host.screen — capture / image search / pixel
 ```luau
@@ -266,14 +276,14 @@ if m then host.input.click(m.x, m.y) end
 local col = host.screen.pixel(x, y)
 local img = host.screen.capture({x1,y1,x2,y2})
 ```
-Win: Windows.Graphics.Capture + SIMD-NCC · macOS: ScreenCaptureKit (Screen Recording permission).
+Win: Windows.Graphics.Capture + SIMD-NCC · macOS: ScreenCaptureKit (Screen Recording permission). *NCC was the plan and was not built: the shipped matcher is exact per colour channel within a `tolerance`, with no score, over a GDI capture (or DXGI Desktop Duplication for a module that declares it); there is no `host.screen.capture`, and on Windows every `pixel` call is a screen read of its own (on macOS only reads inside one small tile within 5 ms share a capture) — see the [reference](api/screen.md).*
 
 ### host.ocr — text recognition
 ```luau
 local r = host.ocr.recognize({ region={540,13,608,23}, engine="best", lang="eng" })
 -- r = { text="Init", boxes={...} }
 ```
-Native by default (Windows.Media.Ocr / Apple Vision), ONNX fallback (study §2). Replaces ReaHotkey's Tesseract-exe invocation.
+Native by default (Windows.Media.Ocr / Apple Vision), ONNX fallback (study §2). Replaces ReaHotkey's Tesseract-exe invocation. *As built there is no `engine` option, the result has `words` rather than `boxes`, the call is synchronous on the event loop, and `lang` is each platform engine's own identifier (`"en-US"` on both; Tesseract's `"eng"` is in neither list), passed unchanged — omitted, Windows uses the user-profile languages — the first language in the user's preferred-language list that OCR supports — and macOS Vision's default. See [Recognition language](api/ocr.md#recognition-language).*
 
 ### Accessibility elements of foreign apps — shipped as `host.element`
 

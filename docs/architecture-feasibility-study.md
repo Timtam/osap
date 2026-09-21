@@ -2,6 +2,28 @@
 
 *Principal architect synthesis from domain research (10 dimensions) and critical review. As of: 2026-06-21.*
 
+> **This is the plan of June 2026, not a description of the platform.** Where it and the
+> [API reference](api/index.md) disagree, the reference is right. The differences a module
+> author is most likely to trip over, each also marked where it appears below:
+>
+> - **Image search is not NCC.** The built matcher has no score: a position matches only if
+>   every non-transparent template pixel is within a per-channel `tolerance`, and the first
+>   position in row order wins — [`host.screen.imageSearch`](api/screen.md#host-screen-imagesearch).
+> - **Pixel reads are not served from a cached frame.** On Windows every `host.screen.pixel`
+>   call is a screen read of its own; on macOS only reads inside one small tile within 5 ms
+>   share a capture — [`pixel`](api/screen.md#host-screen-pixel).
+> - **Capture on Windows is GDI** (and DXGI Desktop Duplication for modules that ask for it),
+>   not Windows.Graphics.Capture.
+> - **There is no worker pool for scripts.** Module code and nearly every host call run on
+>   the one event-loop thread, OCR included; only the asynchronous image searches run on a
+>   worker — [module lifecycle](module-runtime-and-lifecycle.md#runtime-model).
+> - **No memory limit or interrupt** is set on the Luau VMs.
+> - **Keys:** the keyboard hook captures ordinary keys only (there is no listen-only mode for
+>   them; only a `"<modifier> tap"` is watched without being taken), and
+>   `host.input.send` sends virtual-key codes without scan codes — [`host.keys`](api/keys.md),
+>   [`host.input.send`](api/input.md#host-input-send).
+> - **No FFI**: modules cannot load native libraries.
+
 ---
 
 ## 1. Executive Summary
@@ -23,9 +45,9 @@
 | **Screen-reader output** | **tts-rs** (`tts` crate, pure Rust) → `host.speech` | SRAL/prism (C++ FFI) — upgrade if macOS braille is needed |
 | | *Since 2026-09: Windows took the upgrade. See [prism-speech-design.md](prism-speech-design.md).* | |
 | **OCR** | **Native-first**: Apple Vision (mac), Windows.Media.Ocr (Win) | **PP-OCRv5 via RapidOCR-ONNX** as Linux default + determinism fallback |
-| **Capture** | Win: WGC; mac: ScreenCaptureKit; Linux: X11 XShm + Wayland Portal/PipeWire | — |
-| **Image search** | Custom **SIMD-NCC** (lightweight) | OpenCV `matchTemplate` as an optional plugin |
-| **Input/Hooks** | **Direct OS FFI per platform** (no universal wrapper) | `enigo` (send only), `rdev` fork (listen/grab) as a transitional measure |
+| **Capture** | Win: WGC; mac: ScreenCaptureKit; Linux: X11 XShm + Wayland Portal/PipeWire — *built: GDI on Windows, DXGI Desktop Duplication per module on request; ScreenCaptureKit on macOS* | — |
+| **Image search** | Custom **SIMD-NCC** (lightweight) — *not built: the shipped matcher is exact per colour channel within a tolerance, with no score ([reference](api/screen.md#host-screen-imagesearch))* | OpenCV `matchTemplate` as an optional plugin |
+| **Input/Hooks** | **Direct OS FFI per platform** (no universal wrapper) — *built; the hook captures (grabs) ordinary keys, with no listen-only mode for them — only a modifier tap is watched without being taken* | `enigo` (send only), `rdev` fork (listen/grab) as a transitional measure |
 | **FFI/native libs** | `libloading` 0.8 + `libffi` 5.x | — |
 | **Self-update** | **Velopack** + custom Ed25519/TUF signature layer | `self_update` + `cargo-dist` |
 
@@ -37,13 +59,13 @@
 
 ### Script runtime: Luau (answer to "Lua-fast + modern")
 
-The user's question "a language as fast as Lua, but with modern features" has a concrete answer in 2026: **Luau** (luau-lang/luau, MIT). It is Lua re-implemented in C++ (its own register VM, inline caching, fastcall builtins) and delivers exactly the sought profile: gradual/inferred types, clean OOP/closures *and* production-grade sandbox primitives (no FS/OS functions in the stdlib, hard memory limits, interruptible loops — by design). This makes it the only language that combines performance, modern features, and built-in sandboxing in one MIT embeddable — ideal for an AHK/KM successor that executes untrusted user code.
+The user's question "a language as fast as Lua, but with modern features" has a concrete answer in 2026: **Luau** (luau-lang/luau, MIT). It is Lua re-implemented in C++ (its own register VM, inline caching, fastcall builtins) and delivers exactly the sought profile: gradual/inferred types, clean OOP/closures *and* production-grade sandbox primitives (no FS/OS functions in the stdlib, hard memory limits, interruptible loops — by design; *the host as built sets neither a memory limit nor an interrupt, so a runaway module loop stalls the whole application — see [module-runtime-and-lifecycle.md](module-runtime-and-lifecycle.md#runtime-model)*). This makes it the only language that combines performance, modern features, and built-in sandboxing in one MIT embeddable — ideal for an AHK/KM successor that executes untrusted user code.
 
 **Performance clarification (review-corrected):** Luau is *only in interpreter mode* on par with the LuaJIT *interpreter*. The LuaJIT *JIT* remains clearly faster; Luau native codegen is ~1.6x behind. For automation glue (hotkey snippets, UI control) this is irrelevant — the expensive operations are OS calls, not VM cycles. The original "close to LuaJIT" promise was too optimistic and is deliberately corrected here.
 
 **Alternative QuickJS-ng** (JS/ES2025, via `rquickjs`): the strongest alternative when a broad talent pool and familiar syntax matter more than the last bit of performance — AHK users are imperative-familiar, JS lowers the barrier to entry. Trade-off: slower than Luau, more sandboxing effort of your own.
 
-**Open decision (review):** `mlua` advertises async/Tokio but is historically deadlock-prone there; the `mluau` fork *removed async for that reason*. **Recommendation:** do *not* expose async in the module programming model (synchronous model with worker thread pool in the host), which settles the mlua-vs-mluau question in favor of the more stable variant. Non-default: PyO3/CPython (untrusted not sandboxable, heavy), Rhai (AST walker, ~2x slower than CPython), RustPython/Starlark/Wren (too immature/limited).
+**Open decision (review):** `mlua` advertises async/Tokio but is historically deadlock-prone there; the `mluau` fork *removed async for that reason*. **Recommendation:** do *not* expose async in the module programming model (synchronous model with worker thread pool in the host), which settles the mlua-vs-mluau question in favor of the more stable variant. *As built, the module model is synchronous and there is no general worker pool: module code and host calls — OCR included — run on the one event-loop thread, and only the asynchronous image searches run on a worker.* Non-default: PyO3/CPython (untrusted not sandboxable, heavy), Rhai (AST walker, ~2x slower than CPython), RustPython/Starlark/Wren (too immature/limited).
 
 ### GUI toolkit: wxDragon (native wxWidgets controls)
 
@@ -65,8 +87,8 @@ There is no engine that is simultaneously optimally "efficient AND exact" on all
 ### Vision/Capture, Input, FFI
 
 - **Capture** (uniform frame format BGRA8 + stride + DPI/scale + monitor origin): Win = **Windows.Graphics.Capture** (crate `windows-capture`), Desktop Duplication as a monitor fallback, PrintWindow as legacy. mac = **ScreenCaptureKit** (CGWindowList has been removed since macOS 15). Linux = X11 XShm + Wayland `ashpd` (Portal) + `pipewire-rs`.
-- **Image search:** custom **SIMD-NCC + image pyramid + ROI** as a lightweight default (or FFI to `Fastest_Image_Pattern_Matching`, BSD-2); OpenCV `matchTemplate` only as an optional plugin (too heavy for "lightweight").
-- **Input/Hooks:** **direct OS FFI per platform** instead of trusting wrappers. Win = `SendInput` + `SetWindowsHookEx(WH_KEYBOARD_LL/_MOUSE_LL)` + `RegisterHotKey`. mac = custom **CGEventTap FFI** (`.defaultTap` for suppression/remapping) with a re-enable watchdog. Linux = X11 (XTEST/XRecord) + Wayland (`libei`/Portal for sending, `uinput` as a root bypass). `enigo` (send only) and `rdev` forks as a transitional measure.
+- **Image search:** custom **SIMD-NCC + image pyramid + ROI** as a lightweight default (or FFI to `Fastest_Image_Pattern_Matching`, BSD-2); OpenCV `matchTemplate` only as an optional plugin (too heavy for "lightweight"). *Not built as planned: the shipped matcher compares every non-transparent template pixel per colour channel against a `tolerance`, has no score, and returns the first position in row order; scales are a list of factors, not a pyramid ([reference](api/screen.md#host-screen-imagesearch)).*
+- **Input/Hooks:** **direct OS FFI per platform** instead of trusting wrappers. Win = `SendInput` + `SetWindowsHookEx(WH_KEYBOARD_LL/_MOUSE_LL)` + `RegisterHotKey` (*as built: `SendInput` with virtual-key codes only, scan code 0 and no extended flag; no mouse hook*). mac = custom **CGEventTap FFI** (`.defaultTap` for suppression/remapping) with a re-enable watchdog. Linux = X11 (XTEST/XRecord) + Wayland (`libei`/Portal for sending, `uinput` as a root bypass). `enigo` (send only) and `rdev` forks as a transitional measure.
 - **FFI:** `libloading` 0.8 (module loading) + `libffi` 5.x (generic C-call engine, CIF at runtime) = AHK `DllCall`/ctypes equivalent. No custom JIT FFI (LuaJIT level) in v1.
 
 ---
@@ -93,7 +115,7 @@ The system is a **Cargo workspace** with a multi-process runtime model.
 5. **GUI** — Slint, runs in the main-thread run loop *together with the hotkey listener*. Exposes its own a11y tree via AccessKit (provider side — separate from the foreign-app introspection!).
 6. **Update** — Velopack + signature layer. Steers the launcher (coordinated restart), verifies Ed25519-signed manifests.
 
-**Threading rule:** main/GUI thread with OS run loop for hotkey listener + GUI + CGEventTap (all run-loop-bound); Tokio worker thread pool for script/IO work. **Hot-path events stay in the daemon** — never per event across the process boundary (latency).
+**Threading rule:** main/GUI thread with OS run loop for hotkey listener + GUI + CGEventTap (all run-loop-bound); Tokio worker thread pool for script/IO work. *As built: one process, and module code and host calls run on the main thread with the GUI, the hotkeys and the keyboard hook; there is no Tokio pool, and only the asynchronous image searches have a worker ([module-runtime-and-lifecycle.md](module-runtime-and-lifecycle.md#runtime-model)).* **Hot-path events stay in the daemon** — never per event across the process boundary (latency).
 
 ### Process/isolation model
 
@@ -109,9 +131,9 @@ Values: **Full** / **Limited** / **Impossible**.
 |---|---|---|---|---|
 | **Enumerate windows** | Full — EnumWindows/Win32 | Full — CGWindowList (title needs screen-recording perm.) | Full — EWMH `_NET_CLIENT_LIST` | Limited — only compositor-specific (wlr/ext-foreign-toplevel; GNOME only via shell ext.); no standard |
 | **Read controls** | Full — UIA + MSAA fallback | Limited — AX API + TCC accessibility; Electron delivers an empty AX tree; no mature Rust crate | Full — AT-SPI2 (D-Bus) | Limited — AT-SPI2 runs, but no surface mapping/global geometry |
-| **Image search (ImageSearch)** | Full — WGC capture + NCC | Limited — SCK + screen-recording perm. (weekly re-prompt from Sequoia) | Full — XShm, consent-free | Limited — only Portal+PipeWire with consent; no free polling |
+| **Image search (ImageSearch)** | Full — WGC capture + NCC (*built: GDI or DXGI capture + an exact per-channel match with tolerance, no NCC*) | Limited — SCK + screen-recording perm. (weekly re-prompt from Sequoia) | Full — XShm, consent-free | Limited — only Portal+PipeWire with consent; no free polling |
 | **OCR** | Full — Windows.Media.Ocr / ONNX | Limited — Vision API top, but capture needs perm. | Full — ONNX on XShm frame | Limited — engine ok, image acquisition Portal-gated |
-| **Color/pixel detection** | Full — from cached frame | Limited — like capture (TCC) | Full — XGetImage | Limited — like capture |
+| **Color/pixel detection** | Full — each read a live screen read (`GetPixel`, ~16.7 ms per call; ~0.3 ms under DXGI duplication); no cached frame | Limited — like capture (TCC) | Full — XGetImage | Limited — like capture |
 | **Input simulation** | Full — SendInput | Limited — CGEventTap/Accessibility + input monitoring; Secure Input blocks | Full — XTEST | Limited — libei/Portal (prompt) or uinput (root) |
 | **Global hotkeys** | Full — RegisterHotKey/WH_KEYBOARD_LL | Limited — CGEventTap (permissions + silent-disable race) | Full — XGrabKey | Limited/Impossible — only GlobalShortcuts portal (KDE good, Hyprland broken, GNOME/wlroots partly without) |
 | **FFI / native libs** | Full — LoadLibrary/libffi | Limited — Hardened Runtime blocks unsigned dylibs without `disable-library-validation` | Full — dlopen | Full — dlopen (display server irrelevant) |

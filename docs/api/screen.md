@@ -12,6 +12,10 @@ Use it where there is no element to ask. State that exists only as colour — Ko
 
 The matching, unlike the capture, does grow with the area. A template search across a whole plug-in window is the slow call here — measured at twelve seconds for one full-region match while twelve library overlays polled the same window every 500 ms — which is why anything on a detection poll uses `imageSearchAsync` on its worker thread and re-searches a small box around the last hit before widening.
 
+**Everything here except `imageSearchAsync` and `imageSearchEach` runs on the event loop**, the one thread that also carries speech, hotkeys, timers and the keyboard hook. Those two capture and match on a worker thread and call back on a later tick.
+
+**Coordinates are device pixels on Windows and points on macOS.** The application declares per-monitor DPI awareness (`PerMonitorV2`), so on Windows every coordinate on this page — and on every other page — is one physical pixel of the display; on macOS it is one point. The two numbers agree only at 100 % scaling. A region measured with a tool that is **not** DPI-aware on a Windows display scaled above 100 % is in that tool's scaled units: multiply it by the scale factor (1.5 at 150 %) before using it here. See [`host.screen.size`](#host-screen-size).
+
 ## What to declare {#declare}
 
 A module that uses this names it in its manifest:
@@ -30,7 +34,7 @@ Every call on this page, and `host.ocr.recognize` / `recognizeMany`, reads the s
 ```toml
 # module.toml of a game module
 [capabilities]
-require = ["screen", "timer", "speech"]
+require = ["screen", "timer", "speech", "window"]
 
 [screen]
 capture = "duplication"   # "standard" (the default) or "duplication"
@@ -40,8 +44,11 @@ fallback = "none"         # with "duplication": "standard" (the default) or "non
 The code does not change. With the manifest above, this poll reads through desktop duplication, and says the menu state only when it changes:
 
 ```luau
+local GAME = { title = { contains = "My Game" } }
 local lastState = nil
 host.timer.every(100, function()
+    local win = host.window.active()
+    if not win or not host.window.test(GAME, win) then return end   -- only while the game is in front
     local c = host.screen.pixel(412, 318)
     if c == nil then return end   -- only under fallback = "none": no picture this time
     local state = (c.r > 200 and c.g < 60) and "Start" or "Options"
@@ -52,11 +59,13 @@ host.timer.every(100, function()
 end)
 ```
 
-A module that depends on a `code_module` which declares `[screen]` inherits the declaration unless it declares its own: the module's own table wins, then the nearest declaring dependency, then the earliest in manifest order. A dependency's table counts only if that dependency requires `screen` or `ocr`. The log's `[capture]` lines say which source each module ended up with, and why.
+A module that depends on a `code_module` which declares `[screen]` inherits the declaration unless it declares its own: the module's own table wins, then the nearest declaring dependency, then the earliest in manifest order. Only a dependency that is itself a `code_module` is consulted — a plain data dependency's table is never read — and its table counts only if that dependency requires `screen` or `ocr`. The log's `[capture]` lines say which source each module ended up with, and why.
+
+Duplication is opened ahead of time only when one of the module's [`host.window.onTrigger`](./window.md#host-window-ontrigger) triggers fires (the overlay runtime registers one for every module that attaches an overlay). A module that never uses `onTrigger` gets no such head start: its first read starts the opening, and the reads made while it is still opening are read the standard way, or return `nil` under `fallback = "none"` — the first of them after a short wait for the opening (see Windows below).
 
 With `fallback = "none"`, a read that duplication cannot answer fails the way a failed capture always fails on this page — `pixel` returns `nil`, `profile` and `imageSearch` return `nil`, `imageSearchMulti` returns `(nil, nil)`, `imageSearchAsync` and `imageSearchEach` call back with `nil`, `imageSearchAll` returns an empty list, `template{ capture = … }` returns `nil`, `save` and `saveMarked` return `false` — and `host.ocr.recognize` returns `{ text = "", words = {}, skipped = false, error = "…" }` instead of raising. That is for an application where the standard picture is wrong rather than slow: saying a frozen menu item is worse than saying nothing. With the default `fallback = "standard"`, such a read is quietly read the standard way instead.
 
-Poll only while your window is in front. A poll that runs all the time keeps desktop duplication open all the time.
+Poll only while your window is in front. A [`host.timer.every`](./timer.md#host-timer-every) poll cannot be stopped, so gate its callback: return at once unless `host.window.active()` is your window, as the example under [`imageSearchEach`](#host-screen-imagesearcheach) does.
 
 ### Windows
 
@@ -66,7 +75,8 @@ It returns the most recently composed frame without waiting for the next one. Me
 
 - **The mouse pointer:** duplication reports it separately and this path does not draw it in, so, as with the standard path, it is normally not in the picture. Windows documents that a pointer can also be drawn into the desktop image itself, and then it is.
 - **When it cannot answer:** Windows documents that duplication stops during a UAC prompt and on the lock screen and must be reopened after a display mode change or a switch into or out of fullscreen, that no more than four programs of a session may duplicate at once, and that it is refused on some laptops with two graphics chips and over Remote Desktop. A read then gets the standard picture, or fails under `fallback = "none"`, and the log names the reason once.
-- **Opening it takes time.** The first read of a session creates a Direct3D device, which took about 0.2 s on the reference machine and occasionally several seconds. Until it is open, reads get the standard picture or fail under `fallback = "none"`. When a window trigger of such a module fires, the opening is started before the trigger's callback runs, so the callback's first read does not wait for it — that read, and the others made while it is still opening, get the standard picture or fail under `fallback = "none"`.
+- **Opening it takes time.** The first read of a session creates a Direct3D device, which took about 0.2 s on the reference machine and occasionally several seconds. Until it is open, reads get the standard picture or fail under `fallback = "none"`. When a window trigger of such a module fires, the opening is started before the trigger's callback runs, so the callback's first read does not wait for it — that read, and the others made while it is still opening, get the standard picture or fail under `fallback = "none"`. Without that head start, the first read of an opening made on the event loop waits for it, holding the loop, for up to about 60 ms, and gets the standard picture (or fails) if it is not open by then; the reads after it during the same opening do not wait.
+- **Closed when idle.** A duplication that nothing has read for 30 seconds is closed, so a gated poll lets it go while the game is in the background; an ungated one keeps it open all the time.
 - **Regions touching a rotated monitor** are read the standard way (or fail under `fallback = "none"`).
 - **HDR:** Windows converts the picture to 8 bits per channel for this path, so its colours may differ from the standard path's. Cut templates with `host.screen.save` from a module that declares the same `capture`.
 - **"Let modules that ask for it read the screen through the graphics card"** in the Application settings tab turns it off for every module. Turning it off and on again also gives it another try after it stopped answering.
@@ -81,6 +91,8 @@ It returns the most recently composed frame without waiting for the next one. Me
 
 Reads the colour of the screen pixel at `(x, y)`. Returns the 8-bit channels `r`, `g`, `b` (0–255) plus `hex`, an uppercase `#RRGGBB` string. Returns `nil` only in a module that declared `fallback = "none"` (see [Which picture a read sees](#which-picture-a-read-sees)), when there was no picture to read; a module that did not always gets a colour.
 
+**A call is a screen read**, made on the event loop and counted in the log's observation line. It is not the cheap point lookup of a reader that keeps a frame, and there is no call that reads several points from one capture; how much two nearby calls share differs by platform (see below). Where a poll needs many points, use one [`profile`](#host-screen-profile) of the band they lie in, a template search, or [`imageSearchEach`](#host-screen-imagesearcheach) — each one capture, whatever it tests.
+
 ```luau
 local c = host.screen.pixel(100, 200)
 if c == nil then return end   -- only under fallback = "none"
@@ -92,11 +104,13 @@ host.log.info(string.format("rgb(%d,%d,%d)", c.r, c.g, c.b))
 
 ### Windows
 
-Reads the pixel straight from the screen. What you get is what is there — unless the module declares [`[screen] capture = "duplication"`](#which-picture-a-read-sees), in which case it is read from the duplicated picture. A point that lies on no monitor reads as black (0, 0, 0), the same as a region read gives there, whichever way the module reads.
+**Every call is a screen read of its own**; nothing is kept between calls. Reads the pixel straight from the screen. What you get is what is there — unless the module declares [`[screen] capture = "duplication"`](#which-picture-a-read-sees), in which case it is read from the duplicated picture. A point that lies on no monitor reads as black (0, 0, 0), the same as a region read gives there, whichever way the module reads.
+
+The cost is per call. The standard path is `GetPixel` on the screen, measured at about 16.7 ms each — one compositor frame — so ten points in one poll are ten frames, about 170 ms of the event loop. Under a declared `capture = "duplication"` each call is a 1×1 read of the duplicated picture, measured at 0.30 ms in a test build; still one read per point.
 
 ### macOS
 
-Captures a small area around the point and downsamples it, so the value is a **box average of the backing pixels** rather than one of them. On a Retina display an exact comparison — `c.hex == "#FF0000"` — can therefore fail on a colour that is genuinely there, at a boundary or on a thin line. Compare with a tolerance, or read a point well inside a flat area.
+A read captures a tile of up to 256×96 points around the point (starting up to 96 points left of it and 32 above, cut to the display it lies on), at point resolution like every capture on this page, and answers the pixel from it. For the next 5 ms any other `pixel` read inside that tile is answered from the same tile without a new capture; after that, or outside it, the next read captures again. How the backing pixels of a Retina display are reduced to one value per point has not been measured, so compare colours with a tolerance rather than exactly.
 
 ## host.screen.size() {#host-screen-size}
 
@@ -111,7 +125,7 @@ host.log.info("screen is " .. s.w .. "x" .. s.h)
 
 ### Windows
 
-**Device pixels.** The application declares per-monitor DPI awareness, so a 4K panel at 200% scaling reports 3840x2160 and every coordinate the platform takes or returns is one physical pixel.
+**Device pixels.** The application declares per-monitor DPI awareness, so a 4K panel at 200% scaling reports 3840x2160 and every coordinate the platform takes or returns is one physical pixel. A program that is not DPI-aware — a Python script that never called `SetProcessDpiAwareness`, for one — is told the scaled size instead (1920x1080 for the same panel), so coordinates it measured are that factor too small here unless the display was at 100%.
 
 ### macOS
 
@@ -155,11 +169,11 @@ Builds a template in memory, for every search below to take wherever it takes a 
 - **`rgba`** with `w` and `h`: `w * h * 4` bytes, row-major from the top-left, in R, G, B, A order. As in a PNG, **alpha 0 is a wildcard** and any other alpha is compared in full.
 - **`rgb`** with `w` and `h`: `w * h * 3` bytes; every pixel is compared.
 - **`capture`**: the given [region](#region-form) of the screen, captured now. Every pixel is compared (alpha is forced opaque). Returns **`nil`** when the capture fails — the one failure that is a runtime condition rather than a mistake, so the one that does not raise.
-- **`file`**: a PNG, resolved exactly as a path given to a search is, and sharing its cached decode. The handle is a **snapshot**: a re-captured PNG is picked up live only by a search that is given the path.
+- **`file`**: a PNG — the one image format the host is built with; any other file raises `cannot open template` — resolved exactly as a path given to a search is (see [the path rule](./index.md#paths)), and sharing its cached decode. The handle is a **snapshot**: it keeps that decode for as long as it lives, however many other paths pass through the cache, and a re-captured PNG is picked up live only by a search that is given the path.
 
 Bytes are a Luau `string` or a `buffer`, copied once. A handle built from bytes may be at most 4096 pixels on a side and 1,048,576 pixels in all (1024x1024); a `capture` is refused before anything is captured when its region is larger than that, or empty. `name` (at most 64 characters) comes back in every hit the template makes and in `tostring(t)`; a `file` template given none is named by its path as written. `count` is the number of pixels a search compares. Everything else raises, naming the field: a wrong byte count (`rgba is 1436 bytes; 10x36 RGBA needs 1440`), two sources or none, `w`/`h` given to a `capture` or a `file`, and any field this version does not know, so a misspelt `rbga` or a `tolerance` it does not take is never silently ignored. Tolerance and scales are the search's options, as for a path.
 
-A template belongs to the module VM that built it, like any Luau value. It cannot be passed through a legacy data export or stored in `host.settings`. One VM's handles built from bytes or a capture may hold **32 MiB** between them; over that, the collector is run and, if they still do not fit, the constructor raises. `file` handles cost nothing against it. Build templates once, not on every poll: one from bytes or a file when the module loads, a `capture` once what it learns is on screen (see Windows below for a module that reads through desktop duplication).
+A template belongs to the module VM that built it, like any Luau value. It cannot be passed through a legacy data export or stored in `host.settings`. One VM's handles built from bytes or a capture may hold **32 MiB** between them; over that, the collector is run and, if they still do not fit, the constructor raises. Every such handle is held and charged as RGBA — 4 bytes a pixel, an `rgb` one included — plus a fixed amount per handle (the structure and 48 bytes of match order), so an RGB pack costs about four thirds of its own size. The budget is per VM: a `code_module` runtime that builds a pack while it is evaluated inside each game module's VM pays for it once per VM. `file` handles cost nothing against it. Build templates once, not on every poll: one from bytes or a file when the module loads, a `capture` once what it learns is on screen (see Windows below for a module that reads through desktop duplication).
 
 ```luau
 -- A pack a converter wrote as JSON: each signature a name, a size and its RGB bytes as
@@ -205,12 +219,15 @@ Captures are in **points** (see [`host.screen.size`](#host-screen-size)), so a t
 
 Searches the screen for the first occurrence of `template` — an image path or a [`Template`](#host-screen-template) — and returns its match rectangle in **screen pixels**: `x, y` is the top-left of the match and `w, h` the matched size (the template's own, or a scaled one — see `scales`). `n` is `1` here; it is the index into the list for the calls that take several. `name` is the template's name, or the path exactly as you wrote it. Returns `nil` if not found (or if the search region could not be captured). The search runs top to bottom, then left to right, and the first position that matches wins; there is no score.
 
-- A path is resolved relative to the module's root directory; **absolute paths are also accepted**.
+- A path is a **PNG** — the one image format the host is built with; a `.bmp` or `.jpg` raises `cannot open template`. A relative path is resolved against the root of the module whose code makes the call (see [the path rule](./index.md#paths)); **absolute paths are also accepted**, and neither form is checked for `..`.
 - `opts.region` restricts the search area (see [Region form](#region-form)); default is the full primary screen.
-- `opts.tolerance` is the per-channel RGB match tolerance (0–255, default `0` = exact match). A value outside 0–255 is read as `0`, an exact match, without a word — keep it in range.
+- `opts.tolerance` is how far each colour channel may differ, 0–255, default `0` = exact. **A position matches only if every template pixel whose alpha is not 0 differs from the screen by at most `tolerance` in each of R, G and B.** A single pixel outside rejects the position. There is no score, correlation or percentage threshold, and the answer is the first position in row order, not the best one. A value outside 0–255 is read as `0`, an exact match, without a word, and a fraction is cut to the whole number below — keep it in range.
 - `opts.scales` is a list of factors to try, **in the order given**, the first that matches winning; each resizes the template (bilinear) before searching. Omitted, the template is searched at its own size only. A factor that is not a positive finite number, that rounds the template to nothing, or that makes it larger than the region is skipped. Resizing blurs, so pair scales with a tolerance.
-- **Template pixels with alpha = 0 are wildcards** — they are skipped during matching, so you can mask out irrelevant parts of the template.
+- **Template pixels with alpha = 0 are wildcards** — they are skipped during matching, so you can mask out irrelevant parts of the template. Any other alpha is compared in full: alpha is a mask, never a weight.
+- The options are read loosely, unlike a [template spec](#host-screen-template): a key the search does not know — a `threshold` carried over from another matcher, a misspelt `tolerence` — is ignored without an error, and the search runs exact.
 - Raises an error if the template file cannot be opened.
+
+**Porting from a score-based matcher** (OpenCV's `matchTemplate` with a 0.9 threshold, "95 % of pixels within X"): no such threshold carries over, because nothing here counts how many pixels agreed. Make the pixels that are allowed to differ wildcards instead — cut the template as `rgba` and give them alpha 0 — and pick the smallest `tolerance` at which the remaining pixels match on every rendering you have. For "which of these states is showing" use [`imageSearchEach`](#host-screen-imagesearcheach), which answers every template from one capture; for every position of one template use [`imageSearchAll`](#host-screen-imagesearchall).
 
 ```luau
 -- exact, whole-screen
@@ -306,21 +323,32 @@ Several functions (`host.screen.imageSearch` and the other searches, `host.scree
 - Named: `{ x1 = .., y1 = .., x2 = .., y2 = .. }`
 - Positional: `{ x1, y1, x2, y2 }` (array indices `[1]`=x1, `[2]`=y1, `[3]`=x2, `[4]`=y2)
 
-Missing coordinates default to the screen edges: `x1, y1` default to `0`; `x2, y2` default to screen width/height. The rectangle is `[x1, y1] .. [x2, y2]`; width/height are clamped to be non-negative. Omitting `region` entirely searches the full primary screen.
+`x2` and `y2` are **exclusive**: the rectangle starts at `(x1, y1)` and is `x2 - x1` wide and `y2 - y1` high, so `{ 10, 20, 210, 120 }` covers columns 10 to 209. Width and height are clamped to be non-negative. Omitting `region` entirely searches the full primary screen.
+
+Inside a region table nothing raises. A corner that is missing — or is not a number, such as a misspelt key's `nil` or a string that is not a numeral — takes its default without a word: `x1, y1` become `0`, `x2, y2` the primary screen's width and height. So a window's `bounds`-style table, `{ x = …, y = …, w = …, h = … }`, has none of the four keys and silently becomes the **whole primary screen**; convert it with `{ b.x, b.y, b.x + b.w, b.y + b.h }`. A fractional coordinate is cut toward zero, like every coordinate the platform takes: a centre computed as `x + w / 2` lands on the whole pixel toward zero, which for a negative coordinate — a monitor left of or above the primary — is the opposite direction from `//`. Where the nearest pixel matters, round with `math.floor(v + 0.5)`.
+
+What happens to a region that is not a table depends on where it is given. An `opts.region` that is not a table is ignored like a missing one, and the call reads the whole primary screen. `host.screen.template`'s `capture`, an `imageSearchEach` entry's `within` and each entry of `recognizeMany`'s `regions` raise instead. `recognizeMany` also raises when `regions` is missing, and its list ends at the first `nil`, so the regions after a hole are silently not read.
 
 ```luau
 -- these two regions are equivalent
 { region = { x1 = 10, y1 = 20, x2 = 210, y2 = 120 } }
 { region = { 10, 20, 210, 120 } }
+
+-- a window's bounds, converted
+local w = host.window.active()
+if w then
+  local b = w.bounds
+  local p = host.screen.profile({ region = { b.x, b.y, b.x + b.w, b.y + b.h }, axes = "rows" })
+end
 ```
 
 ## host.screen.save(path, opts?) {#host-screen-save}
 
 **Signature:** `host.screen.save(path: string, opts: { region: Region? }?) -> boolean`
 
-Captures `opts.region` (see [Region form](#region-form); omitted, the whole primary screen) and writes it to `path`; the format follows the file extension, so give it `.png`. This is the evidence call: an author who cannot see the screen has no way to check that a coordinate lands on its button, so the picture goes to somebody who can look at it — `tools/probe` writes one shot of the window beside its text dump for exactly that, and the overlay runtime's calibration crop key (`Ctrl+Alt+Shift+T`) uses it to cut a fresh template out of the live plug-in when an old one stopped matching. It costs one capture, so about one compositor frame (~16.7 ms on Windows; the macOS round trip is unmeasured) regardless of the region's size, plus the PNG encode.
+Captures `opts.region` (see [Region form](#region-form); omitted, the whole primary screen) and writes it to `path` as a PNG. PNG is the one image format the host is built with, and the format follows the extension, so `path` must end in `.png`: any other extension, or none, raises. This is the evidence call: an author who cannot see the screen has no way to check that a coordinate lands on its button, so the picture goes to somebody who can look at it — `tools/probe` writes one shot of the window beside its text dump for exactly that, and the overlay runtime's calibration crop key (`Ctrl+Alt+Shift+T`) uses it to cut a fresh template out of the live plug-in when an old one stopped matching. It costs one capture, so about one compositor frame (~16.7 ms on Windows; the macOS round trip is unmeasured) regardless of the region's size, plus the PNG encode.
 
-`path` is resolved under the calling module's root; an absolute path (what `host.path` returns) is used as it stands, and the parent directory is created if it does not exist. Returns `true` on success and `false` when the region could not be captured; a path that cannot be *written* raises instead of returning `false`, so a typo in the folder name is not mistaken for a failed capture.
+A relative `path` is resolved under the root of the module whose code makes the call (see [the path rule](./index.md#paths)); an absolute path (what `host.path` returns) is used as it stands, and the parent directory is created if it does not exist. Neither is checked for `..`: this writes wherever the path points. `save` and `saveMarked` are the only calls in the platform that write a file a module names, and both write PNG only. Returns `true` on success and `false` when the region could not be captured; a path that cannot be *written* raises instead of returning `false`, so a typo in the folder name is not mistaken for a failed capture.
 
 ```luau
 -- tools/probe: the one artefact a sighted helper can check in seconds, saved next to
@@ -351,7 +379,7 @@ Without the Screen Recording permission the capture does **not** fail — macOS 
 
 **Signature:** `host.screen.saveMarked(path: string, opts: { region: Region?, marks: { { x: number, y: number } }? }) -> boolean`
 
-Everything `save` does, plus a magenta crosshair drawn at every point in `opts.marks`, given in **screen** coordinates. It puts the calibration question into one picture — is my control on its button? — instead of leaving somebody to read coordinates out of a log and find that spot in a plain screenshot by hand, which is the step that hides errors: a set of toggles in this repo sat 16 px off, on the caption row under the buttons, for as long as it existed, because the colours sampled there happened to look plausible. Magenta because these dark plug-in UIs do not use it, so ink cannot be mistaken for interface. Each crosshair is 19 px across, and the *n*th mark gets *n* dots on a row 12 px below its centre, so marks stay tellable apart without any text.
+Everything `save` does — a PNG, and only a `.png` path — plus a magenta crosshair drawn at every point in `opts.marks`, given in **screen** coordinates. It puts the calibration question into one picture — is my control on its button? — instead of leaving somebody to read coordinates out of a log and find that spot in a plain screenshot by hand, which is the step that hides errors: a set of toggles in this repo sat 16 px off, on the caption row under the buttons, for as long as it existed, because the colours sampled there happened to look plausible. Magenta because these dark plug-in UIs do not use it, so ink cannot be mistaken for interface. Each crosshair is 19 px across, and the *n*th mark gets *n* dots on a row 12 px below its centre, so marks stay tellable apart without any text.
 
 Four things bite. `opts` is **required** here (`save`'s is optional) — pass at least `{}`. Mark entries are read by **name**: `{ x = 100, y = 200 }`, never positional `{ 100, 200 }`, which reads as screen `(0, 0)`: dropped when the captured region does not reach the screen origin, and otherwise drawn in the corner, which is worse — a crosshair that means nothing. A mark outside the captured region is skipped without a word, so grow the region to cover the marks the way `calibrationShot` does — Komplete Kontrol's standalone menu bar sits 10 px above the client top, and a shot clipped to the client rectangle cut every crosshair off, producing a picture with no marks at all, which reads as "nothing was marked" rather than "the marks are off-frame". And the ink lands on the very thing the mark points at, so when you also need to *look* at those pixels, take the same frame twice.
 
@@ -404,7 +432,7 @@ end
 
 Captures the region **once** and tries each template against that one frame, returning two values: the 1-based index of the first template that matched, and its [hit](#host-screen-imagesearch) in screen pixels (whose `n` is that same index). The list may mix paths and [`Template`](#host-screen-template) handles as you like. Reach for it whenever one question needs more than one template — a toggle's on/off pair, or a glyph as two plug-in versions draw it. The capture is the fixed cost (about a compositor frame on Windows, whatever its size); over a small region the extra comparisons are the cheap part, which is what makes one call beat two. The index is what turns a hit back into meaning: build the list in a known order and keep a parallel list of labels.
 
-Sharing the frame also buys correctness, not only time: both templates are matched against the same pixels, so a toggle that changes mid-repaint cannot fall between two separate captures and come back as neither. Templates are tried in list order and the whole region is scanned for the first before the second is tried, so when both would match, order decides and not position. Decoded templates are cached by path and modification time, shared with `imageSearch` and `imageSearchAsync`, so a re-captured template is picked up live and a repeated poll does not re-decode PNGs. A template file that cannot be opened raises, as with `imageSearch`, and every template in the list is opened **before** the capture — so a bad path raises on the first call wherever it sits in the list. (Until 2026-09 the files were opened inside the loop, after the capture, and a bad path late in the list stayed dormant until every earlier template happened to miss.) A failed capture returns `(nil, nil)` as well, which is indistinguishable from "no template matched": for a state read like `gtoggleState` that is the difference between "off" and "I could not look". This call is synchronous — for anything on a detection poll use [`imageSearchAsync`](#host-screen-imagesearchasync), which takes a template list for the same reason and moves the capture off the event loop.
+Sharing the frame also buys correctness, not only time: both templates are matched against the same pixels, so a toggle that changes mid-repaint cannot fall between two separate captures and come back as neither. Templates are tried in list order and the whole region is scanned for the first before the second is tried, so when both would match, order decides and not position. Decodes of paths are cached for the 64 most recently used paths across the whole application (least recently used out first, keyed by path and modification time), shared by every search: a re-captured template is picked up live, and a poll over a few templates does not re-decode PNGs. A module cycling through more templates than that re-reads and re-decodes them from disk; build [`host.screen.template{ file = … }`](#host-screen-template) handles once at load instead, since a handle keeps its decode. A template file that cannot be opened raises, as with `imageSearch`, and every template in the list is opened **before** the capture — so a bad path raises on the first call wherever it sits in the list. (Until 2026-09 the files were opened inside the loop, after the capture, and a bad path late in the list stayed dormant until every earlier template happened to miss.) A failed capture returns `(nil, nil)` as well, which is indistinguishable from "no template matched": for a state read like `gtoggleState` that is the difference between "off" and "I could not look". This call is synchronous — for anything on a detection poll use [`imageSearchAsync`](#host-screen-imagesearchasync), which takes a template list for the same reason and moves the capture off the event loop.
 
 ```luau
 -- overlay-runtime's gtoggleState: read a graphical toggle. The region is touched ONCE,

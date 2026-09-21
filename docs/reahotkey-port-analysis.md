@@ -132,11 +132,13 @@ end
 return M
 ```
 
+*A sketch from the planning stage, not working code: there is no `"overlay"` capability (the overlay is a dependency, `com.platform.overlay`), no `titleRegex` matcher field, no methods on window tables such as `listViewContent`, and no `engine` option for OCR. For the shape that was built, see [Building an overlay](building-an-overlay.md) and the [matcher keys](api/window.md#matchers).*
+
 The **module is almost nothing but content** — coordinates, regions, labels, hotkeys, one detection rule. All the OS mechanics live under `host.*`, platform-identical. For macOS, ideally only the calibrated numbers change (coordinates + OCR region + detection against AX instead of ListView).
 
 ## 6. Bare-Minimum Scope & Order
 
-**(a) First: the overlay runtime framework** as a host capability (Win+macOS behind traits): `host.overlay` (taxonomy, lifecycle, navigation, speech composition, coordinate compensation) + `host.speech` (tts-rs) + `host.sound` (core) + `host.hotkey` with context gate (macOS: CGEventTap + frontmost check + re-enable watchdog) + `host.window` (detection/geometry) + `host.input` + `host.screen` (image search incl. macOS SCK+NCC) + `host.ocr` (Vision) + `host.resource`. = exactly catalog §6.
+**(a) First: the overlay runtime framework** as a host capability (Win+macOS behind traits): `host.overlay` (taxonomy, lifecycle, navigation, speech composition, coordinate compensation) + `host.speech` (tts-rs) + `host.sound` (core) + `host.hotkey` with context gate (macOS: CGEventTap + frontmost check + re-enable watchdog) + `host.window` (detection/geometry) + `host.input` + `host.screen` (image search incl. macOS SCK+NCC) + `host.ocr` (Vision) + `host.resource`. = exactly catalog §6. *(NCC was the plan; the image search that was built is an exact per-channel match within a tolerance, with no score, on both platforms — see [the reference](api/screen.md#host-screen-imagesearch). The overlay also shipped as a module, `com.platform.overlay`, not as `host.overlay`.)*
 
 **(b) Then: ONE overlay end-to-end on Win AND macOS — simplest first:**
 1. **FabFilter** — *one* HotspotButton, no OCR/Custom/UIA. Validates the complete coordinate-compensation pipeline (AXFrame→click). The "Hello World" of the platform.

@@ -33,7 +33,16 @@ for _, a in ipairs(geo.ARROWS) do … end
 Semantics worth knowing:
 
 - The included file sees the **same `host`** as the file that included it, handed in rather than read from the globals. So inside a **code module** — whose source is evaluated in each dependent's VM — an included file resolves paths, settings and resources against the **defining** module, exactly as its includer does.
-- Executed **once per VM**; further includes of the same file return the same value. A module split across files must not re-run side effects per include. (A code module still runs once per dependent VM, and so do its includes.)
-- Paths are relative to the module root. `..` and absolute paths are **rejected** — this executes code, so escaping the module directory is not a nuisance but a hole.
+- Executed **once per VM**; further includes of the same file return the same value. A module split across files must not re-run side effects per include. (A code module still runs once in its own VM and once in the VM of every module that depends on it, directly or through another code module, and so do its includes.)
+- Paths are relative to the root of the module whose code makes the call — for a code module, its own root (see [the path rule](./index.md#paths)). The one check is that the path, made absolute, still starts with the module's root: `"../other/x.luau"` and an absolute path outside the module are **rejected** on Windows, while an absolute path inside the module, and `"src/../src/a.luau"`, are accepted. The check is there because this executes code; see the platform sections for where it falls short.
+- Luau's own `require` is not a way to split a module: every file here is loaded under a name `require` does not accept, so a `require("./lib")` raises `require is not supported in this context`. Use `host.include`.
 - An include **cycle** raises an error naming the file rather than overflowing the stack.
 - Reported line numbers match the file.
+
+### Windows
+
+Making the path absolute also resolves `..` and `.` in it and turns `/` into `\`, so the check sees where the path really leads: anything that leaves the module folder is rejected, and `"src/a.luau"` and `"src/../src/a.luau"` are one include. The include is remembered by that path as text, though, so spellings the file system treats as one file but the text does not — `"Src/A.luau"` beside `"src/a.luau"`, or a short 8.3 name — are two includes, and the file runs twice in one VM.
+
+### macOS
+
+Rust's `std::path::absolute`, which the check uses, leaves `..` in place on macOS, and a path that merely *starts* with the module root passes. So `"../other/x.luau"` is **not** rejected here: it is loaded from outside the module. Two spellings of one file, such as `"src/a.luau"` and `"src/../src/a.luau"`, are also two different includes, and the file runs twice in one VM. Write include paths without `..`.

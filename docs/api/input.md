@@ -8,7 +8,7 @@ Synthesises mouse and keyboard input: moving and clicking at screen coordinates,
 
 It is what performs every activation an overlay makes. Most modules never touch it, because the overlay's own control kinds click their coordinates for them, so you come here for the gesture that is not one of those — Kontakt's instrument-editor wrench at a fixed offset from the right edge of the window, ON:EAR's tone knob nudged half a wheel notch because a whole one moves it five of its own units, Melodyne's menu bar opened a few pixels above the client origin.
 
-All of it is blind clicking at screen coordinates, and **nothing here asks what is drawn under the point** — which is why modules bring their window forward first, and why the overlay runtime refuses a point falling outside its own window.
+All of it is blind clicking at screen coordinates, and **nothing here asks what is drawn under the point** — which is why modules bring their window forward first, and why the overlay runtime refuses a point falling outside its own window. Coordinates are device pixels on Windows and points on macOS (see [`host.screen.size`](./screen.md#host-screen-size)), and every one is converted to a whole number by cutting toward zero without an error. So a centre computed as `x + w / 2` lands on the whole pixel toward zero, which for a negative coordinate — a monitor left of or above the primary — is the opposite direction from `//`; where the nearest pixel matters, round with `math.floor(v + 0.5)`.
 
 Dragging is deliberately not a press, a warp and a release: the movement is paced over sixteen injected steps and blocks the calling thread for about sixty milliseconds on Windows, because a control that reads the *speed* of a gesture answers an instantaneous jump with an enormous change.
 
@@ -135,7 +135,9 @@ Sends a keyboard shortcut by pressing the modifiers, tapping the key, and releas
 
 **Signature:** `host.input.send(combo: string) -> nil`
 
-`combo` is a single string of `+`-separated parts, with the final part being the key and any leading parts being modifiers (whitespace around parts is trimmed). Recognized modifiers (case-insensitive): `ctrl`/`control`, `alt`/`option`, `shift`, and `win`/`super`/`cmd`/`command`/`meta`. An empty combo or an unknown modifier raises a Lua error. Returns `nil`.
+`combo` is a single string of `+`-separated parts, with the final part being the key and any leading parts being modifiers (whitespace around parts is trimmed). Recognized modifiers (case-insensitive): `ctrl`/`control`, `alt`/`option`, `shift`, and `win`/`super`/`cmd`/`command`/`meta`. The key is one of the [key names](./keys.md#key-spec-string-format) — letters, digits, `F1`–`F24` and fourteen named keys; there are no numpad keys, punctuation, `Insert` or media keys, and there is no separate key-down or key-up. An empty combo, an unknown modifier or an unknown key raises a Lua error. Returns `nil`.
+
+The key goes through the same keyboard hook as a real one, so a combination that any module has [captured](./keys.md#host-keys-capture) is caught and suppressed again — sending the key you captured does not pass it on. See [`post`](#host-input-post) for that.
 
 ```luau
 host.input.send("Ctrl+S")
@@ -146,11 +148,15 @@ host.input.send("Ctrl+Shift+Esc")
 
 The modifiers are synthesised as real key presses around the key, and whatever the user is **physically holding is inherited**. Called from a hotkey callback while Alt is still down, `host.input.send("Escape")` arrives as Alt+Escape — which is why `host.keys.modifiersDown()` exists and why modules defer a synthesised key until the user has let go.
 
+Every key is sent by **virtual-key code only**: `SendInput` with scan code 0, without `KEYEVENTF_SCANCODE` and without the extended-key flag — so the arrows, Home, End, Page Up/Down and Delete go out as their non-extended forms. Each press and release is its own `SendInput` call, back to back with no delay between them, so there is no hold time. An application that reads scan codes, DirectInput or Raw Input — many games — may ignore the key, or read it as a different one.
+
 ### macOS
 
 The modifiers are set as flags on the event, and setting them **replaces the whole set**, so anything the user is holding is stripped and the same call delivers a bare Escape. No modifier key event is posted at all, so an application that watches for physical modifier presses sees an unmodified key.
 
 The deferral dance is therefore unnecessary for keys here, and since 2026-09-03 not for clicks either: a synthesised click has its flags cleared the same way (see `click`).
+
+The key is a US keyboard position, not a character: `"Cmd+Z"` is the key labelled Y on a German Mac (see [the key spec](./keys.md#key-spec-string-format)).
 
 ## host.input.text(text) {#host-input-text}
 
@@ -158,11 +164,22 @@ Types a Unicode string as synthetic keystrokes.
 
 **Signature:** `host.input.text(text: string) -> nil`
 
-`text` is sent character-by-character as Unicode input. Returns `nil`.
+`text` is sent character-by-character as Unicode input, not as key presses. Returns `nil`.
+
+Control characters are sent as characters too: `"\n"` is the character U+000A and `"\t"` is U+0009, **not** a press of Enter or Tab, and whether an application treats those characters like the keys is up to the application. Press keys with [`send`](#host-input-send): `host.input.send("Enter")`.
 
 ```luau
 host.input.text("Hello, world!")
+host.input.send("Enter")   -- not "\n"
 ```
+
+### Windows
+
+Each UTF-16 unit is sent with `SendInput` as a `KEYEVENTF_UNICODE` event (virtual key `VK_PACKET`), down and up. An application that reads scan codes, DirectInput or Raw Input — many games — does not see it.
+
+### macOS
+
+Each character is posted as a keyboard event pair with key code 0 and the character as its Unicode payload, with the modifier flags cleared, so the keyboard layout plays no part.
 
 ## host.input.mouseDown(x, y, opts?) {#host-input-mousedown}
 
@@ -241,7 +258,7 @@ The move before the release is posted as a **drag** event, because the backend s
 
 Delivers a single key to **one window** rather than to whatever has focus. Reach for it when a hotkey has to act *and* still hand the application a key: our own hotkey registration and key capture see synthesised input exactly as they see real input, so `host.input.send` from inside a hotkey callback re-triggers the handler that sent it, forever. A posted key goes to the addressed window (or process) without travelling past that machinery, and is seen by nobody else. `id` is the handle from `host.window.*` or the overlay's `O:hwnd()` — never a number you constructed. `key` is a single [key name](./keys.md#key-spec-string-format) (`A`–`Z`, `0`–`9`, `F1`–`F24`, `Space`, `Enter`/`Return`, `Esc`/`Escape`, `Tab`, `Backspace`, `Delete`/`Del`, the arrows, `Home`, `End`, `PageUp`, `PageDown`, all matched case-insensitively); **there are no modifiers here** — `"Ctrl+S"` is not a key name and raises, as does any name the table does not know.
 
-Unlike every other call in `host.input` that acts, a posted key does **not** turn over `host.inputEpoch()`. Anything memoised against that counter — a view state read from pixels, a probe of which sub-tool is active — will not be re-read because you posted a key, so re-read it explicitly after a post sequence, which is what the Melodyne overlay does when it checks with the uncached probe what its presses actually reached.
+Unlike every other call in `host.input` that acts, a posted key does **not** turn over `host.inputEpoch()`, nor `host.epoch()`. So the host's own per-epoch answers are not re-asked either: a `host.window.focusChain()`, `active()` or `host.element.find` that was already asked in this epoch gives the same answer after the post — the one from before the key (see [`host.window`](./window.md)). Anything memoised against that counter — a view state read from pixels, a probe of which sub-tool is active — will not be re-read because you posted a key, so re-read it explicitly after a post sequence, which is what the Melodyne overlay does when it checks with the uncached probe what its presses actually reached.
 
 ```luau
 -- modules/melodyne/src/main.luau: Melodyne's sub-tools are reached by pressing the tool's
@@ -260,7 +277,7 @@ host.timer.after(PRESS_GAP, step)
 
 ### Windows
 
-Genuinely per-window: `WM_KEYDOWN`/`WM_KEYUP` are posted to the handle you passed with `PostMessageW`, with the scan code packed into the `lParam` because some applications read that rather than the virtual key — Melodyne decodes keys itself rather than leaving it to the defaults. Posting is also the path most likely to be seen at all here: Melodyne runs its own message pump with its own accelerator table, so a posted `WM_KEYDOWN` reaches `TranslateAccelerator` where a sent one would bypass it. A handle whose window is gone is not reported: the post goes nowhere and the call returns normally.
+Genuinely per-window: `WM_KEYDOWN`/`WM_KEYUP` are posted to the handle you passed with `PostMessageW`, with the scan code packed into the `lParam` because some applications read that rather than the virtual key — Melodyne decodes keys itself rather than leaving it to the defaults. Posting is also the path most likely to be seen at all here: Melodyne runs its own message pump with its own accelerator table, so a posted `WM_KEYDOWN` reaches `TranslateAccelerator` where a sent one would bypass it. A handle whose window is gone is not reported: the post goes nowhere and the call returns normally. A posted key exists only as a window message: the keyboard state is not changed, and an application that reads the keyboard through DirectInput or Raw Input — as many games do — never sees it.
 
 ### macOS
 

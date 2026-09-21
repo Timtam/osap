@@ -62,10 +62,10 @@ foreach ($m in [regex]::Matches($sources, 'host\.set\(\s*"([A-Za-z_][A-Za-z0-9_]
 foreach ($m in [regex]::Matches($sources, 'function\s+host\.([A-Za-z_][A-Za-z0-9_]*)')) {
   $hostTables += $m.Groups[1].Value
 }
-# `host.match` is built by the prelude as a value rather than through either shape, and
 # `host.overlay` is deliberately absent — it is a module, and a documented `host.overlay.*`
-# call is a mistake worth reporting.
-$hostTables += 'match'
+# call is a mistake worth reporting. So is `host.match`: it used to be added here by hand as
+# "built by the prelude", but nothing builds it — a matcher is a plain table — and the hand
+# entry let a documented `host.match { … }` pass as real.
 $hostTables = $hostTables | Sort-Object -Unique
 
 # ---- What the documentation calls -------------------------------------------------------

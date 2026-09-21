@@ -32,7 +32,20 @@ You will meet these words throughout. Read them once now; each is explained prop
 
 ## Step 1 — the smallest overlay
 
-A module is a folder with a `module.toml` and a Luau file. Declare the overlay runtime as a dependency and pull it in:
+A module is a folder with a `module.toml` and a Luau file. The manifest names the module — `id`, `name` and `version` are required — declares the overlay runtime as a dependency, and lists what the module's own code calls: here `host.speech`, from the button's callback. What the runtime does on the module's behalf — matching the window, capturing Tab, reading OCR — is covered by the runtime's own manifest, with one exception: every module that attaches an overlay declares `window`, because the host delivers foreground and focus changes through the module's own `host.window`, and without it the overlay never activates (see [What to declare](api/index.md#capabilities)).
+
+```toml
+# module.toml
+id           = "com.example.notepad-helper"
+name         = "Notepad helper"
+version      = "0.1.0"
+dependencies = ["com.platform.overlay"]
+
+[capabilities]
+require = ["window", "speech"]
+```
+
+Then `src/main.luau`, the default entry file, pulls the runtime in:
 
 ```luau
 local O = host.require("com.platform.overlay")
@@ -48,7 +61,7 @@ ov:addCustomButton({
 ov:attach({ title = { contains = "Notepad" } })
 ```
 
-That is a complete, working overlay. While a window whose title contains "Notepad" is focused, Tab and Shift+Tab move through the two controls, each is spoken as you reach it, and Enter or Space activates the focused one. `Ctrl+Alt+1` fires from anywhere in that window.
+Those two files are a complete, working overlay: put the folder under `modules/` beside the application, or run it with `automation-platform <folder>` — which finds the overlay runtime only in the folder that holds yours or in a `modules/` folder beside that one, so keep the runtime's folder there (see [where modules are found](module-package-format.md#where-modules-are-found)). While a window whose title contains "Notepad" is focused, Tab and Shift+Tab move through the two controls, each is spoken as you reach it, and Enter or Space activates the focused one. `Ctrl+Alt+1` fires from anywhere in that window.
 
 Three things happened implicitly, and they are worth knowing:
 
@@ -178,7 +191,7 @@ end
 
 Call it from every overlay that should carry that header. There is no inheritance mechanism to learn — an overlay is built by calling functions, so sharing is done by calling the same function.
 
-Parts cross module boundaries too. A module marked `code_module = true` in its manifest has its exported functions available to modules that depend on it, so the module that *owns* a set of controls can hand them out instead of everyone reimplementing them:
+Parts cross module boundaries too. A module marked `code_module = true` in its manifest has its exported functions available to modules that depend on it, so the module that *owns* a set of controls can hand them out instead of everyone reimplementing them. Its source is evaluated inside each dependent's VM and also runs once in a VM of its own, so anything it does at its top level happens once per copy; see [`host.require`](api/require.md) for the `activate` convention that runs setup only once:
 
 ```luau
 local kk = host.tryRequire("com.platform.komplete-kontrol")
@@ -200,7 +213,7 @@ This does two jobs:
 1. **A gate.** The overlay only applies while that image is on screen. Combined with a higher layer, it takes over from the plugin's plain header exactly when the library is loaded.
 2. **An anchor** (with `anchor = true`). Coordinates are then measured from the *wordmark's* position rather than the window's — so they survive the plugin being resized, the host being different, or a browser panel shifting everything sideways. The wordmark and the controls move together.
 
-Image paths must be **absolute** — always `host.path("…")`. A relative path is resolved against whichever module is *running*, and for an inherited overlay that is not yours. This is checked when you bind, and reported.
+Image paths must be **absolute** — always `host.path("…")`. A relative path is resolved against the module whose code makes the call, and the search is made by the overlay runtime's code (or, for an inherited overlay, by the base module's), so it would be looked for in that module's folder, not yours — see [Paths](api/index.md#paths). This is checked when you bind, and reported.
 
 Because a library can load or unload with no window event, gate it on a poll:
 
@@ -224,15 +237,25 @@ local geo = host.include("src/geometry.luau")
 
 Each file runs once per VM, and sees the same `host` as the file that included it — so a shared framework's files resolve against *its* module, not against whoever is using it. The Kontakt module is split into detection, the cell table, the geometry, what a control does, what a cell contains, and the wiring.
 
+Luau's own `require` does not work here — it raises `require is not supported in this context` in module code — so `host.include` is the way to split a module.
+
 ---
 
 ## Step 8 — the same module on Windows and macOS
 
-Almost all of an overlay is already portable, and that is not a coincidence: coordinates are
-points with the origin at the top left of the primary display on both systems, a capture is
-one pixel per point on both, and clicking, dragging, typing, image search and OCR take the
-same numbers and mean the same thing. **Nothing about the controls, the geometry, the
-hotkeys or the actions needs to know which system it is on.**
+Almost all of an overlay is already portable: coordinates have their origin at the top left
+of the primary display on both systems, every call takes them in one unit per system, and
+clicking, dragging, typing, image search and OCR all take the same numbers the screen calls
+return. **Nothing about the controls, the hotkeys or the actions needs to know which system
+it is on.**
+
+The unit is where the two differ. On **Windows** a coordinate is a physical device pixel — the
+application is per-monitor DPI aware — and on **macOS** it is a point, and a capture there is
+one pixel per point. The numbers are the same only at 100 % scaling: on a Retina Mac they are
+exactly half what the same panel gives on Windows at 200 %, and a template cut on one is a
+different size on the other. Geometry measured on one system at another scaling has to be
+scaled, or measured again (see [Coordinates](api/index.md#coordinates)). The same applies to
+numbers taken from a tool that is not DPI-aware: at 150 % on Windows, multiply them by 1.5.
 
 What genuinely differs is *identity* — how you say "this window is Kontakt". There is no
 common vocabulary for it: Windows has a window class, macOS has an accessibility role and a
@@ -250,8 +273,8 @@ local KONTAKT = {
 }
 ```
 
-A platform block takes the same fields as the top level — `title`, `app`, `class` — plus,
-on macOS, `axRole`, `axSubrole` and `axIdentifier`. Those three are parts of the one `class`
+A platform block takes `title` and `app` as the top level does, plus `class` — which only a
+platform block takes — and, on macOS, `axRole`, `axSubrole` and `axIdentifier`. Those three are parts of the one `class`
 string the macOS backend publishes (`AXRole/AXSubrole/AXIdentifier`, both separators always
 present); matching them individually just saves writing a pattern around the separators.
 
@@ -264,8 +287,12 @@ Three more rules worth knowing:
   why a Windows-only module is a clean no-op on a Mac rather than a source of wrong matches.
   `os = { "windows" }` says the same thing for a matcher that needs no block.
 - **Any single field can be given per platform**, since the OS keys and the match modes are
-  different words: `class = { windows = "NINormalWindow", macos = "AXWindow//" }`. Use it
+  different words: `title = { windows = "Kontakt 8", macos = { prefix = "Kontakt" } }`. Use it
   where one field differs and the rest of the matcher does not.
+- **`class` belongs inside a platform block.** Only `title`, `app`, `os`, the platform blocks
+  and `where` are read at the top level; a top-level `class` — where AutoHotkey's `ahk_class`
+  habit puts it — is ignored without an error, and the matcher then matches every window of
+  the application. The full list of keys is under [Matchers](api/window.md#matchers).
 
 The embedded binding has one more of these, for the same reason — a host names its plugin
 surface with a window class on Windows and an accessibility role on macOS:

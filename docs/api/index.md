@@ -5,11 +5,11 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 130 entries.
+Every call the platform offers a module, in one place. 132 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
-Every callback registered through any of these runs in the calling module's own Luau VM, and only fires while that module is **enabled**.
+Every callback registered through any of these runs in the calling module's own Luau VM, and fires only while that module is **enabled** — with two exceptions: a [`host.settings.onChange`](settings.md#host-settings-onchange) callback fires whenever its setting changes, the module manager's Settings dialog included, and an arbiter claim that holds its slot when the module is disabled has its `onDeactivate` called, so an overlay can tear down. A disabled module is still loaded — its entry file has run, and its recurring timers and listeners are kept — and its other callbacks stop; see the [module lifecycle](../module-runtime-and-lifecycle.md).
 
 ## What to declare in module.toml {#capabilities}
 
@@ -20,19 +20,45 @@ Each page says which name to put in its manifest:
 require = ["window", "screen", "speech"]
 ```
 
+**These are all the names:** `window`, `screen`, `ocr`, `element`, `input`, `keys`, `hotkey`, `gamepad`, `speech`, `sound`, `timer`, `settings` (which also covers `host.config`), `log`, `path`, `resource` and `arbiter` — one per namespace, spelt as the namespace. There are no finer-grained names: `"window.read"` or `"screen.imagesearch"` unlock nothing. **Names are not checked** when the module loads, so a misspelt or invented one loads without a word, and the first use of the namespace it was meant for raises. `path`, `resource` and `log` are gated like the rest: a module that only reads its own data files still declares `path` and `resource`, and `log` if it logs.
+
 **It is enforced.** A namespace you have not declared is not on your `host` table, and reaching for it raises an error naming your module and the capability it needs rather than evaluating to `nil` three frames from anything that could explain it. Declaring more than you use is legal and harmless; declaring less is a failure at the moment you first need it.
 
 **Permission follows the module that wrote the code, not the one running it.** A `code_module` dependency is evaluated inside its dependent's VM, and what it may reach is decided by its own manifest: the overlay runtime declares `ocr`, so its code may read text on behalf of a module that never declared `ocr` itself. The reverse also holds — a dependency cannot reach something merely because one of its dependents declared it.
 
-Ownership is unaffected, and deliberately so. A hotkey or a timer that a dependency's code registers still belongs to the module whose VM it ran in, so disabling that module takes it away.
+Ownership is unaffected, and deliberately so. A hotkey or a timer that a dependency's code registers still belongs to the module whose VM it ran in, so disabling that module takes it away. A `code_module` also runs in a VM of its own, so its top level runs once there and once in every dependent — see [`host.require`](require.md#host-require).
 
-**A callback you register is your code.** That is why a module whose own file never writes `host.window` still declares `window` if it attaches an overlay: the gate and the matcher it supplied are called during a focus change, and they are yours.
+**A module that attaches an overlay declares `window`**, even when its own file never writes `host.window`. The host delivers every foreground and focus change through the module's own `host.window`, so without `window` the module's triggers are never seen and its overlay never activates. A gate or matcher the module supplied is its own code as well, and needs `window` if it calls `host.window`.
+
+The same delivery reaches every enabled module, overlay or not. So a module that lacks `window`, loaded beside one that watches windows, has an error logged on every foreground and focus change and shown once in a dialog. That is a bug, listed in `TODO.md`; until it is fixed, such a module declares `window` too.
 
 Nothing is gated on `host.os`, `host.require`, `host.tryRequire`, `host.include`, `host.epoch`, `host.now`, `host.inputEpoch`, `host.calibrating` or `host.json`. A clock, a counter, a platform name, a way to reach a declared dependency and a parser of strings the module already holds are not worth asking permission for, and gating them would mean every manifest names them — which is the same as naming none.
 
-The list is also shown to the user before installing a module from GitHub. It is not a security boundary on its own — a module still runs arbitrary Luau, and the declaration is the module's own word — but it is now the word the platform holds it to.
+The list is also shown to the user once, before installing a module from GitHub; nothing is granted or refused per capability, and a module copied into `modules/` by hand is not reviewed at all. It is not a security boundary on its own — a module still runs arbitrary Luau, and the declaration is the module's own word — but it is now the word the platform holds it to.
 
 The overlay is the exception in shape rather than degree: it is a **module**, so it goes under `dependencies` rather than here.
+
+## Paths {#paths}
+
+**Every relative path resolves against the root of the module whose source contains the call.** For your own code that is your module's folder. For a `code_module` it is the dependency's own folder, even while its code runs in your VM: a runtime whose code calls `host.screen.imageSearch("images/x.png")` looks in the runtime's `images/`, whichever game module it is working for. So hand a shared runtime something that cannot be misread — an absolute path from your own `host.path`, a `host.screen.template` handle, or the decoded data itself — never a relative path. The rule holds for `host.path`, `host.resource.read` and `exists`, `host.screen` (search templates, `template{ file = … }`, `save`, `saveMarked`), `host.sound.play` and `host.include`, and settings are stored under the id of the module whose code defines them.
+
+**Paths are not confined to the module.** Every call above except `host.include` joins the path onto the root as written: an absolute path is used as it stands and `..` is not refused, so a path can name any file the user can read. `host.include` checks that the path stays inside the module; [its page](include.md#host-include) says where that check falls short.
+
+## Coordinates {#coordinates}
+
+Every coordinate the platform takes or returns — window bounds, regions, clicks, hits — is a screen coordinate with its origin at the top left of the primary display. On **Windows** it is a physical device pixel, because the application is per-monitor DPI aware; on **macOS** it is a point. The two agree only at 100 % scaling, and a Retina Mac is exactly half of the same panel on Windows at 200 %. Coordinates measured by a tool that is not DPI-aware, on a Windows display scaled above 100 %, have to be multiplied by the scale factor. A fractional coordinate is cut toward zero without an error. Regions are `{ x1, y1, x2, y2 }` with `x2` and `y2` exclusive — see [Region form](screen.md#region-form).
+
+## Coming from another tool {#coming-from}
+
+Where habits from other tools mislead, and the section that says what happens here instead:
+
+- **A score-based image matcher** (OpenCV and the like). There is no score or threshold: every template pixel that is not transparent must be within `tolerance` on each colour channel, and the first position in row order wins — [`imageSearch`](screen.md#host-screen-imagesearch). For several templates against one frame, [`imageSearchEach`](screen.md#host-screen-imagesearcheach). Template files are PNG only; [`host.screen.template`](screen.md#host-screen-template) builds one from bytes.
+- **A reader that keeps a frame and reads many points from it.** On Windows every [`pixel`](screen.md#host-screen-pixel) call is a screen read of its own; on macOS only reads close together in place and time share one. No call reads many points from one capture.
+- **Tesseract or other OCR language codes.** `lang` is each platform engine's own identifier — [Recognition language](ocr.md#recognition-language) — and OCR is synchronous.
+- **AutoHotkey.** `ahk_class` belongs inside the `windows` block of a [matcher](window.md#matchers); `SetTimer` is [`host.timer.every`](timer.md#host-timer-every), which cannot be stopped; `Send` is [`host.input.send`](input.md#host-input-send), virtual keys only; `ImageSearch`'s second corner is exclusive here.
+- **A keyboard hook that only listens.** A [capture](keys.md#host-keys-capture) takes the key away; there is no listen-only mode for ordinary keys, only the `"<modifier> tap"` form watches without taking.
+- **A script host with threads or async.** Every callback runs on one thread, and nothing interrupts one that does not return — see the [module lifecycle](../module-runtime-and-lifecycle.md).
+- **A manifest that names its target window.** `module.toml` has no window or process field; matching is Luau — see the [manifest](../module-package-format.md).
 
 
 ## Overlay
@@ -101,8 +127,8 @@ Reading pixels, profiling a region, and finding an image within one.
 | [`host.screen.imageSearchMulti(templates, opts?)`](screen#host-screen-imagesearchmulti) | Captures the region **once** and tries each template against that one frame, returning two values |
 | [`host.screen.pixel(x, y)`](screen#host-screen-pixel) | Reads the colour of the screen pixel at `(x, y)`. |
 | [`host.screen.profile(opts?)`](screen#host-screen-profile) | Takes **one** capture of `region` (see Region form |
-| [`host.screen.save(path, opts?)`](screen#host-screen-save) | Captures `opts.region` (see Region form |
-| [`host.screen.saveMarked(path, opts)`](screen#host-screen-savemarked) | Everything `save` does, plus a magenta crosshair drawn at every point in `opts.marks`, given in **screen** coordinates. |
+| [`host.screen.save(path, opts?)`](screen#host-screen-save) | Captures `opts.region` (see Region form; omitted, the whole primary screen) and writes it to `path` as a PNG. |
+| [`host.screen.saveMarked(path, opts)`](screen#host-screen-savemarked) | Everything `save` does |
 | [`host.screen.size()`](screen#host-screen-size) | Returns the primary screen dimensions in pixels as `{ w, h }`. |
 | [`host.screen.template(spec)`](screen#host-screen-template) | Builds a template in memory, for every search below to take wherever it takes a path. |
 
@@ -177,7 +203,7 @@ Claiming a combination system-wide.
 
 ## host.gamepad
 
-Watching game controllers while a game is in front — observed only, never taken from the game.
+Watching game controllers — observed only, never taken from the game, and delivered whichever window is in front.
 
 | | |
 |---|---|
@@ -208,8 +234,8 @@ Waiting without blocking, and knowing when a cached reading went stale.
 
 | | |
 |---|---|
-| [`host.timer.after(ms, callback)`](timer#host-timer-after) | Schedules a **one-shot** callback to fire approximately `ms` milliseconds later, driven from the event-loop tick. |
-| [`host.timer.every(ms, callback)`](timer#host-timer-every) | Schedules a **recurring** callback to fire approximately every `ms` milliseconds, driven from the event-loop tick. |
+| [`host.timer.after(ms, callback)`](timer#host-timer-after) | Schedules a **one-shot** callback to fire approximately `ms` milliseconds later, driven from the event-loop tick |
+| [`host.timer.every(ms, callback)`](timer#host-timer-every) | Schedules a **recurring** callback to fire approximately every `ms` milliseconds, driven from the event-loop tick, and rounded… |
 
 ## host.settings
 
@@ -219,7 +245,7 @@ Typed, per-module settings, edited by the user in the module manager.
 |---|---|
 | [`host.settings.define(key, default, opts?)`](settings#host-settings-define) | Registers a setting `key` for this module, pins its kind from `default`, and |
 | [`host.settings.get(key)`](settings#host-settings-get) | Returns the current stored value of a previously-defined setting |
-| [`host.settings.onChange(key, callback)`](settings#host-settings-onchange) | Registers `callback` to run whenever this setting changes (via `set` or the |
+| [`host.settings.onChange(key, callback)`](settings#host-settings-onchange) | Registers `callback` to run whenever this setting is set (via `set` or the |
 | [`host.settings.set(key, value)`](settings#host-settings-set) | Validates `value` against the setting's schema and writes it to the store |
 
 ## host.config
@@ -326,10 +352,12 @@ The shapes and grammars the calls above are written in.
 
 | | |
 |---|---|
+| [`A slow callback`](timer#a-slow-callback) | What a callback that takes too long costs beyond delaying everything else on the loop depends on the platform. |
 | [`Button and axis names`](gamepad#button-and-axis-names) | Every name a filter accepts, beside what SDL3, pygame and XInput call it and what is printed on each family's pads. |
 | [`Key spec string format`](keys#key-spec-string-format) | Two namespaces parse `+`-joined spec strings; segments are trimmed and case-insensitive. |
-| [`Matchers`](window#matchers) | A *matcher* is a declarative table passed to `host.window.find/findAll/test/onTrigger`. |
+| [`Matchers`](window#matchers) | A *matcher* is a declarative table passed to `host.window.find/findAll/test/onTrigger`, and to the overlay's bindings. |
 | [`Plugin base + library overlays (the cell model)`](overlay#plugin-base-library-overlays) | A plugin is not one overlay. |
+| [`Recognition language`](ocr#recognition-language) | What `lang` means to each platform's engine, and what leaving it out means. |
 | [`Region form`](screen#region-form) | Several functions (`host.screen.imageSearch` and the other searches, `host.screen.profile`, `host.ocr.recognize`, and each… |
 | [`Table shapes`](window#table-shapes) | Returned by `host.window.list()`, `host.window.active()`, `host.window.find()`, `host.window.findAll()`, and passed to trigger/test callbacks. |
 | [`Which picture a read sees`](screen#which-picture-a-read-sees) | Every call on this page, and `host.ocr.recognize` / `recognizeMany`, reads the screen one way for the whole module, chosen in its manifest rather than per call. |
