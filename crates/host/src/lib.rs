@@ -1438,6 +1438,12 @@ fn collect_code_deps(
     Ok(())
 }
 
+/// Whether a module loads on this platform: its `supported_os` claim, unless the override that
+/// loads every module anyway is set. The same rule the loader applies to the module itself.
+fn runs_here(manifest: &module_manifest::ModuleManifest) -> bool {
+    manifest.runs_on(std::env::consts::OS) || appcfg::ignore_supported_os()
+}
+
 fn collect_one_code_dep(
     parent: &Path,
     spec: &str,
@@ -1462,6 +1468,16 @@ fn collect_one_code_dep(
     let lm = LoadedModule::load(&dir)?;
     if !lm.manifest.code_module {
         return Ok(()); // legacy data dependency — not loaded into the VM
+    }
+    // An optional dependency that does not run on this platform is as absent as one that is
+    // not installed. Its module is skipped at load for its `supported_os`, so it never enters
+    // the module table, and evaluating its code here failed the whole dependent with "not in
+    // the module table" — which is how declaring Komplete Kontrol Windows-only took Kontakt and
+    // every Kontakt library down on macOS (the Mac CI's module smoke run, 2026-09-22). The
+    // dependent's `host.tryRequire` answers nil for it, as for a missing one. A REQUIRED
+    // dependency that does not run here stays an error: the dependent cannot work without it.
+    if optional && !runs_here(&lm.manifest) {
+        return Ok(());
     }
     // Its own code-module deps first (required + optional), so they're registered before it.
     collect_code_deps(parent, &lm.manifest.dependencies, &lm.manifest.optional_dependencies, out, seen)?;
@@ -6576,6 +6592,56 @@ mod luau_source_tests {
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
         assert!(compiled > 20, "only {compiled} Luau files found under {}", root.display());
+    }
+}
+
+#[cfg(test)]
+mod optional_code_dep_tests {
+    use super::*;
+
+    /// A code module in its own folder under `parent`, claiming `os` in `supported_os`.
+    fn code_module(parent: &Path, id: &str, os: &str) {
+        let dir = parent.join(id.rsplit('.').next().unwrap());
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("module.toml"),
+            format!(
+                "id = \"{id}\"\nname = \"Test\"\nversion = \"1.0.0\"\nentry = \"src/main.luau\"\n\
+                 code_module = true\nsupported_os = [\"{os}\"]\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("src").join("main.luau"), "return {}\n").unwrap();
+    }
+
+    #[test]
+    fn an_optional_code_dependency_for_another_platform_is_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        code_module(tmp.path(), "com.test.elsewhere", "plan9");
+        code_module(tmp.path(), "com.test.here", std::env::consts::OS);
+        let mut out = Vec::new();
+        collect_code_deps(
+            tmp.path(),
+            &[],
+            &["com.test.elsewhere".to_string(), "com.test.here".to_string()],
+            &mut out,
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        let ids: Vec<&str> = out.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, ["com.test.here"], "only the dependency that runs here is evaluated");
+    }
+
+    #[test]
+    fn a_required_code_dependency_for_another_platform_is_still_collected() {
+        // Kept, so the dependent fails loudly where the module table is consulted: it cannot
+        // work without a dependency it requires.
+        let tmp = tempfile::tempdir().unwrap();
+        code_module(tmp.path(), "com.test.elsewhere", "plan9");
+        let mut out = Vec::new();
+        collect_code_deps(tmp.path(), &["com.test.elsewhere".to_string()], &[], &mut out, &mut HashSet::new())
+            .unwrap();
+        assert_eq!(out.len(), 1);
     }
 }
 
