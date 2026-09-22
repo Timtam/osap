@@ -322,6 +322,7 @@ pub fn shutdown_capture() {
 }
 
 /// A recognized word with its bounding box (in capture-region coordinates).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OcrWord {
     pub text: String,
     pub x: i32,
@@ -330,10 +331,27 @@ pub struct OcrWord {
     pub h: i32,
 }
 
+/// One line as the engine returned it — Windows' `OcrLine`, one Vision observation — with its
+/// words in capture-region coordinates. What `host.ocr.read` groups into rows
+/// (`ocr::pipeline::rows`); the two legacy calls never look at it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OcrLine {
+    pub text: String,
+    pub words: Vec<OcrWord>,
+}
+
 /// OCR result: the full recognized text plus per-word boxes.
 pub struct OcrText {
     pub text: String,
     pub words: Vec<OcrWord>,
+    /// The engine's lines, the same words grouped as it grouped them. Empty when the fallback
+    /// recogniser answered, which locates nothing.
+    pub lines: Vec<OcrLine>,
+    /// Set when Windows' fallback recogniser answered instead of the system one: the content
+    /// crop it read, `(x, y, w, h)` in capture-region coordinates. `text` is its answer and
+    /// `words` and `lines` are empty, as the legacy calls have always returned it; `host.ocr.read`
+    /// shares the crop out among the text's tokens as approximate boxes.
+    pub fallback: Option<(i32, i32, i32, i32)>,
     /// The blank guard answered instead of the engine: the region's content crop found no
     /// ink, so the recogniser was never asked, and the empty `text` and `words` are the
     /// guard's answer rather than a reading. It rides on the result because the only other
@@ -343,6 +361,116 @@ pub struct OcrText {
     /// result: a failed capture or a zero-sized region is a different fault, and the log
     /// names those on its own.
     pub skipped: bool,
+}
+
+/// What `host.ocr.read` says when the platform has no recogniser at all.
+pub const NO_RECOGNISER: &str = "no text recogniser on this platform";
+
+/// The pixels the OCR capture stage took for one read, handed to the recognise stage. `Send`,
+/// because it crosses from the one thread to the other; what it holds is the platform's own.
+#[cfg(windows)]
+pub type OcrShot = Vec<Result<CapturedImage, String>>;
+#[cfg(target_os = "macos")]
+pub type OcrShot = macos::ocr::Shot;
+#[cfg(not(any(windows, target_os = "macos")))]
+pub type OcrShot = ();
+
+/// Which of the two OCR threads is starting — see [`OcrWorker::init_thread`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OcrThread {
+    Capture,
+    Recognise,
+}
+
+/// What one recognition is asked for, beside the pixels.
+///
+/// `fast_ok` and `preempt` steer the macOS ladder; Windows has no optional pass to skip, and
+/// reads neither. `stop` and `region_done` are for both, through [`Recognise::each`].
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct Recognise<'a> {
+    /// The language as the platform lists it, already resolved (`ocr::lang`). `None` is the
+    /// engine's own default, which only the legacy calls use.
+    pub lang: Option<&'a str>,
+    /// Whether the fast model reads `lang` too (macOS; its last rung is skipped when not).
+    pub fast_ok: bool,
+    /// For a background read: set while interactive work waits, and a recogniser with optional
+    /// extra passes skips them (macOS's bigger-then-faster rungs). `None` for interactive reads.
+    pub preempt: Option<&'a std::sync::atomic::AtomicBool>,
+    /// Set when the application is closing: the regions not started yet are answered
+    /// [`CLOSING`] without being read. Without it a job of 64 regions went on recognising —
+    /// and on Windows kept starting neural recognitions — after the exit had stopped waiting
+    /// for it, which is the fault the exit's waits are there to prevent.
+    pub stop: Option<&'a std::sync::atomic::AtomicBool>,
+    /// Called after each region is answered: the service's hang guard counts from the last
+    /// region answered, not from the start of the job.
+    pub region_done: Option<&'a dyn Fn()>,
+}
+
+/// What a region is answered when the application closed before it was read.
+pub const CLOSING: &str = "the application is closing";
+
+impl Recognise<'_> {
+    /// Answers `items` one region at a time, in order, through `read` — every recogniser's loop,
+    /// so that the exit and the hang guard see each region: a region is not started once
+    /// `stop` is set, and `region_done` is told after each one that was.
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+    pub fn each<T>(
+        &self,
+        items: impl IntoIterator<Item = T>,
+        mut read: impl FnMut(T) -> Result<OcrText, String>,
+    ) -> Vec<Result<OcrText, String>> {
+        items
+            .into_iter()
+            .map(|item| {
+                if self.stop.is_some_and(|s| s.load(std::sync::atomic::Ordering::Acquire)) {
+                    return Err(CLOSING.to_string());
+                }
+                let answer = read(item);
+                if let Some(done) = self.region_done {
+                    done();
+                }
+                answer
+            })
+            .collect()
+    }
+}
+
+/// The OCR threads' view of the platform: bare functions, so neither thread ever touches the
+/// `Rc` backend — the same arrangement as [`CaptureFn`] for the image worker. Generic over the
+/// pixels so the service can be tested with a fake; the platform's is [`OcrShot`].
+pub struct OcrWorker<S = OcrShot> {
+    /// Whether this platform has a text recogniser at all.
+    pub present: bool,
+    /// Runs first on each of the two threads: WinRT's apartment on Windows, the recognise
+    /// thread's quality of service on macOS.
+    pub init_thread: fn(OcrThread),
+    /// Photographs `regions` through the source, at once: all of them from one moment. Returns
+    /// the pixels and roughly how many bytes they hold. One failed region fails in its own slot.
+    pub capture: fn(&[(i32, i32, i32, i32)], CaptureSource) -> (S, usize),
+    /// Recognises each region of a capture, one answer per region in order.
+    pub recognise: fn(&S, &[(i32, i32, i32, i32)], &Recognise) -> Vec<Result<OcrText, String>>,
+    /// The languages the engine reads and the user prefers. Called on the recognise thread.
+    pub languages: fn() -> crate::ocr::lang::Languages,
+}
+
+impl<S> Clone for OcrWorker<S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<S> Copy for OcrWorker<S> {}
+
+impl OcrWorker {
+    /// The worker of a platform without a recogniser: nothing is captured, every region fails.
+    pub fn none() -> OcrWorker {
+        OcrWorker {
+            present: false,
+            init_thread: |_| {},
+            capture: |_, _| (OcrShot::default(), 0),
+            recognise: |_, regions, _| regions.iter().map(|_| Err(NO_RECOGNISER.to_string())).collect(),
+            languages: crate::ocr::lang::Languages::default,
+        }
+    }
 }
 
 /// One element of an accessibility dump: what it is, what it is called, and WHERE it is.
@@ -644,6 +772,12 @@ pub trait Backend {
             .iter()
             .map(|(x, y, w, h)| self.ocr(*x, *y, *w, *h, lang, src))
             .collect()
+    }
+
+    /// The functions `host.ocr.read`'s two threads call — see [`OcrWorker`]. Taken once, when
+    /// the service starts. The default is a platform with no recogniser.
+    fn ocr_worker(&self) -> OcrWorker {
+        OcrWorker::none()
     }
 
     /// Current mouse cursor position (screen coordinates).
@@ -1448,6 +1582,44 @@ pub fn platform() -> Rc<dyn Backend> {
     #[cfg(not(any(windows, target_os = "macos")))]
     let backend: Rc<dyn Backend> = Rc::new(stub::StubBackend);
     backend
+}
+
+#[cfg(test)]
+mod recognise_each_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn text(t: &str) -> Result<OcrText, String> {
+        Ok(OcrText { text: t.into(), words: vec![], lines: vec![], fallback: None, skipped: false })
+    }
+
+    /// Every region is reported as it is answered, and once the application is closing the rest
+    /// are answered without being read — not one more recognition starts.
+    #[test]
+    fn regions_after_the_stop_are_not_read_and_each_answered_one_is_reported() {
+        let stop = AtomicBool::new(false);
+        let done = Cell::new(0);
+        let tick = || done.set(done.get() + 1);
+        let ctx = Recognise { lang: None, fast_ok: true, preempt: None, stop: Some(&stop), region_done: Some(&tick) };
+        let read = Cell::new(0);
+        let answers = ctx.each(0..5, |i| {
+            read.set(read.get() + 1);
+            if i == 1 {
+                stop.store(true, Ordering::Release); // the exit begins during the second region
+            }
+            text(&i.to_string())
+        });
+        assert_eq!(read.get(), 2, "the third region was never started");
+        assert_eq!(done.get(), 2);
+        assert_eq!(answers.len(), 5, "every region is still answered");
+        assert_eq!(answers[1].as_ref().unwrap().text, "1");
+        assert!(answers[2..].iter().all(|a| a.as_ref().err().map(String::as_str) == Some(CLOSING)));
+
+        // Neither is required: the legacy shape reads everything and reports nothing.
+        let plain = Recognise { lang: None, fast_ok: true, preempt: None, stop: None, region_done: None };
+        assert_eq!(plain.each(0..3, |_| text("x")).len(), 3);
+    }
 }
 
 #[cfg(test)]

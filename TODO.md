@@ -2487,7 +2487,7 @@ entry and per batch on the image worker (step 2); `host.screen.template` with `r
 to 255 in the Windows capture; `host.json.decode`; the doc bugs in `resource.md`, `require.md`
 and `screen.md`. Bindings and worker are in `crates/host/src/image_search.rs`.
 
-- [ ] **Step 3 waits for the developer's answer: what is one cell of his signatures?** A pixel
+- [x] **Step 3 waits for the developer's answer: what is one cell of his signatures?** A pixel
       at a fixed place, or the mean of a block. Until he says, none of this is built: sparse
       point templates, `lo`/`hi` ranges, `outside` checks, template-level `tolerance`,
       `maxMiss` and the ±2 px refinement after a first hit with misses, nor the
@@ -2497,6 +2497,11 @@ and `screen.md`. Bindings and worker are in `crates/host/src/image_search.rs`.
       today, so adding them later changes no existing behaviour. If a cell is a mean, give the
       colour test a `kind` byte (critique issue 1) so a channel-difference predicate can follow
       without an API change.
+  - Answered (2026-09-21): a cell is the share of a block's pixels that pass a colour test, so
+      the reducer was built instead of the sparse templates: `host.screen.cells` (2026-09-22,
+      "Grid cells and window regions" below). Points, ranges, `outside`, `maxMiss` and the
+      refinement are not needed for it and are not built; a template colour test would reuse
+      `cells::Predicate` (see the last item there).
 - [ ] **Measure the variant cache (step 2).** `match_ms` from the `[image]` batch line on the
       Kontakt and Soundiron landmark polls and on the gtoggle scale ladder, before and after
       this change. Expected: scaled scans faster (probes again, no resize per call); unscaled
@@ -2785,19 +2790,25 @@ was planned, or found, and is not built.
 
 Planned — the API pages say these do not exist:
 
-- [ ] **Threaded OCR.** `host.ocr.recognize` and `recognizeMany` capture and recognise on the
+- [x] **Threaded OCR.** Built 2026-09-22 as `host.ocr.read` — see "Text recognition off the
+      event loop" below; the modules that poll with the synchronous calls move one by one, with
+      an NVDA test each. What it was: `host.ocr.recognize` and `recognizeMany` capture and recognise on the
       event loop (`lib.rs`, the `recognize` binding; `RecognizeAsync(…).get()` and the untimed
       join of the Paddle thread in `backend/windows.rs`; the synchronous `performRequests`
       ladder in `backend/macos/ocr.rs`), which holds the keyboard hook for the whole read —
       estimated at 50–200 ms for a control label in `docs/screen-frame-sharing-design.md`, a
       cost ranking rather than a recorded measurement. Move recognition to a worker with a callback form, the way
       `imageSearchAsync` did for search, and keep the synchronous call for one-shots.
-- [ ] **OCR language normalisation**, with the threaded OCR: the module names a language once
+- [x] **OCR language normalisation**, with the threaded OCR — built 2026-09-22 (`ocr/lang.rs`,
+      `fluent-langneg`), for `read` and the two older calls; one engine per language is not kept
+      yet (O1 below). What it was: the module names a language once
       (`"de"`), and the host maps it to each engine's identifier. Today `lang` goes to
       `Windows.Media.Ocr` and Vision unchanged (`docs/api/ocr.md`, Recognition language). On
       Windows, ask `OcrEngine::IsLanguageSupported` instead of letting `TryCreateFromLanguage`
       fail, and keep one engine per language instead of creating one per call.
-- [ ] **Measure: does either engine take a bare `"de"` or `"en"`?** Never observed — no module
+- [x] **Measure: does either engine take a bare `"de"` or `"en"`?** Superseded 2026-09-22: the
+      resolver hands each engine a tag from its own list, so a bare tag never reaches one; what
+      Vision does with a tag it does not list stays open as O6 below. It was never observed — no module
       in the repo passes `lang`. Windows: `Language::CreateLanguage("de")` and
       `TryCreateFromLanguage` on a machine with the German OCR component; macOS:
       `setRecognitionLanguages(["de"])` against `supportedRecognitionLanguages`. The docs make
@@ -2816,7 +2827,7 @@ Planned — the API pages say these do not exist:
       Windows every `host.screen.pixel` call is a screen read of its own (about 16.7 ms on the
       standard path), on macOS only reads inside the last 256×96 tile within 5 ms share one,
       and no call reads several points from one capture. `host.screen.cells`
-      (step 3 of the in-memory templates section above) covers the block-statistics half.
+      (built 2026-09-22, "Grid cells and window regions" below) covers the block-statistics half.
 
 Found while documenting — the behaviour is written down now, and wants fixing:
 
@@ -3561,6 +3572,198 @@ the `Mod`/`Global` tokens of the same morning.
       was invisible before our dependencies' messages reached the log. Find which tree call
       returns the invalid item (the module manager's tree, gui.rs) and whether anything the user
       sees is missing because of it.
+
+## Grid cells and window regions (2026-09-22)
+
+Step 4 of the API work: `host.screen.predicate`, `cells`, `matchCells` and `matchCellsAsync`,
+and the window-relative Region form, built to reproduce an outside game-menu reader's signatures
+bit for bit. The rules are in `crates/host/src/cells.rs` and `region.rs`, the bindings in
+`lib.rs`, the worker job in `image_search.rs`. Built and unit-tested; nothing of it has run in
+the real application yet.
+
+- [x] **`region.rs`:** `{ window = w, fraction = { x1, y1, x2, y2 } }` resolved from the window
+      table's `client` with the reader's own formula in f64 (floor for starts, ceil for ends,
+      then his pixel clamps), so it never raises for a fraction outside 0..1 or an end before
+      its start; only non-finite numbers and wrong types raise (`region_lua.rs`).
+      His eight bounds cases are a unit test.
+- [x] **`cells.rs`:** the predicate string on winnow (C# as pasted, a canonical form, errors
+      with the column in characters), multiplied out into integer conditions; blocks with the
+      one-pixel minimum; the cell as his `Math.Round(255.0*m/t)` in f64 (`round_ties_even`),
+      held to the exact integer half-even on all 582,266 midpoints up to 200,000 pixels; hex
+      (the `hex` crate) as the only exchange format; similarity with an integer sum; items by
+      name and the runner-up. All 2^24 colours are checked against a Rust copy of his condition.
+- [x] **Golden test against his package** (`cells_golden_tests.rs`): the frame's checksum, both
+      vectors' bounds, all 720 blocks of his tables (edges, counts, byte) and both hex strings
+      reproduce. The package is a frame of a commercial game, so it lives only in
+      `crates/host/tests-data-local/` (ignored by git); the test says it skipped where the
+      folder is missing, which is every CI runner.
+- [x] **Bindings:** options and states read strictly by serde through mlua and
+      `serde_path_to_error` (paths 1-based); `nil, reason` for an empty client area, a failed
+      capture and a capture of the wrong size; `matchCellsAsync` as `Job::Cells` on the image
+      worker, sharing frames with the searches of its batch, read through the VM's capture
+      source; a region that did not resolve is answered on the worker without a capture, so
+      the callback always comes. `region.rs` and `cells.rs` are borrowed into `macos-check`.
+- [x] **Review fixes:** `host.json.decode` reads a number as the nearest double (serde_json's
+      `float_roundtrip`: the default parser read 10.5 % of the fractions k/W up to W = 2000 a
+      unit in the last place off, which moved a window region's edge by a pixel); predicate
+      sources up to 8192 bytes, above the longest canonical form (6916), so what `predicate`
+      returns is always accepted again; parentheses at most 32 deep, because the parser
+      recursed once per `(` on the event loop's 1 MB stack (508 of them, in 1024 bytes, needed
+      2.1 MB in a debug build: a crash, not an error); a number with a leading zero is
+      refused, since C and JavaScript can read `010` as octal; hex errors count characters,
+      not bytes.
+- [ ] **Live self-test on Windows, needing nobody to set up a screen:** `cells` of a fraction
+      region of the manager window, taken twice, gives equal hex; `matchCells` against that hex
+      and an all-zero state gives index 1 with similarity 1.0; `matchCellsAsync` gives the
+      same; a 5x20 px region with a 10x36 grid returns 720 hex digits.
+- [ ] **A `matchCellsAsync` held over a disable, live:** disable a module in the manager while
+      its cells read waits, then enable it: the callback gets `nil, "the module was disabled
+      while the read waited"` without a capture, and a poll gated on it asks again.
+      `image_search::resend` is unit-tested; the path through `apply_enabled`, the worker and
+      the drain has not run, and a headless run cannot disable a module.
+- [ ] **End to end with the reader's author:** his reader and `cells` log hex for the same
+      static menu at the same time, through the same source (`[screen] capture =
+      "duplication"`, which his pack prefers). The golden test proves the reduction only; this
+      is the only proof that the two capture paths hand over the same pixels.
+- [ ] **Standard path against duplication:** cells of one static window through both sources.
+      Unmeasured, which is why `screen.md` tells authors to record through the source they poll
+      with.
+- [ ] **Optional: states recorded at 100 % against 150 % scaling**, to put a number on what the
+      docs say about games that are not DPI-aware.
+- [ ] **macOS, never run on a Mac:** the unit tests run in the macOS CI job's `cargo test`, but
+      no Mac capture has been reduced. Add to `tools/capture-probe`: the stability of the cells
+      of a static window; a Retina display against 1x; whether drawing into the DeviceRGB
+      context changes a known sRGB patch (it would move every cell near a colour test's edges).
+      The client rectangle a window region resolves against is derived there, not read, and has
+      not been checked against a game window either.
+- [ ] **The other calls should take the window Region form too**, through `region_lua::read`
+      and `Region::resolve` (`host.ocr.read` does since the merge with the OCR step):
+      `host.screen.profile`, `imageSearch`, `imageSearchAsync`, `imageSearchEach` and its
+      entries' `within`, `imageSearchAll`, `imageSearchMulti`, `save`, `saveMarked`,
+      `template{ capture = ... }`, `host.ocr.recognize` and each `recognizeMany` region, and
+      `pixel` as a point form (`{ window, fraction = { x, y } }`). They read corners loosely
+      today; adopting the form means deciding per call whether their corners become strict too,
+      which changes what existing modules get.
+- [ ] **Snapshots:** a `snapshot` key for the cells calls once snapshots exist. A region not
+      wholly inside the snapshot must answer `nil, "the region is not inside the snapshot"`
+      rather than be clipped, which would change every block.
+- [ ] **An in-repo benchmark of `cells::reduce`.** The 8 ns a pixel in `screen.md` was measured
+      with a scratch crate that borrowed `cells.rs` (release build, i7-8700K); an `#[ignore]`
+      test would keep the number true when the code changes.
+- [ ] **Share the predicate with templates** when a template colour test is built:
+      `cells::Predicate` is that test, and a second parser would be a second set of rules.
+
+## Text recognition off the event loop (2026-09-22)
+
+`host.ocr.read` is built: a `screen-capture` thread photographs at the call, an `ocr-recognise`
+thread recognises, the answer is delivered on the loop (ocr/service.rs, ocr/lua.rs,
+docs/api/ocr.md). Languages go through `fluent-langneg` on both platforms, for `read`,
+`languages`, `resolveLanguage` and the `lang` of the two older calls. The Windows neural
+recogniser still starts beside `Windows.Media.Ocr` for every small region, exactly as before.
+What only a person, a Mac or a measurement can settle:
+
+- [ ] **Migrate the Melodyne selection watcher** to `host.ocr.read` with `key = "selection"`,
+      re-checking `ov.active` and `nativeMenuOpen` inside the callback. Needs an NVDA test: the
+      same announcements, and the pump overrun lines gone.
+- [ ] **Migrate the overlay runtime's `speakControl`**: the name spoken at once, the OCR value
+      appended when it arrives, and the callback returning on `newer` (the focus moved) or on a
+      changed pinned window. Only an `ocrLabel` control waits for its read before speaking. The
+      input barrier is what keeps read-then-click right for the `opensMenu` buttons (sforzando,
+      u-he, Soundiron, Impact Soundworks) and the Komplete Kontrol OCR edit field; an NVDA test
+      with each of them is the gate.
+- [ ] **Kontakt's file-menu read** moves to `read` with the other two, but keeps building its own
+      rows (`ocrRows`) until `read`'s rows are compared with it on both platforms.
+- [ ] **The language list at load:** in the first headless run the list was not known within the
+      50 ms `languages()` waits, so a module asking in its top-level code got `{}` (it was known a
+      moment later). Measure how long the recognise thread's first `AvailableRecognizerLanguages`
+      and `GlobalizationPreferences.Languages` take; if it is routinely over 50 ms, publish the
+      last session's list at start and replace it when the fresh one arrives.
+- [ ] **O1** — WinRT engine creation against `RecognizeAsync` (decides whether the recogniser
+      should keep one engine per language).
+- [ ] **O3 / O16** — how long reads wait: before the capture, the capture, before the recogniser,
+      per lane, p50 and p95, with Melodyne polling and while tabbing through an overlay; and the
+      input barrier's waits. The log's "ocr: N region(s) … waited" line covers jobs over 100 ms.
+- [ ] **O4** — a synchronous `recognize` inline against the same read queued and waited for.
+- [ ] **O5** — confirmation only: Windows with the resolver hands `"de-DE"` for `"de"`; whether
+      `TryCreateFromLanguage("de")` alone would have worked is now moot.
+- [ ] **O6 (Mac)** — Vision's accurate and fast language lists on macOS 12, 14, 15 and 26, and what
+      Vision does with a tag it does not list (the resolver never hands it one, but `recognize`
+      does while the list is not known yet).
+- [ ] **O7 (Mac)** — what one Vision pass costs on the recognise thread, against the pump thread.
+- [ ] **O8 (Mac)** — the spelling `NSLocale.preferredLanguages` gives ("de-DE", "de", "de-Latn-DE")
+      and that it resolves; and that asking for it off the main thread is fine.
+- [ ] **O9** — the line separator in `OcrResult.Text()` (what `recognize` returns as `text`).
+- [ ] **O10** — whether the GitHub Windows runner has an OCR language, which decides whether a CI
+      probe can assert a `read`.
+- [ ] **O11 / O12 / O17** — `OcrEngine.MaxImageDimension`; what `Cancel()` does after a timeout;
+      how long a whole-screen read takes on the reference machine. Together they decide a 5 s
+      guard on `RecognizeAsync` (`SetCompleted` once, never `get()`), which is not built: the
+      recognise thread waits on `get()` as `recognize` does, and a region not answered for 5 s
+      only makes new reads fail at once until one is (the guard counts from the last region
+      answered, not from the start of the job, since the review of 2026-09-22).
+- [ ] **O13** — the event loop's COM apartment. `ensure_winrt` logs once when a thread keeps an
+      apartment it already had; a GUI session's log answers it.
+- [ ] **O14 (Mac)** — how often the ladder's last rungs read something past 250 ms, now that they
+      no longer hold the tap thread.
+- [ ] **O15** — how often WinRT and the neural recogniser disagree on small regions both read.
+- [ ] **O18** — whether the two threads are throttled when the application is in the background:
+      Windows power throttling (EcoQoS) on battery, macOS App Nap; and on macOS whether the
+      user-initiated quality of service the recognise thread asks for changes anything.
+- [ ] **O19** — the cost of deciding the small-text path by the content crop instead of the
+      region's size (up to 1 MP), and whether it changes any read in the repo's modules.
+- [ ] **Mac, first run:** a `read` from a headless probe — the capture from the `screen-capture`
+      thread (ScreenCaptureKit's answer while the pump is not the thread waiting), rows from
+      Vision's observations, `languages()` and `resolveLanguage("de")`.
+- [ ] **Not built yet from the design:** the capture-probe `read` line and its CI assertion
+      (informational on Windows first); a log nudge for a module polling `recognize` from a
+      timer; the await form (`host.task`); snapshots on the `screen-capture` thread; `expect`.
+- [x] **At the merge with the cells step: one strict region reader.**
+      `crates/host/src/region_lua.rs` is the one reader, used by the cells calls and by `read`;
+      the rule for corners is `region::corners` in the pure `region.rs`, which the macOS check
+      borrows. One rule, the stricter of the two on each point: corners are whole numbers (a
+      fraction of a pixel raises instead of being cut toward zero), `{}` raises instead of
+      meaning the whole display, and empty or turned-around corners raise instead of being
+      answered `"failed"`. What a window does at run time is answered, not raised: a window
+      region whose client area is empty is `nil, reason` from the cells calls and a `"failed"`
+      reading with that reason from `read`, while the call's other regions are read. `read`
+      takes `{ window, fraction }` as a bare region, as an entry's `region` and in a list,
+      resolved at the call. Written once under `docs/api/screen.md#region-form`; `ocr.md`
+      points there.
+  - Review fixes, same day: the pixel limit follows the same rule — corners past it raise,
+      a window region past it is answered (`nil, reason` from the cells calls, a `"failed"`
+      reading from `read`, counted after the corners and in order), since its size is the
+      window's; a `read` whose every region is unresolved is answered without the queue (no
+      ticket, picture or language), superseding its key's waiting reads all the same; a
+      `matchCellsAsync` held over a disable is answered `nil, reason` on enable instead of
+      reading a rectangle worked out minutes earlier; a three-letter `lang` (`"eng"`) is a
+      well-formed tag and is answered unavailable, not raised, as the docs now say.
+- [ ] **`read` with a window region, live:** a minimised game's region answered `"failed"` with
+      the client-area reason while the other regions of the same call are read, and a region
+      that follows the window when it is resized — neither has run outside the unit tests.
+- [ ] **Measure: do the neural recognitions pile up under `read`?** They still start beside
+      `Windows.Media.Ocr` for every small region, on purpose. But `read` is no longer paced by the
+      event loop: a 64-region call starts 64 of them at once, all queuing on the one session
+      lock, and a region that really needs the fallback waits behind every one of them that will
+      be thrown away. One debug headless run delivered a small region after about 9 s (not
+      reproduced; 894 ms in the trace run). Measure the fallback's wait with many regions per
+      call first. If it matters, a way that keeps the start parallel: hand the thread a flag, set
+      when `Windows.Media.Ocr` answers or the blank guard fires, and have `paddle_ocr::recognize`
+      return early when it is set — after the preprocessing, before it takes the session lock.
+- [ ] **An exit that hung in a third-party audio DLL** (seen 2026-09-22, not OCR): one of five
+      headless runs that exited on their own (a module that fails to load, so nothing is
+      pending) never finished exiting. Our exit had completed; the last thread sat in
+      `ExitProcess` → `LdrShutdownProcess` → `SS3DevProps.dll` (ASUS Sonic Suite 3, loaded
+      through the audio stack once the OneCore voice opened) → `SleepEx`, in a loop, and
+      `TerminateProcess` is refused for a process already exiting. The other four exited with
+      code 0 in 1.5–4 s. The `read` build's own headless runs had all been stopped by PID, so
+      they never reached this. Check whether the tray's Quit meets the same on this machine, and
+      whether headless should open a voice at all when nothing is spoken.
+- [ ] **The older calls' region arithmetic can overflow** (found beside the `read` review, older
+      than it): `read_region` and `recognizeMany` in `lib.rs` compute `(x2 - x1).max(0)` in
+      `i32`, so one region from x = -2e9 to 2e9 panics in a debug build (on the event loop) and
+      becomes an empty region in a release one; the macOS `recognize_regions` adds and subtracts
+      the edges of several regions in `i32` the same way. `read` works in 64 bits (`region.rs`
+      `corners`, `Rect::union`); do the same there.
 
 ## Dev tools
 

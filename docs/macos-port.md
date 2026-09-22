@@ -335,3 +335,14 @@ described above, not something that was built. The first tester session showed t
 thread suffices for ordinary use: the tap was never disabled during minutes of Tab
 navigation, only by stalls of over a second, and the watchdog had it back within about two
 seconds each time.)
+
+**`host.ocr.read` takes OCR off the pump thread.** It photographs on a thread named
+`screen-capture` (the same `capture_backing` the synchronous calls use) and runs Vision on a
+second one, `ocr-recognise`, which asks for the user-initiated quality of service and wraps
+every job in an autorelease pool. The Vision warm-up keeps its own thread from
+`MacBackend::new`; the recogniser never waits for it. The recognise thread also asks Vision
+which languages it reads (`supportedRecognitionLanguages`, at the accurate and the fast
+level) and the system which ones the user prefers (`NSLocale.preferredLanguages`), and a
+read's `lang` is matched against those. `recognize` and `recognizeMany` still run on the pump
+thread and still stall it; the modules that poll with them have not moved yet (TODO.md). None
+of this has run on a Mac.

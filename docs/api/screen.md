@@ -1,10 +1,10 @@
 ---
-title: "host.screen — pixels, profiles and image search"
+title: "host.screen — pixels, profiles, cells and image search"
 sidebar_position: 14
 toc_max_heading_level: 2
 ---
 
-Reads what is on screen: the colour of a point, a per-column and per-row profile of a region, and a search for a template image within one — a PNG, or a template built in memory from bytes or from the screen itself.
+Reads what is on screen: the colour of a point, a per-column and per-row profile of a region, a region reduced to a grid of cells and compared with stored ones, and a search for a template image within one — a PNG, or a template built in memory from bytes or from the screen itself.
 
 Use it where there is no element to ask. State that exists only as colour — Kontakt reads whether its snapshot bar is open from one pixel on the camera icon, and ON:EAR classifies each of its switches from a single pixel — and anything whose position moves, which is what image search is for, since Kontakt's five instrument-editor sections are found by their captions because opening one pushes the rest down the window.
 
@@ -12,7 +12,7 @@ Use it where there is no element to ask. State that exists only as colour — Ko
 
 The matching, unlike the capture, does grow with the area. A template search across a whole plug-in window is the slow call here — measured at twelve seconds for one full-region match while twelve library overlays polled the same window every 500 ms — which is why anything on a detection poll uses `imageSearchAsync` on its worker thread and re-searches a small box around the last hit before widening.
 
-**Everything here except `imageSearchAsync` and `imageSearchEach` runs on the event loop**, the one thread that also carries speech, hotkey and key callbacks, timers and, on macOS, the event tap. Those two capture and match on a worker thread and call back on a later tick.
+**Everything here except `imageSearchAsync`, `imageSearchEach` and `matchCellsAsync` runs on the event loop**, the one thread that also carries speech, hotkey and key callbacks, timers and, on macOS, the event tap. Those three capture and match on a worker thread and call back on a later tick.
 
 **Coordinates are device pixels on Windows and points on macOS.** The application declares per-monitor DPI awareness (`PerMonitorV2`), so on Windows every coordinate on this page — and on every other page — is one physical pixel of the display; on macOS it is one point. The two numbers agree only at 100 % scaling. A region measured with a tool that is **not** DPI-aware on a Windows display scaled above 100 % is in that tool's scaled units: multiply it by the scale factor (1.5 at 150 %) before using it here. See [`host.screen.size`](#host-screen-size).
 
@@ -29,7 +29,7 @@ See [what that list is and is not](./index.md#capabilities).
 
 ## Which picture a read sees {#which-picture-a-read-sees}
 
-Every call on this page, and `host.ocr.recognize` / `recognizeMany`, reads the screen one way for the whole module, chosen in its manifest rather than per call. Nothing needs declaring for the standard way, which is what every module gets by default. A module written for an application the standard way may not read correctly — a game whose picture it sees frozen or black — can ask for the other one:
+Every call on this page, and `host.ocr.read` / `recognize` / `recognizeMany`, reads the screen one way for the whole module, chosen in its manifest rather than per call. Nothing needs declaring for the standard way, which is what every module gets by default. A module written for an application the standard way may not read correctly — a game whose picture it sees frozen or black — can ask for the other one:
 
 ```toml
 # module.toml of a game module
@@ -63,9 +63,9 @@ A module that depends on a `code_module` which declares `[screen]` inherits the 
 
 Duplication is opened ahead of time only when one of the module's [`host.window.onTrigger`](./window.md#host-window-ontrigger) triggers fires (the overlay runtime registers one for every module that attaches an overlay). A module that never uses `onTrigger` gets no such head start: its first read starts the opening, and the reads made while it is still opening are read the standard way, or return `nil` under `fallback = "none"` — the first of them after a short wait for the opening (see Windows below).
 
-With `fallback = "none"`, a read that duplication cannot answer fails the way a failed capture always fails on this page — `pixel` returns `nil`, `profile` and `imageSearch` return `nil`, `imageSearchMulti` returns `(nil, nil)`, `imageSearchAsync` and `imageSearchEach` call back with `nil`, `imageSearchAll` returns an empty list, `template{ capture = … }` returns `nil`, `save` and `saveMarked` return `false` — and `host.ocr.recognize` returns `{ text = "", words = {}, skipped = false, error = "…" }` instead of raising. That is for an application where the standard picture is wrong rather than slow: saying a frozen menu item is worse than saying nothing. With the default `fallback = "standard"`, such a read is quietly read the standard way instead.
+With `fallback = "none"`, a read that duplication cannot answer fails the way a failed capture always fails on this page — `pixel` returns `nil`, `profile` and `imageSearch` return `nil`, `imageSearchMulti` returns `(nil, nil)`, `imageSearchAsync` and `imageSearchEach` call back with `nil`, `cells` and `matchCells` return `nil` and a reason that says so, `matchCellsAsync` calls back with the same, `imageSearchAll` returns an empty list, `template{ capture = … }` returns `nil`, `save` and `saveMarked` return `false` — `host.ocr.read` answers a `"failed"` reading, and `host.ocr.recognize` returns `{ text = "", words = {}, skipped = false, error = "…" }` instead of raising. That is for an application where the standard picture is wrong rather than slow: saying a frozen menu item is worse than saying nothing. With the default `fallback = "standard"`, such a read is quietly read the standard way instead.
 
-Poll only while your window is in front. A [`host.timer.every`](./timer.md#host-timer-every) poll cannot be stopped, so gate its callback: return at once unless `host.window.active()` is your window, as the example under [`imageSearchEach`](#host-screen-imagesearcheach) does.
+Poll only while your window is in front. A [`host.timer.every`](./timer.md#host-timer-every) poll runs until it is [cancelled](./timer.md#host-timer-cancel), so gate its callback: return at once unless `host.window.active()` is your window, as the example under [`imageSearchEach`](#host-screen-imagesearcheach) does.
 
 ### Windows
 
@@ -316,18 +316,252 @@ The capture runs on the worker thread, not on the event loop, through the module
 
 The same worker and the same capture as `imageSearchAsync`. Without the Screen Recording permission the capture succeeds with a picture of the wallpaper, so the answer is **not** `nil` — `nil` only ever means the capture itself failed — but usually a list of `false`. Usually: a [`capture` template](#host-screen-template) that was itself made without the grant is a picture of the wallpaper, and its entry will match.
 
+## host.screen.predicate(expr) {#host-screen-predicate}
+
+**Signature:** `host.screen.predicate(expr: string) -> string`
+
+Checks a colour test for the [cells](#host-screen-cells) calls and returns it in its canonical form, or raises, naming the column, when it does not parse. The cells calls take the string itself and parse it on every call, which costs microseconds, so this call is for one thing: making a mistake in a pack's colour test fail when the module loads, not in a poll, where the error would open a dialog over the game.
+
+A predicate is an OR of AND-groups of comparisons over the 8-bit channels of a pixel, `r`, `g` and `b` (or `red`, `green`, `blue`):
+
+```text
+expr := and { OR and }        and := atom { AND atom }        atom := cmp | "(" expr ")"
+cmp  := sum REL sum           sum := ["-"] term { ("+" | "-") term }
+term := INT ["*" CH] | CH ["*" INT]
+CH   := r | g | b | red | green | blue        REL := >= | <= | > | < | ==
+AND  := and | &&      OR := or | ||
+INT  := decimal digits without a leading zero, at most 2147483647
+```
+
+`and` binds tighter than `or`, as in Luau, and parentheses group, so a condition written for C#, C or JavaScript is taken as pasted: `red*10 >= green*13 && red >= 80`. Whitespace, newlines included, may stand between any two tokens. Everything is a whole number: `r >= 1.3*g` is refused with the advice to scale both sides, `10*r >= 13*g`. A term is a number times one channel, never two channels.
+
+The canonical form is what the host evaluates. The expression is multiplied out into alternatives. Each comparison keeps its channels on the left, in r, g, b order, with its constant on the right. `>` becomes `>=` one higher, `<` becomes `<=` one lower, and `==` becomes two comparisons. A comparison whose coefficients are all negative is turned around, so `b <= 150` stays `b <= 150`. The canonical form parses back to itself.
+
+**Limits:**
+- 8192 bytes of source, which is more than the longest canonical form (6916 bytes), so whatever this call returns is accepted again.
+- Parentheses nested at most 32 deep.
+- At most 8 alternatives once multiplied out.
+- At most 16 comparisons in one alternative; `==` counts as two.
+- Once a comparison's terms are combined, each channel's coefficient is at most ±1,000,000 and the constant at most ±1,000,000,000, which keeps every test inside 32-bit integers.
+
+**Raises** for anything that is not a string, and for every mistake in one, with the column (in characters, from 1) and the text: `host.screen.predicate: the predicate: 'x' is not a channel; use r, g or b (or red, green, blue) (column 13 of "r >= 80 and x > 3")`. Among what is refused:
+- an empty string
+- `!=` (write `x < y or x > y`) and `not`
+- a chained `80 <= r <= 120`
+- a comparison that never looks at the pixel, such as `80 >= 3` or `r - r >= 0`
+- upper-case channel names
+- a number with a leading zero, such as `010`: C# and Luau read it as 10, C and JavaScript as octal 8, so it is refused rather than guessed
+- a parenthesis left open, and parentheses nested more than 32 deep
+
+It never returns `nil`. It runs on the event loop, costs microseconds and touches nothing on screen.
+
+```luau
+-- A game pack's colour test, pasted from the C# reader it was recorded with, checked once.
+local WARM = host.screen.predicate(
+    "(red >= 80 && red*10 >= green*13 && red*10 >= blue*12) || " ..
+    "(red >= 100 && green >= 45 && blue <= 150 && red >= green && green >= blue)")
+host.log.info(WARM)
+-- (r >= 80 and 10*r - 13*g >= 0 and 10*r - 12*b >= 0) or
+--   (r >= 100 and g >= 45 and b <= 150 and r - g >= 0 and g - b >= 0)
+```
+
+### Windows
+
+The test runs in the host on the red, green and blue bytes of each captured pixel, and the same string gives the same answer for the same colour on every platform. What can differ is the colour a capture yields for the same picture; see [`cells`](#host-screen-cells).
+
+### macOS
+
+As on Windows: the same string gives the same answer for the same colour. A Mac capture of a picture does not necessarily yield the colours a Windows capture of it yields; see [`cells`](#host-screen-cells).
+
+## host.screen.cells(opts) {#host-screen-cells}
+
+**Signature:** `host.screen.cells(opts: { region: Region, cols: number, rows: number, predicate: string }) -> (Cells?, string?)` where `Cells = { cells: string, x: number, y: number, w: number, h: number }`
+
+Captures `opts.region` once and reduces it to a grid of `cols` × `rows` cells. Each cell is the share of its pixels that pass `opts.predicate` (see [`predicate`](#host-screen-predicate)), as a byte from 0 (none) to 255 (all). The answer has two parts:
+- `cells`: the grid as lower-case hex, two digits a cell, row by row from the top left. Cell (row *r*, column *c*, both counted from 0) is at digits `2*(r*cols + c) + 1` and `+ 2`.
+- `x, y, w, h`: the rectangle actually read, in screen coordinates.
+
+Hex is the format [`matchCells`](#host-screen-matchcells) takes a stored state in, so this is the call that records one: read the state once while it is on screen, and put the hex in the module's data.
+
+A grid like this is a signature, not a picture. A selected menu entry drawn in a warm colour shows as a band of high cells, and reads the same however the rest of the picture changes. The rules are those of an existing game-menu reader, so the signatures it records can be matched here as they are:
+- **Blocks.** For a region `L` pixels long cut into `n` blocks, block `s` covers `floor(s*L/n)` up to `floor((s+1)*L/n)`, and at least one pixel. Where the region is at least as long as the grid, the widths differ by at most one; where it is shorter, every cell still has a value, and neighbouring cells share a pixel.
+- **Value.** `round(255 * passing / total)`, with halves rounded to even: 127.5 is 128, and 42.5 is 42.
+- **Alpha** is ignored.
+
+`opts` is **strict**. All four keys are required, and anything else raises, naming what is wrong: a misspelt key, a `cols` of `10.5`, a string where a number goes (``host.screen.cells: opts.cols: invalid value: floating point `10.5`, expected a whole number``).
+- `cols` and `rows` are whole numbers from 1 to 256, and at most 4096 cells in all.
+- `region` takes either form of the [Region form](#region-form), read strictly: no default, no corner left out, no clipping. Corners may cover at most 40,000,000 pixels.
+
+**Returns `nil` and a reason, and never raises**, for what happens at run time:
+- the window of a `{ window, fraction }` region has an empty client area, as a minimised game does (`"the window's client area is empty (0x0)"`), or one so large that the region covers more than 40,000,000 pixels;
+- the screen could not be read (under `fallback = "none"`, the reason says desktop duplication had no picture);
+- the capture came back a different size from the region.
+
+So a poll never puts an error dialog over the game.
+
+**Cost:** one screen capture and the reduction, both on the event loop, counted as one screen touch in the log's observation line, like `profile`. The reduction looks at each pixel once and tests every comparison of the predicate on it. On the reference machine (Core i7-8700K, release build) that measured about 8 ns a pixel with an eight-comparison predicate: 0.4 ms for 91×544 pixels, 10 ms for 1280×1024 and 17 ms for 1920×1080, on top of the capture (see below). So this is the call for recording a state or reading one once; a poll uses [`matchCellsAsync`](#host-screen-matchcellsasync).
+
+```luau
+-- Record the menu's current state for a pack: the grid as hex, logged with where it was read.
+local WARM = host.screen.predicate("(r >= 80 and 10*r >= 13*g and 10*r >= 12*b) or " ..
+    "(r >= 100 and g >= 45 and b <= 150 and r >= g and g >= b)")
+local w = host.window.active()
+if w then
+    local c, why = host.screen.cells({
+        region = { window = w, fraction = { 0.02, 0.33, 0.09, 0.86 } },   -- x1, y1, x2, y2
+        cols = 10, rows = 36, predicate = WARM,
+    })
+    if c then
+        host.log.info(string.format("menu at %d,%d %dx%d: %s", c.x, c.y, c.w, c.h, c.cells))
+    else
+        host.log.info("menu not read: " .. why)
+    end
+end
+```
+
+### Windows
+
+Device pixels, never scaled: a window region resolves against the client area `host.window` reports, which is `GetClientRect` on the screen. The capture reads through the module's [source](#which-picture-a-read-sees). Through the standard path it costs about 16.7 ms whatever its size up to about 1028×666, and 28 ms for the whole 1920×1080 screen; through desktop duplication, 0.3 to 1 ms for regions up to 633×418, and 5 ms for the whole screen. What covers the region is what gets read: another window over the game, the mouse pointer when Windows draws it into the picture, and black where the region leaves every monitor.
+
+A stored state matches only if it was recorded from the same pixels:
+- the same window size, or a window region, which follows the window;
+- the same display scaling: a game that is not DPI-aware is stretched by the compositor at any scaling other than 100 %, so a state recorded at one scaling is not the same bytes at another;
+- the same capture source. Whether the standard path and desktop duplication give the same bytes for the same game has not been measured, so record through the source the module polls with.
+
+### macOS
+
+Points, not pixels: a window region resolves against the client area `host.window` derives from the window's frame, and a capture on a Retina display is downsampled so that one pixel is one point (see [`host.screen.size`](#host-screen-size)). Cells computed from a Mac capture are not guaranteed to be the same bytes as those from a Windows capture of the same picture, so record the states on a Mac for a Mac. Without the Screen Recording permission the capture does not fail: it is a picture of the wallpaper, so the call returns cells of the wallpaper, not `nil`. This call pays for its capture on the event loop.
+
+## host.screen.matchCells(opts, states) {#host-screen-matchcells}
+
+**Signature:** `host.screen.matchCells(opts: { region: Region, cols: number, rows: number, predicate: string }, states: { string | { cells: string, name: string? } }) -> (CellsMatch?, string?)` where `CellsMatch = { cells: string, x: number, y: number, w: number, h: number, index: number, name: string?, similarity: number, distance: number, runnerUp: number, similarities: { number } }`
+
+Reads the region exactly as [`cells`](#host-screen-cells) does, and says which of `states` it looks most like. A state is either the hex `cells` recorded, or a table `{ cells = hex, name = "Start" }`. The hex may be in either case, and must be exactly two digits per cell of this grid.
+
+**Similarity** is `1 - sum(|a - b|) / (cells * 255)` over the two grids: 1 when they are identical, 0 when every cell is as far apart as it can be. `distance` is the sum itself, an exact whole number.
+
+**States with the same name are one item**: several recordings of one menu entry. A state without a name is an item of its own. An item's score is its best state's score, and the item with the best score wins; on a tie, the item that comes first in `states` wins. The answer describes the winner:
+- `index`: the winning item's best state, 1-based, into `states` (on a tie, the first of them);
+- `name`: that state's name, absent for a state without one;
+- `similarity` and `distance`: its score;
+- `runnerUp`: the best score among the other items, or `0` when there is no other item;
+- `similarities`: every state's score, in the order given;
+- `cells`, `x`, `y`, `w`, `h`: what `cells` returns.
+
+The decision is the module's to make in Luau, and a menu reader's two thresholds both go there: `m.similarity >= MINIMUM and m.similarity - m.runnerUp >= MARGIN`.
+
+**Raises** for everything [`cells`](#host-screen-cells) raises for, and for these, checked before anything is captured:
+- `states` that is not a list of 1 to 1024 entries, or that has other keys;
+- a state that is not hex of the right length (`states[3]: 358 characters; this grid's states are 720 hex digits, two per cell`);
+- a state that is not hex at all (`states are hex (720 characters), not the cells' raw bytes`);
+- a state with a character that is not a hex digit, counted in characters (`states[2]: 'é' at character 5 is not a hex digit`);
+- a state table with a key other than `cells` and `name`.
+
+**Returns `nil` and a reason** exactly where `cells` does.
+
+**Cost:** that of `cells`, plus comparing the grid with every state, which for 360 cells and a hundred states is microseconds. It runs on the event loop, so for a poll use [`matchCellsAsync`](#host-screen-matchcellsasync).
+
+```luau
+-- A key that says which menu entry is selected: read once, ranked, and spoken only when sure.
+local pack = host.json.decode(host.resource.read("data/menu.json"))
+-- pack = { region = { x1, y1, x2, y2 }, cols, rows, predicate, states = { { name, cells }, … } }
+local w = host.window.active()
+if w then
+    local m, why = host.screen.matchCells({
+        region = { window = w, fraction = pack.region },
+        cols = pack.cols, rows = pack.rows, predicate = pack.predicate,
+    }, pack.states)
+    if not m then
+        host.speech.output("Menu not read: " .. why)
+    elseif m.similarity >= 0.97 and m.similarity - m.runnerUp >= 0.01 then
+        host.speech.output(m.name)
+    end
+end
+```
+
+### Windows
+
+The capture and the pixels are those of [`cells`](#host-screen-cells): device pixels, through the module's source, on the event loop, and states recorded from the same pixels match exactly.
+
+### macOS
+
+The capture and the pixels are those of [`cells`](#host-screen-cells): points, with states recorded on a Mac for a Mac. Without the Screen Recording permission this compares the wallpaper with the states and returns a match rather than `nil`; its `similarity` is whatever the wallpaper happens to score, so the thresholds are what keep it quiet.
+
+## host.screen.matchCellsAsync(opts, states, cb) {#host-screen-matchcellsasync}
+
+**Signature:** `host.screen.matchCellsAsync(opts: { region: Region, cols: number, rows: number, predicate: string }, states: { string | { cells: string, name: string? } }, cb: (m: CellsMatch?, why: string?) -> ()) -> nil`
+
+[`matchCells`](#host-screen-matchcells), with the capture, the reduction and the comparison on the image worker thread. `cb(m, nil)` or `cb(nil, reason)` is called on a later tick, exactly once, whatever happened. That includes a window region whose client area was empty: that answer, too, comes on a later tick, without a capture.
+
+Everything is checked at the call, on the calling thread, so every mistake `matchCells` raises for raises here, as does a `cb` that is not a function. A window region is resolved at the call, from the window table given, not when the worker gets to it.
+
+Reads queued within the same few milliseconds share one capture when they ask for the same region through the same source, whether they are cells matches or image searches, and from one module or several. The callback belongs to the module whose VM made the call, under [`imageSearchAsync`](#host-screen-imagesearchasync)'s rules with one difference. If that module is disabled before the answer comes, the read is held, but it is not made again when the module is enabled, as a search is: its rectangle was worked out at the call, and by then the window may have moved, changed size or closed. Instead the callback gets `nil, "the module was disabled while the read waited"` on a later tick once the module is enabled, without a capture, so a poll that waits for its callback asks again. ([`host.ocr.read`](./ocr.md#host-ocr-read) drops its callback on a disable instead.) If the module is reloaded or removed, the callback is dropped. A panic inside the reduction is answered with `nil, "internal error: …"`.
+
+**Read, then act, is not guarded here.** A pending [`host.ocr.read`](./ocr.md#host-ocr-read) makes the same module's `host.input.*` and `host.window.focus` wait, up to 50 ms, until its picture is taken. A pending `matchCellsAsync` does not, and neither does an image search: a click made while it waits may land before its picture is taken, so its callback can describe the screen after the click. Act on a match inside its callback.
+
+```luau
+-- Say the selected menu entry when it changes: one read in flight, only while the game is in front.
+local pack = host.json.decode(host.resource.read("data/menu.json"))
+host.screen.predicate(pack.predicate)                        -- a bad pack fails here, at load
+local GAME = { title = { contains = "My Game" } }
+local since, last = nil, nil
+host.timer.every(150, function()
+    if since and host.now() - since < 1000 then return end   -- one in flight, unless it got lost
+    local w = host.window.active()
+    if not w or not host.window.test(GAME, w) then return end
+    since = host.now()
+    host.screen.matchCellsAsync({
+        region = { window = w, fraction = pack.region },
+        cols = pack.cols, rows = pack.rows, predicate = pack.predicate,
+    }, pack.states, function(m, why)
+        since = nil
+        if not m then return end                              -- could not look: keep what we knew
+        local name = (m.similarity >= 0.97 and m.similarity - m.runnerUp >= 0.01) and m.name or nil
+        if name ~= last then
+            last = name
+            if name then host.speech.output(name) end
+        end
+    end)
+end)
+```
+
+### Windows
+
+The capture runs on the worker thread, not the event loop, through the module's [source](#which-picture-a-read-sees), exactly as `imageSearchAsync`'s does; through the standard path it costs the same fixed compositor frame as any other. The reduction runs there too, so a poll costs the event loop only the checking of its arguments.
+
+### macOS
+
+The same worker and the same capture as `imageSearchAsync`, in points. Without the Screen Recording permission the answer is a match against the wallpaper, not `nil`: `nil` only ever means the region could not be read.
+
 ## Region form {#region-form}
 
-Several functions (`host.screen.imageSearch` and the other searches, `host.screen.profile`, `host.ocr.recognize`, and each entry of `host.ocr.recognizeMany`'s `regions` list) accept a `region` table, and the same form is what `host.screen.template`'s `capture` and an `imageSearchEach` entry's `within` take. A region describes an axis-aligned rectangle by its top-left and bottom-right corners and may be written in **named** or **positional** form (named keys take precedence):
+A region is a rectangle on screen, written in one of two forms: by its **corners**, which every call on this page takes, or as **fractions of a window's client area**, which the cells calls and [`host.ocr.read`](./ocr.md#host-ocr-read) take.
+
+**Corners.** Several functions (`host.screen.imageSearch` and the other searches, `host.screen.profile`, `host.ocr.recognize`, and each entry of `host.ocr.recognizeMany`'s `regions` list) accept a `region` table, and the same form is what `host.screen.template`'s `capture` and an `imageSearchEach` entry's `within` take. The cells calls and `host.ocr.read` take it too, but read it strictly (see **How strictly it is read**, below), so of what follows only the two spellings and the exclusive `x2` and `y2` apply to them. A region describes an axis-aligned rectangle by its top-left and bottom-right corners and may be written in **named** or **positional** form (named keys take precedence):
 
 - Named: `{ x1 = .., y1 = .., x2 = .., y2 = .. }`
 - Positional: `{ x1, y1, x2, y2 }` (array indices `[1]`=x1, `[2]`=y1, `[3]`=x2, `[4]`=y2)
 
-`x2` and `y2` are **exclusive**: the rectangle starts at `(x1, y1)` and is `x2 - x1` wide and `y2 - y1` high, so `{ 10, 20, 210, 120 }` covers columns 10 to 209. Width and height are clamped to be non-negative. Omitting `region` entirely searches the full primary screen.
+`x2` and `y2` are **exclusive**: the rectangle starts at `(x1, y1)` and is `x2 - x1` wide and `y2 - y1` high, so `{ 10, 20, 210, 120 }` covers columns 10 to 209. Outside the strict calls, width and height are clamped to be non-negative, and omitting `region` entirely searches the full primary screen.
 
-Inside a region table nothing raises. A corner that is missing — or is not a number, such as a misspelt key's `nil` or a string that is not a numeral — takes its default without a word: `x1, y1` become `0`, `x2, y2` the primary screen's width and height. So a window's `bounds`-style table, `{ x = …, y = …, w = …, h = … }`, has none of the four keys and silently becomes the **whole primary screen**; convert it with `{ b.x, b.y, b.x + b.w, b.y + b.h }`. A fractional coordinate is cut toward zero, like every coordinate the platform takes: a centre computed as `x + w / 2` lands on the whole pixel toward zero, which for a negative coordinate — a monitor left of or above the primary — is the opposite direction from `//`. Where the nearest pixel matters, round with `math.floor(v + 0.5)`.
+**Window fractions.** `{ window = w, fraction = { x1, y1, x2, y2 } }` gives a rectangle as fractions of a window's client area, and the host turns it into pixels (points on macOS) at the call. `cells`, `matchCells`, `matchCellsAsync` and `host.ocr.read` accept it. Every other call on this page takes corners only, and so do `host.ocr.recognize` and `recognizeMany`.
+- `window` is a window table as `host.window` returns it (a control table works too). Only its `client = { x, y, w, h }` is read, with no call to the operating system, so the region is exactly as current as the table.
+- `fraction` is `{ x1, y1, x2, y2 }`, named or positional like corners, in fractions of the client area's width (`x1`, `x2`) and height (`y1`, `y2`): `{ 0, 0, 1, 1 }` is the whole client area, and `{ 0.5, 0, 1, 1 }` its right half. A reader that stores a region as `XStart, XEnd, YStart, YEnd` writes `{ XStart, YStart, XEnd, YEnd }`.
+- With `W` the client area's width, the columns read start at `floor(W * x1)` and end before `ceil(W * x2)`. The start is then clamped to 0 through `W - 1`, and the end to one past the start through `W`; rows are worked out the same way from the height. So the rectangle never leaves the client area and is never empty: a fraction outside 0 to 1, or an `x2` before `x1`, still reads at least one column. The arithmetic is IEEE double precision, exactly as a C# reader computing with `double` does it. `800 * 0.035` is 28.000000000000004 there, so the end is 29.
+- The numbers themselves never raise for being outside 0 to 1 or in the wrong order, as the clamps above say. What raises is the shape: a fraction that is not a finite number (`1/0`, NaN) or not a number, a `fraction` table with a corner missing, with named and positional corners mixed or with any other key, a key beside `window` and `fraction`, and a `window` that is not a table or has no `client` with four whole numbers — see **How strictly it is read**, below. A client area without width or height is a runtime condition, a minimised window: the cells calls return `nil` and a reason for it, and `host.ocr.read` answers that region with a `"failed"` reading whose `error` is the reason, while the other regions of the call are read.
 
-What happens to a region that is not a table depends on where it is given. An `opts.region` that is not a table is ignored like a missing one, and the call reads the whole primary screen. `host.screen.template`'s `capture`, an `imageSearchEach` entry's `within` and each entry of `recognizeMany`'s `regions` raise instead. `recognizeMany` also raises when `regions` is missing, and its list ends at the first `nil`, so the regions after a hole are silently not read.
+Written as fractions, a region keeps covering the same part of the window when the window is resized, at any display scaling, and on both platforms, with nothing in the module that knows which of those it is running under.
+
+**How strictly it is read.** The cells calls and `host.ocr.read` read either form strictly, through one reader, and raise at the call for anything that is not exactly right, naming it (`host.screen.cells: opts.region.x2 must be a whole number, got 10.5`):
+- in corners, all four corners are required, as whole numbers (`10.0` is one, `10.5` is not), written one way (named or positional, not both), with `x2` greater than `x1` and `y2` greater than `y1`, and any other key raises;
+- in window fractions, any key other than `window` and `fraction` raises, and so does a window table without `client`;
+- the region has no default: `{}` has no corners and raises like any other region with a corner missing, and a region the cells calls read is not clipped to the screen, so a part off every monitor reads black.
+
+Only what a window does at run time is answered instead of raised, as the window fractions above say. Round a computed corner yourself, `math.floor(v + 0.5)` for the nearest pixel, or give the region as fractions of the window it belongs to.
+
+Every other call reads corners loosely, and inside a region table nothing raises. A corner that is missing — or is not a number, such as a misspelt key's `nil` or a string that is not a numeral — takes its default without a word: `x1, y1` become `0`, `x2, y2` the primary screen's width and height. So a window's `bounds`-style table, `{ x = …, y = …, w = …, h = … }`, has none of the four keys and silently becomes the **whole primary screen**; convert it with `{ b.x, b.y, b.x + b.w, b.y + b.h }`. A fractional coordinate is cut toward zero, like every coordinate the platform takes: a centre computed as `x + w / 2` lands on the whole pixel toward zero, which for a negative coordinate — a monitor left of or above the primary — is the opposite direction from `//`. Where the nearest pixel matters, round with `math.floor(v + 0.5)`.
+
+What happens to a region that is not a table depends on where it is given. An `opts.region` that is not a table is ignored like a missing one, and the call reads the whole primary screen. `host.screen.template`'s `capture`, an `imageSearchEach` entry's `within`, each entry of `recognizeMany`'s `regions`, the cells calls' `region` and every region given to `host.ocr.read` raise instead. `recognizeMany` also raises when `regions` is missing, and its list ends at the first `nil`, so the regions after a hole are silently not read.
 
 ```luau
 -- these two regions are equivalent
@@ -340,7 +574,28 @@ if w then
   local b = w.bounds
   local p = host.screen.profile({ region = { b.x, b.y, b.x + b.w, b.y + b.h }, axes = "rows" })
 end
+
+-- the lower left of the active window's client area, as fractions: follows the window
+if w then
+  local c = host.screen.cells({ region = { window = w, fraction = { 0, 0.4, 1/3, 1 } },
+                                cols = 3, rows = 6, predicate = "r > g + b" })
+end
+
+-- the same form for text: the top tenth of the client area, read off the event loop
+if w then
+  host.ocr.read({ window = w, fraction = { 0, 0, 1, 0.1 } }, function(r)
+    host.log.info(r.status .. ": " .. (r.error or r.text))
+  end)
+end
 ```
+
+### Windows
+
+Fractions resolve to device pixels of the client area `GetClientRect` reports, translated to the screen.
+
+### macOS
+
+Fractions resolve to points of the client area derived from the window's frame (see [the window table](./window.md#table-shapes)). The same fractions cover the same part of a window as on Windows, where corners measured on one platform would need converting for the other.
 
 ## host.screen.save(path, opts?) {#host-screen-save}
 

@@ -867,6 +867,48 @@ mod tests {
         }
     }
 
+    /// A fraction written in the shortest form that reads back — as `encode` writes it, and as
+    /// .NET, Python and JavaScript do — is read as exactly that number. serde_json's default
+    /// number parser is only nearly right: it read 210,463 of these 2,003,000 one unit in the
+    /// last place off, which moves a window region's edge by a pixel against a reader that
+    /// parses exactly. Its `float_roundtrip` feature (crates/host/Cargo.toml) is what this holds.
+    #[test]
+    fn fractions_read_back_exactly() {
+        let lua = json_vm();
+        // The case that was found: 59/600, a region starting at column 59 of a 600-wide window,
+        // came back as 0.09833333333333331, and floor(600 * that) is 58.
+        let v: f64 = lua.load(r#"return json.decode("0.09833333333333333")"#).eval().unwrap();
+        assert_eq!(v, 59.0 / 600.0);
+        assert_eq!((600.0 * v).floor(), 59.0);
+        // Every k/W up to W = 2000, through the parser `decode` uses: the shortest form Rust
+        // prints (the form .NET Core 3.0 and later print) and the form `encode` prints.
+        for w in 1..=2000u32 {
+            for k in 0..=w {
+                let f = k as f64 / w as f64;
+                for text in [format!("{f:?}"), serde_json::to_string(&f).unwrap()] {
+                    let back: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    assert_eq!(back.as_f64(), Some(f), "{k}/{w} written as {text}");
+                }
+            }
+        }
+        // And the whole way through Luau, for the common window widths.
+        let ok: bool = lua
+            .load(
+                r#"
+                for _, w in ipairs({ 600, 768, 800, 1024, 1032, 1080, 1280, 1366, 1440, 1600, 1920, 2560 }) do
+                  for k = 0, w do
+                    local f = k / w
+                    if json.decode(json.encode(f)) ~= f then error(k .. "/" .. w) end
+                  end
+                end
+                return true
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert!(ok);
+    }
+
     /// `decode(encode(x))` deep-equals `x` for Luau values nobody decoded first, holes included.
     #[test]
     fn luau_values_survive_the_round_trip() {

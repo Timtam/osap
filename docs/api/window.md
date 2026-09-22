@@ -50,7 +50,7 @@ Returned by `host.window.list()`, `host.window.active()`, `host.window.find()`, 
 }
 ```
 
-`client` is the window's client area in screen pixels: `x`/`y` its origin, which overlay regions are expressed relative to, and `w`/`h` its size.
+`client` is the window's client area in screen pixels: `x`/`y` its origin, which overlay regions are expressed relative to, and `w`/`h` its size. It is also what a window region reads: `{ window = w, fraction = { x1, y1, x2, y2 } }` is a rectangle in fractions of `client.w` and `client.h`, from `client.x` and `client.y` (see [the Region form](./screen.md#region-form)), so the table must come from `host.window`, or at least carry a `client` with those four whole numbers.
 
 ### Control table
 
@@ -223,7 +223,10 @@ application anything.
 **Signature:** `host.window.focus(id: number) -> boolean`
 
 Brings the window with that handle to the front and gives it the keyboard. Returns whether
-the system accepted it.
+the system accepted it. Like `host.input.*`, it first waits — up to 50 ms, and only while the
+calling module has a [`host.ocr.read`](./ocr.md#host-ocr-read) whose picture has not been
+taken — until that picture is taken, and puts that picture before every other read's, so a read
+asked for just before sees the screen as it was.
 
 **Believe the answer.** Both platforms can decline — Windows refuses a foreground change
 under conditions it does not explain, and on macOS the window's own application has to be

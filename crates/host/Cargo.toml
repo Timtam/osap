@@ -15,7 +15,12 @@ module-manifest = { path = "../module-manifest" }
 rodio = "0.20"
 semver = "1"
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0"
+# `float_roundtrip`: `host.json.decode` reads a number as the double nearest to it, as .NET,
+# Python and JavaScript do. The default parser reads about one fraction in ten a unit in the
+# last place off, which moved a window region's edge by a pixel (json.rs,
+# `fractions_read_back_exactly`). By serde_json's own figure it parses such numbers about half
+# as fast.
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
 # Two users: the settings store's atomic replace (settings.rs, `replace_file`: a temporary
 # file of its own beside the store, flushed, then renamed over it), and the staging folder an
 # install or update is unpacked into before it replaces the installed module (registry.rs,
@@ -30,6 +35,14 @@ path-clean = "1.0.1"
 # A branch name in the raw.githubusercontent.com path (registry.rs, `fetch_manifest`). Already
 # in the build under ureq; the same version.
 percent-encoding = "2.3"
+# `host.screen.cells` (cells.rs): the predicate string's parser, on winnow's combinators —
+# already compiled in, under toml, at this version — and hex, the one format cells are
+# exchanged in. crates/macos-check borrows cells.rs and lists both again.
+winnow = "1.0.3"
+hex = "0.4.3"
+# The strict option readers of `host.screen.cells` and `matchCells` (lib.rs): serde through
+# mlua's `serialize` feature, with the path of whatever was wrong (`states[3].cells`).
+serde_path_to_error = "0.1.20"
 
 wxdragon = "0.9.15"
 
@@ -40,18 +53,25 @@ interprocess = "2.4.4"
 # header's OS line. Both are borrowed by crates/macos-check through logging.rs.
 log = "0.4"
 os_info = { version = "3.15", default-features = false }
+# Which recognition language a read gets (ocr/lang.rs): BCP 47 negotiation against the list the
+# platform's engine offers, with CLDR's likely subtags so "de" finds "de-DE" and "zh-TW" finds
+# "zh-Hant". Borrowed by crates/macos-check through that file, so it is declared there too.
+fluent-langneg = { version = "0.14.2", features = ["cldr"] }
 
 [dev-dependencies]
 # Archives for the install tests (registry.rs), written in the test rather than checked in.
 # Unpacking itself is module_manifest::unpack_zip; the features match that crate's.
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# The `host.screen.cells` golden test (cells_golden_tests.rs) checks the frame it reads is the
+# one the reference vectors were computed from. Already in the lock file.
+sha2 = "0.11"
 
 [target."cfg(windows)".dependencies]
 # Speech through the screen reader, compiled from source and linked statically — see
 # docs/prism-speech-design.md. Windows only: macOS reaches VoiceOver through
 # speech/voiceover.rs, which is better than prism's own VoiceOver backend.
 prism-sys = { path = "../prism-sys" }
-windows = { version = "0.58", features = ["Media_Ocr", "Graphics_Imaging", "Globalization", "Foundation", "Foundation_Collections", "Security_Cryptography", "Win32_System_WinRT", "Storage_Streams", "Win32_UI_Accessibility", "Win32_System_Com", "Win32_System_Variant",
+windows = { version = "0.58", features = ["Media_Ocr", "Graphics_Imaging", "Globalization", "Foundation", "Foundation_Collections", "Security_Cryptography", "Win32_System_WinRT", "Storage_Streams", "System_UserProfile", "Win32_UI_Accessibility", "Win32_System_Com", "Win32_System_Variant",
     # Desktop duplication (backend/dxgi.rs), for the modules that declare `[screen] capture =
     # "duplication"`. Gdi is here because the crate gates DXGI_OUTPUT_DESC on it (its HMONITOR).
     "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11"] }
@@ -95,7 +115,9 @@ dispatch2 = "0.3"
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-foundation]
 version = "0.3"
-features = ["NSString", "NSArray", "NSValue", "NSGeometry", "NSDictionary", "NSError", "NSData", "NSRunLoop", "NSThread", "NSObjCRuntime", "NSEnumerator", "NSURL", "NSProcessInfo", "NSNotification", "NSOperation", "NSAppleScript", "NSAppleEventDescriptor", "objc2-core-services", "NSDate", "NSRange", "block2"]
+features = ["NSString", "NSArray", "NSValue", "NSGeometry", "NSDictionary", "NSError", "NSData", "NSRunLoop", "NSThread", "NSObjCRuntime", "NSEnumerator", "NSURL", "NSProcessInfo", "NSNotification", "NSOperation", "NSAppleScript", "NSAppleEventDescriptor", "objc2-core-services", "NSDate", "NSRange", "block2",
+    # The user's preferred languages, for the OCR language a read without `lang` gets (ocr/lang.rs).
+    "NSLocale"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-app-kit]
 version = "0.3"

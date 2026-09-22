@@ -9,14 +9,27 @@ mod backend;
 /// Which build is running: the executable's commit and the package's. See the file.
 pub mod build_info;
 mod capture_source;
+/// `host.screen.cells`: the predicate, the grid and the ranking, pure — see the file.
+mod cells;
+/// The golden test of `cells` against an outside reader's own vectors (local data only).
+#[cfg(test)]
+mod cells_golden_tests;
 mod gui;
 mod image_search;
 /// One running copy per user: the lock, and the request a second start sends — see the file.
 mod instance;
 mod json;
 pub mod logging;
+/// `host.ocr.read`: the capture and recognise threads, their queue, languages and the shape a
+/// module is handed — see the folder.
+mod ocr;
 mod appcfg;
 mod portable;
+/// The window-relative Region form, `{ window, fraction }`, resolved to pixels, and the rule for
+/// strict corners — see the file.
+mod region;
+/// The one strict reader of a Region argument, for the cells calls and `host.ocr.read`.
+mod region_lua;
 pub mod registry;
 mod settings;
 mod speech;
@@ -198,6 +211,11 @@ struct Shared {
     image_results: std::sync::mpsc::Receiver<ImageResult>,
     pending_image: RefCell<HashMap<u64, PendingImage>>,
     next_image_id: Cell<u64>,
+    /// `host.ocr.read`: the capture and recognise threads (ocr/service.rs)...
+    ocr: ocr::service::Service<backend::OcrShot>,
+    /// ...and what the event loop keeps for them: the callbacks waiting, the answers decided
+    /// without the threads, the newest read per key (ocr/lua.rs).
+    ocr_state: ocr::lua::OcrState,
     /// module_idx → the generation of the VM it runs now (see `image_search::VmOwner`). A map,
     /// not a fifth parallel vector: `populate_vm` overwrites the entry for its index, so a
     /// rollback has nothing here to keep aligned.
@@ -923,6 +941,8 @@ impl Shared {
         // The VM that asked is going; the one built in its place asks for itself.
         self.initial_pending.borrow_mut().retain(|(i, _)| *i != idx);
         self.purge_pending_images(idx);
+        // Its reads are dropped, not answered: the callbacks belong to the VM that is going.
+        self.ocr_drop_owner(idx, true);
         self.drop_pad_listeners(|i| i == idx);
         let mut to_resolve: Vec<String> = Vec::new();
         let mut deactivations: Vec<Function> = Vec::new();
@@ -1006,6 +1026,12 @@ impl Shared {
         self.refresh_hotkeys();
         self.refresh_captured();
         self.refresh_gamepad();
+        // A disabled module's text reads are dropped, as its one-shot timers are: a callback
+        // that clicked or spoke minutes later, over whatever is in front then, is worse than
+        // none. Enabled again, its polls simply read afresh.
+        if !enabled {
+            self.ocr_drop_owner(idx, false);
+        }
         // A disabled module must not stay the active overlay (and an enabled one
         // may now win): re-elect every arbiter slot it participates in.
         let slots: Vec<String> = self
@@ -1057,6 +1083,7 @@ impl Shared {
         rollback_on_change(&mut self.on_change.borrow_mut(), n);
         self.timers.retain(|idx| idx < n);
         self.initial_pending.borrow_mut().retain(|(idx, _)| *idx < n);
+        self.ocr_drop_from(n);
         self.drop_pad_listeners(|idx| idx >= n);
         {
             // Drop arbiter claims owned by the rolled-back modules; clear a now-
@@ -3475,6 +3502,10 @@ struct ExcludedModule {
 /// Loads and runs many modules concurrently in one process.
 pub struct Manager {
     shared: Rc<Shared>,
+    /// Stops `host.ocr.read`'s two threads. Handed to `run` by [`Manager::ocr_shutdown`] before
+    /// anything is loaded, because the manager itself is dropped inside `run`'s closure and the
+    /// threads must not depend on that.
+    ocr_shutdown: ocr::service::ShutdownHandle,
     modules: Rc<RefCell<Vec<Module>>>,
     /// Module ids the user disabled in a previous run (from the portable config).
     disabled_ids: HashSet<String>,
@@ -3488,12 +3519,23 @@ impl Manager {
         // anything can read it. See `clock_origin`.
         clock_origin();
         let backend = backend::platform();
+        // `host.ocr.read`'s threads, first: the recognise thread publishes the language list
+        // as its first act, and the speech engines below can take seconds to open, so a module
+        // asking for the languages in its `activate` finds them there.
+        let (ocr, ocr_shutdown) = ocr::service::Service::spawn(backend.ocr_worker());
         // Timed because it is not free and it is not obvious: building the fallback speech
         // engine measured 3.1 seconds in a test, and this call is synchronous — that is
         // start-up time the user waits through, for a voice that on a machine with a screen
         // reader will very likely never say anything.
         let began = Instant::now();
-        let speech = speech::Speech::new()?;
+        let speech = match speech::Speech::new() {
+            Ok(s) => s,
+            Err(e) => {
+                // No manager, so nothing will hand `run` the handle: the threads stop here.
+                ocr_shutdown.shutdown(ocr::policy::SHUTDOWN);
+                return Err(e);
+            }
+        };
         logging::line(
             "speech",
             &format!("the speech engines took {} ms to open", began.elapsed().as_millis()),
@@ -3546,6 +3588,8 @@ impl Manager {
             image_results,
             pending_image: RefCell::new(HashMap::new()),
             next_image_id: Cell::new(0),
+            ocr,
+            ocr_state: ocr::lua::OcrState::default(),
             vm_gens: RefCell::new(HashMap::new()),
             template_cache: RefCell::new(HashMap::new()),
             template_seq: Cell::new(0),
@@ -3559,10 +3603,16 @@ impl Manager {
         shared.reload_hotkey_id.set(shared.alloc_id());
         Ok(Self {
             shared,
+            ocr_shutdown,
             modules: Rc::new(RefCell::new(Vec::new())),
             disabled_ids,
             loading: HashSet::new(),
         })
+    }
+
+    /// What stops `host.ocr.read`'s threads at exit — see the field.
+    pub fn ocr_shutdown(&self) -> ocr::service::ShutdownHandle {
+        self.ocr_shutdown.clone()
     }
 
     /// Loads a module from an unpacked directory and runs its entry point.
@@ -3635,6 +3685,7 @@ impl Manager {
         // to be alive are not only the ones the OS delivers.
         let has_own_work = !self.shared.timers.is_empty()
             || !self.shared.pending_image.borrow().is_empty()
+            || self.shared.ocr_state.has_pending()
             || self.shared.pads.has_listeners();
         let headless = appcfg::headless();
 
@@ -3835,6 +3886,9 @@ impl Manager {
                         let t = std::time::Instant::now();
                         shared.fire_image_results();
                         let images_ms = t.elapsed().as_millis();
+                        let t = std::time::Instant::now();
+                        shared.fire_ocr_results();
+                        let ocr_ms = t.elapsed().as_millis();
                         // `onTrigger { initial = true }`: the window already in front, for
                         // the triggers that asked since the last tick (at load, on enable, or
                         // from a timer earlier in this very tick). Inside the measured
@@ -3869,8 +3923,9 @@ impl Manager {
                                      = {act_n}x window-activate {act_ms} + focus-change \
                                      {focus_ms} + gamepad {pad_ms} + everything else \
                                      {other_ms}, which is mostly key and hotkey dispatch; \
-                                     timers {timers_ms}, image results {images_ms}, initial \
-                                     window report {initial_ms}) — {hazard}"
+                                     timers {timers_ms}, image results {images_ms}, text \
+                                     recognition results {ocr_ms}, initial window report \
+                                     {initial_ms}) — {hazard}"
                                 ),
                             );
                         }
@@ -3997,8 +4052,12 @@ pub fn run(dirs: &[String]) -> Result<()> {
         ),
     }
     let warmup = backend::warmup_ocr(); // preload the neural OCR model off the hot path
+    // Taken out of the manager the moment it exists: the manager is dropped inside the closure,
+    // and `Shared` — which holds the service — very likely never is (Lua closures hold it).
+    let mut ocr_stop: Option<ocr::service::ShutdownHandle> = None;
     let result = (|| -> Result<()> {
         let mut manager = Manager::new()?;
+        ocr_stop = Some(manager.ocr_shutdown());
         // Nothing to load is a legitimate state — it is how somebody installs their first
         // module — and it is also what a translocated bundle, a moved folder or an empty
         // `modules` directory look like. Those are indistinguishable from the outside and
@@ -4033,6 +4092,12 @@ pub fn run(dirs: &[String]) -> Result<()> {
     // take seconds, during which a second start must not be told that a window is coming.
     if let Some(p) = &instance {
         p.stop_serving();
+    }
+    // `host.ocr.read`'s two threads, first: the capture thread may be inside a duplication read,
+    // which the next step stops, and the recognise thread inside ONNX Runtime, which the steps
+    // after it wait out. Bounded; a thread still busy after it is logged and left.
+    if let Some(stop) = ocr_stop {
+        stop.shutdown(ocr::policy::SHUTDOWN);
     }
     // The desktop duplication thread, if a module ever started it: out of the graphics driver
     // before the process tears down, for the reason the OCR warmup is joined below. A no-op
@@ -4200,6 +4265,8 @@ impl Dispatcher<'_> {
         if pending.is_empty() {
             return; // every tick but a handful
         }
+        // A trigger reporting the window in front, as an activation does.
+        let _prio = ocr::types::enter_priority(ocr::types::Priority::Interactive);
         let shared = self.shared;
         drain_initial(
             pending,
@@ -4339,6 +4406,7 @@ impl HostEvents for Dispatcher<'_> {
         self.shared.fire_due_timers();
         self.shared.fire_pad_replays();
         self.shared.fire_image_results();
+        self.shared.fire_ocr_results();
         self.dispatch_initial();
         if self.shared.recheck_requested.replace(false) {
             self.on_focus_change();
@@ -4346,10 +4414,16 @@ impl HostEvents for Dispatcher<'_> {
     }
 
     fn on_gamepad(&mut self, events: Vec<backend::gamepad::PadEvent>) {
+        // Somebody is waiting for what this dispatch does: a read or a timer it asks for goes
+        // in the interactive lane (ocr/types.rs, `enter_priority`).
+        let _prio = ocr::types::enter_priority(ocr::types::Priority::Interactive);
         self.shared.dispatch_gamepad(events);
     }
 
     fn on_hotkey(&mut self, id: i32) {
+        // Somebody is waiting for what this dispatch does: a read or a timer it asks for goes
+        // in the interactive lane (ocr/types.rs, `enter_priority`).
+        let _prio = ocr::types::enter_priority(ocr::types::Priority::Interactive);
         self.shared.bump_epoch();
         // Logged on ARRIVAL, before anything is looked up. Registration and delivery are
         // different things: `RegisterHotKey` can succeed while the keystroke still never
@@ -4394,6 +4468,9 @@ impl HostEvents for Dispatcher<'_> {
     }
 
     fn on_key(&mut self, vk: u32, mods: u8) {
+        // Somebody is waiting for what this dispatch does: a read or a timer it asks for goes
+        // in the interactive lane (ocr/types.rs, `enter_priority`).
+        let _prio = ocr::types::enter_priority(ocr::types::Priority::Interactive);
         self.shared.bump_epoch();
         // The hook only calls this for keys in the captured set, so the presence of this line
         // IS the answer to "did the overlay swallow that keystroke, or did the application
@@ -4430,6 +4507,9 @@ impl HostEvents for Dispatcher<'_> {
     }
 
     fn on_window_activate(&mut self, win: WinInfo) {
+        // Somebody is waiting for what this dispatch does: a read or a timer it asks for goes
+        // in the interactive lane (ocr/types.rs, `enter_priority`).
+        let _prio = ocr::types::enter_priority(ocr::types::Priority::Interactive);
         let started = Instant::now();
         // A different window in front is a different screen — this counts as the screen
         // having changed, not merely the world (see bump_input_epoch).
@@ -4456,6 +4536,9 @@ impl HostEvents for Dispatcher<'_> {
     }
 
     fn on_focus_change(&mut self) {
+        // Somebody is waiting for what this dispatch does: a read or a timer it asks for goes
+        // in the interactive lane (ocr/types.rs, `enter_priority`).
+        let _prio = ocr::types::enter_priority(ocr::types::Priority::Interactive);
         let started = Instant::now();
         self.shared.bump_epoch();
         for (idx, m) in self.modules.iter().enumerate() {
@@ -5115,7 +5198,10 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     win.set(
         "focus",
-        lua.create_function(move |_, id: isize| {
+        lua.create_function(move |lua, id: isize| {
+            // A read of the window before focusing it sees it as it was: the module's pending
+            // OCR pictures are taken first.
+            sh.ocr_barrier(lua);
             let accepted = sh.backend.focus_window(id);
             // A focus change is a fresh observation of the world, so the cache that served
             // the last one is turned over — the same way a click does it. Without this, a
@@ -5897,6 +5983,93 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     )?;
     // In image_search.rs too; see the note above imageSearch.
     screen.set("imageSearchAll", image_search::image_search_all(lua, shared, idx)?)?;
+    // host.screen.predicate / cells / matchCells / matchCellsAsync — a region reduced to a
+    // grid of cells, each the share of its pixels that pass a colour test, and the ranking of
+    // that grid against stored ones. Built to read the signatures an outside game-menu reader
+    // records, bit for bit: the rules are in cells.rs, the window-relative region in region.rs,
+    // the Region form's one strict reader in region_lua.rs, and the strict readers of the other
+    // arguments above `read_cells_opts`.
+    //
+    // predicate(expr) -> the canonical form, or raises with the column. For checking a pack's
+    // predicate once, at load, instead of in a poll.
+    screen.set(
+        "predicate",
+        lua.create_function(|_, expr: mlua::Value| {
+            const F: &str = "host.screen.predicate";
+            let mlua::Value::String(s) = &expr else {
+                return Err(mlua::Error::external(format!(
+                    "{F}: expects the predicate as a string, got {}",
+                    describe_value(&expr)
+                )));
+            };
+            let src = s.to_str()?.to_string();
+            cells::Predicate::parse(&src)
+                .map(|p| p.to_string())
+                .map_err(|e| predicate_error(F, "the predicate", &src, &e))
+        })?,
+    )?;
+    // cells(opts) -> { cells, x, y, w, h } | nil, reason. One capture on the event loop,
+    // counted like `profile`; for recording a state, not for a poll.
+    let sh = shared.clone();
+    screen.set(
+        "cells",
+        lua.create_function(move |lua, opts: mlua::Value| {
+            let call = read_cells_opts(lua, "host.screen.cells", opts)?;
+            let r = match call.rect {
+                Ok(r) => r,
+                Err(why) => return nil_because(lua, why),
+            };
+            match read_cells_with(&sh, lua, r, |cap| cells::of_capture(cap, r.w, r.h, &call.spec)) {
+                Ok(bytes) => Ok((mlua::Value::Table(cells_table(lua, &bytes, r)?), mlua::Value::Nil)),
+                Err(why) => nil_because(lua, why),
+            }
+        })?,
+    )?;
+    // matchCells(opts, states) -> match | nil, reason. The same capture, ranked against the
+    // states in Rust. Every argument is checked before anything is captured, so a bad state
+    // raises on the first call, not on the first call whose region resolves.
+    let sh = shared.clone();
+    screen.set(
+        "matchCells",
+        lua.create_function(move |lua, (opts, states): (mlua::Value, mlua::Value)| {
+            const F: &str = "host.screen.matchCells";
+            let call = read_cells_opts(lua, F, opts)?;
+            let st = read_states(F, states, call.spec.cells())?;
+            let r = match call.rect {
+                Ok(r) => r,
+                Err(why) => return nil_because(lua, why),
+            };
+            let matcher = cells::Matcher { item_of: cells::items_of(&st.names), spec: call.spec, states: st.bytes };
+            match read_cells_with(&sh, lua, r, |cap| matcher.answer(cap, r.w, r.h)) {
+                Ok((live, ranked)) => Ok((
+                    mlua::Value::Table(cells_match_table(lua, &live, r, &ranked, &st.names)?),
+                    mlua::Value::Nil,
+                )),
+                Err(why) => nil_because(lua, why),
+            }
+        })?,
+    )?;
+    // matchCellsAsync(opts, states, cb) — capture, reduction and ranking on the image worker,
+    // `cb(match, nil)` or `cb(nil, reason)` on a later tick, with the ownership rules of
+    // imageSearchAsync (image_search.rs).
+    let sh = shared.clone();
+    screen.set(
+        "matchCellsAsync",
+        lua.create_function(move |lua, (opts, states, cb): (mlua::Value, mlua::Value, mlua::Value)| {
+            const F: &str = "host.screen.matchCellsAsync";
+            let call = read_cells_opts(lua, F, opts)?;
+            let st = read_states(F, states, call.spec.cells())?;
+            let mlua::Value::Function(cb) = cb else {
+                return Err(mlua::Error::external(format!(
+                    "{F}: the third argument must be the callback, got {}",
+                    describe_value(&cb)
+                )));
+            };
+            let matcher = cells::Matcher { item_of: cells::items_of(&st.names), spec: call.spec, states: st.bytes };
+            let rect = call.rect.map(|r| (r.x, r.y, r.w, r.h));
+            image_search::enqueue_cells(&sh, lua, idx, cb, rect, matcher, st.names)
+        })?,
+    )?;
     // host.screen.save(path, opts?) — capture a screen region (opts.region, else the
     // full screen) and write it to `path` (relative to the calling module's root; an
     // absolute path is used as-is) as a PNG. Returns true on success. A calibration
@@ -5930,8 +6103,31 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     )?;
     host.set("screen", screen)?;
 
-    // host.ocr.recognize({ region, lang }) -> { text, words = {{text,x,y,w,h}, ...}, skipped }
+    // host.ocr.read(what, opts?, cb) — the region(s) photographed at the call, recognised on a
+    // thread of its own, the answer delivered to `cb` on the event loop. Everything but the
+    // registration is in ocr/lua.rs; the rules are in ocr/service.rs and ocr/sched.rs.
     let ocr = lua.create_table()?;
+    let sh = shared.clone();
+    ocr.set(
+        "read",
+        lua.create_function(move |lua, (what, opts, cb): (mlua::Value, mlua::Value, mlua::Value)| {
+            sh.ocr_read(lua, idx, what, opts, cb)
+        })?,
+    )?;
+    // host.ocr.languages() -> { string } — what the engine reads, the default first.
+    let sh = shared.clone();
+    ocr.set(
+        "languages",
+        lua.create_function(move |lua, ()| sh.ocr_languages_value(lua))?,
+    )?;
+    // host.ocr.resolveLanguage(tag | { tag } | nil) -> string? — what `lang` would read with.
+    let sh = shared.clone();
+    ocr.set(
+        "resolveLanguage",
+        lua.create_function(move |_, v: mlua::Value| sh.ocr_resolve_value(&v))?,
+    )?;
+
+    // host.ocr.recognize({ region, lang }) -> { text, words = {{text,x,y,w,h}, ...}, skipped }
     let sh = shared.clone();
     ocr.set(
         "recognize",
@@ -5939,6 +6135,22 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             let (sw, shh) = sh.backend.screen_size();
             let (rx, ry, rw, rh) = read_region(opts.as_ref(), sw, shh);
             let lang: Option<String> = opts.as_ref().and_then(|o| o.get::<String>("lang").ok());
+            // Through the resolver, so "de" reads German on both platforms: the tag the engine
+            // lists, or this call's failed shape when nothing here reads the language.
+            let lang = match lang {
+                Some(tag) => match sh.ocr_legacy_lang(&tag, "host.ocr.recognize")? {
+                    Ok(resolved) => Some(resolved),
+                    Err(why) => {
+                        let t = lua.create_table()?;
+                        t.set("text", "")?;
+                        t.set("words", lua.create_table()?)?;
+                        t.set("skipped", false)?;
+                        t.set("error", why)?;
+                        return Ok(t);
+                    }
+                },
+                None => None,
+            };
             let src = capture_source::read_source(lua, &*sh.backend, (rx, ry, rw, rh));
             let res = match sh.backend.ocr(rx, ry, rw, rh, lang.as_deref(), src) {
                 Ok(r) => r,
@@ -6009,6 +6221,26 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 let y2: i32 = r.get("y2").or_else(|_| r.get(4)).unwrap_or(shh);
                 rects.push((x1, y1, (x2 - x1).max(0), (y2 - y1).max(0)));
             }
+            // Through the resolver, as in `recognize`; a language nothing here reads fails every
+            // region with the reason, in the shape a failed region always had.
+            let lang = match lang {
+                Some(tag) => match sh.ocr_legacy_lang(&tag, "host.ocr.recognizeMany")? {
+                    Ok(resolved) => Some(resolved),
+                    Err(why) => {
+                        let out = lua.create_table()?;
+                        for _ in &rects {
+                            let t = lua.create_table()?;
+                            t.set("text", "")?;
+                            t.set("words", lua.create_table()?)?;
+                            t.set("skipped", false)?;
+                            t.set("error", why.as_str())?;
+                            out.push(t)?;
+                        }
+                        return Ok(out);
+                    }
+                },
+                None => None,
+            };
             let src = capture_source::read_source(lua, &*sh.backend, rects.first().copied().unwrap_or_default());
             let results = sh.backend.ocr_regions(&rects, lang.as_deref(), src);
             let out = lua.create_table()?;
@@ -6072,7 +6304,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     input.set(
         "move",
-        lua.create_function(move |_, (x, y): (i32, i32)| {
+        lua.create_function(move |lua, (x, y): (i32, i32)| {
+            // Read, then act: this module's pending OCR pictures are taken first.
+            sh.ocr_barrier(lua);
             sh.bump_input_epoch();
             sh.backend.mouse_move(x, y);
             Ok(())
@@ -6081,7 +6315,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     input.set(
         "click",
-        lua.create_function(move |_, (x, y, opts): (i32, i32, Option<Table>)| {
+        lua.create_function(move |lua, (x, y, opts): (i32, i32, Option<Table>)| {
+            // Read, then act: this module's pending OCR pictures are taken first.
+            sh.ocr_barrier(lua);
             sh.bump_input_epoch();
             sh.backend.mouse_click(x, y, button_from(opts.as_ref()));
             Ok(())
@@ -6090,7 +6326,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     input.set(
         "post",
-        lua.create_function(move |_, (hwnd, key): (i64, String)| {
+        lua.create_function(move |lua, (hwnd, key): (i64, String)| {
+            // Read, then act: this module's pending OCR pictures are taken first.
+            sh.ocr_barrier(lua);
             sh.backend
                 .key_post(hwnd as isize, &key)
                 .map_err(mlua::Error::external)
@@ -6099,7 +6337,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     input.set(
         "mouseDown",
-        lua.create_function(move |_, (x, y, opts): (i32, i32, Option<Table>)| {
+        lua.create_function(move |lua, (x, y, opts): (i32, i32, Option<Table>)| {
+            // Read, then act: this module's pending OCR pictures are taken first.
+            sh.ocr_barrier(lua);
             sh.bump_input_epoch();
             sh.backend.mouse_down(x, y, button_from(opts.as_ref()));
             Ok(())
@@ -6108,7 +6348,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     input.set(
         "mouseUp",
-        lua.create_function(move |_, (x, y, opts): (i32, i32, Option<Table>)| {
+        lua.create_function(move |lua, (x, y, opts): (i32, i32, Option<Table>)| {
+            // Read, then act: this module's pending OCR pictures are taken first.
+            sh.ocr_barrier(lua);
             sh.bump_input_epoch();
             sh.backend.mouse_up(x, y, button_from(opts.as_ref()));
             Ok(())
@@ -6117,7 +6359,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     input.set(
         "drag",
-        lua.create_function(move |_, (x1, y1, x2, y2, opts): (i32, i32, i32, i32, Option<Table>)| {
+        lua.create_function(move |lua, (x1, y1, x2, y2, opts): (i32, i32, i32, i32, Option<Table>)| {
+            // Read, then act: this module's pending OCR pictures are taken first.
+            sh.ocr_barrier(lua);
             sh.bump_input_epoch();
             sh.backend.mouse_drag(x1, y1, x2, y2, button_from(opts.as_ref()));
             Ok(())
@@ -6135,7 +6379,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // simply does not move, and says the same value back, which is the honest outcome.
     input.set(
         "scroll",
-        lua.create_function(move |_, (x, y, notches): (i32, i32, f64)| {
+        lua.create_function(move |lua, (x, y, notches): (i32, i32, f64)| {
+            // Read, then act: this module's pending OCR pictures are taken first.
+            sh.ocr_barrier(lua);
             sh.bump_input_epoch();
             let delta = (notches * 120.0).round() as i32;
             sh.backend.mouse_scroll(x, y, delta);
@@ -6145,7 +6391,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     input.set(
         "send",
-        lua.create_function(move |_, combo: String| {
+        lua.create_function(move |lua, combo: String| {
+            // Read, then act: this module's pending OCR pictures are taken first.
+            sh.ocr_barrier(lua);
             sh.bump_input_epoch();
             sh.backend.key_send(&combo).map_err(mlua::Error::external)
         })?,
@@ -6153,7 +6401,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     input.set(
         "text",
-        lua.create_function(move |_, text: String| {
+        lua.create_function(move |lua, text: String| {
+            // Read, then act: this module's pending OCR pictures are taken first.
+            sh.ocr_barrier(lua);
             sh.bump_input_epoch();
             sh.backend.type_text(&text);
             Ok(())
@@ -6924,6 +7174,526 @@ fn read_scales(opts: Option<&Table>) -> Vec<f32> {
     v
 }
 
+// ---- host.screen.cells, matchCells and matchCellsAsync: their arguments and answers --------
+//
+// STRICT, where the older screen calls read their options loosely, and on purpose: a cell
+// signature is only worth anything if it is read from exactly the pixels it was recorded from,
+// so a misspelt key that silently fell back to a default — a region reading down to the bottom
+// of the screen, a grid of the wrong size — would give a module confident, wrong answers. What
+// raises is a mistake in the call; what the screen or the window does at run time (an empty
+// client area, a capture that failed) is `nil, reason`, never an error dialog over a game.
+//
+// The options and the states are read with serde through mlua's deserializer, so a wrong key
+// or type is reported with its path (`states[3].cells`, 1-based like Luau); the region is read
+// by the Region form's one strict reader (`region_lua.rs`), which `host.ocr.read` shares.
+
+/// A value as a message names it: numbers as themselves, anything else by its type. Shared by
+/// every strict reader, the Region form's (`region_lua.rs`) among them.
+pub(crate) fn describe_value(v: &mlua::Value) -> String {
+    match v {
+        mlua::Value::Integer(i) => i.to_string(),
+        mlua::Value::Number(n) => n.to_string(),
+        mlua::Value::String(s) => format!("the string {:?}", s.to_string_lossy()),
+        mlua::Value::Nil => "nothing".to_string(),
+        other => format!("a {}", other.type_name()),
+    }
+}
+
+/// A whole number for serde, with the platform's word for it in the error rather than `u32`.
+struct WholeIn(i64);
+
+impl<'de> serde::Deserialize<'de> for WholeIn {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = WholeIn;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a whole number")
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> std::result::Result<WholeIn, E> {
+                Ok(WholeIn(v))
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> std::result::Result<WholeIn, E> {
+                i64::try_from(v).map(WholeIn).map_err(|_| E::invalid_value(serde::de::Unexpected::Unsigned(v), &self))
+            }
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> std::result::Result<WholeIn, E> {
+                if v.is_finite() && v.fract() == 0.0 && v.abs() < 9.0e15 {
+                    Ok(WholeIn(v as i64))
+                } else {
+                    Err(E::invalid_value(serde::de::Unexpected::Float(v), &self))
+                }
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// `opts` of the three cells calls, minus the region (read by hand).
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CellsOptsIn {
+    /// Only its presence: `read_cells_opts` puts `true` here for the region it reads itself.
+    #[serde(rename = "region")]
+    _region: serde::de::IgnoredAny,
+    cols: WholeIn,
+    rows: WholeIn,
+    predicate: String,
+}
+
+/// Hex text, from a Luau string whatever its bytes; `cells::from_hex` judges it.
+struct HexIn(Vec<u8>);
+
+impl<'de> serde::Deserialize<'de> for HexIn {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = HexIn;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a hex string")
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> std::result::Result<HexIn, E> {
+                Ok(HexIn(v.as_bytes().to_vec()))
+            }
+            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> std::result::Result<HexIn, E> {
+                Ok(HexIn(v.to_vec()))
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// One stored state: hex, or `{ cells = hex, name = string }`.
+enum StateIn {
+    Bare(Vec<u8>),
+    Named { cells: Vec<u8>, name: Option<String> },
+}
+
+impl<'de> serde::Deserialize<'de> for StateIn {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = StateIn;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a hex string, or a table { cells = hex, name = string }")
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> std::result::Result<StateIn, E> {
+                Ok(StateIn::Bare(v.as_bytes().to_vec()))
+            }
+            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> std::result::Result<StateIn, E> {
+                Ok(StateIn::Bare(v.to_vec()))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut m: A) -> std::result::Result<StateIn, A::Error> {
+                let (mut cells, mut name) = (None, None);
+                while let Some(k) = m.next_key::<String>()? {
+                    match k.as_str() {
+                        "cells" => cells = Some(m.next_value::<HexIn>()?.0),
+                        "name" => name = Some(m.next_value::<String>()?),
+                        other => return Err(serde::de::Error::unknown_field(other, &["cells", "name"])),
+                    }
+                }
+                let cells = cells.ok_or_else(|| serde::de::Error::missing_field("cells"))?;
+                Ok(StateIn::Named { cells, name })
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// A serde error as a Luau author reads it: the path from `root`, 1-based, then the reason.
+fn serde_message(root: &str, e: serde_path_to_error::Error<mlua::Error>) -> String {
+    use std::fmt::Write as _;
+    let mut path = root.to_string();
+    for seg in e.path().iter() {
+        match seg {
+            serde_path_to_error::Segment::Seq { index } => {
+                let _ = write!(path, "[{}]", index + 1);
+            }
+            serde_path_to_error::Segment::Map { key } | serde_path_to_error::Segment::Enum { variant: key } => {
+                let _ = write!(path, ".{key}");
+            }
+            serde_path_to_error::Segment::Unknown => {}
+        }
+    }
+    let why = match e.into_inner() {
+        mlua::Error::DeserializeError(m) => m,
+        other => other.to_string(),
+    };
+    format!("{path}: {why}")
+}
+
+/// A predicate that did not parse, with where and in what.
+fn predicate_error(fname: &str, what: &str, src: &str, e: &cells::PredError) -> mlua::Error {
+    let shown: String = if src.chars().count() > 80 {
+        src.chars().take(79).chain(std::iter::once('…')).collect()
+    } else {
+        src.to_string()
+    };
+    mlua::Error::external(format!("{fname}: {what}: {} (column {} of \"{shown}\")", e.message, e.column))
+}
+
+/// What the three cells calls read from `opts`.
+struct CellsCall {
+    /// Where to read — or why there is nothing to read this time, which the call answers as
+    /// `nil, reason` (an empty client area).
+    rect: std::result::Result<region::ScreenRect, String>,
+    spec: cells::CellSpec,
+}
+
+/// Reads `opts = { region, cols, rows, predicate }`, raising for every mistake in it.
+fn read_cells_opts(lua: &Lua, fname: &str, opts: mlua::Value) -> mlua::Result<CellsCall> {
+    let err = |m: String| mlua::Error::external(format!("{fname}: {m}"));
+    let mlua::Value::Table(t) = opts else {
+        return Err(err(format!(
+            "opts must be a table {{ region, cols, rows, predicate }}, got {}",
+            describe_value(&opts)
+        )));
+    };
+    // serde reads everything but the region, which `region_lua::read` reads below. It stands
+    // in as `true`, so a missing region is reported like any other missing option.
+    let copy = lua.create_table()?;
+    let mut region_value = mlua::Value::Nil;
+    for pair in t.pairs::<mlua::Value, mlua::Value>() {
+        let (k, v) = pair?;
+        if matches!(&k, mlua::Value::String(s) if s.as_bytes().as_ref() == b"region") {
+            region_value = v;
+            copy.raw_set(k, true)?;
+        } else {
+            copy.raw_set(k, v)?;
+        }
+    }
+    let o: CellsOptsIn = serde_path_to_error::deserialize(mlua::serde::Deserializer::new(mlua::Value::Table(copy)))
+        .map_err(|e| err(serde_message("opts", e)))?;
+    for (name, n) in [("cols", o.cols.0), ("rows", o.rows.0)] {
+        if !(1..=cells::MAX_SIDE as i64).contains(&n) {
+            return Err(err(format!("opts.{name} is {n}; it must be from 1 to {}", cells::MAX_SIDE)));
+        }
+    }
+    let pred = cells::Predicate::parse(&o.predicate)
+        .map_err(|e| predicate_error(fname, "opts.predicate", &o.predicate, &e))?;
+    let spec = cells::CellSpec::new(o.cols.0 as u32, o.rows.0 as u32, pred).map_err(|m| err(format!("opts: {m}")))?;
+    // The Region form's one strict reader, shared with `host.ocr.read`: a mistake raises, an
+    // empty client area is this call's `nil, reason`.
+    let given = region_lua::read(&region_value, "opts.region").map_err(err)?;
+    let mut rect = given.resolve().map_err(|u| u.to_string());
+    if let Ok(r) = &rect {
+        let px = r.w as u64 * r.h as u64;
+        if px > cells::MAX_REGION_PIXELS {
+            let why = format!("the region is {}x{}, {px} pixels; the limit is {}", r.w, r.h, cells::MAX_REGION_PIXELS);
+            match given {
+                // Corners are the module's own: a mistake in the call.
+                region::Region::Rect(_) => return Err(err(why)),
+                // A window region's size is the window's, at run time: answered, like an empty
+                // client area, so the same call cannot raise only when the window is large.
+                region::Region::Window(..) => rect = Err(format!("at the window's current size {why}")),
+            }
+        }
+    }
+    Ok(CellsCall { rect, spec })
+}
+
+/// The states a match compares against, decoded, with their names.
+struct StatesIn {
+    bytes: Vec<Box<[u8]>>,
+    names: Vec<Option<String>>,
+}
+
+/// Reads `states`: a list of 1 to 1024 entries, each hex of exactly two digits per cell or
+/// `{ cells = hex, name = string }`. Raises for anything else.
+fn read_states(fname: &str, v: mlua::Value, cells_per_state: usize) -> mlua::Result<StatesIn> {
+    let err = |m: String| mlua::Error::external(format!("{fname}: {m}"));
+    let mlua::Value::Table(t) = &v else {
+        return Err(err(format!(
+            "states must be a list of hex strings or {{ cells, name }} tables, got {}",
+            describe_value(&v)
+        )));
+    };
+    let len = t.raw_len();
+    if len == 0 {
+        return Err(err("states is empty; give at least one".to_string()));
+    }
+    if t.clone().pairs::<mlua::Value, mlua::Value>().count() != len {
+        return Err(err("states must be a list (1, 2, 3, …) with nothing else in it".to_string()));
+    }
+    if len > cells::MAX_STATES {
+        return Err(err(format!("states has {len} entries; the limit is {}", cells::MAX_STATES)));
+    }
+    let list: Vec<StateIn> = serde_path_to_error::deserialize(mlua::serde::Deserializer::new(v.clone()))
+        .map_err(|e| err(serde_message("states", e)))?;
+    let mut out = StatesIn { bytes: Vec::with_capacity(len), names: Vec::with_capacity(len) };
+    for (n, s) in list.into_iter().enumerate() {
+        let (text, name, at) = match s {
+            StateIn::Bare(b) => (b, None, format!("states[{}]", n + 1)),
+            StateIn::Named { cells, name } => (cells, name, format!("states[{}].cells", n + 1)),
+        };
+        let bytes = cells::from_hex(&text, cells_per_state).map_err(|e| err(format!("{at}: {e}")))?;
+        out.bytes.push(bytes.into_boxed_slice());
+        out.names.push(name);
+    }
+    Ok(out)
+}
+
+/// `{ cells, x, y, w, h }`: the cells as hex and the rectangle actually read.
+fn cells_table(lua: &Lua, bytes: &[u8], r: region::ScreenRect) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("cells", cells::to_hex(bytes))?;
+    t.set("x", r.x)?;
+    t.set("y", r.y)?;
+    t.set("w", r.w)?;
+    t.set("h", r.h)?;
+    Ok(t)
+}
+
+/// `cells_table` plus the ranking: `index` (1-based, the winning state), `name`, `similarity`,
+/// `distance`, `runnerUp` and `similarities` (one per state). Shared by `matchCells` and the
+/// image worker's delivery of `matchCellsAsync`.
+pub(crate) fn cells_match_table(
+    lua: &Lua,
+    bytes: &[u8],
+    r: region::ScreenRect,
+    ranked: &cells::Ranked,
+    names: &[Option<String>],
+) -> mlua::Result<Table> {
+    let t = cells_table(lua, bytes, r)?;
+    t.set("index", ranked.state + 1)?;
+    if let Some(Some(name)) = names.get(ranked.state) {
+        t.set("name", name.as_str())?;
+    }
+    t.set("similarity", ranked.similarity)?;
+    t.set("distance", ranked.distance)?;
+    t.set("runnerUp", ranked.runner_up)?;
+    t.set("similarities", lua.create_sequence_from(ranked.all.iter().copied())?)?;
+    Ok(t)
+}
+
+/// Why a read through `src` got no picture.
+pub(crate) fn capture_failed(src: backend::CaptureSource) -> String {
+    match src {
+        backend::CaptureSource::Duplication { or_standard: false } => {
+            "the screen could not be read: desktop duplication had no picture, and this module \
+             declared fallback = \"none\""
+                .to_string()
+        }
+        _ => "the screen could not be read".to_string(),
+    }
+}
+
+/// `nil, reason`, the answer of every cells call that could not look.
+fn nil_because(lua: &Lua, why: String) -> mlua::Result<(mlua::Value, mlua::Value)> {
+    Ok((mlua::Value::Nil, mlua::Value::String(lua.create_string(why)?)))
+}
+
+/// Captures `r` through this VM's source on the event loop and hands the picture to `reduce`,
+/// counted as one screen touch in the observation log and timed to the end of the reduction,
+/// as `profile` is: the capture is a fixed frame, and the part that grows with the region is
+/// what the log is there to show.
+fn read_cells_with<T>(
+    sh: &Shared,
+    lua: &Lua,
+    r: region::ScreenRect,
+    reduce: impl FnOnce(&backend::CapturedImage) -> std::result::Result<T, String>,
+) -> std::result::Result<T, String> {
+    let src = capture_source::read_source(lua, &*sh.backend, (r.x, r.y, r.w, r.h));
+    let t0 = Instant::now();
+    let out = match sh.backend.capture(r.x, r.y, r.w, r.h, src) {
+        Some(cap) => reduce(&cap),
+        None => Err(capture_failed(src)),
+    };
+    let mut obs = sh.observations();
+    obs.pixels += 1;
+    obs.pixel_us += t0.elapsed().as_micros();
+    out
+}
+
+#[cfg(test)]
+mod cells_binding_tests {
+    use super::*;
+
+    const WARM: &str = "(red >= 80 && red*10 >= green*13 && red*10 >= blue*12) || \
+                        (red >= 100 && green >= 45 && blue <= 150 && red >= green && green >= blue)";
+
+    fn opts(lua: &Lua, src: &str) -> mlua::Result<CellsCall> {
+        let v: mlua::Value = lua.load(src).eval()?;
+        read_cells_opts(lua, "host.screen.cells", v)
+    }
+
+    fn opts_err(lua: &Lua, src: &str) -> String {
+        match opts(lua, src) {
+            Ok(_) => panic!("expected an error from {src}"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    fn states(lua: &Lua, src: &str, cells: usize) -> mlua::Result<StatesIn> {
+        let v: mlua::Value = lua.load(src).eval()?;
+        read_states("host.screen.matchCells", v, cells)
+    }
+
+    fn states_err(lua: &Lua, src: &str, cells: usize) -> String {
+        match states(lua, src, cells) {
+            Ok(_) => panic!("expected an error from {src}"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    /// A window table the way `win_to_table` builds one, with a client area of 1280x1024 at
+    /// (100, 50).
+    const WIN: &str = "local w = { id = 7, title = 't', class = 'c', app = { name = 'x', exe = 'x.exe', pid = 1 }, \
+                       bounds = { x = 92, y = 19, w = 1296, h = 1063 }, client = { x = 100, y = 50, w = 1280, h = 1024 } }";
+
+    #[test]
+    fn the_window_form_resolves_with_his_formula() {
+        let lua = Lua::new();
+        let c = opts(
+            &lua,
+            &format!("{WIN} return {{ region = {{ window = w, fraction = {{ 0.02, 0.33, 0.09, 0.86 }} }}, cols = 10, rows = 36, predicate = [[{WARM}]] }}"),
+        )
+        .unwrap();
+        assert_eq!(c.rect, Ok(region::ScreenRect { x: 100 + 25, y: 50 + 337, w: 91, h: 544 }));
+        assert_eq!((c.spec.cols, c.spec.rows, c.spec.cells()), (10, 36, 360));
+        // Named fractions, and his clamps: an end before its start still reads one pixel.
+        let c = opts(
+            &lua,
+            &format!("{WIN} return {{ region = {{ window = w, fraction = {{ x1 = 0.5, y1 = 0.5, x2 = 0.1, y2 = 2 }} }}, cols = 1, rows = 1, predicate = 'r >= 1' }}"),
+        )
+        .unwrap();
+        assert_eq!(c.rect, Ok(region::ScreenRect { x: 100 + 640, y: 50 + 512, w: 1, h: 512 }));
+        // An empty client area is `nil, reason`, not an error: a minimised game.
+        let c = opts(
+            &lua,
+            "return { region = { window = { client = { x = 0, y = 0, w = 0, h = 0 } }, fraction = { 0, 0, 1, 1 } }, cols = 2, rows = 2, predicate = 'r >= 1' }",
+        )
+        .unwrap();
+        assert_eq!(c.rect, Err("the window's client area is empty (0x0)".to_string()));
+        // So is a window region past the pixel limit: its size is the window's, and corners of
+        // the same size raise (every_mistake_in_opts_raises_naming_it).
+        let c = opts(
+            &lua,
+            "return { region = { window = { client = { x = 0, y = 0, w = 10000, h = 5000 } }, fraction = { 0, 0, 1, 1 } }, cols = 2, rows = 2, predicate = 'r >= 1' }",
+        )
+        .unwrap();
+        assert_eq!(
+            c.rect,
+            Err("at the window's current size the region is 10000x5000, 50000000 pixels; the limit is 40000000".to_string())
+        );
+        // A pack's fractions read through `host.json.decode` land where the reader put them:
+        // 59/600, written as the shortest text that reads back, starts at column 59, not 58.
+        lua.globals().set("decode", lua.create_function(json::decode).unwrap()).unwrap();
+        let c = opts(
+            &lua,
+            "local f = decode('[0.09833333333333333, 0, 1, 1]') \
+             return { region = { window = { client = { x = 0, y = 0, w = 600, h = 10 } }, fraction = f }, cols = 1, rows = 1, predicate = 'r >= 1' }",
+        )
+        .unwrap();
+        assert_eq!(c.rect, Ok(region::ScreenRect { x: 59, y: 0, w: 541, h: 10 }));
+        // The absolute form, positional and named.
+        let c = opts(&lua, "return { region = { 10, 20, 110, 70 }, cols = 2, rows = 2, predicate = 'r >= 1' }").unwrap();
+        assert_eq!(c.rect, Ok(region::ScreenRect { x: 10, y: 20, w: 100, h: 50 }));
+        let c = opts(&lua, "return { region = { x1 = -10, y1 = 0, x2 = 0, y2 = 5 }, cols = 2, rows = 2, predicate = 'r >= 1' }").unwrap();
+        assert_eq!(c.rect, Ok(region::ScreenRect { x: -10, y: 0, w: 10, h: 5 }));
+    }
+
+    #[test]
+    fn every_mistake_in_opts_raises_naming_it() {
+        let lua = Lua::new();
+        let base = "cols = 10, rows = 36, predicate = 'r >= 80'";
+        for (src, want) in [
+            ("return 5".to_string(), "opts must be a table"),
+            (format!("return {{ {base} }}"), "missing field `region`"),
+            (format!("return {{ region = {{ 0, 0, 10, 10 }}, {base}, rouding = 'even' }}"), "unknown field `rouding`"),
+            ("return { region = { 0, 0, 10, 10 }, rows = 36, predicate = 'r >= 80' }".to_string(), "missing field `cols`"),
+            ("return { region = { 0, 0, 10, 10 }, cols = 10.5, rows = 36, predicate = 'r >= 80' }".to_string(), "opts.cols: invalid value: floating point `10.5`, expected a whole number"),
+            ("return { region = { 0, 0, 10, 10 }, cols = '10', rows = 36, predicate = 'r >= 80' }".to_string(), "opts.cols: invalid type: string"),
+            ("return { region = { 0, 0, 10, 10 }, cols = 0, rows = 36, predicate = 'r >= 80' }".to_string(), "opts.cols is 0; it must be from 1 to 256"),
+            ("return { region = { 0, 0, 10, 10 }, cols = 100, rows = 41, predicate = 'r >= 80' }".to_string(), "100x41 is 4100 cells; the limit is 4096"),
+            ("return { region = { 0, 0, 10, 10 }, cols = 10, rows = 36, predicate = 5 }".to_string(), "opts.predicate: invalid type"),
+            ("return { region = { 0, 0, 10, 10 }, cols = 10, rows = 36, predicate = 'r >= 80 and x > 3' }".to_string(), "opts.predicate: 'x' is not a channel; use r, g or b (or red, green, blue) (column 13 of \"r >= 80 and x > 3\")"),
+            ("return { region = { 0, 0, 10, 10 }, cols = 10, rows = 36, predicate = 'r >= 080' }".to_string(), "opts.predicate: '080' has a leading zero, which C and JavaScript can read as octal; write 80 (column 6"),
+            (format!("return {{ region = 'screen', {base} }}"), "opts.region must be a table"),
+            (format!("return {{ region = {{ 0, 0, 10 }}, {base} }}"), "opts.region.y2 is missing"),
+            (format!("return {{ region = {{ x1 = 0, y1 = 0, x2 = 10, yy2 = 10 }}, {base} }}"), "opts.region has a key 'yy2'"),
+            (format!("return {{ region = {{ 0, 0, 10, 10, x1 = 0 }}, {base} }}"), "mixes named and positional"),
+            (format!("return {{ region = {{ 0, 0, 10.5, 10 }}, {base} }}"), "opts.region.x2 must be a whole number, got 10.5"),
+            (format!("return {{ region = {{ 10, 0, 10, 10 }}, {base} }}"), "is empty or turned around"),
+            (format!("return {{ region = {{ x = 0, y = 0, w = 10, h = 10 }}, {base} }}"), "has a key"),
+            (format!("{WIN} return {{ region = {{ window = w, fraction = {{ 0, 0, 1, 1 }}, x1 = 3 }}, {base} }}"), "a key 'x1' beside window and fraction"),
+            (format!("return {{ region = {{ window = 3, fraction = {{ 0, 0, 1, 1 }} }}, {base} }}"), "opts.region.window must be a window table"),
+            (format!("return {{ region = {{ window = {{}}, fraction = {{ 0, 0, 1, 1 }} }}, {base} }}"), "has no client table"),
+            (format!("return {{ region = {{ window = {{ client = {{ x = 0, y = 0, w = 1.5, h = 3 }} }}, fraction = {{ 0, 0, 1, 1 }} }}, {base} }}"), "opts.region.window.client.w must be a whole number, got 1.5"),
+            (format!("{WIN} return {{ region = {{ window = w }}, {base} }}"), "opts.region.fraction must be a table"),
+            (format!("{WIN} return {{ region = {{ window = w, fraction = {{ 0, 0, 1/0, 1 }} }}, {base} }}"), "opts.region.fraction.x2 is inf, not a finite number"),
+            (format!("{WIN} return {{ region = {{ window = w, fraction = {{ 0, 0, '1', 1 }} }}, {base} }}"), "opts.region.fraction.x2 must be a number"),
+            (format!("return {{ region = {{ 0, 0, 10000, 10000 }}, {base} }}"), "100000000 pixels; the limit is 40000000"),
+        ] {
+            let e = opts_err(&lua, &src);
+            assert!(e.contains("host.screen.cells: "), "{src}: {e}");
+            assert!(e.contains(want), "{src}:\n  got  {e}\n  want {want}");
+        }
+    }
+
+    #[test]
+    fn states_are_hex_named_or_bare_and_strictly_read() {
+        let lua = Lua::new();
+        let s = states(&lua, "return { 'a0ff', { cells = 'A0FE', name = 'Start' }, { cells = '0000' } }", 2).unwrap();
+        assert_eq!(s.bytes, vec![vec![0xa0, 0xff].into_boxed_slice(), vec![0xa0, 0xfe].into(), vec![0, 0].into()]);
+        assert_eq!(s.names, vec![None, Some("Start".to_string()), None]);
+        for (src, want) in [
+            ("return 'a0ff'", "states must be a list"),
+            ("return {}", "states is empty"),
+            ("return { 'a0ff', n = 1 }", "with nothing else in it"),
+            ("return { 'a0f' }", "states[1]: 3 characters; this grid's states are 4 hex digits"),
+            ("return { 'a0ff', 'zz00' }", "states[2]: 'z' at character 1 is not a hex digit"),
+            ("return { 'a0ff', '\\255\\1' }", "states[2]: states are hex (4 characters)"),
+            // Counted in characters, and the character itself, not its first byte as Latin-1.
+            ("return { 'a0ff', 'a0é' }", "states[2]: 'é' at character 3 is not a hex digit"),
+            ("return { 'a0ff', 'a\\255ff' }", "states[2]: byte 2 (0xFF) is not a hex digit, and the state is not text"),
+            ("return { { cells = 'a0ff', name = 'x' }, { cels = 'a0ff' } }", "states[2]: unknown field `cels`, expected `cells` or `name`"),
+            ("return { { name = 'x' } }", "states[1]: missing field `cells`"),
+            ("return { { cells = 'a0ff', name = 5 } }", "states[1].name: invalid type"),
+            ("return { 5 }", "states[1]: invalid type: integer `5`, expected a hex string, or a table"),
+            ("return { { cells = 'a0' } }", "states[1].cells: 2 characters"),
+        ] {
+            let e = states_err(&lua, src, 2);
+            assert!(e.contains("host.screen.matchCells: "), "{src}: {e}");
+            assert!(e.contains(want), "{src}:\n  got  {e}\n  want {want}");
+        }
+        let many = format!("return {{ {} }}", vec!["'a0ff'"; cells::MAX_STATES + 1].join(", "));
+        assert!(states_err(&lua, &many, 2).contains("the limit is 1024"));
+    }
+
+    /// The answer's shape, and hex surviving the two conversions that break raw bytes: the
+    /// legacy export's `from_value::<serde_json::Value>` and a string setting's `to_str`.
+    #[test]
+    fn the_answer_is_plain_data() {
+        let lua = Lua::new();
+        let r = region::ScreenRect { x: 5, y: 6, w: 7, h: 8 };
+        let live = vec![0x80u8, 0x01];
+        let states: Vec<Box<[u8]>> = vec![vec![0x80, 0x01].into(), vec![0, 0].into()];
+        let names = vec![Some("Start".to_string()), None];
+        let ranked = cells::rank(&live, &states, &cells::items_of(&names)).unwrap();
+        let t = cells_match_table(&lua, &live, r, &ranked, &names).unwrap();
+        assert_eq!(t.get::<String>("cells").unwrap(), "8001");
+        assert_eq!((t.get::<i32>("x").unwrap(), t.get::<i32>("w").unwrap()), (5, 7));
+        assert_eq!(t.get::<i64>("index").unwrap(), 1);
+        assert_eq!(t.get::<String>("name").unwrap(), "Start");
+        assert_eq!(t.get::<f64>("similarity").unwrap(), 1.0);
+        assert_eq!(t.get::<u64>("distance").unwrap(), 0);
+        assert_eq!(t.get::<f64>("runnerUp").unwrap(), 1.0 - 129.0 / 510.0);
+        assert_eq!(t.get::<Table>("similarities").unwrap().raw_len(), 2);
+        let json = lua.from_value::<serde_json::Value>(mlua::Value::Table(t.clone())).expect("exportable");
+        assert_eq!(json["cells"], "8001");
+        let s: mlua::String = t.get("cells").unwrap();
+        assert_eq!(s.to_str().unwrap().to_string(), "8001");
+        // No name for an unnamed winner.
+        let ranked = cells::rank(&[0, 0], &states, &cells::items_of(&names)).unwrap();
+        let t = cells_match_table(&lua, &[0, 0], r, &ranked, &names).unwrap();
+        assert_eq!(t.get::<i64>("index").unwrap(), 2);
+        assert!(t.get::<mlua::Value>("name").unwrap().is_nil());
+        // Why a read failed, per source.
+        assert_eq!(capture_failed(backend::CaptureSource::Standard), "the screen could not be read");
+        assert!(capture_failed(backend::CaptureSource::Duplication { or_standard: false }).contains("fallback = \"none\""));
+    }
+}
+
 /// Converts a native window snapshot into the Lua table modules see:
 /// `{ id, title, class, app = { name, exe, pid }, bounds = { x, y, w, h } }`.
 /// Finds the module directory whose manifest id matches — for auto-discovering
@@ -7035,4 +7805,97 @@ fn win_to_table(lua: &Lua, w: &WinInfo) -> mlua::Result<Table> {
     t.set("client", cl)?;
 
     Ok(t)
+}
+
+/// Where `host.ocr.read`'s rules meet the event loop: the input barrier, the interactive lane,
+/// dropping a module's reads, the legacy calls' language. None of these places can be reached by
+/// a unit test — they are methods of `Shared`, whose speech engines a test must not open — and
+/// deleting any one of them left every other test green. So each is checked where it is written:
+/// a crude check on the source, which fails loudly when the code it looks for moves, rather than
+/// silently when the rule goes.
+#[cfg(test)]
+mod ocr_wiring_tests {
+    const LIB: &str = include_str!("lib.rs");
+    const IMAGES: &str = include_str!("image_search.rs");
+
+    /// The text of the item that starts with `sig`, up to its closing brace at its own
+    /// indentation.
+    fn body<'a>(src: &'a str, sig: &str) -> &'a str {
+        let start = src.find(sig).unwrap_or_else(|| panic!("`{sig}` is not in the source any more"));
+        let line = src[..start].rfind('\n').map_or(0, |i| i + 1);
+        let indent = src[line..].len() - src[line..].trim_start_matches(' ').len();
+        let close = format!("\n{}}}\n", " ".repeat(indent));
+        let end = src[start..].find(&close).unwrap_or_else(|| panic!("the end of `{sig}` was not found"));
+        &src[start..start + end]
+    }
+
+    /// Every `table.set("name", …)` in `src`: its name and its text, up to the next one.
+    fn bindings<'a>(src: &'a str, table: &str) -> Vec<(&'a str, &'a str)> {
+        src.split(format!("{table}.set(").as_str())
+            .skip(1)
+            .map(|seg| {
+                let seg = seg.split("host.set(").next().unwrap_or(seg);
+                (seg.split('"').nth(1).unwrap_or(""), seg)
+            })
+            .collect()
+    }
+
+    /// Read, then act: every `host.input` call that acts, and `host.window.focus`, waits for the
+    /// module's pending pictures first. A new `host.input` call has to be put in one list or
+    /// the other.
+    #[test]
+    fn every_acting_call_waits_for_the_modules_pending_pictures() {
+        const ACTING: [&str; 9] = ["move", "click", "post", "mouseDown", "mouseUp", "drag", "scroll", "send", "text"];
+        const READ_ONLY: [&str; 1] = ["cursorPos"];
+        let api = body(LIB, "fn install_host_api(");
+        let input = bindings(api, "input");
+        assert_eq!(input.len(), ACTING.len() + READ_ONLY.len(), "{:?}", input.iter().map(|b| b.0).collect::<Vec<_>>());
+        for (name, text) in input {
+            if ACTING.contains(&name) {
+                assert!(text.contains("sh.ocr_barrier(lua);"), "host.input.{name} does not wait for the OCR barrier");
+            } else {
+                assert!(READ_ONLY.contains(&name), "host.input.{name} is new: does it act (ACTING) or only read?");
+            }
+        }
+        let focus = bindings(api, "win").into_iter().find(|b| b.0 == "focus").expect("host.window.focus");
+        assert!(focus.1.contains("sh.ocr_barrier(lua);"), "host.window.focus does not wait for the OCR barrier");
+    }
+
+    /// Somebody waiting: every dispatch a person causes runs in the interactive lane, and an
+    /// image search's callback in the lane it was asked from.
+    #[test]
+    fn the_dispatches_a_person_causes_are_interactive() {
+        for sig in [
+            "fn on_key(&mut self",
+            "fn on_hotkey(&mut self",
+            "fn on_gamepad(&mut self",
+            "fn on_window_activate(&mut self",
+            "fn on_focus_change(&mut self",
+            "fn dispatch_initial(&self)",
+        ] {
+            assert!(
+                body(LIB, sig).contains("let _prio = ocr::types::enter_priority(ocr::types::Priority::Interactive);"),
+                "`{sig}` does not dispatch in the interactive lane"
+            );
+        }
+        assert!(
+            body(IMAGES, "fn fire_image_results(").contains("let _prio = crate::ocr::types::enter_priority(p.prio);"),
+            "an image search's callback does not run in the lane it was asked from"
+        );
+    }
+
+    /// A module's reads are dropped, never delivered, when it is disabled, reloaded or rolled
+    /// back; and the two older calls send `lang` through the resolver.
+    #[test]
+    fn a_modules_reads_go_with_it_and_the_older_calls_resolve_their_language() {
+        assert!(body(LIB, "fn apply_enabled(").contains("self.ocr_drop_owner(idx, false);"));
+        assert!(body(LIB, "fn purge_module(").contains("self.ocr_drop_owner(idx, true);"));
+        assert!(body(LIB, "fn rollback_to(").contains("self.ocr_drop_from(n);"));
+        let api = body(LIB, "fn install_host_api(");
+        let ocr = bindings(api, "ocr");
+        for name in ["recognize", "recognizeMany"] {
+            let text = ocr.iter().find(|b| b.0 == name).unwrap_or_else(|| panic!("host.ocr.{name}")).1;
+            assert!(text.contains("sh.ocr_legacy_lang(&tag, \"host.ocr."), "host.ocr.{name} skips the resolver");
+        }
+    }
 }

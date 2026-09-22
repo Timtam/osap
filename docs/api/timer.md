@@ -31,7 +31,7 @@ See [what that list is and is not](./index.md#capabilities).
 
 **Signature:** `host.timer.after(ms: number, callback: () -> ())` → `number`
 
-Schedules a **one-shot** callback to fire approximately `ms` milliseconds later, driven from the event-loop tick — at the earliest on the first tick at or after that time, so `after(1)` and `after(10)` both wait for the next tick, and an `after(0)` armed from inside a timer callback waits for the next tick too. The callback runs once with no arguments (only if the module is still enabled at fire time) and is then discarded. Returns the timer's token, for [`host.timer.cancel`](#host-timer-cancel). `ms` must be a number of at least 0 (a fraction is cut to the whole number below); a negative one raises.
+Schedules a **one-shot** callback to fire approximately `ms` milliseconds later, driven from the event-loop tick — at the earliest on the first tick at or after that time, so `after(1)` and `after(10)` both wait for the next tick, and an `after(0)` armed from inside a timer callback waits for the next tick too. The callback runs once with no arguments (only if the module is still enabled at fire time) and is then discarded. Returns the timer's token, for [`host.timer.cancel`](#host-timer-cancel). `ms` must be a number of at least 0 (a fraction is cut to the whole number below); a negative one raises. The callback runs with the priority of the dispatch that armed it — a re-read armed from a key press is still somebody waiting — which decides where a [`host.ocr.read`](./ocr.md#host-ocr-read) it asks for waits; an `every` callback always runs as background work.
 
 Arming costs a registry slot and a list entry, and nothing else; the list is looked at once per tick.
 

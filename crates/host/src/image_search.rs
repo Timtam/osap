@@ -16,15 +16,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use mlua::{
-    Function, Lua, MetaMethod, RegistryKey, Table, UserData, UserDataFields, UserDataMethods,
-    Value,
+    Function, Lua, MetaMethod, MultiValue, RegistryKey, Table, UserData, UserDataFields,
+    UserDataMethods, Value,
 };
 use rayon::prelude::*;
 
 use crate::backend::{CaptureFn, CaptureSource, CapturedImage};
 use crate::capture_source;
+use crate::cells;
+use crate::region::ScreenRect;
 use crate::template::{self, Decoded, Rect};
-use crate::{call_guarded, logging, read_region, read_scales, Shared};
+use crate::{call_guarded, capture_failed, cells_match_table, logging, read_region, read_scales, Shared};
 
 // ── Who a search belongs to ─────────────────────────────────────────────────────────────
 
@@ -94,7 +96,7 @@ enum Fate {
     /// The owner is still the VM that asked, but disabled. Kept, and searched AGAIN when the
     /// owner is enabled (`Shared::resume_held_images`), so that the callback, when it comes,
     /// describes the screen the module can act on rather than one from before it was switched
-    /// off.
+    /// off. A `matchCellsAsync` is answered instead of read again (`resend`).
     ///
     /// Dropping it instead was a wedge. A caller that waits for its callback before it searches
     /// again — the overlay runtime's landmark gate, which clears its in-flight flag only there
@@ -145,15 +147,18 @@ pub(crate) struct PendingImage {
     /// Whose VM the callback runs in, and which incarnation of it; see `VmOwner`.
     owner: usize,
     gen: u64,
-    /// Each entry's name, travelling here rather than through the worker: the worker only
-    /// ever holds pixels, and a name is a Lua-side affair.
+    /// Each entry's name — or each state's, for `matchCellsAsync` — travelling here rather
+    /// than through the worker: the worker only ever holds pixels, and a name is a Lua-side
+    /// affair.
     names: Vec<Option<String>>,
-    mode: Mode,
     /// The search as it was sent, so it can be sent again after a `Fate::Hold`. `Arc`s and a
     /// few numbers: the pixels are shared with the worker's copy, not duplicated.
     task: ImageTask,
     /// Answered while its owner was disabled; waiting for the owner to be enabled again.
     held: bool,
+    /// The priority of the dispatch that asked, which the callback runs under: a key press, then
+    /// a search, then a text read stays the user waiting (`ocr::types::Priority`).
+    prio: crate::ocr::types::Priority,
 }
 
 /// A pending entry for a search made in `lua` under the identity `scope`, owned by the VM it
@@ -174,9 +179,9 @@ fn pending(
         owner,
         gen,
         names,
-        mode: task.mode,
         task,
         held: false,
+        prio: crate::ocr::types::current_priority(),
     })
 }
 
@@ -204,13 +209,36 @@ fn unhold(
         }
         if Some(p.gen) == gen {
             p.held = false;
-            again.push(p.task.clone());
+            again.push(resend(&p.task));
         } else {
             stale.push(*id);
         }
     }
     let stale = stale.into_iter().filter_map(|id| map.remove(&id)).collect();
     (again, stale)
+}
+
+/// What a held `matchCellsAsync` is answered when its module is enabled again.
+const HELD_CELLS: &str = "the module was disabled while the read waited";
+
+/// What a held task is sent as when its owner is enabled again. A search is made again exactly
+/// as it was asked. A `matchCellsAsync` is not read again: its rectangle was worked out at the
+/// call — a window region from the window table the module passed then — and minutes later the
+/// window may have moved, been resized or closed, so reading the old rectangle could rank the
+/// wrong pixels and speak a confident match. It is answered `nil, HELD_CELLS` instead, by the
+/// worker and without a capture, so the callback still comes on a later tick and still clears
+/// a caller's in-flight flag.
+fn resend(task: &ImageTask) -> ImageTask {
+    match &task.job {
+        Job::Search { .. } => task.clone(),
+        Job::Cells(c) => ImageTask {
+            job: Job::Cells(Arc::new(CellsJob {
+                matcher: c.matcher.clone(),
+                unresolved: Some(HELD_CELLS.to_string()),
+            })),
+            ..task.clone()
+        },
+    }
 }
 
 /// Frees what finished or abandoned entries hold in their VMs' registries.
@@ -235,16 +263,55 @@ fn release(gone: impl IntoIterator<Item = PendingImage>) {
 pub(crate) struct ImageTask {
     pub(crate) id: u64,
     pub(crate) region: (i32, i32, i32, i32),
-    /// Each template with the part of the captured frame it may be found in (`None`: all of
-    /// it), in frame coordinates.
-    pub(crate) entries: Vec<(Arc<Decoded>, Option<Rect>)>,
-    pub(crate) tol: u8,
-    pub(crate) scales: Vec<f32>,
-    pub(crate) mode: Mode,
     /// How the asking module's VM reads the screen (`capture_source.rs`). Part of the frame's
     /// identity in a batch: the same region read two ways is two frames. Travels with the
     /// task, so a held search sent again on re-enable reads the way it was first asked to.
     pub(crate) source: CaptureSource,
+    /// What is done with the frame.
+    pub(crate) job: Job,
+}
+
+/// What the worker does with a task's frame.
+#[derive(Clone)]
+pub(crate) enum Job {
+    /// Template search.
+    Search {
+        /// Each template with the part of the captured frame it may be found in (`None`: all
+        /// of it), in frame coordinates.
+        entries: Vec<(Arc<Decoded>, Option<Rect>)>,
+        tol: u8,
+        scales: Vec<f32>,
+        mode: Mode,
+    },
+    /// `matchCellsAsync`: the whole frame reduced to cells and ranked against the states. A
+    /// cells task shares its capture with every search of the same region and source in its
+    /// batch.
+    Cells(Arc<CellsJob>),
+}
+
+/// A `matchCellsAsync` call's work.
+pub(crate) struct CellsJob {
+    /// Shared, so that a held task can be sent again as an answer without copying the states.
+    pub(crate) matcher: Arc<cells::Matcher>,
+    /// Why there is nothing to read this time — the window's client area was empty when the
+    /// call was made. Answered on the worker, without a capture, so that the callback still
+    /// comes on a later tick like every other answer.
+    pub(crate) unresolved: Option<String>,
+}
+
+impl ImageTask {
+    /// Whether the worker reads the screen for this task.
+    fn captures(&self) -> bool {
+        !matches!(&self.job, Job::Cells(c) if c.unresolved.is_some())
+    }
+
+    /// The binding that asked, for an error report.
+    fn binding(&self) -> &'static str {
+        match &self.job {
+            Job::Search { mode, .. } => mode.binding(),
+            Job::Cells(_) => "matchCellsAsync",
+        }
+    }
 }
 
 /// A hit in screen coordinates, with the 1-based index of the entry that made it.
@@ -257,13 +324,30 @@ pub(crate) struct ScreenHit {
     pub n: usize,
 }
 
+/// What the worker found for one task.
+pub(crate) enum Outcome {
+    /// A search: `None` when the region could not be captured — "could not look", which is not
+    /// the same answer as "looked and found nothing". Otherwise one slot per entry in
+    /// `Mode::Each`, and exactly one slot, the first hit or none, in `Mode::First`.
+    Search(Option<Vec<Option<ScreenHit>>>),
+    /// A cells match: the live cells and their ranking, or why there are none.
+    Cells(Result<(Vec<u8>, cells::Ranked), String>),
+}
+
+impl Outcome {
+    /// The answer of a task whose batch panicked: could not look.
+    fn failed(t: &ImageTask) -> Outcome {
+        match &t.job {
+            Job::Search { .. } => Outcome::Search(None),
+            Job::Cells(_) => Outcome::Cells(Err("internal error: the cells could not be computed".to_string())),
+        }
+    }
+}
+
 /// The worker's answer.
 pub(crate) struct ImageResult {
     pub(crate) id: u64,
-    /// `None` when the region could not be captured — "could not look", which is not the same
-    /// answer as "looked and found nothing". Otherwise one slot per entry in `Mode::Each`, and
-    /// exactly one slot, the first hit or none, in `Mode::First`.
-    pub(crate) found: Option<Vec<Option<ScreenHit>>>,
+    pub(crate) outcome: Outcome,
     /// How long this search actually took, split into the shared capture and this
     /// task's own matching. Reported so a slow search is a NUMBER in the log rather
     /// than an inference from the gap between two events — the landmark poll is
@@ -340,7 +424,7 @@ fn worker_loop(
                     .enumerate()
                     .map(|(i, t)| ImageResult {
                         id: t.id,
-                        found: None,
+                        outcome: Outcome::failed(t),
                         capture_ms: 0,
                         match_ms: 0,
                         batch: n,
@@ -372,9 +456,17 @@ fn run_batch(batch: &[ImageTask], capture: CaptureFn) -> Vec<ImageResult> {
     // duplication regions of a batch go to the capture thread as one request — see
     // capture_source::capture_frames.
     let batch_len = batch.len() as u32;
-    let (keys, frame_of) = capture_source::frame_keys(batch.iter().map(|t| (t.region, t.source)));
+    // Only the tasks that read the screen get a frame: a cells task whose window had no client
+    // area is answered without one.
+    let reading: Vec<usize> = (0..batch.len()).filter(|&i| batch[i].captures()).collect();
+    let (keys, frame_of_reading) =
+        capture_source::frame_keys(reading.iter().map(|&i| (batch[i].region, batch[i].source)));
     let frames: Vec<(Option<CapturedImage>, u32)> = capture_source::capture_frames(capture, &keys);
-    let plan: Vec<(&ImageTask, usize)> = batch.iter().zip(frame_of).collect();
+    let mut frame_of: Vec<Option<usize>> = vec![None; batch.len()];
+    for (&i, &f) in reading.iter().zip(&frame_of_reading) {
+        frame_of[i] = Some(f);
+    }
+    let plan: Vec<(&ImageTask, Option<usize>)> = batch.iter().zip(frame_of).collect();
     // MATCH IN PARALLEL. Every candidate position is independent of every other, so
     // this is the shape a thread pool is actually for; the tasks in a batch are
     // independent too. Sequentially, twelve installed libraries cost twelve full
@@ -382,18 +474,18 @@ fn run_batch(batch: &[ImageTask], capture: CaptureFn) -> Vec<ImageResult> {
     // the logging threshold and therefore invisible, while together they were the
     // several seconds before the right overlay appeared.
     let t1 = Instant::now();
-    let found: Vec<Option<Vec<Option<ScreenHit>>>> = plan
+    let outcomes: Vec<Outcome> = plan
         .par_iter()
-        .map(|(t, idx)| frames[*idx].0.as_ref().map(|cap| match_task(t, cap)))
+        .map(|(t, idx)| answer(t, idx.and_then(|i| frames[i].0.as_ref())))
         .collect();
     let match_ms = t1.elapsed().as_millis() as u32;
     let capture_ms: u32 = frames.iter().map(|f| f.1).sum();
     plan.iter()
-        .zip(found)
+        .zip(outcomes)
         .enumerate()
-        .map(|(i, ((t, _), found))| ImageResult {
+        .map(|(i, ((t, _), outcome))| ImageResult {
             id: t.id,
-            found,
+            outcome,
             capture_ms,
             match_ms,
             batch: batch_len,
@@ -402,13 +494,51 @@ fn run_batch(batch: &[ImageTask], capture: CaptureFn) -> Vec<ImageResult> {
         .collect()
 }
 
-/// One task against its captured frame.
-fn match_task(t: &ImageTask, cap: &CapturedImage) -> Vec<Option<ScreenHit>> {
-    let (rx, ry, _, _) = t.region;
+/// One task against its frame (`None`: the region could not be captured, or was not asked for).
+fn answer(t: &ImageTask, frame: Option<&CapturedImage>) -> Outcome {
+    match &t.job {
+        Job::Search { entries, tol, scales, mode } => {
+            Outcome::Search(frame.map(|cap| match_task(t.region, entries, *tol, scales, *mode, cap)))
+        }
+        Job::Cells(job) => Outcome::Cells(cells_task(t, job, frame)),
+    }
+}
+
+/// A `matchCellsAsync` against its frame. A panic in the reduction is answered, like a
+/// template's, rather than taking the worker with it.
+fn cells_task(
+    t: &ImageTask,
+    job: &CellsJob,
+    frame: Option<&CapturedImage>,
+) -> Result<(Vec<u8>, cells::Ranked), String> {
+    if let Some(why) = &job.unresolved {
+        return Err(why.clone());
+    }
+    let Some(cap) = frame else { return Err(capture_failed(t.source)) };
+    let (_, _, w, h) = t.region;
+    match logging::contain(|| job.matcher.answer(cap, w, h)) {
+        Ok(answer) => answer,
+        Err(report) => {
+            contained("a cells match", "it was answered nil", &report);
+            Err("internal error: the cells could not be computed".to_string())
+        }
+    }
+}
+
+/// One search against its captured frame.
+fn match_task(
+    region: (i32, i32, i32, i32),
+    entries: &[(Arc<Decoded>, Option<Rect>)],
+    tol: u8,
+    scales: &[f32],
+    mode: Mode,
+    cap: &CapturedImage,
+) -> Vec<Option<ScreenHit>> {
+    let (rx, ry, _, _) = region;
     let one = |n: usize, (dec, within): &(Arc<Decoded>, Option<Rect>)| -> Option<ScreenHit> {
         // Per entry, so one template that trips something cannot take its neighbours' answers
         // with it. On whichever pool thread runs it: `contain` marks the thread it runs on.
-        match logging::contain(|| template::find(cap, *within, dec, t.tol, &t.scales)) {
+        match logging::contain(|| template::find(cap, *within, dec, tol, scales)) {
             Ok(hit) => hit.map(|h| ScreenHit {
                 x: rx + h.x as i32,
                 y: ry + h.y as i32,
@@ -422,10 +552,10 @@ fn match_task(t: &ImageTask, cap: &CapturedImage) -> Vec<Option<ScreenHit>> {
             }
         }
     };
-    match t.mode {
+    match mode {
         // Templates in order against this one frame; first hit wins.
-        Mode::First => vec![t.entries.iter().enumerate().find_map(|(n, e)| one(n, e))],
-        Mode::Each => t.entries.par_iter().enumerate().map(|(n, e)| one(n, e)).collect(),
+        Mode::First => vec![entries.iter().enumerate().find_map(|(n, e)| one(n, e))],
+        Mode::Each => entries.par_iter().enumerate().map(|(n, e)| one(n, e)).collect(),
     }
 }
 
@@ -511,10 +641,11 @@ impl Shared {
             let verdict = fate(p.owner, p.gen, &self.enabled.borrow(), &self.vm_gens.borrow());
             match verdict {
                 Fate::Deliver => {
+                    let _prio = crate::ocr::types::enter_priority(p.prio);
                     if let Ok(f) = p.lua.registry_value::<Function>(&p.cb) {
-                        let arg = result_value(&p.lua, p.mode, &p.names, res.found);
-                        if let Err(e) = call_guarded(&f, arg) {
-                            self.report_callback_error(p.scope, p.mode.binding(), &e);
+                        let args = result_args(&p.lua, &p.task, &p.names, res.outcome);
+                        if let Err(e) = call_guarded(&f, args) {
+                            self.report_callback_error(p.scope, p.task.binding(), &e);
                         }
                     }
                 }
@@ -541,7 +672,8 @@ impl Shared {
     }
 
     /// Sends again every search that was answered while module `owner` was disabled (see
-    /// `Fate::Hold`). Called by `apply_enabled` when the module is enabled.
+    /// `Fate::Hold`), and every held cells read as the answer it gets instead (`resend`).
+    /// Called by `apply_enabled` when the module is enabled.
     pub(crate) fn resume_held_images(&self, owner: usize) {
         let gen = self.vm_gens.borrow().get(&owner).copied();
         let (again, stale) = unhold(&mut self.pending_image.borrow_mut(), owner, gen);
@@ -557,8 +689,32 @@ impl Shared {
     }
 }
 
-/// What the callback receives. Built in the owner's VM, from the answer and the names that
-/// stayed on this side.
+/// What the callback is called with: a search's one value, or a cells match's `(match, nil)`
+/// / `(nil, reason)`.
+fn result_args(lua: &Lua, task: &ImageTask, names: &[Option<String>], outcome: Outcome) -> MultiValue {
+    let values = match (&task.job, outcome) {
+        (Job::Search { mode, .. }, Outcome::Search(found)) => vec![result_value(lua, *mode, names, found)],
+        (_, Outcome::Cells(Ok((live, ranked)))) => {
+            let (x, y, w, h) = task.region;
+            match cells_match_table(lua, &live, ScreenRect { x, y, w, h }, &ranked, names) {
+                Ok(t) => vec![Value::Table(t), Value::Nil],
+                Err(e) => vec![Value::Nil, reason(lua, format!("internal error: {e}"))],
+            }
+        }
+        (_, Outcome::Cells(Err(why))) => vec![Value::Nil, reason(lua, why)],
+        // A search answered as cells, or the reverse: cannot happen, as the worker answers each
+        // task by its own job. Answered as "could not look" rather than unwrapped.
+        (Job::Cells(_), Outcome::Search(_)) => vec![Value::Nil, reason(lua, "internal error".to_string())],
+    };
+    MultiValue::from_vec(values)
+}
+
+fn reason(lua: &Lua, why: String) -> Value {
+    lua.create_string(why).map(Value::String).unwrap_or(Value::Nil)
+}
+
+/// What a search's callback receives. Built in the owner's VM, from the answer and the names
+/// that stayed on this side.
 fn result_value(
     lua: &Lua,
     mode: Mode,
@@ -1092,12 +1248,48 @@ fn enqueue(
     // Which picture the worker reads for this VM, decided here on the main thread: the worker
     // never sees a Lua state. The one place both async searches set it.
     let source = capture_source::read_source(lua, &*sh.backend, region);
+    submit(sh, lua, scope, cb, names, region, source, Job::Search { entries, tol, scales, mode })
+}
+
+/// Queues `host.screen.matchCellsAsync`: the worker captures `rect` through this VM's source,
+/// reduces it to cells and ranks them against the matcher's states. `rect` may instead be why
+/// there is nothing to read this time; that is answered on the worker's next batch without a
+/// capture, so the callback comes on a later tick either way.
+pub(crate) fn enqueue_cells(
+    sh: &Shared,
+    lua: &Lua,
+    scope: usize,
+    cb: Function,
+    rect: Result<(i32, i32, i32, i32), String>,
+    matcher: cells::Matcher,
+    names: Vec<Option<String>>,
+) -> mlua::Result<()> {
+    let (region, source, unresolved) = match rect {
+        Ok(r) => (r, capture_source::read_source(lua, &*sh.backend, r), None),
+        Err(why) => ((0, 0, 0, 0), capture_source::vm_source(lua), Some(why)),
+    };
+    let job = Job::Cells(Arc::new(CellsJob { matcher: Arc::new(matcher), unresolved }));
+    submit(sh, lua, scope, cb, names, region, source, job)
+}
+
+/// Sends a task to the worker, with its callback waiting on this side.
+#[allow(clippy::too_many_arguments)]
+fn submit(
+    sh: &Shared,
+    lua: &Lua,
+    scope: usize,
+    cb: Function,
+    names: Vec<Option<String>>,
+    region: (i32, i32, i32, i32),
+    source: CaptureSource,
+    job: Job,
+) -> mlua::Result<()> {
     // The worker captures the region itself and ALWAYS posts a result (a failed capture
     // or a contained panic becomes an answer on the tick), so the pending callback is
     // always drained.
     let id = sh.next_image_id.get() + 1;
     sh.next_image_id.set(id);
-    let task = ImageTask { id, region, entries, tol, scales, mode, source };
+    let task = ImageTask { id, region, source, job };
     let entry = pending(lua, &sh.vm_gens.borrow(), scope, cb, names, task.clone())?;
     sh.pending_image.borrow_mut().insert(id, entry);
     if sh.image_tasks.send(task).is_err() {
@@ -1471,6 +1663,23 @@ mod tests {
         release([p]);
     }
 
+    /// A search asked while a key is dispatched keeps that priority for its callback, so a read
+    /// the callback asks for waits in the interactive lane; one asked from a poll does not.
+    #[test]
+    fn a_search_remembers_the_priority_it_was_asked_under() {
+        use crate::ocr::types::{enter_priority, Priority};
+        let lua = Lua::new();
+        let gens: HashMap<usize, u64> = [(1, 5)].into_iter().collect();
+        let asked_on_a_key = {
+            let _key = enter_priority(Priority::Interactive);
+            entry(&lua, &gens, 1, 1)
+        };
+        let asked_by_a_poll = entry(&lua, &gens, 2, 1);
+        assert_eq!(asked_on_a_key.prio, Priority::Interactive);
+        assert_eq!(asked_by_a_poll.prio, Priority::Background);
+        release([asked_on_a_key, asked_by_a_poll]);
+    }
+
     /// A state nobody tagged answers to the binding's own index at its current generation; one
     /// whose index has no generation either is never answered.
     #[test]
@@ -1539,10 +1748,63 @@ mod tests {
         release(map.into_values());
     }
 
+    /// A held `matchCellsAsync` is not read again on enable — its rectangle is from the window
+    /// as it was at the call — but answered `nil, HELD_CELLS`, without a capture.
+    #[test]
+    fn a_held_cells_read_is_answered_not_read_again() {
+        let lua = Lua::new();
+        let _ = lua.try_set_app_data(VmOwner { idx: 2, gen: 6 });
+        let gens: HashMap<usize, u64> = [(2, 6)].into_iter().collect();
+        let cb: Function = lua.load("return function() end").eval().unwrap();
+        let mut p = pending(&lua, &gens, 2, cb, vec![None, None], cells_matching(20, (5, 5, 2, 2), None)).unwrap();
+        p.held = true;
+        let mut map: HashMap<u64, PendingImage> = [(20, p)].into_iter().collect();
+        let (again, stale) = unhold(&mut map, 2, Some(6));
+        assert!(stale.is_empty());
+        assert_eq!(again.len(), 1);
+        let t = &again[0];
+        assert_eq!(t.id, 20, "the same id, so the waiting callback gets the answer");
+        assert!(!t.captures(), "nothing is captured for it");
+        match answer(t, None) {
+            Outcome::Cells(Err(why)) => assert_eq!(why, HELD_CELLS),
+            _ => panic!("a held cells read must be answered with the reason"),
+        }
+        // Held again before that answer came: answered the same way on the next enable.
+        map.get_mut(&20).unwrap().held = true;
+        let (again, _) = unhold(&mut map, 2, Some(6));
+        assert!(!again[0].captures());
+        release(map.into_values());
+    }
+
     // ── the worker ─────────────────────────────────────────────────────────────────────
 
+    impl ImageResult {
+        /// A search's answer; a cells answer here is a mistake in the test.
+        fn found(&self) -> Option<Vec<Option<ScreenHit>>> {
+            match &self.outcome {
+                Outcome::Search(f) => f.clone(),
+                Outcome::Cells(_) => panic!("a cells answer where a search's was expected"),
+            }
+        }
+        fn cells(&self) -> &Result<(Vec<u8>, cells::Ranked), String> {
+            match &self.outcome {
+                Outcome::Cells(c) => c,
+                Outcome::Search(_) => panic!("a search's answer where a cells answer was expected"),
+            }
+        }
+    }
+
+    /// A 2x2 grid of "clearly red", ranked against an all-zero state and an all-255 one.
+    fn cells_matching(id: u64, region: (i32, i32, i32, i32), unresolved: Option<&str>) -> ImageTask {
+        let spec = cells::CellSpec::new(2, 2, cells::Predicate::parse("r > g + b").unwrap()).unwrap();
+        let states: Vec<Box<[u8]>> = vec![vec![0u8; 4].into(), vec![255u8; 4].into()];
+        let matcher = cells::Matcher { spec, states, item_of: vec![0, 1] };
+        let job = Job::Cells(Arc::new(CellsJob { matcher: Arc::new(matcher), unresolved: unresolved.map(str::to_string) }));
+        ImageTask { id, region, source: CaptureSource::Standard, job }
+    }
+
     fn task(id: u64, region: (i32, i32, i32, i32), entries: Vec<(Arc<Decoded>, Option<Rect>)>, mode: Mode) -> ImageTask {
-        ImageTask { id, region, entries, tol: 0, scales: Vec::new(), mode, source: CaptureSource::Standard }
+        ImageTask { id, region, source: CaptureSource::Standard, job: Job::Search { entries, tol: 0, scales: Vec::new(), mode } }
     }
 
     fn dot(rgb: [u8; 3]) -> Arc<Decoded> {
@@ -1572,7 +1834,7 @@ mod tests {
             (dot([0, 255, 0]), Some(within_frame((100, 200, 10, 10), (106, 203, 200, 200)))),
         ];
         let out = run_batch(&[task(1, (100, 200, 10, 10), entries, Mode::Each)], two_dots);
-        let found = out[0].found.clone().expect("captured");
+        let found = out[0].found().expect("captured");
         assert_eq!(found[0], Some(ScreenHit { x: 103, y: 202, w: 1, h: 1, n: 1 }));
         assert_eq!(found[1], None);
         assert_eq!(found[2], None, "outside its within");
@@ -1583,14 +1845,14 @@ mod tests {
     fn first_answers_the_first_entry_that_matches() {
         let entries = vec![(dot([0, 0, 255]), None), (dot([0, 255, 0]), None), (dot([255, 0, 0]), None)];
         let out = run_batch(&[task(1, (0, 0, 10, 10), entries, Mode::First)], two_dots);
-        assert_eq!(out[0].found, Some(vec![Some(ScreenHit { x: 8, y: 5, w: 1, h: 1, n: 2 })]));
+        assert_eq!(out[0].found(), Some(vec![Some(ScreenHit { x: 8, y: 5, w: 1, h: 1, n: 2 })]));
     }
 
     #[test]
     fn a_failed_capture_is_none_not_a_list_of_misses() {
         let entries = vec![(dot([255, 0, 0]), None)];
         let out = run_batch(&[task(1, (0, 0, 10, 10), entries, Mode::Each)], |r, _| r.iter().map(|_| None).collect());
-        assert!(out[0].found.is_none());
+        assert!(out[0].found().is_none());
         let lua = Lua::new();
         assert!(result_value(&lua, Mode::Each, &[None], None).is_nil());
         // ...while a capture that worked but matched nothing is a list of `false`.
@@ -1652,9 +1914,9 @@ mod tests {
         let mut none = task(3, region, red(), Mode::First);
         none.source = CaptureSource::Duplication { or_standard: false };
         let out = run_batch(&[task(1, region, red(), Mode::First), dup, none], by_source);
-        assert_eq!(out[0].found, Some(vec![Some(ScreenHit { x: 3, y: 2, w: 1, h: 1, n: 1 })]));
-        assert_eq!(out[1].found, Some(vec![None]), "not the standard frame of the same region");
-        assert!(out[2].found.is_none(), "no picture under fallback = \"none\" is nil, not a miss");
+        assert_eq!(out[0].found(), Some(vec![Some(ScreenHit { x: 3, y: 2, w: 1, h: 1, n: 1 })]));
+        assert_eq!(out[1].found(), Some(vec![None]), "not the standard frame of the same region");
+        assert!(out[2].found().is_none(), "no picture under fallback = \"none\" is nil, not a miss");
         assert!(out.iter().all(|r| r.batch == 3));
     }
 
@@ -1670,11 +1932,11 @@ mod tests {
         task_tx.send(task(1, (666, 0, 10, 10), vec![(dot([255, 0, 0]), None)], Mode::First)).unwrap();
         let first = res_rx.recv_timeout(Duration::from_secs(10)).expect("an answer, not silence");
         assert_eq!(first.id, 1);
-        assert!(first.found.is_none(), "a panicking batch could not look");
+        assert!(first.found().is_none(), "a panicking batch could not look");
         task_tx.send(task(2, (0, 0, 10, 10), vec![(dot([255, 0, 0]), None)], Mode::First)).unwrap();
         let second = res_rx.recv_timeout(Duration::from_secs(10)).expect("the worker survived");
         assert_eq!(second.id, 2);
-        assert_eq!(second.found, Some(vec![Some(ScreenHit { x: 3, y: 2, w: 1, h: 1, n: 1 })]));
+        assert_eq!(second.found(), Some(vec![Some(ScreenHit { x: 3, y: 2, w: 1, h: 1, n: 1 })]));
     }
 
     /// The worker's panics are reported by the worker, with their place, and kept from the
@@ -1687,6 +1949,69 @@ mod tests {
         assert_eq!(logging::contain(|| 5), Ok(5));
         // Outside `contain` the hook is not told to hold anything, and asks for no report.
         assert!(!logging::hold_contained_panic(|| unreachable!()));
+    }
+
+    /// A cells task shares its batch with searches: it reads its own region through its own
+    /// source, answers from the whole frame, and names why when it could not look.
+    #[test]
+    fn a_cells_task_is_answered_from_its_frame() {
+        let region = (0, 0, 10, 10);
+        let search = task(1, region, vec![(dot([255, 0, 0]), None)], Mode::First);
+        let cells_here = cells_matching(2, region, None);
+        let unresolved = cells_matching(3, (0, 0, 0, 0), Some("the window's client area is empty (0x0)"));
+        let mut not_read = cells_matching(4, region, None);
+        not_read.source = CaptureSource::Duplication { or_standard: false };
+        // Only the two frames that are read are asked for, once each: the unresolved task is
+        // never captured.
+        fn record(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Option<CapturedImage>> {
+            ASKED.with(|a| a.borrow_mut().extend(regions.iter().map(|r| (*r, src))));
+            by_source(regions, src)
+        }
+        thread_local! {
+            static ASKED: std::cell::RefCell<Vec<((i32, i32, i32, i32), CaptureSource)>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        let out = run_batch(&[search, cells_here, unresolved, not_read], record);
+        assert_eq!(
+            ASKED.with(|a| a.borrow().clone()),
+            vec![(region, CaptureSource::Standard), (region, CaptureSource::Duplication { or_standard: false })]
+        );
+        assert_eq!(out[0].found(), Some(vec![Some(ScreenHit { x: 3, y: 2, w: 1, h: 1, n: 1 })]));
+        // The two dots on grey: only the red one passes, one pixel of the top-left 5x5 cell.
+        let (live, ranked) = out[1].cells().as_ref().expect("read");
+        assert_eq!(live, &vec![10, 0, 0, 0], "round(255 / 25)");
+        assert_eq!(ranked.state, 0, "closer to all-zero than to all-255");
+        assert_eq!(out[2].cells().as_ref().unwrap_err(), "the window's client area is empty (0x0)");
+        assert!(out[3].cells().as_ref().unwrap_err().contains("fallback = \"none\""));
+        // A capture the wrong size is named too.
+        let short = |regions: &[(i32, i32, i32, i32)], _: CaptureSource| -> Vec<Option<CapturedImage>> {
+            regions.iter().map(|_| Some(opaque(3, 3, [0, 0, 0]))).collect()
+        };
+        let out = run_batch(&[cells_matching(5, region, None)], short);
+        assert!(out[0].cells().as_ref().unwrap_err().contains("came back 3x3, not the region's 10x10"));
+    }
+
+    /// The callback's arguments: `(match, nil)`, or `(nil, reason)`.
+    #[test]
+    fn a_cells_answer_is_a_table_or_a_reason() {
+        let lua = Lua::new();
+        let t = cells_matching(1, (5, 6, 10, 10), None);
+        let names = vec![Some("off".to_string()), Some("on".to_string())];
+        let live = vec![0u8; 4];
+        let ranked = cells::rank(&live, &[vec![0u8; 4].into(), vec![255u8; 4].into()], &[0, 1]).unwrap();
+        let args = result_args(&lua, &t, &names, Outcome::Cells(Ok((live, ranked)))).into_vec();
+        let Value::Table(m) = &args[0] else { panic!("expected a match") };
+        assert!(args[1].is_nil());
+        assert_eq!(m.get::<String>("cells").unwrap(), "00000000");
+        assert_eq!(m.get::<String>("name").unwrap(), "off");
+        assert_eq!((m.get::<i32>("x").unwrap(), m.get::<i32>("y").unwrap()), (5, 6));
+        let args = result_args(&lua, &t, &names, Outcome::Cells(Err("the screen could not be read".into()))).into_vec();
+        assert!(args[0].is_nil());
+        let Value::String(why) = &args[1] else { panic!("expected a reason") };
+        assert_eq!(why.to_string_lossy(), "the screen could not be read");
+        assert_eq!(t.binding(), "matchCellsAsync");
+        // A search's callback still gets exactly one value.
+        let s = task(2, (0, 0, 10, 10), vec![(dot([1, 2, 3]), None)], Mode::First);
+        assert_eq!(result_args(&lua, &s, &[None], Outcome::Search(None)).len(), 1);
     }
 
     #[test]

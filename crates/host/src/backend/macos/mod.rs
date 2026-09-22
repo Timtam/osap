@@ -45,7 +45,9 @@ mod input;
 mod key_age;
 mod keys;
 mod layout;
-mod ocr;
+/// `pub(crate)` for its [`ocr::Shot`], which the backend names as the platform's
+/// `OcrShot`.
+pub(crate) mod ocr;
 pub(crate) mod perm;
 mod queue;
 mod tap;
@@ -190,6 +192,16 @@ impl Backend for MacBackend {
 
     fn capture_fn(&self) -> CaptureFn {
         capture_many
+    }
+
+    fn ocr_worker(&self) -> super::OcrWorker {
+        super::OcrWorker {
+            present: true,
+            init_thread: ocr::thread_init,
+            capture: ocr::capture_for_read,
+            recognise: ocr::recognise_shot,
+            languages: ocr::languages,
+        }
     }
 
     fn ocr(

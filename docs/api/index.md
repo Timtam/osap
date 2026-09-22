@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 138 entries.
+Every call the platform offers a module, in one place. 145 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -44,16 +44,17 @@ The overlay is the exception in shape rather than degree: it is a **module**, so
 
 ## Coordinates {#coordinates}
 
-Every coordinate the platform takes or returns — window bounds, regions, clicks, hits — is a screen coordinate with its origin at the top left of the primary display. On **Windows** it is a physical device pixel, because the application is per-monitor DPI aware; on **macOS** it is a point. The two agree only at 100 % scaling, and a Retina Mac is exactly half of the same panel on Windows at 200 %. Coordinates measured by a tool that is not DPI-aware, on a Windows display scaled above 100 %, have to be multiplied by the scale factor. A fractional coordinate is cut toward zero without an error. Regions are `{ x1, y1, x2, y2 }` with `x2` and `y2` exclusive — see [Region form](screen.md#region-form).
+Every coordinate the platform takes or returns — window bounds, regions, clicks, hits — is a screen coordinate with its origin at the top left of the primary display. On **Windows** it is a physical device pixel, because the application is per-monitor DPI aware; on **macOS** it is a point. The two agree only at 100 % scaling, and a Retina Mac is exactly half of the same panel on Windows at 200 %. Coordinates measured by a tool that is not DPI-aware, on a Windows display scaled above 100 %, have to be multiplied by the scale factor. A fractional coordinate is cut toward zero without an error, except by the calls that read regions strictly — the cells calls and `host.ocr.read` — which raise for a corner that is not a whole number. Regions are `{ x1, y1, x2, y2 }` with `x2` and `y2` exclusive, and the cells calls and `host.ocr.read` also take one as fractions of a window's client area, `{ window = w, fraction = { x1, y1, x2, y2 } }`, which follows the window across sizes, scalings and platforms — see [Region form](screen.md#region-form).
 
 ## Coming from another tool {#coming-from}
 
 Where habits from other tools mislead, and the section that says what happens here instead:
 
 - **A score-based image matcher** (OpenCV and the like). There is no score or threshold: every template pixel that is not transparent must be within `tolerance` on each colour channel, and the first position in row order wins — [`imageSearch`](screen.md#host-screen-imagesearch). For several templates against one frame, [`imageSearchEach`](screen.md#host-screen-imagesearcheach). Template files are PNG only; [`host.screen.template`](screen.md#host-screen-template) builds one from bytes.
+- **A reader that compares grid signatures by similarity** (a region cut into blocks, each the share of pixels passing a colour test). That is [`host.screen.matchCells`](screen.md#host-screen-matchcells): its colour test is pasted as written, its regions are window fractions, its signatures are hex, and the similarity and the runner-up come back for the module's own thresholds.
 - **A reader that keeps a frame and reads many points from it.** On Windows every [`pixel`](screen.md#host-screen-pixel) call is a screen read of its own; on macOS only reads close together in place and time share one. No call reads many points from one capture.
-- **Tesseract or other OCR language codes.** `lang` is each platform engine's own identifier — [Recognition language](ocr.md#recognition-language) — and OCR is synchronous.
-- **AutoHotkey.** `ahk_class` belongs inside the `windows` block of a [matcher](window.md#matchers); `SetTimer` is [`host.timer.every`](timer.md#host-timer-every), which cannot be stopped; `Send` is [`host.input.send`](input.md#host-input-send), virtual keys only; `ImageSearch`'s second corner is exclusive here.
+- **Tesseract or other OCR language codes.** `lang` is a language tag such as `"de"` or `"de-DE"`, matched against what the platform's recogniser reads. A three-letter code such as `"eng"` is a well-formed tag that no recogniser lists, so it does not raise: the read is answered `"failed"`, naming the languages that are there. Write `"en"` — [Recognition language](ocr.md#recognition-language). [`host.ocr.read`](ocr.md#host-ocr-read) recognises off the event loop and answers in a callback; only `recognize` and `recognizeMany` block it.
+- **AutoHotkey.** `ahk_class` belongs inside the `windows` block of a [matcher](window.md#matchers); `SetTimer` is [`host.timer.every`](timer.md#host-timer-every), stopped with [`host.timer.cancel`](timer.md#host-timer-cancel); `Send` is [`host.input.send`](input.md#host-input-send), virtual keys only; `ImageSearch`'s second corner is exclusive here.
 - **A keyboard hook that only listens.** A [capture](keys.md#host-keys-capture) takes the key away; there is no listen-only mode for ordinary keys, only the `"<modifier> tap"` form watches without taking.
 - **A script host with threads or async.** Every callback runs on one thread, and nothing interrupts one that does not return — see the [module lifecycle](../module-runtime-and-lifecycle.md).
 - **A manifest that names its target window.** `module.toml` has no window or process field; matching is Luau — see the [manifest](../module-package-format.md).
@@ -114,16 +115,20 @@ Finding windows and the surfaces inside them, and reacting when the focus moves.
 
 ## host.screen
 
-Reading pixels, profiling a region, and finding an image within one.
+Reading pixels, profiling a region, reducing one to a grid of cells, and finding an image within one.
 
 | | |
 |---|---|
+| [`host.screen.cells(opts)`](screen#host-screen-cells) | Captures `opts.region` once and reduces it to a grid of `cols` × `rows` cells. |
 | [`host.screen.imageSearch(template, opts?)`](screen#host-screen-imagesearch) | Searches the screen for the first occurrence of `template` |
 | [`host.screen.imageSearchAll(template, opts?)`](screen#host-screen-imagesearchall) | Returns **every** match of `template` in the region, as an array of hits in screen pixels, rather than stopping at the first one like `imageSearch`. |
 | [`host.screen.imageSearchAsync(template, opts?, cb)`](screen#host-screen-imagesearchasync) | Like `imageSearch`, but the region capture **and** the match both run on a worker thread; `cb` fires on a later tick. |
 | [`host.screen.imageSearchEach(entries, opts?, cb)`](screen#host-screen-imagesearcheach) | **One** capture of `opts.region` on the worker thread, and an answer for **every** entry |
 | [`host.screen.imageSearchMulti(templates, opts?)`](screen#host-screen-imagesearchmulti) | Captures the region **once** and tries each template against that one frame, returning two values |
+| [`host.screen.matchCells(opts, states)`](screen#host-screen-matchcells) | Reads the region exactly as `cells` does, and says which of `states` it looks most like. |
+| [`host.screen.matchCellsAsync(opts, states, cb)`](screen#host-screen-matchcellsasync) | `matchCells`, with the capture, the reduction and the comparison on the image worker thread. |
 | [`host.screen.pixel(x, y)`](screen#host-screen-pixel) | Reads the colour of the screen pixel at `(x, y)`. |
+| [`host.screen.predicate(expr)`](screen#host-screen-predicate) | Checks a colour test for the cells calls and returns it in its canonical form, or raises, naming the column, when it does not parse. |
 | [`host.screen.profile(opts?)`](screen#host-screen-profile) | Takes **one** capture of `region` (see Region form |
 | [`host.screen.save(path, opts?)`](screen#host-screen-save) | Captures `opts.region` (see Region form; omitted, the whole primary screen) and writes it to `path` as a PNG. |
 | [`host.screen.saveMarked(path, opts)`](screen#host-screen-savemarked) | Everything `save` does |
@@ -136,8 +141,11 @@ Recognising text in a screen region.
 
 | | |
 |---|---|
-| [`host.ocr.recognize(opts?)`](ocr#host-ocr-recognize) | Recognizes text inside a screen region and returns the full text plus per-word bounding boxes. |
-| [`host.ocr.recognizeMany(opts)`](ocr#host-ocr-recognizemany) | Recognizes several regions from **one** screen capture, so that values which have to agree with each other come from the same instant. |
+| [`host.ocr.languages()`](ocr#host-ocr-languages) | The languages the platform's recogniser reads, the one a read without `lang` uses first. |
+| [`host.ocr.read(what, opts?, cb)`](ocr#host-ocr-read) | Photographs one region or several at the moment of the call, recognises them off the event loop, and calls `cb` with the answer. |
+| [`host.ocr.recognize(opts?)`](ocr#host-ocr-recognize) | Recognizes text inside a screen region and returns the full text plus per-word bounding boxes |
+| [`host.ocr.recognizeMany(opts)`](ocr#host-ocr-recognizemany) | Recognizes several regions from **one** screen capture, so that values which have to agree with each other come from the same instant |
+| [`host.ocr.resolveLanguage(lang?)`](ocr#host-ocr-resolvelanguage) | Which language a read with this `lang` would use here. |
 
 ## host.element
 
@@ -361,8 +369,8 @@ The shapes and grammars the calls above are written in.
 | [`Key spec string format`](keys#key-spec-string-format) | One grammar, read by one parser, for every call that takes a key |
 | [`Matchers`](window#matchers) | A *matcher* is a declarative table passed to `host.window.find/findAll/test/onTrigger`, and to the overlay's bindings. |
 | [`Plugin base + library overlays (the cell model)`](overlay#plugin-base-library-overlays) | A plugin is not one overlay. |
-| [`Recognition language`](ocr#recognition-language) | What `lang` means to each platform's engine, and what leaving it out means. |
-| [`Region form`](screen#region-form) | Several functions (`host.screen.imageSearch` and the other searches, `host.screen.profile`, `host.ocr.recognize`, and each… |
+| [`Recognition language`](ocr#recognition-language) | What `lang` means, and what leaving it out means. |
+| [`Region form`](screen#region-form) | A region is a rectangle on screen, written in one of two forms |
 | [`Table shapes`](window#table-shapes) | Returned by `host.window.list()`, `host.window.active()`, `host.window.find()`, `host.window.findAll()`, and passed to trigger/test callbacks. |
-| [`Which picture a read sees`](screen#which-picture-a-read-sees) | Every call on this page, and `host.ocr.recognize` / `recognizeMany`, reads the screen one way for the whole module, chosen in its manifest rather than per call. |
+| [`Which picture a read sees`](screen#which-picture-a-read-sees) | Every call on this page, and `host.ocr.read` / `recognize` / `recognizeMany`, reads the screen one way for the whole module,… |
 | [`ocrLabel — reading a control's name off the screen`](overlay#ocrlabel) | Any hotspot or hotspot-toggle may carry `ocrLabel = {x1, y1, x2, y2}` (origin-relative) |

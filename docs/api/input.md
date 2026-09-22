@@ -12,6 +12,8 @@ All of it is blind clicking at screen coordinates, and **nothing here asks what 
 
 Dragging is deliberately not a press, a warp and a release: the movement is paced over sixteen injected steps and blocks the calling thread for about sixty milliseconds on Windows, because a control that reads the *speed* of a gesture answers an instantaneous jump with an enormous change.
 
+**A read comes first.** Every call on this page but `cursorPos` first waits — up to 50 ms, and only when the calling module has a [`host.ocr.read`](./ocr.md#host-ocr-read) whose picture has not been taken yet — until that picture is taken, and that picture goes before every other read's meanwhile. A module that reads a field and then clicks it therefore reads the field as it was before the click. When the picture is not taken within 50 ms the input goes ahead, and the log says so once per module. A module with no read pending pays a lookup and nothing else.
+
 Sending a shortcut is the call that catches authors out. On Windows the synthesised key inherits whatever the user is still physically holding, so a key sent from inside a hotkey callback arrives with that hotkey's modifiers attached — which is why the overlay waits for the modifiers to come up before it sends anything.
 
 ## What to declare {#declare}

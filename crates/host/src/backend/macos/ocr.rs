@@ -37,6 +37,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use objc2::rc::Retained;
@@ -47,12 +48,38 @@ use objc2_core_graphics::{
     CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext, CGImage,
     CGImageAlphaInfo, CGImageByteOrderInfo, CGInterpolationQuality, CGPreflightScreenCaptureAccess,
 };
-use objc2_foundation::{NSArray, NSDictionary, NSRange, NSString};
+use objc2_foundation::{NSArray, NSDictionary, NSLocale, NSRange, NSString};
 use objc2_vision::{
     VNImageRequestHandler, VNRecognizeTextRequest, VNRequest, VNRequestTextRecognitionLevel,
 };
 
-use crate::backend::{OcrText, OcrWord};
+use crate::backend::{CaptureSource, OcrLine, OcrText, OcrThread, OcrWord, Recognise};
+use crate::ocr::plan::{self, Plan as CapturePlan};
+use crate::ocr::types::Rect;
+
+/// Which of the ladder's last rungs one recognition may climb.
+///
+/// The legacy calls climb all of them, as they always have. A `host.ocr.read` skips the fast
+/// model for a language that model does not read, and a background read skips both rungs while
+/// an interactive one is waiting behind it — they are the rungs that cost the most on a read that
+/// will never resolve.
+struct Ladder<'a> {
+    fast_ok: bool,
+    preempt: Option<&'a AtomicBool>,
+    /// Climbed on the event loop — the legacy calls — rather than on `host.ocr.read`'s recognise
+    /// thread. Only what the log says about a ladder given up depends on it.
+    on_event_loop: bool,
+}
+
+impl Ladder<'static> {
+    const FULL: Ladder<'static> = Ladder { fast_ok: true, preempt: None, on_event_loop: true };
+}
+
+impl Ladder<'_> {
+    fn preempted(&self) -> bool {
+        self.preempt.is_some_and(|p| p.load(Ordering::Relaxed))
+    }
+}
 
 /// Background border added around the upscaled content, in pixels of the processed image.
 ///
@@ -80,9 +107,9 @@ const LADDER_BUDGET: std::time::Duration = std::time::Duration::from_millis(250)
 ///
 /// Identical to the Windows thresholds on purpose: whether a region gets the small-text
 /// treatment is observable from Lua (it changes which of two adjacent read-outs is legible),
-/// so the two platforms have to draw the line in the same place.
-const SMALL_W: i32 = 400;
-const SMALL_H: i32 = 200;
+/// so the two platforms have to draw the line in the same place — one constant, in
+/// `ocr/policy.rs`, for both.
+use crate::ocr::policy::{SMALL_H, SMALL_W};
 
 pub fn recognize(x: i32, y: i32, w: i32, h: i32, lang: Option<&str>) -> Result<OcrText, String> {
     // Vision produces a good deal of temporary Objective-C on every pass — an observation
@@ -122,7 +149,7 @@ fn recognize_inner(
         report_capture_failure(x, y, w, h);
         return Ok(empty());
     };
-    recognize_captured(&native, scale, x, y, w, h, lang, started, debug)
+    recognize_captured(&native, scale, x, y, w, h, lang, started, debug, &Ladder::FULL)
 }
 
 /// Everything after the capture, so that a caller who already has the pixels — one bounding-box
@@ -138,6 +165,7 @@ fn recognize_captured(
     lang: Option<&str>,
     started: Instant,
     debug: bool,
+    ladder: &Ladder,
 ) -> Result<OcrText, String> {
     let nw = CGImage::width(Some(native));
     let nh = CGImage::height(Some(&native));
@@ -231,7 +259,7 @@ fn recognize_captured(
             // Only when the tightened pass found nothing, and only when it actually cropped
             // — if it already fell back to the whole region there is no second input to try
             // and the retry would just pay for the same answer twice.
-            Some((ref t, _)) if t.trim().is_empty() && plan.cropped => {
+            Some((ref t, _, _)) if t.trim().is_empty() && plan.cropped => {
                 crate::logging::trace("macos", || {
                     "ocr: tightened pass read nothing, trying the whole region".to_string()
                 });
@@ -245,9 +273,33 @@ fn recognize_captured(
                     drop(buf);
                     r
                 });
-                let exhausted = second.as_ref().is_none_or(|(t, _)| t.trim().is_empty());
-                if exhausted && started.elapsed() < LADDER_BUDGET {
-                    bigger_then_faster(native, &plan, &rgba, px_w, px_h, scale, lang, debug)
+                let exhausted = second.as_ref().is_none_or(|(t, _, _)| t.trim().is_empty());
+                if exhausted && started.elapsed() < LADDER_BUDGET && !ladder.preempted() {
+                    bigger_then_faster(native, &plan, &rgba, px_w, px_h, scale, lang, debug, ladder)
+                } else if exhausted && ladder.preempted() {
+                    // Not a failure: a read from a poll made way for one somebody is waiting
+                    // for, and the poll asks again on its next tick. Traced, because a poll
+                    // would otherwise say it every tick.
+                    crate::logging::trace("macos", || {
+                        format!(
+                            "ocr: skipped the last rungs for a {w}x{h} pt region after {} ms: an \
+                             interactive read is waiting",
+                            started.elapsed().as_millis()
+                        )
+                    });
+                    second
+                } else if exhausted && !ladder.on_event_loop {
+                    // Out of budget on `host.ocr.read`'s recognise thread: nothing waits on
+                    // the event loop here, but every read queued behind this one does.
+                    crate::logging::line(
+                        "macos",
+                        &format!(
+                            "ocr: gave up on a {w}x{h} pt region after {} ms rather than keep the \
+                             reads behind it waiting",
+                            started.elapsed().as_millis()
+                        ),
+                    );
+                    second
                 } else if exhausted {
                     // Out of budget with nothing to show. Said out loud rather than traced,
                     // because this is the shape of a real failure the tester met: a read
@@ -271,7 +323,7 @@ fn recognize_captured(
         }
     };
 
-    let (text, words) = result.unwrap_or_else(|| (String::new(), Vec::new()));
+    let (text, words, lines) = result.unwrap_or_else(|| (String::new(), Vec::new(), Vec::new()));
     let ms = started.elapsed().as_secs_f64() * 1000.0;
     crate::logging::trace("macos", || {
         format!(
@@ -282,7 +334,7 @@ fn recognize_captured(
         )
     });
     note_cost(ms, w, h);
-    Ok(OcrText { text, words, skipped: false })
+    Ok(OcrText { text, words, lines, fallback: None, skipped: false })
 }
 
 /// Several regions, one capture.
@@ -351,7 +403,7 @@ pub fn recognize_regions(
                 match render(&big, &cut) {
                     Some((img, buf)) => {
                         let r = recognize_captured(
-                            &img, scale, *x, *y, *w, *h, lang, started, debug,
+                            &img, scale, *x, *y, *w, *h, lang, started, debug, &Ladder::FULL,
                         );
                         // `buf` backs the image copy-on-write; it has to outlive every read
                         // of it, which on a machine nobody here owns is not a thing to leave
@@ -366,10 +418,163 @@ pub fn recognize_regions(
     })
 }
 
+// ── host.ocr.read's two threads ─────────────────────────────────────────────────────────────
+
+/// The pixels the capture stage took for one read: one backing-resolution capture of the
+/// regions' bounding box, or one per region when the box would be wasteful or came back
+/// clipped. `CGImage` is `Send + Sync` in these bindings, so this crosses to the recognise
+/// thread as it is.
+pub enum Shot {
+    Shared { big: CFRetained<CGImage>, scale: f64, origin: (i32, i32) },
+    /// Per region, in order: its capture and scale, or `None` when it could not be taken.
+    Each(Vec<Option<(CFRetained<CGImage>, f64)>>),
+}
+
+impl Default for Shot {
+    fn default() -> Shot {
+        Shot::Each(Vec::new())
+    }
+}
+
+/// What the recognise thread does first: ask for the quality of service a person waiting for
+/// an answer gets. Designed rather than measured — whether macOS throttles this thread when the
+/// application is in the background is on the list in TODO.md.
+pub fn thread_init(role: OcrThread) {
+    if role == OcrThread::Recognise {
+        // SAFETY: a plain call about the calling thread; the answer is only logged.
+        let rc = unsafe {
+            libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0)
+        };
+        if rc != 0 {
+            crate::logging::line(
+                "macos",
+                &format!("ocr: the recognise thread kept its quality of service ({rc})"),
+            );
+        }
+    }
+}
+
+/// The capture stage of `host.ocr.read`. The source is ignored here, as everywhere on this
+/// platform.
+pub fn capture_for_read(regions: &[(i32, i32, i32, i32)], _src: CaptureSource) -> (Shot, usize) {
+    objc2::rc::autoreleasepool(|_| {
+        let rects: Vec<Rect> = regions.iter().copied().map(Rect::from_tuple).collect();
+        let bytes_of = |img: &CGImage| CGImage::width(Some(img)) * CGImage::height(Some(img)) * 4;
+        if let CapturePlan::BoundingBox(b) = plan::capture_plan(&rects) {
+            if let Some((big, scale)) = super::capture::capture_backing(b.x, b.y, b.w, b.h) {
+                let (gw, gh) = (CGImage::width(Some(&big)), CGImage::height(Some(&big)));
+                let want = (((b.w as f64) * scale).round() as usize, ((b.h as f64) * scale).round() as usize);
+                if (gw, gh) == want {
+                    let bytes = bytes_of(&big);
+                    return (Shot::Shared { big, scale, origin: (b.x, b.y) }, bytes);
+                }
+            } else {
+                report_capture_failure(b.x, b.y, b.w, b.h);
+            }
+        }
+        let each: Vec<Option<(CFRetained<CGImage>, f64)>> = regions
+            .iter()
+            .map(|&(x, y, w, h)| {
+                let got = super::capture::capture_backing(x, y, w, h);
+                if got.is_none() && w > 0 && h > 0 {
+                    report_capture_failure(x, y, w, h);
+                }
+                got
+            })
+            .collect();
+        let bytes = each.iter().flatten().map(|(img, _)| bytes_of(img)).sum();
+        (Shot::Each(each), bytes)
+    })
+}
+
+/// The recognise stage: each region through exactly the pipeline `recognize` runs, the ladder
+/// and the blank guard included, with the rungs `ctx` allows. One region at a time through
+/// `Recognise::each`, so a closing application starts no further one and the hang guard hears
+/// of every region answered.
+pub fn recognise_shot(
+    shot: &Shot,
+    regions: &[(i32, i32, i32, i32)],
+    ctx: &Recognise,
+) -> Vec<Result<OcrText, String>> {
+    let ladder = Ladder { fast_ok: ctx.fast_ok, preempt: ctx.preempt, on_event_loop: false };
+    let debug = crate::appcfg::ocr_debug();
+    ctx.each(regions.iter().enumerate(), |(i, &(x, y, w, h))| {
+        objc2::rc::autoreleasepool(|_| {
+            let started = Instant::now();
+            match shot {
+                Shot::Shared { big, scale, origin } => {
+                    let cut = Plan {
+                        x0: (((x - origin.0) as f64) * scale).round() as usize,
+                        y0: (((y - origin.1) as f64) * scale).round() as usize,
+                        cw: ((w as f64) * scale).round() as usize,
+                        ch: ((h as f64) * scale).round() as usize,
+                        up: 1,
+                        pad: 0,
+                        ink_h: 1,
+                        bg: [0.0; 3],
+                        cropped: false,
+                        blank: false,
+                    };
+                    match render(big, &cut) {
+                        Some((img, buf)) => {
+                            let r = recognize_captured(
+                                &img, *scale, x, y, w, h, ctx.lang, started, debug, &ladder,
+                            );
+                            // `buf` backs the image copy-on-write; see `recognize_regions`.
+                            drop(buf);
+                            r
+                        }
+                        None => Err("could not cut this region out of the shared capture".to_string()),
+                    }
+                }
+                Shot::Each(each) => match each.get(i).and_then(|c| c.as_ref()) {
+                    Some((native, scale)) => recognize_captured(
+                        native, *scale, x, y, w, h, ctx.lang, started, debug, &ladder,
+                    ),
+                    None => Err(
+                        "screen capture failed — if every read fails, grant this application \
+                         Screen Recording and restart it"
+                            .to_string(),
+                    ),
+                },
+            }
+        })
+    })
+}
+
+/// What Vision reads at each level on this macOS, and the user's languages. Asked on the
+/// recognise thread, once, and again when a language did not resolve.
+pub fn languages() -> crate::ocr::lang::Languages {
+    objc2::rc::autoreleasepool(|_| {
+        let supported = |level: VNRequestTextRecognitionLevel| -> Vec<String> {
+            let request = VNRecognizeTextRequest::new();
+            request.setRecognitionLevel(level);
+            // SAFETY: an instance method of a request made on this thread (macOS 12 and later,
+            // which is the oldest this application runs on).
+            match unsafe { request.supportedRecognitionLanguagesAndReturnError() } {
+                Ok(list) => list.iter().map(|s| s.to_string()).collect(),
+                Err(e) => {
+                    warn_once(
+                        "ocr-languages",
+                        &format!("ocr: Vision did not list its languages — {}", e.localizedDescription()),
+                    );
+                    Vec::new()
+                }
+            }
+        };
+        let available = supported(ACCURATE);
+        let fast = supported(FAST);
+        let preferred = NSLocale::preferredLanguages().iter().map(|s| s.to_string()).collect();
+        crate::ocr::lang::Languages { available, fast, preferred }
+    })
+}
+
 fn empty() -> OcrText {
     OcrText {
         text: String::new(),
         words: Vec::new(),
+        lines: Vec::new(),
+        fallback: None,
         // Not the blank guard's answer. Every caller of this is a fault of its own — a
         // zero-sized region, a capture that failed, pixels that could not be read back —
         // and each says so in the log; the guard overrides this at its one site.
@@ -414,7 +619,7 @@ fn warm_up_in_pool() {
             "ocr: Vision warmed up in {:.0} ms{}",
             started.elapsed().as_secs_f64() * 1000.0,
             match read {
-                Some((text, _)) if !text.trim().is_empty() => " and read its test page",
+                Some((text, _, _)) if !text.trim().is_empty() => " and read its test page",
                 // The bars are not letters, so finding nothing in them is the expected
                 // outcome; the model is loaded either way, which is the whole point.
                 Some(_) => "",
@@ -592,7 +797,8 @@ fn bigger_then_faster(
     scale: f64,
     lang: Option<&str>,
     debug: bool,
-) -> Option<(String, Vec<OcrWord>)> {
+    ladder: &Ladder,
+) -> Option<VisionRead> {
     let big = Plan {
         x0: tight.x0,
         y0: tight.y0,
@@ -614,12 +820,17 @@ fn bigger_then_faster(
     // Both passes share one blit: rendering is the expensive part, and the only thing that
     // differs between them is which model reads it.
     let mut out = run_vision(&img, lang, ACCURATE, &|bb| map_box(&big, scale, bb));
-    if out.as_ref().is_none_or(|(t, _)| t.trim().is_empty()) {
+    // The fast model only for a language it reads, and not while an interactive read waits
+    // behind a background one.
+    if out.as_ref().is_none_or(|(t, _, _)| t.trim().is_empty())
+        && ladder.fast_ok
+        && !ladder.preempted()
+    {
         crate::logging::trace("macos", || {
             format!("ocr: {}x enlarged accurate pass read nothing, trying the fast model", big.up)
         });
         out = run_vision(&img, lang, FAST, &|bb| map_box(&big, scale, bb));
-        if let Some((t, _)) = out.as_ref().filter(|(t, _)| !t.trim().is_empty()) {
+        if let Some((t, _, _)) = out.as_ref().filter(|(t, _, _)| !t.trim().is_empty()) {
             // Named, because it is the one answer in this file that did not come from the
             // recogniser we trust most, and a reader of the log should know which read it.
             crate::logging::line("macos", &format!("ocr: only the fast model read this: '{t}'"));
@@ -629,12 +840,16 @@ fn bigger_then_faster(
     out
 }
 
+/// One pass's answer: the text (lines joined with "\n"), every word in reading order, and the
+/// lines themselves, which `host.ocr.read` groups into rows.
+type VisionRead = (String, Vec<OcrWord>, Vec<OcrLine>);
+
 fn run_vision(
     image: &CGImage,
     lang: Option<&str>,
     level: VNRequestTextRecognitionLevel,
     map: &dyn Fn(CGRect) -> (i32, i32, i32, i32),
-) -> Option<(String, Vec<OcrWord>)> {
+) -> Option<VisionRead> {
     let request = VNRecognizeTextRequest::new();
     request.setRecognitionLevel(level);
     // Language correction is a dictionary pass over the result, and every string this
@@ -736,8 +951,10 @@ fn run_vision(
         .map(|l| l.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
+    let out_lines =
+        ordered.iter().map(|l| OcrLine { text: l.text.clone(), words: l.words.clone() }).collect();
     let words = ordered.into_iter().flat_map(|l| l.words).collect();
-    Some((text, words))
+    Some((text, words, out_lines))
 }
 
 /// One observation: a run of text Vision read, and where it put it.

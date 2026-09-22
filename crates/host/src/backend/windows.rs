@@ -13,8 +13,11 @@ use super::dxgi::{self, Caller, Fallback};
 use super::hotkey_hook::{self, Down, Mods, OsPress, Route, NO_ID};
 use super::{
     Backend, CaptureFn, CaptureSource, CapturedImage, ControlInfo, DumpNode, HostEvents,
-    MouseButton, OcrText, OcrWord, WinInfo, CAPTURE_FAILED, DUPLICATION_UNANSWERED,
+    MouseButton, OcrLine, OcrShot, OcrText, OcrThread, OcrWord, OcrWorker, Recognise, WinInfo,
+    CAPTURE_FAILED, DUPLICATION_UNANSWERED,
 };
+use crate::ocr::plan::{self, Plan};
+use crate::ocr::types::Rect;
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
@@ -475,6 +478,128 @@ fn capture_on_worker(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Ve
     capture_all(regions, src, Caller::Worker).into_iter().map(Result::ok).collect()
 }
 
+// ── host.ocr.read's two threads ─────────────────────────────────────────────────────────────
+
+/// The capture stage of `host.ocr.read` (`OcrWorker::capture`), on its own thread: every region
+/// of one read from one moment, and roughly how many bytes that is.
+fn ocr_capture(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> (OcrShot, usize) {
+    let shot = capture_for_read(regions, src);
+    let bytes = shot.iter().map(|r| r.as_ref().map_or(0, |c| c.rgba.len())).sum();
+    (shot, bytes)
+}
+
+/// The pixels for a read. Desktop duplication takes every region as a piece of one frame in one
+/// request, as `recognizeMany` does; the standard source photographs the bounding box when that
+/// is not wasteful (`ocr::plan`) and each region on its own otherwise, or when the box came back
+/// clipped at a screen edge.
+fn capture_for_read(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> OcrShot {
+    if let CaptureSource::Duplication { or_standard } = src {
+        match duplicate(regions, Caller::Worker) {
+            Ok(caps) => return caps,
+            Err(why) => {
+                dxgi::note_fallback(why, or_standard);
+                if !or_standard {
+                    return regions.iter().map(|_| Err(unanswered(why))).collect();
+                }
+            }
+        }
+    }
+    let one = |&(x, y, w, h): &(i32, i32, i32, i32)| -> Result<CapturedImage, String> {
+        capture_screen(x, y, w, h).ok_or_else(|| CAPTURE_FAILED.to_string())
+    };
+    let rects: Vec<Rect> = regions.iter().copied().map(Rect::from_tuple).collect();
+    match plan::capture_plan(&rects) {
+        Plan::Each => regions.iter().map(one).collect(),
+        Plan::BoundingBox(b) => match capture_screen(b.x, b.y, b.w, b.h) {
+            // A capture of a different size than asked for was clipped at a screen edge, and
+            // every offset into it would point somewhere else.
+            Some(big) if big.w as i32 == b.w && big.h as i32 == b.h => rects
+                .iter()
+                .zip(regions)
+                .map(|(r, t)| match plan::offset_in(r, &b) {
+                    Some((ox, oy)) if !r.is_empty() => crop(&big, ox, oy, r.w, r.h)
+                        .ok_or_else(|| "region outside the captured area".to_string()),
+                    _ => one(t),
+                })
+                .collect(),
+            _ => regions.iter().map(one).collect(),
+        },
+    }
+}
+
+/// The recognise stage (`OcrWorker::recognise`): each piece through exactly what `recognize`
+/// runs — the small-text crop, the blank guard, `Windows.Media.Ocr`, and for a small region the
+/// neural recogniser beside it, started at the same moment and used only when the system engine
+/// reads nothing. One region at a time through `Recognise::each`, so a closing application
+/// starts no further region, and so no further neural recognition either.
+fn ocr_recognise(
+    shot: &OcrShot,
+    _regions: &[(i32, i32, i32, i32)],
+    ctx: &Recognise,
+) -> Vec<Result<OcrText, String>> {
+    ctx.each(shot.iter(), |piece| match piece {
+        Ok(img) => recognize_image(img, ctx.lang),
+        Err(e) => Err(e.clone()),
+    })
+}
+
+/// The OCR languages installed on this machine, and the user's own list, as Windows spells them.
+/// On the recognise thread, whose apartment `ensure_winrt` set up.
+fn ocr_languages() -> crate::ocr::lang::Languages {
+    use windows::Media::Ocr::OcrEngine;
+    use windows::System::UserProfile::GlobalizationPreferences;
+    ensure_winrt();
+    let available: Vec<String> = match OcrEngine::AvailableRecognizerLanguages() {
+        Ok(list) => list
+            .into_iter()
+            .filter_map(|l| l.LanguageTag().ok().map(|t| t.to_string()))
+            .collect(),
+        Err(e) => {
+            crate::logging::line("ocr", &format!("the OCR languages could not be listed: {e}"));
+            Vec::new()
+        }
+    };
+    let preferred: Vec<String> = match GlobalizationPreferences::Languages() {
+        Ok(list) => list.into_iter().map(|t| t.to_string()).collect(),
+        Err(e) => {
+            crate::logging::line("ocr", &format!("the user's languages could not be read: {e}"));
+            Vec::new()
+        }
+    };
+    crate::ocr::lang::Languages { fast: available.clone(), available, preferred }
+}
+
+/// WinRT's multithreaded apartment, entered once per thread and never left.
+///
+/// Per thread, not once per process: the `Once` this replaces initialised whichever thread
+/// happened to recognise first and no other, and with two OCR threads beside the event loop that
+/// is no longer one thread. Never uninitialised — an engine released after its thread left the
+/// apartment is the fault that would buy. A thread already in a single-threaded apartment
+/// (wxWidgets puts the event loop in one) answers `RPC_E_CHANGED_MODE` and keeps it; that is
+/// logged once, because which apartment the event loop really has has never been measured.
+fn ensure_winrt() {
+    use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
+    thread_local! {
+        static DONE: Cell<bool> = const { Cell::new(false) };
+    }
+    static SAID: AtomicBool = AtomicBool::new(false);
+    if DONE.with(|d| d.replace(true)) {
+        return;
+    }
+    if let Err(e) = unsafe { RoInitialize(RO_INIT_MULTITHREADED) } {
+        if !SAID.swap(true, Ordering::Relaxed) {
+            let name = std::thread::current().name().unwrap_or("unnamed").to_string();
+            crate::logging::line(
+                "ocr",
+                &format!(
+                    "the '{name}' thread keeps the COM apartment it already had ({e}); text \
+                     recognition runs in it"
+                ),
+            );
+        }
+    }
+}
+
 /// A pixel through `src`: `GetPixel` for the standard source, a 1x1 region of the duplicated
 /// picture otherwise. `None` only when duplication could not answer and the module forbade
 /// the fallback.
@@ -828,6 +953,16 @@ impl Backend for WindowsBackend {
 
     fn capture_fn(&self) -> CaptureFn {
         capture_on_worker
+    }
+
+    fn ocr_worker(&self) -> OcrWorker {
+        OcrWorker {
+            present: true,
+            init_thread: |_: OcrThread| ensure_winrt(),
+            capture: ocr_capture,
+            recognise: ocr_recognise,
+            languages: ocr_languages,
+        }
     }
 
     fn ocr(
@@ -2230,6 +2365,11 @@ struct Tightened {
     off_y: u32,
     scale: u32, // integer upscale applied to the crop
     pad: u32,   // background border added around the upscaled crop
+    /// The content crop's size within the capture — the whole capture when nothing was
+    /// cropped. The neural recogniser crops to the same box by the same rule, so this is also
+    /// where its answer lies (`OcrText::fallback`).
+    cw: u32,
+    ch: u32,
     /// Nothing in the region differs from its own background — there is no content here at
     /// all, as opposed to content this step chose not to crop to.
     blank: bool,
@@ -2249,6 +2389,8 @@ fn tighten(cap: &CapturedImage) -> Tightened {
         off_y: 0,
         scale: 3,
         pad: OCR_PAD,
+        cw: cap.w,
+        ch: cap.h,
         blank: false,
     };
     if cap.w < 3 || cap.h < 3 {
@@ -2332,25 +2474,25 @@ fn tighten(cap: &CapturedImage) -> Tightened {
         off_y: y0,
         scale,
         pad: OCR_PAD,
+        cw,
+        ch,
         blank: false,
     }
 }
 
-/// Runs Windows.Media.Ocr (WinRT) over a captured region.
-fn run_ocr(img: &CapturedImage, lang: Option<&str>) -> windows::core::Result<(String, Vec<OcrWord>)> {
-    use std::sync::Once;
-
+/// Runs Windows.Media.Ocr (WinRT) over a captured region: the engine's text, every word in
+/// reading order, and the same words grouped into the engine's lines.
+fn run_ocr(
+    img: &CapturedImage,
+    lang: Option<&str>,
+) -> windows::core::Result<(String, Vec<OcrWord>, Vec<OcrLine>)> {
     use windows::core::HSTRING;
     use windows::Globalization::Language;
     use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
     use windows::Media::Ocr::OcrEngine;
     use windows::Security::Cryptography::CryptographicBuffer;
-    use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        let _ = unsafe { RoInitialize(RO_INIT_MULTITHREADED) };
-    });
+    ensure_winrt();
 
     // SoftwareBitmap wants BGRA, opaque. `capture_screen` and duplication both deliver alpha
     // 255 now, off the desktop included, but this also receives crops of a capture and the
@@ -2381,10 +2523,12 @@ fn run_ocr(img: &CapturedImage, lang: Option<&str>) -> windows::core::Result<(St
 
     let text = result.Text()?.to_string();
     let mut words = Vec::new();
+    let mut lines = Vec::new();
     for line in result.Lines()? {
+        let mut line_words = Vec::new();
         for word in line.Words()? {
             let r = word.BoundingRect()?;
-            words.push(OcrWord {
+            line_words.push(OcrWord {
                 text: word.Text()?.to_string(),
                 x: r.X as i32,
                 y: r.Y as i32,
@@ -2392,8 +2536,10 @@ fn run_ocr(img: &CapturedImage, lang: Option<&str>) -> windows::core::Result<(St
                 h: r.Height as i32,
             });
         }
+        words.extend(line_words.iter().cloned());
+        lines.push(OcrLine { text: line.Text()?.to_string(), words: line_words });
     }
-    Ok((text, words))
+    Ok((text, words, lines))
 }
 
 fn button_flags(button: MouseButton) -> (u32, u32) {
@@ -2471,7 +2617,7 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
         // glyphs are large (far better than scaling the whole padded region, which
         // leaves tiny digits tiny). Large regions (e.g. a whole window) are left
         // alone so multi-word layout and speed are preserved.
-        let small = cap.w <= 400 && cap.h <= 200;
+        let small = crate::ocr::policy::is_small(cap.w as i32, cap.h as i32);
 
         // Run the neural recognizer (PaddleOCR via ONNX Runtime) CONCURRENTLY for
         // small regions. Its result is used only when Windows.Media.Ocr comes back
@@ -2482,19 +2628,22 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
         //
         // Counted from before the spawn until the thread is done, because a thread nobody
         // joins can still be inside ONNX Runtime when the application exits; `run` waits for
-        // the count to reach zero (see `paddle_ocr::InFlight`).
-        let paddle = small.then(|| {
-            let probe = CapturedImage {
-                w: cap.w,
-                h: cap.h,
-                rgba: cap.rgba.clone(),
-            };
-            let running = super::paddle_ocr::IN_FLIGHT.start();
-            std::thread::spawn(move || {
-                let _running = running;
-                super::paddle_ocr::recognize(&probe)
+        // the count to reach zero (see `paddle_ocr::InFlight`). Not started at all once that
+        // wait has begun: `start` answers `None` then, and the system engine reads alone.
+        let paddle = small
+            .then(|| {
+                let running = super::paddle_ocr::IN_FLIGHT.start()?;
+                let probe = CapturedImage {
+                    w: cap.w,
+                    h: cap.h,
+                    rgba: cap.rgba.clone(),
+                };
+                Some(std::thread::spawn(move || {
+                    let _running = running;
+                    super::paddle_ocr::recognize(&probe)
+                }))
             })
-        });
+            .flatten();
 
         let t_tight = std::time::Instant::now();
         let tight = if small { Some(tighten(cap)) } else { None };
@@ -2515,10 +2664,17 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
             drop(paddle);
             // `skipped` is how a caller learns this branch was taken: no engine's answer was
             // used, so the empty answer is the guard's and not a reading of anything.
-            return Ok(OcrText { text: String::new(), words: Vec::new(), skipped: true });
+            return Ok(OcrText {
+                text: String::new(),
+                words: Vec::new(),
+                lines: Vec::new(),
+                fallback: None,
+                skipped: true,
+            });
         }
         let t_win = std::time::Instant::now();
-        let (mut text, mut words) = run_ocr(img, lang).map_err(|e| format!("OCR failed: {e}"))?;
+        let (mut text, mut words, mut lines) =
+            run_ocr(img, lang).map_err(|e| format!("OCR failed: {e}"))?;
         let win_ms = t_win.elapsed().as_secs_f64() * 1000.0;
 
         let mut used_paddle = false;
@@ -2540,6 +2696,7 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
                 if let Some(t) = got {
                     text = t;
                     words.clear(); // recognition-only fallback returns text without boxes
+                    lines.clear();
                     used_paddle = true;
                 }
             }
@@ -2573,14 +2730,21 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
         // Map word coordinates from the processed image back to the captured region.
         if let Some(t) = &tight {
             let (s, pad) = (t.scale as i32, t.pad as i32);
-            for word in &mut words {
+            let back = |word: &mut OcrWord| {
                 word.x = (word.x - pad) / s + t.off_x as i32;
                 word.y = (word.y - pad) / s + t.off_y as i32;
                 word.w /= s;
                 word.h /= s;
-            }
+            };
+            words.iter_mut().for_each(back);
+            lines.iter_mut().flat_map(|l| l.words.iter_mut()).for_each(back);
         }
-        Ok(OcrText { text, words, skipped: false })
+        // Where the neural recogniser's answer lies: the content crop, which it takes by the
+        // same rule as `tighten`, so the two agree on the box.
+        let fallback = used_paddle
+            .then(|| tight.as_ref().map(|t| (t.off_x as i32, t.off_y as i32, t.cw as i32, t.ch as i32)))
+            .flatten();
+        Ok(OcrText { text, words, lines, fallback, skipped: false })
 }
 
 /// The shared parser's mask, converted to what `RegisterHotKey` and `SendInput` are given. The

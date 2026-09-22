@@ -46,7 +46,8 @@ NS_BLURB = {
               'aloud. A module, not a host namespace: `host.require("com.platform.overlay")`.',
     'host.window': 'Finding windows and the surfaces inside them, and reacting when the focus '
                    'moves.',
-    'host.screen': 'Reading pixels, profiling a region, and finding an image within one.',
+    'host.screen': 'Reading pixels, profiling a region, reducing one to a grid of cells, and '
+                   'finding an image within one.',
     'host.ocr': 'Recognising text in a screen region.',
     'host.element': 'Querying the accessibility tree an application publishes.',
     'host.input': 'Synthesising mouse and keyboard input.',
@@ -316,9 +317,12 @@ CAPABILITIES = [
     '**macOS** it is a point. The two agree only at 100 % scaling, and a Retina Mac is exactly '
     'half of the same panel on Windows at 200 %. Coordinates measured by a tool that is not '
     'DPI-aware, on a Windows display scaled above 100 %, have to be multiplied by the scale '
-    'factor. A fractional coordinate is cut toward zero without an error. Regions are '
-    '`{ x1, y1, x2, y2 }` with `x2` and `y2` exclusive — see '
-    '[Region form](screen.md#region-form).',
+    'factor. A fractional coordinate is cut toward zero without an error, except by the calls '
+    'that read regions strictly — the cells calls and `host.ocr.read` — which raise for a '
+    'corner that is not a whole number. Regions are `{ x1, y1, x2, y2 }` with `x2` and `y2` '
+    'exclusive, and the cells calls and `host.ocr.read` also take one as fractions of a '
+    'window\'s client area, `{ window = w, fraction = { x1, y1, x2, y2 } }`, which follows the '
+    'window across sizes, scalings and platforms — see [Region form](screen.md#region-form).',
     '',
     '## Coming from another tool {#coming-from}',
     '',
@@ -331,15 +335,26 @@ CAPABILITIES = [
     '[`imageSearch`](screen.md#host-screen-imagesearch). For several templates against one '
     'frame, [`imageSearchEach`](screen.md#host-screen-imagesearcheach). Template files are PNG '
     'only; [`host.screen.template`](screen.md#host-screen-template) builds one from bytes.',
+    '- **A reader that compares grid signatures by similarity** (a region cut into blocks, each '
+    'the share of pixels passing a colour test). That is '
+    '[`host.screen.matchCells`](screen.md#host-screen-matchcells): its colour test is pasted as '
+    'written, its regions are window fractions, its signatures are hex, and the similarity '
+    'and the runner-up come back for the module\'s own thresholds.',
     '- **A reader that keeps a frame and reads many points from it.** On Windows every '
     '[`pixel`](screen.md#host-screen-pixel) call is a screen read of its own; on macOS only '
     'reads close together in place and time share one. No call reads many points from one '
     'capture.',
-    '- **Tesseract or other OCR language codes.** `lang` is each platform engine\'s own '
-    'identifier — [Recognition language](ocr.md#recognition-language) — and OCR is synchronous.',
+    '- **Tesseract or other OCR language codes.** `lang` is a language tag such as `"de"` or '
+    '`"de-DE"`, matched against what the platform\'s recogniser reads. A three-letter code such '
+    'as `"eng"` is a well-formed tag that no recogniser lists, so it does not raise: the read is '
+    'answered `"failed"`, naming the languages that are there. Write `"en"` — '
+    '[Recognition language](ocr.md#recognition-language). '
+    '[`host.ocr.read`](ocr.md#host-ocr-read) recognises off the event loop and answers in a '
+    'callback; only `recognize` and `recognizeMany` block it.',
     '- **AutoHotkey.** `ahk_class` belongs inside the `windows` block of a '
     '[matcher](window.md#matchers); `SetTimer` is '
-    '[`host.timer.every`](timer.md#host-timer-every), which cannot be stopped; `Send` is '
+    '[`host.timer.every`](timer.md#host-timer-every), stopped with '
+    '[`host.timer.cancel`](timer.md#host-timer-cancel); `Send` is '
     '[`host.input.send`](input.md#host-input-send), virtual keys only; `ImageSearch`\'s second '
     'corner is exclusive here.',
     '- **A keyboard hook that only listens.** A [capture](keys.md#host-keys-capture) takes the '

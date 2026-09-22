@@ -7,7 +7,7 @@
 //! The recognition model and its dictionary are embedded in the binary (via
 //! `include_bytes!`), so the app stays fully self-contained and portable.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -53,8 +53,14 @@ fn lock_even_if_poisoned<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// the application exits, and a thread in there while `ort`'s static cleanup runs is the fault
 /// the warm-up join in `run` exists for: an access violation at exit. This counts them, so
 /// that the exit can wait for them the way it waits for the warm-up — see `settle`.
+///
+/// And once that wait has begun it is CLOSED: `start` refuses, so nothing enters ONNX Runtime
+/// after the exit stopped waiting. The recognise thread of `host.ocr.read` can still be working
+/// through a job of many regions then — the exit waits for it only a second — and without this
+/// each small region it reached would start a recognition nobody waits for.
 pub(super) struct InFlight {
     running: AtomicUsize,
+    closed: AtomicBool,
 }
 
 /// The recognitions of this process. A struct rather than a bare counter so the tests can
@@ -75,21 +81,35 @@ impl Drop for Running<'_> {
 
 impl InFlight {
     pub(super) const fn new() -> Self {
-        InFlight { running: AtomicUsize::new(0) }
+        InFlight { running: AtomicUsize::new(0), closed: AtomicBool::new(false) }
     }
 
-    /// Counts one recognition, from now until the returned guard is dropped.
+    /// Counts one recognition, from now until the returned guard is dropped; `None`, counting
+    /// nothing, once [`close`](Self::close) was called — the caller then does not start it.
     ///
     /// Taken by the caller BEFORE it spawns the thread and moved into it: counted only once
     /// the thread had started, a recognition spawned a moment before the exit would not be
     /// counted yet, and the exit would not wait for it.
-    pub(super) fn start(&self) -> Running<'_> {
-        self.running.fetch_add(1, Ordering::AcqRel);
-        Running { of: self }
+    ///
+    /// Counted first and checked second, both sequentially consistent, against `close`, which
+    /// sets the flag first and reads the count second: whichever order the two threads meet
+    /// in, either this sees the flag and backs out, or the exit sees this counted and waits.
+    pub(super) fn start(&self) -> Option<Running<'_>> {
+        self.running.fetch_add(1, Ordering::SeqCst);
+        if self.closed.load(Ordering::SeqCst) {
+            self.running.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(Running { of: self })
+    }
+
+    /// No recognition starts from now on (see the type).
+    pub(super) fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
     }
 
     pub(super) fn count(&self) -> usize {
-        self.running.load(Ordering::Acquire)
+        self.running.load(Ordering::SeqCst)
     }
 
     /// Waits until nothing is counted, for at most `bound`. True when nothing is.
@@ -118,12 +138,14 @@ impl InFlight {
 const SETTLE_BOUND: Duration = Duration::from_millis(500);
 
 /// Waits, for at most half a second, until no recognition is inside ONNX Runtime any more.
-/// Called by `run` at exit, beside the warm-up join; see `InFlight`. Returns at once when
-/// nothing is running. Otherwise it logs how long it waited, or, when the bound is hit, that it
-/// gave up — and then leaves what is still running to the process exit, which is the state of
-/// things before this wait existed, now with a line in the log when it happens.
+/// Called by `run` at exit, beside the warm-up join; see `InFlight`. Closes the count first, so
+/// no recognition starts after this has looked. Returns at once when nothing is running.
+/// Otherwise it logs how long it waited, or, when the bound is hit, that it gave up — and then
+/// leaves what is still running to the process exit, which is the state of things before this
+/// wait existed, now with a line in the log when it happens.
 pub fn settle() {
     let started = Instant::now();
+    IN_FLIGHT.close();
     let at_exit = IN_FLIGHT.count();
     if at_exit == 0 {
         return;
@@ -296,7 +318,7 @@ mod exit_safety_tests {
         let c = InFlight::new();
         assert!(c.wait_idle(Duration::ZERO), "nothing running: no wait at all");
 
-        let running = c.start();
+        let running = c.start().expect("open");
         assert_eq!(c.count(), 1, "counted before the thread is even spawned");
         let waited = std::thread::scope(|s| {
             s.spawn(move || {
@@ -311,11 +333,26 @@ mod exit_safety_tests {
         assert!(waited < Duration::from_secs(5), "returned at the end of the run: {waited:?}");
     }
 
+    /// Once the exit's wait has begun nothing new is counted or started, and what was already
+    /// running is still waited for.
+    #[test]
+    fn closed_refuses_new_recognitions_and_still_counts_the_running_ones() {
+        let c = InFlight::new();
+        let running = c.start().expect("open");
+        c.close();
+        assert!(c.start().is_none(), "no recognition starts after the exit looked");
+        assert_eq!(c.count(), 1, "the refused one left no count behind");
+        assert!(!c.wait_idle(Duration::ZERO));
+        drop(running);
+        assert!(c.wait_idle(Duration::ZERO));
+        assert!(c.start().is_none(), "closed stays closed");
+    }
+
     /// A recognition that never finishes costs the exit its bound and no more.
     #[test]
     fn the_wait_gives_up_at_its_bound() {
         let c = InFlight::new();
-        let _stuck = c.start();
+        let _stuck = c.start().expect("open");
         let t = Instant::now();
         assert!(!c.wait_idle(Duration::from_millis(40)));
         assert!(t.elapsed() >= Duration::from_millis(40));
@@ -330,7 +367,7 @@ mod exit_safety_tests {
         let c = InFlight::new();
         let joined = std::thread::scope(|s| {
             s.spawn(|| {
-                let _running = c.start();
+                let _running = c.start().expect("open");
                 panic!("{EXPECTED_PANIC}inside the recogniser");
             })
             .join()

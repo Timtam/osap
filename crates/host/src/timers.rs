@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 
+use crate::ocr::types::{current_priority, enter_priority, Priority};
+
 /// A one-shot timer: fired once at or after `deadline`, then gone.
 struct Once {
     token: i64,
@@ -25,6 +27,9 @@ struct Once {
     idx: usize,
     lua: Lua,
     cb: RegistryKey,
+    /// The priority of the dispatch that armed it, which its callback runs under: a re-read
+    /// 150 ms after a key press is still the user waiting (see `ocr::types::Priority`).
+    prio: Priority,
 }
 
 /// A recurring timer: fired at `next`, then re-armed `interval` later — also while its module
@@ -60,7 +65,8 @@ impl Timers {
     pub(crate) fn after(&self, lua: &Lua, idx: usize, delay: Duration, cb: Function, now: Instant) -> mlua::Result<i64> {
         let cb = lua.create_registry_value(cb)?;
         let token = self.token();
-        self.once.borrow_mut().push(Once { token, deadline: now + delay, idx, lua: lua.clone(), cb });
+        let prio = current_priority();
+        self.once.borrow_mut().push(Once { token, deadline: now + delay, idx, lua: lua.clone(), cb, prio });
         Ok(token)
     }
 
@@ -150,6 +156,7 @@ impl Timers {
             };
             let Some(t) = taken else { continue };
             if enabled(t.idx) {
+                let _prio = enter_priority(t.prio);
                 if let Ok(f) = t.lua.registry_value::<Function>(&t.cb) {
                     if let Err(e) = crate::call_guarded(&f, ()) {
                         failed(t.idx, &e);
@@ -171,6 +178,8 @@ impl Timers {
             };
             let Some((idx, Some(f))) = found else { continue };
             if enabled(idx) {
+                // A poll is background work, whatever armed it.
+                let _prio = enter_priority(Priority::Background);
                 if let Err(e) = crate::call_guarded(&f, ()) {
                     failed(idx, &e);
                 }
@@ -565,6 +574,38 @@ mod tests {
         assert_eq!(get_i(&lua, "ran"), 1);
         assert_eq!(seen.len(), 1);
         assert!(seen[0].0 == 3 && seen[0].1.contains("boom"), "{seen:?}");
+    }
+
+    /// A one-shot runs under the priority of the dispatch that armed it; a poll always in the
+    /// background lane.
+    #[test]
+    fn a_one_shot_keeps_the_priority_it_was_armed_under_and_a_poll_is_background() {
+        let c = clocked();
+        let lua = vm(&c, 0);
+        let seen: Rc<RefCell<Vec<Priority>>> = Rc::default();
+        let s = seen.clone();
+        lua.globals()
+            .set(
+                "note",
+                lua.create_function(move |_, ()| {
+                    s.borrow_mut().push(current_priority());
+                    Ok(())
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        {
+            let _key = enter_priority(Priority::Interactive);
+            lua.load("host.timer.after(150, note); host.timer.every(100, note)").exec().unwrap();
+        }
+        lua.load("host.timer.after(150, note)").exec().unwrap();
+        tick(&c, 150);
+        assert_eq!(
+            *seen.borrow(),
+            vec![Priority::Interactive, Priority::Background, Priority::Background],
+            "the key's re-read, the background one, then the poll"
+        );
+        assert_eq!(current_priority(), Priority::Background, "restored after each callback");
     }
 
     /// A timer armed during a tick waits for a later tick, even with a delay of 0.

@@ -15,6 +15,12 @@ dist/
 # Agent worktrees created by background tasks — separate checkouts, not content.
 /.claude/
 
+# Test data that must never be committed: a frame of a commercial game, and the reference
+# vectors an outside reader computed from it, for the `host.screen.cells` golden test
+# (crates/host/src/cells_golden_tests.rs). The test skips, saying why, when the folder is
+# missing; the region numbers it also checks are in region.rs, where they may live.
+crates/host/tests-data-local/
+
 # Probe output: a window capture plus its dump, written next to the tool that made it.
 # Evidence for one measurement, not something to carry in the history — and deleting it by
 # hand once cost the measurement it was taken for.
