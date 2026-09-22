@@ -5,11 +5,24 @@
 //! backends were ever dropped, it would not start at all — `0xC0000135`, before `main` —
 //! and the whole file would fail rather than one assertion.
 //!
-//! These run wherever somebody runs them, which for now is a development machine. That is
-//! worth saying out loud: none of this is guarded by CI yet.
+//! These run on a development machine and in the Windows CI job, which runs the whole workspace.
+//! They run one at a time (see `serial`), because prism's backends may not be used from two
+//! threads at once and cargo runs tests in parallel.
 #![cfg(windows)]
 
 use prism_sys::{feature, Context, Error, BACKENDS};
+
+/// One test at a time. Every member of a prism backend's vtable other than `is_supported` is
+/// under the library's single-instance constraint (its thread-safety chapter), and cargo runs
+/// the tests of this file on parallel threads, several of which open every backend in turn.
+/// Twice that crashed the whole test process in CI with `STATUS_STACK_BUFFER_OVERRUN`
+/// (2026-09-12 and 2026-09-22), and both times it passed on a re-run — a race, not a defect in
+/// what the tests check. Poison-tolerant, so one failing test does not fail the rest.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// The one that catches a silent mute.
 ///
@@ -21,6 +34,7 @@ use prism_sys::{feature, Context, Error, BACKENDS};
 /// nine things, including the wrong nine.
 #[test]
 fn every_configured_backend_is_present() {
+    let _serial = serial();
     let ctx = Context::open().expect("prism did not initialise");
     let mut found = ctx.backend_names();
     found.sort();
@@ -41,6 +55,7 @@ fn every_configured_backend_is_present() {
 /// without this, one untitled window would silence NVDA for the rest of the session.
 #[test]
 fn empty_text_never_reaches_prism() {
+    let _serial = serial();
     let ctx = Context::open().expect("prism did not initialise");
     let Some(backend) = any_working_backend(&ctx) else {
         eprintln!("no backend initialises on this machine; nothing to say to");
@@ -63,6 +78,7 @@ fn empty_text_never_reaches_prism() {
 /// iteration, which is why the layer counts its own outstanding utterances instead.
 #[test]
 fn unsupported_is_speaking_is_distinguishable_from_a_real_failure() {
+    let _serial = serial();
     let ctx = Context::open().expect("prism did not initialise");
     let Some(backend) = any_working_backend(&ctx) else {
         return;
@@ -88,6 +104,7 @@ fn unsupported_is_speaking_is_distinguishable_from_a_real_failure() {
 /// being true, retrying would adopt a dead backend and the user would hear nothing.
 #[test]
 fn a_backend_that_opens_says_it_is_available() {
+    let _serial = serial();
     let ctx = Context::open().expect("prism did not initialise");
     for name in BACKENDS {
         if let Ok(b) = ctx.open_backend(name) {
@@ -103,6 +120,7 @@ fn a_backend_that_opens_says_it_is_available() {
 /// A rejected string and a dead screen reader must not look alike.
 #[test]
 fn caller_faults_are_told_apart_from_backend_faults() {
+    let _serial = serial();
     assert!(Error::INVALID_UTF8.is_our_fault());
     assert!(!Error::BACKEND_NOT_AVAILABLE.is_our_fault());
     assert!(Error::NOT_IMPLEMENTED.is_unsupported());
@@ -116,6 +134,7 @@ fn caller_faults_are_told_apart_from_backend_faults() {
 /// which would be a three-second freeze during start-up, before any window exists.
 #[test]
 fn opening_the_library_is_immediate() {
+    let _serial = serial();
     let start = std::time::Instant::now();
     let ctx = Context::open().expect("prism did not initialise");
     let _ = ctx.backend_names();
@@ -148,6 +167,7 @@ fn any_working_backend(ctx: &Context) -> Option<prism_sys::Backend> {
 /// speaks at the volume its user chose and this is somebody's working machine.
 #[test]
 fn the_braille_call_accepts_multibyte_text() {
+    let _serial = serial();
     let ctx = Context::open().expect("prism did not initialise");
     let Some(backend) = prism_sys::SYNTHESISERS.iter().find_map(|n| ctx.open_backend(n).ok())
     else {

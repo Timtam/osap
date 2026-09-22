@@ -1852,14 +1852,11 @@ point: a session that cannot be repeated is not the place to land everything at 
       or the plugin — cannot be ordered from the log, only from the tester's ear. Milliseconds
       are a one-line change; not made mid-protocol because every line of every log the project
       has would change format in the same week a session runs.
-- [ ] **`prism-sys`' smoke tests crashed once in CI** (`STATUS_STACK_BUFFER_OVERRUN`, run
-      34638177265, 2026-09-12) and passed on re-run. The four tests that did not report all
-      share `any_working_backend`, which opens every backend in turn; cargo runs them in
-      parallel on a runner with no screen reader. The file's own header says these "run
-      wherever somebody runs them ... none of this is guarded by CI yet", which stopped being
-      true when the Windows job started running the whole workspace. Either serialise them or
-      find the race.
-
+- [x] **`prism-sys`' smoke tests crashed in CI** (`STATUS_STACK_BUFFER_OVERRUN`, run
+      34638177265 on 2026-09-12 and run 35691602651 on 2026-09-22), both times passing on a
+      re-run: cargo ran them on parallel threads, several opening every backend in turn, and
+      prism's backends may not be used from two threads at once. They now run one at a time
+      (a shared lock in `crates/prism-sys/tests/smoke.rs`, 2026-09-22).
 ## The third macOS session (2026-09-10)
 
 The protocol is `docs/macos-session-three.md`; the results came back from a **different
