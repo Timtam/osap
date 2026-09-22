@@ -131,12 +131,15 @@ file again. Useful while **developing** a module.
   A module that reaches it only through `optional_dependencies` keeps the old copy
   until it is reloaded itself.
 
-### Reload everything: Ctrl+Shift+Win+Alt+F5, or Command-Shift-F5 on a Mac
+### Reload everything: Ctrl+Alt+Shift+Win+F5, or Command-Shift-F5 on a Mac
 
 > Not the same chord translated: the Windows one would carry Control-Option on a Mac, which
 > is VoiceOver's own modifier and never reaches an application while VoiceOver keeps its
-> default setting. Either way it uses an F-key, so on a Mac it needs "Use F1, F2, etc. as
-> standard function keys" turned on in System Settings or the `fn` key held down as well.
+> default setting. So the host picks one chord per platform, `Ctrl+Shift+Win+Alt+F5` and
+> `Cmd+Shift+F5` in the [key spec](api/keys.md#key-spec-string-format), and its log names it
+> `Ctrl+Alt+Shift+Win+F5` on Windows and `Shift+Cmd+F5` on a Mac. Either way it uses an
+> F-key, so on a Mac it needs "Use F1, F2, etc. as standard function keys" turned on in
+> System Settings or the `fn` key held down as well.
 
 The same rebuild for **every** loaded module at once, on a **system-wide** key — it
 works from inside the plugin you are testing, so you never have to leave it, find the
@@ -397,8 +400,10 @@ disabled automatically.
 
 What this does not cover is a callback that never returns. There is no time or
 memory limit on a module's code, so a loop that does not end holds the one thread
-everything runs on — every module, speech and the keyboard hook — until the
-application is ended.
+everything runs on — every module, speech, every key and hotkey callback, and on
+macOS the event tap — until the application is ended. (The Windows keyboard hook
+has a thread of its own, so typing elsewhere goes on, and captured keys stay
+swallowed, their callbacks never coming.)
 
 ## Headless mode
 

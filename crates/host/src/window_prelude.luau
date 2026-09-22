@@ -197,9 +197,30 @@ local triggers = {}
 
 local focusCbs = {}
 
+-- `initial = true` also reports the window already in front — once, on the next tick, and not
+-- from inside this call: a callback often uses locals the file assigns further down, and a
+-- disabled module's callback must not run at all. The trigger is PRIMED here, and the host is
+-- asked for a report (`_requestInitial`, which queues this VM's owner for the tick); the host
+-- then calls `_dispatchInitial` with the window in front. A real activation dispatched first
+-- un-primes it, so the same foreground is never reported twice.
 function W.onTrigger(matcher, opts, cb)
   opts = opts or {}
-  triggers[#triggers + 1] = { matcher = matcher or {}, on = opts.on or "activate", cb = cb }
+  if opts.initial ~= nil and type(opts.initial) ~= "boolean" then
+    error("host.window.onTrigger: initial is true or false, not a " .. type(opts.initial), 2)
+  end
+  local t = {
+    matcher = matcher or {},
+    on = opts.on or "activate",
+    cb = cb,
+    initial = opts.initial == true,
+    primed = false,
+  }
+  triggers[#triggers + 1] = t
+  if t.initial then
+    t.primed = true
+    -- Absent only in a test's stand-in host.
+    if W._requestInitial then W._requestInitial() end
+  end
 end
 
 -- Focus-change callbacks: fired when the keyboard focus moves, including within
@@ -212,14 +233,28 @@ function W._hasTriggers()
   return #triggers > 0 or #focusCbs > 0
 end
 
+-- Whether `_dispatchInitial(win, reprime)` would have anything to do: a trigger still waiting
+-- for its report or, re-arming, any `initial` trigger at all. The host asks this before it
+-- asks the system for the window in front, so enabling a module that never asked for a report
+-- costs no foreground query.
+function W._wantsInitial(reprime)
+  for _, t in ipairs(triggers) do
+    if t.primed or (reprime and t.initial) then
+      return true
+    end
+  end
+  return false
+end
+
 -- Both dispatches are TIMED, and report the slow ones with their own size.
 --
 -- This is the last unmeasured stretch of the activation path. The OS calls underneath are
 -- now answered once per epoch (one question in four hundred reaches the system) and the
 -- conversion to Lua costs nothing measurable, yet a window switch still blocks the pump
--- thread for 400 ms — which is past the point where Windows stops waiting for our keyboard
--- hook and delivers the keystroke without us. So the cost is in here, and "here" is one
--- callback per registered overlay, in each module's own VM.
+-- thread for 400 ms — which was past the point where Windows stopped waiting for our keyboard
+-- hook while it shared this thread, and is still 400 ms that every captured key and hotkey
+-- waits for its callback. So the cost is in here, and "here" is one callback per registered
+-- overlay, in each module's own VM.
 --
 -- Reported per VM with a count, because the shape of the number is the diagnosis: one
 -- expensive callback reads differently from a hundred cheap ones, and a single VM standing
@@ -234,6 +269,14 @@ function W._dispatchActivate(win, beforeFirst)
   local started = host.now and host.now() or nil
   local fired = 0
   for _, t in ipairs(triggers) do
+    -- This activation IS the report of what is in front now, for every trigger: one still
+    -- waiting for its initial report has had it (see onTrigger).
+    t.primed = false
+  end
+  for _, t in ipairs(triggers) do
+    -- Again here, for a trigger a callback of this very dispatch registered: the loop reaches
+    -- it and reports this window to it, so its initial report would be the same one twice.
+    t.primed = false
     if t.on == "activate" and matches(t.matcher, win) then
       fired = fired + 1
       if fired == 1 and beforeFirst then
@@ -250,6 +293,47 @@ function W._dispatchActivate(win, beforeFirst)
       ))
     end
   end
+  return fired
+end
+
+-- The report `onTrigger { initial = true }` asked for, called by the host on the tick with the
+-- window in front (`nil` when there is none). Every primed trigger is un-primed FIRST and only
+-- then called, so one that raises cannot leave the rest primed for a later, different window:
+-- as with an activation, an error skips the module's later triggers for this report. With
+-- `reprime` — the module was just enabled — every `initial` trigger is primed again first.
+-- `beforeFirst` is the host's preparation before the first matching callback, as in
+-- `_dispatchActivate`. Returns how many callbacks ran.
+function W._dispatchInitial(win, reprime, beforeFirst)
+  local started = host.now and host.now() or nil
+  local due = {}
+  for _, t in ipairs(triggers) do
+    if reprime and t.initial then t.primed = true end
+    if t.primed then
+      t.primed = false
+      due[#due + 1] = t
+    end
+  end
+  local fired = 0
+  if win ~= nil then
+    for _, t in ipairs(due) do
+      if t.on == "activate" and matches(t.matcher, win) then
+        fired = fired + 1
+        if fired == 1 and beforeFirst then
+          beforeFirst()
+        end
+        t.cb(win)
+      end
+    end
+  end
+  if started then
+    local ms = host.now() - started
+    if ms >= SLOW_DISPATCH_MS then
+      host.log.info(string.format(
+        "[dispatch] initial %d ms — %d of %d trigger(s) fired", ms, fired, #due
+      ))
+    end
+  end
+  return fired
 end
 
 function W._dispatchFocus()

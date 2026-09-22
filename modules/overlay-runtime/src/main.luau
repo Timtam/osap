@@ -817,14 +817,67 @@ local function findTabControl(self)
   return nil
 end
 
+-- The key a hotkey spec stands for on this platform, in the host's one spelling: what two
+-- controls' specs are compared by and what the claim maps are keyed by. "Cmd+S" beside an
+-- inherited "Ctrl+S" — or "Option+P" beside "Alt+P" — is ONE key everywhere, and keyed
+-- by the raw strings it became two registrations of which the host could keep only one live:
+-- one control's key silently dead, the holds line claiming both. A spec that does not parse
+-- keys as itself; the declaration report names it, and _syncControlHotkeys leaves it out.
+local function keyOf(spec)
+  if type(spec) ~= "string" then return spec end
+  return host.keys.normalize(spec) or spec
+end
+
+-- A hotkey spec as this platform says it: "Option+V" on a Mac for the "Alt+V" a module wrote,
+-- "Control+L" on Windows and "Command+L" on a Mac for "Ctrl+L". The authored
+-- string was spoken before, which told a Mac user to press Alt, a key their keyboard does not
+-- have by that name. Anything that is not a spec — a free-form label — is said as written.
+local function spokenKey(spec)
+  if type(spec) ~= "string" then return tostring(spec) end
+  return host.keys.describe(spec) or spec
+end
+
+-- The host.keys.check reasons host.hotkey.register raises for: a spec that does not parse, a
+-- combination the system keeps, a key this platform has no code for, and a modifier tap.
+-- VoiceOver's layer is not one — it registers, and arrives on a Mac whose VoiceOver modifier
+-- is Caps Lock — and neither is a character the layout types with the key.
+local REFUSES_HOTKEY = { parse = true, reserved = true, ["no-keycode"] = true, tap = true }
+local hotkeyRefusals = {}
+
+-- Why the host will not hold `spec` as a hotkey, or nil when it will. Asked with the layout
+-- left out: only the structure matters here, and asking the layout costs a system call per
+-- spec at every bind and every hotkey sync. Remembered per spec for the life of the VM, because
+-- nothing that decides it can change while the application runs.
+local function hotkeyRefusal(spec)
+  if type(spec) ~= "string" and type(spec) ~= "number" then return "parse" end
+  local key = tostring(spec)
+  local known = hotkeyRefusals[key]
+  if known == nil then
+    known = false
+    for _, why in ipairs(host.keys.check(key, { layout = false }).reasons) do
+      if REFUSES_HOTKEY[why] then
+        known = why
+        break
+      end
+    end
+    hotkeyRefusals[key] = known
+  end
+  return known or nil
+end
+
 -- Spoken form of a tab, ReaHotkey-style: "<label> tab selected" — a tab's state is
 -- "selected" when it is the current one, which is the only tab we ever announce. An
 -- optional `extra` (e.g. "tab control") is inserted, and a bound hotkey's label is spoken
--- last (ReaHotkey appends the HotkeyLabel), so the user hears how to jump to it.
+-- last (ReaHotkey appends the HotkeyLabel), so the user hears how to jump to it — in this
+-- platform's words when the label is a key spec, as Melodyne's are. Not for a hotkey the host
+-- refuses: that one is never registered, and telling the user to press it sends them to a key
+-- that does nothing.
 local function tabMessage(tab, extra)
   local m = ((tab and tab.label) or "") .. " tab selected"
   if extra and extra ~= "" then m = m .. ", " .. extra end
-  if tab and tab.hotkeyLabel and tab.hotkeyLabel ~= "" then m = m .. ", " .. tab.hotkeyLabel end
+  if tab and tab.hotkeyLabel and tab.hotkeyLabel ~= "" and not (tab.hotkey and hotkeyRefusal(tab.hotkey)) then
+    m = m .. ", " .. spokenKey(tab.hotkeyLabel)
+  end
   return m
 end
 
@@ -1424,7 +1477,7 @@ local function speakControl(self, index, moveMouse, withHint, queued)
     if c.verticalName then
       local ok, name = pcall(c.verticalName, self, c._current)
       if ok and type(name) == "string" and name ~= "" then
-        tab = { label = name, hotkeyLabel = tab and tab.hotkeyLabel }
+        tab = { label = name, hotkeyLabel = tab and tab.hotkeyLabel, hotkey = tab and tab.hotkey }
       end
     end
     host.speech.output(tabMessage(tab, c.typeLabel or "tab control"), { interrupt = true })
@@ -1483,8 +1536,9 @@ local function speakControl(self, index, moveMouse, withHint, queued)
   -- The KEY, spoken on arrival. Without it a hotkey is only discoverable by being told, and
   -- the whole point of these overlays is that a plug-in with no accessible tree can still be
   -- learned from itself. Only on a focus read — repeating it when the user has just pressed
-  -- the key is noise, and they plainly know it.
-  if moveMouse and c.hotkey then parts[#parts + 1] = tostring(c.hotkey) end
+  -- the key is noise, and they plainly know it. A key the host refuses is not said: it is never
+  -- registered, and the bind-time report has named it in the log.
+  if moveMouse and c.hotkey and not hotkeyRefusal(c.hotkey) then parts[#parts + 1] = spokenKey(c.hotkey) end
   if (c.kind == "ocr" or c.kind == "ocredit") and c.region then
     local ox, oy = originOf(self, c)
     local region = { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] }
@@ -1816,8 +1870,9 @@ function Overlay:activate(index)
     -- to return without a word, which from the keyboard is a key that does nothing.
     local found = false
     if c.hotkey then
+      local key = keyOf(c.hotkey)
       for j, d in ipairs(self.controls) do
-        if j ~= i and d.hotkey == c.hotkey and isVisible(self, d) then
+        if j ~= i and d.hotkey and keyOf(d.hotkey) == key and isVisible(self, d) then
           i, c, found = j, d, true
           self.focus = j
           self:_syncNativeKeys()
@@ -2115,24 +2170,32 @@ function Overlay:_syncControlHotkeys()
   self.controlHotkeys = {}
   local o = self:origin()
   self._hotkeyOriginId = (o and o.id) or false
+  -- Keyed by the key each spec stands for on this platform, not by its spelling — see keyOf.
   local claim, specs = {}, {}
   for i, c in ipairs(self.controls) do
     if c.hotkey then
-      local held = claim[c.hotkey]
+      local key = keyOf(c.hotkey)
+      local held = claim[key]
       if held then
         held[#held + 1] = i
       else
-        claim[c.hotkey] = { i }
-        specs[#specs + 1] = c.hotkey
+        claim[key] = { i }
+        specs[#specs + 1] = key
       end
     end
   end
   local took, skipped = {}, {}
   for _, spec in ipairs(specs) do
     local candidates = claim[spec]
-    if self:_visibleClaimant(candidates) then
-      took[#took + 1] = spec
-      self.controlHotkeys[#self.controlHotkeys + 1] = host.hotkey.register(spec, function()
+    -- A combination the host refuses (see hotkeyRefusal) is left out rather than asked for:
+    -- asking raises, and raising here would take the rest of the activation with it. The
+    -- declaration report has already said why. The registration is still guarded, so a refusal
+    -- this list does not know about costs one key and says so, not the activation.
+    local refused = hotkeyRefusal(spec)
+    if refused then
+      skipped[#skipped + 1] = spec .. " (" .. refused .. ")"
+    elseif self:_visibleClaimant(candidates) then
+      local ok, id = pcall(host.hotkey.register, spec, function()
         -- The claimant is resolved AFTER the wait, not before: the point of resolving at press
         -- time is that the visible set can have changed, and waiting is time in which it can.
         afterModifiersReleased(function()
@@ -2141,6 +2204,12 @@ function Overlay:_syncControlHotkeys()
           self:activate(i or candidates[1])
         end)
       end)
+      if ok then
+        took[#took + 1] = spec
+        self.controlHotkeys[#self.controlHotkeys + 1] = id
+      else
+        skipped[#skipped + 1] = spec .. " (refused: " .. tostring(id) .. ")"
+      end
     else
       -- Every claimant hidden: the combination is deliberately NOT taken, so it reaches the
       -- application instead of being swallowed by a control that cannot appear here.
@@ -2275,11 +2344,23 @@ function Overlay:_registerHotkeys()
     -- doesn't bind any, but other plugins (e.g. Dubler) do — so the mechanism is here.
     if c.kind == "tabcontrol" then
       for tn, tab in ipairs(c.tabs) do
-        if tab.hotkey then
+        local refused = tab.hotkey and hotkeyRefusal(tab.hotkey)
+        if refused then
+          -- Refused by the host (see _syncControlHotkeys), so not asked for: asking would raise
+          -- out of the activation.
+          host.log.info(string.format("[keys] '%s': tab '%s' hotkey %s is not registered (%s)",
+            tostring(self.label), tostring(tab.label), tostring(tab.hotkey), refused))
+        elseif tab.hotkey then
           local n = tn
-          self.registered[#self.registered + 1] = host.hotkey.register(tab.hotkey, function()
+          local ok, id = pcall(host.hotkey.register, tab.hotkey, function()
             afterModifiersReleased(function() self:gotoTab(n) end)
           end)
+          if ok then
+            self.registered[#self.registered + 1] = id
+          else
+            host.log.info(string.format("[keys] '%s': tab '%s' hotkey %s is not registered: %s",
+              tostring(self.label), tostring(tab.label), tostring(tab.hotkey), tostring(id)))
+          end
         end
       end
     end
@@ -2303,12 +2384,16 @@ function Overlay:_registerHotkeys()
     -- the key and nothing happened" has two very different causes.
     if not calibrationAnnounced then
       calibrationAnnounced = true
-      host.log.info(
-        "[calibrate] armed — Ctrl+Alt+Shift+S shot, +T template, +V verify (active overlay)"
-      )
+      host.log.info(string.format(
+        "[calibrate] armed — %s shot, +T template, +V verify (active overlay)",
+        host.keys.describe("Ctrl+Alt+Shift+S", { style = "short" })
+      ))
     end
     -- NOT the Ctrl+Alt+F-keys: graphics drivers commonly claim those system-wide, and a
     -- key another process holds never reaches our hook at all.
+    --
+    -- On a Mac these are Command+Option+Shift (Ctrl is the Command role there), which is off
+    -- Control+Option — VoiceOver's modifier, taken before our event tap ever sees it.
     cap("Ctrl+Alt+Shift+S", function() self:calibrationShot() end)
     cap("Ctrl+Alt+Shift+T", function() self:calibrationCrop() end)
     cap("Ctrl+Alt+Shift+V", function() self:calibrationVerify() end)
@@ -2336,8 +2421,22 @@ function Overlay:_registerHotkeys()
       -- diagnosis is the right rule — everything should pass through except what the CONTROL
       -- IN FOCUS explicitly wants. A tab control three stops away wanting Left is not a reason
       -- to take Left away from the thing the user is actually working in.
-      cap("Ctrl+Tab", function() self:cycleTab(1) end)
-      cap("Ctrl+Shift+Tab", function() self:cycleTab(-1) end)
+      --
+      -- Control+Tab on a Mac as well, which is the Mac's own next-tab key: there the spec's Ctrl
+      -- is Command, and Command+Tab is the application switcher, which the system keeps (the
+      -- host's `check` says `reserved`) and which an event tap must never take from a blind
+      -- user. So the Mac's pick names the Control key by its role, Win (`Meta`). Ctrl+<n> is
+      -- Command+<n> there, the tab key of the Mac's own tabbed windows.
+      cap(host.os.pick {
+        windows = "Ctrl+Tab",
+        macos = "Meta+Tab",
+        linux = "Ctrl+Tab",
+      }, function() self:cycleTab(1) end)
+      cap(host.os.pick {
+        windows = "Ctrl+Shift+Tab",
+        macos = "Meta+Shift+Tab",
+        linux = "Ctrl+Shift+Tab",
+      }, function() self:cycleTab(-1) end)
       local _, tcCtrl = findTabControl(self)
       local ntabs = tcCtrl and #tcCtrl.tabs or 0
       for n = 1, math.min(ntabs, 9) do
@@ -2888,8 +2987,9 @@ function Overlay:_refocusIfHidden()
   local c = self.controls[self.focus]
   local to
   if c and c.hotkey then
+    local key = keyOf(c.hotkey)
     for j, d in ipairs(self.controls) do
-      if j ~= self.focus and d.hotkey == c.hotkey and isFocusable(self, j) then
+      if j ~= self.focus and d.hotkey and keyOf(d.hotkey) == key and isFocusable(self, j) then
         to = j
         break
       end
@@ -3178,15 +3278,37 @@ local function report(self, opts)
   -- from hearing it, because both controls announce themselves correctly. Two `when`-gated
   -- claimants are NOT reported: whether two predicates are mutually exclusive cannot be
   -- decided here, and guessing would report every legitimate case.
+  --
+  -- Keyed by the key each spec stands for on this platform (keyOf), so "Cmd+S" and an inherited
+  -- "Ctrl+S" are caught as the one key they are.
   local claim, order = {}, {}
   for i, c in ipairs(self.controls) do
     if type(c.hotkey) == "string" then
-      if claim[c.hotkey] then
-        table.insert(claim[c.hotkey], i)
+      local key = keyOf(c.hotkey)
+      if claim[key] then
+        table.insert(claim[key], i)
       else
-        claim[c.hotkey] = { i }
-        order[#order + 1] = c.hotkey
+        claim[key] = { i }
+        order[#order + 1] = key
       end
+    end
+  end
+  -- A spec the host will refuse to register, said once here with the control's name, because
+  -- at activation it is only left out of the holds line. The informational reasons (a character
+  -- the layout types with the key, VoiceOver's layer on a Mac) are not findings: the first costs
+  -- a character and still works, and the second is a setting the module may never meet.
+  local REFUSAL_WORDS = {
+    parse = "is not a key spec",
+    reserved = "is kept by the system",
+    ["no-keycode"] = "has no key code on this platform",
+    tap = "is a modifier tap, which only host.keys.capture can watch",
+  }
+  for _, spec in ipairs(order) do
+    local why = hotkeyRefusal(spec)
+    if why then
+      local c = self.controls[claim[spec][1]]
+      bad("control '%s': hotkey %s %s — it will not be registered", tostring(c.label or ""), spec,
+        REFUSAL_WORDS[why] or why)
     end
   end
   for _, spec in ipairs(order) do
@@ -3520,6 +3642,22 @@ function Overlay:attach(matcher, opts)
   ensureTrigger(self, opts)
 end
 
+-- Patterns already explained as Win32 classes on a Mac, so each is said once per VM however
+-- many overlays share it (Kontakt's cells all carry the same one).
+local win32PatternsSaid = {}
+local function warnWin32PatternOnMac(self, pattern)
+  if host.os.current ~= "macos" or type(pattern) ~= "string" then return end
+  if string.find(pattern, "AX", 1, true) or string.find(pattern, "/", 1, true) then return end
+  if win32PatternsSaid[pattern] then return end
+  win32PatternsSaid[pattern] = true
+  host.log.info(string.format(
+    "[%s] embedded control pattern '%s' looks like a Win32 window class, and on macOS a control's "
+      .. "class is AXRole/AXSubrole/AXIdentifier — it probably never matches here, and then this "
+      .. "binding stays inert. Give `control` a macos entry: { windows = ..., macos = ... }",
+    tostring(self.label or "overlay"), pattern
+  ))
+end
+
 -- Context-bound (embedded): active while the keyboard focus is *inside* a plugin
 -- control — a window whose class matches `spec.control` (a Luau pattern) on the
 -- focus-ancestor chain — within a DAW host window (any of `spec.hosts`). Keying
@@ -3561,6 +3699,14 @@ function Overlay:attachEmbedded(spec, opts)
     ))
     return self
   end
+  -- A plain-string pattern is a Win32 window class almost always ("^Plugin%x+$",
+  -- "Qt%d+.-QWindowIcon"), and on a Mac it is matched against the AXRole/AXSubrole/AXIdentifier
+  -- triple a control's `class` is there — so it almost never matches, and the binding is as
+  -- inert as one with no pattern, except that nothing said so. Said once per pattern; the
+  -- behaviour is unchanged. A macOS pattern usually names an AX role or has the triple's `/`
+  -- in it; one that matches an AXIdentifier alone ("^com%.u%-he") is told too, which is why
+  -- the line says "probably".
+  warnWin32PatternOnMac(self, pattern)
   -- Optional identity check: the control class often matches *any* plugin in a
   -- host (e.g. REAPER's "Plugin<ptr>"), so `spec.identify(control)` confirms it
   -- is really this plugin (via UIA / OCR landmark / image search — the module's
@@ -4009,6 +4155,9 @@ end
 --                     control where it will actually click, plus the pixel read there
 --   Ctrl+Alt+Shift+T  crop a template around the focused control, straight into the module
 --   Ctrl+Alt+Shift+V  count every match of the focused control's template in the region
+--
+-- Command+Option+Shift on a Mac, where the spec's Ctrl is Command — off Control+Option, which
+-- is VoiceOver's.
 --
 -- Written into `calibration/` under the module's own directory.
 

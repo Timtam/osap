@@ -21,6 +21,8 @@ pub mod registry;
 mod settings;
 mod speech;
 mod template;
+/// `host.timer`: pending timers, their tokens, and the firing rules — see the file.
+mod timers;
 /// `host.gamepad`: listeners, dispatch rules and bindings — see the file.
 mod gamepad_api;
 
@@ -148,8 +150,10 @@ struct Shared {
     on_change: RefCell<OnChangeMap>,
     /// Coalesces setting auto-saves to the event-loop tick.
     dirty: Cell<bool>,
-    /// One-shot timers: (deadline, module_idx, VM, callback), fired from the tick.
-    timers: RefCell<Vec<(Instant, usize, Lua, RegistryKey)>>,
+    /// `host.timer`'s pending timers, one-shot and recurring, fired from the tick. Recurring
+    /// ones are re-armed even while the owning module is disabled, so a poll resumes on
+    /// re-enable instead of dying. See timers.rs.
+    timers: timers::Timers,
     /// Data exported by library modules (module id → value), exposed to dependent
     /// modules via `host.require`. Data only — Lua functions can't cross VMs.
     exports: RefCell<HashMap<String, serde_json::Value>>,
@@ -180,11 +184,6 @@ struct Shared {
     next_arbiter: Cell<i64>,
     /// Monotonic id source for captured-key registration tokens.
     next_key_token: Cell<i64>,
-    /// Recurring timers: (next deadline, interval, module_idx, VM, callback). Fired
-    /// from the tick and re-armed even while the owning module is disabled, so a
-    /// poll resumes on re-enable instead of dying (unlike a Lua self-rescheduling
-    /// host.timer.after chain, whose reschedule is skipped while disabled).
-    recurring: RefCell<Vec<(Instant, Duration, usize, Lua, RegistryKey)>>,
     /// Module callback failures (Lua errors + caught panics) queued for the GUI to
     /// show in an accessible dialog, as (title, message). Drained each tick.
     errors: RefCell<Vec<(String, String)>>,
@@ -217,6 +216,12 @@ struct Shared {
     /// Set by `host.window.recheck()`; drained on the tick to fire a cross-VM overlay
     /// re-check (as an OS focus event would), for state changes an overlay itself caused.
     recheck_requested: Cell<bool>,
+    /// Modules owed a report of the window already in front — `onTrigger { initial = true }` —
+    /// as (module_idx, reprime), at most one entry per module. Filled by the prelude's
+    /// `_requestInitial` (reprime false) and by `apply_enabled(true)` (reprime true: every
+    /// `initial` trigger of the module is primed again); drained on the tick by
+    /// `Dispatcher::dispatch_initial`.
+    initial_pending: RefCell<Vec<(usize, bool)>>,
     /// Shows a notification, and says whether it managed to.
     ///
     /// Installed by the GUI once its tray icon exists, so `None` means headless — there is
@@ -580,6 +585,9 @@ impl Shared {
             )
         };
         logging::line("conflict", &format!("[{me}] {kind} '{spec}' conflicts with [{owner}]"));
+        // The log keeps the spec; the dialog says the key in the words a user looks for it by,
+        // which on a Mac are not the spec's (see `dialog_key_words_for`).
+        let key = backend::dialog_key_words_for(backend::KeyOs::CURRENT, spec);
         self.queue_dialog(
             // The OWNER is part of the key. Without it, three modules wanting one combination
             // produced one message per loser naming the first holder, and then the corrected
@@ -596,7 +604,7 @@ impl Shared {
             // bind", which stopped being true once this report could name a module that had
             // been holding the key and was asked to give it up.
             format!(
-                "Module \u{201c}{me}\u{201d} wants the {kind} {spec}, and module \u{201c}{owner}\u{201d} is using it. Only one module can hold a combination at a time. {spec} passes on by itself as soon as \u{201c}{owner}\u{201d} releases it \u{2014} disabling or removing that module in the module manager is enough, and nothing needs restarting."
+                "Module \u{201c}{me}\u{201d} wants the {kind} {key}, and module \u{201c}{owner}\u{201d} is using it. Only one module can hold a combination at a time. {key} passes on by itself as soon as \u{201c}{owner}\u{201d} releases it \u{2014} disabling or removing that module in the module manager is enough, and nothing needs restarting."
             ),
         );
     }
@@ -606,11 +614,12 @@ impl Shared {
     fn report_os_conflict(&self, idx: usize, kind: &str, spec: &str, err: &str) {
         let me = self.ids.borrow().get(idx).cloned().unwrap_or_default();
         logging::line("conflict", &format!("[{me}] {kind} '{spec}' rejected by OS: {err}"));
+        let key = backend::dialog_key_words_for(backend::KeyOs::CURRENT, spec);
         self.queue_dialog(
             format!("{me}\u{1}osconflict\u{1}{kind}\u{1}{spec}"),
             "Binding unavailable".to_string(),
             format!(
-                "The {kind} {spec} for module \u{201c}{me}\u{201d} couldn\u{2019}t be registered \u{2014} another application already uses it system-wide."
+                "The {kind} {key} for module \u{201c}{me}\u{201d} couldn\u{2019}t be registered \u{2014} another application already uses it system-wide."
             ),
         );
     }
@@ -910,8 +919,9 @@ impl Shared {
         // By the VM the callback was registered from, not by whose setting it watches — see
         // `drop_on_change_from`.
         purge_on_change(&mut self.on_change.borrow_mut(), idx);
-        self.timers.borrow_mut().retain(|(_, i, ..)| *i != idx);
-        self.recurring.borrow_mut().retain(|(_, _, i, ..)| *i != idx);
+        self.timers.retain(|i| i != idx);
+        // The VM that asked is going; the one built in its place asks for itself.
+        self.initial_pending.borrow_mut().retain(|(i, _)| *i != idx);
         self.purge_pending_images(idx);
         self.drop_pad_listeners(|i| i == idx);
         let mut to_resolve: Vec<String> = Vec::new();
@@ -965,6 +975,12 @@ impl Shared {
         self.refresh_captured();
     }
 
+    /// Queues module `idx` for a report of the window in front on the next tick — see
+    /// `initial_pending` and [`queue_initial`].
+    fn request_initial(&self, idx: usize, reprime: bool) {
+        queue_initial(&mut self.initial_pending.borrow_mut(), idx, reprime);
+    }
+
     /// Enables or disables a module at runtime: (un)registers its OS hotkeys and
     /// recomputes the captured-key set. The dispatcher already skips disabled
     /// modules' hotkeys/keys/triggers via the `enabled` flag.
@@ -1005,6 +1021,9 @@ impl Shared {
         // Searches answered while it was off are asked again, so their callbacks still come.
         if enabled {
             self.resume_held_images(idx);
+            // And a trigger that asked to hear about the window already in front hears about
+            // it again: to a module that was off, whatever is in front now is new.
+            self.request_initial(idx, true);
         }
         logging::line(
             "manager",
@@ -1036,8 +1055,8 @@ impl Shared {
         }
         self.keys.borrow_mut().retain(|(_, _, idx, ..)| *idx < n);
         rollback_on_change(&mut self.on_change.borrow_mut(), n);
-        self.timers.borrow_mut().retain(|(_, idx, ..)| *idx < n);
-        self.recurring.borrow_mut().retain(|(_, _, idx, ..)| *idx < n);
+        self.timers.retain(|idx| idx < n);
+        self.initial_pending.borrow_mut().retain(|(idx, _)| *idx < n);
         self.drop_pad_listeners(|idx| idx >= n);
         {
             // Drop arbiter claims owned by the rolled-back modules; clear a now-
@@ -1311,60 +1330,19 @@ impl Shared {
         self.store.borrow().save();
     }
 
-    /// Fires one-shot timers whose deadline has passed (driven by the loop tick).
+    /// Fires the timers whose time has come (driven by the loop tick) — see
+    /// `timers::Timers::fire_due` for the order and for what a callback may do to the others.
     fn fire_due_timers(&self) {
-        let now = Instant::now();
-        let mut due: Vec<(usize, Lua, RegistryKey)> = Vec::new();
-        {
-            let mut timers = self.timers.borrow_mut();
-            let mut i = 0;
-            while i < timers.len() {
-                if timers[i].0 <= now {
-                    let (_, idx, lua, cb) = timers.remove(i);
-                    due.push((idx, lua, cb));
-                } else {
-                    i += 1;
-                }
-            }
-        }
-        // Only once something actually fires — this runs on EVERY loop tick, and an idle
-        // tick has changed nothing. Bumping there would make the epoch a tick counter and
-        // defeat the memoization it exists for.
-        if !due.is_empty() {
-            self.bump_epoch();
-        }
-        for (idx, lua, cb) in due {
-            if self.enabled.borrow().get(idx).copied().unwrap_or(false) {
-                if let Ok(f) = lua.registry_value::<Function>(&cb) {
-                    if let Err(e) = call_guarded(&f, ()) {
-                        self.report_callback_error(idx, "timer", &e);
-                    }
-                }
-            }
-            let _ = lua.remove_registry_value(cb);
-        }
-
-        // Recurring timers: re-arm every due one (so the schedule survives a
-        // disable), but fire only those whose module is enabled.
-        let mut due_recurring: Vec<(usize, Function)> = Vec::new();
-        {
-            let mut rec = self.recurring.borrow_mut();
-            for t in rec.iter_mut() {
-                if t.0 <= now {
-                    t.0 = now + t.1;
-                    if let Ok(f) = t.3.registry_value::<Function>(&t.4) {
-                        due_recurring.push((t.2, f));
-                    }
-                }
-            }
-        }
-        for (idx, f) in due_recurring {
-            if self.enabled.borrow().get(idx).copied().unwrap_or(false) {
-                if let Err(e) = call_guarded(&f, ()) {
-                    self.report_callback_error(idx, "timer", &e);
-                }
-            }
-        }
+        self.timers.fire_due(
+            Instant::now(),
+            |idx| self.enabled.borrow().get(idx).copied().unwrap_or(false),
+            // Only once a one-shot timer actually comes due — this runs on EVERY loop tick, and
+            // an idle tick has changed nothing. Bumping there would make the epoch a tick
+            // counter and defeat the memoization it exists for. A recurring tick does not bump
+            // it either (see `host.epoch` in timer.md).
+            || self.bump_epoch(),
+            |idx, e| self.report_callback_error(idx, "timer", e),
+        );
     }
 
     /// Applies a setting change from the GUI: validates against the schema,
@@ -1584,22 +1562,22 @@ fn build_dep_host(
     // for: handing back the owner's copy would return exactly what was just denied, and would
     // mean a module could reach anything its dependents happen to have declared.
     let dep_id = shared.ids.borrow().get(dep_idx).cloned().unwrap_or_default();
+    // The free members of a namespace the dependency did not declare, from its OWN table: they
+    // carry no identity, so whose copy answers does not matter, and the owner's is exactly what
+    // must not be handed over.
+    let free = free_subsets(
+        lua,
+        &dep_full,
+        |ns| capability_for(ns).is_some_and(|cap| !dep_caps.contains(cap)),
+        &dep_id,
+        FOREIGN_VM,
+    )?;
     let owner = host_owner.clone();
     let mt = lua.create_table()?;
     mt.set(
         "__index",
         lua.create_function(move |_, (_t, key): (Table, String)| -> mlua::Result<mlua::Value> {
-            if let Some(cap) = capability_for(&key) {
-                if !dep_caps.contains(cap) {
-                    return Err(undeclared(
-                        &dep_id,
-                        &key,
-                        ". Its code runs inside another module's VM; what that module declares \
-                         does not apply to it",
-                    ));
-                }
-            }
-            owner.raw_get(key)
+            dep_host_member(&key, &dep_caps, &free, &owner, &dep_id)
         })?,
     )?;
     host.set_metatable(Some(mt))?;
@@ -1609,6 +1587,33 @@ fn build_dep_host(
     // root, and hand them the dependent's host.
     install_include(lua, shared, dep_idx, &host, &host)?;
     Ok(host)
+}
+
+/// What a dependency's refusal adds to the ordinary one.
+const FOREIGN_VM: &str = ". Its code runs inside another module's VM; what that module \
+                          declares does not apply to it";
+
+/// What `host.<key>` answers for a dependency's code running in another module's VM: the
+/// owner's table for a namespace the dependency declared (or one that needs nothing), the
+/// dependency's own free members of one it did not declare, and the refusal otherwise.
+///
+/// Out of `build_dep_host` so the rule can be tested without a whole `Shared`.
+fn dep_host_member(
+    key: &str,
+    dep_caps: &HashSet<String>,
+    free: &HashMap<String, Table>,
+    owner: &Table,
+    dep_id: &str,
+) -> mlua::Result<mlua::Value> {
+    if let Some(cap) = capability_for(key) {
+        if !dep_caps.contains(cap) {
+            if let Some(subset) = free.get(key) {
+                return Ok(mlua::Value::Table(subset.clone()));
+            }
+            return Err(undeclared(dep_id, key, FOREIGN_VM));
+        }
+    }
+    owner.raw_get(key)
 }
 
 /// Calls a no-arg-or-args Lua callback, catching BOTH a Lua error and a Rust
@@ -2147,6 +2152,544 @@ mod capability_gate_tests {
         assert_eq!(view.get::<String>("speech").unwrap(), "yes");
         assert!(view.metatable().is_none());
     }
+
+    /// A module that only registers a hotkey can put its key into words, and still cannot
+    /// capture one: `host.keys.normalize`, `describe` and `check` are free, the rest of
+    /// `host.keys` is not. Through the module's own view; the dependency's view is the next
+    /// test.
+    #[test]
+    fn describing_a_key_needs_no_capability_and_capturing_one_still_does() {
+        let lua = Lua::new();
+        let full = lua.create_table().unwrap();
+        let keys = lua.create_table().unwrap();
+        for name in ["normalize", "describe", "check", "capture"] {
+            let n = name.to_string();
+            keys.set(name, lua.create_function(move |_, ()| Ok(n.clone())).unwrap()).unwrap();
+        }
+        full.set("keys", keys).unwrap();
+        let caps: HashSet<String> = ["hotkey"].iter().map(|s| (*s).to_string()).collect();
+        let view = gated_view(&lua, &full, &caps, "com.example.hotkey-only").unwrap();
+        lua.globals().set("host", view).unwrap();
+
+        for name in ["normalize", "describe", "check"] {
+            let got: String = lua.load(format!("return host.keys.{name}()")).eval().unwrap();
+            assert_eq!(got, name);
+        }
+        let err = lua.load("return host.keys.capture").eval::<mlua::Value>().unwrap_err().to_string();
+        assert!(err.contains("com.example.hotkey-only") && err.contains("\"keys\""), "{err}");
+        // Not a way round the gate either: the subset carries the three and nothing else.
+        let leaked: bool = lua
+            .load("for k in pairs(host.keys) do if k == 'capture' then return true end end return false")
+            .eval()
+            .unwrap();
+        assert!(!leaked);
+
+        // Declared, the namespace is the whole table as before.
+        let all: HashSet<String> = ["keys"].iter().map(|s| (*s).to_string()).collect();
+        let view = gated_view(&lua, &full, &all, "com.example.keys").unwrap();
+        lua.globals().set("host", view).unwrap();
+        let got: String = lua.load("return host.keys.capture()").eval().unwrap();
+        assert_eq!(got, "capture");
+    }
+
+    /// The same for a dependency's code in another module's VM: its free members come from its
+    /// OWN table — never the owner's, which is exactly what must not be handed over — and a
+    /// namespace it declared still resolves to the owner's binding.
+    #[test]
+    fn a_dependency_gets_its_own_free_members_and_not_the_owners_namespace() {
+        let lua = Lua::new();
+        let table_of = |tag: &str, names: &[&str]| {
+            let t = lua.create_table().unwrap();
+            for name in names {
+                let v = format!("{tag}.{name}");
+                t.set(*name, lua.create_function(move |_, ()| Ok(v.clone())).unwrap()).unwrap();
+            }
+            t
+        };
+        let dep_full = lua.create_table().unwrap();
+        dep_full.set("keys", table_of("dep", &["normalize", "describe", "check", "capture"])).unwrap();
+        let owner = lua.create_table().unwrap();
+        owner.set("keys", table_of("owner", &["normalize", "capture"])).unwrap();
+        owner.set("hotkey", table_of("owner", &["register"])).unwrap();
+        let caps: HashSet<String> = ["hotkey"].iter().map(|s| (*s).to_string()).collect();
+        let free = free_subsets(
+            &lua,
+            &dep_full,
+            |ns| capability_for(ns).is_some_and(|cap| !caps.contains(cap)),
+            "com.example.dep",
+            FOREIGN_VM,
+        )
+        .unwrap();
+        let member = |key: &str| dep_host_member(key, &caps, &free, &owner, "com.example.dep");
+
+        let Ok(mlua::Value::Table(keys)) = member("keys") else { panic!("keys was refused") };
+        let got: String = keys.get::<Function>("normalize").unwrap().call(()).unwrap();
+        assert_eq!(got, "dep.normalize", "the free members are the dependency's own");
+        let err = keys.get::<mlua::Value>("capture").unwrap_err().to_string();
+        assert!(err.contains("com.example.dep") && err.contains("another module's VM"), "{err}");
+
+        let Ok(mlua::Value::Table(hk)) = member("hotkey") else { panic!("hotkey was refused") };
+        let got: String = hk.get::<Function>("register").unwrap().call(()).unwrap();
+        assert_eq!(got, "owner.register", "a declared namespace is the owner's binding");
+
+        let err = member("speech").unwrap_err().to_string();
+        assert!(err.contains("\"speech\""), "{err}");
+    }
+}
+
+/// `onTrigger { initial = true }` against the real prelude and a stand-in host: the prelude's
+/// priming, `dispatch_initial`, and the queue the host drains on the tick.
+#[cfg(test)]
+mod initial_trigger_tests {
+    use super::*;
+
+    /// A VM whose whole host table has the prelude installed and a `window._requestInitial`
+    /// that counts, the way `populate_vm` leaves it; the module's code sees `caps` only.
+    fn vm(caps: &[&str]) -> (Lua, Table) {
+        let lua = Lua::new();
+        let full = lua.create_table().unwrap();
+        for (key, _) in GATED {
+            full.set(*key, lua.create_table().unwrap()).unwrap();
+        }
+        let os = lua.create_table().unwrap();
+        os.set("current", "windows").unwrap();
+        full.set("os", os).unwrap();
+        full.set("now", lua.create_function(|_, ()| Ok(0)).unwrap()).unwrap();
+        lua.globals().set("requests", 0).unwrap();
+        let window: Table = full.get("window").unwrap();
+        window
+            .set(
+                "_requestInitial",
+                lua.create_function(|lua, ()| {
+                    let n: i64 = lua.globals().get("requests")?;
+                    lua.globals().set("requests", n + 1)
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        install_window_prelude(&lua, &full).unwrap();
+        let caps: HashSet<String> = caps.iter().map(|s| (*s).to_string()).collect();
+        let view = gated_view(&lua, &full, &caps, "com.example.game").unwrap();
+        lua.globals().set("host", &view).unwrap();
+        (lua, full)
+    }
+
+    fn game() -> WinInfo {
+        window_titled("Arcade Game")
+    }
+
+    fn window_titled(title: &str) -> WinInfo {
+        WinInfo {
+            hwnd: 9,
+            title: title.to_string(),
+            class: "GameWindow".to_string(),
+            pid: 42,
+            exe: "game.exe".to_string(),
+            bundle_id: String::new(),
+            x: 0,
+            y: 0,
+            w: 1280,
+            h: 1024,
+            client_x: 0,
+            client_y: 0,
+            client_w: 1280,
+            client_h: 1024,
+        }
+    }
+
+    /// Registers a counting trigger on the WHOLE table (as a runtime's code does) for the game.
+    fn register(lua: &Lua, full: &Table, name: &str, opts: &str) {
+        lua.load(format!(
+            r#"
+            local host = ...
+            {name} = 0
+            host.window.onTrigger({{ title = {{ contains = "Arcade" }} }}, {opts}, function(win)
+              {name} = {name} + 1
+              {name}_title = win.title
+            end)
+            "#
+        ))
+        .call::<()>(full)
+        .unwrap();
+    }
+
+    fn count(lua: &Lua, name: &str) -> i64 {
+        lua.globals().get::<i64>(name).unwrap()
+    }
+
+    /// Dispatches the report and returns (fired, how often `before_first` ran).
+    fn report(lua: &Lua, win: Option<&WinInfo>, reprime: bool) -> (i64, u32) {
+        let before = Cell::new(0u32);
+        let fired = dispatch_initial(lua, win, reprime, &|| before.set(before.get() + 1)).unwrap();
+        (fired, before.get())
+    }
+
+    #[test]
+    fn fires_once_after_load_for_the_window_in_front() {
+        let (lua, full) = vm(&["window"]);
+        register(&lua, &full, "hits", "{ initial = true }");
+        assert_eq!(count(&lua, "requests"), 1, "the registration asked the host for a report");
+        assert_eq!(count(&lua, "hits"), 0, "not called from inside onTrigger");
+        assert_eq!(report(&lua, Some(&game()), false), (1, 1));
+        assert_eq!(count(&lua, "hits"), 1);
+        assert_eq!(lua.globals().get::<String>("hits_title").unwrap(), "Arcade Game");
+        // Once: the next tick has nothing left to report.
+        assert_eq!(report(&lua, Some(&game()), false), (0, 0));
+        assert_eq!(count(&lua, "hits"), 1);
+    }
+
+    #[test]
+    fn a_registration_after_load_is_reported_on_the_next_tick() {
+        let (lua, full) = vm(&["window"]);
+        register(&lua, &full, "early", "{ initial = true }");
+        assert_eq!(report(&lua, Some(&game()), false).0, 1);
+        // From a timer, say: a second trigger, registered once the first was reported.
+        register(&lua, &full, "late", "{ initial = true }");
+        assert_eq!(count(&lua, "requests"), 2);
+        assert_eq!(report(&lua, Some(&game()), false), (1, 1));
+        assert_eq!((count(&lua, "early"), count(&lua, "late")), (1, 1));
+    }
+
+    #[test]
+    fn nothing_fires_without_a_match_or_a_window_and_the_report_is_used_up() {
+        let (lua, full) = vm(&["window"]);
+        register(&lua, &full, "hits", "{ initial = true }");
+        assert_eq!(report(&lua, Some(&window_titled("Desktop")), false), (0, 0));
+        // That WAS the report: the game coming forward later is an activation, not this.
+        assert_eq!(report(&lua, Some(&game()), false), (0, 0));
+        register(&lua, &full, "second", "{ initial = true }");
+        assert_eq!(report(&lua, None, false), (0, 0), "no window in front: nothing to report");
+        assert_eq!(report(&lua, Some(&game()), false), (0, 0));
+        assert_eq!((count(&lua, "hits"), count(&lua, "second")), (0, 0));
+    }
+
+    #[test]
+    fn a_trigger_without_initial_is_never_reported() {
+        let (lua, full) = vm(&["window"]);
+        register(&lua, &full, "plain", "nil");
+        register(&lua, &full, "activateOnly", "{ on = \"activate\" }");
+        assert_eq!(count(&lua, "requests"), 0, "nothing asked for a report");
+        assert_eq!(report(&lua, Some(&game()), true), (0, 0), "not even on re-enable");
+        assert_eq!((count(&lua, "plain"), count(&lua, "activateOnly")), (0, 0));
+    }
+
+    #[test]
+    fn fires_again_on_re_enable() {
+        let (lua, full) = vm(&["window"]);
+        register(&lua, &full, "hits", "{ initial = true }");
+        assert_eq!(report(&lua, Some(&game()), false).0, 1);
+        assert_eq!(report(&lua, Some(&game()), true), (1, 1), "enabled again: reported again");
+        assert_eq!(count(&lua, "hits"), 2);
+    }
+
+    #[test]
+    fn an_earlier_activation_prevents_a_double_call() {
+        let (lua, full) = vm(&["window"]);
+        register(&lua, &full, "hits", "{ initial = true }");
+        // The game comes forward before the tick: the activation reports it...
+        dispatch_activate(&lua, &game()).unwrap();
+        assert_eq!(count(&lua, "hits"), 1);
+        // ...and the report the registration asked for finds nothing left to say.
+        assert_eq!(report(&lua, Some(&game()), false), (0, 0));
+        assert_eq!(count(&lua, "hits"), 1);
+
+        // An activation of some OTHER window also uses the report up: the game is not in
+        // front, and when it comes forward that is an activation of its own.
+        register(&lua, &full, "other", "{ initial = true }");
+        dispatch_activate(&lua, &window_titled("Desktop")).unwrap();
+        assert_eq!(report(&lua, Some(&game()), false), (0, 0));
+        assert_eq!(count(&lua, "other"), 0);
+    }
+
+    /// A trigger registered by a callback of an activation is reported that activation by the
+    /// dispatch itself, so the report it asked for must not repeat it.
+    #[test]
+    fn a_trigger_registered_during_an_activation_is_not_reported_twice() {
+        let (lua, full) = vm(&["window"]);
+        lua.load(
+            r#"
+            local host = ...
+            inner = 0
+            host.window.onTrigger({ title = { contains = "Arcade" } }, nil, function()
+              if registered then return end
+              registered = true
+              host.window.onTrigger({ title = { contains = "Arcade" } }, { initial = true },
+                function() inner = inner + 1 end)
+            end)
+            "#,
+        )
+        .call::<()>(&full)
+        .unwrap();
+        dispatch_activate(&lua, &game()).unwrap();
+        assert_eq!(count(&lua, "inner"), 1);
+        assert_eq!(report(&lua, Some(&game()), false), (0, 0));
+        assert_eq!(count(&lua, "inner"), 1);
+    }
+
+    #[test]
+    fn every_matching_trigger_runs_and_the_preparation_runs_once() {
+        let (lua, full) = vm(&["window"]);
+        register(&lua, &full, "a", "{ initial = true }");
+        register(&lua, &full, "b", "{ initial = true }");
+        lua.load(
+            r#"
+            local host = ...
+            host.window.onTrigger({ title = "Somewhere else" }, { initial = true }, function() end)
+            "#,
+        )
+        .call::<()>(&full)
+        .unwrap();
+        assert_eq!(report(&lua, Some(&game()), false), (2, 1), "fired counts the callbacks that ran");
+    }
+
+    /// One raising callback stops the report for that module, and the rest are not left
+    /// primed for a later window — the rule an activation follows.
+    #[test]
+    fn a_raising_callback_uses_the_report_up_for_the_rest() {
+        let (lua, full) = vm(&["window"]);
+        lua.load(
+            r#"
+            local host = ...
+            host.window.onTrigger({ title = { contains = "Arcade" } }, { initial = true },
+              function() error("boom") end)
+            "#,
+        )
+        .call::<()>(&full)
+        .unwrap();
+        register(&lua, &full, "after", "{ initial = true }");
+        let e = dispatch_initial(&lua, Some(&game()), false, &|| {}).unwrap_err().to_string();
+        assert!(e.contains("boom"), "{e}");
+        assert_eq!(report(&lua, Some(&game()), false), (0, 0));
+        assert_eq!(count(&lua, "after"), 0);
+    }
+
+    /// Reported into a module that never declared `window` — its runtime registered the
+    /// trigger — through the host's own handle, as activations are.
+    #[test]
+    fn reaches_a_module_that_did_not_declare_window() {
+        let (lua, full) = vm(&["speech"]);
+        register(&lua, &full, "hits", "{ initial = true }");
+        assert_eq!(report(&lua, Some(&game()), false), (1, 1));
+        let err = lua.load("return host.window").eval::<mlua::Value>().unwrap_err().to_string();
+        assert!(err.contains("without declaring it"), "the module's own code is still gated: {err}");
+    }
+
+    #[test]
+    fn a_vm_without_triggers_or_prelude_is_skipped() {
+        let (lua, _full) = vm(&["window"]);
+        assert_eq!(report(&lua, Some(&game()), true), (0, 0));
+        let bare = Lua::new();
+        assert_eq!(report(&bare, Some(&game()), true), (0, 0));
+    }
+
+    #[test]
+    fn initial_must_be_a_boolean() {
+        let (lua, full) = vm(&["window"]);
+        let e = lua
+            .load(
+                r#"
+                local host = ...
+                host.window.onTrigger({}, { initial = "yes" }, function() end)
+                "#,
+            )
+            .call::<()>(&full)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("initial is true or false"), "{e}");
+    }
+
+    /// The host's queue: one entry per module, `reprime` sticks, and only enabled modules
+    /// are answered.
+    #[test]
+    fn the_queue_asks_once_per_module_and_skips_disabled_ones() {
+        let mut q = Vec::new();
+        queue_initial(&mut q, 2, false);
+        queue_initial(&mut q, 0, false);
+        queue_initial(&mut q, 2, false);
+        assert_eq!(q, vec![(2, false), (0, false)]);
+        queue_initial(&mut q, 0, true);
+        queue_initial(&mut q, 0, false);
+        assert_eq!(q, vec![(2, false), (0, true)], "a re-enable's reprime is not lost");
+        let enabled = [true, false, false];
+        assert_eq!(initial_due(q, |i| enabled.get(i).copied().unwrap_or(false)), vec![(0, true)]);
+    }
+
+    /// An activation dispatched into a module is its report: a queued re-enable of that
+    /// module stops re-arming, and a disabled module's entry is left as it was.
+    #[test]
+    fn an_activation_stops_a_queued_re_enable_from_re_arming() {
+        let mut q = vec![(0, true), (1, true), (2, false)];
+        let enabled = [true, false, true];
+        initial_reported_by_activation(&mut q, |i| enabled[i]);
+        assert_eq!(q, vec![(0, false), (1, true), (2, false)]);
+    }
+
+    /// The binding the host installs, into a VM with the real prelude: bound to its module,
+    /// never re-arming, and one queue entry however many `initial` triggers ask.
+    #[test]
+    fn the_real_request_binding_queues_its_module_once() {
+        let (lua, full) = vm(&["window"]);
+        let queue: Rc<RefCell<Vec<(usize, bool)>>> = Rc::new(RefCell::new(Vec::new()));
+        let window: Table = full.get("window").unwrap();
+        window.set("_requestInitial", initial_request_fn(&lua, 4, queue.clone(), |q| q).unwrap()).unwrap();
+        register(&lua, &full, "plain", "nil");
+        assert!(queue.borrow().is_empty(), "a trigger without initial asks nothing");
+        register(&lua, &full, "a", "{ initial = true }");
+        register(&lua, &full, "b", "{ initial = true }");
+        assert_eq!(*queue.borrow(), vec![(4, false)]);
+    }
+
+    /// What `drain_initial` did with the host's parts, recorded.
+    #[derive(Debug, PartialEq)]
+    struct Drained {
+        /// How often the foreground was asked for.
+        asked: u32,
+        /// How often the input epoch turned over.
+        bumps: u32,
+        /// The `vm_id` of every VM the duplication was opened for, in order.
+        prewarmed: Vec<i64>,
+        /// The modules whose dispatch raised.
+        failed: Vec<usize>,
+    }
+
+    /// Runs `drain_initial` over `vms` (module index = position) with `front` in front.
+    fn drain(vms: &[&Lua], pending: Vec<(usize, bool)>, enabled: &[bool], front: Option<WinInfo>) -> Drained {
+        let asked = Cell::new(0);
+        let bumps = Cell::new(0);
+        let prewarmed = RefCell::new(Vec::new());
+        let mut failed = Vec::new();
+        drain_initial(
+            pending,
+            |i| enabled.get(i).copied().unwrap_or(false),
+            |i| vms.get(i).copied(),
+            || {
+                asked.set(asked.get() + 1);
+                front
+            },
+            || bumps.set(bumps.get() + 1),
+            |lua: &Lua| prewarmed.borrow_mut().push(lua.globals().get::<i64>("vm_id").unwrap()),
+            |i, _| failed.push(i),
+        );
+        Drained { asked: asked.get(), bumps: bumps.get(), prewarmed: prewarmed.into_inner(), failed }
+    }
+
+    /// A prelude VM for module `id`, told apart by its `vm_id` global.
+    fn module_vm(id: i64) -> (Lua, Table) {
+        let (lua, full) = vm(&["window"]);
+        lua.globals().set("vm_id", id).unwrap();
+        (lua, full)
+    }
+
+    #[test]
+    fn the_drain_asks_for_the_foreground_only_when_a_report_is_wanted() {
+        let (a, fa) = module_vm(0);
+        let none = Drained { asked: 0, bumps: 0, prewarmed: vec![], failed: vec![] };
+        assert_eq!(drain(&[&a], vec![], &[true], Some(game())), none, "nothing queued");
+        // Enabling a module whose triggers never asked for a report: nothing to ask about.
+        register(&a, &fa, "plain", "nil");
+        assert!(!a.load("return host.window._wantsInitial(true)").eval::<bool>().unwrap());
+        assert_eq!(drain(&[&a], vec![(0, true)], &[true], Some(game())), none);
+        assert_eq!(count(&a, "plain"), 0);
+        // One that did: asked for once, and used up, so a second pass asks nothing.
+        register(&a, &fa, "hits", "{ initial = true }");
+        let once = Drained { asked: 1, bumps: 1, prewarmed: vec![0], failed: vec![] };
+        assert_eq!(drain(&[&a], vec![(0, false)], &[true], Some(game())), once);
+        assert_eq!(drain(&[&a], vec![(0, false)], &[true], Some(game())), none);
+        assert_eq!((count(&a, "hits"), count(&a, "plain")), (1, 0));
+    }
+
+    /// Two modules owed a report: one foreground query, one turn of the input epoch before
+    /// the first callback of either, and the duplication opened once per VM.
+    #[test]
+    fn two_modules_share_one_query_and_one_epoch_turn() {
+        let (a, fa) = module_vm(0);
+        let (b, fb) = module_vm(1);
+        register(&a, &fa, "hits", "{ initial = true }");
+        register(&b, &fb, "hits", "{ initial = true }");
+        let got = drain(&[&a, &b], vec![(0, false), (1, false)], &[true, true], Some(game()));
+        assert_eq!(got, Drained { asked: 1, bumps: 1, prewarmed: vec![0, 1], failed: vec![] });
+        assert_eq!((count(&a, "hits"), count(&b, "hits")), (1, 1));
+    }
+
+    #[test]
+    fn a_disabled_module_is_dropped_and_costs_no_query() {
+        let (a, fa) = module_vm(0);
+        let (b, fb) = module_vm(1);
+        register(&a, &fa, "hits", "{ initial = true }");
+        register(&b, &fb, "hits", "{ initial = true }");
+        let none = Drained { asked: 0, bumps: 0, prewarmed: vec![], failed: vec![] };
+        assert_eq!(drain(&[&a, &b], vec![(0, false)], &[false, true], Some(game())), none);
+        let got = drain(&[&a, &b], vec![(0, false), (1, false)], &[false, true], Some(game()));
+        assert_eq!(got, Drained { asked: 1, bumps: 1, prewarmed: vec![1], failed: vec![] });
+        assert_eq!((count(&a, "hits"), count(&b, "hits")), (0, 1));
+    }
+
+    /// Neither platform hands an untitled foreground window to a trigger on activation, so
+    /// the report does not either — and it is used up all the same.
+    #[test]
+    fn a_window_without_a_title_is_not_reported() {
+        let (a, fa) = module_vm(0);
+        lua_catch_all(&a, &fa);
+        let got = drain(&[&a], vec![(0, false)], &[true], Some(window_titled("")));
+        assert_eq!(got, Drained { asked: 1, bumps: 0, prewarmed: vec![], failed: vec![] });
+        assert_eq!(count(&a, "any"), 0);
+        assert!(!a.load("return host.window._wantsInitial(false)").eval::<bool>().unwrap(), "used up");
+        // The same catch-all hears a titled window when the module is enabled again.
+        drain(&[&a], vec![(0, true)], &[true], Some(window_titled("Desktop")));
+        assert_eq!(count(&a, "any"), 1);
+    }
+
+    fn lua_catch_all(lua: &Lua, full: &Table) {
+        lua.load(
+            r#"
+            local host = ...
+            any = 0
+            host.window.onTrigger({}, { initial = true }, function() any = any + 1 end)
+            "#,
+        )
+        .call::<()>(full)
+        .unwrap();
+    }
+
+    /// Enabling a module queues a re-arm; an activation delivered on the same tick, before the
+    /// drain, is the report — so the window that came forward is reported once, not twice.
+    #[test]
+    fn a_re_enable_and_an_activation_in_one_tick_report_once() {
+        let (a, fa) = module_vm(0);
+        register(&a, &fa, "hits", "{ initial = true }");
+        drain(&[&a], vec![(0, false)], &[true], Some(game()));
+        assert_eq!(count(&a, "hits"), 1, "the report at load");
+        // Enabled from the manager, and the game comes forward before the tick's drain.
+        let mut pending = vec![(0, true)];
+        dispatch_activate(&a, &game()).unwrap();
+        initial_reported_by_activation(&mut pending, |_| true);
+        assert_eq!(count(&a, "hits"), 2, "the activation");
+        let got = drain(&[&a], pending, &[true], Some(game()));
+        assert_eq!(got.asked, 0, "nothing left to report");
+        assert_eq!(count(&a, "hits"), 2);
+        // Without an activation in between, the re-enable does report again.
+        drain(&[&a], vec![(0, true)], &[true], Some(game()));
+        assert_eq!(count(&a, "hits"), 3);
+    }
+
+    #[test]
+    fn a_module_whose_report_raises_is_named_and_the_others_still_hear() {
+        let (a, fa) = module_vm(0);
+        let (b, fb) = module_vm(1);
+        a.load(
+            r#"
+            local host = ...
+            host.window.onTrigger({ title = { contains = "Arcade" } }, { initial = true },
+              function() error("boom") end)
+            "#,
+        )
+        .call::<()>(&fa)
+        .unwrap();
+        register(&b, &fb, "hits", "{ initial = true }");
+        let got = drain(&[&a, &b], vec![(0, false), (1, false)], &[true, true], Some(game()));
+        assert_eq!(got, Drained { asked: 1, bumps: 1, prewarmed: vec![0, 1], failed: vec![0] });
+        assert_eq!(count(&b, "hits"), 1);
+    }
 }
 
 #[cfg(test)]
@@ -2282,6 +2825,40 @@ mod guard_tests {
         assert!(backend::key_spec("Ctrl+Alt+H").is_some());
         assert_ne!(backend::key_spec("Ctrl+Alt+H"), backend::key_spec("Ctrl+H"));
         assert_ne!(backend::key_spec("Tab"), backend::key_spec("Shift+Tab"));
+        // Two spellings of one role are one combination to the contest, so a `Cmd+S` beside an
+        // inherited `Ctrl+S` is a conflict, not two holders — on every platform.
+        assert_eq!(backend::key_spec("Cmd+S"), backend::key_spec("Ctrl+S"));
+        assert_eq!(backend::key_spec("Meta+S"), backend::key_spec("Win+S"));
+        assert_ne!(backend::key_spec("Win+S"), backend::key_spec("Ctrl+S"));
+    }
+
+    /// The host's own reload key: the four modifiers on Windows, Command-Shift on a Mac — which
+    /// is off VoiceOver's Control+Option layer, where the four-modifier chord would be.
+    #[test]
+    fn the_reload_key_is_the_chord_it_was() {
+        use backend::{check_spec_for, key_spec, KeyOs, MASK_ALT, MASK_CTRL, MASK_SHIFT, MASK_WIN};
+        let expected = if cfg!(target_os = "macos") { RELOAD_HOTKEY_MACOS } else { RELOAD_HOTKEY_WINDOWS };
+        assert_eq!(RELOAD_HOTKEY_SPEC, expected);
+        assert_eq!(key_spec(RELOAD_HOTKEY_WINDOWS), Some((0x74, MASK_CTRL | MASK_ALT | MASK_SHIFT | MASK_WIN)));
+        assert_eq!(key_spec(RELOAD_HOTKEY_MACOS), Some((0x74, MASK_CTRL | MASK_SHIFT)));
+        assert!(backend::hotkey_refusal_for(KeyOs::Windows, RELOAD_HOTKEY_WINDOWS).is_none());
+        assert!(backend::hotkey_refusal_for(KeyOs::Linux, RELOAD_HOTKEY_WINDOWS).is_none());
+        assert!(check_spec_for(KeyOs::Macos, RELOAD_HOTKEY_MACOS, |_, _| None).reasons.is_empty());
+        assert_eq!(
+            check_spec_for(KeyOs::Macos, RELOAD_HOTKEY_WINDOWS, |_, _| None).reasons,
+            vec![backend::REASON_VOICEOVER],
+            "why the Mac has a chord of its own"
+        );
+        assert_eq!(
+            backend::normalize_spec_for(KeyOs::Windows, RELOAD_HOTKEY_WINDOWS).as_deref(),
+            Some("Ctrl+Alt+Shift+Win+F5"),
+            "the log's spelling on Windows"
+        );
+        assert_eq!(
+            backend::describe_spec_for(KeyOs::Macos, RELOAD_HOTKEY_MACOS, backend::KeyStyle::Spoken)
+                .as_deref(),
+            Some("Shift+Command+F5")
+        );
     }
 
     #[test]
@@ -2937,7 +3514,7 @@ impl Manager {
             schemas: RefCell::new(Vec::new()),
             on_change: RefCell::new(HashMap::new()),
             dirty: Cell::new(false),
-            timers: RefCell::new(Vec::new()),
+            timers: timers::Timers::default(),
             exports: RefCell::new(HashMap::new()),
             arbiter: RefCell::new(HashMap::new()),
             observations: RefCell::new(Observations::default()),
@@ -2947,7 +3524,6 @@ impl Manager {
             input_epoch: Cell::new(0),
             next_arbiter: Cell::new(0),
             next_key_token: Cell::new(0),
-            recurring: RefCell::new(Vec::new()),
             errors: RefCell::new(Vec::new()),
             error_seen: RefCell::new(HashSet::new()),
             image_tasks,
@@ -2958,6 +3534,7 @@ impl Manager {
             template_cache: RefCell::new(HashMap::new()),
             template_seq: Cell::new(0),
             recheck_requested: Cell::new(false),
+            initial_pending: RefCell::new(Vec::new()),
             notify: RefCell::new(None),
         });
         // Claimed before the first module is loaded, so it is the one id no module can be
@@ -3040,8 +3617,7 @@ impl Manager {
         // being right when the tick grew a headless counterpart, and nothing failed loudly
         // enough to say so — which is what makes it worth naming here. A module's own reasons
         // to be alive are not only the ones the OS delivers.
-        let has_own_work = !self.shared.timers.borrow().is_empty()
-            || !self.shared.recurring.borrow().is_empty()
+        let has_own_work = !self.shared.timers.is_empty()
             || !self.shared.pending_image.borrow().is_empty()
             || self.shared.pads.has_listeners();
         let headless = appcfg::headless();
@@ -3083,14 +3659,16 @@ impl Manager {
                 // Logged either way: the key has no visible presence at all, so "did it
                 // even register" is otherwise unanswerable after the fact.
                 let reload_id = self.shared.reload_hotkey_id.get();
-                match self.shared.backend.register_hotkey(reload_id, RELOAD_HOTKEY_SPEC) {
+                // By its canonical spelling, like every module hotkey, so a failure line names
+                // one chord once rather than the token and the chord side by side.
+                match self.shared.backend.register_hotkey(reload_id, &reload_hotkey_shown()) {
                     Ok(()) => logging::line(
                         "manager",
-                        &format!("{RELOAD_HOTKEY_SPEC} reloads every module"),
+                        &format!("{} reloads every module", reload_hotkey_shown()),
                     ),
                     Err(e) => logging::line(
                         "manager",
-                        &format!("reload hotkey {RELOAD_HOTKEY_SPEC} unavailable: {e}"),
+                        &format!("reload hotkey {} unavailable: {e}", reload_hotkey_shown()),
                     ),
                 }
                 let mut module_infos: Vec<gui::ModuleInfo> = self
@@ -3194,17 +3772,17 @@ impl Manager {
                         // How long ONE pump iteration takes, reported when it runs long.
                         //
                         // This is not a general performance counter — it watches a specific
-                        // hazard. The low-level keyboard hook (WH_KEYBOARD_LL) is installed
-                        // on THIS thread (backend/windows.rs, watch_keys), and Windows calls
-                        // a low-level hook back on its owning thread. A thread busy inside a
-                        // poll callback cannot answer, and past LowLevelHooksTimeout (300 ms
-                        // by default) Windows stops waiting and delivers the keystroke
-                        // WITHOUT us — so a Tab the overlay believed it had captured lands
-                        // in the plugin instead, intermittently, with nothing logged.
-                        //
-                        // For a user who navigates entirely by Tab and cannot see where the
-                        // focus went, that is not a performance problem, it is a correctness
-                        // one. Measured landmark polls have already been seen at 400 ms.
+                        // hazard. Every captured key and every hotkey waits for this thread to
+                        // run its callback, so a stall is a Tab that moves the overlay's focus
+                        // late, for a user who navigates entirely by Tab and cannot see where
+                        // the focus went. It used to be worse on Windows: the low-level
+                        // keyboard hook ran on THIS thread, a thread busy inside a poll
+                        // callback could not answer it, and past LowLevelHooksTimeout Windows
+                        // delivered the keystroke WITHOUT us — a Tab the overlay believed it had
+                        // captured landed in the plugin instead. The hook has its own thread
+                        // now (backend/windows.rs, keyboard_hook_thread); the macOS event tap
+                        // still shares this one. Measured landmark polls have already been seen
+                        // at 400 ms.
                         let pump_started = std::time::Instant::now();
                         let mods = modules.borrow();
                         let mut dispatcher = Dispatcher {
@@ -3241,6 +3819,14 @@ impl Manager {
                         let t = std::time::Instant::now();
                         shared.fire_image_results();
                         let images_ms = t.elapsed().as_millis();
+                        // `onTrigger { initial = true }`: the window already in front, for
+                        // the triggers that asked since the last tick (at load, on enable, or
+                        // from a timer earlier in this very tick). Inside the measured
+                        // iteration: its callbacks are trigger callbacks, a detection read
+                        // among them, and they hold the keyboard hook up like any other.
+                        let t = std::time::Instant::now();
+                        dispatcher.dispatch_initial();
+                        let initial_ms = t.elapsed().as_millis();
                         let pump_ms = pump_started.elapsed().as_millis();
                         if pump_ms >= 250 {
                             // The hazard is different on each platform, and the line has to
@@ -3250,8 +3836,9 @@ impl Manager {
                             // thread stops answering; the watchdog in tap.rs re-enables it
                             // and logs that it did, so the two lines can be read together.
                             #[cfg(windows)]
-                            let hazard = "past ~300 ms Windows stops waiting for our \
-                                          keyboard hook and delivers the key without us";
+                            let hazard = "every captured key and hotkey pressed meanwhile \
+                                          waited this long for its callback (the keyboard hook \
+                                          itself answers on its own thread)";
                             #[cfg(target_os = "macos")]
                             let hazard = "a stall this long is what gets the event tap \
                                           switched off, and keys go uncaptured until the \
@@ -3266,7 +3853,8 @@ impl Manager {
                                      = {act_n}x window-activate {act_ms} + focus-change \
                                      {focus_ms} + gamepad {pad_ms} + everything else \
                                      {other_ms}, which is mostly key and hotkey dispatch; \
-                                     timers {timers_ms}, image results {images_ms}) — {hazard}"
+                                     timers {timers_ms}, image results {images_ms}, initial \
+                                     window report {initial_ms}) — {hazard}"
                                 ),
                             );
                         }
@@ -3466,16 +4054,27 @@ pub fn run(dirs: &[String]) -> Result<()> {
 /// other application, so it must be impossible to hit by accident; and the modules themselves
 /// claim ordinary combinations, so it has to stay out of their way.
 ///
-/// Two spellings, because the awkward one cannot be pressed on a Mac. Win and Alt become
-/// Command and Option there, and Control-Option together is VoiceOver's own modifier:
-/// VoiceOver takes those chords in the window server, above anything an application can
-/// register or tap, and answers an unassigned one with its error sound. The third Mac session
-/// measured exactly that — registered on both launches, never delivered, a beep for every
-/// press — on a Mac with the default VoiceOver modifier, after two sessions on another Mac
-/// where the same chord had arrived. Command-Shift is what the probe's key uses, and that one
-/// arrived four times out of four on the same machine.
+/// Two chords, because the awkward one cannot be pressed on a Mac. Its Win and Alt are Control
+/// and Option there, and Control-Option together is VoiceOver's own modifier: VoiceOver takes
+/// those chords in the window server, above anything an application can register or tap, and
+/// answers an unassigned one with its error sound. The third Mac session measured exactly
+/// that — registered on both launches, never delivered, a beep for every press — on a Mac with
+/// the default VoiceOver modifier, after two sessions on another Mac where the same chord had
+/// arrived. Command-Shift is what the probe's key uses, and that one arrived four times out of
+/// four on the same machine; `Cmd` is the Ctrl role, so the Mac's spec reads the same under
+/// the role rule as it did when it was chosen.
 const RELOAD_HOTKEY_SPEC: &str =
-    if cfg!(target_os = "macos") { "Cmd+Shift+F5" } else { "Ctrl+Shift+Win+Alt+F5" };
+    if cfg!(target_os = "macos") { RELOAD_HOTKEY_MACOS } else { RELOAD_HOTKEY_WINDOWS };
+/// The reload key on Windows and Linux.
+const RELOAD_HOTKEY_WINDOWS: &str = "Ctrl+Shift+Win+Alt+F5";
+/// The reload key on macOS: Command+Shift+F5.
+const RELOAD_HOTKEY_MACOS: &str = "Cmd+Shift+F5";
+
+/// The reload key as the log names it: the chord it is on this platform.
+fn reload_hotkey_shown() -> String {
+    backend::normalize_spec_for(backend::KeyOs::CURRENT, RELOAD_HOTKEY_SPEC)
+        .unwrap_or_else(|| RELOAD_HOTKEY_SPEC.to_string())
+}
 
 /// Rebuild every module from source, dependencies before dependents.
 ///
@@ -3576,6 +4175,126 @@ impl Dispatcher<'_> {
     fn enabled(&self, idx: usize) -> bool {
         self.shared.enabled.borrow().get(idx).copied().unwrap_or(false)
     }
+
+    /// Answers `onTrigger { initial = true }`: reports the window in front to the triggers that
+    /// asked since the last tick — registered at load, on enable, or later from a timer. The
+    /// rules are [`drain_initial`]'s; this only hands it the host's parts.
+    fn dispatch_initial(&self) {
+        let pending = std::mem::take(&mut *self.shared.initial_pending.borrow_mut());
+        if pending.is_empty() {
+            return; // every tick but a handful
+        }
+        let shared = self.shared;
+        drain_initial(
+            pending,
+            |idx| self.enabled(idx),
+            |idx| self.modules.get(idx).map(|m| &m.lua),
+            || {
+                let t = Instant::now();
+                let win = shared.backend.active_window();
+                slow_observation("window.active", "initial report", t);
+                win
+            },
+            || shared.bump_input_epoch(),
+            capture_source::prewarm_if_declared,
+            |idx, e| shared.report_callback_error(idx, "window trigger", e),
+        );
+    }
+}
+
+/// The report `onTrigger { initial = true }` asked for, for every module queued in `pending`.
+///
+/// On the tick, not inside `onTrigger`, and the same at every moment a report is owed: the
+/// module's load has finished by then, so a callback can use what the file assigns after the
+/// registration. A disabled module's request is dropped rather than kept: enabling it asks
+/// again, with every `initial` trigger primed afresh.
+///
+/// - **The foreground is asked ONCE**, through `active_window`, for every module owed a report
+///   together — and not at all when none of them has an `initial` trigger waiting
+///   (`_wantsInitial`): enabling a module that never asked for a report costs no foreground
+///   query, which on macOS is an accessibility call into whichever application is in front,
+///   at that moment usually our own manager.
+/// - **A window without a title is no window**, as it is to an activation: neither platform
+///   hands an untitled foreground window to a trigger, so the report does not either. The
+///   report is still used up.
+/// - **Delivered through the host's own handle** on each window table (see
+///   `install_window_prelude`), so a module relying on its runtime's `window` capability is
+///   reported to as its activations are.
+/// - **The preparation an activation makes**, made before the first callback that matches:
+///   `bump_input_epoch` ONCE for the whole report, before the first matching callback of any
+///   module — an activation turns it over once, before any module, and a second turn between
+///   two modules would make stale what the first module's callback just cached against it —
+///   and `prewarm` once per VM, before that VM's first matching callback.
+/// - `failed` hears each module whose dispatch raised; the other modules are still reported to.
+fn drain_initial<'m>(
+    pending: Vec<(usize, bool)>,
+    enabled: impl Fn(usize) -> bool,
+    vm: impl Fn(usize) -> Option<&'m Lua>,
+    active_window: impl FnOnce() -> Option<WinInfo>,
+    bump_input_epoch: impl Fn(),
+    prewarm: impl Fn(&Lua),
+    mut failed: impl FnMut(usize, &str),
+) {
+    let due: Vec<(usize, bool, &Lua)> = initial_due(pending, enabled)
+        .into_iter()
+        .filter_map(|(idx, reprime)| vm(idx).map(|lua| (idx, reprime, lua)))
+        .filter(|(_, reprime, lua)| wants_initial(lua, *reprime))
+        .collect();
+    if due.is_empty() {
+        return;
+    }
+    let win = active_window().filter(|w| !w.title.is_empty());
+    let bumped = Cell::new(false);
+    for (idx, reprime, lua) in due {
+        let before_first = || {
+            if !bumped.replace(true) {
+                bump_input_epoch();
+            }
+            prewarm(lua);
+        };
+        if let Err(e) = guard(|| dispatch_initial(lua, win.as_ref(), reprime, &before_first).map(|_| ())) {
+            failed(idx, &e);
+        }
+    }
+}
+
+/// Adds module `idx` to the modules owed a report of the window in front, once: a second
+/// request before the tick only widens the first (`reprime` sticks once any request asked for
+/// it), so a module that registers ten `initial` triggers is asked about the foreground once.
+fn queue_initial(pending: &mut Vec<(usize, bool)>, idx: usize, reprime: bool) {
+    match pending.iter_mut().find(|(i, _)| *i == idx) {
+        Some(entry) => entry.1 |= reprime,
+        None => pending.push((idx, reprime)),
+    }
+}
+
+/// An activation was just dispatched into every module `enabled` answers true for, and to
+/// each of them it IS the report of what is in front: the prelude has un-primed their
+/// triggers. A re-enable's queued `reprime` must not prime them again for the same window on
+/// this tick, or the window that just came forward is reported twice.
+fn initial_reported_by_activation(pending: &mut [(usize, bool)], enabled: impl Fn(usize) -> bool) {
+    for entry in pending.iter_mut().filter(|(idx, _)| enabled(*idx)) {
+        entry.1 = false;
+    }
+}
+
+/// The queued requests the tick answers: those of enabled modules, in the order they asked.
+fn initial_due(pending: Vec<(usize, bool)>, enabled: impl Fn(usize) -> bool) -> Vec<(usize, bool)> {
+    pending.into_iter().filter(|(idx, _)| enabled(*idx)).collect()
+}
+
+/// `host.window._requestInitial` for module `idx`: queues it, without re-arming, on the queue
+/// `get` finds in `holder` — the host's `Shared`, or a bare queue in the tests.
+fn initial_request_fn<S: 'static>(
+    lua: &Lua,
+    idx: usize,
+    holder: Rc<S>,
+    get: fn(&S) -> &RefCell<Vec<(usize, bool)>>,
+) -> mlua::Result<Function> {
+    lua.create_function(move |_, ()| {
+        queue_initial(&mut get(&holder).borrow_mut(), idx, false);
+        Ok(())
+    })
 }
 
 impl HostEvents for Dispatcher<'_> {
@@ -3595,11 +4314,19 @@ impl HostEvents for Dispatcher<'_> {
     /// Not instrumented the way the GUI path is (which breaks its iteration into phases and
     /// logs anything over 250 ms). Worth adding when there is a reason to look; a headless
     /// session is a test harness, not somebody's desktop.
+    ///
+    /// The two window drains after them are the GUI tick's too, in the same order: the report
+    /// `onTrigger { initial = true }` asked for, then a `host.window.recheck()` round. The
+    /// recheck used to be missing here, so a module that asked for one headless never got it.
     fn on_tick(&mut self) {
         self.shared.speech.pump();
         self.shared.fire_due_timers();
         self.shared.fire_pad_replays();
         self.shared.fire_image_results();
+        self.dispatch_initial();
+        if self.shared.recheck_requested.replace(false) {
+            self.on_focus_change();
+        }
     }
 
     fn on_gamepad(&mut self, events: Vec<backend::gamepad::PadEvent>) {
@@ -3671,10 +4398,10 @@ impl HostEvents for Dispatcher<'_> {
         if let Some((idx, lua, f)) = found {
             let table = lua.create_table().ok();
             if let Some(t) = &table {
-                let _ = t.set("shift", mods & backend::MASK_SHIFT != 0);
-                let _ = t.set("ctrl", mods & backend::MASK_CTRL != 0);
-                let _ = t.set("alt", mods & backend::MASK_ALT != 0);
-                let _ = t.set("win", mods & backend::MASK_WIN != 0);
+                // One field per modifier role: on a Mac `ctrl` is Command held, `win` Control.
+                for (name, held) in backend::capture_mods_fields(mods) {
+                    let _ = t.set(name, held);
+                }
             }
             let res = match table {
                 Some(t) => call_guarded(&f, t),
@@ -3701,6 +4428,11 @@ impl HostEvents for Dispatcher<'_> {
                 self.shared.report_callback_error(idx, "window trigger", &e);
             }
         }
+        // To every module it reached, this activation was the report of what is in front, so a
+        // re-enable still queued for this tick must not re-arm the triggers it just un-primed.
+        initial_reported_by_activation(&mut self.shared.initial_pending.borrow_mut(), |idx| {
+            self.enabled(idx)
+        });
         let mut c = self.shared.ev_counts.get();
         c.0 += 1;
         c.1 += started.elapsed().as_millis();
@@ -3734,6 +4466,8 @@ impl HostEvents for Dispatcher<'_> {
 ///
 /// `config` is the second name of the settings table, so it answers to the same capability
 /// rather than to one of its own — nothing declares `"config"` and nothing should have to.
+///
+/// A few members of a gated namespace are free as well; see [`FREE_MEMBERS`].
 const GATED: &[(&str, &str)] = &[
     ("window", "window"),
     ("screen", "screen"),
@@ -3757,6 +4491,53 @@ const GATED: &[(&str, &str)] = &[
 /// The capability a `host.<key>` access needs, or `None` when it needs none.
 fn capability_for(key: &str) -> Option<&'static str> {
     GATED.iter().find(|(k, _)| *k == key).map(|(_, c)| *c)
+}
+
+/// Members of a gated namespace that need no capability.
+///
+/// `host.keys` is gated because it CAPTURES keystrokes, which is what a user reviewing a
+/// manifest should be told about. Putting a key into words is not that, and a module that only
+/// registers a hotkey — daw-hosts, the probe, an example — has to be able to say its own key in
+/// the platform's words without asking for the right to swallow everybody's.
+///
+/// `normalize` and `describe` read nothing but the string they are handed. `check` reads one
+/// thing more: for Ctrl+Alt on Windows and Option on a Mac it asks the keyboard layout in use
+/// what that chord types, so a module that declared nothing can learn which character that is
+/// — which says something about the layout, and nothing about what anybody typed.
+const FREE_MEMBERS: &[(&str, &[&str])] = &[("keys", &["normalize", "describe", "check"])];
+
+/// For each namespace in [`FREE_MEMBERS`] that `denied` refuses: a table of just its free
+/// members, taken from `source`, whose every other member raises the refusal `host.<key>`
+/// would have. Built once per view, not per access.
+fn free_subsets(
+    lua: &Lua,
+    source: &Table,
+    denied: impl Fn(&str) -> bool,
+    owner: &str,
+    note: &'static str,
+) -> Result<HashMap<String, Table>> {
+    let mut out = HashMap::new();
+    for (ns, members) in FREE_MEMBERS {
+        if !denied(ns) {
+            continue;
+        }
+        let Ok(mlua::Value::Table(full)) = source.raw_get::<mlua::Value>(*ns) else { continue };
+        let subset = lua.create_table()?;
+        for m in members.iter() {
+            subset.raw_set(*m, full.raw_get::<mlua::Value>(*m)?)?;
+        }
+        let (owner, name) = (owner.to_string(), (*ns).to_string());
+        let mt = lua.create_table()?;
+        mt.set(
+            "__index",
+            lua.create_function(move |_, (_t, _k): (Table, mlua::Value)| -> mlua::Result<mlua::Value> {
+                Err(undeclared(&owner, &name, note))
+            })?,
+        )?;
+        subset.set_metatable(Some(mt))?;
+        out.insert((*ns).to_string(), subset);
+    }
+    Ok(out)
 }
 
 /// The refusal a module gets for a namespace it did not declare.
@@ -3812,6 +4593,7 @@ fn gated_view(lua: &Lua, full: &Table, caps: &HashSet<String>, id: &str) -> Resu
     if denied.is_empty() {
         return Ok(full.clone());
     }
+    let free = free_subsets(lua, full, |ns| denied.contains(ns), id, "")?;
     let owner = id.to_string();
     let source = full.clone();
     let view = lua.create_table()?;
@@ -3820,6 +4602,9 @@ fn gated_view(lua: &Lua, full: &Table, caps: &HashSet<String>, id: &str) -> Resu
         "__index",
         lua.create_function(move |_, (_t, key): (Table, String)| -> mlua::Result<mlua::Value> {
             if denied.contains(&key) {
+                if let Some(subset) = free.get(&key) {
+                    return Ok(mlua::Value::Table(subset.clone()));
+                }
                 return Err(undeclared(&owner, &key, ""));
             }
             source.raw_get(key)
@@ -3861,10 +4646,12 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     )?;
     host.set("log", log)?;
 
-    // host.json.decode(text) — see json.rs. Ungated, like host.os: it reads nothing but the
-    // string it is handed.
+    // host.json.decode(text) / encode(value, opts?) / array(t?) — see json.rs. Ungated, like
+    // host.os: they read nothing but the value they are handed.
     let json = lua.create_table()?;
     json.set("decode", lua.create_function(json::decode)?)?;
+    json.set("encode", lua.create_function(json::encode)?)?;
+    json.set("array", lua.create_function(json::array)?)?;
     host.set("json", json)?;
 
     // host.require(id) — access a declared dependency. A `code_module` dependency
@@ -3994,7 +4781,25 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     hk.set(
         "register",
         lua.create_function(move |lua, (spec, cb): (String, Function)| {
-            let binding = backend::key_spec(&spec);
+            // What the operating system can never hold is refused here and now, loudly, rather
+            // than recorded as a claim: a tap, a key the platform has no code for, and a
+            // combination the system keeps for itself. Command+Q on a Mac would REGISTER, and
+            // then take quitting away from every application for as long as the module held
+            // it; the other two would fail at the claim, where the only word the user got was
+            // a dialog blaming another application. VoiceOver's layer and a character the
+            // layout types with the key are said by `host.keys.check`, not refused. Nor is a
+            // letter no key of the current macOS layout types: the user can switch layouts at
+            // any moment, and the macOS backend parks that hotkey until a layout types it.
+            //
+            // Otherwise recorded, reported and handed to the OS in its canonical spelling, so
+            // every log line names the chord it is on this platform — `Ctrl+Shift+F6` is
+            // `Ctrl+Shift+F6` here or `Shift+Cmd+F6` there — and one key written two ways
+            // (`Cmd+S` and `ctrl+s`) reads as one key. The dialogs say it from that spelling, in
+            // the Mac's own words there (`dialog_key_words_for`). An unparseable spec keeps the
+            // author's spelling for the OS to refuse. Both in `hotkey_claim_for`, where the
+            // refusal comes first.
+            let (binding, spec) = backend::hotkey_claim_for(backend::KeyOs::CURRENT, &spec)
+                .map_err(mlua::Error::external)?;
             let id = sh.alloc_id();
             // Only an ENABLED module actually claims the OS combo and can clash. A
             // disabled (persisted-off) module just records its binding here so a
@@ -4062,8 +4867,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     keys.set(
         "capture",
         lua.create_function(move |lua, (spec, cb): (String, Function)| {
-            let (vk, mask) = backend::key_spec(&spec)
-                .ok_or_else(|| mlua::Error::external(format!("unknown key spec '{spec}'")))?;
+            // The parser's own error, which names the part it could not read.
+            let (vk, mask) = backend::parse_key_spec(&spec).map_err(mlua::Error::external)?;
             // No cross-module conflict surfacing here: captured keys are routinely
             // shared by window-scoped overlays (each active only while its own
             // window is focused), so a duplicate is usually legitimate, not a clash.
@@ -4168,6 +4973,73 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             Ok(t)
         })?,
     )?;
+    // host.keys.normalize(spec) -> string? — the key a spec stands for on this platform, in one
+    // spelling. What the overlay runtime keys its claims by, so `Cmd+S` and `Ctrl+S` are one key
+    // and not two registrations of which only one can live. Needs no capability
+    // (see FREE_MEMBERS).
+    keys.set(
+        "normalize",
+        lua.create_function(|_, spec: String| {
+            Ok(backend::normalize_spec_for(backend::KeyOs::CURRENT, &spec))
+        })?,
+    )?;
+    // host.keys.describe(spec, { style = "spoken" | "short" }?) -> string? — the key in this
+    // platform's words: "Control+Alt+P" on Windows, "Option+Command+P" for the same spec on a
+    // Mac, where the Ctrl role is Command.
+    keys.set(
+        "describe",
+        lua.create_function(|_, (spec, opts): (String, Option<Table>)| {
+            let style = match opts {
+                None => backend::KeyStyle::Spoken,
+                Some(t) => match t.get::<Option<String>>("style")?.as_deref() {
+                    None | Some("spoken") => backend::KeyStyle::Spoken,
+                    Some("short") => backend::KeyStyle::Short,
+                    Some(other) => {
+                        return Err(mlua::Error::external(format!(
+                            "host.keys.describe: style must be \"spoken\" or \"short\", not \
+                             \"{other}\""
+                        )))
+                    }
+                },
+            };
+            Ok(backend::describe_spec_for(backend::KeyOs::CURRENT, &spec, style))
+        })?,
+    )?;
+    // host.keys.check(spec, { layout = false }?) -> { ok, resolved, reasons, produces?,
+    // deadKey? } — what this platform does with a combination, structurally. No list of other
+    // programs' keys. `layout = false` leaves the keyboard layout unasked, for a caller that
+    // wants only the structural answer: the overlay runtime asks at every bind and every
+    // hotkey sync, and has no use for the character.
+    let sh = shared.clone();
+    keys.set(
+        "check",
+        lua.create_function(move |lua, (spec, opts): (String, Option<Table>)| {
+            let ask_layout = match &opts {
+                Some(t) => t.get::<Option<bool>>("layout")?.unwrap_or(true),
+                None => true,
+            };
+            let c = backend::check_spec_for(backend::KeyOs::CURRENT, &spec, |vk, mask| {
+                if ask_layout {
+                    sh.backend.layout_char(vk, mask)
+                } else {
+                    None
+                }
+            });
+            let t = lua.create_table()?;
+            t.set("ok", c.ok())?;
+            t.set("resolved", c.resolved.clone())?;
+            let reasons = lua.create_table()?;
+            for r in &c.reasons {
+                reasons.push(*r)?;
+            }
+            t.set("reasons", reasons)?;
+            if let Some(p) = c.produces {
+                t.set("produces", p)?;
+                t.set("deadKey", c.dead_key)?;
+            }
+            Ok(t)
+        })?,
+    )?;
     host.set("keys", keys)?;
 
     // host.gamepad — game controllers, observed only. Its own file, gamepad_api.rs.
@@ -4196,35 +5068,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         lua.create_function(move |_, ()| Ok(sh_ie.input_epoch.get() as i64))?,
     )?;
 
-    // host.timer: one-shot delayed callbacks, fired from the event-loop tick.
-    let timer = lua.create_table()?;
-    let sh = shared.clone();
-    timer.set(
-        "after",
-        lua.create_function(move |lua, (ms, cb): (u64, Function)| {
-            let key = lua.create_registry_value(cb)?;
-            let deadline = Instant::now() + Duration::from_millis(ms);
-            sh.timers.borrow_mut().push((deadline, idx, lua.clone(), key));
-            Ok(())
-        })?,
-    )?;
-    let sh = shared.clone();
-    timer.set(
-        "every",
-        // Recurring timer. Unlike a Lua self-rescheduling host.timer.after, this
-        // survives a disable/enable cycle (the schedule is re-armed by the host),
-        // so it's the right tool for a poll (e.g. watching for a plugin library's
-        // landmark to appear).
-        lua.create_function(move |lua, (ms, cb): (u64, Function)| {
-            let key = lua.create_registry_value(cb)?;
-            let interval = Duration::from_millis(ms.max(1));
-            sh.recurring
-                .borrow_mut()
-                .push((Instant::now() + interval, interval, idx, lua.clone(), key));
-            Ok(())
-        })?,
-    )?;
-    host.set("timer", timer)?;
+    // host.timer.after / every / cancel — see timers.rs. Owned by `idx`, which for a dependency's
+    // code is this VM's owner: `build_dep_host` hands a dependency the owner's table.
+    host.set("timer", timers::table(lua, idx, shared.clone(), |s| &s.timers, |_| Instant::now())?)?;
 
     // host.os.current / host.os.is(name)
     let os = lua.create_table()?;
@@ -4466,6 +5312,11 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             Ok(())
         })?,
     )?;
+    // host.window._requestInitial() — the prelude's half of `onTrigger { initial = true }`:
+    // queues THIS table's owner for a report of the window in front on the next tick (see
+    // `Dispatcher::dispatch_initial`). Bound to `idx`, and a dependency's code reaches the
+    // owner's window table, so a runtime's trigger is reported into the VM it registered in.
+    win.set("_requestInitial", initial_request_fn(lua, idx, shared.clone(), |s| &s.initial_pending)?)?;
     host.set("window", win)?;
 
     // host.element.find(hwnd, name, controlType) — does the window's UI Automation
@@ -5694,6 +6545,40 @@ fn include_target(root: &Path, rel: &str) -> std::result::Result<PathBuf, String
     Ok(target)
 }
 
+/// Every Luau file this repository ships compiles.
+///
+/// Compiled, never run: running a module needs a host and a screen, and most of what goes
+/// wrong in a Luau edit is caught here already — a syntax error, and Luau's own limits, of
+/// which the one that bites a file the overlay runtime's size is 200 locals per function.
+/// Until this test, the first to hear of either was the log of whoever loaded the module next.
+#[cfg(test)]
+mod luau_source_tests {
+    #[test]
+    fn every_shipped_luau_file_compiles() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut stack: Vec<std::path::PathBuf> =
+            ["modules", "tools", "examples"].iter().map(|d| root.join(d)).collect();
+        let (lua, mut compiled, mut failures) = (mlua::Lua::new(), 0, Vec::new());
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "luau") {
+                    let src = std::fs::read_to_string(&p).unwrap();
+                    match lua.load(&src).set_name(p.display().to_string()).into_function() {
+                        Ok(_) => compiled += 1,
+                        Err(e) => failures.push(format!("{}: {e}", p.display())),
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        assert!(compiled > 20, "only {compiled} Luau files found under {}", root.display());
+    }
+}
+
 #[cfg(test)]
 mod include_tests {
     use super::include_target;
@@ -5855,6 +6740,16 @@ fn has_triggers(window: &Table) -> mlua::Result<bool> {
     window.get::<Function>("_hasTriggers")?.call::<bool>(())
 }
 
+/// Whether `_dispatchInitial(win, reprime)` would have anything to do in this VM: a trigger
+/// still waiting for its report, or — re-arming — any `initial` trigger at all. Asked before
+/// the foreground is, so a VM that answers false costs no foreground query. False for a VM
+/// the prelude never ran in.
+fn wants_initial(lua: &Lua, reprime: bool) -> bool {
+    host_window(lua)
+        .and_then(|w| w.get::<Function>("_wantsInitial")?.call::<bool>(reprime))
+        .unwrap_or(false)
+}
+
 /// Returns true if the given module VM registered any window triggers or focus callbacks,
 /// whether its own code did or a code dependency's did on its behalf.
 fn window_has_triggers(lua: &Lua) -> bool {
@@ -5880,6 +6775,40 @@ fn dispatch_activate(lua: &Lua, win: &WinInfo) -> mlua::Result<()> {
     // for. `nil` for every other module.
     let before = capture_source::prewarm_hook(lua)?;
     window.get::<Function>("_dispatchActivate")?.call::<()>((table, before))
+}
+
+/// Delivers the report `onTrigger { initial = true }` asked for into one VM: the window in
+/// front, or `None` when there is none (then nothing is called, though the primed triggers
+/// are still un-primed — nothing was in front to report). With `reprime`, every `initial`
+/// trigger of the VM is primed again first (the module was just enabled).
+///
+/// `before_first` runs once, before the first callback that matches — the host's preparation,
+/// as the activation dispatch has one. Returns how many callbacks ran. A VM with no triggers,
+/// or without the prelude, is skipped before anything is converted.
+fn dispatch_initial(
+    lua: &Lua,
+    win: Option<&WinInfo>,
+    reprime: bool,
+    before_first: &dyn Fn(),
+) -> mlua::Result<i64> {
+    let Ok(window) = host_window(lua) else { return Ok(0) };
+    if !has_triggers(&window)? {
+        return Ok(0);
+    }
+    let table = match win {
+        Some(w) => mlua::Value::Table(win_to_table(lua, w)?),
+        None => mlua::Value::Nil,
+    };
+    let dispatch: Function = window.get("_dispatchInitial")?;
+    // A scoped function, because what it runs borrows the host: it is gone again when the
+    // dispatch returns, so nothing in the VM can keep it.
+    lua.scope(|scope| {
+        let before = scope.create_function(|_, ()| {
+            before_first();
+            Ok(())
+        })?;
+        dispatch.call::<i64>((table, reprime, before))
+    })
 }
 
 /// Delivers a focus change into one VM's `onFocus` callbacks; skipped, like

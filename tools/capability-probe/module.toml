@@ -5,7 +5,8 @@ license = "GPL-3.0-or-later"
 
 # Deliberately minimal, and the whole point of the module: `log` so it can report, `timer` for
 # the liveness line below, and NOTHING else. Every namespace it reaches for is one it has not
-# asked for — `speech` and `screen` — so a run that reaches either is a hole in the gate.
+# asked for — `speech`, `screen` and the capture in `keys` — so a run that reaches any of them is
+# a hole in the gate.
 [capabilities]
 require = ["log", "timer"]
 

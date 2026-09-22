@@ -117,7 +117,7 @@ end)
 Fires when a matching window **becomes the foreground window** — the auto-activation for overlays (ReaHotkey's 500-ms state machine, but **event-driven**). What is built, and what is not:
 
 - **Only `"activate"` is dispatched.** The design's `"open"`, `"close"`, `"focus"` and `"titleChange"` are accepted and never fire. Focus moves within a window reach [`host.window.onFocus`](api/window.md#host-window-onfocus) instead.
-- **The window already in front when the module loads is not reported**; check `host.window.active()` once at load. Overlay bindings do evaluate at once.
+- **The window already in front is reported only when asked for:** `{ initial = true }` reports it once, on the next tick after the load, after each enable and after a later registration; see [`onTrigger`](api/window.md#host-window-ontrigger). On macOS that is the only report a game already frontmost at load gets. Overlay bindings do evaluate at once.
 - **No handle, no removal**; a trigger stays until the module is reloaded.
 
 **Backend:** Win = `SetWinEventHook` (`EVENT_SYSTEM_FOREGROUND` for triggers; focus and name changes only run a focus round); macOS = `NSWorkspace.didActivateApplication` + per-application `AXObserver`. **Not built:** a polling fallback for applications that raise no events, and `host.window.triggers.available()` to ask whether triggers work at all; there is no Linux or Wayland backend.

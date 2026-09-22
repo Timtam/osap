@@ -26,8 +26,10 @@ use prism_sys::{feature, Context, SCREEN_READERS};
 /// The reason this exists at all: `osascript` can be killed, and a synchronous RPC call into
 /// a hung NVDA cannot — it blocks with no timeout, inside our own process. So the deadline
 /// lives with the caller rather than with the call. 300 ms is not a round number picked for
-/// looks: it is the same budget the event loop is already written around, because Windows
-/// removes a low-level keyboard hook that takes longer than `LowLevelHooksTimeout`.
+/// looks: it is the same budget the event loop is written around — macOS switches off an
+/// event tap whose thread stops answering for about that long, and on Windows it was the
+/// `LowLevelHooksTimeout` budget while the keyboard hook shared the event loop (it has a
+/// thread of its own now).
 ///
 /// What it cannot do is un-say something. A screen reader that is merely SLOW rather than
 /// wedged will finish its line after the deadline has already handed the same words to the

@@ -10,6 +10,13 @@ license = "MIT"
 # `activate` side effect still runs only in its own VM.
 code_module = true
 dependencies = ["com.platform.overlay", "com.platform.daw-hosts"]
+# Windows only, because everything it matches on is Windows vocabulary: the standalone
+# window's NINormalWindow class, the #32770 dialogs, and the embedded control as the plain
+# Win32 class pattern "Qt%d+.-QWindowIcon" — which on a Mac is compared with an
+# AXRole/AXSubrole/AXIdentifier triple and never matches. Nobody has had Komplete Kontrol in
+# front of a Mac through this module. Kontakt's optional import of it answers nil there, which
+# Kontakt already handles (no in-KK cell, no standalone-KK host).
+supported_os = ["windows"]
 
 [capabilities]
 require = ["window", "element", "input", "speech", "timer", "log", "settings", "path"]

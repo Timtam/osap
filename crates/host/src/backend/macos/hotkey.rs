@@ -33,11 +33,28 @@ use super::{keys, queue};
 /// what keeps somebody else's hotkey from arriving as one of our ids.
 const SIGNATURE: OSType = fourcc(b"aphk");
 
+/// One registration, and what it was made from.
+struct Registration {
+    /// What `UnregisterEventHotKey` wants back — or null while the hotkey is **parked**: it
+    /// could not follow a layout change to its letter's new key, or no key of the layout typed
+    /// its letter when it was registered, so nothing is registered with Carbon for it, and
+    /// [`reregister_letters`] tries it again at every later change.
+    reference: EventHotKeyRef,
+    /// The spec, virtual key and mask it came from, so that a hotkey on a letter can be
+    /// registered again on another key when the keyboard layout changes.
+    spec: String,
+    vk: u32,
+    mask: u8,
+    /// The key code it is registered on now; for a parked one, the key it was last on, and
+    /// `None` for one that has never been held.
+    code: Option<u16>,
+}
+
 thread_local! {
-    /// Host id to the reference `UnregisterEventHotKey` wants back. Kept because Carbon
-    /// gives us no way to ask "what is registered for id N" — lose the reference and the
-    /// hotkey stays claimed for the life of the process.
-    static REGISTERED: RefCell<HashMap<i32, EventHotKeyRef>> = RefCell::new(HashMap::new());
+    /// Host id to its registration. Kept because Carbon gives us no way to ask "what is
+    /// registered for id N" — lose the reference and the hotkey stays claimed for the life of
+    /// the process.
+    static REGISTERED: RefCell<HashMap<i32, Registration>> = RefCell::new(HashMap::new());
     static HANDLER_INSTALLED: Cell<bool> = const { Cell::new(false) };
     /// Chords already explained as VoiceOver's, by (vk, mask). Per-control hotkeys are
     /// released and registered again on every focus move and tab switch, so a per-call line
@@ -58,7 +75,8 @@ thread_local! {
 /// through Carbon, or captured by the event tap — because the two are explained at
 /// different sites and a reader should not have to guess which one produced the line.
 pub(super) fn warn_if_voiceover_owns(vk: u32, mask: u8, how: &str) {
-    const VOICEOVER_PAIR: u8 = crate::backend::MASK_CTRL | crate::backend::MASK_ALT;
+    // Control and Option, which are the Win and Alt roles.
+    const VOICEOVER_PAIR: u8 = crate::backend::MAC_VOICEOVER_LAYER;
     if mask & VOICEOVER_PAIR != VOICEOVER_PAIR {
         return;
     }
@@ -71,20 +89,12 @@ pub(super) fn warn_if_voiceover_owns(vk: u32, mask: u8, how: &str) {
         return;
     }
     VOICEOVER_WARNED.with(|w| w.borrow_mut().insert((vk, mask)));
-    let key = crate::backend::vk_name(vk).unwrap_or_else(|| format!("vk {vk:#04x}"));
-    let mut spec = String::new();
-    for (bit, name) in [
-        (crate::backend::MASK_CTRL, "Ctrl"),
-        (crate::backend::MASK_ALT, "Alt"),
-        (crate::backend::MASK_SHIFT, "Shift"),
-        (crate::backend::MASK_WIN, "Cmd"),
-    ] {
-        if mask & bit != 0 {
-            spec.push_str(name);
-            spec.push('+');
-        }
-    }
-    spec.push_str(&key);
+    let spec = crate::backend::describe_key_for(
+        crate::backend::KeyOs::Macos,
+        vk,
+        mask,
+        crate::backend::KeyStyle::Short,
+    );
     crate::logging::line(
         "macos",
         &format!(
@@ -92,8 +102,9 @@ pub(super) fn warn_if_voiceover_owns(vk: u32, mask: u8, how: &str) {
              VoiceOver is running: with the default VoiceOver modifier this chord is taken by \
              VoiceOver before any application sees it, and pressing it plays VoiceOver's \
              error sound. It is accepted here and never arrives. A chord without both Control \
-             and Option — Command-Shift-<key> is measured to arrive — is the fix; VoiceOver \
-             Utility > General > modifier set to Caps Lock is the workaround"
+             and Option — Command-Shift-<key>, which is `Ctrl+Shift+<key>` in a spec, is \
+             measured to arrive — is the fix; VoiceOver Utility > General > modifier set to \
+             Caps Lock is the workaround"
         ),
     );
 }
@@ -102,8 +113,8 @@ pub fn register(id: i32, spec: &str) -> Result<(), String> {
     // The shared parser, not a second one: what a module writes in its manifest has to mean
     // the same thing on both platforms, and a spec that parses here but not on Windows is a
     // module that works on one machine and mystifies the user on the other.
-    let (vk, mask) = crate::backend::key_spec(spec)
-        .ok_or_else(|| format!("could not parse the hotkey spec '{spec}'"))?;
+    let (vk, mask) = crate::backend::parse_key_spec(spec)
+        .map_err(|e| format!("could not parse the hotkey spec '{spec}': {e}"))?;
 
     // A bare modifier tap is not something any OS can register: there is no key to hang it
     // on, and the whole point of it is that the modifier keeps working as a modifier. The
@@ -117,11 +128,6 @@ pub fn register(id: i32, spec: &str) -> Result<(), String> {
         ));
     }
 
-    let code = keys::vk_to_keycode(vk).ok_or_else(|| {
-        format!("'{spec}' resolves to virtual key {vk:#04X}, which macOS has no key code for")
-    })?;
-    let modifiers = keys::mask_to_carbon(mask);
-
     // Said here, at registration, because this is the last place the chord is a chord and
     // not a reference. See `warn_if_voiceover_owns` for why it is worth a line at all.
     warn_if_voiceover_owns(vk, mask, "registered");
@@ -133,6 +139,50 @@ pub fn register(id: i32, spec: &str) -> Result<(), String> {
     // registration in place and its reference unreachable, so the combination would stay
     // claimed until the process exited.
     unregister(id);
+
+    // A letter no key of the current layout types is parked, not refused: the letters are the
+    // layout's, which the user can switch at any moment, so the hotkey is kept and registered
+    // by `reregister_letters` as soon as a layout that types the letter is selected — as a
+    // hotkey is that could not follow a switch. Refused, it went back to the host as an error,
+    // which reached the user as the "Binding unavailable" dialog blaming another application,
+    // and nothing tried it again after a switch.
+    if (0x41..=0x5A).contains(&vk) && keys::vk_to_keycode_for(vk, mask).is_none() {
+        REGISTERED.with(|m| {
+            m.borrow_mut().insert(
+                id,
+                Registration {
+                    reference: core::ptr::null_mut(),
+                    spec: spec.to_string(),
+                    vk,
+                    mask,
+                    code: None,
+                },
+            )
+        });
+        crate::logging::line(
+            "macos",
+            &format!(
+                "hotkey '{spec}' is not held now: {}. It is registered as soon as a layout \
+                 that types it is selected",
+                keys::why_no_keycode(vk)
+            ),
+        );
+        return Ok(());
+    }
+
+    register_on_key(id, spec, vk, mask)
+}
+
+/// The registration itself, on the key the letters in force give `vk` — shared by `register`
+/// and by [`reregister_letters`], which moves a letter's hotkey when the layout changes.
+fn register_on_key(id: i32, spec: &str, vk: u32, mask: u8) -> Result<(), String> {
+    // A letter is the key that types it under the current layout (`keys.rs`, `layout.rs`) — with
+    // Command held when the combination holds Command — so for a letter the miss means no key
+    // of that layout types it.
+    let code = keys::vk_to_keycode_for(vk, mask).ok_or_else(|| {
+        format!("'{spec}' (virtual key {vk:#04X}): {}", keys::why_no_keycode(vk))
+    })?;
+    let modifiers = keys::mask_to_carbon(mask);
 
     let hot_key_id = EventHotKeyID { signature: SIGNATURE, id: id as u32 };
     let mut reference: EventHotKeyRef = core::ptr::null_mut();
@@ -163,17 +213,105 @@ pub fn register(id: i32, spec: &str) -> Result<(), String> {
         return Err(msg);
     }
 
-    REGISTERED.with(|m| m.borrow_mut().insert(id, reference));
+    REGISTERED.with(|m| {
+        m.borrow_mut().insert(
+            id,
+            Registration { reference, spec: spec.to_string(), vk, mask, code: Some(code) },
+        )
+    });
     crate::logging::trace("macos", || {
         format!("hotkey {id} registered: '{spec}' is key code {code:#04X} + mods {modifiers:#06X}")
     });
     Ok(())
 }
 
+/// Moves every hotkey on a letter to the key that types that letter now — called by the pump
+/// after `layout.rs` put a changed layout in force. A Carbon hotkey is a key code, so without
+/// this a hotkey registered on the German Z would stay on the key where US has Y after a
+/// switch to a US layout, and the other way round.
+///
+/// All of them are released first, then all registered again: two of our own hotkeys can swap
+/// keys (Cmd+Y and Cmd+Z between US and German), and registering the first while the second
+/// still held its new key would be refused. A hotkey that cannot follow — another application
+/// holds the combination on its new key, or no key types the letter now — is said in the log
+/// and **parked**: kept here without a Carbon registration, and tried again at every later
+/// layout change, so switching back to the old layout brings it back. The host still counts it
+/// as held meanwhile, and does not claim it again on its own, so without the parking a hotkey
+/// a module registers once would be lost for the session; one its module registers again (an
+/// overlay does on its next focus move) is registered afresh then. A hotkey parked by
+/// [`register`], because no key typed its letter then, is tried here the same way.
+pub fn reregister_letters() {
+    let moved: Vec<(i32, String, u32, u8, Option<u16>, bool)> = REGISTERED.with(|m| {
+        m.borrow()
+            .iter()
+            .filter(|(_, r)| {
+                r.reference.is_null()
+                    || ((0x41..=0x5A).contains(&r.vk)
+                        && keys::vk_to_keycode_for(r.vk, r.mask) != r.code)
+            })
+            .map(|(id, r)| (*id, r.spec.clone(), r.vk, r.mask, r.code, r.reference.is_null()))
+            .collect()
+    });
+    for (id, ..) in &moved {
+        unregister(*id);
+    }
+    for (id, spec, vk, mask, old, was_parked) in moved {
+        match register_on_key(id, &spec, vk, mask) {
+            Ok(()) => {
+                let now = keys::vk_to_keycode_for(vk, mask).unwrap_or(0);
+                let how = match (was_parked, old) {
+                    (_, None) => format!("held for the first time, on key code {now:#04x}"),
+                    (true, Some(old)) => {
+                        format!("held again, last on key code {old:#04x}, now on {now:#04x}")
+                    }
+                    (false, Some(old)) => {
+                        format!("moved from key code {old:#04x}, now on {now:#04x}")
+                    }
+                };
+                crate::logging::line(
+                    "macos",
+                    &format!("hotkey '{spec}' follows the keyboard layout: {how}"),
+                )
+            }
+            Err(e) => {
+                REGISTERED.with(|m| {
+                    m.borrow_mut().insert(
+                        id,
+                        Registration {
+                            reference: core::ptr::null_mut(),
+                            spec: spec.clone(),
+                            vk,
+                            mask,
+                            code: old,
+                        },
+                    )
+                });
+                // Said once, when it is parked; a retry that fails again adds only what
+                // `register_on_key` says itself about a refusal.
+                if !was_parked {
+                    crate::logging::line(
+                        "macos",
+                        &format!(
+                            "hotkey '{spec}' could not follow the keyboard layout and is not held \
+                             now; it is tried again at every layout change: {e}"
+                        ),
+                    );
+                }
+            }
+        }
+    }
+}
+
 pub fn unregister(id: i32) {
-    let Some(reference) = REGISTERED.with(|m| m.borrow_mut().remove(&id)) else {
+    let Some(Registration { reference, .. }) = REGISTERED.with(|m| m.borrow_mut().remove(&id))
+    else {
         return;
     };
+    if reference.is_null() {
+        // Parked: nothing is registered with Carbon to release.
+        crate::logging::trace("macos", || format!("hotkey {id} unregistered while parked"));
+        return;
+    }
     let status = unsafe { UnregisterEventHotKey(reference) };
     if status != noErr {
         // Not fatal and not worth failing a caller over — the host has no error path here —

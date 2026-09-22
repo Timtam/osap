@@ -5,6 +5,10 @@ engine_api = ">=0.1, <0.2"
 entry = "src/main.luau"
 license = "MIT"
 dependencies = ["com.platform.overlay", "com.platform.daw-hosts"]
+# Windows only: each synth is found through its embedded control's Win32 window class, a plain
+# string pattern that a Mac compares with an AXRole/AXSubrole/AXIdentifier triple and never
+# matches. What u-he's plug-ins publish on a Mac has not been looked at.
+supported_os = ["windows"]
 
 [capabilities]
 require = ["log", "window"]

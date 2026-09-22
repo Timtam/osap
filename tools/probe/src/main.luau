@@ -18,13 +18,10 @@
 --
 -- Nothing here interprets. It records.
 
-local KEY = host.os.pick {
-  -- Control+Option is VoiceOver's own modifier and everything on it belongs to VoiceOver,
-  -- so the Mac gets Command+Shift instead.
-  macos = "Cmd+Shift+F9",
-  windows = "Ctrl+Shift+F9",
-  linux = "Ctrl+Shift+F9",
-}
+-- Control+Shift+F9 on Windows and Command+Shift+F9 on a Mac, where a spec's Ctrl is Command:
+-- Control+Option is VoiceOver's own modifier and everything on it belongs to VoiceOver, so the
+-- Mac key must not have Control in it with Option.
+local KEY = "Ctrl+Shift+F9"
 
 -- The questions this platform can be ASKED rather than told — everything the log could settle
 -- on its own instead of a person working through a checklist. Read-only, all of it.
@@ -458,6 +455,7 @@ local gamepad = host.include("src/gamepad.luau")
 gamepad.start(function(pads)
   host.log.info(string.format(
     "[probe] ready — press %s over the window you want recorded, %s for the game controllers; %s",
-    KEY, gamepad.KEY, pads
+    host.keys.describe(KEY, { style = "short" }), host.keys.describe(gamepad.KEY, { style = "short" }),
+    pads
   ))
 end)

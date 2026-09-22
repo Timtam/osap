@@ -8,9 +8,9 @@ Timers are how a module waits without blocking. `after` covers the settling time
 
 **Neither is a thread.** Both are drained by the application's own loop, on the same main thread as speech, hotkeys and the arbiter, so a slow callback delays all of them: the pump logs any iteration over 250 ms, and what else it costs is platform-specific — see [A slow callback](#a-slow-callback). Nothing interrupts a callback that does not return: a loop that never ends stops the whole application.
 
-**Resolution is the loop's tick, about 15 ms.** Timers are looked at once per pass of the loop, which runs every 15 ms. A timer fires on the first pass at or after its time, never sooner, and `every` re-arms from the moment that pass ran — so an interval rounds up to whole ticks: `every(20)` fires about every 30 ms, `every(16)` about every 30 ms rather than at 60 Hz, and nothing fires more often than once a tick. The schedule also drifts by whatever each pass was late.
+**Resolution is the loop's tick, about 15 ms.** Timers are looked at once per pass of the loop, which runs every 15 ms. A timer fires on the first pass at or after its time, never sooner, and `every` re-arms from the moment that pass ran — so an interval rounds up to whole ticks: `every(20)` fires about every 30 ms, `every(16)` about every 30 ms rather than at 60 Hz, and nothing fires more often than once a tick. The schedule also drifts by whatever each pass was late. Within one pass the one-shot timers that are due run first, then the recurring ones, each in the order they were armed.
 
-**Neither returns anything.** There is no handle and no way to cancel a timer: an `after` runs once, an `every` runs until the module is reloaded or removed. While the module is disabled an `every` is kept and goes on being re-armed, with its callback skipped; an `after` that comes due then is discarded without being called.
+**Both return a token, and [`cancel`](#host-timer-cancel) takes it back.** The token is a whole number, unique for the life of the application and never reused. An `after` runs once unless it is cancelled first; an `every` runs until it is cancelled or its module is reloaded or removed. While the module is disabled an `every` is kept and goes on being re-armed, with its callback skipped; an `after` that comes due then is discarded without being called. Throwing the token away is fine: nothing is stopped when it is collected.
 
 `host.epoch` is what an expensive reading should be memoized against instead of a clock. It moves whenever an OS event, a one-shot `after` coming due, or the module's own synthesised input could have changed the screen, so a cached answer is free within one dispatch and re-taken after the next such event — which "it was fresh 50 ms ago" cannot promise. An `every` tick does not move it, so a poll is handed what was cached before the tick until something else moves it.
 
@@ -29,25 +29,39 @@ See [what that list is and is not](./index.md#capabilities).
 
 ## host.timer.after(ms, callback) {#host-timer-after}
 
-**Signature:** `host.timer.after(ms: number, callback: () -> ())` → `nil`
+**Signature:** `host.timer.after(ms: number, callback: () -> ())` → `number`
 
-Schedules a **one-shot** callback to fire approximately `ms` milliseconds later, driven from the event-loop tick — at the earliest on the first tick at or after that time, so `after(1)` and `after(10)` both wait for the next tick. The callback runs once with no arguments (only if the module is still enabled at fire time) and is then discarded. There is no returned handle and no way to cancel an individual timer: to call one off, have the callback check a flag of your own. `ms` must be a number of at least 0 (a fraction is cut to the whole number below); a negative one raises.
+Schedules a **one-shot** callback to fire approximately `ms` milliseconds later, driven from the event-loop tick — at the earliest on the first tick at or after that time, so `after(1)` and `after(10)` both wait for the next tick, and an `after(0)` armed from inside a timer callback waits for the next tick too. The callback runs once with no arguments (only if the module is still enabled at fire time) and is then discarded. Returns the timer's token, for [`host.timer.cancel`](#host-timer-cancel). `ms` must be a number of at least 0 (a fraction is cut to the whole number below); a negative one raises.
+
+Arming costs a registry slot and a list entry, and nothing else; the list is looked at once per tick.
 
 ```luau
-host.timer.after(500, function()
+local pending = host.timer.after(500, function()
   host.speech.output("Half a second later")
 end)
+-- Changed our mind before it came due:
+host.timer.cancel(pending)
 ```
+
+### Windows
+
+Drained by the 15 ms tick of the module manager's window (a wxWidgets timer), and in a headless run by the loop's own 15 ms wait for messages.
+
+### macOS
+
+Drained by the same 15 ms wxWidgets tick; in a headless run by a 15 ms turn of the CoreFoundation run loop.
 
 ---
 
 ## host.timer.every(ms, callback) {#host-timer-every}
 
-**Signature:** `host.timer.every(ms: number, callback: () -> ())` → `nil`
+**Signature:** `host.timer.every(ms: number, callback: () -> ())` → `number`
 
-Schedules a **recurring** callback to fire approximately every `ms` milliseconds, driven from the event-loop tick, and rounded up to whole ticks as described at the top of this page (`ms` below 1 counts as 1). Unlike a self-rescheduling `host.timer.after` chain, a recurring timer is **re-armed even while the owning module is disabled** (the callback is only *invoked* while enabled), so a poll resumes on re-enable instead of dying. There is no returned handle or per-timer cancel; it runs until the module is reloaded or removed. **The only way to stop a poll is to return early**: gate the callback on the condition it is for — the window being in front, a flag of your own — and let it return at once when that does not hold.
+Schedules a **recurring** callback to fire approximately every `ms` milliseconds, driven from the event-loop tick, and rounded up to whole ticks as described at the top of this page. `ms` must be a number of at least 0 (a fraction is cut to the whole number below, and an interval below 1 counts as 1); a negative one raises. Unlike a self-rescheduling `host.timer.after` chain, a recurring timer is **re-armed even while the owning module is disabled** (the callback is only *invoked* while enabled), so a poll resumes on re-enable instead of dying. Returns the timer's token; it runs until [`host.timer.cancel`](#host-timer-cancel) is called with it — from inside its own callback too — or until the module is reloaded or removed.
 
-The timer belongs to the module whose VM runs the call. A `code_module` runtime that calls `every` at its top level therefore arms one poll in its own VM and one in the VM of every module that depends on it — directly, or through another `code_module` — each owned, and disabled, with the module whose VM it is (see [`host.require`](./require.md#host-require)).
+The timer belongs to the module whose VM runs the call. A `code_module` runtime that calls `every` at its top level therefore arms one poll in its own VM and one in the VM of every module that depends on it — directly, or through another `code_module` — each owned, and disabled, with the module whose VM it is (see [`host.require`](./require.md#host-require)). Each of those VMs gets its own token and can cancel its own poll, and only that one.
+
+Arming costs a registry slot and a list entry, as for `after`; the list is looked at once per tick, and every tick the timer is due its callback runs on the main thread, so what it costs is what the callback does.
 
 ```luau
 -- A poll that only works while the game is in front, and never has two searches in flight.
@@ -69,13 +83,70 @@ host.timer.every(150, function()
 end)
 ```
 
+### Windows
+
+The same tick as [`after`](#host-timer-after): 15 ms, from the manager window's wxWidgets timer or the headless loop's wait.
+
+### macOS
+
+The same tick as [`after`](#host-timer-after): 15 ms, from the wxWidgets timer or, headless, a turn of the CoreFoundation run loop.
+
+---
+
+## host.timer.cancel(token) {#host-timer-cancel}
+
+**Signature:** `host.timer.cancel(token: number?) -> boolean`
+
+Stops the pending timer `token` and returns `true`, or returns `false` when there was nothing of yours to stop: `nil`, anything that is not a whole number, a token that was never handed out, a one-shot timer that has already fired, a timer that was already cancelled, and a timer that belongs to another module. It never raises, so a module can cancel "whatever poll is running" without testing for `nil` first.
+
+- **Only your own.** A timer can be cancelled only from the module that owns it — the module whose VM armed it, which for a `code_module` runtime's code is the dependent it runs in. A token is a small number, and one module must not be able to stop another's poll by guessing it.
+- **From inside a callback.** An `every` that cancels itself returns `true` and does not fire again. An `after` that cancels itself gets `false`: it has already fired.
+- **In the same tick.** A callback that cancels another timer due in the same pass of the loop stops it before it runs, one-shot or recurring.
+- **While disabled.** Cancelling works while the module is disabled, for both kinds.
+
+A linear scan over the pending timers, on the main thread.
+
+```luau
+-- Read a game's menu only while the game is in front: the poll starts when the game is
+-- (already) in front and cancels itself as soon as it is not. Needs "window" and "timer".
+local GAME = { title = { contains = "My Game" } }
+local poll
+local function readMenu()
+  -- one detection read of the menu
+end
+host.window.onTrigger(GAME, { initial = true }, function()
+  if poll then return end
+  poll = host.timer.every(100, function()
+    local win = host.window.active()
+    if not (win and host.window.test(GAME, win)) then
+      host.timer.cancel(poll); poll = nil; return
+    end
+    readMenu()
+  end)
+end)
+```
+
+`initial = true` is what starts the poll for a game that is already in front when the module loads or is enabled — see [`onTrigger`](./window.md#host-window-ontrigger). After the first switch away the poll stops, and the next activation of the game starts it again.
+
+### Windows
+
+No operating-system call: the timer is taken out of the host's own list.
+
+### macOS
+
+No operating-system call; the same code as on Windows.
+
 ## A slow callback {#a-slow-callback}
 
 What a callback that takes too long costs beyond delaying everything else on the loop depends on the platform.
 
 ### Windows
 
-Past roughly 300 ms Windows stops waiting for the keyboard hook and delivers the key without us. Windows also documents that a low-level keyboard hook which keeps timing out can be removed without notice; the host installs its hook once and never checks it again, so after such a removal no key would be captured for the rest of the session and nothing would say why. That has not been observed here, but it is one more reason to keep every callback short.
+Captured keys and hotkeys wait: the keyboard hook swallows them on its own thread at once, and their callbacks run when the loop is free again, late by as long as it was busy. The user's typing elsewhere is not delayed, and a captured key does not slip through to the application. What the loop's stalls no longer reach is the hook itself: Windows documents that a low-level hook which keeps timing out can be removed without notice, and since its thread does nothing but answer it, that takes a machine too loaded to schedule it. The host never checks the hook again once it is installed, so after such a removal no key would be captured for the rest of the session; a hotkey press that then arrives through `RegisterHotKey` alone is written to the log.
+
+### macOS
+
+The system switches off an event tap whose thread stops answering, and keys go uncaptured until the host's watchdog notices and switches it back on; the watchdog logs each time it does.
 
 ---
 
@@ -100,6 +171,14 @@ end
 
 Deliberately **not** time-based, and it does not advance on an idle tick. A stale answer here means acting on the wrong screen position, and "it was fresh 50 ms ago" is not a safety property.
 
+### Windows
+
+A counter in the host; reading it makes no system call.
+
+### macOS
+
+The same counter, moved by the same events as on Windows.
+
 ## host.now() {#host-now}
 
 **Signature:** `host.now() -> number`
@@ -114,11 +193,19 @@ local value = readTheSlowThing()
 host.log.info(("read took %d ms"):format(host.now() - t0))
 ```
 
+### Windows
+
+Rust's monotonic clock (`std::time::Instant`), read in the host; no module-visible system call.
+
+### macOS
+
+The same clock as on Windows, Rust's `std::time::Instant`.
+
 ## host.inputEpoch() {#host-inputepoch}
 
 **Signature:** `host.inputEpoch() -> number`
 
-A counter that turns over only when something **acted** on the screen: input this platform drove, or a window coming forward.
+A counter that turns over only when something **acted** on the screen: input this platform drove, a window coming forward, or a window already in front being reported to an [`onTrigger { initial = true }`](./window.md#host-window-ontrigger) callback.
 
 `host.epoch` also moves when a one-shot timer comes due and on the user's own keystrokes, which is right for "re-resolve where the plug-in is" and far too eager for "what does this pixel say". A screen read costs a fixed compositor frame, so a property that only an action can change should be cached against this one instead.
 
@@ -128,3 +215,11 @@ if cachedAt ~= host.inputEpoch() then
   cached, cachedAt = host.screen.pixel(x, y), host.inputEpoch()
 end
 ```
+
+### Windows
+
+A counter in the host; reading it makes no system call.
+
+### macOS
+
+The same counter, moved by the same events as on Windows.

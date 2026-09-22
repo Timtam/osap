@@ -111,6 +111,8 @@ A control's `hotkey` also **moves the overlay's focus** to that control, silentl
 
 Space or Return on a focused control that has **hidden itself** since focus reached it acts on the visible control that shares its hotkey — Kontakt's "Switch to classic view" and "Switch to play view" share Alt+V and swap places on every press. With no such control, the overlay says "… is not available now" instead of doing nothing without a word.
 
+Two controls **share** a hotkey when their specs name the same key on this platform, however they are written: the runtime compares them through [`host.keys.normalize`](keys.md#host-keys-normalize), so `"Cmd+S"` beside an inherited `"Ctrl+S"` is one claim on every platform (both are the Ctrl role, which is Command on a Mac). The key is spoken on focus in the platform's words through [`host.keys.describe`](keys.md#host-keys-describe) — `"Alt+V"` is "Option+V" on a Mac, and a tab's `hotkeyLabel` is said the same way when it is a key spec. A hotkey the host would refuse — one that is not a key spec, one the system keeps for itself, a modifier tap, or a key the platform has no code for (the reasons [`host.keys.check`](keys.md#host-keys-check) marks "raises") — is reported when the overlay binds, naming the control, left out of the `[keys] … holds:` line with its reason instead of being registered, and not spoken when the control or tab is focused.
+
 ## Bindings — O.window / O.embedded / \:with / O.hosts / O\:bind {#bindings}
 
 **Signatures:**
@@ -472,7 +474,7 @@ end)
 
 Binds the overlay as a **standalone** context: active while a window matching `matcher` is the foreground/active window, with coordinates relative to that window's client area. `matcher` is a window matcher passed to `host.window.test`; `opts: { hoverToRead: boolean? }?`.
 
-While active, the overlay captures and suppresses the navigation keys, scoped to its own window (so `Alt+Tab` and menus pass through natively): `Tab` / `Shift+Tab` move between controls, `Return` and `Space` activate the focused control, and — when the overlay has a tab control — `Left`/`Right`, `Ctrl+Tab`/`Ctrl+Shift+Tab` and `Ctrl+<n>` drive it. `Space` is released while an editable field (an `ocredit` control) is focused, so a literal space can be typed into it. On activation the overlay starts at its first control (and any tab control at its first tab) when a **genuinely new** window opened, but resumes the last-focused control when the *same* still-open window merely regained the foreground (`Alt+Tab` out and back); the two are told apart by the window's identity (its HWND). `hoverToRead` (default `false`) moves the mouse onto an OCR control on focus (some UIs only reveal values on hover). Registers the foreground/focus trigger once. Returns nothing.
+While active, the overlay captures and suppresses the navigation keys, scoped to its own window (so `Alt+Tab` and menus pass through natively): `Tab` / `Shift+Tab` move between controls, `Return` and `Space` activate the focused control, and — when the overlay has a tab control — `Left`/`Right`, `Ctrl+Tab`/`Ctrl+Shift+Tab` and `Ctrl+<n>` drive it (the first two are Control+Tab on a Mac, see [below](#o-attach-macos)). `Space` is released while an editable field (an `ocredit` control) is focused, so a literal space can be typed into it. On activation the overlay starts at its first control (and any tab control at its first tab) when a **genuinely new** window opened, but resumes the last-focused control when the *same* still-open window merely regained the foreground (`Alt+Tab` out and back); the two are told apart by the window's identity (its HWND). `hoverToRead` (default `false`) moves the mouse onto an OCR control on focus (some UIs only reveal values on hover). Registers the foreground/focus trigger once. Returns nothing.
 
 ```luau
 -- Melodyne's standalone window, by executable and window class.
@@ -490,6 +492,14 @@ ov:attach({
 -- settings:attach(on_ear, { menus = true, slot = ON_EAR_SLOT,
 --                           specificity = O.layer.dialog, pollMatch = 500 })
 ```
+
+### Windows {#o-attach-windows}
+
+The tab keys are the ones written: `Ctrl+Tab` and `Ctrl+Shift+Tab` cycle the tabs, and `Ctrl+1` to `Ctrl+9` go to tab 1 to 9.
+
+### macOS {#o-attach-macos}
+
+`Ctrl+1` to `Ctrl+9` are Command-1 to Command-9, because a spec's `Ctrl` is Command on a Mac ([the key spec](./keys.md#key-spec-string-format)). The two cycling keys are picked per platform instead: they are Control-Tab and Control-Shift-Tab (`Meta+Tab`, `Meta+Shift+Tab`), because Command-Tab is the application switcher, which the system keeps for itself.
 
 ## O\:attachEmbedded(spec, opts) {#o-attachembedded}
 

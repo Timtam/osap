@@ -56,7 +56,12 @@ features = ["NSWorkspace", "NSRunningApplication", "NSScreen", "NSApplication", 
 version = "0.3"
 features = ["CFBase", "CFString", "CFArray", "CFDictionary", "CFNumber", "CFRunLoop", "CFCGTypes", "CFData", "CFMachPort",
     # The alert a second start shows when it gives up (instance.rs), before wxWidgets exists.
-    "CFUserNotification", "CFDate", "CFURL"]
+    "CFUserNotification", "CFDate", "CFURL",
+    # The keyboard-layout change (backend/macos/layout.rs): a distributed notification that has
+    # to arrive while this accessory application is in the background. AppKit suspends those for
+    # an application that is not active, and only the CF observer can ask for DeliverImmediately;
+    # the NSDistributedNotificationCenter block form cannot.
+    "CFNotificationCenter"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-core-graphics]
 version = "0.3"

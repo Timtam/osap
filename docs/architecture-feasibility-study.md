@@ -115,7 +115,7 @@ The system is a **Cargo workspace** with a multi-process runtime model.
 5. **GUI** — Slint, runs in the main-thread run loop *together with the hotkey listener*. Exposes its own a11y tree via AccessKit (provider side — separate from the foreign-app introspection!).
 6. **Update** — Velopack + signature layer. Steers the launcher (coordinated restart), verifies Ed25519-signed manifests.
 
-**Threading rule:** main/GUI thread with OS run loop for hotkey listener + GUI + CGEventTap (all run-loop-bound); Tokio worker thread pool for script/IO work. *As built: one process, and module code and host calls run on the main thread with the GUI, the hotkeys and the keyboard hook; there is no Tokio pool, and only the asynchronous image searches have a worker ([module-runtime-and-lifecycle.md](module-runtime-and-lifecycle.md#runtime-model)).* **Hot-path events stay in the daemon** — never per event across the process boundary (latency).
+**Threading rule:** main/GUI thread with OS run loop for hotkey listener + GUI + CGEventTap (all run-loop-bound); Tokio worker thread pool for script/IO work. *As built: one process, and module code and host calls run on the main thread with the GUI, the hotkeys and the macOS event tap (the Windows keyboard hook has a thread of its own); there is no Tokio pool, and only the asynchronous image searches have a worker ([module-runtime-and-lifecycle.md](module-runtime-and-lifecycle.md#runtime-model)).* **Hot-path events stay in the daemon** — never per event across the process boundary (latency).
 
 ### Process/isolation model
 

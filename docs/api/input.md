@@ -135,28 +135,28 @@ Sends a keyboard shortcut by pressing the modifiers, tapping the key, and releas
 
 **Signature:** `host.input.send(combo: string) -> nil`
 
-`combo` is a single string of `+`-separated parts, with the final part being the key and any leading parts being modifiers (whitespace around parts is trimmed). Recognized modifiers (case-insensitive): `ctrl`/`control`, `alt`/`option`, `shift`, and `win`/`super`/`cmd`/`command`/`meta`. The key is one of the [key names](./keys.md#key-spec-string-format) — letters, digits, `F1`–`F24` and fourteen named keys; there are no numpad keys, punctuation, `Insert` or media keys, and there is no separate key-down or key-up. An empty combo, an unknown modifier or an unknown key raises a Lua error. Returns `nil`.
+`combo` is a [key spec](./keys.md#key-spec-string-format), read by the same parser as a hotkey or a capture: `+`-separated parts, the final part being the key and any leading parts modifiers (whitespace around parts is trimmed, case does not matter). The modifiers are the four roles: `ctrl` (also `control`, `cmd`, `command`), `alt` (`option`), `shift` and `win` (`super`, `meta`). On a Mac `ctrl` is Command and `win` is Control, so `host.input.send("Ctrl+S")` is Ctrl+S on Windows and Command+S on a Mac, the application's own Save on both. For the Mac's Control key, write `Meta`. The key is one of the [key names](./keys.md#key-spec-string-format) — letters, digits, `F1`–`F24` and fourteen named keys; there are no numpad keys, punctuation, `Insert` or media keys, and there is no separate key-down or key-up. An empty combo, an unknown modifier, an unknown key or a `"<modifier> tap"` raises a Lua error naming the part. Returns `nil`.
 
 The key goes through the same keyboard hook as a real one, so a combination that any module has [captured](./keys.md#host-keys-capture) is caught and suppressed again — sending the key you captured does not pass it on. See [`post`](#host-input-post) for that.
 
 ```luau
-host.input.send("Ctrl+S")
+host.input.send("Ctrl+S")         -- the application's Save, on either platform
 host.input.send("Ctrl+Shift+Esc")
 ```
 
 ### Windows
 
-The modifiers are synthesised as real key presses around the key, and whatever the user is **physically holding is inherited**. Called from a hotkey callback while Alt is still down, `host.input.send("Escape")` arrives as Alt+Escape — which is why `host.keys.modifiersDown()` exists and why modules defer a synthesised key until the user has let go.
+Each role is the key of its name. The modifiers are synthesised as real key presses around the key — pressed in the order Ctrl, Alt, Shift, Win, whatever order the spec wrote them in, and released in reverse — and whatever the user is **physically holding is inherited**. Called from a hotkey callback while Alt is still down, `host.input.send("Escape")` arrives as Alt+Escape — which is why `host.keys.modifiersDown()` exists and why modules defer a synthesised key until the user has let go.
 
 Every key is sent by **virtual-key code only**: `SendInput` with scan code 0, without `KEYEVENTF_SCANCODE` and without the extended-key flag — so the arrows, Home, End, Page Up/Down and Delete go out as their non-extended forms. Each press and release is its own `SendInput` call, back to back with no delay between them, so there is no hold time. An application that reads scan codes, DirectInput or Raw Input — many games — may ignore the key, or read it as a different one.
 
 ### macOS
 
-The modifiers are set as flags on the event, and setting them **replaces the whole set**, so anything the user is holding is stripped and the same call delivers a bare Escape. No modifier key event is posted at all, so an application that watches for physical modifier presses sees an unmodified key.
+`Ctrl` is Command, `Alt` Option, `Shift` Shift and `Win` (`Meta`) Control, so `"Ctrl+C"` copies and `"Meta+C"` is Control+C. The modifiers are set as flags on the event, and setting them **replaces the whole set**, so anything the user is holding is stripped and the same call delivers a bare Escape. No modifier key event is posted at all, so an application that watches for physical modifier presses sees an unmodified key.
 
 The deferral dance is therefore unnecessary for keys here, and since 2026-09-03 not for clicks either: a synthesised click has its flags cleared the same way (see `click`).
 
-The key is a US keyboard position, not a character: `"Cmd+Z"` is the key labelled Y on a German Mac (see [the key spec](./keys.md#key-spec-string-format)).
+A letter is the key that types it under the current keyboard layout — with Command held, when the combo holds Command — as on Windows: `"Ctrl+Z"` is the key labelled Z on a German Mac as on a US one, so `host.input.send("Ctrl+Z")` is Undo on both. Digits and the named keys are US keyboard positions (see [the key spec](./keys.md#key-spec-string-format)).
 
 ## host.input.text(text) {#host-input-text}
 
@@ -281,4 +281,4 @@ Genuinely per-window: `WM_KEYDOWN`/`WM_KEYUP` are posted to the handle you passe
 
 ### macOS
 
-There is no per-window message queue to post into, so this is one step coarser — the event is handed to the window's **process** with `CGEventPostToPid` and lands wherever that application routes it, which need not be the window you addressed. Three consequences a caller can observe: the handle must be one this backend issued, and a stale or foreign number raises an error naming it instead of quietly doing nothing; a key name the shared table accepts can still fail here, because it has to map on to a Quartz keycode as well, and one that does not raises an error naming the key and its VK code; and the modifier flags on the event are **cleared**, not inherited, so a key posted from inside a hotkey callback while its combination is still physically held arrives bare. The first post of a run writes a line to the log saying it is routing per process — the line to suspect if a posted key ever surfaces in the wrong window of the same application.
+There is no per-window message queue to post into, so this is one step coarser — the event is handed to the window's **process** with `CGEventPostToPid` and lands wherever that application routes it, which need not be the window you addressed. Three consequences a caller can observe: the handle must be one this backend issued, and a stale or foreign number raises an error naming it instead of quietly doing nothing; a key name the shared table accepts can still fail here, because it has to map on to a Quartz keycode as well — a letter maps to the key that types it under the current keyboard layout (see [the key spec](./keys.md#key-spec-string-format)) — and one that does not (`F21`–`F24`, or a letter no key of the layout types) raises an error naming the key and its VK code; and the modifier flags on the event are **cleared**, not inherited, so a key posted from inside a hotkey callback while its combination is still physically held arrives bare. The first post of a run writes a line to the log saying it is routing per process — the line to suspect if a posted key ever surfaces in the wrong window of the same application.

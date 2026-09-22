@@ -75,7 +75,10 @@ windows-sys = { version = "0.61.2", features = ["Win32_UI_Input_KeyboardAndMouse
     # The single-instance guard (instance.rs): the user's SID and the session id for the names,
     # and FileSystem for the flags the second start opens the pipe with (overlapped, at
     # identification level).
-    "Win32_Security_Authorization", "Win32_System_RemoteDesktop", "Win32_Storage_FileSystem"] }
+    "Win32_Security_Authorization", "Win32_System_RemoteDesktop", "Win32_Storage_FileSystem",
+    # `GetTickCount`, for how late the keyboard hook ran against the key event it was handed:
+    # both are on the tick clock, and the pairing of a late hook with its WM_HOTKEY needs that.
+    "Win32_System_SystemInformation"] }
 # The pipe's security descriptor is written as SDDL, and interprocess takes it as widestring's
 # `U16CStr` (instance.rs). Already in the lock through interprocess.
 widestring = "1"
@@ -102,7 +105,12 @@ features = ["NSWorkspace", "NSRunningApplication", "NSScreen", "NSApplication", 
 version = "0.3"
 features = ["CFBase", "CFString", "CFArray", "CFDictionary", "CFNumber", "CFRunLoop", "CFCGTypes", "CFData", "CFMachPort",
     # The alert a second start shows when it gives up (instance.rs), before wxWidgets exists.
-    "CFUserNotification", "CFDate", "CFURL"]
+    "CFUserNotification", "CFDate", "CFURL",
+    # The keyboard-layout change (backend/macos/layout.rs): a distributed notification that has
+    # to arrive while this accessory application is in the background. AppKit suspends those for
+    # an application that is not active, and only the CF observer can ask for DeliverImmediately;
+    # the NSDistributedNotificationCenter block form cannot.
+    "CFNotificationCenter"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-core-graphics]
 version = "0.3"

@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 132 entries.
+Every call the platform offers a module, in one place. 138 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -30,7 +30,7 @@ Ownership is unaffected, and deliberately so. A hotkey or a timer that a depende
 
 **Receiving window events needs no declaration.** The host delivers foreground and focus changes to the callbacks registered with `host.window.onTrigger` and `onFocus` through a handle of its own, not through the module's `host` table. So a module that attaches an overlay declares `window` only if its own code calls `host.window`: the overlay runtime registers the triggers with its own manifest's permission, and a module that registered none is skipped. A gate or a matcher's `where` function the module supplies is its own code, though, and needs `window` if it calls `host.window`.
 
-Nothing is gated on `host.os`, `host.require`, `host.tryRequire`, `host.include`, `host.epoch`, `host.now`, `host.inputEpoch`, `host.calibrating` or `host.json`. A clock, a counter, a platform name, a way to reach a declared dependency and a parser of strings the module already holds are not worth asking permission for, and gating them would mean every manifest names them — which is the same as naming none.
+Nothing is gated on `host.os`, `host.require`, `host.tryRequire`, `host.include`, `host.epoch`, `host.now`, `host.inputEpoch`, `host.calibrating` or `host.json`, nor on `host.keys.normalize`, `describe` and `check` — the rest of `host.keys` needs `keys`. A clock, a counter, a platform name, a way to reach a declared dependency and a parser of strings the module already holds are not worth asking permission for, and gating them would mean every manifest names them — which is the same as naming none. `host.keys.check` reads one thing besides its string: for a Ctrl+Alt chord on Windows or an Option chord on a Mac, the character the keyboard layout in use types with it, unless it is asked with `layout = false`.
 
 The list is also shown to the user before installing from GitHub — for the module chosen and for every dependency the install adds — and again before an update that asks for a capability the installed version did not, or starts using a module it did not (see [the module manager](../module-manager.md#browse-tab)). Nothing is granted or refused per capability, and a module copied into `modules/` by hand is not reviewed at all. It is not a security boundary on its own — a module still runs arbitrary Luau, and the declaration is the module's own word — but it is now the word the platform holds it to.
 
@@ -177,14 +177,17 @@ Synthesising mouse and keyboard input.
 
 ## host.keys
 
-Claiming keys before the focused application sees them.
+Claiming keys before the focused application sees them, and the key spec every call that takes a key reads.
 
 | | |
 |---|---|
 | [`host.keys.capture(spec, callback)`](keys#host-keys-capture) | Begins intercepting the key spec |
+| [`host.keys.check(spec, opts)`](keys#host-keys-check) | What this platform does with a combination, structurally. |
+| [`host.keys.describe(spec, opts)`](keys#host-keys-describe) | `spec` in this platform's own words, for telling a user which key to press. |
 | [`host.keys.menuOpen(open)`](keys#host-keys-menuopen) | Tells the hook a plugin's own (Qt/UIA) menu is open (`true`) or closed (`false`). |
-| [`host.keys.modifiersDown()`](keys#host-keys-modifiersdown) | True while any of Ctrl, Alt, Shift or Win — Control, Option, Shift or Command on macOS — is physically held. |
+| [`host.keys.modifiersDown()`](keys#host-keys-modifiersdown) | True while any of the four modifiers is physically held |
 | [`host.keys.nativeMenuOpen()`](keys#host-keys-nativemenuopen) | True while the application in front has a menu open that the operating system itself drew. |
+| [`host.keys.normalize(spec)`](keys#host-keys-normalize) | The key `spec` stands for, in this platform's spelling. |
 | [`host.keys.passedThrough()`](keys#host-keys-passedthrough) | The keys the hook let through to the application because a menu was open, since the last call |
 | [`host.keys.release(token)`](keys#host-keys-release) | Undoes the exact capture identified by the `token` `host.keys.capture` returned, recomputing the global captured set so the… |
 | [`host.keys.releaseAll()`](keys#host-keys-releaseall) | Removes **all** key captures owned by this module and refreshes the suppression set. |
@@ -233,6 +236,7 @@ Waiting without blocking, and knowing when a cached reading went stale.
 | | |
 |---|---|
 | [`host.timer.after(ms, callback)`](timer#host-timer-after) | Schedules a **one-shot** callback to fire approximately `ms` milliseconds later, driven from the event-loop tick |
+| [`host.timer.cancel(token)`](timer#host-timer-cancel) | Stops the pending timer `token` and returns `true`, or returns `false` when there was nothing of yours to stop |
 | [`host.timer.every(ms, callback)`](timer#host-timer-every) | Schedules a **recurring** callback to fire approximately every `ms` milliseconds, driven from the event-loop tick, and rounded… |
 
 ## host.settings
@@ -257,7 +261,7 @@ Typed, per-module settings, edited by the user in the module manager.
 | | |
 |---|---|
 | [`host.os.current`](os#host-os-current) | Read-only string: the current OS, from Rust `std::env::consts::OS` (`"windows"`, `"macos"`, `"linux"`, …). |
-| [`host.os.is(name)`](os#host-os-is) | Returns `true` when `name` equals the current OS string. |
+| [`host.os.is(name)`](os#host-os-is) | Returns `true` when `name` equals the current OS string, exactly: `"macOS"` or `"mac"` is simply `false`. |
 | [`host.os.pick(t)`](os#host-os-pick) | The per-platform value, or `nil` when this platform has no entry. |
 
 ## host.log
@@ -283,11 +287,13 @@ Writing to the log file beside the application.
 
 ## host.json
 
-Turning JSON text a module ships into Luau values.
+Turning JSON text a module ships into Luau values, and Luau values into JSON text.
 
 | | |
 |---|---|
+| [`host.json.array(t?)`](json#host-json-array) | Marks `t` — or a new empty table when it is left out — to be written by `encode` as a JSON array, and returns it. |
 | [`host.json.decode(text)`](json#host-json-decode) | Parses `text` as one JSON document and returns it as Luau values |
+| [`host.json.encode(value, opts?)`](json#host-json-encode) | Writes `value` as JSON text. |
 
 ## host.require
 
@@ -323,7 +329,7 @@ Turning JSON text a module ships into Luau values.
 
 | | |
 |---|---|
-| [`host.inputEpoch()`](timer#host-inputepoch) | A counter that turns over only when something **acted** on the screen: input this platform drove, or a window coming forward. |
+| [`host.inputEpoch()`](timer#host-inputepoch) | A counter that turns over only when something **acted** on the screen |
 
 ## host.arbiter
 
@@ -352,7 +358,7 @@ The shapes and grammars the calls above are written in.
 |---|---|
 | [`A slow callback`](timer#a-slow-callback) | What a callback that takes too long costs beyond delaying everything else on the loop depends on the platform. |
 | [`Button and axis names`](gamepad#button-and-axis-names) | Every name a filter accepts, beside what SDL3, pygame and XInput call it and what is printed on each family's pads. |
-| [`Key spec string format`](keys#key-spec-string-format) | Two namespaces parse `+`-joined spec strings; segments are trimmed and case-insensitive. |
+| [`Key spec string format`](keys#key-spec-string-format) | One grammar, read by one parser, for every call that takes a key |
 | [`Matchers`](window#matchers) | A *matcher* is a declarative table passed to `host.window.find/findAll/test/onTrigger`, and to the overlay's bindings. |
 | [`Plugin base + library overlays (the cell model)`](overlay#plugin-base-library-overlays) | A plugin is not one overlay. |
 | [`Recognition language`](ocr#recognition-language) | What `lang` means to each platform's engine, and what leaving it out means. |

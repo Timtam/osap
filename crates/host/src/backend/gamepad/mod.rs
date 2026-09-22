@@ -13,11 +13,12 @@
 //! of contact with the event loop is [`drain_into`], which every backend's `pump_pending`
 //! calls after keys and before the focus change.
 //!
-//! **The hub is a `Mutex`, never a thread-local.** The Windows key queues are thread-locals and
-//! only work because the keyboard hook runs on the pump thread; a pad source runs on its own
-//! thread (Windows) or on a dispatch queue (macOS), and a thread-local written there would be a
-//! queue nobody ever drains. Every lock recovers from poisoning: a panic in a source must cost
-//! that one report, not every report after it.
+//! **The hub is a `Mutex`, never a thread-local.** A pad source runs on its own thread
+//! (Windows) or on a dispatch queue (macOS), and a thread-local written there would be a queue
+//! nobody ever drains — the reason the Windows key queues are behind locks as well, since the
+//! keyboard hook got a thread of its own (`keyboard_hook_thread` in `windows.rs`). Every lock
+//! recovers from poisoning: a panic in a source must cost that one report, not every report
+//! after it.
 //!
 //! **What is used where.** The lease, the synchronous refresh and the rebaseline exist for a
 //! source that POLLS and parks — the Windows one. The macOS source is driven by callbacks and

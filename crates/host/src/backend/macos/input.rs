@@ -363,7 +363,7 @@ static KEY_POST_ROUTE_LOGGED: AtomicBool = AtomicBool::new(false);
 pub fn key_post(hwnd: isize, key: &str) -> Result<(), String> {
     let vk = crate::backend::key_to_vk(key).ok_or_else(|| format!("unknown key '{key}'"))?;
     let code = keys::vk_to_keycode(vk)
-        .ok_or_else(|| format!("key '{key}' (VK {vk:#04x}) has no macOS keycode"))?;
+        .ok_or_else(|| format!("key '{key}' (VK {vk:#04x}): {}", keys::why_no_keycode(vk)))?;
     let entry = super::handles::get(hwnd).ok_or_else(|| {
         format!("key_post: {hwnd} is not a handle this backend issued, so there is no process to post '{key}' to")
     })?;
@@ -406,14 +406,15 @@ pub fn key_post(hwnd: isize, key: &str) -> Result<(), String> {
 }
 
 pub fn key_send(combo: &str) -> Result<(), String> {
-    let parts: Vec<&str> = combo
-        .split('+')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .collect();
-    let (key_part, mod_parts) = parts
-        .split_last()
-        .ok_or_else(|| "empty key combo".to_string())?;
+    // The shared parser, so a spec means here what it means to a hotkey: its modifiers are
+    // roles, and `keys::MODIFIER_KEYS` makes them Mac keys — `"Ctrl+C"` is Command+C, which
+    // copies, as it does on Windows; `"Win+C"` (or `"Meta+C"`) is Control+C.
+    let (vk, mask) = crate::backend::parse_key_spec(combo)?;
+    if mask & crate::backend::MASK_TAP != 0 {
+        return Err(format!(
+            "'{combo}' is a modifier tap, which is something to capture, not a key to send"
+        ));
+    }
 
     // The modifiers become flags on the key event rather than key events of their own, and
     // that is a deliberate divergence from the Windows implementation's press-key-release
@@ -437,22 +438,11 @@ pub fn key_send(combo: &str) -> Result<(), String> {
     // The cost, if a tester finds an application that ignores flag-only modifiers: the fix is
     // to bracket the pair below with `FlagsChanged` events carrying the accumulating and then
     // receding flag set. Nothing else in this file would change.
-    let mut flags = CGEventFlags::empty();
-    for m in mod_parts {
-        flags |= match m.to_ascii_lowercase().as_str() {
-            "ctrl" | "control" => CGEventFlags::MaskControl,
-            "alt" | "option" => CGEventFlags::MaskAlternate,
-            "shift" => CGEventFlags::MaskShift,
-            // By position, not by name: what a module wrote as the Windows key is the key in
-            // the same place on this keyboard, which is Command.
-            "win" | "super" | "cmd" | "command" | "meta" => CGEventFlags::MaskCommand,
-            other => return Err(format!("unknown modifier '{other}'")),
-        };
-    }
-    let vk =
-        crate::backend::key_to_vk(key_part).ok_or_else(|| format!("unknown key '{key_part}'"))?;
-    let code = keys::vk_to_keycode(vk)
-        .ok_or_else(|| format!("key '{key_part}' (VK {vk:#04x}) has no macOS keycode"))?;
+    let flags = CGEventFlags(keys::mask_to_cg_flags(mask));
+    // The mask also picks the letter table: with Command held (the Ctrl role) a letter is the
+    // key the layout's Command table puts it on (`keys::letters_for`).
+    let code = keys::vk_to_keycode_for(vk, mask)
+        .ok_or_else(|| format!("'{combo}' (VK {vk:#04x}): {}", keys::why_no_keycode(vk)))?;
 
     let src = source();
     for is_down in [true, false] {

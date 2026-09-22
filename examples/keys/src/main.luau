@@ -2,9 +2,10 @@
 -- Ctrl+Alt+O. While on, Tab and Escape are intercepted (spoken, and NOT passed
 -- to the focused app); while off, they work normally.
 
+local TOGGLE = "Ctrl+Alt+O"
 local capturing = false
 
-host.hotkey.register("Ctrl+Alt+O", function()
+host.hotkey.register(TOGGLE, function()
   capturing = not capturing
   if capturing then
     -- Plain Tab and Shift+Tab are captured; Alt+Tab is NOT (different combo),
@@ -19,4 +20,5 @@ host.hotkey.register("Ctrl+Alt+O", function()
   end
 end)
 
-host.speech.output("Key capture demo. Press control alt O to toggle Tab and Escape capture.", { interrupt = true })
+host.speech.output("Key capture demo. Press " .. host.keys.describe(TOGGLE)
+  .. " to toggle Tab and Escape capture.", { interrupt = true })

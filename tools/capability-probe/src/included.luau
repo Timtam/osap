@@ -10,5 +10,6 @@ end
 
 denied("host.speech from an included file", function() return host.speech.output end)
 denied("host.screen from an included file", function() return host.screen.pixel end)
+denied("host.keys.capture from an included file", function() return host.keys.capture end)
 
 return holes

@@ -385,36 +385,40 @@ if w and host.window.test({ windows = { class = "REAPERwnd" } }, w) then ... end
 
 ## host.window.onTrigger(matcher, opts, cb) {#host-window-ontrigger}
 
-`host.window.onTrigger(matcher: Matcher, opts: { on: string? }?, cb: (win: Window) -> ()) -> ()`
+`host.window.onTrigger(matcher: Matcher, opts: { on: string?, initial: boolean? }?, cb: (win: Window) -> ()) -> ()`
 
 (prelude) Registers `cb` to fire on every foreground change for which the new active window satisfies `matcher`. The callback receives the matched [window table](#window-table). An empty matcher `{}` matches every window.
 
+**`initial = true` also reports the window already in front.** Without it, a window that is in front when the module loads, is enabled or is reloaded is not reported — only a foreground change after that. With it, that window is reported too, **once**, on the next pass of the loop:
+
+- **When.** After the module's load has finished — its entry file and `activate` have returned — so the callback can use what the file sets up after the registration. Again every time the module is enabled in the module manager, because to a module that was off whatever is in front is new — though at that moment the window in front is usually the manager itself, so a game behind it is reported at its next activation instead. And for a trigger registered later, from a timer say, on the pass after the registration. Never from inside `onTrigger` itself, and never while the module is disabled.
+- **Once per foreground.** An activation dispatched before that pass *is* the report — after an enable as well — so the trigger is not called a second time for the same window. A report that found no match, or no window in front, is used up as well — the matching window coming forward later is an ordinary activation.
+- **What it costs.** The foreground window is asked for once per pass, for every module owed a report together, and only when one of them has an `initial` trigger still waiting: enabling a module that has none asks nothing. The callbacks run on the main thread, inside the loop pass whose length the application logs past 250 ms, like every other trigger.
+- **The same window an activation hands over.** The callback gets the same window table, and a foreground window an activation never hands over — one without a title — is not reported; the report is used up all the same. Before the first matching callback of the pass, [`host.inputEpoch`](./timer.md#host-inputepoch) turns over once, however many modules the pass reports to, and each module that reads through desktop duplication has it opened before its own first matching callback — both as an activation does.
+- **What raises.** `initial` is `true` or `false`; anything else raises from `onTrigger`.
+
 What it does **not** do:
 
-- **It is not called for the window already in front** when the module loads, is enabled or is reloaded — only for a foreground change after that. At load, look yourself, as the example does. (The overlay's bindings are different: they evaluate at once when they bind.)
-- **Only `"activate"` is dispatched.** `opts.on` defaults to it; any other value — `"open"`, `"close"`, `"focus"`, `"titleChange"` — is accepted and never fires. Focus moves inside a window go to [`onFocus`](#host-window-onfocus).
-- **There is no handle.** `onTrigger` returns nothing, and a trigger cannot be removed; it stays until the module is reloaded. While the module is disabled it simply is not called.
-- **One failing callback stops the rest.** A module's triggers are called one after another in registration order, with no protection between them: an error in one skips the module's later triggers for that foreground change. The error is logged every time and shown to the user once.
+- **Only `"activate"` is dispatched.** `opts.on` defaults to it; any other value — `"open"`, `"close"`, `"focus"`, `"titleChange"` — is accepted and never fires, with or without `initial`. Focus moves inside a window go to [`onFocus`](#host-window-onfocus).
+- **There is no handle.** `onTrigger` returns nothing, and a trigger cannot be removed; it stays until the module is reloaded. While the module is disabled it simply is not called. To stop work a trigger started, stop that work — a poll it armed is [cancelled by its token](./timer.md#host-timer-cancel).
+- **One failing callback stops the rest.** A module's triggers are called one after another in registration order, with no protection between them: an error in one skips the module's later triggers for that foreground change, or for that initial report. The error is logged every time and shown to the user once.
 
 ```luau
 local REAPER = { app = { name = "reaper" } }
-local function start(w)
+-- Also called for a REAPER window that is already in front when the module loads or is
+-- enabled: once, on the next tick, and not at all while the module is disabled.
+host.window.onTrigger(REAPER, { initial = true }, function(w)
   host.speech.output("REAPER focused")
-end
-host.window.onTrigger(REAPER, { on = "activate" }, start)
--- Not called for a REAPER window that is already in front: check once at load, from a
--- timer ("timer" declared too), because the entry file also runs for a disabled module.
-host.timer.after(0, function()
-  local w = host.window.active()
-  if w and host.window.test(REAPER, w) then start(w) end
 end)
 ```
 
-The load-time check goes through [`host.timer.after`](./timer.md#host-timer-after) for a reason. The entry file runs even when the module is loaded disabled, and speech is not gated for a disabled module, so a check made straight from the top level would announce "REAPER focused" for a module the user switched off; an `after` that comes due while the module is disabled is discarded instead. In a `code_module` the top level also runs once in its own VM and once in every dependent's, so the check runs that many times too — arm the `after` from `activate`, which runs once, in the module's own VM (see [`host.require`](./require.md#host-require)).
+In a `code_module` runtime the top level runs once in the runtime's own VM and once in every dependent's, so a trigger registered there is registered — and reported — once per VM; register from `activate`, which runs once, in the module's own VM (see [`host.require`](./require.md#host-require)). A poll that starts from `initial = true` and stops itself when the game leaves the front is the example under [`host.timer.cancel`](./timer.md#host-timer-cancel).
 
 ### Windows
 
 A system-wide foreground hook, registered for **every process**, whether or not it cooperates with accessibility, is what fires this. A foreground window **without a title** is never handed to a trigger: it runs a focus round (the `onFocus` callbacks) instead. The focus and name-change hooks beside it only ever run a focus round, so a window whose title becomes matchable after it came forward does not fire `onTrigger` either — re-check such a window from `onFocus`.
+
+The `initial` report asks the same question as [`host.window.active()`](#host-window-active): the foreground window, its title and class, and the name of its process. Unlike `active()`, it treats a window without a title as no window, the rule the foreground hook follows: an untitled dialog or the taskbar in front at load is not reported, and the report is used up.
 
 No focus round is run when watching starts. The window already in front is seen by `onFocus` only when the foreground or the focus next changes, or when a module calls [`host.window.recheck()`](#host-window-recheck).
 
@@ -422,9 +426,11 @@ No focus round is run when watching starts. The window already in front is seen 
 
 Only *application* activation is system-wide. Focus-within-an-application, window-created and title-changed exist solely as per-process accessibility observers, created lazily the first time that application comes to the front and abandoned after three permanent refusals.
 
+**For an application that is already frontmost, `initial = true` is the only report there is.** A game already in front when its module loads raises no application activation, so without `initial` it stays unreported until the user switches away and back. The report asks the frontmost application for its window through accessibility, as [`host.window.active()`](#host-window-active) does, with the same five-second memory for an application that does not answer; with no answer at all it finds no window, and nothing fires. A window without a title is not reported, as the activation path does not report one.
+
 The consequence lands exactly on the embedded-plug-in case: a plug-in window opening inside a DAW that is **already** frontmost raises no application activation, so the event depends entirely on that per-process observer. In a host that refuses accessibility, the overlay never activates even though the same module works on Windows.
 
-When watching first starts, one focus round is run for the application already in front, so `onFocus` callbacks registered by then see it; `onTrigger` still does not.
+When watching first starts, one focus round is run for the application already in front, so `onFocus` callbacks registered by then see it; `onTrigger` sees it only through `initial = true`.
 
 ## host.window.onFocus(cb) {#host-window-onfocus}
 
@@ -441,7 +447,11 @@ end)
 
 ### Internal prelude functions
 
-`window_prelude.luau` also defines `W._hasTriggers()`, `W._dispatchActivate(win)`, and `W._dispatchFocus()`. These are called by the host event loop to deliver foreground/focus changes into the registered `onTrigger`/`onFocus` callbacks; modules do not call them directly.
+`window_prelude.luau` also defines `W._hasTriggers()`, `W._wantsInitial(reprime)`, `W._dispatchActivate(win, beforeFirst)`, `W._dispatchInitial(win, reprime, beforeFirst)` and `W._dispatchFocus()`, and the host adds `W._requestInitial()`, which `onTrigger { initial = true }` calls to queue its module for the report. The host event loop calls the dispatchers to deliver foreground and focus changes, and the initial report, into the registered `onTrigger`/`onFocus` callbacks; modules do not call any of them directly.
+
+### Windows
+
+Fired by the system-wide focus and name-change hooks, and by a foreground change to a window without a title. No focus round is run when watching starts — see [`onTrigger`](#host-window-ontrigger).
 
 ### macOS
 
@@ -451,7 +461,7 @@ Same caveat as `onTrigger` above: focus changes *within* an application are deli
 
 **Signature:** `host.window.recheck() -> ()`
 
-Asks the host to run a focus-change round at the end of the current tick — after OS events, timers and image results have run — exactly as if the OS had reported one: the observation epoch turns over (so cached window answers are re-read) and every enabled module's `host.window.onFocus` callbacks fire — including the one the overlay runtime registers, which re-evaluates each overlay's context match and gate. It exists for the case where a module *itself* changed what is detectable on screen and no OS event will follow: Komplete Kontrol auto-closing its library browser reveals the nested Kontakt underneath, and nothing about that is a focus change, so without this nobody notices until the next `pollMatch` tick (~500 ms) — half a second in which the ring sits on the wrong overlay for somebody who cannot see that it moved. The dispatch is **cross-VM**, which is the whole point here: the module that acted is usually not the module that has to notice.
+Asks the host to run a focus-change round at the end of the current tick — after OS events, timers, image results and any [initial window report](#host-window-ontrigger) have run — exactly as if the OS had reported one: the observation epoch turns over (so cached window answers are re-read) and every enabled module's `host.window.onFocus` callbacks fire — including the one the overlay runtime registers, which re-evaluates each overlay's context match and gate. It exists for the case where a module *itself* changed what is detectable on screen and no OS event will follow: Komplete Kontrol auto-closing its library browser reveals the nested Kontakt underneath, and nothing about that is a focus change, so without this nobody notices until the next `pollMatch` tick (~500 ms) — half a second in which the ring sits on the wrong overlay for somebody who cannot see that it moved. The dispatch is **cross-VM**, which is the whole point here: the module that acted is usually not the module that has to notice.
 
 Calls are coalesced — any number in one tick cost a single round — but the round itself is the same work a real focus change does: every overlay that is not already outranked re-runs its contexts and its gate (the runtime logs any recheck of 15 ms or more). So this is a one-shot for a change you caused and can therefore time; a match that changes on its own, with nothing of yours running, is what [`pollMatch` under `O:attach`](./overlay.md#o-attach) is for, and putting `recheck` on a recurring timer is that poll written twice. Two further things bite: only *focus* is dispatched, so a module's own `onTrigger(..., { on = "activate" })` callbacks do **not** run (overlays are unaffected — the runtime re-checks on both); and nothing guarantees the plug-in has finished redrawing by the next tick, so a reveal that takes an unknown moment is poked more than once rather than once and hopefully late enough.
 
@@ -469,3 +479,11 @@ if p then
   host.timer.after(1000, host.window.recheck)
 end
 ```
+
+### Windows
+
+Answered by the 15 ms tick, in the manager window's timer and in a headless run alike.
+
+### macOS
+
+Answered by the same 15 ms tick as on Windows, in the wxWidgets timer and in a headless run alike.

@@ -33,7 +33,7 @@ use objc2_core_graphics::{
 };
 
 use super::{key_age, keys, queue, watch};
-use crate::backend::{MASK_ALT, MASK_CTRL, MASK_SHIFT, MASK_TAP, MASK_WIN};
+use crate::backend::MASK_TAP;
 use crate::logging;
 
 /// What the tap asks to see.
@@ -48,34 +48,51 @@ const TAP_MASK: CGEventMask = (1u64 << CGEventType::KeyDown.0)
     | (1u64 << CGEventType::FlagsChanged.0);
 
 /// One physical modifier key: its keycode, the flag it contributes, and the Win32 code the
-/// host knows it by.
+/// host knows its ROLE by.
 ///
 /// Left and right collapse onto one `vk` because that is what `key_spec` produces for a tap
 /// spec — `"Alt tap"` is `(0x12, MASK_TAP)`, with no way to say which side — and because a
 /// module asking for a bare Option press does not care which thumb produced it.
 ///
-/// The table is here rather than in `keys.rs` on purpose: `key_to_vk` deliberately has no
+/// The collapse is here rather than in `keys.rs` on purpose: `key_to_vk` deliberately has no
 /// entry for a bare modifier, so that `"Alt"` cannot be used as an ordinary hotkey, and the
-/// left/right collapse is a rule about taps rather than about key translation.
+/// left/right collapse is a rule about taps rather than about key translation. Which key each
+/// role is comes from `keys::MODIFIER_KEYS`, the one role table: a Command key is the Ctrl
+/// role's key (vk 0x11, what `"Ctrl tap"` names), a Control key the Win role's (0x5B).
 struct Modifier {
     keycode: u16,
     flag: CGEventFlags,
     vk: u32,
 }
 
+/// One side of one role's key.
+const fn side(role: &keys::MacModifier, i: usize) -> Modifier {
+    Modifier { keycode: role.keycodes[i], flag: CGEventFlags(role.cg_flag), vk: role.vk }
+}
+
 /// Keycodes are Carbon's `kVK_*`: Command 0x37, Shift 0x38, Option 0x3A, Control 0x3B, and
-/// the right-hand ones 0x36, 0x3C, 0x3D, 0x3E. Caps Lock (0x39) and Fn (0x3F) are absent
-/// because neither carries a mask bit the host can name.
-const MODIFIERS: [Modifier; 8] = [
-    Modifier { keycode: 0x38, flag: CGEventFlags::MaskShift, vk: 0x10 },
-    Modifier { keycode: 0x3C, flag: CGEventFlags::MaskShift, vk: 0x10 },
-    Modifier { keycode: 0x3B, flag: CGEventFlags::MaskControl, vk: 0x11 },
-    Modifier { keycode: 0x3E, flag: CGEventFlags::MaskControl, vk: 0x11 },
-    Modifier { keycode: 0x3A, flag: CGEventFlags::MaskAlternate, vk: 0x12 },
-    Modifier { keycode: 0x3D, flag: CGEventFlags::MaskAlternate, vk: 0x12 },
-    Modifier { keycode: 0x37, flag: CGEventFlags::MaskCommand, vk: 0x5B },
-    Modifier { keycode: 0x36, flag: CGEventFlags::MaskCommand, vk: 0x5B },
-];
+/// the right-hand ones 0x36, 0x3C, 0x3D, 0x3E, all from `keys::MODIFIER_KEYS`. Caps Lock (0x39)
+/// and Fn (0x3F) are absent because neither carries a mask bit the host can name.
+const MODIFIERS: [Modifier; 8] = {
+    let k = &keys::MODIFIER_KEYS;
+    [
+        side(&k[0], 0),
+        side(&k[0], 1),
+        side(&k[1], 0),
+        side(&k[1], 1),
+        side(&k[2], 0),
+        side(&k[2], 1),
+        side(&k[3], 0),
+        side(&k[3], 1),
+    ]
+};
+
+// The role table writes Quartz's flags out as numbers so that it compiles, and is tested, on
+// any platform; these hold them to the bindings' own, where the bindings exist.
+const _: () = assert!(keys::CG_FLAG_SHIFT == CGEventFlags::MaskShift.0);
+const _: () = assert!(keys::CG_FLAG_CONTROL == CGEventFlags::MaskControl.0);
+const _: () = assert!(keys::CG_FLAG_ALTERNATE == CGEventFlags::MaskAlternate.0);
+const _: () = assert!(keys::CG_FLAG_COMMAND == CGEventFlags::MaskCommand.0);
 
 /// Whether this run has ever suppressed a key. See the one-shot line in the tap callback:
 /// on macOS a tap that was never granted Input Monitoring is indistinguishable in the log
@@ -328,12 +345,37 @@ pub fn set_captured_keys(keys: &[(u32, u8)]) {
     drop(held);
     logging::trace("macos", || format!("tap: {n} captured key(s)"));
     // A captured chord on VoiceOver's modifier fails the same way a registered one does —
-    // the tap never sees the press — and explained the same way, once per chord. The
-    // calibrator's three keys are captures, and the permissions page said the log would
-    // warn about them; until this, it only did so for registrations.
+    // the tap never sees the press — and is explained the same way, once per chord. The
+    // permissions page says the log warns for captures as well as registrations, and a
+    // module's own capture can sit on the layer as easily as a hotkey can.
     for &(vk, mask) in keys {
         super::hotkey::warn_if_voiceover_owns(vk, mask, "captured");
+        warn_if_reserved(vk, mask);
     }
+}
+
+/// Chords already said to be the system's, by (vk, mask). The set is replaced on every focus
+/// move, so a per-call line would repeat for as long as the capture held.
+static RESERVED_WARNED: Mutex<Vec<(u32, u8)>> = Mutex::new(Vec::new());
+
+/// Says once, per chord, when a capture holds a combination macOS keeps for itself: a
+/// Windows-written `"Ctrl+Q"` is Command+Q here, which `host.hotkey.register` refuses and
+/// `host.keys.capture` does not. The words are `reserved_capture_line`'s, which is tested.
+fn warn_if_reserved(vk: u32, mask: u8) {
+    let Some(line) = crate::backend::reserved_capture_line(crate::backend::KeyOs::Macos, vk, mask)
+    else {
+        return;
+    };
+    let mut warned = match RESERVED_WARNED.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if warned.contains(&(vk, mask)) {
+        return;
+    }
+    warned.push((vk, mask));
+    drop(warned);
+    logging::line("macos", &line);
 }
 
 /// Which window suppression applies to; 0 means everywhere. The value is a SNAPSHOT taken
@@ -532,11 +574,12 @@ unsafe extern "C-unwind" fn tap_callback(
     // between" is the whole definition, and this is the "in between".
     TAP_ARMED.store(0, Ordering::Relaxed);
 
-    let Some(vk) = keys::keycode_to_vk(keycode) else {
+    // The modifiers first: with Command held a letter is named by the layout's Command table.
+    let mask = mask_of(flags);
+    let Some(vk) = keys::keycode_to_vk_for(keycode, mask) else {
         logging::trace("macos", || format!("tap: keycode {keycode} has no Win32 equivalent"));
         return pass;
     };
-    let mask = mask_of(flags);
     // The two keys that END a menu, remembered whenever the runtime says a plugin menu is
     // open — captured or not. Escape is captured by no overlay, and Return only while the
     // focused control wants it, so a record kept only for captured keys never held the one
@@ -662,8 +705,8 @@ fn modifier_changed(keycode: u16, flags: CGEventFlags) {
 
 /// Is this pair in the captured set? Exact equality on the mask, never "at least these".
 ///
-/// `"Tab"` is mask 0 and must not swallow Command-Tab, which is the same key with a mask of
-/// 8; a subset test would take both.
+/// `"Tab"` is mask 0 and must not swallow Command-Tab, which is the same key with the Ctrl
+/// role's mask (2); a subset test would take both.
 fn captured(vk: u32, mask: u8) -> bool {
     match CAPTURED.try_lock() {
         Ok(set) => set.iter().any(|&(v, m)| v == vk && m == mask),
@@ -683,30 +726,18 @@ fn captured(vk: u32, mask: u8) -> bool {
     }
 }
 
-/// The four bits the host names, out of the event's own flags.
+/// The roles the host names, out of the event's own flags: Command held is the Ctrl role and
+/// Control held the Win role (`keys::mask_of_cg_flags`, the one role table).
 ///
 /// From the event rather than from any cached per-application state — that mistake on
 /// Windows made every combination collapse to a mask of 0 and stayed hidden for a long time,
 /// because unmodified keys like Tab went on working.
 ///
-/// Only these four bits: an arrow key on macOS also carries `MaskSecondaryFn` and
+/// Only the four modifier flags: an arrow key on macOS also carries `MaskSecondaryFn` and
 /// `MaskNumericPad`, so comparing whole `CGEventFlags` for equality would mean no arrow key
 /// ever matched a capture of "Down".
 fn mask_of(flags: CGEventFlags) -> u8 {
-    let mut mask = 0u8;
-    if flags.contains(CGEventFlags::MaskShift) {
-        mask |= MASK_SHIFT;
-    }
-    if flags.contains(CGEventFlags::MaskControl) {
-        mask |= MASK_CTRL;
-    }
-    if flags.contains(CGEventFlags::MaskAlternate) {
-        mask |= MASK_ALT;
-    }
-    if flags.contains(CGEventFlags::MaskCommand) {
-        mask |= MASK_WIN;
-    }
-    mask
+    keys::mask_of_cg_flags(flags.0)
 }
 
 thread_local! {

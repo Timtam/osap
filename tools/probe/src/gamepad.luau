@@ -24,12 +24,9 @@
 
 local M = {}
 
-M.KEY = host.os.pick {
-  -- Command+Shift for the reason the main key uses it: Control+Option belongs to VoiceOver.
-  macos = "Cmd+Shift+F10",
-  windows = "Ctrl+Shift+F10",
-  linux = "Ctrl+Shift+F10",
-}
+-- Ctrl+Shift+F10 on Windows, Command+Shift+F10 on a Mac (a spec's Ctrl is Command there), off
+-- Control+Option for the reason the main key is: that pair belongs to VoiceOver.
+M.KEY = "Ctrl+Shift+F10"
 
 local LATE = 60000 -- ms; see the note above
 

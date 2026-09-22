@@ -283,6 +283,24 @@ pub(crate) fn prewarm_hook(lua: &Lua) -> mlua::Result<Option<Function>> {
     Ok(None)
 }
 
+/// Opens the duplication now, for a VM that reads through it; nothing for every other VM.
+///
+/// What [`prewarm_hook`] does, called directly: the report of a window already in front
+/// (`onTrigger { initial = true }`) runs it before its first matching callback, as the
+/// activation dispatch runs the hook. Without it, a game that is already in front when its
+/// module loads would pay the opening cost on its first detection read.
+pub(crate) fn prewarm_if_declared(lua: &Lua) {
+    prewarm_if_declared_with(lua, backend::prewarm_capture);
+}
+
+/// [`prewarm_if_declared`] with the opening passed in, so which VMs it opens for can be tested
+/// without touching the graphics driver.
+fn prewarm_if_declared_with(lua: &Lua, open: impl FnOnce()) {
+    if let CaptureSource::Duplication { .. } = vm_source(lua) {
+        open();
+    }
+}
+
 /// Whether an OCR error in a VM with `src` answers with an `error` field instead of raising.
 ///
 /// Only a missing PICTURE — duplication had none to give — and only for a module that chose
@@ -607,6 +625,23 @@ mod tests {
         // none does: there the declaration resolves to the standard source.
         assert_eq!(prewarm_hook(&built(DUP)).unwrap().is_some(), cfg!(windows));
         assert!(prewarm_hook(&built(CaptureSource::Standard)).unwrap().is_none());
+    }
+
+    /// The initial window report's half of the same rule (`prewarm_if_declared`): it opens the
+    /// duplication for a VM that reads through it, with or without the fallback, and for no
+    /// other VM — including one built before any source was recorded.
+    #[test]
+    fn the_initial_report_opens_the_duplication_only_for_a_vm_that_reads_through_it() {
+        let opened = Cell::new(0u32);
+        let open = || opened.set(opened.get() + 1);
+        prewarm_if_declared_with(&built(DUP), open);
+        prewarm_if_declared_with(&built(DUP_ONLY), open);
+        // Off Windows the declaration resolves to the standard source, so nothing opens.
+        let expected = if cfg!(windows) { 2 } else { 0 };
+        assert_eq!(opened.get(), expected);
+        prewarm_if_declared_with(&built(CaptureSource::Standard), open);
+        prewarm_if_declared_with(&Lua::new(), open);
+        assert_eq!(opened.get(), expected);
     }
 
     #[test]

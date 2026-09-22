@@ -14,6 +14,11 @@ pub mod gamepad;
 
 #[cfg(windows)]
 mod windows;
+/// Registered hotkeys matched in the low-level keyboard hook as well as by `RegisterHotKey`:
+/// the table and the one-press rules, with no OS call in them, so their tests run anywhere
+/// Windows builds. See the file.
+#[cfg(windows)]
+mod hotkey_hook;
 /// DXGI Desktop Duplication, the second way of reading the screen on Windows — for the modules
 /// that declare `[screen] capture = "duplication"`, and for nothing else. See the file.
 #[cfg(windows)]
@@ -711,6 +716,13 @@ pub trait Backend {
     /// WHILE its own combination is still pressed, so anything it synthesises afterwards
     /// arrives with those modifiers attached — see the note in the overlay runtime.
     fn modifiers_down(&self) -> bool;
+    /// What the keyboard layout the user is typing in types for `vk` with the modifiers in
+    /// `mask`, and whether that is a dead key — the one question `host.keys.check` needs the
+    /// running system for, asked only for the shape [`layout_question`] names. `None` when it
+    /// types nothing (or only a control character), and wherever the platform cannot say.
+    fn layout_char(&self, _vk: u32, _mask: u8) -> Option<(String, bool)> {
+        None
+    }
     /// Is a NATIVE popup menu on screen? One window-class lookup, no traversal —
     /// the cheap half of "is a menu open", which the key hook already uses and
     /// which the menu watch should ask before paying for an accessibility walk.
@@ -820,12 +832,17 @@ pub fn vk_name(vk: u32) -> Option<String> {
 }
 
 /// Modifier bitmask for `host.keys` (matches the pressed modifier state exactly).
+///
+/// The bits are modifier ROLES, not keys: [`MASK_CTRL`] is the Ctrl role, which is the
+/// Control key on Windows and Linux and the Command key on macOS; [`MASK_WIN`] is the Win role,
+/// the Windows (Super) key there and the Control key on a Mac. See [`KeyOs`] for the rule and
+/// [`role_words`] for the table. Every mask the host stores, compares or hands a module is in
+/// roles; only a backend's edge turns one into keys (`macos/keys.rs` holds that table).
 pub const MASK_SHIFT: u8 = 1;
 pub const MASK_CTRL: u8 = 2;
 pub const MASK_ALT: u8 = 4;
 pub const MASK_WIN: u8 = 8;
 
-/// Parses a key spec like "Tab", "Shift+Tab", "Ctrl+Right" into (vk, modifier mask).
 /// A modifier pressed and released with nothing in between — "Alt tap" and friends.
 ///
 /// Its own mask bit rather than a mask of zero, because a bare modifier IS a mask of zero as
@@ -833,38 +850,569 @@ pub const MASK_WIN: u8 = 8;
 /// The hook never suppresses a tap: the modifier has to keep working as a modifier.
 pub const MASK_TAP: u8 = 0x10;
 
-pub fn key_spec(spec: &str) -> Option<(u32, u8)> {
+/// macOS: the roles that hold Control and Option together — Win and Alt — which is VoiceOver's
+/// modifier. Every chord that holds both is VoiceOver's before it is anybody else's.
+pub const MAC_VOICEOVER_LAYER: u8 = MASK_WIN | MASK_ALT;
+
+/// Which platform's reading of a key spec is wanted.
+///
+/// There is one grammar, and its modifier names are ROLES — the Qt convention, decided
+/// 2026-09-22 (it replaced the 2026-08-20 "positional" rule and the `Mod`/`Global` tokens):
+/// Ctrl, Alt, Win and Shift. On Windows and Linux each is the key of that name. On macOS Ctrl
+/// is Command, Alt is Option, Win is Control and Shift is Shift, as Qt's `ControlModifier` is
+/// Command there and its `MetaModifier` Control. So `"Ctrl+C"` copies on both platforms, and
+/// VoiceOver's Control+Option layer is Win+Alt in a spec.
+///
+/// Parsing does not depend on the platform — every spelling names the same role everywhere
+/// ([`modifier_mask`]). What does is which key each role is ([`role_words`]), which
+/// combinations the system keeps for itself, and the words a key is said in. So every
+/// function below that depends on one of those takes the platform as an argument, and the
+/// macOS answers are tested on the machine this project is written on, the way `macos/keys.rs`
+/// is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyOs {
+    Windows,
+    Macos,
+    /// Read the Windows way — the stub backend's platforms have no hotkeys of their own to
+    /// be different about — and said with `Super` for the Windows key.
+    Linux,
+}
+
+impl KeyOs {
+    /// The platform this build runs on.
+    pub const CURRENT: KeyOs = if cfg!(target_os = "macos") {
+        KeyOs::Macos
+    } else if cfg!(windows) {
+        KeyOs::Windows
+    } else {
+        KeyOs::Linux
+    };
+}
+
+/// One modifier role as a platform writes and says it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoleWords {
+    /// The mask bit: [`MASK_CTRL`], [`MASK_ALT`], [`MASK_SHIFT`] or [`MASK_WIN`].
+    pub role: u8,
+    /// The spelling [`normalize_spec_for`] writes it in on this platform. Parses back to the
+    /// same role on every platform.
+    pub spec: &'static str,
+    /// The key this role is on this platform's keyboard, spelled out, for speech.
+    pub spoken: &'static str,
+    /// The same, as the platform abbreviates it in writing, for a log line or a label.
+    pub short: &'static str,
+}
+
+const fn role(role: u8, spec: &'static str, spoken: &'static str, short: &'static str) -> RoleWords {
+    RoleWords { role, spec, spoken, short }
+}
+
+/// Windows, in the order Windows writes modifiers: Ctrl+Alt+Shift+Win.
+const WINDOWS_ROLES: [RoleWords; 4] = [
+    role(MASK_CTRL, "Ctrl", "Control", "Ctrl"),
+    role(MASK_ALT, "Alt", "Alt", "Alt"),
+    role(MASK_SHIFT, "Shift", "Shift", "Shift"),
+    role(MASK_WIN, "Win", "Windows", "Win"),
+];
+
+/// Linux: the Windows words, with the key a Linux keyboard calls Super.
+const LINUX_ROLES: [RoleWords; 4] = [
+    role(MASK_CTRL, "Ctrl", "Control", "Ctrl"),
+    role(MASK_ALT, "Alt", "Alt", "Alt"),
+    role(MASK_SHIFT, "Shift", "Shift", "Shift"),
+    role(MASK_WIN, "Win", "Super", "Super"),
+];
+
+/// macOS, in the order Apple prints modifiers (⌃⌥⇧⌘): Control, Option, Shift, Command — which
+/// are the Win, Alt, Shift and Ctrl roles. The Control key is `Meta` in a spec and `Control`
+/// in both styles of words: `Ctrl` written in a Mac's log would read as the spec spelling,
+/// which is Command.
+const MACOS_ROLES: [RoleWords; 4] = [
+    role(MASK_WIN, "Meta", "Control", "Control"),
+    role(MASK_ALT, "Option", "Option", "Option"),
+    role(MASK_SHIFT, "Shift", "Shift", "Shift"),
+    role(MASK_CTRL, "Cmd", "Command", "Cmd"),
+];
+
+/// The role table for `os`: which key each modifier role is there, and how it is written and
+/// said, in the order the platform writes modifiers.
+pub fn role_words(os: KeyOs) -> &'static [RoleWords; 4] {
+    match os {
+        KeyOs::Windows => &WINDOWS_ROLES,
+        KeyOs::Macos => &MACOS_ROLES,
+        KeyOs::Linux => &LINUX_ROLES,
+    }
+}
+
+/// The words for one role bit on `os`.
+fn role_word(os: KeyOs, bit: u8) -> &'static RoleWords {
+    role_words(os)
+        .iter()
+        .find(|w| w.role == bit)
+        .expect("every role bit is in every platform's table")
+}
+
+/// The modifier role one modifier name stands for, or `None` for a word that is not a
+/// modifier. The same on every platform, and the one place a modifier name is read: the parser,
+/// both `key_send`s and the Windows hotkey conversion all come through here.
+///
+/// - `Ctrl`, `Control`, `Cmd`, `Command`: the Ctrl role — Control on Windows and Linux, Command
+///   on macOS.
+/// - `Alt`, `Option`: the Alt role — Alt, and Option on macOS.
+/// - `Win`, `Super`, `Meta`: the Win role — the Windows key, Super on Linux, and the Control key
+///   on macOS. A Mac author writes `Meta` (or `Win`) for the Mac's Control key.
+/// - `Shift`.
+pub fn modifier_mask(name: &str) -> Option<u8> {
+    Some(match name.trim().to_ascii_lowercase().as_str() {
+        "shift" => MASK_SHIFT,
+        "ctrl" | "control" | "cmd" | "command" => MASK_CTRL,
+        "alt" | "option" => MASK_ALT,
+        "win" | "super" | "meta" => MASK_WIN,
+        _ => return None,
+    })
+}
+
+/// The virtual key a role is as a key in its own right — the one a `"<modifier> tap"` names:
+/// the generic Win32 code of the key the role is on Windows. A backend that has other keys for
+/// the roles translates it at its edge, as `macos/keys.rs` does.
+fn role_vk(bit: u8) -> u32 {
+    match bit {
+        MASK_SHIFT => 0x10,
+        MASK_CTRL => 0x11,
+        MASK_ALT => 0x12,
+        _ => 0x5B,
+    }
+}
+
+/// The role of a tap's virtual key, the reverse of [`role_vk`]; `None` for any other key.
+fn vk_role(vk: u32) -> Option<u8> {
+    [MASK_SHIFT, MASK_CTRL, MASK_ALT, MASK_WIN].into_iter().find(|&bit| role_vk(bit) == vk)
+}
+
+/// Parses a key spec like "Tab", "Shift+Tab", "Ctrl+S" or "Alt tap" into (vk, modifier mask),
+/// or says which part it could not read. The same on every platform: the mask is in roles (see
+/// [`KeyOs`]).
+///
+/// The error names the part, because it reaches a module author: `host.input.send` raises it,
+/// and the Windows hotkey path logs it with the conflict it causes.
+pub fn parse_key_spec(spec: &str) -> Result<(u32, u8), String> {
     // "<modifier> tap": pressed alone, no other key in between, and passed through.
     if let Some(rest) = spec.strip_suffix(" tap").or_else(|| spec.strip_suffix(" Tap")) {
         // Resolved here rather than in `key_to_vk`, deliberately: a bare modifier is a key in a
         // TAP and a mistake anywhere else, and putting it in the general table would make
         // "Alt" quietly acceptable as an ordinary hotkey.
-        let vk = match rest.trim().to_ascii_lowercase().as_str() {
-            "alt" | "option" => 0x12u32,
-            "ctrl" | "control" => 0x11,
-            "shift" => 0x10,
-            "win" | "super" | "cmd" | "command" | "meta" => 0x5B,
-            other => key_to_vk(other)?,
+        let name = rest.trim();
+        let vk = match modifier_mask(name) {
+            Some(bit) => role_vk(bit),
+            None => key_to_vk(name).ok_or_else(|| format!("unknown key '{name}' in '{spec}'"))?,
         };
-        return Some((vk, MASK_TAP));
+        return Ok((vk, MASK_TAP));
     }
     let parts: Vec<&str> = spec
         .split('+')
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .collect();
-    let (key, mods) = parts.split_last()?;
+    let (key, mods) = parts.split_last().ok_or_else(|| "empty key spec".to_string())?;
     let mut mask = 0u8;
+    // The Ctrl role has two families of spelling, and a spec that uses one of each names two
+    // keys to its author — `"Control+Command+F"` is Control-Command-F to a Mac user — where the roles make
+    // them one. ORed together it would quietly be Command+F, so it is refused with the Mac's
+    // own spelling for the Control key. Repeating one family (`"Ctrl+Control+S"`) is harmless.
+    let (mut ctrl_word, mut cmd_word) = (None, None);
     for m in mods {
-        mask |= match m.to_ascii_lowercase().as_str() {
-            "shift" => MASK_SHIFT,
-            "ctrl" | "control" => MASK_CTRL,
-            "alt" | "option" => MASK_ALT,
-            "win" | "super" | "cmd" | "command" | "meta" => MASK_WIN,
-            _ => return None,
+        mask |= modifier_mask(m).ok_or_else(|| format!("unknown modifier '{m}' in '{spec}'"))?;
+        match m.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => ctrl_word = ctrl_word.or(Some(*m)),
+            "cmd" | "command" => cmd_word = cmd_word.or(Some(*m)),
+            _ => {}
+        }
+    }
+    if let (Some(a), Some(b)) = (ctrl_word, cmd_word) {
+        return Err(format!(
+            "'{a}' and '{b}' in '{spec}' are both the Ctrl role, which is Command on a Mac; \
+             the Mac's Control key is written 'Meta'"
+        ));
+    }
+    let vk = key_to_vk(key).ok_or_else(|| format!("unknown key '{key}' in '{spec}'"))?;
+    Ok((vk, mask))
+}
+
+/// [`parse_key_spec`] without the reason.
+pub fn key_spec(spec: &str) -> Option<(u32, u8)> {
+    parse_key_spec(spec).ok()
+}
+
+/// How a key is put into words by [`describe_key_for`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyStyle {
+    /// Whole words, for speech: "Control+Alt+P", "Shift+Command+F9", "Up Arrow".
+    Spoken,
+    /// The platform's written abbreviations, for a label or a log line: "Ctrl+Alt+P",
+    /// "Shift+Cmd+F9", "Up".
+    Short,
+}
+
+/// How one modifier role is written on `os`. `style` `None` is the parser's own spelling —
+/// what [`normalize_spec_for`] produces and what reads back as the same key.
+fn modifier_word(os: KeyOs, bit: u8, style: Option<KeyStyle>) -> &'static str {
+    let w = role_word(os, bit);
+    match style {
+        None => w.spec,
+        Some(KeyStyle::Spoken) => w.spoken,
+        Some(KeyStyle::Short) => w.short,
+    }
+}
+
+/// How the key itself is written. `None` for the parser's own spelling.
+///
+/// Two of these are asymmetric and bite on a Mac: the key Windows calls Backspace is labelled
+/// Delete there, and what Windows calls Delete is Forward Delete. Return is Enter on a Windows
+/// keyboard. None of the words below reads back as the same key, which is why a description
+/// is never a spec.
+fn key_word(os: KeyOs, vk: u32, style: Option<KeyStyle>) -> String {
+    let named = vk_name(vk).unwrap_or_else(|| format!("vk {vk:#04x}"));
+    let Some(style) = style else { return named };
+    let mac = os == KeyOs::Macos;
+    let spoken = style == KeyStyle::Spoken;
+    let word = match vk {
+        0x0D if mac => "Return",
+        0x0D => "Enter",
+        0x08 if mac => "Delete",
+        0x2E if mac => "Forward Delete",
+        0x1B if spoken => "Escape",
+        0x1B => "Esc",
+        0x21 => "Page Up",
+        0x22 => "Page Down",
+        0x26 if spoken => "Up Arrow",
+        0x28 if spoken => "Down Arrow",
+        0x25 if spoken => "Left Arrow",
+        0x27 if spoken => "Right Arrow",
+        _ => return named,
+    };
+    word.to_string()
+}
+
+/// A resolved key in words; `style` `None` is the parser's own spelling.
+fn key_words(os: KeyOs, vk: u32, mask: u8, style: Option<KeyStyle>) -> String {
+    if mask & MASK_TAP != 0 {
+        let name = match vk_role(vk) {
+            Some(bit) => modifier_word(os, bit, style).to_string(),
+            None => key_word(os, vk, style),
+        };
+        return match style {
+            Some(KeyStyle::Spoken) => format!("{name} pressed on its own"),
+            _ => format!("{name} tap"),
         };
     }
-    Some((key_to_vk(key)?, mask))
+    let mut out = String::new();
+    for w in role_words(os) {
+        if mask & w.role != 0 {
+            out.push_str(modifier_word(os, w.role, style));
+            out.push('+');
+        }
+    }
+    out.push_str(&key_word(os, vk, style));
+    out
+}
+
+/// The canonical spelling of a resolved key on `os`: the modifiers in the platform's order and
+/// in its spec words ([`role_words`]), the key in [`vk_name`]'s. Two specs name the same key
+/// exactly when this is equal for both, and it parses back to the same `(vk, mask)` — on every
+/// platform, because parsing does not depend on one.
+pub fn spec_name_for(os: KeyOs, vk: u32, mask: u8) -> String {
+    key_words(os, vk, mask, None)
+}
+
+/// The key `spec` stands for, in `os`'s canonical spelling ([`spec_name_for`]); `None` when it
+/// does not parse. `"ctrl + s"` and `"Control+S"` are `"Ctrl+S"` on Windows and `"Cmd+S"` on
+/// macOS; `"Alt+Shift+Ctrl+Win+X"` is `"Ctrl+Alt+Shift+Win+X"` on Windows and
+/// `"Meta+Option+Shift+Cmd+X"` on macOS.
+pub fn normalize_spec_for(os: KeyOs, spec: &str) -> Option<String> {
+    key_spec(spec).map(|(vk, mask)| spec_name_for(os, vk, mask))
+}
+
+/// A resolved key as `os` says it.
+pub fn describe_key_for(os: KeyOs, vk: u32, mask: u8, style: KeyStyle) -> String {
+    key_words(os, vk, mask, Some(style))
+}
+
+/// `spec` as `os` says it; `None` when it does not parse. Not a spec: `"Delete"` in a Mac
+/// description is the key the parser calls Backspace, and `"Control"` there is the Win role.
+pub fn describe_spec_for(os: KeyOs, spec: &str, style: KeyStyle) -> Option<String> {
+    key_spec(spec).map(|(vk, mask)| describe_key_for(os, vk, mask, style))
+}
+
+/// How the host's "Binding conflict" and "Binding unavailable" dialogs name a hotkey the log
+/// names by `spec` — the spelling [`hotkey_claim_for`] recorded it in.
+///
+/// On Windows and Linux the spec's words are the keys' own names, so the dialog reads as the
+/// log does. On a Mac they are not: the spec calls the Control key `Meta` and Command `Cmd`, and
+/// a user told "Meta+Shift+F6" is not told which keys to look for. So a Mac's dialog says the
+/// key in [`describe_key_for`]'s spoken words — "Control+Shift+F6" — and its log line keeps the
+/// spec. A spec that does not parse is shown as written.
+pub fn dialog_key_words_for(os: KeyOs, spec: &str) -> String {
+    match os {
+        KeyOs::Macos => {
+            describe_spec_for(os, spec, KeyStyle::Spoken).unwrap_or_else(|| spec.to_string())
+        }
+        KeyOs::Windows | KeyOs::Linux => spec.to_string(),
+    }
+}
+
+/// macOS: the log line for a capture of a combination the system keeps for itself
+/// ([`reserved_for`]), or `None` for any other capture and on any other platform.
+///
+/// `host.keys.capture` raises only for a spec that does not parse, so a capture of `"Ctrl+Q"`
+/// written for Windows is Command+Q on a Mac, and the event tap is asked to take it from the
+/// system for as long as the capture holds. Said, not refused: a capture is the module's own
+/// decision about the keys of its window, and what the tap does with each of these chords has
+/// not been measured. Windows is left out on purpose — its two reserved combinations are about
+/// `RegisterHotKey`, and the hook captures F12 like any other key. Called by the macOS event
+/// tap only; it lives here so its words are tested where the project is written.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn reserved_capture_line(os: KeyOs, vk: u32, mask: u8) -> Option<String> {
+    if os != KeyOs::Macos {
+        return None;
+    }
+    let why = reserved_for(os, vk, mask)?;
+    let key = describe_key_for(os, vk, mask, KeyStyle::Short);
+    Some(format!(
+        "the captured key '{key}' is one macOS keeps for itself ({why}): a hotkey on it is \
+         refused, and this capture asks the event tap to take it from the system while it \
+         holds. host.os.pick gives the Mac another key"
+    ))
+}
+
+/// The modifier table a capture callback is handed, from the mask the key arrived with: one
+/// field per role, named for the role. On macOS `ctrl` is therefore Command held and `win`
+/// Control held.
+pub fn capture_mods_fields(mask: u8) -> [(&'static str, bool); 4] {
+    [
+        ("shift", mask & MASK_SHIFT != 0),
+        ("ctrl", mask & MASK_CTRL != 0),
+        ("alt", mask & MASK_ALT != 0),
+        ("win", mask & MASK_WIN != 0),
+    ]
+}
+
+/// `host.keys.check` reasons. Structural only: what the platform does with a combination, never
+/// what some other program happens to hold — JAWS and NVDA are extensible, and a list of their
+/// keys would be wrong the day somebody installs an add-on.
+pub const REASON_PARSE: &str = "parse";
+/// The system keeps the combination for itself; `host.hotkey.register` refuses it.
+pub const REASON_RESERVED: &str = "reserved";
+/// macOS: the combination holds Control and Option together, VoiceOver's modifier — the Win and
+/// Alt roles ([`MAC_VOICEOVER_LAYER`]).
+pub const REASON_VOICEOVER: &str = "voiceover";
+/// macOS: the key has no key code (F21–F24).
+pub const REASON_NO_KEYCODE: &str = "no-keycode";
+/// A modifier pressed on its own: something `host.keys.capture` watches, and never a hotkey.
+pub const REASON_TAP: &str = "tap";
+/// Windows: Ctrl+Alt is AltGr, and this one types a character in the current layout.
+pub const REASON_ALTGR: &str = "altgr";
+/// macOS: Option with this key types a character in the current layout.
+pub const REASON_COMPOSES: &str = "composes";
+
+/// Does `reason` mean the combination cannot work — as opposed to working and costing the
+/// user a character their layout types with it? A tap works: as the capture it is.
+pub fn reason_blocks(reason: &str) -> bool {
+    matches!(reason, REASON_PARSE | REASON_RESERVED | REASON_VOICEOVER | REASON_NO_KEYCODE)
+}
+
+/// Does `host.hotkey.register` raise for a spec `check` gives this reason? Every reason that
+/// makes a registration impossible rather than merely costly: VoiceOver's layer is not one of
+/// them, because a Mac whose VoiceOver modifier is Caps Lock, or that runs no VoiceOver, gets
+/// the key. The overlay runtime skips its control hotkeys by the same list.
+pub fn reason_refuses_hotkey(reason: &str) -> bool {
+    matches!(reason, REASON_PARSE | REASON_RESERVED | REASON_NO_KEYCODE | REASON_TAP)
+}
+
+/// Why `os` keeps `(vk, mask)` for itself, or `None` when it does not. Exact matches: the
+/// modifier state has to be the one listed. The masks are roles, so the macOS entries are
+/// written with the keys they are there.
+///
+/// - Windows, from the `RegisterHotKey` documentation: F12 is kept for the debugger even when
+///   none is running, and Win+L locks the computer before any application sees it.
+/// - macOS: Command+F5 turns VoiceOver on and off, Option+Command+F5 opens the Accessibility
+///   Shortcuts panel — the two a blind user can least afford to lose — and the system chords
+///   that have no Windows counterpart a module could be expected to know about. Carbon would
+///   register the application-menu ones (Command+H, +M, +Q) system-wide, taking hide,
+///   minimise and quit away from every application for as long as the hotkey is held. In a
+///   spec Command is `Ctrl` (or `Cmd`), so `"Ctrl+Q"` is refused there.
+pub fn reserved_for(os: KeyOs, vk: u32, mask: u8) -> Option<&'static str> {
+    // The Mac keys, as the roles they are.
+    const CMD: u8 = MASK_CTRL;
+    const OPT: u8 = MASK_ALT;
+    const CTL: u8 = MASK_WIN;
+    const SHF: u8 = MASK_SHIFT;
+    const WINDOWS: &[(u32, u8, &str)] = &[
+        (0x7B, 0, "F12 is kept for the debugger, even when none is running"),
+        (0x4C, MASK_WIN, "Win+L locks the computer"),
+    ];
+    const MACOS: &[(u32, u8, &str)] = &[
+        (0x74, CMD, "Command+F5 turns VoiceOver on and off"),
+        (0x74, CMD | OPT, "Option+Command+F5 opens the Accessibility Shortcuts panel"),
+        (0x09, CMD, "Command+Tab is the application switcher"),
+        (0x09, CMD | SHF, "Shift+Command+Tab is the application switcher"),
+        // The grammar cannot name the grave key today; listed so the day it can, this holds.
+        (0xC0, CMD, "Command+` moves between the windows of the application in front"),
+        (0x20, CMD, "Command+Space is Spotlight"),
+        (0x48, CMD, "Command+H hides the application in front"),
+        (0x4D, CMD, "Command+M minimises the window in front"),
+        (0x51, CMD, "Command+Q quits the application in front"),
+        (0x51, CMD | SHF, "Shift+Command+Q logs out"),
+        (0x51, CMD | CTL, "Control+Command+Q locks the screen"),
+        (0x1B, CMD | OPT, "Option+Command+Escape opens Force Quit"),
+        (0x33, CMD | SHF, "Shift+Command+3 takes a screenshot"),
+        (0x34, CMD | SHF, "Shift+Command+4 takes a screenshot"),
+        (0x35, CMD | SHF, "Shift+Command+5 opens the screenshot tools"),
+    ];
+    let table = match os {
+        KeyOs::Windows => WINDOWS,
+        KeyOs::Macos => MACOS,
+        KeyOs::Linux => return None,
+    };
+    table.iter().find(|(v, m, _)| *v == vk && *m == mask).map(|(_, _, why)| *why)
+}
+
+/// Does macOS have a key code for this virtual key? Everything [`key_to_vk`] produces except
+/// F21–F24; `macos/keys.rs` checks this against its table. A letter always has one here: which
+/// key types it is the keyboard layout's answer, which can change while the application runs,
+/// so a hotkey on a letter no key of the current layout types is accepted and parked by the
+/// macOS backend until a layout that types it is selected, not refused as `no-keycode`.
+pub fn has_mac_keycode(vk: u32) -> bool {
+    !(0x84..=0x87).contains(&vk)
+}
+
+/// Would this combination type a character, so that holding it takes that character from the
+/// user? The one shape per platform where the answer can be yes, and the reason it would be:
+/// Ctrl+Alt without Win on Windows, which is AltGr there; Option without Control or Command on
+/// macOS — the Alt role without the Win or Ctrl role — which composes. The keyboard layout is
+/// asked only then.
+pub fn layout_question(os: KeyOs, mask: u8) -> Option<&'static str> {
+    if mask & MASK_TAP != 0 {
+        return None;
+    }
+    match os {
+        KeyOs::Windows => (mask & (MASK_CTRL | MASK_ALT) == MASK_CTRL | MASK_ALT
+            && mask & MASK_WIN == 0)
+            .then_some(REASON_ALTGR),
+        KeyOs::Macos => {
+            (mask & MASK_ALT != 0 && mask & (MASK_CTRL | MASK_WIN) == 0).then_some(REASON_COMPOSES)
+        }
+        KeyOs::Linux => None,
+    }
+}
+
+/// What `host.keys.check` answers.
+#[derive(Debug, Default, PartialEq)]
+pub struct KeyCheck {
+    /// The canonical spec ([`spec_name_for`]), `None` when it did not parse.
+    pub resolved: Option<String>,
+    pub reasons: Vec<&'static str>,
+    /// For `altgr` / `composes`: what the layout types with it.
+    pub produces: Option<String>,
+    /// And whether that is a dead key, waiting for the next keystroke to combine with.
+    pub dead_key: bool,
+}
+
+impl KeyCheck {
+    /// No reason that stops the combination working. `altgr` and `composes` do not: the key
+    /// fires, and the character is what it costs.
+    pub fn ok(&self) -> bool {
+        !self.reasons.iter().any(|r| reason_blocks(r))
+    }
+}
+
+/// [`KeyCheck`] for `spec` on `os`. `layout` answers the one question that needs the running
+/// system — what the current keyboard layout types for `(vk, mask)`, and whether it is a dead
+/// key — and is asked only when [`layout_question`] says the answer can matter.
+pub fn check_spec_for(
+    os: KeyOs,
+    spec: &str,
+    layout: impl FnOnce(u32, u8) -> Option<(String, bool)>,
+) -> KeyCheck {
+    let Some((vk, mask)) = key_spec(spec) else {
+        return KeyCheck { reasons: vec![REASON_PARSE], ..KeyCheck::default() };
+    };
+    let mut check = KeyCheck { resolved: Some(spec_name_for(os, vk, mask)), ..KeyCheck::default() };
+    if mask & MASK_TAP != 0 {
+        check.reasons.push(REASON_TAP);
+    }
+    if reserved_for(os, vk, mask).is_some() {
+        check.reasons.push(REASON_RESERVED);
+    }
+    if os == KeyOs::Macos {
+        // The whole layer, not a list: VoiceOver's default modifier is the pair, and every
+        // chord that holds both is VoiceOver's before it is anybody else's. Structural, so it
+        // is said whether or not VoiceOver is running on the machine that asks — the module is
+        // written for the machines where it is. In a spec the pair is Win+Alt.
+        if mask & MAC_VOICEOVER_LAYER == MAC_VOICEOVER_LAYER {
+            check.reasons.push(REASON_VOICEOVER);
+        }
+        if !has_mac_keycode(vk) {
+            check.reasons.push(REASON_NO_KEYCODE);
+        }
+    }
+    if let Some(reason) = layout_question(os, mask) {
+        if let Some((text, dead)) = layout(vk, mask) {
+            check.reasons.push(reason);
+            check.produces = Some(text);
+            check.dead_key = dead;
+        }
+    }
+    check
+}
+
+/// Why `host.hotkey.register` refuses `spec` on `os`, or `None` when it does not. `None` for a
+/// spec that does not parse, too: the parser's own error is the one to raise for that.
+///
+/// Everything the operating system can never hold is refused here, when the module asks, with
+/// the reason — a tap, a key the platform has no code for, a combination the system keeps. Left
+/// to the claim, each of these failed inside `refresh_hotkeys` instead, and reached the user as
+/// the "Binding unavailable" dialog, which blames another application that uses the key. The
+/// [`reason_refuses_hotkey`] reasons of [`check_spec_for`], and derived from them, so the two
+/// cannot say different things.
+pub fn hotkey_refusal_for(os: KeyOs, spec: &str) -> Option<String> {
+    let (vk, mask) = key_spec(spec)?;
+    let check = check_spec_for(os, spec, |_, _| None);
+    let reason = check.reasons.iter().copied().find(|r| reason_refuses_hotkey(r))?;
+    let shown = describe_key_for(os, vk, mask, KeyStyle::Short);
+    Some(match reason {
+        REASON_TAP => format!(
+            "the hotkey '{spec}' ({shown}) is a modifier pressed on its own, which cannot be a \
+             global hotkey: capture it with host.keys.capture instead"
+        ),
+        REASON_NO_KEYCODE => format!(
+            "the hotkey '{spec}' ({shown}) cannot be registered: macOS has no key code for {}. \
+             Choose another key",
+            key_word(os, vk, Some(KeyStyle::Short))
+        ),
+        _ => format!(
+            "the hotkey '{spec}' ({shown}) is kept by the system and cannot be registered: {}. \
+             Choose another combination",
+            reserved_for(os, vk, mask).unwrap_or("the system uses it")
+        ),
+    })
+}
+
+/// What `host.hotkey.register` claims for `spec` on `os`: its `(vk, mask)`, and the spelling the
+/// claim is recorded, logged and handed to the backend under — the canonical one
+/// ([`spec_name_for`]), or the author's own for a spec that does not parse, which the backend
+/// then refuses with the parser's error. `Err`, with the message the binding raises, for
+/// everything [`hotkey_refusal_for`] refuses: then there is nothing to record and nothing to
+/// register, so a refused spec reaches neither the backend nor, on Windows, the keyboard
+/// hook's table. One function, so that "refused before anything is registered" is its order
+/// and not a convention of the binding's.
+pub fn hotkey_claim_for(os: KeyOs, spec: &str) -> Result<(Option<(u32, u8)>, String), String> {
+    if let Some(why) = hotkey_refusal_for(os, spec) {
+        return Err(why);
+    }
+    let binding = key_spec(spec);
+    let spelled =
+        binding.map_or_else(|| spec.to_string(), |(vk, mask)| spec_name_for(os, vk, mask));
+    Ok((binding, spelled))
 }
 
 /// Warms up the secondary OCR engine (loads its model off the hot path) so the
@@ -900,4 +1448,722 @@ pub fn platform() -> Rc<dyn Backend> {
     #[cfg(not(any(windows, target_os = "macos")))]
     let backend: Rc<dyn Backend> = Rc::new(stub::StubBackend);
     backend
+}
+
+#[cfg(test)]
+mod key_grammar_tests {
+    use super::*;
+    use KeyOs::{Linux, Macos, Windows};
+
+    const ALL: [KeyOs; 3] = [Windows, Macos, Linux];
+
+    /// Every spelling names one role, on every platform: the parse has no platform in it.
+    #[test]
+    fn every_spelling_names_its_role() {
+        for (names, bit) in [
+            (&["Ctrl", "Control", "Cmd", "Command", "ctrl", "CONTROL", " cmd "][..], MASK_CTRL),
+            (&["Alt", "Option", "alt", "OPTION"][..], MASK_ALT),
+            (&["Win", "Super", "Meta", "win", "META"][..], MASK_WIN),
+            (&["Shift", "SHIFT"][..], MASK_SHIFT),
+        ] {
+            for name in names {
+                assert_eq!(modifier_mask(name), Some(bit), "{name}");
+                assert_eq!(key_spec(&format!("{name}+X")), Some((0x58, bit)), "{name}+X");
+            }
+        }
+        assert_eq!(key_spec("Cmd+S"), key_spec("Ctrl+S"));
+        assert_eq!(key_spec("Command+S"), key_spec("Control+S"));
+        assert_eq!(key_spec("Meta+S"), key_spec("Win+S"));
+        assert_eq!(key_spec("Super+S"), key_spec("Win+S"));
+        assert_eq!(key_spec("Option+S"), key_spec("Alt+S"));
+        assert_eq!(key_spec("Shift+Tab"), Some((0x09, MASK_SHIFT)));
+        assert_eq!(key_spec("Ctrl+Alt+Shift+Win+X"), Some((0x58, 0x0F)));
+    }
+
+    /// A spec that spells the Ctrl role both ways names two keys to its author, and would be one
+    /// key under the roles: `"Control+Command+F"` would be Command+F (Find) on a Mac rather than
+    /// Control-Command-F, and `"Control+Command+Q"` refused as if it were Command+Q. Refused as a
+    /// parse error instead, naming the Mac's word for the Control key. One family repeated is
+    /// still one key.
+    #[test]
+    fn the_ctrl_role_spelled_both_ways_is_refused() {
+        for spec in [
+            "Control+Command+F",
+            "Ctrl+Cmd+F",
+            "cmd + ctrl + F",
+            "Command+Shift+Control+F6",
+            "Control+Command+Q",
+        ] {
+            let e = parse_key_spec(spec).unwrap_err();
+            assert!(e.contains("both the Ctrl role") && e.contains("'Meta'"), "{spec}: {e}");
+            for os in ALL {
+                assert_eq!(normalize_spec_for(os, spec), None, "{spec}");
+                assert_eq!(check_spec_for(os, spec, |_, _| None).reasons, vec![REASON_PARSE]);
+            }
+        }
+        let e = parse_key_spec("Control+Command+F").unwrap_err();
+        assert!(e.starts_with("'Control' and 'Command' in 'Control+Command+F'"), "{e}");
+        for (spec, same) in [
+            ("Ctrl+Control+S", "Ctrl+S"),
+            ("Cmd+Command+S", "Ctrl+S"),
+            ("Alt+Option+S", "Alt+S"),
+            ("Win+Meta+S", "Win+S"),
+            ("Meta+Command+F", "Ctrl+Win+F"),
+        ] {
+            assert_eq!(key_spec(spec), key_spec(same), "{spec}");
+        }
+    }
+
+    /// The tokens of 2026-09-21 are gone: they are unknown modifiers like any other word.
+    #[test]
+    fn mod_and_global_are_not_modifiers_any_more() {
+        for word in ["Mod", "Global", "mod", "GLOBAL", "Hyper"] {
+            assert_eq!(modifier_mask(word), None, "{word}");
+            let e = parse_key_spec(&format!("{word}+F6")).unwrap_err();
+            assert!(e.contains(&format!("unknown modifier '{word}'")), "{e}");
+            let e = parse_key_spec(&format!("{word} tap")).unwrap_err();
+            assert!(e.contains(&format!("unknown key '{word}'")), "{e}");
+            for os in ALL {
+                let spec = format!("{word}+S");
+                assert_eq!(normalize_spec_for(os, &spec), None);
+                assert_eq!(describe_spec_for(os, &spec, KeyStyle::Spoken), None);
+                assert_eq!(check_spec_for(os, &spec, |_, _| None).reasons, vec![REASON_PARSE]);
+                // The backend's parser raises for it; the claim keeps the author's spelling.
+                assert_eq!(hotkey_claim_for(os, &spec), Ok((None, spec.clone())));
+            }
+        }
+    }
+
+    /// The role table: which key each role is, per platform — the Qt convention on a Mac.
+    #[test]
+    fn the_role_table_per_platform() {
+        let table = |os| {
+            role_words(os).iter().map(|w| (w.role, w.spec, w.spoken, w.short)).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            table(Windows),
+            vec![
+                (MASK_CTRL, "Ctrl", "Control", "Ctrl"),
+                (MASK_ALT, "Alt", "Alt", "Alt"),
+                (MASK_SHIFT, "Shift", "Shift", "Shift"),
+                (MASK_WIN, "Win", "Windows", "Win"),
+            ]
+        );
+        assert_eq!(
+            table(Macos),
+            vec![
+                (MASK_WIN, "Meta", "Control", "Control"),
+                (MASK_ALT, "Option", "Option", "Option"),
+                (MASK_SHIFT, "Shift", "Shift", "Shift"),
+                (MASK_CTRL, "Cmd", "Command", "Cmd"),
+            ]
+        );
+        assert_eq!(
+            table(Linux),
+            vec![
+                (MASK_CTRL, "Ctrl", "Control", "Ctrl"),
+                (MASK_ALT, "Alt", "Alt", "Alt"),
+                (MASK_SHIFT, "Shift", "Shift", "Shift"),
+                (MASK_WIN, "Win", "Super", "Super"),
+            ]
+        );
+        for os in ALL {
+            let mut roles: Vec<u8> = role_words(os).iter().map(|w| w.role).collect();
+            roles.sort_unstable();
+            assert_eq!(roles, vec![MASK_SHIFT, MASK_CTRL, MASK_ALT, MASK_WIN], "{os:?}: each role once");
+            for w in role_words(os) {
+                assert_eq!(modifier_mask(w.spec), Some(w.role), "{os:?}: '{}' reads back", w.spec);
+            }
+        }
+    }
+
+    /// What a Mac makes of the roles, key by key.
+    #[test]
+    fn on_a_mac_ctrl_is_command_and_win_is_control() {
+        let d = |s| describe_spec_for(Macos, s, KeyStyle::Spoken).unwrap();
+        assert_eq!(d("Ctrl+C"), "Command+C");
+        assert_eq!(d("Control+C"), "Command+C");
+        assert_eq!(d("Cmd+C"), "Command+C");
+        assert_eq!(d("Win+C"), "Control+C");
+        assert_eq!(d("Meta+C"), "Control+C");
+        assert_eq!(d("Super+C"), "Control+C");
+        assert_eq!(d("Alt+C"), "Option+C");
+        assert_eq!(d("Meta+Alt+Right"), "Control+Option+Right Arrow");
+        assert_eq!(d("Ctrl+Alt+Shift+Win+X"), "Control+Option+Shift+Command+X");
+    }
+
+    /// The runtime's calibration keys: Ctrl+Alt+Shift on Windows as they always were, and
+    /// Command+Option+Shift on a Mac — off VoiceOver's layer, which is Control+Option.
+    #[test]
+    fn the_calibration_keys_are_command_option_shift_on_a_mac() {
+        for k in ["S", "T", "V"] {
+            let spec = format!("Ctrl+Alt+Shift+{k}");
+            let (_, mask) = key_spec(&spec).unwrap();
+            assert_eq!(mask, MASK_CTRL | MASK_ALT | MASK_SHIFT);
+            assert_eq!(
+                describe_spec_for(Windows, &spec, KeyStyle::Spoken).unwrap(),
+                format!("Control+Alt+Shift+{k}")
+            );
+            assert_eq!(
+                describe_spec_for(Macos, &spec, KeyStyle::Spoken).unwrap(),
+                format!("Option+Shift+Command+{k}")
+            );
+            let c = check_spec_for(Macos, &spec, |_, _| None);
+            assert!(c.ok() && c.reasons.is_empty(), "{spec} on a Mac: {:?}", c.reasons);
+        }
+    }
+
+    /// A tap is one role pressed on its own; on a Mac "Ctrl tap" is a Command tap.
+    #[test]
+    fn taps_take_one_role() {
+        for (specs, vk) in [
+            (&["Ctrl tap", "Control tap", "Cmd tap", "Command Tap"][..], 0x11),
+            (&["Alt tap", "Option tap"][..], 0x12),
+            (&["Win tap", "Super tap", "Meta tap"][..], 0x5B),
+            (&["Shift tap"][..], 0x10),
+        ] {
+            for s in specs {
+                assert_eq!(key_spec(s), Some((vk, MASK_TAP)), "{s}");
+            }
+        }
+        let d = |os, s| describe_spec_for(os, s, KeyStyle::Spoken).unwrap();
+        assert_eq!(d(Windows, "Ctrl tap"), "Control pressed on its own");
+        assert_eq!(d(Macos, "Ctrl tap"), "Command pressed on its own");
+        assert_eq!(d(Macos, "Win tap"), "Control pressed on its own");
+        assert_eq!(d(Macos, "Alt tap"), "Option pressed on its own");
+        assert_eq!(d(Linux, "Win tap"), "Super pressed on its own");
+        let n = |os, s| normalize_spec_for(os, s).unwrap();
+        assert_eq!(n(Windows, "Cmd tap"), "Ctrl tap");
+        assert_eq!(n(Macos, "Ctrl tap"), "Cmd tap");
+        assert_eq!(n(Macos, "Win tap"), "Meta tap");
+        assert_eq!(n(Macos, "Alt tap"), "Option tap");
+    }
+
+    /// The part that did not parse is named, because the message reaches the module author.
+    #[test]
+    fn a_spec_that_does_not_parse_says_which_part() {
+        let e = parse_key_spec("Hyper+F6").unwrap_err();
+        assert!(e.contains("unknown modifier 'Hyper'"), "{e}");
+        let e = parse_key_spec("Ctrl+Foo").unwrap_err();
+        assert!(e.contains("unknown key 'Foo'"), "{e}");
+        assert!(parse_key_spec("").unwrap_err().contains("empty"));
+        assert!(parse_key_spec("+ +").unwrap_err().contains("empty"));
+        // A modifier on its own is not a key, outside the tap form.
+        assert!(key_spec("Alt").is_none());
+        assert!(key_spec("Ctrl+Cmd").is_none());
+    }
+
+    #[test]
+    fn normalize_is_one_spelling_per_key() {
+        let n = |os, s| normalize_spec_for(os, s);
+        assert_eq!(n(Windows, "ctrl + s").as_deref(), Some("Ctrl+S"));
+        assert_eq!(n(Windows, "Control+S").as_deref(), Some("Ctrl+S"));
+        assert_eq!(n(Windows, "Cmd+S").as_deref(), Some("Ctrl+S"));
+        assert_eq!(n(Windows, "Meta+X").as_deref(), Some("Win+X"));
+        assert_eq!(n(Windows, "Ctrl+Shift+Win+Alt+F6").as_deref(), Some("Ctrl+Alt+Shift+Win+F6"));
+        assert_eq!(n(Windows, "Option+P").as_deref(), Some("Alt+P"));
+        assert_eq!(n(Windows, "shift+tab").as_deref(), Some("Shift+Tab"));
+        assert_eq!(n(Windows, "Ctrl+enter").as_deref(), Some("Ctrl+Return"));
+        assert_eq!(n(Windows, "Alt+Shift+Ctrl+Win+x").as_deref(), Some("Ctrl+Alt+Shift+Win+X"));
+        assert_eq!(n(Windows, "Hyper+X"), None);
+
+        assert_eq!(n(Macos, "Ctrl+S").as_deref(), Some("Cmd+S"));
+        assert_eq!(n(Macos, "Control+S").as_deref(), Some("Cmd+S"));
+        assert_eq!(n(Macos, "Win+X").as_deref(), Some("Meta+X"));
+        assert_eq!(n(Macos, "Cmd+Shift+F6").as_deref(), Some("Shift+Cmd+F6"));
+        assert_eq!(n(Macos, "Alt+P").as_deref(), Some("Option+P"));
+        assert_eq!(n(Macos, "Alt+Shift+Ctrl+Win+x").as_deref(), Some("Meta+Option+Shift+Cmd+X"));
+        assert_eq!(n(Linux, "Win+E").as_deref(), Some("Win+E"));
+
+        // What the runtime keys its claim maps by: one key, however it is written, and the same
+        // one on every platform.
+        for os in ALL {
+            assert_eq!(n(os, "Cmd+S"), n(os, "Ctrl+S"), "{os:?}");
+            assert_eq!(n(os, "Option+P"), n(os, "Alt+P"), "{os:?}");
+            assert_ne!(n(os, "Win+S"), n(os, "Ctrl+S"), "{os:?}");
+        }
+    }
+
+    /// The canonical spelling reads back as the same key and is its own canonical spelling, for
+    /// every key name and every modifier word the grammar has, on every platform — and one
+    /// platform's spelling reads back as the same key on every other.
+    #[test]
+    fn normalize_round_trips() {
+        let mut keys: Vec<String> = ('A'..='Z').map(String::from).collect();
+        keys.extend(('0'..='9').map(String::from));
+        keys.extend((1..=24).map(|n| format!("F{n}")));
+        for k in [
+            "Space", "Enter", "Return", "Esc", "Escape", "Tab", "Backspace", "Delete", "Del", "Up",
+            "Down", "Left", "Right", "Home", "End", "PageUp", "PageDown",
+        ] {
+            keys.push(k.to_string());
+        }
+        let mods = [
+            "", "Ctrl+", "Control+", "Cmd+", "Command+", "Alt+", "Option+", "Shift+", "Win+",
+            "Super+", "Meta+", "Ctrl+Alt+Shift+Win+", "Meta+Alt+", "Cmd+Shift+",
+        ];
+        for os in ALL {
+            for m in mods {
+                for k in &keys {
+                    let spec = format!("{m}{k}");
+                    let n = normalize_spec_for(os, &spec).unwrap_or_else(|| panic!("{spec} lost"));
+                    assert_eq!(key_spec(&n), key_spec(&spec), "{os:?} {spec} -> {n}");
+                    assert_eq!(normalize_spec_for(os, &n).as_deref(), Some(n.as_str()), "{os:?} {n}");
+                    for other in ALL {
+                        let theirs = normalize_spec_for(other, &n).unwrap();
+                        assert_eq!(key_spec(&theirs), key_spec(&spec), "{os:?} {n} on {other:?}");
+                    }
+                }
+            }
+            for tap in [
+                "Alt tap", "Ctrl tap", "Shift tap", "Win tap", "Cmd tap", "Meta tap", "Option tap",
+            ] {
+                let n = normalize_spec_for(os, tap).unwrap();
+                assert_eq!(key_spec(&n), key_spec(tap), "{os:?} {tap} -> {n}");
+            }
+        }
+    }
+
+    #[test]
+    fn describe_says_each_platform_in_its_own_words() {
+        use KeyStyle::{Short, Spoken};
+        let d = |os, s, st| describe_spec_for(os, s, st).unwrap();
+        assert_eq!(d(Windows, "Ctrl+Shift+F9", Spoken), "Control+Shift+F9");
+        assert_eq!(d(Macos, "Ctrl+Shift+F9", Spoken), "Shift+Command+F9");
+        assert_eq!(d(Macos, "Ctrl+Shift+F9", Short), "Shift+Cmd+F9");
+        assert_eq!(d(Windows, "Ctrl+Shift+Win+Alt+F5", Spoken), "Control+Alt+Shift+Windows+F5");
+        assert_eq!(d(Windows, "Ctrl+Shift+Win+Alt+F5", Short), "Ctrl+Alt+Shift+Win+F5");
+        assert_eq!(d(Macos, "Cmd+Shift+F5", Short), "Shift+Cmd+F5");
+        assert_eq!(d(Macos, "Cmd+Shift+F5", Spoken), "Shift+Command+F5");
+        assert_eq!(d(Macos, "Ctrl+Shift+Win+Alt+F6", Spoken), "Control+Option+Shift+Command+F6");
+        assert_eq!(d(Macos, "Ctrl+Shift+Win+Alt+F6", Short), "Control+Option+Shift+Cmd+F6");
+        assert_eq!(d(Macos, "Meta+Tab", Spoken), "Control+Tab");
+        assert_eq!(d(Macos, "Win+X", Short), "Control+X");
+        assert_eq!(d(Macos, "Alt+V", Spoken), "Option+V");
+        assert_eq!(d(Windows, "Alt+V", Spoken), "Alt+V");
+        assert_eq!(d(Windows, "Win+E", Spoken), "Windows+E");
+        assert_eq!(d(Windows, "Win+E", Short), "Win+E");
+        assert_eq!(d(Linux, "Win+E", Spoken), "Super+E");
+        assert_eq!(d(Linux, "Win+E", Short), "Super+E");
+        // The two keys that swap names on a Mac, and Return.
+        assert_eq!(d(Macos, "Backspace", Spoken), "Delete");
+        assert_eq!(d(Macos, "Delete", Spoken), "Forward Delete");
+        assert_eq!(d(Windows, "Backspace", Spoken), "Backspace");
+        assert_eq!(d(Windows, "Del", Spoken), "Delete");
+        assert_eq!(d(Windows, "Return", Spoken), "Enter");
+        assert_eq!(d(Macos, "Enter", Spoken), "Return");
+        assert_eq!(d(Windows, "Shift+Up", Spoken), "Shift+Up Arrow");
+        assert_eq!(d(Windows, "Shift+Up", Short), "Shift+Up");
+        assert_eq!(d(Windows, "Esc", Short), "Esc");
+        assert_eq!(d(Windows, "Esc", Spoken), "Escape");
+        assert_eq!(d(Windows, "PageDown", Spoken), "Page Down");
+        assert_eq!(d(Windows, "Alt tap", Spoken), "Alt pressed on its own");
+        assert_eq!(d(Macos, "Alt tap", Spoken), "Option pressed on its own");
+        assert_eq!(d(Macos, "Cmd tap", Short), "Cmd tap");
+        assert_eq!(d(Macos, "Meta tap", Short), "Control tap");
+        assert_eq!(describe_spec_for(Windows, "Hyper+X", Spoken), None);
+    }
+
+    /// The reserved lists, in role terms: on a Mac Command is `Ctrl` (or `Cmd`) in a spec and
+    /// Control is `Win` (or `Meta`), so `"Ctrl+Q"` is Command+Q there and `"Win+Q"` is not.
+    #[test]
+    fn the_system_keeps_what_it_keeps_and_nothing_near_it() {
+        let reserved = |os, s: &str| {
+            let (vk, mask) = key_spec(s).unwrap();
+            reserved_for(os, vk, mask).is_some()
+        };
+        assert!(reserved(Windows, "F12"));
+        assert!(!reserved(Windows, "Shift+F12"));
+        assert!(!reserved(Windows, "Ctrl+F12"));
+        assert!(reserved(Windows, "Win+L"));
+        assert!(reserved(Windows, "Meta+L"), "Meta is the Win role on Windows too");
+        assert!(!reserved(Windows, "Win+Shift+L"));
+        for s in ["Ctrl+H", "Ctrl+Q", "Ctrl+Tab", "Ctrl+Space", "Ctrl+F5", "Ctrl+Alt+F5", "Cmd+L"] {
+            assert!(!reserved(Windows, s), "{s} is nobody's on Windows");
+        }
+        for s in [
+            "Ctrl+F5", "Cmd+F5", "Ctrl+Alt+F5", "Cmd+Option+F5", "Ctrl+Tab", "Ctrl+Shift+Tab",
+            "Ctrl+Space", "Ctrl+H", "Ctrl+M", "Ctrl+Q", "Command+Q", "Ctrl+Shift+Q", "Ctrl+Win+Q",
+            "Cmd+Meta+Q", "Ctrl+Alt+Esc", "Ctrl+Shift+3", "Ctrl+Shift+4", "Ctrl+Shift+5",
+        ] {
+            assert!(reserved(Macos, s), "{s} on a Mac");
+        }
+        for s in [
+            "F5", "Ctrl+Shift+F5", "Win+F5", "Meta+Alt+F5", "Win+Q", "Win+Tab", "Meta+Tab",
+            "Meta+Space", "Win+H", "Option+H", "Ctrl+Shift+6", "Ctrl+W", "Ctrl+L", "Alt+Q",
+        ] {
+            assert!(!reserved(Macos, s), "{s} on a Mac");
+        }
+        assert!(!reserved(Macos, "F12"), "F12 is the debugger's on Windows only");
+        assert!(!reserved(Macos, "Win+L"), "Control+L on a Mac");
+        for s in ["F12", "Win+L", "Ctrl+Q", "Cmd+Q"] {
+            assert!(!reserved(Linux, s));
+        }
+    }
+
+    /// `check`'s structural reasons, per platform, in role terms: VoiceOver's Control+Option is
+    /// Win+Alt in a spec, and Ctrl+Alt is Command+Option on a Mac, which is off it.
+    #[test]
+    fn check_names_the_structure_and_not_a_list() {
+        let none = |_: u32, _: u8| -> Option<(String, bool)> { None };
+        for spec in ["Win+Alt+X", "Meta+Option+X", "Super+Alt+X", "Ctrl+Shift+Win+Alt+F6"] {
+            let c = check_spec_for(Macos, spec, none);
+            assert_eq!(c.reasons, vec![REASON_VOICEOVER], "{spec}");
+            assert!(!c.ok(), "{spec}");
+            assert!(check_spec_for(Windows, spec, none).ok(), "{spec} on Windows");
+        }
+        assert_eq!(check_spec_for(Macos, "Win+Alt+X", none).resolved.as_deref(), Some("Meta+Option+X"));
+        for spec in ["Ctrl+Alt+X", "Cmd+Option+X", "Ctrl+Alt+Shift+S", "Cmd+Shift+F6", "Win+X", "Alt+X"] {
+            assert!(check_spec_for(Macos, spec, none).reasons.is_empty(), "{spec} on a Mac");
+        }
+        assert_eq!(check_spec_for(Macos, "F21", none).reasons, vec![REASON_NO_KEYCODE]);
+        assert!(check_spec_for(Windows, "F21", none).ok());
+        let c = check_spec_for(Windows, "F12", none);
+        assert_eq!(c.reasons, vec![REASON_RESERVED]);
+        assert!(!c.ok());
+        let c = check_spec_for(Macos, "Ctrl+Q", none);
+        assert_eq!(c.reasons, vec![REASON_RESERVED]);
+        assert_eq!(c.resolved.as_deref(), Some("Cmd+Q"));
+        let c = check_spec_for(Windows, "Hyper+X", none);
+        assert_eq!(c.reasons, vec![REASON_PARSE]);
+        assert_eq!(c.resolved, None);
+        assert!(!c.ok());
+        // A tap works — as the capture it is — and is said, because no hotkey can be one.
+        for os in ALL {
+            let c = check_spec_for(os, "Alt tap", |_, _| panic!("a tap types nothing"));
+            assert_eq!(c.reasons, vec![REASON_TAP], "{os:?}");
+            assert!(c.ok(), "{os:?}");
+        }
+    }
+
+    /// The layout is asked only where the answer can matter, and what it says is informational.
+    #[test]
+    fn check_asks_the_layout_only_for_altgr_and_option() {
+        let never = |_: u32, _: u8| -> Option<(String, bool)> { panic!("the layout was asked") };
+        let at = |_: u32, _: u8| Some(("@".to_string(), false));
+        let c = check_spec_for(Windows, "Ctrl+Alt+Q", at);
+        assert_eq!(c.reasons, vec![REASON_ALTGR]);
+        assert_eq!(c.produces.as_deref(), Some("@"));
+        assert!(c.ok(), "AltGr costs a character; the key still fires");
+        assert!(check_spec_for(Windows, "Ctrl+Alt+Q", |_, _| None).reasons.is_empty());
+        check_spec_for(Windows, "Ctrl+Alt+Win+Q", never);
+        check_spec_for(Windows, "Ctrl+Shift+Win+Alt+F6", never);
+        check_spec_for(Windows, "Alt+Q", never);
+        let c = check_spec_for(Macos, "Alt+E", |vk, mask| {
+            assert_eq!((vk, mask), (0x45, MASK_ALT));
+            Some(("\u{b4}".to_string(), true))
+        });
+        assert_eq!(c.reasons, vec![REASON_COMPOSES]);
+        assert!(c.dead_key);
+        assert!(c.ok());
+        check_spec_for(Macos, "Alt+Shift+E", |vk, mask| {
+            assert_eq!((vk, mask), (0x45, MASK_ALT | MASK_SHIFT));
+            None
+        });
+        // Option with Command (Ctrl) or with Control (Win) is a shortcut, not a character.
+        check_spec_for(Macos, "Ctrl+Alt+E", never);
+        check_spec_for(Macos, "Cmd+Alt+E", never);
+        check_spec_for(Macos, "Win+Alt+E", never);
+        check_spec_for(Linux, "Ctrl+Alt+Q", never);
+    }
+
+    /// What no operating system can hold is refused when the module asks, with the reason —
+    /// not left to the claim, where it used to end in a dialog blaming another application.
+    #[test]
+    fn register_refuses_what_can_never_be_held() {
+        let why = hotkey_refusal_for(Windows, "F12").unwrap();
+        assert!(why.contains("'F12'") && why.contains("debugger"), "{why}");
+        let why = hotkey_refusal_for(Macos, "Ctrl+Q").unwrap();
+        assert!(why.contains("'Ctrl+Q' (Cmd+Q)") && why.contains("quits"), "{why}");
+        assert_eq!(hotkey_refusal_for(Windows, "Ctrl+Q"), None);
+        assert_eq!(hotkey_refusal_for(Macos, "Win+Q"), None, "Control+Q on a Mac");
+        for os in ALL {
+            let why = hotkey_refusal_for(os, "Alt tap").unwrap();
+            assert!(why.contains("on its own") && why.contains("host.keys.capture"), "{os:?}: {why}");
+        }
+        let why = hotkey_refusal_for(Macos, "Shift+F21").unwrap();
+        assert!(why.contains("no key code for F21"), "{why}");
+        assert_eq!(hotkey_refusal_for(Windows, "F21"), None, "Windows has F21");
+        assert_eq!(hotkey_refusal_for(Windows, "Ctrl+F12"), None);
+        assert_eq!(hotkey_refusal_for(Macos, "Win+Alt+X"), None, "VoiceOver's is said, not refused");
+        assert_eq!(hotkey_refusal_for(Windows, "Hyper+X"), None, "the parser answers that one");
+    }
+
+    /// What `host.hotkey.register` hands on: the canonical spelling for a spec it accepts, the
+    /// author's for one that does not parse (the backend's parser raises for it), and for a
+    /// refused one no spec at all — the refusal is all there is.
+    #[test]
+    fn a_claim_is_the_canonical_spec_and_a_refusal_claims_nothing() {
+        assert_eq!(hotkey_claim_for(Windows, "ctrl+s"), Ok((Some((0x53, MASK_CTRL)), "Ctrl+S".into())));
+        assert_eq!(
+            hotkey_claim_for(Windows, "Ctrl+Shift+Win+Alt+F6"),
+            Ok((Some((0x75, 0x0F)), "Ctrl+Alt+Shift+Win+F6".into()))
+        );
+        assert_eq!(
+            hotkey_claim_for(Macos, "Cmd+Shift+F6"),
+            Ok((Some((0x75, MASK_SHIFT | MASK_CTRL)), "Shift+Cmd+F6".into()))
+        );
+        assert_eq!(hotkey_claim_for(Macos, "Ctrl+S"), Ok((Some((0x53, MASK_CTRL)), "Cmd+S".into())));
+        assert_eq!(hotkey_claim_for(Windows, "Hyper+X"), Ok((None, "Hyper+X".into())));
+        for (os, spec) in [(Windows, "F12"), (Windows, "Win+L"), (Macos, "Ctrl+Q"), (Macos, "F21")] {
+            assert_eq!(hotkey_claim_for(os, spec), Err(hotkey_refusal_for(os, spec).unwrap()));
+        }
+        for os in ALL {
+            assert!(hotkey_claim_for(os, "Alt tap").is_err(), "{os:?}");
+        }
+    }
+
+    /// `register` refuses exactly the specs whose `check` carries a reason
+    /// [`reason_refuses_hotkey`] names — the list the overlay runtime skips its control hotkeys
+    /// by, so a key the runtime asks for is never one the host raises for.
+    #[test]
+    fn check_says_what_register_refuses() {
+        let specs = [
+            "F12", "Win+L", "Ctrl+Q", "Cmd+Q", "Win+Q", "Ctrl+F5", "Cmd+Alt+F5", "Ctrl+Shift+3",
+            "Ctrl+Tab", "Meta+Tab", "Alt tap", "Ctrl tap", "F21", "Ctrl+F24", "Ctrl+Alt+X",
+            "Win+Alt+X", "Ctrl+Alt+Q", "Ctrl+Shift+Win+Alt+F6", "Cmd+Shift+F6", "Ctrl+Shift+F9",
+            "Alt+P", "Tab", "Hyper+X", "Mod+S",
+        ];
+        for os in ALL {
+            for s in specs {
+                let c = check_spec_for(os, s, |_, _| None);
+                let says = c.reasons.iter().any(|r| *r != REASON_PARSE && reason_refuses_hotkey(r));
+                assert_eq!(hotkey_refusal_for(os, s).is_some(), says, "{os:?} {s}: {:?}", c.reasons);
+            }
+        }
+    }
+
+    /// The capture callback's modifier table names the roles: `ctrl` is the Ctrl role — Command
+    /// on a Mac — and `win` the Win role, Control there. (The Mac's flags become that mask in
+    /// `macos/keys.rs`, whose test composes the two.)
+    #[test]
+    fn the_capture_table_is_the_roles() {
+        assert_eq!(
+            capture_mods_fields(MASK_CTRL | MASK_SHIFT),
+            [("shift", true), ("ctrl", true), ("alt", false), ("win", false)]
+        );
+        assert_eq!(
+            capture_mods_fields(MASK_WIN | MASK_ALT),
+            [("shift", false), ("ctrl", false), ("alt", true), ("win", true)]
+        );
+        assert!(capture_mods_fields(0).iter().all(|(_, held)| !held));
+        assert!(capture_mods_fields(MASK_TAP).iter().all(|(_, held)| !held));
+    }
+
+    /// The dialogs name a key by the spec on Windows and Linux, unchanged, and in the Mac's
+    /// spoken words on a Mac, where the spec calls the Control key `Meta`.
+    #[test]
+    fn the_dialogs_say_a_mac_key_in_its_words() {
+        for spec in ["Ctrl+Alt+Shift+Win+F5", "Ctrl+Shift+F9", "Alt+B", "Ctrl+Return", "Mod+S"] {
+            assert_eq!(dialog_key_words_for(Windows, spec), spec);
+            assert_eq!(dialog_key_words_for(Linux, spec), spec);
+        }
+        assert_eq!(dialog_key_words_for(Macos, "Shift+Cmd+F5"), "Shift+Command+F5");
+        assert_eq!(dialog_key_words_for(Macos, "Meta+Shift+F6"), "Control+Shift+F6");
+        assert_eq!(
+            dialog_key_words_for(Macos, "Meta+Option+Shift+Cmd+F8"),
+            "Control+Option+Shift+Command+F8"
+        );
+        assert_eq!(dialog_key_words_for(Macos, "Option+B"), "Option+B");
+        // Not a spec: shown as the module wrote it.
+        assert_eq!(dialog_key_words_for(Macos, "Mod+S"), "Mod+S");
+    }
+
+    /// A capture of a combination macOS keeps is said in the log on a Mac, with the reason;
+    /// nothing is said for a free one, and nothing on Windows, whose hook captures F12 like any
+    /// other key.
+    #[test]
+    fn a_reserved_capture_is_said_on_a_mac_only() {
+        let line = |os, s: &str| {
+            let (vk, mask) = key_spec(s).unwrap();
+            reserved_capture_line(os, vk, mask)
+        };
+        let q = line(Macos, "Ctrl+Q").expect("Command+Q is the system's");
+        assert!(q.contains("'Cmd+Q'") && q.contains("Command+Q quits"), "{q}");
+        let tab = line(Macos, "Ctrl+Tab").expect("Command+Tab is the system's");
+        assert!(tab.contains("'Cmd+Tab'") && tab.contains("application switcher"), "{tab}");
+        for s in ["Meta+Tab", "Meta+Shift+Tab", "Ctrl+1", "Tab", "Ctrl+Alt+Shift+S", "Ctrl+L"] {
+            assert_eq!(line(Macos, s), None, "{s} is free on a Mac");
+        }
+        for s in ["F12", "Win+L", "Ctrl+Q", "Ctrl+Tab"] {
+            assert_eq!(line(Windows, s), None, "{s} on Windows");
+            assert_eq!(line(Linux, s), None, "{s} on Linux");
+        }
+    }
+
+    /// Every key a module or tool asks for reads on Windows exactly as it did before the roles
+    /// (the table is what the host answered for them on 2026-09-22, before the change; the
+    /// tokens' keys under the literal spellings they went back to). Windows is unchanged: its
+    /// roles are its keys.
+    #[test]
+    fn windows_answers_are_unchanged_for_every_shipped_key() {
+        #[rustfmt::skip]
+        const BEFORE: &[(&str, u32, u8, &str, &str, &str, &[&str])] = &[
+        ("1", 0x31, 0, "1", "1", "1", &[]),
+        ("A", 0x41, 0, "A", "A", "A", &[]),
+        ("Alt tap", 0x12, 16, "Alt tap", "Alt pressed on its own", "Alt tap", &["tap"]),
+        ("Alt+1", 0x31, 4, "Alt+1", "Alt+1", "Alt+1", &[]),
+        ("Alt+2", 0x32, 4, "Alt+2", "Alt+2", "Alt+2", &[]),
+        ("Alt+3", 0x33, 4, "Alt+3", "Alt+3", "Alt+3", &[]),
+        ("Alt+8", 0x38, 4, "Alt+8", "Alt+8", "Alt+8", &[]),
+        ("Alt+9", 0x39, 4, "Alt+9", "Alt+9", "Alt+9", &[]),
+        ("Alt+B", 0x42, 4, "Alt+B", "Alt+B", "Alt+B", &[]),
+        ("Alt+C", 0x43, 4, "Alt+C", "Alt+C", "Alt+C", &[]),
+        ("Alt+E", 0x45, 4, "Alt+E", "Alt+E", "Alt+E", &[]),
+        ("Alt+F", 0x46, 4, "Alt+F", "Alt+F", "Alt+F", &[]),
+        ("Alt+H", 0x48, 4, "Alt+H", "Alt+H", "Alt+H", &[]),
+        ("Alt+L", 0x4c, 4, "Alt+L", "Alt+L", "Alt+L", &[]),
+        ("Alt+M", 0x4d, 4, "Alt+M", "Alt+M", "Alt+M", &[]),
+        ("Alt+N", 0x4e, 4, "Alt+N", "Alt+N", "Alt+N", &[]),
+        ("Alt+P", 0x50, 4, "Alt+P", "Alt+P", "Alt+P", &[]),
+        ("Alt+Q", 0x51, 4, "Alt+Q", "Alt+Q", "Alt+Q", &[]),
+        ("Alt+R", 0x52, 4, "Alt+R", "Alt+R", "Alt+R", &[]),
+        ("Alt+S", 0x53, 4, "Alt+S", "Alt+S", "Alt+S", &[]),
+        ("Alt+V", 0x56, 4, "Alt+V", "Alt+V", "Alt+V", &[]),
+        ("Alt+W", 0x57, 4, "Alt+W", "Alt+W", "Alt+W", &[]),
+        ("Alt+X", 0x58, 4, "Alt+X", "Alt+X", "Alt+X", &[]),
+        ("Alt+Y", 0x59, 4, "Alt+Y", "Alt+Y", "Alt+Y", &[]),
+        ("B", 0x42, 0, "B", "B", "B", &[]),
+        ("Control+Alt+H", 0x48, 6, "Ctrl+Alt+H", "Control+Alt+H", "Ctrl+Alt+H", &[]),
+        ("Control+L", 0x4c, 2, "Ctrl+L", "Control+L", "Ctrl+L", &[]),
+        ("Control+Option+H", 0x48, 6, "Ctrl+Alt+H", "Control+Alt+H", "Ctrl+Alt+H", &[]),
+        ("Ctrl tap", 0x11, 16, "Ctrl tap", "Control pressed on its own", "Ctrl tap", &["tap"]),
+        ("Ctrl+1", 0x31, 2, "Ctrl+1", "Control+1", "Ctrl+1", &[]),
+        ("Ctrl+2", 0x32, 2, "Ctrl+2", "Control+2", "Ctrl+2", &[]),
+        ("Ctrl+9", 0x39, 2, "Ctrl+9", "Control+9", "Ctrl+9", &[]),
+        ("Ctrl+Alt+1", 0x31, 6, "Ctrl+Alt+1", "Control+Alt+1", "Ctrl+Alt+1", &[]),
+        ("Ctrl+Alt+3", 0x33, 6, "Ctrl+Alt+3", "Control+Alt+3", "Ctrl+Alt+3", &[]),
+        ("Ctrl+Alt+C", 0x43, 6, "Ctrl+Alt+C", "Control+Alt+C", "Ctrl+Alt+C", &[]),
+        ("Ctrl+Alt+H", 0x48, 6, "Ctrl+Alt+H", "Control+Alt+H", "Ctrl+Alt+H", &[]),
+        ("Ctrl+Alt+I", 0x49, 6, "Ctrl+Alt+I", "Control+Alt+I", "Ctrl+Alt+I", &[]),
+        ("Ctrl+Alt+O", 0x4f, 6, "Ctrl+Alt+O", "Control+Alt+O", "Ctrl+Alt+O", &[]),
+        ("Ctrl+Alt+S", 0x53, 6, "Ctrl+Alt+S", "Control+Alt+S", "Ctrl+Alt+S", &[]),
+        ("Ctrl+Alt+Shift+S", 0x53, 7, "Ctrl+Alt+Shift+S", "Control+Alt+Shift+S", "Ctrl+Alt+Shift+S", &[]),
+        ("Ctrl+Alt+Shift+T", 0x54, 7, "Ctrl+Alt+Shift+T", "Control+Alt+Shift+T", "Ctrl+Alt+Shift+T", &[]),
+        ("Ctrl+Alt+Shift+V", 0x56, 7, "Ctrl+Alt+Shift+V", "Control+Alt+Shift+V", "Ctrl+Alt+Shift+V", &[]),
+        ("Ctrl+Alt+U", 0x55, 6, "Ctrl+Alt+U", "Control+Alt+U", "Ctrl+Alt+U", &[]),
+        ("Ctrl+Alt+Win+F8", 0x77, 14, "Ctrl+Alt+Win+F8", "Control+Alt+Windows+F8", "Ctrl+Alt+Win+F8", &[]),
+        ("Ctrl+L", 0x4c, 2, "Ctrl+L", "Control+L", "Ctrl+L", &[]),
+        ("Ctrl+N", 0x4e, 2, "Ctrl+N", "Control+N", "Ctrl+N", &[]),
+        ("Ctrl+P", 0x50, 2, "Ctrl+P", "Control+P", "Ctrl+P", &[]),
+        ("Ctrl+R", 0x52, 2, "Ctrl+R", "Control+R", "Ctrl+R", &[]),
+        ("Ctrl+S", 0x53, 2, "Ctrl+S", "Control+S", "Ctrl+S", &[]),
+        ("Ctrl+Shift+F10", 0x79, 3, "Ctrl+Shift+F10", "Control+Shift+F10", "Ctrl+Shift+F10", &[]),
+        ("Ctrl+Shift+F11", 0x7a, 3, "Ctrl+Shift+F11", "Control+Shift+F11", "Ctrl+Shift+F11", &[]),
+        ("Ctrl+Shift+F9", 0x78, 3, "Ctrl+Shift+F9", "Control+Shift+F9", "Ctrl+Shift+F9", &[]),
+        ("Ctrl+Shift+N", 0x4e, 3, "Ctrl+Shift+N", "Control+Shift+N", "Ctrl+Shift+N", &[]),
+        ("Ctrl+Shift+P", 0x50, 3, "Ctrl+Shift+P", "Control+Shift+P", "Ctrl+Shift+P", &[]),
+        ("Ctrl+Shift+Tab", 0x09, 3, "Ctrl+Shift+Tab", "Control+Shift+Tab", "Ctrl+Shift+Tab", &[]),
+        ("Ctrl+Shift+Win+Alt+F5", 0x74, 15, "Ctrl+Alt+Shift+Win+F5", "Control+Alt+Shift+Windows+F5", "Ctrl+Alt+Shift+Win+F5", &[]),
+        ("Ctrl+Shift+Win+Alt+F6", 0x75, 15, "Ctrl+Alt+Shift+Win+F6", "Control+Alt+Shift+Windows+F6", "Ctrl+Alt+Shift+Win+F6", &[]),
+        ("Ctrl+Tab", 0x09, 2, "Ctrl+Tab", "Control+Tab", "Ctrl+Tab", &[]),
+        ("Ctrl+U", 0x55, 2, "Ctrl+U", "Control+U", "Ctrl+U", &[]),
+        ("Down", 0x28, 0, "Down", "Down Arrow", "Down", &[]),
+        ("Escape", 0x1b, 0, "Escape", "Escape", "Esc", &[]),
+        ("F1", 0x70, 0, "F1", "F1", "F1", &[]),
+        ("F10", 0x79, 0, "F10", "F10", "F10", &[]),
+        ("F2", 0x71, 0, "F2", "F2", "F2", &[]),
+        ("F3", 0x72, 0, "F3", "F3", "F3", &[]),
+        ("F4", 0x73, 0, "F4", "F4", "F4", &[]),
+        ("F5", 0x74, 0, "F5", "F5", "F5", &[]),
+        ("F6", 0x75, 0, "F6", "F6", "F6", &[]),
+        ("Left", 0x25, 0, "Left", "Left Arrow", "Left", &[]),
+        ("Meta+Shift+Tab", 0x09, 9, "Shift+Win+Tab", "Shift+Windows+Tab", "Shift+Win+Tab", &[]),
+        ("Meta+Tab", 0x09, 8, "Win+Tab", "Windows+Tab", "Win+Tab", &[]),
+        ("Option+P", 0x50, 4, "Alt+P", "Alt+P", "Alt+P", &[]),
+        ("Option+V", 0x56, 4, "Alt+V", "Alt+V", "Alt+V", &[]),
+        ("Q", 0x51, 0, "Q", "Q", "Q", &[]),
+        ("Return", 0x0d, 0, "Return", "Enter", "Enter", &[]),
+        ("Right", 0x27, 0, "Right", "Right Arrow", "Right", &[]),
+        ("Shift tap", 0x10, 16, "Shift tap", "Shift pressed on its own", "Shift tap", &["tap"]),
+        ("Shift+Tab", 0x09, 1, "Shift+Tab", "Shift+Tab", "Shift+Tab", &[]),
+        ("Space", 0x20, 0, "Space", "Space", "Space", &[]),
+        ("Tab", 0x09, 0, "Tab", "Tab", "Tab", &[]),
+        ("Tab      ", 0x09, 0, "Tab", "Tab", "Tab", &[]),
+        ("Up", 0x26, 0, "Up", "Up Arrow", "Up", &[]),
+        ("Win tap", 0x5b, 16, "Win tap", "Windows pressed on its own", "Win tap", &["tap"]),
+        ("c", 0x43, 0, "C", "C", "C", &[]),
+        ("down", 0x28, 0, "Down", "Down Arrow", "Down", &[]),
+        ("k", 0x4b, 0, "K", "K", "K", &[]),
+        ("left", 0x25, 0, "Left", "Left Arrow", "Left", &[]),
+        ("right", 0x27, 0, "Right", "Right Arrow", "Right", &[]),
+        ("s", 0x53, 0, "S", "S", "S", &[]),
+        ("up", 0x26, 0, "Up", "Up Arrow", "Up", &[]),
+        ("x", 0x58, 0, "X", "X", "X", &[]),
+        ];
+        assert!(BEFORE.len() > 80);
+        for &(spec, vk, mask, normalized, spoken, short, reasons) in BEFORE {
+            assert_eq!(key_spec(spec), Some((vk, mask)), "{spec}");
+            assert_eq!(normalize_spec_for(Windows, spec).as_deref(), Some(normalized), "{spec}");
+            assert_eq!(describe_spec_for(Windows, spec, KeyStyle::Spoken).as_deref(), Some(spoken), "{spec}");
+            assert_eq!(describe_spec_for(Windows, spec, KeyStyle::Short).as_deref(), Some(short), "{spec}");
+            let c = check_spec_for(Windows, spec, |_, _| None);
+            assert_eq!(c.reasons, reasons, "{spec}");
+            assert_eq!(c.resolved.as_deref(), Some(normalized), "{spec}");
+            let tap = mask & MASK_TAP != 0;
+            assert_eq!(hotkey_refusal_for(Windows, spec).is_some(), tap, "{spec}");
+            if !tap {
+                assert_eq!(hotkey_claim_for(Windows, spec), Ok((Some((vk, mask)), normalized.to_string())));
+            }
+        }
+    }
+
+    /// No key a shipped module, tool or example asks for becomes refused, on either platform.
+    ///
+    /// Read from the sources rather than listed, so a key added later is checked too: every
+    /// string literal in their Luau that parses as a key spec. A literal on a line that is one
+    /// platform's entry of a `host.os.pick` (`windows = "…"`, `macos = "…"`) is that platform's
+    /// only — the overlay runtime's tab keys are Ctrl+Tab on Windows and Control+Tab (`Meta+Tab`)
+    /// on a Mac, where Ctrl+Tab would be Command+Tab, the application switcher.
+    #[test]
+    fn no_shipped_key_is_refused() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files = Vec::new();
+        let mut stack: Vec<std::path::PathBuf> =
+            ["modules", "tools", "examples"].iter().map(|d| root.join(d)).collect();
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "luau") {
+                    files.push(p);
+                }
+            }
+        }
+        assert!(files.len() > 20, "the module sources were not found under {}", root.display());
+        let mut seen = 0;
+        let mut picked_for_a_mac = 0;
+        for f in files {
+            let text = std::fs::read_to_string(&f).unwrap();
+            // Per line, so one stray quote in a comment cannot turn the rest of the file inside
+            // out; comments are scanned too, which only means more specs checked.
+            for line in text.lines() {
+                let oses: &[KeyOs] = if line.contains("macos =") {
+                    &[Macos]
+                } else if line.contains("windows =") || line.contains("linux =") {
+                    &[Windows]
+                } else {
+                    &[Windows, Macos]
+                };
+                for lit in line.split('"').skip(1).step_by(2) {
+                    // A tap is a capture only; one written in a module is one it captures.
+                    let tap = key_spec(lit).is_some_and(|(_, m)| m & MASK_TAP != 0);
+                    if lit.len() > 40 || key_spec(lit).is_none() || tap {
+                        continue;
+                    }
+                    seen += 1;
+                    if oses == [Macos] {
+                        picked_for_a_mac += 1;
+                    }
+                    for &os in oses {
+                        assert_eq!(hotkey_refusal_for(os, lit), None, "{} asks for '{lit}'", f.display());
+                    }
+                }
+            }
+        }
+        assert!(seen > 20, "only {seen} key specs found; the scan is not reading the modules");
+        assert!(picked_for_a_mac >= 2, "the pick entries were not recognised ({picked_for_a_mac})");
+    }
 }

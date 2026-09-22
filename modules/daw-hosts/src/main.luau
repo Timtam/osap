@@ -98,11 +98,12 @@ local plugin_windows = {
 -- function key along, because a global shortcut has to be one nothing else wants.
 --
 -- Not the same chord on both platforms. The four-modifier one carries Control and Option
--- together on a Mac, and that pair is VoiceOver's own modifier: on a Mac whose VoiceOver
--- modifier is the default Control-Option, the chord is taken by VoiceOver before any
--- application sees it and pressing it plays VoiceOver's error sound. The third Mac session
--- measured that — registered, never delivered — on a machine where the probe's Command-Shift
--- key arrived every time, so the Mac gets that shape instead.
+-- together on a Mac (its Win and Alt are Control and Option there), and that pair is
+-- VoiceOver's own modifier: on a Mac whose VoiceOver modifier is the default Control-Option,
+-- the chord is taken by VoiceOver before any application sees it and pressing it plays
+-- VoiceOver's error sound. The third Mac session measured that — registered, never
+-- delivered — on a machine where the probe's Command-Shift key arrived every time, so the Mac
+-- gets that shape instead. `Cmd` is the Ctrl role: Command-Shift-F6.
 local FOCUS_PLUGIN_WINDOW = host.os.pick {
   windows = "Ctrl+Shift+Win+Alt+F6",
   macos = "Cmd+Shift+F6",
@@ -301,6 +302,7 @@ return {
   -- shortcut exists once no matter how many plugin modules require this one.
   activate = function()
     host.hotkey.register(FOCUS_PLUGIN_WINDOW, focusPluginWindow)
-    host.log.info("[daw-hosts] " .. FOCUS_PLUGIN_WINDOW .. " puts the focus back in a plugin window")
+    host.log.info("[daw-hosts] " .. host.keys.describe(FOCUS_PLUGIN_WINDOW, { style = "short" })
+      .. " puts the focus back in a plugin window")
   end,
 }

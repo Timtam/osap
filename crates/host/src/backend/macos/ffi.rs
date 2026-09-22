@@ -1,6 +1,6 @@
 //! The declarations macOS does not hand us through a crate.
 //!
-//! Two things live here, and both are unverifiable from a Windows machine: `cargo check`
+//! Three things live here, and all of them are unverifiable from a Windows machine: `cargo check`
 //! type-checks an `extern` block but never links it, so every signature below has to be
 //! right by construction rather than by experiment. They are transcribed from Apple's
 //! headers and cross-checked against the type shims in objc2's own bindings.
@@ -8,6 +8,10 @@
 //! - **Carbon hotkeys.** `RegisterEventHotKey` is the proven way to hold a global shortcut
 //!   on macOS: it needs no permission and cannot be silently switched off the way an event
 //!   tap can. No crate in the objc2 family exposes it.
+//! - **The keyboard layout.** `TISCopyCurrentKeyboardLayoutInputSource` and `UCKeyTranslate`,
+//!   so that a letter in a spec means the key that types it, and `host.keys.check` can say what
+//!   Option with a key composes (`layout.rs`, the one user). Also Carbon, and also missing from
+//!   every crate: `objc2-carbon` leaves HIToolbox out.
 //! - **`_AXUIElementGetWindow`.** The one function that pairs an accessibility element with
 //!   the window id capture needs. It is private, it is what every window manager on the
 //!   platform uses, and the fallback when it is missing is matching by geometry.
@@ -197,6 +201,92 @@ extern "C" {
         inBufferSize: ByteCount,
         outActualSize: *mut ByteCount,
         outData: *mut c_void,
+    ) -> OSStatus;
+}
+
+// --- Keyboard layouts (TextInputSources.h, Events.h, UnicodeUtilities.h) ---------------
+//
+// For `layout.rs`: which key types which letter under the layout the user has selected, and
+// what Option with a key composes there (`host.keys.check`). No crate in the objc2 family has
+// these — `objc2-carbon` skips HIToolbox entirely — so they are declared here, from the
+// headers, like the hotkey calls above.
+
+/// `TISInputSourceRef`: `struct __TISInputSource *`, a CoreFoundation object. The Copy
+/// functions below return it +1 (the Create rule); the caller releases it.
+#[repr(C)]
+pub struct OpaqueTISInputSource {
+    _private: [u8; 0],
+}
+pub type TISInputSourceRef = *mut OpaqueTISInputSource;
+
+/// `UCKeyboardLayout`: the 'uchr' resource the layout's `kTISPropertyUnicodeKeyLayoutData`
+/// holds. Only ever passed back to `UCKeyTranslate` by pointer.
+#[repr(C)]
+pub struct UCKeyboardLayout {
+    _private: [u8; 0],
+}
+
+/// `MacTypes.h`: `typedef UInt16 UniChar`.
+pub type UniChar = u16;
+
+/// `MacTypes.h`: `typedef unsigned long UniCharCount` — 64 bits on aarch64, the same trap as
+/// [`ItemCount`]. `UCKeyTranslate` takes one by value and writes one through a pointer.
+pub type UniCharCount = c_ulong;
+
+/// `UnicodeUtilities.h`: `kUCKeyActionDown = 0` — the character the key types when pressed.
+pub const kUCKeyActionDown: u16 = 0;
+
+/// `UnicodeUtilities.h`: `kUCKeyTranslateNoDeadKeysMask = 1L << kUCKeyTranslateNoDeadKeysBit`,
+/// the bit being 0. A dead key then answers with its own character (the German `^` key types
+/// `^`) instead of an empty string and a state waiting for the next key.
+pub const kUCKeyTranslateNoDeadKeysMask: OptionBits = 1 << 0;
+
+#[link(name = "Carbon", kind = "framework")]
+extern "C" {
+    /// `TextInputSources.h`. The keyboard layout currently selected — the layout itself, even
+    /// when an input method is what the user selected. +1; release it.
+    pub fn TISCopyCurrentKeyboardLayoutInputSource() -> TISInputSourceRef;
+
+    /// `TextInputSources.h`. The layout the system would type ASCII with — the one keyboard
+    /// shortcuts go through while a Russian or Greek layout is selected. +1; release it.
+    pub fn TISCopyCurrentASCIICapableKeyboardLayoutInputSource() -> TISInputSourceRef;
+
+    /// `TextInputSources.h`. `void *`, not retained (the Get rule): valid while the source is.
+    pub fn TISGetInputSourceProperty(
+        inputSource: TISInputSourceRef,
+        propertyKey: *const objc2_core_foundation::CFString,
+    ) -> *mut c_void;
+
+    /// `TextInputSources.h`. A `CFDataRef` holding the layout's 'uchr' data; NULL for a source
+    /// that has none.
+    pub static kTISPropertyUnicodeKeyLayoutData: *const objc2_core_foundation::CFString;
+
+    /// `TextInputSources.h`. A `CFStringRef` such as `com.apple.keylayout.German`, for the log.
+    pub static kTISPropertyInputSourceID: *const objc2_core_foundation::CFString;
+
+    /// `TextInputSources.h`. The distributed notification posted when the selected keyboard
+    /// input source changes.
+    pub static kTISNotifySelectedKeyboardInputSourceChanged: *const objc2_core_foundation::CFString;
+
+    /// `Events.h` (HIToolbox): `UInt8 LMGetKbdType(void)` — the physical keyboard's type, which
+    /// `UCKeyTranslate` needs to pick the right table of an ISO or JIS keyboard.
+    pub fn LMGetKbdType() -> u8;
+}
+
+#[link(name = "CoreServices", kind = "framework")]
+extern "C" {
+    /// `UnicodeUtilities.h`. The characters one key produces under a layout.
+    pub fn UCKeyTranslate(
+        keyLayoutPtr: *const UCKeyboardLayout,
+        virtualKeyCode: u16,
+        keyAction: u16,
+        modifierKeyState: u32,
+        keyboardType: u32,
+        keyTranslateOptions: OptionBits,
+        deadKeyState: *mut u32,
+        maxStringLength: UniCharCount,
+        actualStringLength: *mut UniCharCount,
+        unicodeString: *mut UniChar,
     ) -> OSStatus;
 }
 

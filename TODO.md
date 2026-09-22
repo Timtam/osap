@@ -147,6 +147,11 @@ Architecture and feasibility foundation: [docs/architecture-feasibility-study.md
         remap could quietly collide with a third module. And a replacement can itself be
         unavailable — held by another application, or unparseable — which needs the same
         honest refusal the OS-conflict path already gives.
+      - **Half of it exists now (2026-09-22).** `host.keys.normalize` is the effective-spec
+        vocabulary: the host records, logs and reports every registration by it, and the
+        overlay runtime keys its claims by it and announces keys through
+        `host.keys.describe`. What is left is the remap itself, and handing the remapped spec
+        back to the module (from `register`) so the runtime announces that one instead.
 
   - [ ] **`rollback_to` still has the active-overlay `onDeactivate` gap** that `purge_module` fixed for reload — it applies on uninstall and on a failed load.
   - [ ] **Versioned dependencies: no version SELECTION.** Install fetches the default branch's latest, so a `>= x.y` constraint is checked at load but never used to choose what to fetch; reload does not re-verify constraints; and the `"id >= x.y"` syntax is undocumented in the module.toml docs.
@@ -313,7 +318,16 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       Windows through Qt's Windows accessibility provider; the macOS bridge is a different
       one. If they do not survive, those modules need a different anchor on macOS. The
       accessibility dump answers it.
-- [x] **The macOS key vocabulary: keep the Windows one** (2026-08-20). The proposal was to
+- [x] **The macOS key vocabulary: keep the Windows one** (2026-08-20). **Superseded on
+      2026-09-22** by the maintainer's decision that a spec's modifiers are roles, the Qt way:
+      on a Mac `Ctrl` is Command, `Alt` Option, `Win` Control (see "Modifiers are roles, the Qt
+      way" below). The reasons: Qt does exactly this (`ControlModifier` is Command on macOS,
+      `MetaModifier` Control), so it is the convention cross-platform developers already know;
+      `Ctrl+Alt` no longer lands on VoiceOver's Control+Option layer, where the positional rule
+      put every Ctrl+Alt key; an application shortcut a module sends works on both platforms
+      (`host.input.send("Ctrl+C")` copies on a Mac too); and parity with ReaHotkey only ever
+      concerned Windows, where nothing moves. What follows is the 2026-08-20 reasoning, kept for
+      the record. The proposal was to
       translate everything to VOCR's `Cmd+Shift+Ctrl+<letter>` / `Cmd+Ctrl+<arrow>`. It was
       built on an assumption that did not survive being checked: a control's hotkey is
       registered in `_registerHotkeys` from `_activate` and dropped in `_unregisterHotkeys`
@@ -334,8 +348,10 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       spoken announcement as well as every doc.
   - **So it stays, and the log decides rather than the argument.** A refused registration is
       already reported by name (`backend/macos/hotkey.rs:98`, "macOS refused the shortcut
-      ..."). If a specific combination actually fails on a Mac, that one moves, with
-      `host.os.pick`, which already exists. Nothing moves on a prediction.
+      ..."). If a specific combination actually fails on a Mac, that one moves. Nothing moves
+      on a prediction. (This said "to a neutral token, not to a `host.os.pick`". The tokens
+      `Mod` and `Global` were built on 2026-09-22 and removed again the same day with the
+      roles; a module that wants another combination on a Mac picks one with `host.os.pick`.)
   - **Borrowing VoiceOver's own keys is closed, permanently.** The probe came back with no
     tone at all, and four independent lines of evidence say no application can do better.
     Our tap is already `HIDEventTap` + `HeadInsertEventTap` + suppressing — the earliest
@@ -2753,10 +2769,13 @@ Everything below needs a controller in a hand.
       IOHIDManager source on macOS for pads GameController does not list, and a capture
       triggered by DXGI's next frame after a press. (The macOS CI job now fails on "gamepad
       watcher failed" like the Windows probe step.)
-- [ ] **A comment to correct** (design side finding): `backend/windows.rs` says the low-level
-      keyboard hook "runs on its own thread". It runs on the pump thread, which is the only
-      reason its thread-local queues work — and the reason the pad source uses a `Mutex` hub
-      instead.
+- [x] **A comment to correct** (design side finding): `backend/windows.rs` said the low-level
+      keyboard hook "runs on its own thread" while it ran on the pump thread, which was the only
+      reason its thread-local queues worked. True now (2026-09-22): the hook has a thread of
+      its own (`keyboard_hook_thread`), and the state it shares with the pump is behind locks —
+      see "The keyboard hook on a thread of its own" below. The two other comments that still
+      said the hook ran on the pump (`backend/gamepad/mod.rs` on the key queues, `dxgi.rs` on
+      why pump reads wait with a deadline) were corrected in the merge review.
 
 ## From the porting review of the documentation (2026-09-21)
 
@@ -2785,16 +2804,13 @@ Planned — the API pages say these do not exist:
       no claim about it until then. On the Mac, also pass an identifier Vision does not list
       and see what comes back: `docs/api/ocr.md` says only that a refused request is logged
       once and returns empty (`backend/macos/ocr.rs`, `warn_once("ocr-perform", …)`).
-- [ ] **Cancellable timers.** `host.timer.after` and `every` return nothing and cannot be
-      stopped; a poll can only return early, and a runtime that N game modules depend on arms
-      N+1 polls — one in its own VM and one in every dependent's. Return a handle that
-      cancels.
-- [ ] **`host.window.onTrigger` for the window already in front** (`initial = true` in `opts`):
-      call the trigger at once when a matching window is in front at load, enable or reload.
-      Today `window_prelude.luau` only stores the trigger, and modules check
-      `host.window.active()` by hand.
-- [ ] **`host.json.encode`**, the counterpart of `decode`, for a converter written in Luau and
-      for structured log lines. Decide what a table with both an array and a hash part becomes.
+- [x] **Cancellable timers.** `after` and `every` return a token, and `host.timer.cancel`
+      takes it back. Built 2026-09-22 — see "Timers, JSON encode and the window already in
+      front" below.
+- [x] **`host.window.onTrigger` for the window already in front** (`initial = true` in `opts`).
+      Built 2026-09-22, reported on the next tick rather than at once — see the same section.
+- [x] **`host.json.encode`**, with `host.json.array` for the empty list. Built 2026-09-22; a
+      table with both an array and a hash part raises, naming the place — see the same section.
 - [ ] **Screen snapshots**: an explicit frame handle — one capture, then several `pixel` reads
       and searches against it — idea B of `docs/screen-frame-sharing-design.md`. Today on
       Windows every `host.screen.pixel` call is a screen read of its own (about 16.7 ms on the
@@ -2819,6 +2835,11 @@ Found while documenting — the behaviour is written down now, and wants fixing:
       the spec; the platform refuses it later in `refresh_hotkeys`, `report_os_conflict`'s
       dialog blames another application, and the claim is retried on every change to the
       enabled set. Raise at `register` for a spec the platform can never hold.
+      Since 2026-09-22 the same dialog also answers a macOS hotkey on a letter that no key of
+      the current keyboard layout types: `register_on_key` (`backend/macos/hotkey.rs`) says so
+      in its error, and the log has it, but the dialog blames another application. That one
+      can become holdable after a layout switch, so it wants a reason of its own in the
+      dialog (the backend's error classified, not matched as text) rather than a raise.
 - [ ] **A capture whose hook or tap could not be installed stays registered.**
       `host.keys.capture` pushes its entry and refreshes the captured set before
       `watch_keys()`; when that raises (macOS without the Accessibility grant), the token is
@@ -2828,6 +2849,14 @@ Found while documenting — the behaviour is written down now, and wants fixing:
       low-level hook that keeps timing out can be removed without notice; `KEY_HOOK_INSTALLED`
       would stay true and every capture would stop for the session with nothing logged. Not
       observed; worth a check after a long pump stall.
+      Since 2026-09-22 the hook has a thread of its own that does nothing but answer it
+      (`keyboard_hook_thread` in `backend/windows.rs`), so the pump's stalls no longer reach
+      it, and a timeout takes a machine too loaded to schedule that thread. There is one
+      witness: a hotkey that arrives through `RegisterHotKey` although the hook holds it
+      writes "arrived through RegisterHotKey, not through the keyboard hook" to the log, once
+      per window in front (`settle_hotkey`) — which also happens, harmlessly, in front of an
+      elevated window. Still nothing re-installs the hook; see "Re-install a keyboard hook
+      Windows removed" in the section on hotkeys in the keyboard hook.
 - [x] **A module without the `window` capability breaks window delivery for itself.**
       `on_window_activate`, `on_focus_change` and `window_has_triggers` (`lib.rs`) reach the
       prelude through `lua.globals().get("host")`, which after load is the module's GATED view
@@ -2873,11 +2902,11 @@ Found while documenting — the behaviour is written down now, and wants fixing:
 
 Verify on a Mac — the pages state these from the code, or no longer state them:
 
-- [ ] **Key positions.** Every spec goes through the US-layout keycode table in
-      `backend/macos/keys.rs`, so on a German (QWERTZ) Mac `host.input.send("Cmd+Z")` should
-      arrive as Cmd+Y, and a capture or hotkey of `"Z"` should answer to the key labelled Y.
-      `docs/api/keys.md` and `docs/api/input.md` say so; send one letter on a German layout and
-      read what arrives.
+- [x] **Key positions.** Every spec went through the US-layout keycode table in
+      `backend/macos/keys.rs`, so on a German (QWERTZ) Mac `host.input.send("Cmd+Z")` would
+      have arrived as Cmd+Y. Superseded (2026-09-22): letters follow the keyboard layout now;
+      what to verify instead is under "Hotkeys in the keyboard hook, and letters by layout
+      on macOS" below.
 - [ ] **Auto-repeat of a captured key.** Holding a captured arrow should fire the callback at
       the keyboard's repeat rate, as it does on Windows; the event tap matches every key-down
       and nothing filters repeats. `docs/api/keys.md` states it for Windows only.
@@ -3141,6 +3170,397 @@ update flows of `crates/host/src/gui.rs`.
       whose removal failed (logged), leaves `modules/.staging-…` behind. Nothing loads it; it
       has to be deleted by hand. Removing old ones at start-up would need a way to tell them
       from an install running in another process (the CLI beside the manager).
+
+## Timers, JSON encode and the window already in front (2026-09-22)
+
+Step 3, group A of the API work (the revised designs (a), (b) and (c) of the small-API
+critique). Built and unit-tested; nothing of it has run in the real application yet.
+
+- [x] **`host.timer.cancel(token)`**, with `after` and `every` returning the token
+      (`crates/host/src/timers.rs`). Only the owning module's timers — the VM's owner, as
+      `host.gamepad.off` rules; `nil`, an unknown token, a fired or foreign one answer `false`,
+      and nothing raises. A callback that cancels another timer due in the same tick stops it:
+      the due timers are collected as tokens and looked up again before each call.
+- [x] **`host.json.encode(value, { pretty })` and `host.json.array(t?)`** (`json.rs`). Decode
+      stays plain. The array marker is one frozen, unprotected table per VM, so
+      `setmetatable`, `table.clone` and `table.freeze` still work on a marked table. Keys
+      sorted by bytes; whole numbers up to 2^53 as integers; NaN, infinity, functions,
+      threads, userdata, vectors and buffers raise with a path (`value.states[2].cels[1]`);
+      sparse and number-keyed tables raise suggesting `tostring(id)`; cycles and more than
+      127 levels raise. Round trips checked against serde_json's canonical form.
+- [x] **`onTrigger { initial = true }`**: the prelude primes the trigger and asks
+      (`_requestInitial`); the tick — GUI and headless — asks for the foreground once and
+      calls `_dispatchInitial` through the host's own window handle; enabling a module primes
+      its `initial` triggers again; an activation first counts as the report, a re-enable's
+      queued one included. The foreground is asked only when some module has an `initial`
+      trigger waiting (`_wantsInitial`), and a window without a title is no window, as on
+      activation. Before the first matching callback the input epoch turns over once per
+      report, and `capture_source::prewarm_if_declared` opens duplication once per VM. The
+      tick's own timing line counts the report (`initial window report`). The headless
+      `on_tick` also drains `host.window.recheck` now, which it never did. The drain is a free
+      function (`drain_initial`) tested with a fake foreground; `apply_enabled`'s request and
+      the purge/rollback clean-up of the queue need a `Shared`, which no unit test builds.
+- [ ] **Live, Windows: `onTrigger { initial = true }` with the game already in front.** Load
+      (or reload) a module whose trigger asks for it while its window is in front: the callback
+      must run once, on the first tick, and a module that reads through duplication must log
+      the opening before its first read rather than pay it inside that read. Enabling the
+      module from the manager reports the manager window (it is in front then), so that case
+      fires only on the next activation of the game — worth hearing once with NVDA to be sure
+      it reads as intended.
+- [ ] **macOS, never run on a Mac: `onTrigger { initial = true }`** — the only report a game
+      that is already frontmost at load gets there, asked through `ax::active_window()` from
+      the tick. Check it with an application already in front at load, and with one that does
+      not answer accessibility (the docs promise the five-second memory of
+      `host.window.active()` and, with no answer, no call). Also: enabling such a module from
+      the manager asks the frontmost application through accessibility, from the main thread,
+      and at that moment that is our own manager; check that the answer comes at once rather
+      than after a timeout on our own process. A module without an `initial` trigger does not
+      ask.
+- [ ] **No module uses the three yet.** The overlay runtime still works around the missing
+      cancel with generation counters (`Overlay:afterIdle`), and checks the window in front at
+      load itself (`_recheck` after registering). Moving it onto `cancel` and
+      `initial = true` is a behaviour change for every overlay and needs its own live test.
+
+## Keys written once, said per platform (2026-09-22)
+
+The key block of the cross-platform review (`xplat-critique`, "Do now" 1, 2, 3, 5 and 7).
+Built on the positional rule of 2026-08-20 with two neutral tokens, `Mod` and `Global`; both
+were superseded the same day by modifier roles ("Modifiers are roles, the Qt way", below).
+Everything else here stands.
+
+- [x] **One reader of modifier names.** `modifier_mask` in `backend/mod.rs` feeds the shared
+      parser, which both `key_send`s and the Windows hotkey conversion now use (the second
+      Windows parser is gone). Unit-tested for both platforms on Windows, and the Windows
+      conversions to `MOD_*` and to the keys `key_send` holds have tests of their own. The
+      neutral tokens `Mod` and `Global` it was built with are gone again, and the keys that used
+      them are back to literal specs or to their per-platform picks (see the roles section).
+- [x] **`host.keys.normalize`**, and the overlay runtime keys its claim map, its
+      duplicate-claim check and its shared-hotkey lookups by it, so `Cmd+S` beside an inherited
+      `Ctrl+S` is one claim. `host.hotkey.register` records and reports the
+      normalized spec, so the log and the dialogs name the chord it is on this platform. (The
+      reload key's log line reads `Ctrl+Alt+Shift+Win+F5` now, where it read
+      `Ctrl+Shift+Win+Alt+F5`.)
+- [x] **`host.keys.describe`**, and the runtime says a focused control's hotkey and a tab's
+      `hotkeyLabel` through it: Control, Alt, Shift, Windows on Windows; Control, Option, Shift,
+      Command on a Mac, with Backspace as "Delete" and Delete as "Forward Delete" there.
+- [x] **`host.keys.check`** with structural reasons only — `parse`, `reserved`, `voiceover`
+      (the whole Control+Option layer), `no-keycode`, `tap`, and the informational `altgr`
+      (Windows, `ToUnicodeEx`) and `composes` (macOS, `UCKeyTranslate`); `{ layout = false }`
+      leaves the layout unasked. No list of screen-reader keys. `host.hotkey.register` raises,
+      with the reason, for everything no system can hold — `parse`, `reserved`, a tap, and
+      `no-keycode` on macOS — where a tap or an F21 used to register and then end in the
+      "Binding unavailable" dialog blaming another application. A test holds `register`'s
+      refusals and `check`'s reasons together, and one reads every key spec in the modules,
+      tools and examples and checks none of them is refused on either platform. The overlay
+      runtime skips a refused control or tab hotkey (asking `check` without the layout, once
+      per spec), guards the registration, and does not announce the key. `normalize`,
+      `describe` and `check` need no capability (`FREE_MEMBERS` in `lib.rs`; `check` also
+      reads the character the layout types with a Ctrl+Alt or Option chord), for a
+      dependency's code too.
+- [x] **Docs and examples:** `examples/window` matches `axRole = "AXWindow"`,
+      `examples/settings` offers `en`/`de`/`fr`, and `docs/api/os.md`, `keys.md` and
+      `building-an-overlay.md` present `pick` for differences in the other program only.
+      (`docs/api/element.md` already named the capability `element`.)
+- [x] **Plain-string control patterns on macOS** are logged once per pattern by the runtime.
+      Komplete Kontrol, Melodyne and u-he declare `supported_os = ["windows"]`; Kontakt's
+      optional import of Komplete Kontrol answers nil on a Mac, which it handles.
+- [ ] **macOS: `composes` has never run.** `layout::character` in `backend/macos/layout.rs`,
+      the module the letters by layout (below) are read in as well: one read of the layout,
+      taken at start, at each input-source change and again at every `check` that asks the
+      layout (so neither a late nor a missing notification leaves the answer on the old layout,
+      and a letter that read moved is re-registered on the pump's next turn), one set of Text
+      Input Source and `UCKeyTranslate` declarations (`ffi.rs`), and the input source a key is
+      translated through kept with it. Type-checked, linked by the
+      macOS CI build, and called by nothing shipped, because the runtime asks `check` with
+      `layout = false`. At the next Mac session: `host.keys.check("Alt+E")` on a US layout
+      (expect `´`, a dead key), `Alt+L` on German (expect `@`), once right after switching the
+      input source (the new layout's answer), and once with a Japanese input method selected
+      (the ASCII-capable fallback).
+- [ ] **macOS: the calibrator on Command+Option+Shift** is unmeasured through the event tap,
+      and two of its keys are menu shortcuts in many Mac applications: Command+Option+Shift+V
+      is "Paste and Match Style" and Command+Option+Shift+S is "Save As". Only while
+      calibrating and an overlay is active, and the tap takes the key first, but worth hearing
+      once.
+- [ ] **macOS: how VoiceOver says the described keys** ("Shift+Command+F6": whether the `+`
+      is read as "plus", and whether the order sounds natural).
+- [ ] **macOS: the plain-pattern log line** for Kontakt's in-DAW patterns (`^NIChildWindow%x+$`)
+      should appear once per pattern at start-up; not yet seen in a Mac log.
+- [ ] **Windows (live, with NVDA): the announcements** now say "Control+L" where they said
+      "Ctrl+L", a control or tab whose hotkey the host refuses no longer says its key, and a
+      Ctrl+Alt key checked on a German layout reports `altgr` with the character (seen in a
+      headless run: `@`, `€`, `²` for Q, E, 2). The words are unit-tested; how they sound is
+      not heard yet.
+- [x] **The capture callback's modifier table** (`{shift, ctrl, alt, win}`) and a neutral
+      `mod`/`cmd` field (xplat-audit A4): settled by the roles (2026-09-22). Its fields are
+      roles, so on a Mac `ctrl` is Command held and `win` Control held; `ctrl` is the neutral
+      field.
+- [ ] **To confirm (maintainer): `check` without the `keys` capability.** `normalize`,
+      `describe` and `check` are in `FREE_MEMBERS`, and `check` is the one of the three that
+      reads more than the string — the character the current layout types with a Ctrl+Alt or
+      Option chord. Kept free so that any module can ask before it announces a key; to be moved
+      behind `keys` if that read should need the declaration.
+- [ ] **To decide: should `check` say that no key of the current layout types a letter?** On
+      macOS such a hotkey is accepted and parked until a layout that types the letter is
+      selected (see "macOS: letters follow the keyboard layout" below), and `check` stays
+      structural: `no-keycode` is F21–F24 only, and `ok` is true for the letter. A
+      layout-dependent reason would have to be one that does not refuse (`register` does not
+      raise for it) and would be asked of the layout even with `layout = false`.
+- [ ] **`examples/overlay-attach` and the README still use Ctrl+Alt+1 and Ctrl+Alt+3**
+      (`examples/overlay-attach/src/main.luau`, `README.md`, the overlay demo). Ctrl+Alt is
+      AltGr on Windows, where a layout can type a character with 1 or 3 (`check` says `altgr`).
+      On a Mac they are Command+Option+1/3 since the roles, off VoiceOver's layer. A key the
+      overlay captures only while it is active would suit an example better.
+- [x] **Letters by layout on macOS** (decided 2026-09-21 for step 3; xplat critique issue 1).
+      Built in step 3 as well: see "macOS: letters follow the keyboard layout" in the next
+      section, and what to verify on a Mac there. Letters in sends follow the layout with it
+      — on a German Mac `host.input.send("Ctrl+Z")` is Command+Z, Undo.
+- [x] **Hotkeys matched in the low-level hook as well** (decided 2026-09-21 for step 3).
+      Built in step 3 as well, only for hotkeys whose `RegisterHotKey` succeeded, with the hook
+      on a thread of its own: see the next section. A spec `host.hotkey.register` refuses (a
+      tap, `reserved`, F21–F24 on macOS) raises before anything is registered, so it is never
+      filed for the hook either (`hotkey_claim_for` in `backend/mod.rs` decides both, refusal
+      first, and is tested with the hook's table), and every spelling of a role reaches the
+      hook through the same shared parser (`parse_spec`) as `RegisterHotKey`. The dead Ctrl+Shift+F10 that raised it
+      most likely had another cause (a second running copy holding the key), so what the hook
+      adds in practice is unmeasured.
+
+## Hotkeys in the keyboard hook, and letters by layout on macOS (2026-09-22)
+
+From the key block of step 3 (the maintainer's decisions of 2026-09-21, "Hotkeys that games
+switch off" and "Keys"; the cross-platform critique's first issue).
+
+- [x] **Windows: a granted hotkey is matched in the keyboard hook as well**, AutoHotkey's
+      `#UseHook`. WinUAE registers its keyboard with `RIDEV_NOHOTKEYS`, which silences every
+      `RegisterHotKey` of every program while it is in front. `register_hotkey` files a
+      combination for the hook only after `RegisterHotKey` granted it (a refused one belongs to
+      another program and is never taken); the hook swallows it and queues the id, the
+      key-up goes through, repeats are swallowed without firing, and a press with Alt, Win or
+      Ctrl+Shift held gets the masking key 0xE8. A late hook's press and the `WM_HOTKEY` Windows
+      posted for it anyway are paired by timestamp and dispatched once (no cap near one
+      timeout on how late a call may be — several queued events each wait theirs — and an
+      injected event or a stamp ahead of the clock counts as on time). A late call is judged by
+      the modifiers the hook saw go by (`hotkey_hook::Mods`), a call on time by
+      `GetAsyncKeyState`. The auto-repeat threshold follows the keyboard delay and FilterKeys
+      (`repeat_threshold`, read with every grant). Key-downs the captures take and every
+      key-up reach the hotkeys' record of held keys, and a granted combination the hook lets
+      through (screen reader's modifier, key held before the modifiers) is noted, so its
+      `WM_HOTKEY` is expected; the "arrived through RegisterHotKey" line is written once per
+      window in front. Pure parts in `backend/hotkey_hook.rs` with 31 tests, `file_if_granted`
+      tested with a refusal and against the backend's own `parse_spec`; documented in
+      `docs/api/hotkey.md` (Windows).
+- [x] **The keyboard hook on a thread of its own** (`keyboard_hook_thread` in
+      `backend/windows.rs`), at the highest normal priority, doing nothing but answering the
+      hook; installed with the first granted hotkey or capture, at once, no longer deferred to
+      the pump. With the hotkeys matched in the hook it was present in every session — the
+      reload key and daw-hosts' F6 are granted at start — and on the pump it made all typing
+      on the machine wait for every OCR call and long callback (pump iterations of 400 and
+      729 ms measured). The captured-key and hotkey state it shares with the pump moved from
+      thread-locals behind short locks. `docs/api` (hotkey, keys, timer, ocr, screen, speech),
+      `module-runtime-and-lifecycle.md`, `module-manager.md` and the pump's overrun line say
+      so.
+- [ ] **Re-install a keyboard hook Windows removed.** Not built. The only signal is a
+      `WM_HOTKEY` the hook should have seen, and with the hook on its own thread several
+      harmless cases look the same: a hook running late, whose `WM_HOTKEY` now usually arrives
+      first (the two come from two threads); an elevated window in front, which would need an
+      integrity-level check of the foreground process to rule out; a hotkey granted between
+      the hook's lookup and Windows' own check. A re-install also puts our hook in front of a
+      screen reader's in the chain, mid-session. Worth building if a removal is ever seen in a
+      log (captured keys dead, "arrived through RegisterHotKey" lines in front of ordinary
+      windows).
+- [ ] **Live (Windows), with NVDA:**
+  - an overlay's Alt+letter control hotkey (Kontakt's Alt+V, Alt+M) fires once, and
+      REAPER's menu bar does not open when Alt comes up — the masking key's whole job;
+      that NVDA says nothing for the masking key, with and without "speak command keys";
+  - daw-hosts' `Ctrl+Shift+Win+Alt+F6` (`Ctrl+Alt+Shift+Win+F6` in the log) and the reload key still
+      work, and releasing them opens neither Start nor the Office app; with Alt+Shift as
+      the language switch, an Alt+Shift hotkey does not switch the input language;
+  - NVDA+Space, NVDA+Tab and a hotkey pressed with Insert held behave as before (they go
+      to NVDA or through RegisterHotKey, and the log shows no "not through the keyboard
+      hook" line for them);
+  - a hotkey held down fires once; a hotkey pressed in front of an elevated window (Task
+      Manager) still fires, with the "arrived through RegisterHotKey" line;
+  - after a deliberate main-thread stall (a module OCR loop), a hotkey pressed during it
+      fires once, when the stall ends; with the hook on its own thread no "not dispatched a
+      second time" line is expected;
+  - during the same stall, typing in another application is not delayed at all, and a
+      captured Tab in an overlay is swallowed (it reaches the plug-in neither during nor after
+      the stall) and moves the overlay's focus once the stall ends;
+  - plain `v` typed during a stall, with Alt pressed before the stall ends: no Alt+V fires,
+      and no masking key is sent;
+  - NVDA started before the app (the usual order): an overlay hotkey pressed in NVDA's
+      input help (NVDA+1) runs the hotkey instead of being described, an NVDA gesture
+      assigned to the same chord (Input gestures) does nothing, and "speak command keys"
+      does not announce it — as `docs/api/hotkey.md` says; after restarting NVDA, NVDA gets
+      all three back;
+  - with FilterKeys on and a two-second repeat delay, holding a hotkey fires it once, and
+      the log's "counts as auto-repeat" line names about 2200 ms;
+  - WinUAE in front: a registered hotkey fires. Whether it helps in the developer's game
+      (the developer's game, a native remake, not WinUAE) is unmeasured; capture-liveness logs
+      which way a press came.
+- [x] **macOS: letters follow the keyboard layout.** `backend/macos/layout.rs` reads the
+      selected layout (`TISCopyCurrentKeyboardLayoutInputSource`, the ASCII-capable one when
+      it types fewer letters, `UCKeyTranslate` over 48 keys) at start and after
+      `kTISNotifySelectedKeyboardInputSourceChanged` (CF distributed observer,
+      DeliverImmediately; the callback only raises a flag, and the pump — or `host.keys.check`,
+      which reads the layout again whenever it asks it — reads it on the main thread);
+      `keys.rs` holds the letters in force for Carbon registration, `key_send`,
+      `key_post` and the tap's `keycode_to_vk`; `hotkey::reregister_letters` moves the
+      hotkeys on letters. Digits, F-keys, named keys and punctuation stay positional. The
+      table logic is tested on Windows with described German, French, Dvorak and Russian
+      layouts (`backend/macos/keys.rs`).
+      Also since the review: a second table read with Command held (`UCKeyTranslate`
+      modifier state 0x01), used for every combination that holds Command, for "Dvorak –
+      QWERTY ⌘" (`keys::letters_for`, tested with a described one); a hotkey that cannot
+      follow a layout change is parked (null reference) and tried again at every later
+      change, where it used to be lost for the session; the `keyboard letters` line is
+      written at start and when a letter moved, not on every input-source change.
+      Since the merge review: a hotkey on a letter no key of the current layout types is
+      parked when it is registered as well (`hotkey::register`, logged), where it went back to
+      the host as an error, reached the user as the "Binding unavailable" dialog blaming another
+      application, and was not tried again after a switch; `key_send`, `key_post` and Carbon
+      say "no key of the current keyboard layout types this letter" for it
+      (`keys::why_no_keycode`); and a first read of the layout that happens late — the backend
+      created off the main thread, `check` reading it first — re-registers the hotkeys already
+      on US positions.
+- [ ] **Verify on a Mac (letters by layout):**
+  - US layout: the `keyboard letters at start` line says every letter is on its US position,
+      and hotkeys, sends and captures on letters behave exactly as before letters followed the
+      layout;
+  - German layout: the log's `keyboard letters at start` line names
+      `com.apple.keylayout.German` and `Y=0x06 Z=0x10`; `host.input.send("Cmd+Z")` in
+      TextEdit undoes; a hotkey on `"Cmd+Shift+Z"` and a capture of `"Z"` answer to the
+      key labelled Z;
+  - French (AZERTY): `A=0x0c M=0x29 Q=0x00 W=0x06 Z=0x0d` in the line, and `"Cmd+1"` is the
+      key labelled 1 (`&` unshifted);
+  - switching the input source while running (menu bar or Ctrl+Space): a `keyboard letters
+      the selected input source changed` line arrives while the app is in the background,
+      the hotkeys on letters log "follows the keyboard layout", and the moved key fires;
+      Cmd+Y and Cmd+Z registered together swap keys without a refusal;
+  - Russian selected: the line shows the ASCII-capable layout supplying the letters;
+      an input method (Japanese) selected: the layout under it is read;
+  - "Dvorak – QWERTY ⌘": the line reports a table "with Command held" that is the US one,
+      `host.input.send("Cmd+Z")` undoes in TextEdit, and a hotkey on `"Cmd+Shift+Z"` answers
+      to the QWERTY Z key while a capture of `"Meta+Z"` (Control+Z) answers to Dvorak's Z;
+  - a hotkey parked by a layout that cannot hold it (another application holding the chord
+      on the new key) comes back, with a "held again" line, when switching back;
+  - with "Automatically switch to a document's input source" on and two applications on the
+      same layout, switching between them writes no `keyboard letters` line;
+  - that the TIS and UCKeyTranslate declarations in `backend/macos/ffi.rs` link and
+      answer: every start reads the layout through them for the letters, and
+      `host.keys.check` asks the same kept input source for `composes`; neither has run on a
+      Mac yet;
+  - a hotkey on a letter no key of the selected layout types (no shipped layout found that
+      has one; a custom layout that drops a letter, made with Ukelele, would): `register`
+      returns without a dialog, the log says it is not held, and selecting a layout that types
+      the letter logs "held for the first time" and the hotkey fires;
+  - `host.keys.check("Alt+E")` right after a switch the notification has not reached yet
+      answers for the new layout, and when that moved a letter, the next pump turn logs the
+      hotkeys following it; how long a `check` that reads the layout takes (never timed).
+
+## Modifiers are roles, the Qt way (2026-09-22)
+
+The maintainer's decision of 2026-09-22, which supersedes the positional rule of 2026-08-20 and
+the `Mod`/`Global` tokens of the same morning.
+
+- [x] **The rule.** A spec's modifiers are roles: Ctrl, Alt, Win, Shift. On Windows and Linux
+      each is the key of its name. On macOS Ctrl is Command, Alt is Option, Win is Control and
+      Shift is Shift, as Qt's `ControlModifier` is Command there and its `MetaModifier` Control.
+      The spellings are the same on every platform: Ctrl/Control/Cmd/Command are the Ctrl role,
+      Alt/Option the Alt role, Win/Super/Meta the Win role. So a Mac author writes `Meta` (or
+      `Win`) for the Control key, and `"Cmd+S"` is Ctrl+S on Windows as well. Before, `Cmd` and
+      `Command` were the Windows key there, taps included (`"Cmd tap"` was a Windows-key tap and
+      is a Ctrl tap now); no shipped module reads either on Windows, only in a pick's `macos`
+      entry. Other combinations on a Mac: `host.os.pick`.
+- [x] **Built.** `backend/mod.rs` has `modifier_mask` (no platform in it), the role table
+      `role_words(os)` (spec word, spoken and short words, the platform's order), and
+      `MAC_VOICEOVER_LAYER` = Win+Alt. It also has the macOS reserved list in role terms
+      (`"Ctrl+Q"` is Command+Q) and `capture_mods_fields`, the table a capture callback gets.
+      `parse_key_spec`/`key_spec` lost their platform argument; `normalize`, `describe` and
+      `check` keep it. `backend/macos/keys.rs` has `MODIFIER_KEYS`, the one table from a role to
+      the Mac key: Carbon bit, Quartz flag, `UCKeyTranslate` state, and the key codes of both
+      sides. Carbon registration (`mask_to_carbon`), `key_send` (`mask_to_cg_flags`), the event
+      tap's match (`mask_of_cg_flags`), the tap's modifier keys (built from the table in
+      `tap.rs`), the Command letter table (`letters_for`) and the layout read all go through it.
+      The tap asserts at compile time that the flag numbers are the bindings' own. `Mod` and
+      `Global` are gone from the grammar, the docs and the tests. The keys that used them went
+      back to literal specs: calibration `Ctrl+Alt+Shift+S/T/V`, and `Ctrl+Shift+F9`/`F10`/`F11`
+      for the probe and capture-liveness. daw-hosts' back-into-plugin key and the host's reload
+      key went back to their per-OS picks (`Ctrl+Shift+Win+Alt+F6`/`F5` on Windows,
+      `Cmd+Shift+F6`/`F5` on a Mac, which is Command+Shift under the roles as it was before).
+      Windows answers are byte-identical for every key spec in `modules/`, `tools/` and
+      `examples/`: `windows_answers_are_unchanged_for_every_shipped_key` holds a golden table
+      taken before the change.
+- [x] **Refused on a Mac by the new rule, and moved (to confirm, maintainer).** The overlay
+      runtime's tab keys `Ctrl+Tab` and `Ctrl+Shift+Tab` became Command+Tab and
+      Shift+Command+Tab, the application switcher (`reserved`). They are now
+      `host.os.pick { windows = "Ctrl+Tab", macos = "Meta+Tab" }` (and the Shift form):
+      Control+Tab, the key they were on a Mac before and the Mac's own next-tab key. No other
+      shipped key is refused on a Mac. `no_shipped_key_is_refused` reads every spec, and checks
+      a pick's `macos =` entry for macOS only.
+- [ ] **Next Mac session: every overlay key with Ctrl in it moved to Command.** For each: with
+      the overlay active it fires, the application does not also act on it, and VoiceOver says
+      it the way `describe` does.
+  - Kontakt (`modules/kontakt`): `Ctrl+L`, `Ctrl+S`, `Ctrl+R` (`header.luau`) are
+      Command+L/S/R. Previous/next instrument, `Ctrl+P`/`Ctrl+N` (both layouts in
+      `geometry.luau`), are Command+P/N. Previous/next multi, `Ctrl+Shift+P`/`Ctrl+Shift+N`,
+      are Shift+Command+P/N. All were Control+… before. Command+S, +P and +N are the DAW's
+      Save, Print and New, which the overlay takes from it while active.
+  - u-he (`modules/u-he`, `supported_os = ["windows"]` today): `Ctrl+U` and `Ctrl+S` are
+      Command+U and Command+S.
+  - Overlay runtime: go to tab n, `Ctrl+1`…`Ctrl+9`, is Command+1…9. Tab cycling stays
+      Control+Tab and Control+Shift+Tab (picked, above). Calibration `Ctrl+Alt+Shift+S/T/V` is
+      Command+Option+Shift, as with `Mod` this morning and Control+Option+Shift before that.
+  - Tools: `inspect`'s `Ctrl+Alt+I/C/U` are Command+Option+I/C/U, off VoiceOver's layer now;
+      Command+Option+I opens many applications' developer tools. The probe's `Ctrl+Shift+F9`,
+      and `Ctrl+Shift+F10`/`F11` for the probe's controller key and capture-liveness, stay
+      Command+Shift: they were Command+Shift picks.
+  - Examples: `hotkey`'s `Ctrl+Alt+H` would be Command+Option+H, Hide Others in most
+      applications' menu and taken from all of them while registered, so the example picks
+      `Cmd+Shift+F7` on a Mac (Windows keeps `Ctrl+Alt+H`): it fires with F-keys set as standard
+      function keys, or with fn held, and says "Shift+Command+F7". `keys`' `Ctrl+Alt+O`,
+      `settings`' `Ctrl+Alt+S` and `overlay-attach`'s `Ctrl+Alt+1`/`3` are Command+Option.
+  - Unchanged on a Mac: every `Alt+…` key (Option, as before, in Komplete Kontrol, Kontakt,
+      Melodyne, Soundiron and u-he), the reload key and daw-hosts' key (Command+Shift+F5/F6).
+      `hotkey-test-a`/`b`'s `Ctrl+Alt+Win+F8` also stays: Command+Option+Control+F8, still on
+      VoiceOver's layer, a test tool.
+- [x] **Review follow-ups (2026-09-22).** A spec that spells the Ctrl role both ways
+      (`"Control+Command+F"`, `"Ctrl+Cmd+F"`) is a parse error naming the two words and `Meta`,
+      rather than one key a Mac author did not mean (Command+F instead of Control+Command+F); no
+      shipped spec does it, and on Windows it was Ctrl+Win before the roles and plain Ctrl
+      after. The "Binding conflict" and "Binding unavailable" dialogs say a Mac key in
+      `describe`'s spoken words ("Control+Shift+F6", not "Meta+Shift+F6"); Windows keeps the
+      spec there and the log keeps it everywhere. A capture of a combination the Mac keeps
+      (`reserved`) is not refused, and the log says so once per chord
+      (`reserved_capture_line`). Command+W stays off the reserved list: the list holds the
+      system chords with no Windows counterpart, and Ctrl+W closes a window on Windows too
+      (maintainer to confirm).
+- [ ] **Mac: the review follow-ups.** A binding conflict on a Mac (two modules on
+      `"Ctrl+Shift+F9"`) puts up a dialog VoiceOver reads as "Shift+Command+F9". A module that
+      captures `"Ctrl+Q"` writes one `the captured key 'Cmd+Q' is one macOS keeps for itself`
+      line, once however often focus moves. Whether the event tap actually receives, and can
+      suppress, Command-Tab, Command-Space and Command-Q before the system acts on them has
+      not been measured; the log line and `keys.md` say only that the tap is asked for them.
+- [ ] **Mac: what only a Mac can prove about the roles.** Carbon registers `"Ctrl+Shift+F9"`
+      as `cmdKey|shiftKey`, and it fires on Command+Shift+F9. The event tap matches a capture
+      of `"Ctrl+1"` on Command+1, and the callback gets `mods.ctrl == true` and
+      `mods.win == false`; `"Meta+Tab"` matches on Control+Tab, with `mods.win`.
+      `host.input.send("Ctrl+C")` copies in TextEdit, and `"Meta+A"` moves to the start of the
+      line. `"Ctrl tap"` fires on a bare Command press and `"Win tap"` on a bare Control press,
+      right-hand keys included. VoiceOver speaks `describe("Ctrl+Shift+F9")` as
+      "Shift+Command+F9" and `describe("Meta+Tab")` as "Control+Tab". Under "Dvorak – QWERTY
+      ⌘", `"Ctrl+Z"` takes its letter from the Command table. The flag numbers are checked
+      against the bindings at compile time; everything else only by the tests on Windows.
+- [ ] **Windows, live:** nothing a module does changes, so a spot check is enough. Kontakt's
+      Ctrl+L and the calibration keys still fire, and the log's key spellings are the ones
+      before.
+
+## Seen in the first session with the log backend (2026-09-22)
+
+- [ ] **wxdragon warns once at start:** `[dep:wxdragon] warn: Warning: C++ returned invalid
+      TreeItemId pointer 0x..., rejecting`, logged right after the installed list is filled. It
+      was invisible before our dependencies' messages reached the log. Find which tree call
+      returns the invalid item (the module manager's tree, gui.rs) and whether anything the user
+      sees is missing because of it.
 
 ## Dev tools
 

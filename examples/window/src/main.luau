@@ -18,8 +18,9 @@ end
 local winMatch = host.window.findAll({ windows = { class = { contains = "Window" } } })
 host.log.info("Matcher [windows: class contains 'Window'] matched: " .. #winMatch)
 
--- OS-gating demo: a macOS-only matcher must match nothing on Windows.
-local macOnly = host.window.findAll({ macos = { class = "AXWindow" } })
+-- OS-gating demo: a macOS-only matcher must match nothing on Windows. On a Mac `class` is the
+-- whole AXRole/AXSubrole/AXIdentifier triple, so the role alone is matched with `axRole`.
+local macOnly = host.window.findAll({ macos = { axRole = "AXWindow" } })
 host.log.info("Matcher [macos-only] matched on this OS: " .. #macOnly .. " (expected 0 on Windows)")
 
 host.speech.output(string.format("Detected %d windows on %s.", #all, host.os.current), { interrupt = true })

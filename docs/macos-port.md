@@ -191,10 +191,34 @@ module already speak, and the alternative — teaching modules two key vocabular
 put a platform detail into every overlay.
 
 The macOS backend translates at its own edge, Win32 VK → macOS virtual keycode, in one
-table. Modifiers map by *position*, not by name: `Ctrl` → Control, `Alt` → Option, `Shift`
-→ Shift, `Win`/`Cmd` → Command. A module written for Windows therefore keeps its finger on
-the same physical key, which is what a ported overlay wants; a module that wants Command
-asks for `Cmd`, which the parser has always accepted.
+table. Modifiers are *roles* and map the Qt way (decided 2026-09-22): `Ctrl` → Command, `Alt`
+→ Option, `Shift` → Shift, `Win` → Control, as Qt's `ControlModifier` is Command on macOS and
+its `MetaModifier` Control. A module written for Windows therefore lands on the Mac's
+counterpart (`"Ctrl+C"` copies on both), and a Mac author writes `Meta` (or `Win`) for the
+Control key; `Cmd`/`Command` are spellings of the Ctrl role. One table in `keys.rs`,
+`MODIFIER_KEYS`, turns a role into Carbon's hotkey bit, the event flag `key_send` sets and the
+tap reads, the layout's modifier state and the modifier keys themselves, and it is tested on
+Windows. A module that wants another combination on a Mac picks one with `host.os.pick`.
+
+Letters are the exception to "one table", because on Windows they are not positions: a
+letter virtual key follows the layout's labels, so `"Z"` is the key labelled Z on a German
+keyboard. The macOS backend therefore asks the selected keyboard layout which key types each
+letter (`backend/macos/layout.rs`: `TISCopyCurrentKeyboardLayoutInputSource`, falling back to
+the ASCII-capable layout, and `UCKeyTranslate`), puts the answer in force in `keys.rs` for
+Carbon registration, `key_send`, `key_post` and the event tap alike, and does it again when the
+system posts `kTISNotifySelectedKeyboardInputSourceChanged`, moving the hotkeys on letters to
+their new keys (one that cannot move is parked and tried again at the next change, as is one
+registered while no key types its letter). It asks
+twice, without and with Command held, because a layout such as "Dvorak – QWERTY ⌘" types
+QWERTY while Command is down, and a combination that holds Command is looked up in that
+second table. The US table stays the letters' fallback, and everything that is not a letter
+stays positional. The same read serves `host.keys.check`'s `composes`: `check` takes it again
+when it asks, so that it answers for the layout selected at that moment, and the input source
+a key is translated through is asked what Option with a key types — the layout is read in one
+place, through one set of declarations in `ffi.rs`, on the main thread only. The
+choice of layout and the letter tables are plain code, tested on Windows
+with described German, French, Dvorak, Dvorak – QWERTY ⌘ and Russian layouts; the reading of a
+real one has not run yet.
 
 ## Which macOS API answers which trait method
 
@@ -276,8 +300,9 @@ Every item here needs a Mac. They are listed in the order a first session should
 5. **Does OCR read plugin text** — the same regions the Windows modules read.
 6. **`_AXUIElementGetWindow`** — whether the private pairing works, or the geometry
    fallback is carrying it.
-7. **The pump budget** — Windows drops keystrokes if one iteration exceeds ~300 ms; macOS
-   disables an event tap that is too slow. The equivalent number here is unmeasured.
+7. **The pump budget** — macOS disables an event tap that is too slow (Windows used to drop
+   keystrokes past ~300 ms while its keyboard hook shared the pump; the hook has a thread of
+   its own now). The equivalent number here is unmeasured.
 8. **Does Vision read a lone digit** — the one measurement that decides whether the second
    OCR engine has to become cross-platform. Windows runs a neural fallback specifically
    because the system engine refuses single digits, and that fallback is a Windows-only

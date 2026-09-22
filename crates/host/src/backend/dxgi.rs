@@ -20,9 +20,10 @@
 //! Both the pump and the image worker read the screen, a process may hold one duplication
 //! per output, the immediate context must not be used from two threads at once — and, the
 //! decisive reason, a mutex cannot put a time limit on a call that is stuck inside a graphics
-//! driver. The pump thread also owns the low-level keyboard hook, which Windows silently
-//! removes after it misses its timeout; so callers send a request and wait with a deadline,
-//! and a driver that stops answering costs them a bounded wait, once, and then nothing.
+//! driver. Every captured key and hotkey waits for the pump — the low-level keyboard hook has a
+//! thread of its own, but what it matches is dispatched there — so callers send a request and
+//! wait with a deadline, and a driver that stops answering costs them a bounded wait, once, and
+//! then nothing.
 //!
 //! **Pull, not push.** Each request calls `AcquireNextFrame(0)` once per output it touches.
 //! A new frame is copied (GPU to GPU) into a kept "last frame"; `WAIT_TIMEOUT` means nothing
@@ -97,9 +98,10 @@ const PUMP_OPENING_WAIT: Duration = Duration::from_millis(150);
 /// shared by every VM, including the ones that read the standard way, and a batch stuck
 /// behind a driver holds up all of them.
 const WORKER_WAIT: Duration = Duration::from_millis(250);
-/// How much of any 300 ms the pump may spend waiting for this thread. The keyboard hook's
-/// own budget is about 300 ms (`LowLevelHooksTimeout`), shared with everything else the pump
-/// does; duplication may take a fifth of it and no more.
+/// How much of any 300 ms the pump may spend waiting for this thread. 300 ms was the keyboard
+/// hook's budget (`LowLevelHooksTimeout`) while it shared the pump; it has a thread of its own
+/// now, but every captured key and hotkey still waits for the pump, and that budget is shared
+/// with everything else the pump does. Duplication may take a fifth of it and no more.
 const PUMP_BUDGET: Duration = Duration::from_millis(60);
 const PUMP_BUDGET_WINDOW: Duration = Duration::from_millis(300);
 /// What an answered read costs anyway — about 1 ms measured for a small region. Only the part
@@ -431,7 +433,8 @@ pub(crate) fn backoff_for(why: Fallback, streak: u32) -> Option<Duration> {
 /// Who is asking, which decides how long they may wait.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Caller {
-    /// The event loop, which also carries the keyboard hook.
+    /// The event loop, which every captured key and hotkey waits for (the keyboard hook itself
+    /// has a thread of its own).
     Pump,
     /// The image worker.
     Worker,

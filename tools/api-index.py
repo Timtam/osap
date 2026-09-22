@@ -50,7 +50,8 @@ NS_BLURB = {
     'host.ocr': 'Recognising text in a screen region.',
     'host.element': 'Querying the accessibility tree an application publishes.',
     'host.input': 'Synthesising mouse and keyboard input.',
-    'host.keys': 'Claiming keys before the focused application sees them.',
+    'host.keys': 'Claiming keys before the focused application sees them, and the key spec every '
+                 'call that takes a key reads.',
     'host.hotkey': 'Claiming a combination system-wide.',
     'host.gamepad': 'Watching game controllers — observed only, never taken from the game, and '
                     'delivered whichever window is in front.',
@@ -58,7 +59,7 @@ NS_BLURB = {
     'host.timer': 'Waiting without blocking, and knowing when a cached reading went stale.',
     'host.settings': 'Typed, per-module settings, edited by the user in the module manager.',
     'host.log': 'Writing to the log file beside the application.',
-    'host.json': 'Turning JSON text a module ships into Luau values.',
+    'host.json': 'Turning JSON text a module ships into Luau values, and Luau values into JSON text.',
     'Concepts': 'The shapes and grammars the calls above are written in.',
 }
 
@@ -268,10 +269,14 @@ CAPABILITIES = [
     'module supplies is its own code, though, and needs `window` if it calls `host.window`.',
     '',
     'Nothing is gated on `host.os`, `host.require`, `host.tryRequire`, `host.include`, '
-    '`host.epoch`, `host.now`, `host.inputEpoch`, `host.calibrating` or `host.json`. A clock, a '
-    'counter, a platform name, a way to reach a declared dependency and a parser of strings the '
-    'module already holds are not worth asking permission for, and gating them would mean every '
-    'manifest names them — which is the same as naming none.',
+    '`host.epoch`, `host.now`, `host.inputEpoch`, `host.calibrating` or `host.json`, nor on '
+    '`host.keys.normalize`, `describe` and `check` — the rest of `host.keys` needs `keys`. A '
+    'clock, a counter, a platform name, a way to reach a declared dependency and a parser of '
+    'strings the module already holds are not worth asking permission for, and gating them would '
+    'mean every manifest names them — which is the same as naming none. `host.keys.check` reads '
+    'one thing besides its string: for a Ctrl+Alt chord on Windows or an Option chord on a Mac, '
+    'the character the keyboard layout in use types with it, unless it is asked with '
+    '`layout = false`.',
     '',
     'The list is also shown to the user before installing from GitHub — for the module chosen '
     'and for every dependency the install adds — and again before an update that asks for a '

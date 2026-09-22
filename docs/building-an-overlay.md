@@ -54,14 +54,14 @@ local ov = O.new("Notepad")
 ov:addStaticText("Notepad helper")
 ov:addCustomButton({
   label = "Say hello",
-  hotkey = "Ctrl+Alt+1",
+  hotkey = "Alt+1",
   onActivate = function() host.speech.output("Hello!") end,
 })
 
 ov:attach({ title = { contains = "Notepad" } })
 ```
 
-Those two files are a complete, working overlay: put the folder under `modules/` beside the application, or run it with `automation-platform <folder>` — which finds the overlay runtime only in the folder that holds yours or in a `modules/` folder beside that one, so keep the runtime's folder there (see [where modules are found](module-package-format.md#where-modules-are-found)). While a window whose title contains "Notepad" is focused, Tab and Shift+Tab move through the two controls, each is spoken as you reach it, and Enter or Space activates the focused one. `Ctrl+Alt+1` fires from anywhere in that window.
+Those two files are a complete, working overlay: put the folder under `modules/` beside the application, or run it with `automation-platform <folder>` — which finds the overlay runtime only in the folder that holds yours or in a `modules/` folder beside that one, so keep the runtime's folder there (see [where modules are found](module-package-format.md#where-modules-are-found)). While a window whose title contains "Notepad" is focused, Tab and Shift+Tab move through the two controls, each is spoken as you reach it, and Enter or Space activates the focused one. `Alt+1` fires from anywhere in that window.
 
 Three things happened implicitly, and they are worth knowing:
 
@@ -97,7 +97,7 @@ Other control kinds, all origin-relative:
 
 Do not derive coordinates from another tool's numbers, and do not trust a value because *something* about it looks right. A cautionary tale from this repo: a set of toggles was calibrated by sampling colours, the colours matched, and the positions were taken to be right — they were 16 px off, on the caption row *under* the buttons. Three of five sampled near-black there and reported "off" forever, and the overlay had shipped like that.
 
-Start the app with `AUTOMATION_PLATFORM_CALIBRATE=1` and three keys arm on whichever overlay is active:
+Start the app with `AUTOMATION_PLATFORM_CALIBRATE=1` and three keys arm on whichever overlay is active. They are written `Ctrl+Alt+Shift+…`: Ctrl+Alt+Shift on Windows, and Command+Option+Shift on a Mac (a spec's Ctrl is Command there), which is off Control+Option, VoiceOver's layer.
 
 | Key | What it does |
 | --- | --- |
@@ -304,13 +304,40 @@ O.embedded {
 }
 ```
 
-Where the Mac publishes nothing that *is* the plugin — Kontakt inside REAPER puts its elements straight into the FX window — the macOS entry can be a function that finds the panel from one of the plugin's own named buttons and returns it as a control; see [`O:attachEmbedded`](api/overlay#o-attachembedded).
+Where the Mac publishes nothing that *is* the plugin — Kontakt inside REAPER puts its elements straight into the FX window — the macOS entry can be a function that finds the panel from one of the plugin's own named buttons and returns it as a control; see [`O:attachEmbedded`](api/overlay#o-attachembedded). A `control` written as a plain string is almost always a Win32 class pattern, which on a Mac is compared with the accessibility role, subrole and identifier and so practically never matches; the runtime says so in the log, once per pattern that names no `AX` role and has no `/`.
 
-And for the genuine one-off, `host.os.is("macos")` and `host.os.current` are always there:
+**Keys are written once, and land on each platform's counterpart.** The key spec's modifiers
+are roles, the way Qt names them. On a Mac `Ctrl` is Command, `Alt` is Option and `Win` (written
+`Meta` by a Mac author) is Control. So `hotkey = "Ctrl+L"` is Command+L there and
+`hotkey = "Alt+P"` is Option+P, and the runtime announces each that way when the control is
+focused ([`host.keys.describe`](api/keys.md#host-keys-describe)). When the counterpart is wrong on
+a Mac, pick another combination there with [`host.os.pick`](api/os.md#host-os-pick). That is the
+case when the Mac keeps the counterpart for itself: Command+Tab, Command+H, +M, +Q. The runtime's
+next-tab key is `{ windows = "Ctrl+Tab", macos = "Meta+Tab" }` for that reason. It is also the case
+when the counterpart holds Control and Option together: `Meta+Alt+…`, or all four modifiers.
+That is VoiceOver's modifier, and a key there never arrives on a Mac whose VoiceOver uses its
+default setting. `Ctrl+Alt+…` is Command+Option on a Mac and is off it, but on Windows it is AltGr,
+a character on many layouts (Ctrl+Alt+2 is ² on a German one).
+[`host.keys.check`](api/keys.md#host-keys-check) says all of these before anybody presses the
+key. A key that has to be free system-wide is best a function key with modifiers. With a letter,
+the four modifiers are held by the Windows shell for the Office key, and Command+Shift with a
+letter is a Mac application's own menu layer.
+
+Screen readers take keys of their own as well — VoiceOver the whole Control+Option layer, JAWS
+and NVDA whatever their scripts and add-ons define — and no list could keep up with the last
+two. If a user reports that a key does nothing while the screen reader runs, the answer is
+another key.
+
+`host.os.pick` and `host.os.is` are for what differs in **the other program** — the plug-in or
+the application, which is a different build on each system:
 
 ```luau
-if host.os.is("macos") then ... end
-local step = host.os.pick { windows = 3, macos = 1 }
+-- Kontakt names its Info Pane button after its own shortcut, which NI changed on the Mac.
+local INFO_PANE = host.os.pick {
+  windows = "Info Pane (F9): Toggles the visibility of the information hint.",
+  macos = "Info Pane (Cmd+I): Toggles the visibility of the information hint.",
+}
+if host.os.is("macos") then ... end -- a whole binding that only exists there
 ```
 
 Reach for that last. A module that branches on the operating system in ten places is a

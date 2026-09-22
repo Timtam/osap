@@ -1,31 +1,38 @@
 //! Windows implementation of the platform [`Backend`](super::Backend):
-//! window enumeration (Win32), global hotkeys (`RegisterHotKey` + `GetMessage`),
+//! window enumeration (Win32), global hotkeys (`RegisterHotKey` + `GetMessage`, and matched
+//! in the low-level keyboard hook as well — see `hotkey_hook.rs`), the low-level keyboard
+//! hook on a thread of its own (`keyboard_hook_thread`),
 //! foreground-change events (`SetWinEventHook`), and screen capture (GDI, or desktop
 //! duplication for the modules that declare it — see `dxgi.rs`).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicI32, AtomicBool, AtomicIsize, AtomicU32, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use super::dxgi::{self, Caller, Fallback};
+use super::hotkey_hook::{self, Down, Mods, OsPress, Route, NO_ID};
 use super::{
     Backend, CaptureFn, CaptureSource, CapturedImage, ControlInfo, DumpNode, HostEvents,
     MouseButton, OcrText, OcrWord, WinInfo, CAPTURE_FAILED, DUPLICATION_UNANSWERED,
 };
 
-use windows_sys::Win32::Foundation::{CloseHandle, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+};
 use windows_sys::Win32::Graphics::Gdi::{
     BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
     GetDC, GetDIBits, GetPixel, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
     DIB_RGB_COLORS, SRCCOPY,
 };
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
+use windows_sys::Win32::System::SystemInformation::GetTickCount;
 use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE};
 use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
 use windows_sys::Win32::System::Threading::{
-    GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentThread, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
+    SetThreadPriority, PROCESS_QUERY_LIMITED_INFORMATION, THREAD_PRIORITY_HIGHEST,
 };
-use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
+use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, FILTERKEYS, HWINEVENTHOOK};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, RegisterHotKey, SendInput, UnregisterHotKey, INPUT, INPUT_KEYBOARD,
     INPUT_MOUSE,
@@ -39,10 +46,11 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::MapVirtualKeyW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumChildWindows,
     EnumWindows, GetAncestor, GetClassNameW, GetClientRect, GetCursorPos,
-    GetForegroundWindow,
+    GetForegroundWindow, GetMessageW, SystemParametersInfoW, FKF_FILTERKEYSON, LLKHF_INJECTED,
+    SPI_GETFILTERKEYS, SPI_GETKEYBOARDDELAY,
     GetGUIThreadInfo, GetSystemMetrics, GetWindowRect,
     MsgWaitForMultipleObjects, PeekMessageW, PM_REMOVE, QS_ALLINPUT, WM_QUIT,
-    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+    GetMessageTime, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
     WindowFromPoint,
     GUI_INMENUMODE, GUI_POPUPMENUMODE, GUI_SYSTEMMENUMODE,
     PostMessageW, PostThreadMessageW, RegisterClassW, SetCursorPos, SetWindowsHookExW,
@@ -58,8 +66,6 @@ thread_local! {
     /// HWNDs whose window became foreground, queued by the WinEvent hook and
     /// drained by the event loop on the same thread.
     static FOREGROUND_QUEUE: RefCell<Vec<isize>> = RefCell::new(Vec::new());
-    /// Hotkey ids received by the message-only window proc, drained by the loop.
-    static HOTKEY_QUEUE: RefCell<Vec<i32>> = RefCell::new(Vec::new());
     /// Set when the focused element changed (coalesced; drained by the loop). A
     /// focus change need not raise a foreground event (e.g. focusing into a
     /// plugin embedded in an already-foreground DAW host window).
@@ -77,19 +83,71 @@ thread_local! {
 /// NULL-hwnd thread message).
 static HOTKEY_HWND: AtomicIsize = AtomicIsize::new(0);
 
-/// Thread id of the event loop, so the WinEvent hook can wake `GetMessage`.
-static HOOK_THREAD: AtomicU32 = AtomicU32::new(0);
+/// Thread id of the event loop — the pump — so the hooks can wake `GetMessage` after queueing
+/// something for it: the WinEvent hook runs on that thread, the keyboard hook on its own.
+static PUMP_THREAD: AtomicU32 = AtomicU32::new(0);
+
+// What the keyboard hook shares with the pump. The hook runs on a thread of its own
+// (`keyboard_hook_thread`), so these are behind locks rather than thread-locals. Every lock is
+// held for a copy, a push or a table lookup — microseconds — and never across a call into
+// another program, so the hook never waits for more than that.
+
+/// (vk, modifier-mask) pairs currently intercepted (+ suppressed) by the hook. Written by the
+/// pump when the captured set changes.
+static CAPTURED_KEYS: Mutex<Vec<(u32, u8)>> = Mutex::new(Vec::new());
+/// Captured key-downs (vk, modifier-mask), queued by the hook for the event loop.
+static KEY_QUEUE: Mutex<Vec<(u32, u8)>> = Mutex::new(Vec::new());
+/// Hotkey presses, drained by the pump: ids the message-only window proc received as
+/// `WM_HOTKEY` on the pump's thread, and ids the keyboard hook matched itself on its own (see
+/// `hotkey_hook`), each with the way it came, so that the pump can tell the two deliveries of
+/// one press apart. Drained in place rather than taken, so its capacity stays.
+static HOTKEY_QUEUE: Mutex<Vec<(i32, Route)>> = Mutex::new(Vec::new());
+/// The hotkeys Windows GRANTED, matched in the hook as well as by `RegisterHotKey` — see
+/// `hotkey_hook` for why. `None` until the first grant, which is also the table's only
+/// allocation. Filed and removed by the pump; the hook looks combinations up and keeps its
+/// record of held keys in it.
+static HOOK_HOTKEYS: Mutex<Option<hotkey_hook::Table>> = Mutex::new(None);
+
+/// A lock that a panic elsewhere cannot poison for good: the hook must go on answering, and
+/// the data behind every lock here is valid after any single push or copy.
+fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 thread_local! {
-    /// (vk, modifier-mask) pairs currently intercepted (+ suppressed) by the hook.
-    static CAPTURED_KEYS: RefCell<Vec<(u32, u8)>> = RefCell::new(Vec::new());
-    /// Captured key-downs (vk, modifier-mask) queued for the event loop.
-    static KEY_QUEUE: RefCell<Vec<(u32, u8)>> = RefCell::new(Vec::new());
-    /// Keys whose DOWN was let through because a screen reader's modifier was held, so
-    /// that their UP is let through as well even if the modifier has since been released.
-    /// A down without its up leaves the application holding a key nobody is pressing.
+    /// (The hook's thread.) Keys whose DOWN was let through because a screen reader's modifier
+    /// was held, so that their UP is let through as well even if the modifier has since been
+    /// released. A down without its up leaves the application holding a key nobody is pressing.
     static SCREEN_READER_PASSED: RefCell<Vec<u32>> = RefCell::new(Vec::new());
+    /// (The hook's thread.) The modifiers as the hook saw them go by, for judging a late call
+    /// by the moment of its key event — see `hotkey_hook::Mods`.
+    static HOOK_MODS: Cell<Mods> = Cell::new(Mods::default());
+    /// (The pump.) Pairs a late hook's press with the `WM_HOTKEY` the system posted for it
+    /// anyway. Never touched by the hook.
+    static HOTKEY_DEDUPE: RefCell<hotkey_hook::Dedupe> =
+        RefCell::new(hotkey_hook::Dedupe::default());
+    /// (The pump.) The window that was in front when the last "arrived through RegisterHotKey"
+    /// line was written, so that it is written once per window rather than once per press.
+    static MISS_LOGGED_FOR: Cell<isize> = const { Cell::new(0) };
 }
+
+/// A hotkey has been filed in [`HOOK_HOTKEYS`] at some point, so the hook consults it. Set
+/// once, from registration on the pump thread, and never cleared: an empty table answers "not
+/// mine" as cheaply as a flag would, and the flag only spares every keystroke the lock while
+/// no module has registered anything.
+static HOOK_HOTKEYS_PRESENT: AtomicBool = AtomicBool::new(false);
+
+/// The auto-repeat threshold last put in force, for saying so when the keyboard settings
+/// change it — see `repeat_threshold_now`.
+static REPEAT_MS_IN_FORCE: AtomicU32 = AtomicU32::new(hotkey_hook::REPEAT_MS);
+
+/// The key sent to mask a swallowed hotkey's modifiers — see `hotkey_hook::needs_mask_key`.
+///
+/// 0xE8 is listed as unassigned in the virtual-key table, so no application and no screen
+/// reader binds it; it is the key AutoHotkey documents for the same job, as the one with the
+/// fewest side effects. Its default there is Ctrl, which a screen reader takes as "stop
+/// speaking", and would silence the announcement the hotkey is about to make.
+const VK_MASK_KEY: u16 = 0xE8;
 
 /// Whether a screen reader's modifier key is held, as OUR OWN HOOK saw it go past.
 ///
@@ -127,6 +185,100 @@ impl WindowsBackend {
     pub fn new() -> Self {
         Self
     }
+
+    /// Files a combination for the keyboard hook once `RegisterHotKey` has answered, and makes
+    /// sure the hook is there to match it. `granted` is that answer: a refused combination is
+    /// not filed (`hotkey_hook::file_if_granted`), and nothing else happens for it.
+    ///
+    /// **When the hook is installed, and what that costs.** With the first granted hotkey —
+    /// at once, while modules load if that is when it comes — and for the rest of the session,
+    /// the same lifetime captured keys give it. Not taken down again when the last hotkey goes:
+    /// an overlay releases and registers its control hotkeys on every focus move, and an idle
+    /// hook costs microseconds per keystroke. In the module manager the host's own reload key
+    /// is registered at start, so there the hook is present from the start whatever the
+    /// modules do. It runs on a thread of its own that does nothing else
+    /// (`keyboard_hook_thread`), so a busy pump no longer holds up the keyboard: the price of a
+    /// long callback is that the hotkey's own callback waits for it, not that the user's typing
+    /// does.
+    fn file_for_hook(&self, id: i32, vk: u32, mods: u32, granted: bool) {
+        // Read before the lock, so the hook never waits for the system call.
+        let repeat_ms = granted.then(repeat_threshold_now);
+        let filed = {
+            let mut t = locked(&HOOK_HOTKEYS);
+            let filed = hotkey_hook::file_if_granted(&mut t, granted, id, vk, mods);
+            if let (true, Some(t), Some(ms)) = (filed, t.as_mut(), repeat_ms) {
+                t.set_repeat_ms(ms);
+            }
+            filed
+        };
+        if !filed {
+            return;
+        }
+        if !HOOK_HOTKEYS_PRESENT.swap(true, Ordering::Relaxed) {
+            // Room for a burst of presses, so a push from inside the hook rarely allocates.
+            locked(&HOTKEY_QUEUE).reserve(32);
+            crate::logging::line(
+                "keys",
+                "registered hotkeys are matched in the keyboard hook as well from now on, so a \
+                 program that switches hotkeys off while it is in front does not silence them; \
+                 RegisterHotKey still claims each one and delivers it whenever the hook does not",
+            );
+        }
+        if let Err(e) = self.watch_keys() {
+            // Not fatal: the registrations stand, and WM_HOTKEY delivers the keys as it always
+            // did. Said once; the next grant simply tries again.
+            static SAID: AtomicBool = AtomicBool::new(false);
+            if !SAID.swap(true, Ordering::Relaxed) {
+                crate::logging::line(
+                    "keys",
+                    &format!(
+                        "the keyboard hook is not available ({e}); hotkeys stay on RegisterHotKey \
+                         alone"
+                    ),
+                );
+            }
+        }
+    }
+}
+
+/// The auto-repeat threshold for the keyboard settings in force now — see
+/// `hotkey_hook::repeat_threshold` — and a line in the log when they changed it. Two
+/// `SystemParametersInfoW` calls, microseconds, on the pump; asked with every grant, because
+/// the settings can change at any time and an overlay grants on every focus move.
+fn repeat_threshold_now() -> u32 {
+    let (delay, filter_keys) = unsafe {
+        let mut setting: i32 = 0;
+        let delay = (SystemParametersInfoW(
+            SPI_GETKEYBOARDDELAY,
+            0,
+            &mut setting as *mut i32 as *mut core::ffi::c_void,
+            0,
+        ) != 0)
+            .then_some(setting.max(0) as u32);
+        let mut fk: FILTERKEYS = std::mem::zeroed();
+        fk.cbSize = std::mem::size_of::<FILTERKEYS>() as u32;
+        let filter_keys = (SystemParametersInfoW(
+            SPI_GETFILTERKEYS,
+            fk.cbSize,
+            &mut fk as *mut FILTERKEYS as *mut core::ffi::c_void,
+            0,
+        ) != 0
+            && fk.dwFlags & FKF_FILTERKEYSON != 0)
+            .then_some((fk.iDelayMSec, fk.iRepeatMSec));
+        (delay, filter_keys)
+    };
+    let ms = hotkey_hook::repeat_threshold(delay, filter_keys);
+    if REPEAT_MS_IN_FORCE.swap(ms, Ordering::Relaxed) != ms {
+        crate::logging::line(
+            "keys",
+            &format!(
+                "a key-down within {ms} ms of the same key's last one, with no key-up between, \
+                 now counts as auto-repeat for the hotkeys the hook matches (keyboard delay \
+                 setting {delay:?}, FilterKeys delay and repeat {filter_keys:?} ms)"
+            ),
+        );
+    }
+    ms
 }
 
 /// Stateless GDI screen-region capture (BitBlt → GetDIBits → RGBA, top-down). Free-
@@ -851,26 +1003,16 @@ impl Backend for WindowsBackend {
     }
 
     fn key_send(&self, combo: &str) -> Result<(), String> {
-        let parts: Vec<&str> = combo
-            .split('+')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .collect();
-        let (key_part, mod_parts) = parts
-            .split_last()
-            .ok_or_else(|| "empty key combo".to_string())?;
-        let mut mod_vks: Vec<u16> = Vec::new();
-        for m in mod_parts {
-            let vk: u16 = match m.to_ascii_lowercase().as_str() {
-                "ctrl" | "control" => 0x11,
-                "alt" | "option" => 0x12,
-                "shift" => 0x10,
-                "win" | "super" | "cmd" | "command" | "meta" => 0x5B,
-                other => return Err(format!("unknown modifier '{other}'")),
-            };
-            mod_vks.push(vk);
+        // The shared parser, so a spec means here what it means to a hotkey. Its modifiers are
+        // roles, which on Windows are the keys of their names.
+        let (vk, mask) = super::parse_key_spec(combo)?;
+        if mask & super::MASK_TAP != 0 {
+            return Err(format!(
+                "'{combo}' is a modifier tap, which is something to capture, not a key to send"
+            ));
         }
-        let key_vk = parse_key(key_part)? as u16;
+        let mod_vks = modifier_vks(mask);
+        let key_vk = vk as u16;
         unsafe {
             for &vk in &mod_vks {
                 send_key_event(vk, 0, 0);
@@ -896,8 +1038,15 @@ impl Backend for WindowsBackend {
     fn register_hotkey(&self, id: i32, spec: &str) -> Result<(), String> {
         let (mods, vk) = parse_spec(spec)?;
         let hwnd = hotkey_window();
-        let ok = unsafe { RegisterHotKey(hwnd, id, mods | MOD_NOREPEAT, vk) };
-        if ok == 0 {
+        let granted = unsafe { RegisterHotKey(hwnd, id, mods | MOD_NOREPEAT, vk) } != 0;
+        // Granted: matched in the hook from now on as well, so a program that switches
+        // registered hotkeys off while it is in front does not switch this one off. Refused:
+        // another program holds it — and therefore NOT filed. The hook could take it anyway,
+        // which is exactly why it must not: the other program's key would stop working and
+        // nothing anywhere would say why. The answer goes in as it came; `file_if_granted`
+        // is the rule, and it is tested with a refusal.
+        self.file_for_hook(id, vk, mods, granted);
+        if !granted {
             return Err(format!(
                 "RegisterHotKey failed for '{spec}' (already in use by another app?)"
             ));
@@ -910,6 +1059,11 @@ impl Backend for WindowsBackend {
         unsafe {
             UnregisterHotKey(hwnd, id);
         }
+        // Out of the hook with the registration, whatever the OS answered: an id that is no
+        // longer ours must not be matched by the hook for a moment longer than by Windows.
+        if let Some(t) = locked(&HOOK_HOTKEYS).as_mut() {
+            t.remove(id);
+        }
     }
 
     fn watch_foreground(&self) -> Result<(), String> {
@@ -920,7 +1074,7 @@ impl Backend for WindowsBackend {
         if FG_HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
-        HOOK_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
+        PUMP_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
         let hook = unsafe {
             SetWinEventHook(
                 EVENT_SYSTEM_FOREGROUND,
@@ -971,7 +1125,11 @@ impl Backend for WindowsBackend {
     }
 
     fn set_captured_keys(&self, keys: &[(u32, u8)]) {
-        CAPTURED_KEYS.with(|c| *c.borrow_mut() = keys.to_vec());
+        // Built, and the old set freed, outside the lock, so the hook waits for a swap and
+        // nothing more.
+        let keys = keys.to_vec();
+        let old = std::mem::replace(&mut *locked(&CAPTURED_KEYS), keys);
+        drop(old);
     }
 
     fn set_key_scope(&self, to_foreground: bool) {
@@ -992,6 +1150,57 @@ impl Backend for WindowsBackend {
         unsafe {
             let down = |k: u16| (GetAsyncKeyState(k as i32) as u16 & 0x8000) != 0;
             down(VK_MENU) || down(VK_CONTROL) || down(VK_SHIFT) || down(VK_LWIN) || down(VK_RWIN)
+        }
+    }
+
+    /// `ToUnicodeEx` against the layout of the thread that owns the foreground window — the one
+    /// the user is typing into, which need not be ours: layouts are per thread.
+    ///
+    /// Flag bit 2 leaves the kernel's keyboard state alone (Windows 10 1607 and later). Without
+    /// it, a dead key asked about here would be left waiting in the dead-key buffer and would
+    /// combine with whatever the user types next.
+    fn layout_char(&self, vk: u32, mask: u8) -> Option<(String, bool)> {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+            GetKeyboardLayout, MapVirtualKeyExW, ToUnicodeEx, MAPVK_VK_TO_VSC, VK_LCONTROL,
+            VK_LMENU, VK_LSHIFT,
+        };
+        const DOWN: u8 = 0x80;
+        unsafe {
+            let fg = GetForegroundWindow();
+            let thread = if fg.is_null() {
+                0
+            } else {
+                GetWindowThreadProcessId(fg, std::ptr::null_mut())
+            };
+            let hkl = GetKeyboardLayout(thread);
+            let mut state = [0u8; 256];
+            if mask & super::MASK_SHIFT != 0 {
+                state[VK_SHIFT as usize] = DOWN;
+                state[VK_LSHIFT as usize] = DOWN;
+            }
+            if mask & super::MASK_CTRL != 0 {
+                state[VK_CONTROL as usize] = DOWN;
+                state[VK_LCONTROL as usize] = DOWN;
+            }
+            if mask & super::MASK_ALT != 0 {
+                state[VK_MENU as usize] = DOWN;
+                state[VK_LMENU as usize] = DOWN;
+            }
+            let scan = MapVirtualKeyExW(vk, MAPVK_VK_TO_VSC, hkl);
+            let mut buf = [0u16; 8];
+            let n = ToUnicodeEx(vk, scan, state.as_ptr(), buf.as_mut_ptr(), buf.len() as i32, 0x4, hkl);
+            let (text, dead) = match n {
+                // A dead key: the buffer holds its spacing form.
+                n if n < 0 => (String::from_utf16_lossy(&buf[..1]), true),
+                0 => return None,
+                n => (String::from_utf16_lossy(&buf[..(n as usize).min(buf.len())]), false),
+            };
+            // Ctrl with a letter "types" a control character; that is not a character anybody
+            // loses.
+            if text.chars().all(char::is_control) {
+                return None;
+            }
+            Some((text, dead))
         }
     }
 
@@ -1052,18 +1261,35 @@ impl Backend for WindowsBackend {
         out
     }
 
+    /// Starts the keyboard hook's thread and waits for it to say whether the hook is in —
+    /// see `keyboard_hook_thread`. Idempotent: every capture and every granted hotkey asks.
     fn watch_keys(&self) -> Result<(), String> {
         if KEY_HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
             return Ok(()); // already installed
         }
-        HOOK_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
-        let hmod = unsafe { GetModuleHandleW(std::ptr::null()) };
-        let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_keyboard_proc), hmod, 0) };
-        if hook.is_null() {
-            KEY_HOOK_INSTALLED.store(false, Ordering::SeqCst);
-            return Err("SetWindowsHookExW(WH_KEYBOARD_LL) failed".to_string());
+        // The thread the hook wakes when it has queued something: this one, the pump.
+        PUMP_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+        let result = match std::thread::Builder::new()
+            .name("keyboard-hook".to_string())
+            .spawn(move || keyboard_hook_thread(ready_tx))
+        {
+            Err(e) => Err(format!("could not start the keyboard hook's thread: {e}")),
+            // It answers once, straight after SetWindowsHookExW, which does not block; a
+            // sender dropped unanswered means the thread ended first, and is a failure too.
+            Ok(_) => ready_rx.recv().unwrap_or_else(|_| {
+                Err("the keyboard hook's thread ended before it answered".to_string())
+            }),
+        };
+        match &result {
+            Ok(()) => crate::logging::line(
+                "keys",
+                "the keyboard hook is installed, on a thread of its own that does nothing but \
+                 answer it, so a busy main thread does not hold up the keyboard",
+            ),
+            Err(_) => KEY_HOOK_INSTALLED.store(false, Ordering::SeqCst),
         }
-        Ok(())
+        result
     }
 
     /// The headless loop: wait for input, but never for longer than one tick.
@@ -1113,17 +1339,20 @@ impl Backend for WindowsBackend {
                     DispatchMessageW(&msg);
                 }
             }
-            // Hotkeys reach our window proc during dispatch; the hooks queued
-            // foreground/key events on this thread. Drain them all.
+            // Hotkeys reach our window proc during dispatch; the WinEvent hooks queued
+            // foreground events on this thread, the keyboard hook its keys and hotkeys from
+            // its own. Drain them all.
             self.pump_pending(events);
             events.on_tick();
         }
     }
 
     fn pump_pending(&self, events: &mut dyn HostEvents) {
-        let hotkeys: Vec<i32> = HOTKEY_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
-        for id in hotkeys {
-            events.on_hotkey(id);
+        let hotkeys: Vec<(i32, Route)> = locked(&HOTKEY_QUEUE).drain(..).collect();
+        for (id, route) in hotkeys {
+            if settle_hotkey(id, route) {
+                events.on_hotkey(id);
+            }
         }
         let pending: Vec<isize> = FOREGROUND_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
         let mut unmatched_fg = false;
@@ -1134,7 +1363,7 @@ impl Backend for WindowsBackend {
                 None => unmatched_fg = true,
             }
         }
-        let pending_keys: Vec<(u32, u8)> = KEY_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
+        let pending_keys: Vec<(u32, u8)> = std::mem::take(&mut *locked(&KEY_QUEUE));
         for (vk, mask) in pending_keys {
             events.on_key(vk, mask);
         }
@@ -1270,7 +1499,10 @@ unsafe extern "system" fn hotkey_wndproc(
     lparam: LPARAM,
 ) -> LRESULT {
     if msg == WM_HOTKEY {
-        HOTKEY_QUEUE.with(|q| q.borrow_mut().push(wparam as i32));
+        // Stamped, so the pump can tell a press the keyboard hook already dispatched from a new
+        // one: `GetMessageTime` is on the same tick clock as the hook's key events.
+        let time = GetMessageTime() as u32;
+        locked(&HOTKEY_QUEUE).push((wparam as i32, Route::Os { time }));
         return 0;
     }
     DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -1294,7 +1526,7 @@ unsafe extern "system" fn win_event_proc(
         // yet — a fresh active() re-check via the focus dispatch doesn't depend on that.
         FOCUS_DIRTY.with(|f| f.set(true));
         // Wake the event loop so it drains the queue even without a real message.
-        let tid = HOOK_THREAD.load(Ordering::Relaxed);
+        let tid = PUMP_THREAD.load(Ordering::Relaxed);
         if tid != 0 {
             PostThreadMessageW(tid, WM_NULL, 0, 0);
         }
@@ -1302,7 +1534,7 @@ unsafe extern "system" fn win_event_proc(
         // Focus moved (possibly within the same top-level window); coalesce and
         // let the loop re-check via the focus chain.
         FOCUS_DIRTY.with(|f| f.set(true));
-        let tid = HOOK_THREAD.load(Ordering::Relaxed);
+        let tid = PUMP_THREAD.load(Ordering::Relaxed);
         if tid != 0 {
             PostThreadMessageW(tid, WM_NULL, 0, 0);
         }
@@ -1313,7 +1545,7 @@ unsafe extern "system" fn win_event_proc(
         // (frequent) name changes of other windows / child objects cost only this test.
         if !hwnd.is_null() && hwnd == GetForegroundWindow() {
             FOCUS_DIRTY.with(|f| f.set(true));
-            let tid = HOOK_THREAD.load(Ordering::Relaxed);
+            let tid = PUMP_THREAD.load(Ordering::Relaxed);
             if tid != 0 {
                 PostThreadMessageW(tid, WM_NULL, 0, 0);
             }
@@ -1360,6 +1592,58 @@ fn popup_menu_open() -> bool {
     }
 }
 
+/// The keyboard hook's thread: installs the hook, says whether that worked, and then does
+/// nothing but answer it.
+///
+/// **Why a thread of its own.** Windows calls a low-level hook on the thread that installed
+/// it, by sending that thread a message, and every keystroke on the machine waits until the
+/// hook has answered — up to `LowLevelHooksTimeout` (Microsoft documents no default; since
+/// Windows 10 1709 anything above one second counts as one second), after which the key goes
+/// on without it, a captured key reaches the application, and the hook may be removed without
+/// notice. On the pump that wait was every OCR call, every long callback, every speech engine
+/// opening — measured pump iterations of 400 and 729 ms, during which all typing on the
+/// machine stood still, in every session once registered hotkeys were matched here as well.
+/// Here nothing else runs, so the hook answers in microseconds whatever the pump is doing, and
+/// what it queues waits for the pump instead of the keyboard waiting for it.
+///
+/// At the highest normal thread priority, so that our own recognition threads, busy on every
+/// core, cannot keep it from being scheduled: it runs for microseconds per keystroke, which
+/// takes nothing from anybody.
+///
+/// It never ends, and never needs to: Windows removes the hook with the process.
+fn keyboard_hook_thread(ready: std::sync::mpsc::SyncSender<Result<(), String>>) {
+    unsafe {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+        let hmod = GetModuleHandleW(std::ptr::null());
+        let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_keyboard_proc), hmod, 0);
+        if hook.is_null() {
+            let error = GetLastError();
+            let _ = ready.send(Err(format!("SetWindowsHookExW(WH_KEYBOARD_LL) failed (error {error})")));
+            return;
+        }
+        let _ = ready.send(Ok(()));
+        drop(ready);
+        // Nothing is ever posted to this thread. GetMessageW is where Windows delivers the
+        // hook's calls, as sent messages, and it returns only for a posted one.
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
+/// Wakes the pump after the hook queued something for it.
+fn wake_pump() {
+    let tid = PUMP_THREAD.load(Ordering::Relaxed);
+    if tid != 0 {
+        unsafe {
+            PostThreadMessageW(tid, WM_NULL, 0, 0);
+        }
+    }
+}
+
+/// Runs on the hook's own thread (`keyboard_hook_thread`) for every key event on the machine.
 unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
         let kb = &*(lparam as *const KBDLLHOOKSTRUCT);
@@ -1368,26 +1652,45 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
         let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
         let is_up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
         if is_down || is_up {
+            // How late this call is. Nearly always 0: the thread does nothing else. When the
+            // machine was too loaded to schedule it, the events queued meanwhile arrive in
+            // order, late, and each is judged as of its own moment — see `hotkey_hook`.
+            let late =
+                hotkey_hook::lateness(GetTickCount(), kb.time, kb.flags & LLKHF_INJECTED != 0);
             // GetAsyncKeyState, NOT GetKeyState: a low-level hook runs on the thread
             // that installed it, and GetKeyState reports that THREAD's view of the
             // keyboard — updated only by the messages it retrieves. Our thread never
             // receives the keystrokes (they belong to the focused application), so the
             // modifiers read as up and every combination collapsed to mask 0. Unmodified
             // keys like Tab worked, which is why this stayed hidden.
+            //
+            // And only for a call on time. The asynchronous state is the keyboard as it is
+            // NOW, which for a late call is later than its key event: plain v typed during a
+            // stall, with Alt held by the time the hook got to it, would read as Alt+V. A late
+            // call is judged by the modifiers this hook saw go by before its key.
             let down = |k: u16| (GetAsyncKeyState(k as i32) as u16 & 0x8000) != 0;
-            let mut mask: u8 = 0;
-            if down(VK_SHIFT) {
-                mask |= 1;
-            }
-            if down(VK_CONTROL) {
-                mask |= 2;
-            }
-            if down(VK_MENU) {
-                mask |= 4;
-            }
-            if down(0x5B) || down(0x5C) {
-                mask |= 8; // VK_LWIN / VK_RWIN
-            }
+            let mask = HOOK_MODS.with(|m| {
+                let mut mods = m.get();
+                let mask = hotkey_hook::event_mask(&mut mods, late, || {
+                    let mut mask: u8 = 0;
+                    if down(VK_SHIFT) {
+                        mask |= 1;
+                    }
+                    if down(VK_CONTROL) {
+                        mask |= 2;
+                    }
+                    if down(VK_MENU) {
+                        mask |= 4;
+                    }
+                    if down(0x5B) || down(0x5C) {
+                        mask |= 8; // VK_LWIN / VK_RWIN
+                    }
+                    mask
+                });
+                mods.on_key(vk, is_down);
+                m.set(mods);
+                mask
+            });
             // A MODIFIER TAP: pressed and released with nothing in between.
             //
             // Melodyne is why. It swallows Alt, F10 and even the WM_SYSCOMMAND that would
@@ -1444,20 +1747,15 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
             } else if let Some(generic) = generic {
                 let armed = TAP_ARMED.swap(0, Ordering::Relaxed);
                 if armed == vk as i32 {
-                    let wanted = CAPTURED_KEYS.with(|c| {
-                        c.borrow()
-                            .iter()
-                            .any(|&(v, m)| v == generic && m == crate::backend::MASK_TAP)
-                    });
+                    let wanted = locked(&CAPTURED_KEYS)
+                        .iter()
+                        .any(|&(v, m)| v == generic && m == crate::backend::MASK_TAP);
                     let scope = KEY_SCOPE.load(Ordering::Relaxed);
                     let in_scope = scope == 0 || GetForegroundWindow() as isize == scope;
                     if wanted && in_scope && !popup_menu_open() && !MENU_OPEN.load(Ordering::Relaxed)
                     {
-                        KEY_QUEUE.with(|q| q.borrow_mut().push((generic, crate::backend::MASK_TAP)));
-                        let tid = HOOK_THREAD.load(Ordering::Relaxed);
-                        if tid != 0 {
-                            PostThreadMessageW(tid, WM_NULL, 0, 0);
-                        }
+                        locked(&KEY_QUEUE).push((generic, crate::backend::MASK_TAP));
+                        wake_pump();
                     }
                 }
             }
@@ -1472,9 +1770,21 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                     note_menu_pass(vk, mask);
                 }
             }
+            // The hotkeys' record of which keys are held (`hotkey_hook::Table`) is kept for every
+            // key that is not a modifier, whatever happens to it below: the captured keys'
+            // branch can return before the hotkeys' is reached, and a key it took whose up
+            // the record never saw would make the next real press of that key read as a
+            // repeat — swallowed, without a callback. Every key-up is recorded here, and a
+            // key-down the captures take is recorded where they take it.
+            let hotkeys_filed =
+                generic.is_none() && HOOK_HOTKEYS_PRESENT.load(Ordering::Relaxed);
+            if hotkeys_filed && is_up {
+                if let Some(t) = locked(&HOOK_HOTKEYS).as_mut() {
+                    t.on_up(vk);
+                }
+            }
             // Match only the exact combo, so "Tab" (mask 0) leaves Alt+Tab alone.
-            let matched =
-                CAPTURED_KEYS.with(|c| c.borrow().iter().any(|&(v, m)| v == vk && m == mask));
+            let matched = locked(&CAPTURED_KEYS).iter().any(|&(v, m)| v == vk && m == mask);
             if matched {
                 // A keystroke made with a SCREEN READER'S own modifier held is addressed to
                 // the screen reader, whatever this overlay has claimed.
@@ -1511,6 +1821,9 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                             v.retain(|&k| k != vk);
                         }
                     });
+                    if hotkeys_filed && is_down {
+                        note_captured_down(kb, vk, mask, late, true);
+                    }
                     return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
                 }
                 // Intercept a captured nav key only while the overlay should own
@@ -1522,10 +1835,10 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                 let in_scope = scope == 0 || GetForegroundWindow() as isize == scope;
                 if in_scope && !popup_menu_open() && !MENU_OPEN.load(Ordering::Relaxed) {
                     if is_down {
-                        KEY_QUEUE.with(|q| q.borrow_mut().push((vk, mask)));
-                        let tid = HOOK_THREAD.load(Ordering::Relaxed);
-                        if tid != 0 {
-                            PostThreadMessageW(tid, WM_NULL, 0, 0);
+                        locked(&KEY_QUEUE).push((vk, mask));
+                        wake_pump();
+                        if hotkeys_filed {
+                            note_captured_down(kb, vk, mask, late, false);
                         }
                     }
                     return 1; // suppress the matched combo (down + up)
@@ -1537,9 +1850,202 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                     note_menu_pass(vk, mask);
                 }
             }
+            // A registered hotkey, matched here as well as by RegisterHotKey — see
+            // `hotkey_hook`. After the captured keys, so a capture of the same combination
+            // still wins exactly as it did when the hook swallowed it before RegisterHotKey
+            // could see it. Never a modifier: a hotkey's key is an ordinary key. A key-up has
+            // been recorded above and always goes through.
+            if hotkeys_filed && is_down && hook_hotkey(kb, vk, mask, late) {
+                return 1;
+            }
         }
     }
     CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+}
+
+/// A key-down the captured keys' branch took, or let through for a screen reader, entered in
+/// the hotkeys' record of held keys (`Table::note_down`) before that branch returns. When it
+/// was let through (`passed`) and the combination is also a granted hotkey, `RegisterHotKey`
+/// may deliver it next, and the pump is told to expect that rather than to explain it.
+fn note_captured_down(kb: &KBDLLHOOKSTRUCT, vk: u32, mask: u8, late: u32, passed: bool) {
+    let expected = {
+        let mut t = locked(&HOOK_HOTKEYS);
+        let Some(t) = t.as_mut() else { return };
+        t.note_down(vk, kb.time);
+        if passed {
+            t.lookup(vk, mask)
+        } else {
+            NO_ID
+        }
+    };
+    if expected != NO_ID {
+        locked(&HOTKEY_QUEUE).push((expected, Route::Passed { time: kb.time, late }));
+    }
+}
+
+/// The hook's half of a registered hotkey, for a key-down: whether to swallow it. Queues the
+/// press for the pump when it is one, and a note when it lets a granted combination through.
+///
+/// The rules the captured keys follow, and which of them apply here:
+///
+/// - **A screen reader's modifier held** (Insert, numpad zero, Caps Lock): let through, as a
+///   captured key is. RegisterHotKey then decides, exactly as it did before the hook matched
+///   anything — Windows ignores those keys when it matches a hotkey, and so the press arrives
+///   as `WM_HOTKEY` if the screen reader passes it on.
+/// - **The capture scope and the menu fall-through do not apply**, deliberately. They exist so
+///   that a captured key can be shared with the application's own UI; a registered hotkey was
+///   never shared — it fired whatever window was in front and whatever menu was open — and
+///   the overlay runtime gives its control hotkeys back itself while a menu is open. Applying
+///   them here would change when a hotkey fires, which is not what matching it here is for.
+/// - **The tap form** is untouched: a hotkey's key-down is an ordinary key, which has already
+///   dropped a pending tap above, exactly as it did on its way to RegisterHotKey.
+///
+/// Key-ups are recorded by the caller and always let through, as RegisterHotKey lets them
+/// through to the application. Auto-repeat is swallowed without a second dispatch, as
+/// `MOD_NOREPEAT` does.
+unsafe fn hook_hotkey(kb: &KBDLLHOOKSTRUCT, vk: u32, mask: u8, late: u32) -> bool {
+    enum Act {
+        Fire(i32),
+        Repeat,
+        Pass(i32),
+        Nothing,
+    }
+    let act = {
+        let mut t = locked(&HOOK_HOTKEYS);
+        let Some(t) = t.as_mut() else { return false };
+        let down = t.on_down(vk, mask, kb.time);
+        if matches!(down, Down::Miss) {
+            return false;
+        }
+        // Asked only for a granted combination: three GetAsyncKeyState calls are cheap, but
+        // not free, and every other key goes past without them.
+        let held = |k: i32| (GetAsyncKeyState(k) as u16 & 0x8000) != 0;
+        let screen_reader_held = SCREEN_READER_MOD_DOWN.load(Ordering::Relaxed)
+            || held(0x2D)
+            || held(0x60)
+            || held(0x14);
+        match down {
+            // Its repeats are let through too, below: the registered path is handling it.
+            Down::Fire(id) if screen_reader_held => Act::Pass(id),
+            Down::Repeat if screen_reader_held => Act::Nothing,
+            Down::Fire(id) => Act::Fire(id),
+            Down::Repeat => Act::Repeat,
+            // The key was down before the combination was complete: not a press here, and
+            // RegisterHotKey may still answer for it.
+            Down::Pass(id) => Act::Pass(id),
+            Down::Miss => Act::Nothing,
+        }
+    };
+    // No lock is held from here on: the masking key below comes back through this hook.
+    match act {
+        Act::Fire(id) => {
+            locked(&HOTKEY_QUEUE).push((id, Route::Hook { time: kb.time, late }));
+            if hotkey_hook::needs_mask_key(mask) {
+                send_mask_key();
+            }
+            wake_pump();
+            true
+        }
+        Act::Repeat => true,
+        Act::Pass(id) => {
+            // Not a dispatch: a note for the pump that the WM_HOTKEY coming for this press is
+            // expected, and needs no explaining. No wake either — the WM_HOTKEY wakes it.
+            locked(&HOTKEY_QUEUE).push((id, Route::Passed { time: kb.time, late }));
+            false
+        }
+        Act::Nothing => false,
+    }
+}
+
+/// Presses and releases [`VK_MASK_KEY`] while the user still holds the hotkey's modifiers.
+///
+/// Sent from inside the hook, at the moment the hotkey's key is swallowed — not later, when the
+/// modifier comes up, which is where AutoHotkey sends it. Then the order is certain: this runs
+/// while the modifier is still down, so the mask lands between its press and its release
+/// whatever the system does with input injected from inside a hook. No lock is held while it
+/// is sent, so the hook's own calls for these two events find nothing held; they match no
+/// table and go straight through.
+unsafe fn send_mask_key() {
+    let mut inputs: [INPUT; 2] = std::mem::zeroed();
+    for (input, flags) in inputs.iter_mut().zip([0, KEYEVENTF_KEYUP]) {
+        input.r#type = INPUT_KEYBOARD;
+        input.Anonymous.ki.wVk = VK_MASK_KEY;
+        input.Anonymous.ki.dwFlags = flags;
+    }
+    SendInput(2, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32);
+}
+
+/// The pump's half: whether a hotkey press that reached the queue is dispatched. Says so in
+/// the log when a press came the other way from the one expected, because that is the only
+/// trace either case leaves.
+fn settle_hotkey(id: i32, route: Route) -> bool {
+    HOTKEY_DEDUPE.with(|d| {
+        let mut d = d.borrow_mut();
+        match route {
+            Route::Hook { time, late } => {
+                if d.hook_press(id, time, late) {
+                    return true;
+                }
+                crate::logging::line(
+                    "keys",
+                    &format!(
+                        "hotkey id {id}: the keyboard hook matched a press {late} ms late that \
+                         RegisterHotKey had already delivered; not dispatched a second time"
+                    ),
+                );
+                false
+            }
+            Route::Passed { time, late } => {
+                d.hook_pass(id, time, late);
+                false
+            }
+            Route::Os { time } => match d.os_press(id, time) {
+                OsPress::Duplicate { late } => {
+                    crate::logging::line(
+                        "keys",
+                        &format!(
+                            "hotkey id {id}: RegisterHotKey delivered a press the keyboard hook \
+                             had already dispatched — the hook ran {late} ms late (its thread was \
+                             not scheduled in time), so Windows had passed the key on without \
+                             waiting; not dispatched a second time"
+                        ),
+                    );
+                    false
+                }
+                OsPress::Deliver { expected } => {
+                    let hooked = !expected
+                        && KEY_HOOK_INSTALLED.load(Ordering::Relaxed)
+                        && locked(&HOOK_HOTKEYS).as_ref().is_some_and(|t| t.holds(id));
+                    // Once per window in front: in front of an elevated window this is every
+                    // press, and one line says as much as a hundred.
+                    let first_for_window = hooked && {
+                        let fg = unsafe { GetForegroundWindow() } as isize;
+                        MISS_LOGGED_FOR.with(|w| w.replace(fg)) != fg
+                    };
+                    if first_for_window {
+                        // The hook should have seen this press and did not; every press the
+                        // hook lets through on purpose was noted as expected. What is left: an
+                        // elevated window in front — a hook of an ordinary process is not
+                        // called for input to it, RegisterHotKey is, which is why it stays —
+                        // a hook running late, whose own press then follows and is dropped
+                        // with a line of its own, or a hook Windows removed after it timed out.
+                        crate::logging::line(
+                            "keys",
+                            &format!(
+                                "hotkey id {id} arrived through RegisterHotKey, not through the \
+                                 keyboard hook (said once per window in front): an elevated \
+                                 window is in front, or the hook ran late (a \"not dispatched a \
+                                 second time\" line then follows), or Windows has removed the \
+                                 hook after it timed out (captured keys would then have stopped \
+                                 too)"
+                            ),
+                        );
+                    }
+                    true
+                }
+            },
+        }
+    })
 }
 
 // `require_title`: drop windows with no title (the default — keeps the window LIST and
@@ -1623,28 +2129,48 @@ fn process_exe(pid: u32) -> Option<String> {
     }
 }
 
-/// Parses a spec like "Ctrl+Alt+H" into Win32 modifier flags + virtual-key code.
-fn parse_spec(spec: &str) -> Result<(u32, u32), String> {
-    let parts: Vec<&str> = spec
-        .split('+')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .collect();
-    let (key_part, mod_parts) = parts
-        .split_last()
-        .ok_or_else(|| "empty hotkey spec".to_string())?;
-
+/// Parses a spec like "Ctrl+Alt+H" or "Ctrl+Shift+Win+Alt+F6" into Win32 modifier flags +
+/// virtual-key code, as `RegisterHotKey` takes them: the shared parser, then its mask as `MOD_*`
+/// bits (each role is the key of its name here).
+/// There used to be a second parser here, and it had no tap branch — so a tap was refused as
+/// an "unknown key", where macOS says what a tap is and where it belongs. `pub(super)` for
+/// `hotkey_hook`'s tests, which check it against the mask the hook computes.
+pub(super) fn parse_spec(spec: &str) -> Result<(u32, u32), String> {
+    let (vk, mask) = super::parse_key_spec(spec)?;
+    if mask & super::MASK_TAP != 0 {
+        return Err(format!(
+            "'{spec}' is a modifier tap, which cannot be a global hotkey — capture it with \
+             host.keys instead"
+        ));
+    }
     let mut mods: u32 = 0;
-    for m in mod_parts {
-        match m.to_ascii_lowercase().as_str() {
-            "ctrl" | "control" => mods |= MOD_CONTROL,
-            "alt" | "option" => mods |= MOD_ALT,
-            "shift" => mods |= MOD_SHIFT,
-            "win" | "super" | "cmd" | "command" | "meta" => mods |= MOD_WIN,
-            other => return Err(format!("unknown modifier '{other}'")),
+    for (bit, flag) in [
+        (super::MASK_CTRL, MOD_CONTROL),
+        (super::MASK_ALT, MOD_ALT),
+        (super::MASK_SHIFT, MOD_SHIFT),
+        (super::MASK_WIN, MOD_WIN),
+    ] {
+        if mask & bit != 0 {
+            mods |= flag;
         }
     }
-    Ok((mods, parse_key(key_part)?))
+    Ok((mods, vk))
+}
+
+/// The modifier keys `key_send` holds for `mask`, in the order it presses them: Ctrl, Alt,
+/// Shift, Win — the canonical order, not the order the spec was written in, which is gone with
+/// the parse; no application has been seen to care. Released in reverse.
+fn modifier_vks(mask: u8) -> Vec<u16> {
+    [
+        (super::MASK_CTRL, 0x11u16),
+        (super::MASK_ALT, 0x12),
+        (super::MASK_SHIFT, 0x10),
+        (super::MASK_WIN, 0x5B),
+    ]
+    .iter()
+    .filter(|(bit, _)| mask & bit != 0)
+    .map(|(_, vk)| *vk)
+    .collect()
 }
 
 /// Maps a friendly key name to a Win32 virtual-key code.
@@ -2055,6 +2581,50 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
             }
         }
         Ok(OcrText { text, words, skipped: false })
+}
+
+/// The shared parser's mask, converted to what `RegisterHotKey` and `SendInput` are given. The
+/// grammar is tested in `backend::key_grammar_tests`; these hold the two conversions, which no
+/// other test reaches.
+#[cfg(test)]
+mod key_conversion_tests {
+    use super::*;
+
+    #[test]
+    fn a_spec_becomes_the_register_hotkey_modifiers_it_names() {
+        assert_eq!(
+            parse_spec("Ctrl+Shift+Win+Alt+F5"),
+            Ok((MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_WIN, 0x74))
+        );
+        assert_eq!(parse_spec("Ctrl+S"), Ok((MOD_CONTROL, 0x53)));
+        // Every spelling of a role is that role: Cmd is Ctrl, Meta is Win, Option is Alt.
+        assert_eq!(parse_spec("Cmd+S"), Ok((MOD_CONTROL, 0x53)));
+        assert_eq!(parse_spec("Meta+E"), Ok((MOD_WIN, 0x45)));
+        assert_eq!(parse_spec("Option+V"), Ok((MOD_ALT, 0x56)));
+        assert!(parse_spec("Mod+S").unwrap_err().contains("Mod"));
+        assert!(parse_spec("Global+F5").unwrap_err().contains("Global"));
+        assert_eq!(parse_spec("Alt+V"), Ok((MOD_ALT, 0x56)));
+        assert_eq!(parse_spec("Shift+Tab"), Ok((MOD_SHIFT, 0x09)));
+        assert_eq!(parse_spec("Win+E"), Ok((MOD_WIN, 0x45)));
+        assert_eq!(parse_spec("F6"), Ok((0, 0x75)));
+        let e = parse_spec("Alt tap").unwrap_err();
+        assert!(e.contains("tap"), "{e}");
+        assert!(parse_spec("Hyper+X").unwrap_err().contains("Hyper"));
+    }
+
+    #[test]
+    fn a_sent_chord_holds_its_modifiers_in_one_order() {
+        assert_eq!(modifier_vks(0), Vec::<u16>::new());
+        let all = super::super::key_spec("Ctrl+Shift+Win+Alt+F5").unwrap().1;
+        assert_eq!(modifier_vks(all), vec![0x11, 0x12, 0x10, 0x5B]);
+        // What `host.input.send("Ctrl+C")` holds: Control, the key that copies here.
+        let copy = super::super::key_spec("Ctrl+C").unwrap().1;
+        assert_eq!(modifier_vks(copy), vec![0x11]);
+        assert_eq!(modifier_vks(super::super::MASK_SHIFT), vec![0x10]);
+        assert_eq!(modifier_vks(super::super::MASK_ALT), vec![0x12]);
+        assert_eq!(modifier_vks(super::super::MASK_CTRL), vec![0x11]);
+        assert_eq!(modifier_vks(super::super::MASK_WIN), vec![0x5B]);
+    }
 }
 
 #[cfg(test)]

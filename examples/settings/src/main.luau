@@ -4,9 +4,12 @@
 
 local imageSearch = host.settings.define("imageSearch", false, { label = "Image search" })
 local rate = host.settings.define("speechRate", 50, { label = "Speech rate", min = 0, max = 100 })
-local lang = host.settings.define("ocrLanguage", "eng", {
+-- BCP-47 language tags rather than Tesseract's three-letter codes, which neither platform's
+-- OCR engine knows. (This demo only reads the setting back; see docs/api/ocr.md for what
+-- `lang` takes when it reaches host.ocr.)
+local lang = host.settings.define("ocrLanguage", "en", {
   label = "OCR language",
-  oneOf = { "eng", "deu", "fra" },
+  oneOf = { "en", "de", "fr" },
 })
 
 host.log.info(

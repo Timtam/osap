@@ -23,6 +23,9 @@ return {
   activate = function()
     denied("host.speech from the entry point", function() return host.speech.output end)
     denied("host.screen from the entry point", function() return host.screen.pixel end)
+    -- A namespace with free members: `host.keys.normalize`, `describe` and `check` need no
+    -- capability, and the table that hands them out must not hand out the capture beside them.
+    denied("host.keys.capture from the entry point", function() return host.keys.capture end)
 
     -- The module's own second file: same package, same manifest, and until 2026-09-03 a
     -- complete bypass, because `include` handed it the whole host table.

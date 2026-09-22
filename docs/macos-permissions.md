@@ -180,15 +180,17 @@ is how one chord can work for a tester on his own Mac and beep on somebody else'
 this project's keys used to sit there, and the third Mac session measured what that costs:
 registered on both launches, never delivered, VoiceOver's error sound on every press.
 
-- The application's own **reload-everything** key is `Ctrl+Shift+Win+Alt+F5` on Windows
-  and **Command-Shift-F5** on a Mac; the `daw-hosts` key that puts the keyboard back into a
-  plugin window is `Ctrl+Shift+Win+Alt+F6` and **Command-Shift-F6** likewise. Both use an
-  F-key, so they additionally need "Use F1, F2, etc. as standard function keys" turned on,
-  or the `fn` key held down.
-- The **calibrator's** `Ctrl+Alt+Shift+S/T/V` still sit on Control-Option. They only exist
-  in a run started with `AUTOMATION_PLATFORM_CALIBRATE=1`. The log says once per chord —
-  registered through Carbon or captured by the event tap, which is what the calibrator's
-  are — when a key is on VoiceOver's modifier while VoiceOver is running.
+- The application's own **reload-everything** key is `Ctrl+Alt+Shift+Win+F5` on Windows
+  and **Command-Shift-F5** on a Mac (`Cmd+Shift+F5`); the `daw-hosts` key that puts the
+  keyboard back into a plugin window is **Command-Shift-F6** likewise (`Cmd+Shift+F6`, and
+  `Ctrl+Shift+Win+Alt+F6` on Windows). Both use an F-key, so they additionally need "Use F1,
+  F2, etc. as standard function keys" turned on, or the `fn` key held down.
+- The **calibrator's** keys are `Ctrl+Alt+Shift+S/T/V`: **Command-Option-Shift** on a Mac,
+  where a spec's Ctrl is Command, off Control-Option, and Ctrl+Alt+Shift on Windows. They only
+  exist in a run started with `AUTOMATION_PLATFORM_CALIBRATE=1`.
+- The log says once per chord — registered through Carbon or captured by the event tap —
+  when a key is on VoiceOver's modifier while VoiceOver is running, and `host.keys.check`
+  reports `"voiceover"` for any such chord whether VoiceOver is running or not.
 
 The overlays themselves use `Alt+<key>`, `Ctrl+<key>` and `Ctrl+Shift+<key>`, and their
 macOS question is a different one:
@@ -196,15 +198,20 @@ macOS question is a different one:
 - `Alt` becomes **Option**, which on a Mac is the layer that types accented characters. That
   is harmless for a shortcut the platform consumes, but a combination it fails to claim
   types a character into the plugin rather than doing nothing.
-- `Ctrl` becomes **Control**, and `Control+<letter>` on macOS is the text-editing layer
-  inherited from emacs — `Control+A`, `Control+E`, `Control+N`, `Control+P` all mean
-  something inside any text field. A registered global shortcut wins, but it takes the key
-  away from the plugin's own text entry while the overlay is active, and the macOS
-  convention for a command would be `Command+<letter>` anyway.
+- `Ctrl` becomes **Command**, which is the application-menu layer. An overlay key there
+  takes that shortcut from the application for as long as the overlay is active: Kontakt's
+  `Ctrl+S`, `Ctrl+P` and `Ctrl+N` are Command-S, Command-P and Command-N, which are the DAW's
+  Save, Print and New everywhere else. The overlay runtime's go-to-tab keys `Ctrl+1` to
+  `Ctrl+9` are Command-1 to Command-9, the Mac's own tab keys. Its tab-cycling keys are
+  picked per platform and stay **Control-Tab** and Control-Shift-Tab (`Meta+Tab`), because
+  Command-Tab is the application switcher.
+- A combination the system keeps for itself — Command-Q, Command-H, Command-M, Command-Tab,
+  Command-Space and the rest of the list under `host.keys.check` — is refused as a hotkey. A
+  capture of one is not refused, and the log says so once per chord.
 
-So macOS module variants want their own key choices rather than the Windows ones. The
-mechanism exists — a module can ask which platform it is on with `host.os.is("macos")` and
-register accordingly — and the choice has not been made yet.
+A module that wants another combination on a Mac picks one per platform with
+`host.os.pick { windows = …, macos = … }`. In a spec the Mac's Control key is written `Meta`
+(or `Win`).
 
 ## Where this is not the whole story
 

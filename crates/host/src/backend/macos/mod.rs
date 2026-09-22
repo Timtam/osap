@@ -44,6 +44,7 @@ mod hotkey;
 mod input;
 mod key_age;
 mod keys;
+mod layout;
 mod ocr;
 pub(crate) mod perm;
 mod queue;
@@ -67,6 +68,9 @@ impl MacBackend {
         // thread now is the difference between a first read-out that is merely slow and one
         // that stalls the pump long enough for the system to switch off the event tap.
         ocr::warm_up();
+        // Which key types which letter under the user's keyboard layout, before the first hotkey
+        // is registered on one: a letter in a spec is the key that types it, as on Windows.
+        layout::start();
         MacBackend
     }
 }
@@ -343,6 +347,10 @@ impl Backend for MacBackend {
         input::modifiers_down()
     }
 
+    fn layout_char(&self, vk: u32, mask: u8) -> Option<(String, bool)> {
+        layout::character(vk, mask)
+    }
+
     fn native_menu_open(&self) -> bool {
         watch::native_menu_open()
     }
@@ -390,6 +398,11 @@ impl Backend for MacBackend {
         // A busy application owed another subscription attempt gets it here, on the clock,
         // rather than only when the user next switches applications — see watch.rs.
         watch::retry_refused();
+        // A layout switched while running moves the letters; the hotkeys on them follow before
+        // anything queued is dispatched.
+        if layout::pump() {
+            hotkey::reregister_letters();
+        }
         queue::drain(events);
     }
 }

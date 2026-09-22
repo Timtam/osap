@@ -3,6 +3,10 @@ name = "Melodyne overlay"
 version = "0.1.0"
 license = "GPL-3.0-or-later"
 dependencies = ["com.platform.overlay"]
+# Windows only: the window is matched on its Win32 class (GNWindowDoc) and nothing else, and
+# every coordinate and colour here was measured on Windows. The overlay is meant to reach the
+# Mac one day; until somebody has had Melodyne in front of one, it would only be inert there.
+supported_os = ["windows"]
 
 [capabilities]
 require = ["screen", "ocr", "input", "speech", "keys", "log", "timer", "window"]

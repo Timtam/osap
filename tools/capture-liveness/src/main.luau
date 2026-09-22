@@ -30,16 +30,10 @@
 -- refused (a Mac without the Accessibility grant) the first key falls back to a registered hotkey.
 -- The modifiers still reach the game; only the F10 / F11 is taken.
 
-local KEY = host.os.pick {
-  macos = "Cmd+Shift+F10",
-  windows = "Ctrl+Shift+F10",
-  linux = "Ctrl+Shift+F10",
-}
-local KEY_REGISTERED = host.os.pick {
-  macos = "Cmd+Shift+F11",
-  windows = "Ctrl+Shift+F11",
-  linux = "Ctrl+Shift+F11",
-}
+-- Ctrl+Shift on Windows, Command+Shift on a Mac, where a spec's Ctrl is Command — which keeps
+-- the Mac key off Control+Option, VoiceOver's modifier.
+local KEY = "Ctrl+Shift+F10"
+local KEY_REGISTERED = "Ctrl+Shift+F11"
 local COUNTDOWN_MS = 10000
 
 local READS = 40
@@ -131,7 +125,8 @@ end
 -- Every key that arrives is logged with its way and the window in front at that moment; that line
 -- is the answer to "does this game let our keys through". Then the countdown, then the reads.
 local function start(key, via)
-  line("%s arrived through the %s while %s was in front", key, via, describe(host.window.active()))
+  line("%s arrived through the %s while %s was in front", host.keys.describe(key, { style = "short" }),
+    via, describe(host.window.active()))
   if running then
     say("Still watching.")
     return
@@ -158,9 +153,11 @@ end
 local okReg, errReg = pcall(host.hotkey.register, KEY_REGISTERED,
   function() start(KEY_REGISTERED, "registered hotkey") end)
 if not okReg then
-  line("%s could not be registered (%s)", KEY_REGISTERED, tostring(errReg))
+  line("%s could not be registered (%s)", host.keys.describe(KEY_REGISTERED, { style = "short" }),
+    tostring(errReg))
 end
 
 host.log.info(string.format(
   "[liveness] ready — press %s (%s) or %s (registered hotkey), then bring a moving game to the front",
-  KEY, how, KEY_REGISTERED))
+  host.keys.describe(KEY, { style = "short" }), how,
+  host.keys.describe(KEY_REGISTERED, { style = "short" })))
