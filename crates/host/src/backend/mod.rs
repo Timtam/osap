@@ -880,6 +880,17 @@ pub fn warmup_ocr() -> Option<std::thread::JoinHandle<()>> {
     h
 }
 
+/// Waits, for at most half a second, until no recognition of the secondary OCR engine is
+/// still running, before the process exits. The engine's recognitions are left to finish on
+/// threads of their own whenever the primary engine answers first, and one still inside ONNX
+/// Runtime at exit is the same fault `warmup_ocr` joins its thread against. When there was
+/// anything to wait for, logs how long it waited or that it gave up. Nothing to wait for
+/// anywhere but Windows, which is the only place that engine exists.
+pub fn settle_ocr() {
+    #[cfg(windows)]
+    paddle_ocr::settle();
+}
+
 /// The backend for the current platform.
 pub fn platform() -> Rc<dyn Backend> {
     #[cfg(windows)]

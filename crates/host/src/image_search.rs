@@ -62,6 +62,14 @@ pub(crate) fn register_vm(shared: &Shared, lua: &Lua, idx: usize) {
     shared.vm_gens.borrow_mut().insert(idx, gen);
 }
 
+/// Whose VM `lua` is, as `register_vm` recorded it; `None` for a state it never tagged.
+///
+/// Shared with every other registration that has to die with the VM it was made from rather
+/// than with the identity it was made under — a settings `onChange` among them.
+pub(crate) fn vm_owner(lua: &Lua) -> Option<VmOwner> {
+    lua.try_app_data_ref::<VmOwner>().ok().flatten().map(|o| *o)
+}
+
 /// The owner of the VM a binding is running in, and that VM's generation.
 ///
 /// For a state `register_vm` never tagged — none in production: `populate_vm` tags every VM
@@ -72,7 +80,7 @@ pub(crate) fn register_vm(shared: &Shared, lua: &Lua, idx: usize) {
 /// which no VM ever has (`NEXT_GEN` starts at 1), so `fate` drops the answer: there is no VM
 /// the host knows of to hand it to.
 fn owner_of(lua: &Lua, gens: &HashMap<usize, u64>, scope: usize) -> (usize, u64) {
-    if let Ok(Some(o)) = lua.try_app_data_ref::<VmOwner>() {
+    if let Some(o) = vm_owner(lua) {
         return (o.idx, o.gen);
     }
     (scope, gens.get(&scope).copied().unwrap_or(0))

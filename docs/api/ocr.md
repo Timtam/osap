@@ -38,7 +38,7 @@ Synchronous: it runs on the event loop and blocks speech, hotkeys, timers and th
 The returned table always has:
 - `text` — the full recognized string for the region.
 - `words` — an array; each entry is `{ text, x, y, w, h }` where `x`/`y` are the word's top-left in **absolute screen coordinates** (the region origin `x1,y1` is added back to the per-word offset), and `w`/`h` are the box size.
-- `skipped` — `true` when the **blank guard answered instead of the engine**: the region was small enough to be cropped to its content, the crop found no ink, and the recogniser was never asked — so the empty `text` and `words` are the guard's answer, not a reading. `false` whenever the guard did not fire, which includes every other way of getting an empty result; those are different faults and the log names them.
+- `skipped` — `true` when the **blank guard answered instead of the engine**: the region was small enough to be cropped to its content, the crop found no ink, and the system recogniser was never asked (on Windows the second one has already started by then, and its answer is dropped; see the Windows section below) — so the empty `text` and `words` are the guard's answer, not a reading. `false` whenever the guard did not fire, which includes every other way of getting an empty result; those are different faults and the log names them.
 
 On a backend OCR failure the call raises a Lua error **on Windows**; see the platform sections below, because macOS never raises here and a failure is indistinguishable from an empty region — unless `skipped` says so.
 
@@ -70,9 +70,9 @@ host.speech.output(res.text)
 
 `Windows.Media.Ocr` is asked synchronously — the call waits on its `RecognizeAsync` — and a new engine is created for every call, and for every region of a `recognizeMany`.
 
-For a region of 400x200 or less a second recogniser runs alongside the system one and its answer is used when the system engine returns nothing — which is the lone-digit case, the thing `Windows.Media.Ocr` refuses. In that case the call waits for the second recogniser to finish, with no time limit. That fallback recognises without locating, so when it answers it sets `text` and leaves **`words` empty**. It ignores `lang` and reads Latin script only (see [Recognition language](#recognition-language)).
+For a region of 400x200 or less a second recogniser runs alongside the system one and its answer is used when the system engine returns nothing — which is the lone-digit case, the thing `Windows.Media.Ocr` refuses. In that case the call waits for the second recogniser to finish, with no time limit; when the system engine did answer, the call returns at once and the second recogniser finishes on its own thread, unused. At exit the application waits up to half a second for any that are still running, and logs how long it waited, or that it gave up. That fallback recognises without locating, so when it answers it sets `text` and leaves **`words` empty**. It ignores `lang` and reads Latin script only (see [Recognition language](#recognition-language)).
 
-The blank guard is that same crop step, so it exists only for a region of 400x200 or less: when the tightened crop finds no content the call returns `{ text = "", words = {}, skipped = true }` before either recogniser runs. A larger region is never checked and always reaches the system engine, so `skipped` is `false` for it whatever it contains.
+The blank guard is that same crop step, so it exists only for a region of 400x200 or less: when the tightened crop finds no content the call returns `{ text = "", words = {}, skipped = true }` without asking the system engine. The second recogniser has already been started by then — it starts before the crop — and finishes on its own thread with its answer unused. A larger region is never checked and always reaches the system engine, so `skipped` is `false` for it whatever it contains.
 
 ### macOS
 

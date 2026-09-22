@@ -28,13 +28,11 @@ require = ["window", "screen", "speech"]
 
 Ownership is unaffected, and deliberately so. A hotkey or a timer that a dependency's code registers still belongs to the module whose VM it ran in, so disabling that module takes it away. A `code_module` also runs in a VM of its own, so its top level runs once there and once in every dependent — see [`host.require`](require.md#host-require).
 
-**A module that attaches an overlay declares `window`**, even when its own file never writes `host.window`. The host delivers every foreground and focus change through the module's own `host.window`, so without `window` the module's triggers are never seen and its overlay never activates. A gate or matcher the module supplied is its own code as well, and needs `window` if it calls `host.window`.
-
-The same delivery reaches every enabled module, overlay or not. So a module that lacks `window`, loaded beside one that watches windows, has an error logged on every foreground and focus change and shown once in a dialog. That is a bug, listed in `TODO.md`; until it is fixed, such a module declares `window` too.
+**Receiving window events needs no declaration.** The host delivers foreground and focus changes to the callbacks registered with `host.window.onTrigger` and `onFocus` through a handle of its own, not through the module's `host` table. So a module that attaches an overlay declares `window` only if its own code calls `host.window`: the overlay runtime registers the triggers with its own manifest's permission, and a module that registered none is skipped. A gate or a matcher's `where` function the module supplies is its own code, though, and needs `window` if it calls `host.window`.
 
 Nothing is gated on `host.os`, `host.require`, `host.tryRequire`, `host.include`, `host.epoch`, `host.now`, `host.inputEpoch`, `host.calibrating` or `host.json`. A clock, a counter, a platform name, a way to reach a declared dependency and a parser of strings the module already holds are not worth asking permission for, and gating them would mean every manifest names them — which is the same as naming none.
 
-The list is also shown to the user once, before installing a module from GitHub; nothing is granted or refused per capability, and a module copied into `modules/` by hand is not reviewed at all. It is not a security boundary on its own — a module still runs arbitrary Luau, and the declaration is the module's own word — but it is now the word the platform holds it to.
+The list is also shown to the user before installing from GitHub — for the module chosen and for every dependency the install adds — and again before an update that asks for a capability the installed version did not, or starts using a module it did not (see [the module manager](../module-manager.md#browse-tab)). Nothing is granted or refused per capability, and a module copied into `modules/` by hand is not reviewed at all. It is not a security boundary on its own — a module still runs arbitrary Luau, and the declaration is the module's own word — but it is now the word the platform holds it to.
 
 The overlay is the exception in shape rather than degree: it is a **module**, so it goes under `dependencies` rather than here.
 
@@ -42,7 +40,7 @@ The overlay is the exception in shape rather than degree: it is a **module**, so
 
 **Every relative path resolves against the root of the module whose source contains the call.** For your own code that is your module's folder. For a `code_module` it is the dependency's own folder, even while its code runs in your VM: a runtime whose code calls `host.screen.imageSearch("images/x.png")` looks in the runtime's `images/`, whichever game module it is working for. So hand a shared runtime something that cannot be misread — an absolute path from your own `host.path`, a `host.screen.template` handle, or the decoded data itself — never a relative path. The rule holds for `host.path`, `host.resource.read` and `exists`, `host.screen` (search templates, `template{ file = … }`, `save`, `saveMarked`), `host.sound.play` and `host.include`, and settings are stored under the id of the module whose code defines them.
 
-**Paths are not confined to the module.** Every call above except `host.include` joins the path onto the root as written: an absolute path is used as it stands and `..` is not refused, so a path can name any file the user can read. `host.include` checks that the path stays inside the module; [its page](include.md#host-include) says where that check falls short.
+**Paths are not confined to the module.** Every call above except `host.include` joins the path onto the root as written: an absolute path is used as it stands and `..` is not refused, so a path can name any file the user can read. `host.include` checks that the path stays inside the module; [its page](include.md#host-include) says how.
 
 ## Coordinates {#coordinates}
 

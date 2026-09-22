@@ -43,10 +43,11 @@ dependency that may be absent.
   identity while it runs in your VM: relative paths, resources, settings and
   includes resolve against the dependency (see [the path rule](./index.md#paths)),
   and its manifest decides what it may call. Hotkeys, timers, captures and
-  callbacks it registers belong to your module — except
-  [`host.settings.onChange`](./settings.md#host-settings-onchange): its settings are
-  the dependency's, so a callback it registers fires when the *dependency's* setting
-  changes, and an error in it is reported under the dependency's id.
+  callbacks it registers belong to your module, and go when your module is reloaded.
+  That includes [`host.settings.onChange`](./settings.md#host-settings-onchange); only
+  the setting it watches is the dependency's, so a callback it registers fires when the
+  *dependency's* setting changes, and an error in it is reported under the dependency's
+  id.
 - Otherwise (a legacy data dependency), it returns a fresh Luau value mirroring
   the plain **data** the dependency exported (functions can't cross a VM this way).
 

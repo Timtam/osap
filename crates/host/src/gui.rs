@@ -135,6 +135,12 @@ fn row_label(name: &str, version: &str, id: &str, unsupported: Option<&str>) -> 
 /// close box, Ctrl+W, the tray item, the Windows double-click and the guided start-up all
 /// land in one of them — so they are also where the tray item is re-labelled. A refresh
 /// anywhere else would be a third copy of the same fact, and the one that gets forgotten.
+///
+/// On Windows, while one of the manager's modal dialogs is open, the frame is disabled, and
+/// raising it would put a window in front that cannot take the keyboard: the screen reader's
+/// focus would land outside the dialog the person has to answer. So the dialog — the frame's
+/// most recently active popup — is brought forward after it. A second start of the
+/// application arrives here in exactly that state when a message was left open.
 fn show_manager(frame: &Frame) {
     dock::want("manager", "showing the module window");
     #[cfg(target_os = "macos")]
@@ -142,7 +148,72 @@ fn show_manager(frame: &Frame) {
     frame.show(true);
     frame.centre();
     frame.raise();
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetLastActivePopup, SetForegroundWindow};
+        let hwnd = frame.get_handle();
+        // SAFETY: the frame's own window handle, alive for this call; both functions take any
+        // handle and answer with a return value.
+        unsafe {
+            if !hwnd.is_null() && IsWindowEnabled(hwnd) == 0 {
+                let popup = GetLastActivePopup(hwnd);
+                if !popup.is_null() && popup != hwnd {
+                    SetForegroundWindow(popup);
+                }
+            }
+        }
+    }
     set_tray_label(frame.is_shown());
+}
+
+/// The single-instance lock: wxWidgets' `wxSingleInstanceChecker`, named by `crate::instance`.
+///
+/// Here because this is the file that talks to wxdragon; `instance.rs` only sees the [`Lock`]
+/// trait, which keeps it borrowable by `macos-check`. Created before `wxdragon::main`, which is
+/// fine for this class: on Windows it is `CreateMutex` and nothing else, and on macOS a lock
+/// file in the folder given — neither needs the application object (only `CreateDefault`,
+/// which asks it for a name, would).
+///
+/// `None` when wxWidgets refused (on macOS: a lock file owned by someone else or with other
+/// permissions than 0600, which it treats as an attack and will not touch) or when the folder
+/// is not valid UTF-8. wxdragon passes a folder as a C string and falls back to the home
+/// directory without one, which is not where the rest of the guard looks.
+///
+/// One refusal is not a missing lock but a held one: on Windows, a copy running as
+/// administrator created the mutex, and a normal process may not open it. wxWidgets cannot
+/// tell that apart (it drops the error code), so `instance::held_where_we_cannot_open` asks,
+/// and the answer is a lock that says it is held — rather than a start that runs unguarded
+/// beside the elevated copy, with two keyboard hooks.
+///
+/// [`Lock`]: crate::instance::Lock
+pub(crate) fn instance_lock(names: &crate::instance::Names) -> Option<AppLock> {
+    let dir = match names.lock_dir.as_deref() {
+        Some(d) => Some(d.to_str()?),
+        None => None,
+    };
+    match SingleInstanceChecker::new(&names.lock, dir) {
+        Some(checker) => Some(AppLock::Checker(checker)),
+        None if crate::instance::held_where_we_cannot_open(names) => Some(AppLock::HeldElsewhere),
+        None => None,
+    }
+}
+
+/// The single-instance lock as `run` holds it.
+pub(crate) enum AppLock {
+    /// wxWidgets' checker: ours when nobody held it, and released when dropped.
+    Checker(SingleInstanceChecker),
+    /// Held by a process whose lock this one may not even open (see `instance_lock`).
+    HeldElsewhere,
+}
+
+impl crate::instance::Lock for AppLock {
+    fn another_running(&self) -> bool {
+        match self {
+            AppLock::Checker(checker) => checker.is_another_running(),
+            AppLock::HeldElsewhere => true,
+        }
+    }
 }
 
 /// Puts the manager window away again — the counterpart to `show_manager`.
@@ -584,6 +655,18 @@ pub fn run_gui(
         // The window is a background manager: hiding/closing it must not quit the
         // app — only the tray "Quit" does.
         app.set_exit_on_frame_delete(false);
+
+        // Opening the application again while it runs — from the Finder, Launchpad, Spotlight
+        // or the Dock icon — does not start a second copy on macOS: Launch Services sends the
+        // running one a reopen event instead. It means what a second start means on Windows
+        // (see crate::instance), so it asks for the same thing: the module window, at the next
+        // tick. Replaces wxWidgets' default answer, which would show whatever top-level window
+        // it found. The callback must be `Send`, which a Frame is not, hence the flag.
+        //
+        // Not gated to macOS, although only macOS has the event: wxdragon compiles the call
+        // everywhere and ignores it elsewhere, and a line that is compiled on Windows is a line
+        // the compiler has checked — which nothing else here can do for this file on a Mac.
+        app.on_reopen_app(crate::instance::request_show);
 
         // The build at the end of the title, so a screen reader says it whenever the window
         // gets focus, and after the part that tells the user which window this is.
@@ -1209,11 +1292,17 @@ pub fn run_gui(
         // thread via a shared inbox drained on the timer tick (wxdragon has no
         // CallAfter). Threads only move owned data; controls stay on this thread.
         enum Job {
-            /// An update landed on disk: rebuild the running module + its dependents.
-            Updated(String),
+            /// An update landed on disk: hot-load the modules it newly needed (`new_dirs`),
+            /// then rebuild the running module + its dependents.
+            Updated { id: String, new_dirs: Vec<std::path::PathBuf> },
             Browse(Vec<crate::registry::RemoteModule>),
             BrowseStatus(String),
             Updates(Vec<(String, String, String)>), // (module id, repo, "vX → vY")
+            /// Everything an install would add, worked out and not yet written: shown for
+            /// review before anything is downloaded.
+            InstallPlan(crate::registry::InstallPlan),
+            /// What an update would change: shown for review when it asks for anything new.
+            UpdatePlan(crate::registry::UpdatePlan),
             Installed(std::path::PathBuf),  // hot-load a freshly installed module
             Done(String),                   // a modal result message
         }
@@ -1244,7 +1333,11 @@ pub fn run_gui(
             });
         }
 
-        // Install selected (review capabilities first).
+        // Install selected. Nothing is downloaded here: a background thread works out every
+        // module the install would ADD — the chosen one and each dependency not installed yet,
+        // with its optional extras — and the timer tick shows that list for review
+        // (`Job::InstallPlan`). The review used to show the chosen module's capabilities only,
+        // and then install and hot-load its whole dependency tree unseen.
         {
             let (browse_results, browse_status, inbox, busy) =
                 (browse_results.clone(), browse_status, inbox.clone(), busy.clone());
@@ -1276,102 +1369,21 @@ pub fn run_gui(
                     );
                     return;
                 }
-                // Lock install + update for the whole flow (manifest fetch, the
-                // confirm modal, the download) so neither can be started again.
+                // Lock install + update for the whole flow (working out the plan, the review,
+                // the download) so neither can be started again. Released by whichever job
+                // reports back last: `Done`, `Installed`, or the review being cancelled.
                 busy.set(true);
                 install_btn.enable(false);
                 update_btn.enable(false);
-                browse_status.set_label("Fetching manifest…");
-                let manifest = match crate::registry::fetch_manifest(&full_name, &branch) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        browse_status.set_label(&format!("Failed: {e}"));
-                        busy.set(false);
-                        update_btn.enable(true);
-                        refresh_install_btn(
-                            &browse_list,
-                            &browse_results.borrow(),
-                            false,
-                            &install_btn,
-                        );
-                        return;
-                    }
-                };
-                browse_status.set_label("");
-                let caps = &manifest.capabilities.require;
-                let caps_str = if caps.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    caps.join("\n\u{2022} ")
-                };
-                // The operating-system claim, when the module makes one that excludes this
-                // machine. A warning rather than a refusal: the manifest may simply be
-                // behind the code, the user may be installing on one machine for another,
-                // and refusing an install on the strength of a line in a text file is a
-                // stronger claim than that line can carry. The install still happens; the
-                // module just will not load here, and the log says so at every start.
-                let os = std::env::consts::OS;
-                let os_note = if manifest.runs_on(os) {
-                    String::new()
-                } else {
-                    format!(
-                        "\n\nNOT FOR THIS SYSTEM\nIt declares support for: {}\nThis machine is: \
-                         {os}\n\nIt can be installed, but it will not be loaded here.",
-                        manifest.supported_os.join(", ")
-                    )
-                };
-                let msg = format!(
-                    "\u{201c}{}\u{201d} v{} ({})\n\nRequested capabilities:\n\u{2022} {}{}\n\nInstall this module?",
-                    manifest.name, manifest.version, manifest.id, caps_str, os_note
-                );
-                if !modal_message(&frame, "Review capabilities", &msg, true) {
-                    busy.set(false);
-                    update_btn.enable(true);
-                    refresh_install_btn(
-                        &browse_list,
-                        &browse_results.borrow(),
-                        false,
-                        &install_btn,
-                    );
-                    return;
-                }
-                // Offer the OPTIONAL dependencies (extra features, not required) as an
-                // opt-in: declining still installs the module + its required deps.
-                let optional_ids: Vec<String> = manifest
-                    .optional_dependencies
-                    .iter()
-                    .map(|s| s.split_whitespace().next().unwrap_or("").to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                let accepted_optional: std::collections::HashSet<String> = if optional_ids.is_empty()
-                {
-                    std::collections::HashSet::new()
-                } else {
-                    let opt_msg = format!(
-                        "\u{201c}{}\u{201d} can also use these optional modules (extra features, not required):\n\u{2022} {}\n\nInstall them too?",
-                        manifest.name,
-                        optional_ids.join("\n\u{2022} ")
-                    );
-                    if modal_message(&frame, "Optional dependencies", &opt_msg, true) {
-                        optional_ids.into_iter().collect()
-                    } else {
-                        std::collections::HashSet::new()
-                    }
-                };
-                browse_status.set_label(&format!("Installing {full_name}…"));
+                browse_status.set_label(&format!("Checking what {full_name} needs\u{2026}"));
                 let inbox = inbox.clone();
                 std::thread::spawn(move || {
                     // Always deliver a result, even on an unexpected panic, so the
                     // buttons can never get stuck disabled.
                     let job = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        // Install the whole dependency tree, not just this repo; the
-                        // hot-load resolves the now-installed deps as siblings.
-                        match crate::registry::install_tree(&full_name, &accepted_optional) {
-                            Ok(_) => {
-                                let repo = full_name.rsplit('/').next().unwrap_or(&full_name);
-                                Job::Installed(crate::registry::modules_dir().join(repo))
-                            }
-                            Err(e) => Job::Done(format!("Install failed: {e}")),
+                        match crate::registry::resolve_tree(&full_name, Some(&branch)) {
+                            Ok(plan) => Job::InstallPlan(plan),
+                            Err(e) => Job::Done(format!("Could not install {full_name}: {e:#}")),
                         }
                     }))
                     .unwrap_or_else(|_| Job::Done("Install failed (internal error).".to_string()));
@@ -1413,7 +1425,11 @@ pub fn run_gui(
             });
         }
 
-        // Update selected.
+        // Update selected. Like an install, worked out first and applied second: the new
+        // version is compared with the installed one, and if it asks for a capability the old
+        // one did not, or starts using a module it did not, the tick shows that for review
+        // before anything is written (`Job::UpdatePlan`). An update that asks for nothing new
+        // is applied without a question, as before.
         {
             let (update_results, updates_status, inbox, busy) =
                 (update_results.clone(), updates_status, inbox.clone(), busy.clone());
@@ -1424,19 +1440,25 @@ pub fn run_gui(
                 let Some(row) = updates_list.get_selection() else {
                     return;
                 };
-                let Some((id, repo, _)) = update_results.borrow().get(row as usize).cloned() else {
+                let Some((id, _repo, _)) = update_results.borrow().get(row as usize).cloned() else {
                     return;
                 };
                 busy.set(true);
                 install_btn.enable(false);
                 update_btn.enable(false);
-                updates_status.set_label(&format!("Updating {id}…"));
+                updates_status.set_label(&format!("Checking what the update of {id} changes\u{2026}"));
                 let inbox = inbox.clone();
                 std::thread::spawn(move || {
                     let job = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        match crate::registry::install(&repo) {
-                            Ok(m) => Job::Updated(m.id),
-                            Err(e) => Job::Done(format!("Update failed: {e}")),
+                        let Some(m) = crate::registry::installed().into_iter().find(|m| m.id == id)
+                        else {
+                            return Job::Done(format!(
+                                "Update failed: \u{201c}{id}\u{201d} is no longer installed."
+                            ));
+                        };
+                        match crate::registry::resolve_update(&m) {
+                            Ok(plan) => Job::UpdatePlan(plan),
+                            Err(e) => Job::Done(format!("Update failed: {e:#}")),
                         }
                     }))
                     .unwrap_or_else(|_| Job::Done("Update failed (internal error).".to_string()));
@@ -1477,7 +1499,12 @@ pub fn run_gui(
             let (frame, app) = (frame, app);
             frame.on_menu_selected(move |event| match event.get_id() {
                 MENU_HIDE => hide_manager(&frame),
-                MENU_QUIT => app.exit_main_loop(),
+                MENU_QUIT => {
+                    // First, so a second start from here on is told this copy is quitting
+                    // (and waits for it) instead of being told a window will be shown.
+                    crate::instance::begin_quit();
+                    app.exit_main_loop()
+                }
                 _ => {}
             });
         }
@@ -1545,7 +1572,10 @@ pub fn run_gui(
                     show_manager(&frame);
                 }
             }
-            MENU_QUIT => app.exit_main_loop(),
+            MENU_QUIT => {
+                crate::instance::begin_quit(); // as for the window's own Quit, above
+                app.exit_main_loop()
+            }
             _ => {}
         });
 
@@ -1635,9 +1665,25 @@ pub fn run_gui(
             // but it is a behaviour change, and the guard below still exists for the
             // `modal_message` callers that remain.
             let in_tick = Rc::new(std::cell::Cell::new(false));
+            // Set while an install or update review is open. The guard above is lifted for the
+            // review so the modules keep running behind it, and this keeps the one thing a
+            // running module can do to the review from happening: a module error raises and
+            // focuses the error window (and activates the application on macOS), which would
+            // move the screen reader out of the text being read. The errors stay queued in the
+            // host and are shown by the first tick after the review closes.
+            let reviewing = Rc::new(std::cell::Cell::new(false));
             // Lives as long as the timer: the error window outlives the tick that opened it.
             let error_window: Rc<RefCell<Option<ErrorWindow>>> = Rc::new(RefCell::new(None));
             timer.on_tick(move |_event| {
+                // Somebody started the application again (or, on macOS, reopened it): the window
+                // they are looking for. Before the re-entrancy guard, so it also comes forward
+                // while a modal message is open — the message is its child and comes with it.
+                // Nothing else here runs during that nested loop, and showing a window is safe
+                // there. The request may be older than the window: one made while the modules
+                // were still loading is answered at the first tick.
+                if crate::instance::take_show_request() {
+                    show_manager(&frame);
+                }
                 if in_tick.replace(true) {
                     return;
                 }
@@ -1667,9 +1713,12 @@ pub fn run_gui(
                 }
                 // Surface any module callback failures collected during pump() in an
                 // accessible dialog (deduped + queued host-side), so a faulting module
-                // is visible (and isolated) rather than silently logged or a crash.
-                for (title, msg) in drain_errors() {
-                    report_error(&error_window, &frame, &title, &msg);
+                // is visible (and isolated) rather than silently logged or a crash. Not while
+                // a review is open — see `reviewing`.
+                if !reviewing.get() {
+                    for (title, msg) in drain_errors() {
+                        report_error(&error_window, &frame, &title, &msg);
+                    }
                 }
                 // Drain background-job results and apply them on the GUI thread.
                 let jobs: Vec<Job> = std::mem::take(&mut *inbox.lock().unwrap());
@@ -1716,11 +1765,148 @@ pub fn run_gui(
                             updates_status.set_label(&format!("{} update(s) available.", v.len()));
                             *update_results.borrow_mut() = v;
                         }
+                        Job::InstallPlan(plan) => {
+                            browse_status.set_label("");
+                            let text = crate::registry::install_review_text(
+                                &plan,
+                                std::env::consts::OS,
+                            );
+                            // Two ways to say yes when there are optional modules, so the
+                            // choice is made in the one dialog that lists them, rather than
+                            // in a second question after the first was answered.
+                            let yes: &[(&str, i32)] = if plan.has_optional() {
+                                &[
+                                    ("Install with the optional modules", ID_YES),
+                                    ("Install without them", ID_NO),
+                                ]
+                            } else {
+                                &[("Install", ID_OK)]
+                            };
+                            // The modules keep running behind the review. The guard at the top
+                            // of this tick exists so nothing is pumped, and no second dialog is
+                            // stacked, behind a RESULT dialog; a review is read slowly, and the
+                            // one that came before this one ran from a click handler, which the
+                            // guard never paused. Nothing else can put up a dialog meanwhile:
+                            // `busy` holds every install and update back until this flow ends,
+                            // and a module error waits for the review to close (`reviewing`).
+                            // No borrow is held across the call.
+                            in_tick.set(false);
+                            reviewing.set(true);
+                            let choice = review_dialog(
+                                &frame,
+                                "Review before installing",
+                                "What will be installed",
+                                &text,
+                                yes,
+                            );
+                            reviewing.set(false);
+                            in_tick.set(true);
+                            if choice == ID_CANCEL {
+                                busy.set(false);
+                                update_btn.enable(true);
+                                refresh_install_btn(
+                                    &browse_list,
+                                    &browse_results.borrow(),
+                                    false,
+                                    &install_btn,
+                                );
+                                browse_status.set_label("Install cancelled. Nothing was installed.");
+                            } else {
+                                let with_optional = choice == ID_YES;
+                                let repo = plan.modules[0].repo.clone();
+                                browse_status.set_label(&format!("Installing {repo}\u{2026}"));
+                                let inbox = inbox.clone();
+                                std::thread::spawn(move || {
+                                    let job = std::panic::catch_unwind(
+                                        std::panic::AssertUnwindSafe(|| {
+                                            match crate::registry::install_resolved(
+                                                &plan,
+                                                with_optional,
+                                            ) {
+                                                // The hot-load resolves the now-installed
+                                                // dependencies as siblings.
+                                                Ok(_) => Job::Installed(
+                                                    crate::registry::install_dir(&repo),
+                                                ),
+                                                Err(e) => Job::Done(format!("Install failed: {e:#}")),
+                                            }
+                                        }),
+                                    )
+                                    .unwrap_or_else(|_| {
+                                        Job::Done("Install failed (internal error).".to_string())
+                                    });
+                                    inbox.lock().unwrap().push(job);
+                                });
+                            }
+                        }
+                        Job::UpdatePlan(plan) => {
+                            let id = plan.id.clone();
+                            let go = !plan.needs_review() || {
+                                let text = crate::registry::update_review_text(
+                                    &plan,
+                                    &crate::registry::installed(),
+                                    std::env::consts::OS,
+                                );
+                                // Modules keep running behind it, as behind the install
+                                // review above, and for the same reasons.
+                                in_tick.set(false);
+                                reviewing.set(true);
+                                let choice = review_dialog(
+                                    &frame,
+                                    "Review before updating",
+                                    "What the update changes",
+                                    &text,
+                                    &[("Update", ID_OK)],
+                                );
+                                reviewing.set(false);
+                                in_tick.set(true);
+                                choice == ID_OK
+                            };
+                            if !go {
+                                busy.set(false);
+                                update_btn.enable(true);
+                                refresh_install_btn(
+                                    &browse_list,
+                                    &browse_results.borrow(),
+                                    false,
+                                    &install_btn,
+                                );
+                                updates_status
+                                    .set_label(&format!("Update of {id} cancelled. Nothing was changed."));
+                            } else {
+                                updates_status.set_label(&format!("Updating {id}\u{2026}"));
+                                let inbox = inbox.clone();
+                                std::thread::spawn(move || {
+                                    let job = std::panic::catch_unwind(
+                                        std::panic::AssertUnwindSafe(|| {
+                                            match crate::registry::install_update(&plan) {
+                                                // Everything written besides the updated
+                                                // module itself is new to this machine.
+                                                Ok(written) => Job::Updated {
+                                                    id: plan.id.clone(),
+                                                    new_dirs: written
+                                                        .into_iter()
+                                                        .filter(|m| m.manifest.id != plan.id)
+                                                        .map(|m| m.root)
+                                                        .collect(),
+                                                },
+                                                Err(e) => Job::Done(format!("Update failed: {e:#}")),
+                                            }
+                                        }),
+                                    )
+                                    .unwrap_or_else(|_| {
+                                        Job::Done("Update failed (internal error).".to_string())
+                                    });
+                                    inbox.lock().unwrap().push(job);
+                                });
+                            }
+                        }
                         Job::Installed(dir) => {
                             // Re-enable + clear busy up front, so even a panic in
                             // on_install can't leave the buttons stuck disabled.
                             busy.set(false);
                             update_btn.enable(true);
+                            browse_status.set_label("");
                             refresh_install_btn(
                                 &browse_list,
                                 &browse_results.borrow(),
@@ -1751,9 +1937,36 @@ pub fn run_gui(
                             };
                             modal_message(&frame, "Installed", &msg, false);
                         }
-                        Job::Updated(id) => {
+                        Job::Updated { id, new_dirs } => {
                             busy.set(false);
                             update_btn.enable(true);
+                            updates_status.set_label("");
+                            refresh_install_btn(
+                                &browse_list,
+                                &browse_results.borrow(),
+                                false,
+                                &install_btn,
+                            );
+                            // Modules the new version needs and this session has never loaded
+                            // come first: a code dependency is evaluated into the reloaded
+                            // module's VM from the modules already loaded, and one that is not
+                            // loaded fails the reload.
+                            let mut added: Vec<String> = Vec::new();
+                            let mut add_failed: Vec<String> = Vec::new();
+                            for dir in new_dirs {
+                                match on_install(dir) {
+                                    Ok((dep_id, infos)) => {
+                                        if !infos.is_empty() {
+                                            for info in &infos {
+                                                rows.borrow_mut().push(Row::new(info));
+                                            }
+                                            list.rebuild(&rows.borrow());
+                                        }
+                                        added.push(dep_id);
+                                    }
+                                    Err(e) => add_failed.push(e),
+                                }
+                            }
                             // The files changed on disk; now rebuild what is RUNNING.
                             // Every module that inherits this one holds a copy of its
                             // code, so the reload cascades to them -- that is what used
@@ -1766,7 +1979,7 @@ pub fn run_gui(
                                 .iter()
                                 .find(|r| r.id == id)
                                 .and_then(|r| r.module_idx);
-                            let msg = match idx {
+                            let mut msg = match idx {
                                 None => format!(
                                     "Updated \u{201c}{id}\u{201d} on disk. It is not loaded in this \
                                      session, so there is nothing to reload."
@@ -1820,11 +2033,26 @@ pub fn run_gui(
                                     ),
                                 },
                             };
+                            if !added.is_empty() {
+                                msg.push_str(&format!(
+                                    "\n\nInstalled and loaded with it: {}.",
+                                    added.join(", ")
+                                ));
+                            }
+                            if !add_failed.is_empty() {
+                                msg.push_str(&format!(
+                                    "\n\nInstalled with it, but loading failed:\n{}\n\nRestart the app to retry.",
+                                    add_failed.join("\n")
+                                ));
+                            }
                             modal_message(&frame, "Updated", &msg, false);
                         }
                         Job::Done(msg) => {
                             busy.set(false);
                             update_btn.enable(true);
+                            // Whatever the flow was saying ("Checking…", "Installing…") is over.
+                            browse_status.set_label("");
+                            updates_status.set_label("");
                             refresh_install_btn(
                                 &browse_list,
                                 &browse_results.borrow(),
@@ -1992,6 +2220,18 @@ fn message_size(message: &str) -> Size {
         .sum::<usize>()
         .max(1);
     Size::new(440, ((lines as i32) * 20 + 36).clamp(70, 380))
+}
+
+/// The same estimate for the review dialog's field, which is wider (~80 chars per 560px line)
+/// and taller: a review lists several modules, each with its capabilities, and is read more
+/// than once.
+fn review_size(message: &str) -> Size {
+    let lines: usize = message
+        .lines()
+        .map(|l| (l.chars().count().saturating_sub(1) / 80) + 1)
+        .sum::<usize>()
+        .max(1);
+    Size::new(560, ((lines as i32) * 20 + 36).clamp(160, 480))
 }
 
 /// Shows `message` in the error window, creating it if it is not already open.
@@ -2210,6 +2450,67 @@ fn modal_message(parent: &Frame, title: &str, message: &str, yes_no: bool) -> bo
         res == ID_YES
     } else {
         true
+    }
+}
+
+/// The review before an install or an update: everything there is to decide on, in one
+/// read-only field that has the focus when the dialog opens — so the screen reader reads it at
+/// once — and one button per way of answering. Returns the code of the button pressed, or
+/// `ID_CANCEL` for Cancel, Escape and the close box alike.
+///
+/// Built like `modal_message`, and for its reason: a focused, read-only multiline field can be
+/// read line by line and read again, which a StaticText cannot. The field is labelled the way
+/// the settings dialog labels its fields, by a StaticText in front of it and by its name.
+///
+/// Cancel is a real `ID_CANCEL` button with no handler of its own: wx then maps Escape and the
+/// close box to it and ends the dialog with `ID_CANCEL` by itself. Saying no must never take
+/// more than saying yes, and nothing is the default — Enter does not install.
+fn review_dialog(
+    parent: &Frame,
+    title: &str,
+    label: &str,
+    message: &str,
+    choices: &[(&str, i32)],
+) -> i32 {
+    let dialog = Dialog::builder(parent, title).build();
+    let panel = Panel::builder(&dialog).build();
+    let sizer = BoxSizer::builder(Orientation::Vertical).build();
+
+    let lbl = StaticText::builder(&panel).with_label(label).build();
+    sizer.add(&lbl, 0, SizerFlag::Left | SizerFlag::Right | SizerFlag::Top, 12);
+    let text = TextCtrl::builder(&panel)
+        .with_style(TextCtrlStyle::MultiLine | TextCtrlStyle::ReadOnly)
+        .build();
+    text.set_value(message);
+    text.set_name(label); // SetLabel() asserts on a TextCtrl; the name is what is read
+    text.set_min_size(review_size(message));
+    sizer.add(&text, 1, SizerFlag::All | SizerFlag::Expand, 12);
+
+    let buttons = BoxSizer::builder(Orientation::Horizontal).build();
+    for (caption, code) in choices {
+        let button = Button::builder(&panel).with_label(caption).build();
+        let (d, code) = (dialog, *code);
+        button.on_click(move |_| d.end_modal(code));
+        buttons.add(&button, 0, SizerFlag::All, 6);
+    }
+    let cancel = Button::builder(&panel).with_id(ID_CANCEL).with_label("Cancel").build();
+    buttons.add(&cancel, 0, SizerFlag::All, 6);
+    sizer.add_sizer(&buttons, 0, SizerFlag::AlignRight | SizerFlag::All, 6);
+
+    panel.set_sizer(sizer, true);
+    let dlg_sizer = BoxSizer::builder(Orientation::Vertical).build();
+    dlg_sizer.add(&panel, 1, SizerFlag::Expand, 0);
+    dialog.set_sizer_and_fit(dlg_sizer, true);
+
+    text.set_focus(); // read the review aloud when the dialog opens
+    let res = dialog.show_modal();
+    dialog.destroy();
+    // Anything but one of the offered answers — the close box, Escape, a destroyed dialog —
+    // is a no.
+    if choices.iter().any(|(_, code)| *code == res) {
+        res
+    } else {
+        ID_CANCEL
     }
 }
 
@@ -2616,5 +2917,93 @@ mod native_checkboxes {
     pub fn same(a: &TreeItemId, b: &TreeItemId) -> bool {
         let ha = htreeitem(a);
         !ha.is_null() && ha == htreeitem(b)
+    }
+}
+
+/// Windows only: a Mac runs the workspace's tests too, and there wxWidgets' checker is a lock
+/// file whose behaviour these tests do not describe.
+#[cfg(all(test, windows))]
+mod instance_lock_tests {
+    use super::*;
+    use crate::instance::{Endpoint, Lock, Names};
+
+    fn test_names(tag: &str) -> Names {
+        let name = format!("ap-test-lock-{tag}-{}", std::process::id());
+        Names {
+            lock: name.clone(),
+            lock_dir: None,
+            endpoint: Endpoint::Pipe(name.clone()),
+            for_log: name,
+            owner: None,
+        }
+    }
+
+    /// wxWidgets' checker through wxdragon, before any application object exists — which is
+    /// when `run` creates it. A name no running application uses; nothing here opens a window.
+    #[test]
+    fn the_wx_lock_sees_a_second_holder_and_forgets_a_released_one() {
+        let names = test_names("wx");
+        let first = instance_lock(&names).expect("wxWidgets should create the mutex");
+        assert!(matches!(first, AppLock::Checker(_)));
+        assert!(!first.another_running());
+        let second = instance_lock(&names).expect("and open it a second time");
+        assert!(second.another_running(), "the second holder should see the first");
+        drop(second);
+        drop(first);
+        // Every handle closed: the mutex is gone, and the next copy has it to itself.
+        let third = instance_lock(&names).expect("and create it again");
+        assert!(!third.another_running());
+    }
+
+    /// What a normal start meets while a copy runs as administrator: a mutex of the name that
+    /// this process may not open. Made here with a security descriptor that admits SYSTEM
+    /// alone, which refuses this process the same way an elevated copy's default one refuses
+    /// a normal process.
+    #[test]
+    fn a_mutex_we_may_not_open_counts_as_held() {
+        use windows_sys::Win32::Foundation::{CloseHandle, LocalFree};
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        };
+        use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+        use windows_sys::Win32::System::Threading::CreateMutexW;
+
+        let names = test_names("denied");
+        let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+        let (sddl, name) = (wide("D:P(A;;GA;;;SY)"), wide(&names.lock));
+        // SAFETY: NUL-terminated strings that outlive the calls, out-pointers to locals; the
+        // descriptor is LocalFree'd and the mutex closed below.
+        let mutex = unsafe {
+            let mut sd = std::ptr::null_mut();
+            assert_ne!(
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl.as_ptr(),
+                    SDDL_REVISION_1,
+                    &mut sd,
+                    std::ptr::null_mut()
+                ),
+                0
+            );
+            let attributes = SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: sd,
+                bInheritHandle: 0,
+            };
+            let mutex = CreateMutexW(&attributes, 0, name.as_ptr());
+            LocalFree(sd);
+            mutex
+        };
+        assert!(!mutex.is_null(), "the test mutex should have been created");
+
+        let lock = instance_lock(&names).expect("a mutex we may not open is a held lock");
+        assert!(matches!(lock, AppLock::HeldElsewhere));
+        assert!(lock.another_running());
+
+        // SAFETY: the handle created above, closed once.
+        unsafe { CloseHandle(mutex) };
+        // Gone with its last handle: an ordinary free lock again.
+        let free = instance_lock(&names).expect("and ours once it is gone");
+        assert!(matches!(free, AppLock::Checker(_)));
+        assert!(!free.another_running());
     }
 }

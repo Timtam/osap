@@ -20,6 +20,13 @@ pub mod logging;
 #[path = "../../host/src/build_info.rs"]
 pub mod build_info;
 
+/// The single-instance guard's names, socket and decision. Kept free of wxdragon for this:
+/// the lock itself is created in `gui.rs`, and reaches this file only through its `Lock`
+/// trait. The macOS half — the uid, the per-user temporary folder, the Unix-domain socket and
+/// its peer check — has no other way to meet a compiler before it meets a Mac.
+#[path = "../../host/src/instance.rs"]
+pub mod instance;
+
 #[path = "../../host/src/backend/mod.rs"]
 pub mod backend;
 

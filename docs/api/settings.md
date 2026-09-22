@@ -77,13 +77,15 @@ host.settings.set("speed", 2.0)
 host.settings.set("mode", "safe")
 ```
 
+The file is replaced whole on every save: the store is written to a temporary file of its own beside `settings.toml` (named `settings.<random>.toml.tmp`), flushed to disk, and renamed over `settings.toml`. A crash in the middle leaves the old file or the new one, never a cut-off one, and so does a power cut on a volume that can flush. At worst a temporary file is left behind; nothing reads it, and the application removes it at its next start once it is a minute old. A save that fails leaves `settings.toml` as it was and is logged once per session. On a volume that cannot flush, the save goes through without the flush, and that is logged once per session too; a power cut right after such a save can lose it.
+
 ### Windows
 
-`settings.toml` is next to the `.exe`.
+`settings.toml` is next to the `.exe`. The rename replaces the old file in one step, even while another program has it open (a second instance reading it, a virus scanner, the search indexer, a sync client): `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, and when that is refused, a POSIX-semantics rename (`SetFileInformationByHandle`), which is what `std::fs::rename` does. The flush is `FlushFileBuffers`.
 
 ### macOS
 
-`settings.toml` is in the folder that holds the `.app`.
+`settings.toml` is in the folder that holds the `.app`. The flush is `fcntl(F_FULLFSYNC)`, which APFS and HFS+ support and a network share (SMB, NFS) may not; there the save goes through unflushed, as described above. After the rename the folder itself is flushed as well, since on macOS a rename is only on disk once its folder is. The file is created with mode 0666 less the umask (usually `rw-r--r--`), so other accounts on the Mac can read it.
 
 ## host.settings.onChange(key, callback) {#host-settings-onchange}
 
@@ -101,6 +103,17 @@ dialog shows. Unlike the module's other callbacks, these also fire while the mod
 is disabled — the dialog can be opened for a disabled module too. `old` is not `nil` in
 practice: `define` stores the default when nothing is stored, so the first change
 after load reports the default (or the persisted value) as `old`, never `nil`.
+
+A callback belongs to the VM it was registered from, and goes when that module is
+reloaded. That matters for a `code_module`, whose code also runs inside every module
+that depends on it (see [`host.require`](./require.md#host-require)): a callback it
+registers there watches the code module's own setting, but is dropped when the
+**dependent** is reloaded, and the rebuilt dependent registers it again. Reloading the
+code module itself does not take them. The reload rebuilds each module that lists it in
+`dependencies` next, so theirs go then; one that reaches it only through
+`optional_dependencies`, and every dependent after a reload of the code module that
+failed, keeps them until that module is reloaded itself (until then it still runs the old
+code, which registered them).
 
 ```luau
 host.settings.onChange("speed", function(new, old)

@@ -11,6 +11,8 @@ pub mod build_info;
 mod capture_source;
 mod gui;
 mod image_search;
+/// One running copy per user: the lock, and the request a second start sends — see the file.
+mod instance;
 mod json;
 pub mod logging;
 mod appcfg;
@@ -139,8 +141,11 @@ struct Shared {
     store: RefCell<settings::Store>,
     /// module_idx → (setting key → schema), for validation + the GUI. Not persisted.
     schemas: RefCell<Vec<HashMap<String, settings::Field>>>,
-    /// onChange callbacks: (module_idx, key) → [(VM, callback)].
-    on_change: RefCell<HashMap<(usize, String), Vec<(Lua, RegistryKey)>>>,
+    /// onChange callbacks: (module_idx whose SETTING it watches, key) → [(module_idx that owns
+    /// the VM it was registered from, VM, callback)]. The two indices differ for a code
+    /// dependency's code, which watches the dependency's settings from inside a dependent's
+    /// VM; see `drop_on_change_from`.
+    on_change: RefCell<OnChangeMap>,
     /// Coalesces setting auto-saves to the event-loop tick.
     dirty: Cell<bool>,
     /// One-shot timers: (deadline, module_idx, VM, callback), fired from the tick.
@@ -675,6 +680,68 @@ fn hotkey_winners(
     best.into_iter().map(|(b, (_, _, id))| (b, id)).collect()
 }
 
+/// `Shared::on_change`: (setting owner, key) → [(VM owner, VM, callback)].
+type OnChangeMap = HashMap<(usize, String), Vec<(usize, Lua, RegistryKey)>>;
+
+/// Drops every `onChange` registration made from a VM `gone` names, and every key left with
+/// none.
+///
+/// Matched on the module that owns the VM the callback was REGISTERED from, never on whose
+/// setting it watches, and the difference is a code dependency. Its code runs inside each
+/// dependent's VM with the dependency's own settings table (`build_dep_host`), so a callback
+/// it registers is filed under the DEPENDENCY's index while living in the DEPENDENT's VM.
+/// Purging by the settings owner — which this did — left such a callback behind when the
+/// dependent was reloaded: the old VM stayed alive for its sake, and its callback fired beside
+/// the new VM's own every time the dependency's setting changed. The same rule is why an image
+/// search is purged by its owner (`image_search::purge_owner`).
+///
+/// The other way round, a dependency's reload no longer takes the callbacks its code
+/// registered inside a dependent: that VM is still alive and still running the code that
+/// registered them. They go when the dependent is rebuilt — next, by the reload cascade, for
+/// a module that lists the code module in `dependencies`; only at its own reload for one that
+/// reaches it through `optional_dependencies` (the cascade does not follow those) or when the
+/// code module's own rebuild failed (which skips the cascade). Until then that VM still runs
+/// the old code, so its callbacks are still the right ones.
+fn drop_on_change_from(map: &mut OnChangeMap, gone: impl Fn(usize) -> bool) {
+    for list in map.values_mut() {
+        list.retain(|(owner, ..)| !gone(*owner));
+    }
+    map.retain(|_, list| !list.is_empty());
+}
+
+/// `purge_module(idx)`'s share of `on_change`: every callback registered from module `idx`'s
+/// VM, whoever's setting it watches — see `drop_on_change_from`. Named, and called by the
+/// tests, so that the rule the tests check is the one `purge_module` runs.
+fn purge_on_change(map: &mut OnChangeMap, idx: usize) {
+    drop_on_change_from(map, |owner| owner == idx);
+}
+
+/// `rollback_to(n)`'s share of `on_change`, both halves: every entry for a setting of a module
+/// that is going away, and every callback a VM that is going away registered for a setting of
+/// a dependency that stays.
+fn rollback_on_change(map: &mut OnChangeMap, n: usize) {
+    map.retain(|(idx, _), _| *idx < n);
+    drop_on_change_from(map, |owner| owner >= n);
+}
+
+/// Files an `onChange` callback registered from `lua`: under `setting_of`, the module whose
+/// setting it watches, and owned by the module whose VM `lua` is — for a code dependency's
+/// code, the dependent's. The one place an entry is made, so the rule is tested here.
+fn file_on_change(
+    map: &mut OnChangeMap,
+    lua: &Lua,
+    setting_of: usize,
+    key: String,
+    cb: Function,
+) -> mlua::Result<()> {
+    // `populate_vm` tags every VM before any code runs in it, so the fallback is only the
+    // path of a failed tag — the rule from before owners were recorded.
+    let owner = image_search::vm_owner(lua).map_or(setting_of, |o| o.idx);
+    let rk = lua.create_registry_value(cb)?;
+    map.entry((setting_of, key)).or_default().push((owner, lua.clone(), rk));
+    Ok(())
+}
+
 impl Shared {
     /// Recomputes which registrations hold their combination at the OS, from *enabled*
     /// modules — the counterpart to `refresh_captured` below, and needed for the same reason.
@@ -840,7 +907,9 @@ impl Shared {
             }
         }
         self.keys.borrow_mut().retain(|(_, _, i, ..)| *i != idx);
-        self.on_change.borrow_mut().retain(|(i, _), _| *i != idx);
+        // By the VM the callback was registered from, not by whose setting it watches — see
+        // `drop_on_change_from`.
+        purge_on_change(&mut self.on_change.borrow_mut(), idx);
         self.timers.borrow_mut().retain(|(_, i, ..)| *i != idx);
         self.recurring.borrow_mut().retain(|(_, _, i, ..)| *i != idx);
         self.purge_pending_images(idx);
@@ -966,7 +1035,7 @@ impl Shared {
             }
         }
         self.keys.borrow_mut().retain(|(_, _, idx, ..)| *idx < n);
-        self.on_change.borrow_mut().retain(|(idx, _), _| *idx < n);
+        rollback_on_change(&mut self.on_change.borrow_mut(), n);
         self.timers.borrow_mut().retain(|(_, idx, ..)| *idx < n);
         self.recurring.borrow_mut().retain(|(_, _, idx, ..)| *idx < n);
         self.drop_pad_listeners(|idx| idx >= n);
@@ -1331,7 +1400,7 @@ impl Shared {
             match map.get(&(idx, key.to_string())) {
                 Some(list) => list
                     .iter()
-                    .filter_map(|(lua, rk)| {
+                    .filter_map(|(_, lua, rk)| {
                         lua.registry_value::<Function>(rk).ok().map(|f| (lua.clone(), f))
                     })
                     .collect(),
@@ -1765,15 +1834,8 @@ mod capability_gate_tests {
         // and called with the ungated table, so `host` is an upvalue and not a global. This
         // is the privileged Luau the question was about, so it is the privileged Luau the
         // test uses — a stand-in written for the test would only prove things about itself.
-        lua.load(format!("return function(host) {WINDOW_PRELUDE}
-end"))
-            .set_name("window_prelude")
-            .into_function()
-            .unwrap()
-            .call::<Function>(())
-            .unwrap()
-            .call::<()>(&full)
-            .unwrap();
+        // Through the runtime's own function, so the host's registry handle is in place too.
+        install_window_prelude(&lua, &full).unwrap();
 
         // `window` is declared, `speech` and the rest are not: the module may hold the
         // prelude's own functions and still must not get from them to anything else.
@@ -1861,6 +1923,132 @@ end"))
             .unwrap();
 
         assert!(failures.is_empty(), "capability gate has holes: {failures:?}");
+    }
+
+    /// A whole host table as `populate_vm` has it once the prelude has run, and the module's
+    /// view of it for `caps`, installed as the global `host` the way `populate_vm` leaves it.
+    fn vm_with_caps(lua: &Lua, caps: &[&str], id: &str) -> Table {
+        let full = lua.create_table().unwrap();
+        for (key, _) in GATED {
+            full.set(*key, lua.create_table().unwrap()).unwrap();
+        }
+        let os = lua.create_table().unwrap();
+        os.set("current", "windows").unwrap();
+        full.set("os", os).unwrap();
+        // The dispatch times itself with `host.now`; a clock standing still keeps it quiet.
+        full.set("now", lua.create_function(|_, ()| Ok(0)).unwrap()).unwrap();
+        install_window_prelude(lua, &full).unwrap();
+        let caps: HashSet<String> = caps.iter().map(|s| (*s).to_string()).collect();
+        let view = gated_view(lua, &full, &caps, id).unwrap();
+        lua.globals().set("host", &view).unwrap();
+        full
+    }
+
+    fn a_window(title: &str) -> WinInfo {
+        WinInfo {
+            hwnd: 7,
+            title: title.to_string(),
+            class: "GameWindow".to_string(),
+            pid: 42,
+            exe: "game.exe".to_string(),
+            bundle_id: String::new(),
+            x: 0,
+            y: 0,
+            w: 800,
+            h: 600,
+            client_x: 0,
+            client_y: 0,
+            client_w: 800,
+            client_h: 600,
+        }
+    }
+
+    /// Window events reach a module that never declared `window`, and the gate still holds
+    /// against the module's own code.
+    ///
+    /// The shape is the overlay module that relies on the overlay runtime's manifest: its
+    /// triggers are registered by the RUNTIME's code, through the runtime's host, which does
+    /// declare `window`. Delivery used to look the prelude up through the module's gated view
+    /// and raised instead — every foreground and focus change, for every such module — so the
+    /// overlay never activated, and `window_has_triggers` said there was nothing to watch for.
+    #[test]
+    fn window_events_reach_a_module_that_did_not_declare_window() {
+        let lua = Lua::new();
+        let full = vm_with_caps(&lua, &["speech"], "com.example.overlay-user");
+
+        // Registered the way a code dependency's code does it: against the whole table.
+        lua.load(
+            r#"
+            local host = ...
+            fired, focused = nil, 0
+            host.window.onTrigger({ title = { contains = "Game" } }, nil, function(win)
+                fired = win.title
+            end)
+            host.window.onFocus(function() focused = focused + 1 end)
+            "#,
+        )
+        .call::<()>(&full)
+        .unwrap();
+
+        assert!(window_has_triggers(&lua), "the triggers the runtime registered are seen");
+        dispatch_activate(&lua, &a_window("Desktop")).unwrap();
+        assert_eq!(lua.globals().get::<Option<String>>("fired").unwrap(), None);
+        dispatch_activate(&lua, &a_window("The Game")).unwrap();
+        assert_eq!(lua.globals().get::<String>("fired").unwrap(), "The Game");
+        dispatch_focus(&lua).unwrap();
+        assert_eq!(lua.globals().get::<i64>("focused").unwrap(), 1);
+
+        // The module's own code is still held to its manifest.
+        let err = lua.load("return host.window").eval::<mlua::Value>().unwrap_err().to_string();
+        assert!(err.contains("without declaring it"), "{err}");
+        // And the handle the host dispatches through is not reachable from Luau: the named
+        // registry is only open to Luau through `debug.getregistry`, which Luau does not have.
+        // If that ever changed, the handle would be a way around the gate.
+        let open: bool = lua
+            .load("return type(debug) == 'table' and debug.getregistry ~= nil")
+            .eval()
+            .unwrap();
+        assert!(!open, "Luau now exposes the registry; the window handle is reachable");
+    }
+
+    /// A module that registered nothing — a plain hotkey module, without `window` — is left
+    /// alone by the delivery: no error, and nothing converted for it.
+    #[test]
+    fn window_events_skip_a_module_with_no_triggers() {
+        let lua = Lua::new();
+        vm_with_caps(&lua, &["hotkey"], "com.example.hotkeys-only");
+        assert!(!window_has_triggers(&lua));
+        dispatch_activate(&lua, &a_window("Anything")).unwrap();
+        dispatch_focus(&lua).unwrap();
+    }
+
+    /// A module that did declare `window` and registers its own triggers is delivered to as
+    /// before — through the same table its code wrote to.
+    #[test]
+    fn window_events_reach_a_module_that_declared_window() {
+        let lua = Lua::new();
+        vm_with_caps(&lua, &["window"], "com.example.watcher");
+        lua.load(
+            r#"
+            seen = 0
+            host.window.onTrigger({ title = "Editor" }, nil, function() seen = seen + 1 end)
+            "#,
+        )
+        .exec()
+        .unwrap();
+        assert!(window_has_triggers(&lua));
+        dispatch_activate(&lua, &a_window("editor")).unwrap();
+        assert_eq!(lua.globals().get::<i64>("seen").unwrap(), 1);
+    }
+
+    /// A VM the prelude never ran in — the empty one a failed reload leaves in the module's
+    /// place — is nothing to deliver to: no triggers, and no error on every window switch.
+    #[test]
+    fn window_events_skip_a_vm_without_the_prelude() {
+        let lua = Lua::new();
+        assert!(!window_has_triggers(&lua));
+        dispatch_activate(&lua, &a_window("Anything")).unwrap();
+        dispatch_focus(&lua).unwrap();
     }
 
     /// The one rule privileged Luau has to follow, written down as a test because it is the
@@ -1962,6 +2150,97 @@ end"))
 }
 
 #[cfg(test)]
+mod on_change_ownership_tests {
+    use super::*;
+
+    /// A VM tagged as module `idx`'s, the way `populate_vm` tags it.
+    fn vm(idx: usize) -> Lua {
+        let lua = Lua::new();
+        lua.set_app_data(image_search::VmOwner { idx, gen: 100 + idx as u64 });
+        lua
+    }
+
+    /// Registers a callback through the binding's own filing function.
+    fn register(map: &mut OnChangeMap, lua: &Lua, setting_of: usize, key: &str) {
+        let cb = lua.create_function(|_, ()| Ok(())).unwrap();
+        file_on_change(map, lua, setting_of, key.to_string(), cb).unwrap();
+    }
+
+    fn owners(map: &OnChangeMap, setting_of: usize, key: &str) -> Vec<usize> {
+        map.get(&(setting_of, key.to_string()))
+            .map(|l| l.iter().map(|(o, ..)| *o).collect())
+            .unwrap_or_default()
+    }
+
+    /// The bug: a dependency's code, running inside a dependent, watches the dependency's
+    /// setting. Reloading the dependent purged only the dependent's OWN settings' callbacks,
+    /// so the old VM's callback stayed — keeping that VM alive — and fired beside the new
+    /// VM's own on every change.
+    #[test]
+    fn a_dependents_reload_takes_the_callbacks_its_vm_registered() {
+        // Module 0 is the dependency, module 1 a dependent running 0's code.
+        let dep = vm(0);
+        let old_dependent = vm(1);
+        let mut map = OnChangeMap::new();
+        register(&mut map, &dep, 0, "volume"); // the dependency's own VM
+        register(&mut map, &old_dependent, 0, "volume"); // 0's code inside 1's VM
+        register(&mut map, &old_dependent, 1, "mode"); // 1's own setting
+        assert_eq!(owners(&map, 0, "volume"), vec![0, 1]);
+
+        // What `purge_module(1)` does, through the function it calls.
+        let weak = old_dependent.weak();
+        drop(old_dependent);
+        purge_on_change(&mut map, 1);
+
+        assert_eq!(owners(&map, 0, "volume"), vec![0], "only the dependency's own VM is left");
+        assert!(!map.contains_key(&(1, "mode".to_string())), "an emptied key goes with it");
+        assert!(
+            weak.try_upgrade().is_none(),
+            "nothing may keep the reloaded module's old VM alive"
+        );
+    }
+
+    /// The other direction: reloading the DEPENDENCY leaves the callbacks its code registered
+    /// inside dependents, whose VMs are still alive and still running that code. Each goes
+    /// when its dependent is rebuilt (see `drop_on_change_from` for when that is).
+    #[test]
+    fn a_dependencys_reload_leaves_what_its_code_registered_elsewhere() {
+        let (dep, a, b) = (vm(0), vm(1), vm(2));
+        let mut map = OnChangeMap::new();
+        register(&mut map, &dep, 0, "volume");
+        register(&mut map, &a, 0, "volume");
+        register(&mut map, &b, 0, "volume");
+        purge_on_change(&mut map, 0);
+        assert_eq!(owners(&map, 0, "volume"), vec![1, 2]);
+    }
+
+    /// A failed hot-load rolls back to `n` modules: what the failed VM registered goes, for its
+    /// own settings and for its dependencies' alike.
+    #[test]
+    fn a_rollback_takes_what_the_failed_vm_registered_for_a_surviving_dependency() {
+        let (dep, failed) = (vm(0), vm(1));
+        let mut map = OnChangeMap::new();
+        register(&mut map, &dep, 0, "volume");
+        register(&mut map, &failed, 0, "volume");
+        register(&mut map, &failed, 1, "mode");
+        // What `rollback_to(1)` does, through the function it calls.
+        rollback_on_change(&mut map, 1);
+        assert_eq!(owners(&map, 0, "volume"), vec![0]);
+        assert_eq!(map.len(), 1);
+    }
+
+    /// A state nobody tagged — none in production, `populate_vm` tags every VM before any code
+    /// runs — is owned by the identity it registered under, which is the rule from before.
+    #[test]
+    fn an_untagged_vm_falls_back_to_the_settings_owner() {
+        let lua = Lua::new();
+        let mut map = OnChangeMap::new();
+        register(&mut map, &lua, 3, "k");
+        assert_eq!(owners(&map, 3, "k"), vec![3]);
+    }
+}
+
+#[cfg(test)]
 mod guard_tests {
     use super::*;
     #[test]
@@ -2035,8 +2314,10 @@ fn populate_vm(
     // never into an older VM that once stood at the same index.
     image_search::register_vm(shared, lua, idx);
     // This VM's host: identity (settings/resource/path) + ownership (hotkeys/timers/
-    // keys/arbiter) scoped to the module (idx). Set as the global so its entry + the
-    // host's dispatch resolve it; code dependencies get an identity-scoped variant.
+    // keys/arbiter) scoped to the module (idx). Set as the global so its entry resolves it
+    // (as the gated view, below); code dependencies get an identity-scoped variant. The
+    // host's own window-event dispatch does not go through the global at all — see
+    // `install_window_prelude`.
     let host_m = install_host_api(lua, shared, idx).context("failed to install host API")?;
     // The prelude EXTENDS the host — `host.os.pick`, the window matchers — so it runs against
     // the whole table, before anything is gated. Gating it first would have the prelude write
@@ -2054,13 +2335,9 @@ fn populate_vm(
     // somebody whose module had done nothing wrong.
     //
     // The wrapper opens on the same line as the prelude's first, so reported line numbers
-    // still match the file.
-    let prelude = lua
-        .load(format!("return function(host) {WINDOW_PRELUDE}
-end"))
-        .set_name("window_prelude")
-        .into_function()?;
-    prelude.call::<Function>(())?.call::<()>(&host_m)?;
+    // still match the file. The same call keeps the handle the window events are delivered
+    // through, for the same reason one level up: the delivery is the host's, not the module's.
+    install_window_prelude(lua, &host_m)?;
 
     // From here the module's own code sees only what its manifest declares. `host_m` stays
     // whole, and is what a code dependency's permitted namespaces bind to, so a hotkey or a
@@ -2363,8 +2640,9 @@ fn load_module(
 /// drop a middle module). The enabled flag + persisted settings are kept. Returns
 /// the ids of loaded modules that hold this one's code as a (transitive) dependency
 /// — they keep the OLD copy until restarted (a live cascade is a separate TODO). On
-/// a rebuild error the module is left unregistered (effectively unloaded) with its
-/// store rolled back, and the error returned; a later successful reload recovers.
+/// a rebuild error the module is left unregistered (effectively unloaded), its old VM
+/// replaced by an empty one, with its store rolled back, and the error returned; a later
+/// successful reload recovers.
 fn reload_module(
     shared: &Rc<Shared>,
     modules: &Rc<RefCell<Vec<Module>>>,
@@ -2412,6 +2690,17 @@ fn reload_module(
         // A partial rebuild may have registered hotkeys/keys against the fresh VM
         // (about to be dropped) — purge again so nothing dangles; restore the store.
         shared.purge_module(idx);
+        // And the OLD VM goes as well, for an empty one. The purge above took every
+        // registration the host holds for it, but its window triggers and focus callbacks live
+        // inside the VM, in the window prelude's own lists, and window events are delivered
+        // into every enabled module's VM. Left in place, an overlay in it went on activating on
+        // the next matching window — registering its hotkeys again — for a module this reload
+        // had just reported as failed and inactive. An empty VM has nothing to deliver to
+        // (`window_has_triggers` is false, and `dispatch_activate` / `dispatch_focus` skip it);
+        // the next successful reload builds the real one in its place.
+        if let Some(m) = modules.borrow_mut().get_mut(idx) {
+            m.lua = Lua::new();
+        }
         // Now the module really is gone, so its combinations go to whoever was waiting.
         shared.refresh_hotkeys();
         shared.store.borrow_mut().restore(&old_id, store_snapshot);
@@ -3056,9 +3345,53 @@ pub fn run(dirs: &[String]) -> Result<()> {
     // The settings before the log, because the log's own header reports them — and before
     // anything else, because `headless` decides whether there is going to be a window at all.
     // Read straight from the file rather than through the Manager's store: this happens
-    // before a Manager exists, and the two read the same file.
-    appcfg::load(|key| settings::Store::load().app_flag(key));
+    // before a Manager exists, and the two read the same file. Read only — no quarantine, no
+    // rewrite, no migration — because this process may yet turn out to be a second copy, and
+    // a second copy must not write the running copy's settings file under it. The Manager's
+    // own load, once this copy is the running one, does the rest.
+    let stored = settings::Store::peek();
+    appcfg::load(|key| stored.app_flag(key));
+    // One running copy per user, decided before the log is opened: a second copy that opened
+    // it would write its session header, and possibly rotate the file, in the middle of the
+    // running copy's session. Held until the end of this function, so the lock is released
+    // only after everything below has shut down — the hotkeys included.
+    //
+    // Headless runs are exempt, and neither take the lock nor ask for it: CI and the
+    // development tools start a headless host beside a running application on purpose, and it
+    // has no window to show. A headless copy therefore does not stop a windowed one from
+    // starting, and is not stopped by one.
+    let instance = if appcfg::headless() {
+        None
+    } else {
+        // Until the claim is decided, anything this process has to log — a panic, above all —
+        // is appended as a single line instead of opening a session of its own.
+        logging::set_outside(true);
+        match instance::claim(gui::instance_lock) {
+            instance::Claim::Primary(p) => {
+                logging::set_outside(false);
+                Some(p)
+            }
+            // The running copy has been asked for its window and logs that itself.
+            instance::Claim::Shown => return Ok(()),
+            instance::Claim::GaveUp(why) => {
+                logging::append_from_outside("instance", &why.log_line);
+                instance::tell(&why);
+                return Ok(());
+            }
+        }
+    };
     logging::init();
+    // Every folder under `modules/` that will not load, and why. The launcher read that list
+    // before the log was open, so the reasons it met went nowhere.
+    registry::log_unloadable();
+    settings::sweep_leftovers_at_start();
+    match &instance {
+        Some(p) => p.log_notes(),
+        None => logging::line(
+            "instance",
+            "headless: not guarded against a second copy, and not visible to one",
+        ),
+    }
     let warmup = backend::warmup_ocr(); // preload the neural OCR model off the hot path
     let result = (|| -> Result<()> {
         let mut manager = Manager::new()?;
@@ -3080,8 +3413,23 @@ pub fn run(dirs: &[String]) -> Result<()> {
                 manager.report_load_failure(dir, &e);
             }
         }
-        manager.run()
+        let ran = manager.run();
+        // The window loop has ended, so a second start from here on is told this copy is
+        // quitting, and waits for the lock instead of handing its request to a window that
+        // will never open. Here, before the manager — hotkeys, hooks, modules — is dropped at
+        // the end of this closure; Quit itself says so earlier still, the moment it is chosen
+        // (`instance::begin_quit`).
+        if let Some(p) = &instance {
+            p.stop_serving();
+        }
+        ran
     })();
+    // And again outside, for the early return above: when the Manager could not be made there
+    // never was a window loop, and what follows (the capture thread, the OCR warmup join) can
+    // take seconds, during which a second start must not be told that a window is coming.
+    if let Some(p) = &instance {
+        p.stop_serving();
+    }
     // The desktop duplication thread, if a module ever started it: out of the graphics driver
     // before the process tears down, for the reason the OCR warmup is joined below. A no-op
     // everywhere else and in every session that never used it.
@@ -3093,6 +3441,11 @@ pub fn run(dirs: &[String]) -> Result<()> {
     if let Some(h) = warmup {
         let _ = h.join();
     }
+    // And for the same reason, the recognitions of that engine a read did not wait for — it
+    // runs beside the system one on every small region, and nobody joins it once the system
+    // engine has answered. Bounded at half a second; after the warm-up, which they queue
+    // behind for the session lock.
+    backend::settle_ocr();
     // Whatever went wrong, it goes in the log before it goes anywhere else.
     //
     // Returning the error is enough on a developer's machine, where it lands in a terminal.
@@ -3104,6 +3457,8 @@ pub fn run(dirs: &[String]) -> Result<()> {
     if let Err(e) = &result {
         logging::line("host", &format!("fatal: {e:#}"));
     }
+    // Last: the next copy may start the moment this is released.
+    drop(instance);
     result
 }
 
@@ -3340,21 +3695,9 @@ impl HostEvents for Dispatcher<'_> {
             if !self.enabled(idx) {
                 continue;
             }
-            let table = match win_to_table(&m.lua, &win) {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            if let Err(e) = guard(|| {
-                let host: Table = m.lua.globals().get("host")?;
-                let window: Table = host.get("window")?;
-                let dispatch: Function = window.get("_dispatchActivate")?;
-                // For a module that reads the screen through desktop duplication, a hook the
-                // dispatch runs before the first matching trigger's callback: its window has
-                // just come forward, and that callback's detection read is what opening the
-                // duplication ahead of time is for. `nil` for every other module.
-                let before = capture_source::prewarm_hook(&m.lua)?;
-                dispatch.call::<()>((table, before))
-            }) {
+            // Through the host's own handle on the window table, not the module's `host`:
+            // see `install_window_prelude`.
+            if let Err(e) = guard(|| dispatch_activate(&m.lua, &win)) {
                 self.shared.report_callback_error(idx, "window trigger", &e);
             }
         }
@@ -3371,12 +3714,7 @@ impl HostEvents for Dispatcher<'_> {
             if !self.enabled(idx) {
                 continue;
             }
-            if let Err(e) = guard(|| {
-                let host: Table = m.lua.globals().get("host")?;
-                let window: Table = host.get("window")?;
-                let dispatch: Function = window.get("_dispatchFocus")?;
-                dispatch.call::<()>(())
-            }) {
+            if let Err(e) = guard(|| dispatch_focus(&m.lua)) {
                 self.shared.report_callback_error(idx, "focus change", &e);
             }
         }
@@ -5095,9 +5433,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     settings_api.set(
         "onChange",
         lua.create_function(move |lua, (key, cb): (String, Function)| {
-            let rk = lua.create_registry_value(cb)?;
-            sh.on_change.borrow_mut().entry((idx, key)).or_default().push((lua.clone(), rk));
-            Ok(())
+            file_on_change(&mut sh.on_change.borrow_mut(), lua, idx, key, cb)
         })?,
     )?;
     host.set("settings", settings_api.clone())?;
@@ -5234,9 +5570,10 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
 ///   * Executed ONCE per VM; later includes of the same file return the same value (a
 ///     module split into files must not re-run side effects per include). Cached per VM,
 ///     because a code module legitimately runs once per dependent VM.
-///   * `..` and absolute paths are REJECTED. `host.path` / `host.resource.read` join
-///     without normalizing, which lets a path escape the module directory; that is a
-///     nuisance for reading a file and a different thing entirely for executing one.
+///   * A path that leaves the module directory is REJECTED — see `include_target`.
+///     `host.path` / `host.resource.read` join without normalizing, which lets a path escape
+///     the module directory; that is a nuisance for reading a file and a different thing
+///     entirely for executing one.
 ///   * An include cycle is an error naming the file, not a stack overflow.
 fn install_include(
     lua: &Lua,
@@ -5260,15 +5597,7 @@ fn install_include(
     host.set(
         "include",
         lua.create_function(move |lua, rel: String| {
-            let root = sh.root(idx);
-            let root_abs = std::path::absolute(&root).unwrap_or(root.clone());
-            let joined = root.join(&rel);
-            let abs = std::path::absolute(&joined).unwrap_or(joined);
-            if !abs.starts_with(&root_abs) {
-                return Err(mlua::Error::external(format!(
-                    "include '{rel}' resolves outside the module directory"
-                )));
-            }
+            let abs = include_target(&sh.root(idx), &rel).map_err(mlua::Error::external)?;
             let key = abs.to_string_lossy().to_string();
 
             let cache: Table = match lua.named_registry_value::<Table>("__include_cache") {
@@ -5321,6 +5650,109 @@ fn install_include(
         })?,
     )?;
     Ok(())
+}
+
+/// The file `host.include(rel)` reads for a module rooted at `root`, or why it may not.
+///
+/// The path is cleaned LEXICALLY (path-clean: `.` dropped, each `..` removes the part before
+/// it) before anything is compared, and then must still be relative and must not start with
+/// `..`. The check used to be `std::path::absolute(root.join(rel)).starts_with(root)`, which
+/// is right on Windows, where making a path absolute also resolves `..` — and wrong on macOS,
+/// where it keeps `..`, so `"../other/x.luau"` started with the root and ran code from outside
+/// the module. Cleaning first makes the rule the same on both.
+///
+/// `\` and `:` are refused as TEXT, on every platform. On Windows they are a separator and a
+/// drive (`sub\..\..\x`, `C:x`), and a path that means one thing on Windows and another on
+/// macOS is the kind of difference the check above existed to close; `/` is the separator
+/// everywhere.
+///
+/// The cleaned path is also the include's cache key, so `"src/a.luau"` and
+/// `"src/../src/a.luau"` are one include on both platforms.
+fn include_target(root: &Path, rel: &str) -> std::result::Result<PathBuf, String> {
+    use std::path::Component;
+    if let Some(c) = rel.chars().find(|c| matches!(c, '\\' | ':')) {
+        // `{c}`, not `{c:?}`: Debug doubles the backslash, and a screen reader then reads two.
+        return Err(format!(
+            "include '{rel}': '{c}' is not allowed in an include path — separate folders with '/'"
+        ));
+    }
+    let cleaned = path_clean::clean(rel);
+    let first = cleaned.components().next();
+    if cleaned.has_root()
+        || cleaned.is_absolute()
+        || !matches!(first, Some(Component::Normal(_)))
+    {
+        return Err(format!("include '{rel}' resolves outside the module directory"));
+    }
+    let root_abs = path_clean::clean(std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf()));
+    let target = root_abs.join(&cleaned);
+    // Cannot fail after the checks above; kept so that a later change to them cannot quietly
+    // let a path out.
+    if !target.starts_with(&root_abs) {
+        return Err(format!("include '{rel}' resolves outside the module directory"));
+    }
+    Ok(target)
+}
+
+#[cfg(test)]
+mod include_tests {
+    use super::include_target;
+    use std::path::Path;
+
+    fn root() -> &'static Path {
+        if cfg!(windows) {
+            Path::new(r"C:\apps\modules\m")
+        } else {
+            Path::new("/apps/modules/m")
+        }
+    }
+
+    #[test]
+    fn an_include_stays_inside_the_module() {
+        for rel in [
+            "../other/x.luau",
+            "src/../../other/x.luau",
+            "..",
+            "",
+            ".",
+            "/etc/x.luau",
+            "src/../..",
+            // Windows spellings, refused as text on every platform.
+            "src\\..\\..\\x.luau",
+            "..\\x.luau",
+            "C:x.luau",
+            "C:/x.luau",
+            "\\\\server\\share\\x.luau",
+            "sub/C:evil.luau",
+        ] {
+            assert!(include_target(root(), rel).is_err(), "{rel:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn two_spellings_of_one_file_are_one_include() {
+        let plain = include_target(root(), "src/a.luau").expect("plain path");
+        assert_eq!(plain, root().join("src").join("a.luau"));
+        for rel in ["src/../src/a.luau", "./src/a.luau", "src//a.luau", "src/./a.luau", "x/../src/a.luau"] {
+            assert_eq!(include_target(root(), rel).expect(rel), plain, "{rel:?}");
+        }
+    }
+
+    #[test]
+    fn a_root_given_with_dot_dot_still_contains_its_files() {
+        // A module folder named on the command line as `../modules/m`: the root is cleaned
+        // too, or nothing would ever start with it.
+        let odd = if cfg!(windows) {
+            Path::new(r"C:\apps\x\..\modules\m")
+        } else {
+            Path::new("/apps/x/../modules/m")
+        };
+        assert_eq!(
+            include_target(odd, "src/a.luau").expect("inside"),
+            root().join("src").join("a.luau")
+        );
+        assert!(include_target(odd, "../m2/a.luau").is_err());
+    }
 }
 
 /// Converts a Luau value into a stored setting value (scalars only).
@@ -5382,15 +5814,82 @@ fn field_from(key: &str, default: &settings::Value, opts: Option<&Table>) -> set
     field
 }
 
-/// Returns true if the given module VM registered any window triggers.
+/// The named-registry key under which each VM keeps the host's own handle on its
+/// `host.window` table. See `install_window_prelude`.
+const WINDOW_DISPATCH: &str = "__host_window";
+
+/// Runs the window prelude against `host_m`, the VM's WHOLE host table, and keeps the host's
+/// own handle on the window table it extended.
+///
+/// The handle is what the host delivers window events through: `window_has_triggers`,
+/// `dispatch_activate` and `dispatch_focus`. They used to reach the prelude through the
+/// global `host`, which after loading is the module's GATED view — so a module that had not
+/// declared `window` got a capability refusal on every foreground and focus change, logged
+/// each time and put in a dialog once, for a lookup that was the host's and not the module's.
+/// And an overlay module relying on the runtime's manifest never activated at all: its
+/// triggers were registered (through the runtime's own host, which does declare `window`),
+/// but `window_has_triggers` answered false for it, so the foreground watch was never
+/// started on its behalf, and the dispatch that would have fired them raised.
+///
+/// The named registry is out of reach of Luau code — Luau has no `debug.getregistry` — so
+/// this handle opens nothing to a module. The gate still stands between a module's own code
+/// and `host.window`; only the host's delivery goes around it.
+fn install_window_prelude(lua: &Lua, host_m: &Table) -> mlua::Result<()> {
+    let prelude = lua
+        .load(format!("return function(host) {WINDOW_PRELUDE}
+end"))
+        .set_name("window_prelude")
+        .into_function()?;
+    prelude.call::<Function>(())?.call::<()>(host_m)?;
+    let window: Table = host_m.get("window")?;
+    lua.set_named_registry_value(WINDOW_DISPATCH, window)
+}
+
+/// The window table of `lua`'s host, as the host itself reaches it — never through the
+/// module's gated view. See `install_window_prelude`.
+fn host_window(lua: &Lua) -> mlua::Result<Table> {
+    lua.named_registry_value::<Table>(WINDOW_DISPATCH)
+}
+
+fn has_triggers(window: &Table) -> mlua::Result<bool> {
+    window.get::<Function>("_hasTriggers")?.call::<bool>(())
+}
+
+/// Returns true if the given module VM registered any window triggers or focus callbacks,
+/// whether its own code did or a code dependency's did on its behalf.
 fn window_has_triggers(lua: &Lua) -> bool {
-    (|| -> mlua::Result<bool> {
-        let host: Table = lua.globals().get("host")?;
-        let window: Table = host.get("window")?;
-        let has: Function = window.get("_hasTriggers")?;
-        has.call::<bool>(())
-    })()
-    .unwrap_or(false)
+    host_window(lua).and_then(|w| has_triggers(&w)).unwrap_or(false)
+}
+
+/// Delivers a foreground change into one VM's `onTrigger` callbacks.
+///
+/// A VM that registered nothing is skipped before anything is converted: the window table,
+/// the prewarm hook and the prelude's loop are all work for nobody, repeated for every module
+/// on every window switch.
+fn dispatch_activate(lua: &Lua, win: &WinInfo) -> mlua::Result<()> {
+    // No handle is a VM the prelude never ran in — none that loaded — and nothing to deliver
+    // to, as `window_has_triggers` answers for it too.
+    let Ok(window) = host_window(lua) else { return Ok(()) };
+    if !has_triggers(&window)? {
+        return Ok(());
+    }
+    let table = win_to_table(lua, win)?;
+    // For a module that reads the screen through desktop duplication, a hook the dispatch
+    // runs before the first matching trigger's callback: its window has just come forward,
+    // and that callback's detection read is what opening the duplication ahead of time is
+    // for. `nil` for every other module.
+    let before = capture_source::prewarm_hook(lua)?;
+    window.get::<Function>("_dispatchActivate")?.call::<()>((table, before))
+}
+
+/// Delivers a focus change into one VM's `onFocus` callbacks; skipped, like
+/// `dispatch_activate`, for a VM that registered none.
+fn dispatch_focus(lua: &Lua) -> mlua::Result<()> {
+    let Ok(window) = host_window(lua) else { return Ok(()) };
+    if !has_triggers(&window)? {
+        return Ok(());
+    }
+    window.get::<Function>("_dispatchFocus")?.call::<()>(())
 }
 
 /// Reads `{ button = "left"|"right"|"middle" }` from input opts (default left).
@@ -5446,7 +5945,9 @@ fn find_module_dir(parent: &Path, id: &str) -> Option<PathBuf> {
     fn scan(dir: &Path, id: &str) -> Option<PathBuf> {
         for entry in std::fs::read_dir(dir).ok()?.flatten() {
             let p = entry.path();
-            if p.is_dir() {
+            // A dot-folder is not a module: an install's staging folder (registry.rs,
+            // `install_one`), or a system's hidden folder. The same rule as the installed list.
+            if p.is_dir() && !entry.file_name().to_string_lossy().starts_with('.') {
                 if let Ok(m) = LoadedModule::load_dir(&p) {
                     if m.manifest.id == id {
                         return Some(p);

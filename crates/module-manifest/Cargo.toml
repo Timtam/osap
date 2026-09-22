@@ -8,7 +8,14 @@ license = "GPL-3.0-or-later"
 anyhow = "1.0.102"
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.1.2"
-zip = "8.6.0"
+# Deflate only, through zlib-rs: that is what GitHub's source archives and every zip tool
+# write, and the default feature set would add bzip2, zstd, xz, lzma, AES and three C
+# libraries to read formats no module archive uses. `unpack_zip` keeps its own loop around
+# `enclosed_name` — zip's `extract` lets `top/C:\x` out of the folder.
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# The content address of an unpacked `.zip` package (`load_zip`); std's DefaultHasher is
+# allowed to change between Rust releases.
+sha2 = "0.11"
 
 # Only for the test that every shipped module still PARSES — see the bottom of lib.rs. It
 # lives here, and not in `host`, because this crate builds and links in seconds while `host`
@@ -16,3 +23,5 @@ zip = "8.6.0"
 # and the same `luau` feature as host, so it is the same parser that will load the module.
 [dev-dependencies]
 mlua = { version = "0.11.6", features = ["luau"] }
+# A folder per archive test that removes itself, however the test ends.
+tempfile = "3.27"

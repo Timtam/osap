@@ -114,10 +114,10 @@ fn log_panics() {
         if host::logging::hold_contained_panic(|| info.to_string()) {
             return;
         }
-        // Best effort: if run() has not opened the log yet, `line` is a no-op, so make sure
-        // there is a file to write to.
-        host::logging::init();
-        host::logging::line("panic", &info.to_string());
+        // Opens the log if run() has not got that far — except in a start that may still turn
+        // out to be a second copy, which appends one line to the running copy's log instead
+        // of starting a session in the middle of it (see logging::panic_line).
+        host::logging::panic_line(&info.to_string());
         previous(info);
     }));
 }
@@ -203,61 +203,34 @@ fn cmd_search(query: &str) -> Result<()> {
 fn cmd_install(full_name: Option<&str>) -> Result<()> {
     let full_name = full_name.ok_or_else(|| anyhow::anyhow!("usage: install <owner/repo>"))?;
 
-    // Review the requested capabilities before installing (the GUI gets a proper
-    // dialog in a later phase; this is the console equivalent).
-    let branch = registry::default_branch(full_name)?;
-    let manifest = registry::fetch_manifest(full_name, &branch)?;
-    println!("Module: {} v{} ({})", manifest.name, manifest.version, manifest.id);
-    let caps = &manifest.capabilities.require;
-    println!(
-        "Requested capabilities: {}",
-        if caps.is_empty() { "(none)".to_string() } else { caps.join(", ") }
-    );
-    if !manifest.dependencies.is_empty() {
-        println!("Dependencies (fetched too if missing): {}", manifest.dependencies.join(", "));
+    // Every module the install would add, each with its capabilities, before anything is
+    // downloaded — the same review the manager's Browse tab shows.
+    let plan = registry::resolve_tree(full_name, None)?;
+    println!("{}\n", registry::install_review_text(&plan, std::env::consts::OS));
+    let deps = plan.modules.iter().filter(|m| !m.optional).count() > 1;
+    if !ask(&format!("Install this module{}?", if deps { " and the modules it needs" } else { "" }))? {
+        println!("Cancelled. Nothing was installed.");
+        return Ok(());
     }
-    // Optional dependencies are extra features, not required — listed + offered separately.
-    let optional_ids: Vec<String> = manifest
-        .optional_dependencies
-        .iter()
-        .map(|s| s.split_whitespace().next().unwrap_or("").to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    if !optional_ids.is_empty() {
-        println!("Optional dependencies (extra features, not required): {}", optional_ids.join(", "));
+    // Optional modules are extra features: declining still installs the module and what it
+    // needs.
+    let with_optional = plan.has_optional() && ask("Also install the optional modules?")?;
+
+    let installed = registry::install_resolved(&plan, with_optional)?;
+    println!("Installed {} module(s) into {}:", installed.len(), registry::modules_dir().display());
+    for m in &installed {
+        println!("  {} v{} ({})", m.manifest.name, m.manifest.version, m.manifest.id);
     }
-    print!(
-        "Install this module{}? [y/N] ",
-        if manifest.dependencies.is_empty() { "" } else { " and its dependencies" }
-    );
+    Ok(())
+}
+
+/// Asks a yes/no question on the console; anything but "y" or "yes" is no.
+fn ask(question: &str) -> Result<bool> {
+    print!("{question} [y/N] ");
     std::io::stdout().flush().ok();
     let mut answer = String::new();
     std::io::stdin().read_line(&mut answer)?;
-    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-        println!("Cancelled.");
-        return Ok(());
-    }
-
-    // Offer the optional dependencies (opt-in): declining still installs the module + its
-    // required deps.
-    let mut accepted_optional: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if !optional_ids.is_empty() {
-        print!("Also install its optional dependencies ({})? [y/N] ", optional_ids.join(", "));
-        std::io::stdout().flush().ok();
-        let mut opt_answer = String::new();
-        std::io::stdin().read_line(&mut opt_answer)?;
-        if matches!(opt_answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-            accepted_optional.extend(optional_ids);
-        }
-    }
-
-    // Resolve + fetch the whole dependency tree, not just this repo.
-    let installed = registry::install_tree(full_name, &accepted_optional)?;
-    println!("Installed {} module(s) into {}:", installed.len(), registry::modules_dir().display());
-    for m in &installed {
-        println!("  {} v{} ({})", m.name, m.version, m.id);
-    }
-    Ok(())
+    Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
 fn cmd_list() {
@@ -283,8 +256,18 @@ fn cmd_update() -> Result<()> {
     for m in &mods {
         if let Some(new_version) = registry::update_available(m) {
             if let Some(src) = &m.source {
-                println!("Updating {} ({}): v{} -> v{new_version}...", m.id, src.repo, m.version);
-                registry::install(&src.repo)?;
+                println!("Update for {} ({}): v{} -> v{new_version}", m.id, src.repo, m.version);
+                let plan = registry::resolve_update(m)?;
+                // A new capability or a new dependency is shown and asked about; an update
+                // that asks for nothing new goes ahead, as it does in the manager.
+                if plan.needs_review() {
+                    println!("{}\n", registry::update_review_text(&plan, &mods, std::env::consts::OS));
+                    if !ask(&format!("Update {}?", m.id))? {
+                        println!("Skipped {}.", m.id);
+                        continue;
+                    }
+                }
+                registry::install_update(&plan)?;
                 updated += 1;
             }
         }

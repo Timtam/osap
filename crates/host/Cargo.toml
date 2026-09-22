@@ -16,11 +16,35 @@ rodio = "0.20"
 semver = "1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
+# Two users: the settings store's atomic replace (settings.rs, `replace_file`: a temporary
+# file of its own beside the store, flushed, then renamed over it), and the staging folder an
+# install or update is unpacked into before it replaces the installed module (registry.rs,
+# `install_one`: removed on every way out, error or panic). Already in the lock file:
+# native-tls uses it on macOS.
+tempfile = "3.27"
 ureq = "3"
-zip = "2"
 toml = "1.1.2"
+# Lexical `..` removal for `host.include` (lib.rs, `include_target`): `std::path::absolute`
+# keeps `..` on Unix, which let an include leave the module folder on macOS.
+path-clean = "1.0.1"
+# A branch name in the raw.githubusercontent.com path (registry.rs, `fetch_manifest`). Already
+# in the build under ureq; the same version.
+percent-encoding = "2.3"
 
 wxdragon = "0.9.15"
+
+# The single-instance guard's "show the manager" request: a named pipe on Windows, a
+# Unix-domain socket on macOS (instance.rs, which says why not wxWidgets' own IPC).
+interprocess = "2.4.4"
+# The backend that lets our dependencies' diagnostics reach the log (logging.rs), and the
+# header's OS line. Both are borrowed by crates/macos-check through logging.rs.
+log = "0.4"
+os_info = { version = "3.15", default-features = false }
+
+[dev-dependencies]
+# Archives for the install tests (registry.rs), written in the test rather than checked in.
+# Unpacking itself is module_manifest::unpack_zip; the features match that crate's.
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [target."cfg(windows)".dependencies]
 # Speech through the screen reader, compiled from source and linked statically — see
@@ -35,6 +59,10 @@ windows = { version = "0.58", features = ["Media_Ocr", "Graphics_Imaging", "Glob
 # Runtime, used as a fallback for text Windows.Media.Ocr won't read (lone digits).
 ort = { version = "=2.0.0-rc.10", features = ["download-binaries", "copy-dylibs", "ndarray"] }
 ndarray = "0.16"
+# ort reports through `tracing` (ONNX Runtime's own messages included); the `log` feature turns
+# its events into `log` records while no tracing subscriber is installed, which none is, so they
+# reach logging.rs's backend with everything else.
+tracing = { version = "0.1", default-features = false, features = ["log"] }
 # XInput, loaded at run time, with the ordinal-100 Guide read and the vendor and product ids
 # of XInputGetCapabilitiesEx: the loader under gilrs and Bevy (backend/gamepad/xinput.rs).
 rusty-xinput = "1.3"
@@ -43,7 +71,14 @@ rusty-xinput = "1.3"
 # windows-sys hides `CreateWaitableTimerExW`, the high-resolution timer the 4 ms poll needs.
 windows-sys = { version = "0.61.2", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Threading", "Win32_UI_Accessibility", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_HiDpi", "Win32_UI_Input_XboxController", "Win32_Security",
     # Only for the live duplication test's window (DwmFlush, transitions off); see backend/dxgi.rs.
-    "Win32_Graphics_Dwm"] }
+    "Win32_Graphics_Dwm",
+    # The single-instance guard (instance.rs): the user's SID and the session id for the names,
+    # and FileSystem for the flags the second start opens the pipe with (overlapped, at
+    # identification level).
+    "Win32_Security_Authorization", "Win32_System_RemoteDesktop", "Win32_Storage_FileSystem"] }
+# The pipe's security descriptor is written as SDDL, and interprocess takes it as widestring's
+# `U16CStr` (instance.rs). Already in the lock through interprocess.
+widestring = "1"
 
 # --- macOS ---------------------------------------------------------------------------
 # Kept identical to crates/macos-check/Cargo.toml, which is what type-checks this code
@@ -65,7 +100,9 @@ features = ["NSWorkspace", "NSRunningApplication", "NSScreen", "NSApplication", 
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-core-foundation]
 version = "0.3"
-features = ["CFBase", "CFString", "CFArray", "CFDictionary", "CFNumber", "CFRunLoop", "CFCGTypes", "CFData", "CFMachPort"]
+features = ["CFBase", "CFString", "CFArray", "CFDictionary", "CFNumber", "CFRunLoop", "CFCGTypes", "CFData", "CFMachPort",
+    # The alert a second start shows when it gives up (instance.rs), before wxWidgets exists.
+    "CFUserNotification", "CFDate", "CFURL"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-core-graphics]
 version = "0.3"

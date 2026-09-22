@@ -1953,13 +1953,21 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
         // that case costs about max(winrt, paddle) instead of their sum. When WinRT
         // succeeds the background thread just finishes unused (negligible at human
         // focus rates). WinRT stays the trusted primary and the only multi-word path.
+        //
+        // Counted from before the spawn until the thread is done, because a thread nobody
+        // joins can still be inside ONNX Runtime when the application exits; `run` waits for
+        // the count to reach zero (see `paddle_ocr::InFlight`).
         let paddle = small.then(|| {
             let probe = CapturedImage {
                 w: cap.w,
                 h: cap.h,
                 rgba: cap.rgba.clone(),
             };
-            std::thread::spawn(move || super::paddle_ocr::recognize(&probe))
+            let running = super::paddle_ocr::IN_FLIGHT.start();
+            std::thread::spawn(move || {
+                let _running = running;
+                super::paddle_ocr::recognize(&probe)
+            })
         });
 
         let t_tight = std::time::Instant::now();
@@ -1972,12 +1980,15 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
         // An empty region reads as empty. Nothing else can honestly come out of it, and
         // something else was: the neural fallback, given a rectangle with no content in it,
         // returns a plausible-looking string rather than nothing, and both the primary and
-        // the fallback were being asked. Answering here also saves both recognitions on a
-        // region there was never anything to read in.
+        // the fallback were being asked. Answering here saves the primary recognition on a
+        // region there was never anything to read in. It does NOT save the fallback's: that
+        // thread was spawned above, before the crop that finds the region blank, so it runs to
+        // the end and its answer is dropped with the handle (it stays counted in
+        // `paddle_ocr::IN_FLIGHT` until then, like any other it is not waited for).
         if tight.as_ref().is_some_and(|t| t.blank) {
             drop(paddle);
-            // `skipped` is how a caller learns this branch was taken: neither engine ran, so
-            // the empty answer is the guard's and not a reading of anything.
+            // `skipped` is how a caller learns this branch was taken: no engine's answer was
+            // used, so the empty answer is the guard's and not a reading of anything.
             return Ok(OcrText { text: String::new(), words: Vec::new(), skipped: true });
         }
         let t_win = std::time::Instant::now();
@@ -2006,7 +2017,8 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
                     used_paddle = true;
                 }
             }
-            // else: WinRT won; the paddle thread finishes in the background.
+            // else: WinRT won; the paddle thread finishes in the background, counted in
+            // `paddle_ocr::IN_FLIGHT` until it does.
         }
         // Behind TRACE as well as the OCR-debug switch. Saving the images is for "was the region
         // right"; the timings answer "where did the time go", which is a different question and

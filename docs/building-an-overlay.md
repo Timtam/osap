@@ -32,7 +32,7 @@ You will meet these words throughout. Read them once now; each is explained prop
 
 ## Step 1 — the smallest overlay
 
-A module is a folder with a `module.toml` and a Luau file. The manifest names the module — `id`, `name` and `version` are required — declares the overlay runtime as a dependency, and lists what the module's own code calls: here `host.speech`, from the button's callback. What the runtime does on the module's behalf — matching the window, capturing Tab, reading OCR — is covered by the runtime's own manifest, with one exception: every module that attaches an overlay declares `window`, because the host delivers foreground and focus changes through the module's own `host.window`, and without it the overlay never activates (see [What to declare](api/index.md#capabilities)).
+A module is a folder with a `module.toml` and a Luau file. The manifest names the module — `id`, `name` and `version` are required — declares the overlay runtime as a dependency, and lists what the module's own code calls: here `host.speech`, from the button's callback. What the runtime does on the module's behalf — watching for the window, matching it, capturing Tab, reading OCR — is covered by the runtime's own manifest, so `window` is not on this list: the module's own code never calls `host.window` (see [What to declare](api/index.md#capabilities)).
 
 ```toml
 # module.toml
@@ -42,7 +42,7 @@ version      = "0.1.0"
 dependencies = ["com.platform.overlay"]
 
 [capabilities]
-require = ["window", "speech"]
+require = ["speech"]
 ```
 
 Then `src/main.luau`, the default entry file, pulls the runtime in:

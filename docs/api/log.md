@@ -6,6 +6,8 @@ toc_max_heading_level: 2
 
 One level, `info`, writing to `automation-platform.log` beside the application rather than to the console — a screen reader reads the focused terminal, so console output would be spoken aloud. Where exactly that is, and where the log goes when that folder cannot be written, is in the platform sections of [`info`](#host-log-info).
 
+The same file holds the host's own lines and, marked `[dep:<library>]`, what the libraries the host is built on report (the HTTP client, TLS, ONNX Runtime, wxWidgets' Rust layer and others): their warnings and errors always, their info and debug lines only while **Detailed (trace) logging** is on in the Application settings tab. At most 20 lines per library per minute are written; the first line over that says so, and the number left out is written before that library's next line. A module's own lines are never limited this way.
+
 In this project **the log is evidence rather than debugging comfort.** The tester is blind, remote, and often on the platform none of us can run, so what is not in this file did not happen as far as anyone can establish; the probe tool is little more than this one call, a single keypress writing down everything we would otherwise have to ask a person to describe.
 
 That makes the thing worth logging the thing that is unanswerable after the fact. The overlay runtime logs the exact words it hands to speech for the one control kind whose value has been in dispute, because only the words that actually left can settle whether the code found what it claimed to.

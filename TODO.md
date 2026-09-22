@@ -2807,12 +2807,16 @@ Planned — the API pages say these do not exist:
 
 Found while documenting — the behaviour is written down now, and wants fixing:
 
-- [ ] **`host.include` does not reject `..` on macOS.** The check is
+- [x] **`host.include` does not reject `..` on macOS.** The check was
       `std::path::absolute(root.join(rel)).starts_with(root_abs)` (`lib.rs`,
       `install_include`); on Unix `absolute` keeps `..`, so `"../other/x.luau"` passes and runs
       code from outside the module, and a second spelling of one file is cached under a second
       key and runs twice in one VM. Normalise the path lexically before the check, on both
       platforms.
+  - Fixed (2026-09-21): `include_target` (`lib.rs`) cleans the path with path-clean before the
+      check, refuses `\` and `:` as text on every platform, and uses the cleaned path as the
+      cache key. Unit-tested (`include_tests`) on Windows; the same function runs on macOS, where
+      the tests have not run.
 - [ ] **A `"<modifier> tap"` hotkey — and `F21`–`F24` on macOS — is reported as held by
       "another application".** `host.hotkey.register` returns an id because `key_spec` parses
       the spec; the platform refuses it later in `refresh_hotkeys`, `report_os_conflict`'s
@@ -2827,7 +2831,7 @@ Found while documenting — the behaviour is written down now, and wants fixing:
       low-level hook that keeps timing out can be removed without notice; `KEY_HOOK_INSTALLED`
       would stay true and every capture would stop for the session with nothing logged. Not
       observed; worth a check after a long pump stall.
-- [ ] **A module without the `window` capability breaks window delivery for itself.**
+- [x] **A module without the `window` capability breaks window delivery for itself.**
       `on_window_activate`, `on_focus_change` and `window_has_triggers` (`lib.rs`) reach the
       prelude through `lua.globals().get("host")`, which after load is the module's GATED view
       (`populate_vm` sets it to the `gated_view`), so `host.window` raises for a module that
@@ -2840,13 +2844,30 @@ Found while documenting — the behaviour is written down now, and wants fixing:
       Dispatch through the ungated table (`host_m`), which the prelude is already bound to,
       and skip a module that registered no triggers. The docs tell every module to declare
       `window` until then (`docs/api/index.md`, What to declare).
-- [ ] **A dependency's `host.settings.onChange` outlives its owner's reload.** Dependency code
+      Fixed (2026-09-21): `install_window_prelude` keeps the whole window table in each VM's
+      named registry, and `window_has_triggers`, `dispatch_activate` and `dispatch_focus`
+      go through that; a VM with no triggers is skipped before anything is converted. The
+      gate still holds for module code. Unit-tested on a bare VM (`capability_gate_tests`,
+      `window_events_*`); `examples/overlay-attach` is back to `require = ["speech"]`, and
+      the docs say a module declares `window` only for its own calls.
+- [x] **A dependency's `host.settings.onChange` outlives its owner's reload.** Dependency code
       gets the dependency's own settings table (`build_dep_host`), so a callback it registers
       is stored under `(dep_idx, key)` (`lib.rs`, the `onChange` binding), while
       `purge_module(owner)` removes only `(owner, …)` entries. After the owner is reloaded, the
       old VM's callbacks stay registered, keep that VM alive, and fire beside the new ones
       whenever the dependency's setting changes. Purge by the VM that registered them, not by
       the settings owner.
+      Fixed (2026-09-21): each entry records the module that owns the VM it came from
+      (`image_search::vm_owner`), and `purge_module` and `rollback_to` drop by that
+      (`purge_on_change`, `rollback_on_change`; `on_change_ownership_tests` call those two
+      directly, including that the old VM is released).
+- [x] **A failed reload left the old VM delivering window events.** `reload_module` purged
+      the old VM's registrations but left the VM itself in `m.lua` with the enabled flag
+      unchanged, so `on_window_activate` went on dispatching into its prelude, and an overlay
+      in it could activate and register hotkeys again for a module reported as inactive.
+      Fixed (2026-09-21): a failed rebuild puts an empty VM in its place, which the dispatch
+      skips (`window_events_skip_a_vm_without_the_prelude`). Not unit-tested end to end:
+      nothing builds a `Shared` in a test.
 - [ ] **Stale code comments.** `Shared::report_conflict` (`lib.rs`) says every enabled module
       that captured a key is dispatched to — `on_key` dispatches to the first. The doc comment
       of `reload_module` (`lib.rs`) and the Reload button's comment in `gui.rs` say dependents
@@ -2866,6 +2887,18 @@ Verify on a Mac — the pages state these from the code, or no longer state them
 - [ ] **Auto-repeat of a hotkey.** `backend/macos/hotkey.rs` expects Carbon to fire once per
       press and marks it unverified on hardware; `docs/api/hotkey.md` states once-per-press for
       Windows only. One deliberate press-and-hold.
+- [ ] **The settings save on a Mac.** `Store::save` now replaces `settings.toml` through
+      `tempfile` (a temporary file beside it, created 0666 less the umask; `sync_all`, best
+      effort; `std::fs::rename`) and then flushes the folder (`settings.rs`,
+      `replace_file`); `docs/api/settings.md` says so for macOS from the code. Never run
+      there: the first macOS CI run after 2026-09-21 executes `store_save_tests`, whose
+      failure case relies on renaming a file over a folder being refused, and whose mode test
+      compares the store with a plain `fs::write`; check it is green, and that a setting
+      changed in the application survives a restart with no `settings.*.toml.tmp` left beside
+      the `.app`. Also never tried: the application in a folder on an SMB share or an exFAT
+      stick. `sync_all` is `fcntl(F_FULLFSYNC)` there, which fcntl(2) lists only for HFS,
+      FAT, UDF and APFS; the save should go through unflushed with one "saved settings …
+      without flushing them to disk first" line in the log, and not fail.
 - Background delivery of a game controller is already listed under "Game controllers"
   above; `docs/api/gamepad.md` no longer promises it for macOS.
 
@@ -2945,6 +2978,172 @@ scratch folder); these only a real run can show:
       reuses. Never observed either way. The bundle is left untouched for that reason (only
       `build-info.txt` and `README.txt` beside it change); a file inside it would need a new
       signature, and an ad-hoc signature is a new identity.
+
+## One running copy, and what the libraries say (2026-09-21)
+
+- [x] **A second start shows the running copy's module window and exits** instead of starting a
+      second host (`crates/host/src/instance.rs`). The lock is wxWidgets' single-instance checker
+      through wxdragon (a mutex named with the user's SID and session id on Windows; a lock file
+      named with the uid, in `~/Library/Application Support/AutomationPlatform`, on macOS). The
+      request goes over an `interprocess` named pipe (Windows) or Unix-domain socket (macOS), not
+      wxWidgets' IPC, whose Windows form is DDE and hangs on any hung top-level window. The
+      running copy answers from a thread of its own and the window's timer tick shows the window;
+      on macOS the reopen event asks for the same. Headless runs are exempt. A copy that is
+      quitting answers `quitting` from the moment Quit is chosen and is waited for (10 s); a copy
+      that holds the lock and never answers is left alone. Checked here: unit tests for the names,
+      the decision, the protocol, a real pipe conversation between two claims, and wxWidgets'
+      mutex seen by a second holder and gone after release; a headless run logs the exemption.
+      The macOS half is type-checked through `macos-check`, its tests included.
+- [x] **Hardened after review** (same day): quitting stops the listener and waits for it before
+      the lock is released, and a new copy retries listening for 3 s — before, the listener
+      thread kept a pipe instance open until the process ended, so a copy restarted at once
+      could not listen and nothing could reach it (a unit test restarts a copy and has a third
+      start find it). The pipe admits only the user and SYSTEM (it granted read to Everyone), at
+      most 4 connections are answered at once, and a second start connects at identification
+      level and checks the answering process's session and user before it sends anything or
+      hands over the foreground. A mutex this process may not open (an elevated copy's) counts
+      as held instead of letting the start run unguarded. A start that gives up shows a system
+      message box saying why (not responding, still closing, a different version, not
+      confirmed as this user's) and says so in the log with the same reason. Quit says
+      `quitting` before the window loop ends, and a Manager that fails to start says it too. A
+      panic in a start that may still be a second copy appends one line instead of opening a
+      session in the running copy's log, and that start reads the settings without rewriting or
+      quarantining them. macOS: the lock file and socket moved out of the per-user temporary
+      folder, which macOS empties of files untouched for three days.
+- [x] **What the libraries say reaches the log** (`crates/host/src/logging.rs`): a `log` backend,
+      and tracing's `log` feature for ort (ONNX Runtime's own messages included), written as
+      `[dep:<crate>]`. Warnings and errors always, info and debug while trace logging is on,
+      never trace; 20 lines per library per minute, with a notice when the limit is reached and
+      the count before the library's next line. Checked in a headless run: with trace on, the OCR
+      warmup's ONNX Runtime session start writes 20 `[dep:ort]` lines and then the notice;
+      without trace, no `[dep:` line at all.
+- [x] **The log header's OS line** comes from `os_info`: `os windows x86_64 — Windows 10.0.26220
+      (Windows 11 Professional) [64-bit]` instead of the `OS` variable's `Windows_NT`.
+
+Only a real session can show these:
+
+- [ ] Windows: a second start while the application runs brings the module window to the FRONT,
+      with the screen reader's focus in it. The second copy hands its permission to take the
+      foreground to the running one (`AllowSetForegroundWindow`) before it asks; a window that
+      opens behind the current one means that did not arrive or was refused.
+- [ ] Windows: a second start while one of the manager's message boxes is open brings the message
+      forward (not the window behind it, which the message has disabled) and the screen reader's
+      focus lands in the message (`GetLastActivePopup` in `show_manager`).
+- [ ] Windows: Quit from the tray and start again at once. The new copy should wait for the old
+      one to finish and then start, the log should show one new session header, and a third
+      start should then find the new copy (no `cannot listen` note in the new session; a
+      `listening for other starts after … ms` note is fine).
+- [ ] Windows, elevation, both directions: (a) started as administrator while a normal copy runs,
+      the start should hand over to the normal copy and exit; (b) started normally while an
+      elevated copy runs, the start should find the lock held (`OpenMutexW` refused), and then
+      either hand over — if the pipe's own security admits it and the elevated process's user can
+      be read — or end after 10 s with the "could not confirm that it is yours" message. Two
+      hosts must never run. Which of the two (b) does is not known.
+- [ ] Windows: the message box of a start that gave up is read by NVDA when it appears, and is in
+      front. Case (b) above is the easiest way to get one.
+- [ ] macOS, packaged: opening the running `.app` again from the Finder, and clicking its Dock icon
+      while the window is open, both show the module window (the reopen event). Not known:
+      whether Launch Services sends the reopen event to an agent application (`LSUIElement`).
+- [ ] macOS, bare binary (`run-dev.sh`): a second start finds the first through the socket in
+      `~/Library/Application Support/AutomationPlatform`, and the window comes forward in front
+      of the Terminal. `show_manager` activates the application; the second process gives it no
+      permission of its own on macOS.
+- [ ] macOS: `wxSingleInstanceChecker` works before `wxdragon::main` there as it does on Windows (a
+      lock file is created, a second holder sees it), the folder is created readable by the user
+      alone, and the lock file and the socket are gone after Quit. The take-over of a lock file
+      left by a crash, whose pid now belongs to an unrelated process (told apart from a live copy
+      by `proc_pidpath`), has never run.
+- [ ] macOS: the alert of a start that gave up (`CFUserNotificationDisplayAlert`, shown before
+      wxWidgets exists) appears in front and VoiceOver reads it.
+- [ ] macOS: the OS line reads `os macos aarch64 — Mac OS 15.x [64-bit]` or similar (os_info reads
+      SystemVersion.plist, and `sw_vers` behind it).
+
+## Module installation and the registry, hardened (2026-09-21)
+
+From the crate audit (section C) and the review of the install path. All in
+`crates/host/src/registry.rs`, `crates/module-manifest/src/lib.rs` and the install and
+update flows of `crates/host/src/gui.rs`.
+
+- [x] **A module archive could write outside the module folder.** A member named
+      `top/C:\evil1.txt` was written to `C:\evil1.txt`, and zip's own `extract` lets it out too.
+      Both crates are on zip 8.6 with only `deflate-flate2-zlib-rs` (zip 2.4 and the bzip2, zstd
+      and xz C libraries are gone), and `module_manifest::unpack_zip` is the one loop both the
+      install and a `.zip` package go through: every part of `enclosed_name` a plain name, no
+      absolute name or drive, the archive's one folder first and something after it, and a
+      256 MB budget checked on declared sizes and again on the bytes written. Names are checked
+      before the installed folder is touched. Tested with archives written in the test.
+- [x] **`id`, `version` and `entry` built unchecked paths.** `ModuleManifest::parse` validates
+      them wherever a manifest is read; documented in `docs/module-package-format.md#names`.
+- [x] **Search mangled `c++` and `a & b`, stopped after 30 results, and could hang an
+      install.** `.query()` encodes the terms, search follows pages of 100 up to GitHub's
+      1000-result ceiling, and one agent carries connect, response and body timeouts (10 minutes
+      for an archive). Dependency ids are resolved lazily in star order instead of reading every
+      manifest under the topic. URLs tested through a ureq middleware, without a network.
+- [x] **A `"` in a branch name lost the update source.** `.source.toml` is written with the
+      TOML serializer.
+- [x] **The `.zip` package cache key used `DefaultHasher`,** which is not stable across Rust
+      releases; it is SHA-256 (sha2) now. The package is unpacked beside its cache folder and
+      renamed into place, so a half-written folder is never taken for a finished one.
+- [x] **Dependencies were installed and hot-loaded without their capabilities being shown.**
+      `resolve_tree` works out every module an install adds, pinned to the commit its manifest
+      was read at, and writes nothing; the review dialog lists each with its capabilities in
+      sentences, and the optional modules with their own buttons; `install_resolved` downloads
+      exactly those commits and installs no module whose downloaded manifest differs from the
+      one reviewed. An update that adds a capability or a dependency is reviewed the same way
+      (`resolve_update`); one that asks for nothing new is applied as before. The CLI shows the
+      same text.
+- [x] **Review round (2026-09-21).**
+  - The review text is built from one-line text: a module's name (also as "needed by"), its
+      `supported_os`, an unknown capability name and an optional module's failure reason go
+      through `one_line` (controls, line and paragraph separators and bidi controls become
+      spaces; cut to 100 characters, 300 for a reason), so a name cannot forge lines.
+  - A failed install or update no longer costs the installed version: `install_one` unpacks
+      into `modules/.staging-…` (tempfile), loads it, compares the whole manifest with the
+      reviewed one (`PartialEq` on `ModuleManifest`), and only then renames the installed
+      folder aside and the new one in. `installed_in` and `find_module_dir` skip dot-folders.
+  - A plan is refused when a module would land in a folder (compared without case) that holds
+      an installed module with another id, or that two planned modules share; an optional one
+      is left out instead. The install also refuses, before downloading, a folder that is not a
+      readable module.
+  - Archive names Windows would change or merge are refused before anything is written:
+      trailing `.` or space, `<>"|?*`, case-insensitive duplicates and file/folder clashes, the
+      superscript COM/LPT device names; so are encrypted members, compression other than
+      deflate and stored, more than 10,000 members, and names over 400 bytes or 32 parts.
+  - Module errors wait while a review is open (`reviewing` in `gui.rs`), so the error window
+      does not take the focus from it; the `screen` capability's phrase now says it can save
+      screenshots anywhere; a branch goes into the raw path percent-encoded
+      (percent-encoding), so a module from `fix#12` sees its updates; dependency ids follow the
+      id rule; the dependency lookup fetches search pages one at a time; a folder under
+      `modules/` whose manifest fails is named in the log with the reason; unpacked files keep
+      owner read and write on macOS.
+- [ ] **Live: one install with dependencies and one update against the real GitHub.** The new
+      requests — `commits?sha=<branch>&per_page=1`, `raw…/<sha>/module.toml`, `zipball/<sha>` —
+      are tested only against a table, and so is a percent-encoded branch in the raw path
+      (`raw…/fix%2312/module.toml`), which raw.githubusercontent.com has to decode. Then the
+      review dialog with NVDA: the text is read when it opens, Escape and the close box cancel,
+      and every button reads its label. The review is shown from the timer tick with its
+      re-entrancy guard lifted, so the modules keep running behind it; that nothing else stacks
+      a dialog meanwhile is argued in the code, not observed, and so is that a module error
+      raised during the review appears only after it closes.
+- [ ] **Live (Windows): an update while the module holds a file open** — a sound playing. The
+      rename of the installed folder is expected to fail and leave the module as it was, with
+      the "is a file in it open?" message; not yet seen.
+- [ ] **macOS: the review dialog with VoiceOver,** Escape and the close box mapping to the
+      `ID_CANCEL` button there, the permission bits `unpack_zip` keeps
+      (`(mode & 0o777) | 0o600`), and the rename swap of a module folder on APFS.
+- [ ] **Report upstream:** zip 8.6 `ZipArchive::extract` writes `top/C:\x` outside the target
+      folder on Windows, and cap-std 4.0.3 lets `sub/C:x` out of its directory (both from the
+      crate audit).
+- [x] **A failed install replaced the installed folder.** An archive that failed while
+      unpacking, a manifest that differed from the review, or a download without `module.toml`
+      left the user without the installed version. Each module is staged now (see the review
+      round above); module discovery skips dot-folders.
+- [ ] **A failed multi-module install is not rolled back.** Dependencies are written first, so a
+      failure leaves nothing that cannot load, but it can leave dependencies nobody uses.
+- [ ] **Leftover staging folders are not cleaned up.** A crash mid-install, or a staging folder
+      whose removal failed (logged), leaves `modules/.staging-…` behind. Nothing loads it; it
+      has to be deleted by hand. Removing old ones at start-up would need a way to tell them
+      from an install running in another process (the CLI beside the manager).
 
 ## Dev tools
 

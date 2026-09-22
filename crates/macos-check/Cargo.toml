@@ -33,6 +33,12 @@ publish = false
 # module rather than its two macOS leaves is what makes the WIRING checkable from here —
 # which one line of that wiring immediately needed.
 anyhow = "1"
+# `logging.rs` routes the `log` facade into the file and names the OS through os_info;
+# `instance.rs` speaks interprocess. All three are in host's [dependencies] (every platform),
+# so they are repeated here rather than mirrored from a macOS-only table.
+log = "0.4"
+os_info = { version = "3.15", default-features = false }
+interprocess = "2.4.4"
 libc = "0.2"
 objc2 = "0.6"
 block2 = "0.6"
@@ -48,7 +54,9 @@ features = ["NSWorkspace", "NSRunningApplication", "NSScreen", "NSApplication", 
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-core-foundation]
 version = "0.3"
-features = ["CFBase", "CFString", "CFArray", "CFDictionary", "CFNumber", "CFRunLoop", "CFCGTypes", "CFData", "CFMachPort"]
+features = ["CFBase", "CFString", "CFArray", "CFDictionary", "CFNumber", "CFRunLoop", "CFCGTypes", "CFData", "CFMachPort",
+    # The alert a second start shows when it gives up (instance.rs), before wxWidgets exists.
+    "CFUserNotification", "CFDate", "CFURL"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-core-graphics]
 version = "0.3"
