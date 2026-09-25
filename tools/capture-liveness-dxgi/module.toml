@@ -1,0 +1,17 @@
+id = "com.tool.captureliveness.dxgi"
+name = "Capture liveness (desktop duplication)"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
+# The same measurement as tools/capture-liveness, through DXGI Desktop Duplication instead of the
+# standard read, and with no quiet fallback: a read duplication cannot answer counts as failed,
+# so "Live" here can only mean duplication itself saw the picture move. Windows only.
+supported_os = ["windows"]
+
+[capabilities]
+# Two keys, one window, forty screen reads, one spoken verdict. Nothing is clicked or typed.
+# One key goes through the keyboard hook ("keys"), the other is a registered hotkey ("hotkey").
+require = ["screen", "window", "keys", "hotkey", "timer", "speech", "log"]
+
+[screen]
+capture = "duplication"
+fallback = "none"
