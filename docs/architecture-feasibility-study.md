@@ -14,9 +14,11 @@
 >   share a capture — [`pixel`](api/screen.md#host-screen-pixel).
 > - **Capture on Windows is GDI** (and DXGI Desktop Duplication for modules that ask for it),
 >   not Windows.Graphics.Capture.
-> - **There is no worker pool for scripts.** Module code and nearly every host call run on
->   the one event-loop thread, OCR included; only the asynchronous image searches run on a
->   worker — [module lifecycle](module-runtime-and-lifecycle.md#runtime-model).
+> - **There is no worker pool for scripts.** Module code and most host calls run on the one
+>   event-loop thread; `host.ocr.read` recognises on threads of its own, and `matchCellsAsync`
+>   and the asynchronous image searches run on one image worker, each answering in a callback,
+>   while `recognize`/`recognizeMany` and the synchronous screen reads still hold the loop —
+>   [threads](module-runtime-and-lifecycle.md#threads).
 > - **No memory limit or interrupt** is set on the Luau VMs.
 > - **Keys:** the keyboard hook captures ordinary keys only (there is no listen-only mode for
 >   them; only a `"<modifier> tap"` is watched without being taken), and

@@ -25,6 +25,8 @@ Nothing — this is available to every module. See [what the capability list is 
 
 ## host.os.current {#host-os-current}
 
+**Signature:** `host.os.current: string`
+
 Read-only string: the current OS, from Rust `std::env::consts::OS` (`"windows"`, `"macos"`, `"linux"`, …). Not a function — a plain field, set when the module's VM is built and never changed.
 
 ```luau

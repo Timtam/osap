@@ -128,9 +128,9 @@ fn recognize_inner(
     lang: Option<&str>,
 ) -> Result<OcrText, String> {
     let started = Instant::now();
-    // A zero-sized region is not a failure: `read_region` clamps a reversed rectangle to
-    // zero (`lib.rs`, `(x2 - x1).max(0)`), so a module with its geometry momentarily wrong
-    // gets here rather than being stopped earlier.
+    // A zero-sized region is not a failure: `region::loose_corners` reads a reversed rectangle
+    // as zero wide or high, so a module with its geometry momentarily wrong gets here rather
+    // than being stopped earlier.
     if w <= 0 || h <= 0 {
         crate::logging::trace("macos", || {
             format!("ocr: nothing to read, region is {w}x{h} at {x},{y}")
@@ -357,11 +357,11 @@ pub fn recognize_regions(
     if regions.len() < 2 || regions.iter().any(|(_, _, w, h)| *w <= 0 || *h <= 0) {
         return one_each();
     }
-    let x0 = regions.iter().map(|r| r.0).min().unwrap_or(0);
-    let y0 = regions.iter().map(|r| r.1).min().unwrap_or(0);
-    let x1 = regions.iter().map(|r| r.0 + r.2).max().unwrap_or(0);
-    let y1 = regions.iter().map(|r| r.1 + r.3).max().unwrap_or(0);
-    let (bw, bh) = (x1 - x0, y1 - y0);
+    // No box that fits the coordinate range (two regions two billion points apart): one
+    // capture each, as for a degenerate region.
+    let Some((x0, y0, bw, bh)) = crate::region::bounding_box(regions) else {
+        return one_each();
+    };
 
     objc2::rc::autoreleasepool(|_| {
         let Some((big, scale)) = super::capture::capture_backing(x0, y0, bw, bh) else {

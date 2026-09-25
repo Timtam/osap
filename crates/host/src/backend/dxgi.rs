@@ -4,10 +4,11 @@
 //! the screen DC, which is the image the compositor last composed. A game that presents
 //! through a flip-model swap chain may skip that composition, and a module reading it may then
 //! see a frozen or black picture — wrong data, not slow data. Desktop duplication reads the
-//! image the compositor hands the display instead, which may or may not contain such a game's
-//! frames: neither half is measured yet (TODO.md, step 0, M4 and M14). It is also far cheaper
-//! per read (no wait for the next vsync), but speed alone is not why it was built; see
-//! `docs/screen-frame-sharing-design.md`, step 7.
+//! image the compositor hands the display instead, which for one fullscreen game did contain
+//! its frames: the standard path read it frozen and duplication live (TODO.md, step 0 and M4);
+//! a game whose frames bypass composition altogether would be missed by both (M14). It is
+//! also far cheaper per read (no wait for the next vsync), but speed alone is not why it was
+//! built; see `docs/screen-frame-sharing-design.md`, step 7.
 //!
 //! **Who uses it.** Only a module whose manifest says `[screen] capture = "duplication"` (or
 //! inherits that from its code runtime — `capture_source.rs`), and only while the
@@ -34,8 +35,9 @@
 //! **Mostly unmeasured.** Every constant below is an estimate from the design. The first
 //! numbers from the reference machine (`dxgi_measure` in a test build: small reads in about
 //! 1 ms, bytes identical to GDI, device creation 0.2 s and sometimes 4 s) are in TODO.md with
-//! the measurements (M1-M19) that are to set them; none of them came from the application
-//! under load.
+//! the measurements (M1-M19) that are to set them; the one set from the application under
+//! load, a fullscreen game on an integrated GPU (6-7 ms per 1280x1024 read, device 32 ms), is
+//! under M4.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -91,8 +93,10 @@ const _: () = assert!(PUMP_READY_WAIT.as_millis() >= FIRST_FRAME_WAIT.as_millis(
 /// How long the FIRST pump read of an opening waits — device creation and `DuplicateOutput`
 /// together, estimated at 35-330 ms (M2). Only one pump read per opening waits at all, and
 /// the budget below is the stricter rule: as the constants stand it caps this wait at 60 ms.
-/// The measured opening (about 200 ms with a warm driver) is longer than either, so that
-/// first read gets the standard picture — which is what `prewarm` is for.
+/// The opening measured on the reference machine (about 200 ms with a warm driver) is longer
+/// than either, so there that first read gets the standard picture — which is what `prewarm`
+/// is for. On the machine of M4 the device took 32 ms and the first picture came 4-16 ms
+/// after the duplication opened; whether that first read got it is not recorded.
 const PUMP_OPENING_WAIT: Duration = Duration::from_millis(150);
 /// The image worker's wait. Shorter than the design's first 1000 ms because the worker is
 /// shared by every VM, including the ones that read the standard way, and a batch stuck
@@ -362,8 +366,12 @@ pub(crate) enum Fallback {
 }
 
 impl Fallback {
-    /// The reason in words, for the log and for the `error` a module sees under
-    /// `fallback = "none"`.
+    /// The reason in words, for the log and for what a module under `fallback = "none"` is
+    /// told: the tail of every read's reason, after "screen capture failed: desktop duplication
+    /// could not answer — " (`windows.rs`, `unanswered`). Part of the API: docs/api/screen.md
+    /// lists each one word for word under "Failure reasons", and a test in `windows.rs`
+    /// (`every_reason_a_module_is_told_is_listed`) holds the two together: change the wording
+    /// in both or not at all.
     pub(crate) fn describe(self) -> String {
         match self {
             Fallback::SwitchedOff => "it is switched off in Application settings".into(),

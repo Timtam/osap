@@ -311,11 +311,12 @@ user's, in the same way another application talking over a screen reader does no
 
 ### Losing the screen reader is not permanent
 
-One strike takes the screen-reader path out of service; it does not keep it out. Every few
-seconds the event loop starts a fresh worker that tries only the screen readers — never a
-speech engine, because the fallback is already speaking and the only reason to be there is to
-stop needing it. If one opens, it takes over from the next line onwards; if not, the worker
-exits without a word, because something that runs every few seconds must not write to the log.
+One strike takes the screen-reader path out of service; it does not keep it out. The event
+loop sends out one searcher, a worker that tries only the screen readers — never a speech
+engine, because the fallback is already speaking and the only reason to be there is to stop
+needing it — and keeps looking on a schedule. If one opens, it takes over from the next line
+onwards. What each look finds is logged only when it is news (below), because something that
+runs every few seconds must not write a line each time.
 
 Two things make this safe rather than a way of adopting a corpse.
 
@@ -335,9 +336,57 @@ looking. The four readers nobody here can test are most of the rest, at 5–6.5 
 each goes through the process list; JAWS and ZoomText answer in under 100 µs. So the searcher
 opens the library once and sleeps between sweeps: every 3 seconds for the first minute, every
 30 after, which costs about 0.8% of one core while somebody is plausibly mid-restart. It stops
-when the setting is switched off, because that is an explicit answer and looking anyway would
-be work done against it, and it stops when its channel closes, so a replaced searcher does not
-sit there holding a library nobody can reach.
+at its next look once the setting is switched off, because that is an explicit answer and
+looking anyway would be work done against it — the event loop sends a new one when the setting
+is on again — and it stops when its channel closes, so a replaced searcher does not sit there
+holding a library nobody can reach; it asks before every look, so one replaced while it slept
+neither looks again nor logs a find. (Until 2026-09-25 only the second was true: a searcher
+already out went on looking with the setting off.)
+
+**Ticking the setting looks at once, whether or not anything is said.** The event loop watches
+the setting on every pass (`Speech::pump`) and, on a tick while the path is out of service,
+replaces whatever searcher is out with a fresh one that looks straight away. Until 2026-09-25
+only a line being said noticed the tick (`Speech::say`), so ticking the box off and on with
+nothing said in between — the usual case, since ticking a box makes the application say
+nothing — left the next look to the sleeping searcher, up to thirty seconds later.
+
+**A found reader that fails before anybody noticed it is looked for again** (2026-09-25). A
+searcher that opens a reader marks the path healthy; a line handed over in the same pass of the
+loop can be refused before the loop has seen that, and the loop used to take "a searcher was
+sent and the path is out of service" for "it is still looking" — so none was ever sent again,
+and every line went to the plain voice for the rest of the session. The rule (`searcher_due`)
+now counts a searcher as looking only while it has no reader in hand. A searcher stores
+`healthy` before it releases `reader`, and the loop reads `reader` first, so it never mistakes
+one caught between the two stores for one whose reader has failed. The start-up look says only
+that nothing opened, not that nothing runs — it cannot tell a JAWS that refuses from an absent
+one — and leaves what runs to the searcher's first line; one found by that search is logged as
+`<reader> is open now`, not as started after the application.
+
+**The slow pace is only for a reader that is gone** (2026-09-25). A JAWS whose first line came
+back `INTERNAL` (prism error 9) could not be opened again for over a minute while, by its
+user's account, it kept running; the searcher had dropped to thirty seconds by then, and OneCore
+spoke for 90 seconds. So a look that opens nothing now also asks prism whether each reader is
+*running* (`IS_SUPPORTED_AT_RUNTIME`, which does not initialise the backend), and while one is,
+the pace stays at three seconds for as long as it takes; the thirty-second pace is left for the
+case where none is. That question costs about what the failed opens do again, so a look is
+estimated at twice the sweep above. The searcher writes what it sees — the reader that runs and
+will not open, with prism's error in its own words, or that none runs — once, and again when
+that changes or the pace drops, so the next such session says which it was. The same searcher
+now also starts when no screen reader opened at start-up, so one started later is used
+without a restart. The pace and its lines are a pure function with tests of their own
+(`speech/prism.rs`, `Search`); whether the JAWS of that session would have counted as running
+is for a live JAWS test.
+
+"Running" is prism's runtime check, and for two readers it is wider than the reader itself:
+ZDSR and Boy PC Reader count as running while any of their processes does, background services
+included. Left alone, an installed one whose service runs while the reader is not in use kept
+the three-second pace for as long as no screen reader opened — the whole session, on a machine
+where none does — as did a JAWS whose window is there and whose interface is registered but
+will not be created. So the fast pace is bounded (decided 2026-09-25): only a reader whose check
+looks at the reader itself (NVDA, JAWS, ZoomText, PC-Talker, Sense Reader) keeps it, for five
+minutes from the look that first saw it running and refusing, then every ten seconds; ZDSR and
+Boy PC Reader get the pace of a search that found none running, three seconds for the first
+minute and thirty after that.
 
 The first version keyed the eager tier off when the *worker* had started rather than when the
 path was *lost*, so on an application that had been running for more than a minute the first

@@ -71,6 +71,9 @@ still fight over the same hotkeys and keyboard hook.
   anything that starts the executable inside the bundle directly.
 - Headless runs are not part of this. They neither take the lock nor ask for the window, so a
   headless run and a windowed one can run side by side; see [Headless mode](#headless-mode).
+- Neither is a build from before this rule: it takes no lock and looks for none, so it runs
+  beside a newer copy, started before it or after, and the two compete for hotkeys as two
+  programs would. Quit it from its tray icon.
 
 How it works: the lock is wxWidgets' single-instance checker (a named mutex on Windows, a lock
 file on macOS), and the request travels over a named pipe (Windows) or a Unix-domain socket
@@ -120,6 +123,10 @@ Rebuilds the selected module's VM **in place** from its source directory — edi
 module's code and reload it in the running app, no restart, without disturbing the
 modules that do not depend on it. Its state starts afresh: the new VM runs the entry
 file again. Useful while **developing** a module.
+
+Only a module that is already loaded can be reloaded: Reload never looks for new folders
+under `modules/`. A module folder copied in by hand is loaded at the next start after
+**Quit**; one installed from the Browse tab is loaded at once.
 
 - A broken `module.toml` leaves the running module intact (the manifest is
   re-read before anything is torn down).
@@ -173,9 +180,15 @@ is by topic (HFS-style).
 **One repository is one module**, with its `module.toml` at the repository root.
 It is installed as a plain folder, `modules/<repository name>/` beside the
 application. A pack of many modules cannot be installed from one repository: put
-each module's folder directly under `modules/` instead, and it loads at the next
-start. A folder there whose `module.toml` does not parse is skipped, with a line in
-the log saying why; one whose name starts with `.` is skipped without one. See
+each module's folder directly under `modules/` instead, then **Quit** from the tray
+icon and start the application again — the folders load at that start. Closing the
+window only hides it, and starting the application while it runs only brings the
+window forward ([above](#starting-it-again-brings-the-window-forward)), so neither
+reads the new folders; nor does **Reload**, which rebuilds modules already loaded. A
+folder there whose `module.toml` does not parse is skipped, with a line in the log
+saying why; one whose name starts with `.` is skipped without one. When two folders
+carry the same module id, the first one the file system lists is loaded and the other
+is skipped without a line in the log — keep one folder per id. See
 [where modules are found](module-package-format.md#where-modules-are-found).
 
 **Search** follows GitHub's result pages, 100 results each, up to GitHub's own ceiling of
@@ -433,3 +446,14 @@ automation-platform update              # update bumped modules; asks when one a
 automation-platform uninstall <id>      # dependency-safe uninstall + orphan cleanup
 automation-platform <dir> [<dir> …]     # run the given module directories (dev)
 ```
+
+The last line starts the application with those folders instead of the installed modules, and
+only when no copy is running: with one in the tray, starting the application without one of
+the commands above — with folders or without — brings that copy's window forward and ends, and
+the folders are ignored ([one copy](#starting-it-again-brings-the-window-forward)). A headless
+start (`AUTOMATION_PLATFORM_HEADLESS=1`) loads its folders beside the running copy.
+
+The `search`, `install`, `list`, `update` and `uninstall` commands are not starts of the
+application: they run and end beside a running copy, and do not ask it anything. What they
+change in the modules folder reaches the running copy only when it next starts — it goes on
+with the modules it loaded, and does not load one installed this way until then.

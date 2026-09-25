@@ -54,8 +54,9 @@ NS_BLURB = {
     'host.keys': 'Claiming keys before the focused application sees them, and the key spec every '
                  'call that takes a key reads.',
     'host.hotkey': 'Claiming a combination system-wide.',
-    'host.gamepad': 'Watching game controllers — observed only, never taken from the game, and '
-                    'delivered whichever window is in front.',
+    'host.gamepad': 'Watching game controllers — presses, button combinations, sticks, pads '
+                    'coming and going. Observed only, never taken from the game, and not '
+                    'filtered by the window in front.',
     'host.arbiter': 'Deciding which of several overlays owns a contested slot.',
     'host.timer': 'Waiting without blocking, and knowing when a cached reading went stale.',
     'host.settings': 'Typed, per-module settings, edited by the user in the module manager.',
@@ -320,9 +321,13 @@ CAPABILITIES = [
     'factor. A fractional coordinate is cut toward zero without an error, except by the calls '
     'that read regions strictly — the cells calls and `host.ocr.read` — which raise for a '
     'corner that is not a whole number. Regions are `{ x1, y1, x2, y2 }` with `x2` and `y2` '
-    'exclusive, and the cells calls and `host.ocr.read` also take one as fractions of a '
-    'window\'s client area, `{ window = w, fraction = { x1, y1, x2, y2 } }`, which follows the '
-    'window across sizes, scalings and platforms — see [Region form](screen.md#region-form).',
+    'exclusive, and every `host.screen` and `host.ocr` call that takes a region also takes one '
+    'as fractions of a window\'s client area, `{ window = w, fraction = { x1, y1, x2, y2 } }` — '
+    'and `host.screen.pixel` a point, `{ window = w, fraction = { x, y } }` — which follows the '
+    'window across sizes, scalings and platforms. A region table that is neither form raises; '
+    'only a region left out is the whole primary screen — see [Region form](screen.md#region-form). '
+    'An [overlay](overlay.md) control\'s `region` and `ocrLabel` options take only corners, '
+    'relative to the overlay\'s origin.',
     '',
     '## Coming from another tool {#coming-from}',
     '',
@@ -344,6 +349,14 @@ CAPABILITIES = [
     '[`pixel`](screen.md#host-screen-pixel) call is a screen read of its own; on macOS only '
     'reads close together in place and time share one. No call reads many points from one '
     'capture.',
+    '- **A reader that captures one frame per poll and runs every test on it.** No call hands '
+    'out a frame to test against. [`matchCellsAsync`](screen.md#host-screen-matchcellsasync) and '
+    'the asynchronous image searches share a picture only when they ask for the same region, '
+    'read the same way, and fall into the same batch of the image worker (the requests waiting '
+    'when it becomes free, and those in the next 5 ms); two [`host.ocr.read`](ocr.md#host-ocr-read) '
+    'calls share one only when they ask for the same thing before the first is taken, and never '
+    'with those. Otherwise each call takes a picture of its own, so detecting a state and '
+    'reading its text are two pictures, taken at two moments.',
     '- **Tesseract or other OCR language codes.** `lang` is a language tag such as `"de"` or '
     '`"de-DE"`, matched against what the platform\'s recogniser reads. A three-letter code such '
     'as `"eng"` is a well-formed tag that no recogniser lists, so it does not raise: the read is '
@@ -361,8 +374,13 @@ CAPABILITIES = [
     'key away; there is no listen-only mode for ordinary keys, only the `"<modifier> tap"` '
     'form watches without taking.',
     '- **A script host with threads or async.** Every callback runs on one thread, and nothing '
-    'interrupts one that does not return — see the '
-    '[module lifecycle](../module-runtime-and-lifecycle.md).',
+    'interrupts one that does not return. The slow work of '
+    '[`host.ocr.read`](ocr.md#host-ocr-read), '
+    '[`matchCellsAsync`](screen.md#host-screen-matchcellsasync), '
+    '[`imageSearchAsync`](screen.md#host-screen-imagesearchasync) and '
+    '[`imageSearchEach`](screen.md#host-screen-imagesearcheach) runs on threads of the host\'s '
+    'own and answers in a callback; the other screen and OCR calls hold the loop until they '
+    'return. Which call runs where: [Threads](../module-runtime-and-lifecycle.md#threads).',
     '- **A manifest that names its target window.** `module.toml` has no window or process '
     'field; matching is Luau — see the [manifest](../module-package-format.md).',
     '',

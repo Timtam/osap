@@ -7,7 +7,8 @@
 --   * the ready line says how many pads were found and how each source came up;
 --   * every event is logged with its `age` — how late our callback ran after the press was
 --     detected — so "is it fast enough with the game in front" is read off the log instead of
---     asked of somebody who cannot see a stopwatch;
+--     asked of somebody who cannot see a stopwatch; so is the shoulder-button combination
+--     (left_shoulder + right_shoulder), the one chord the probe listens for;
 --   * a second key reads out what every pad is doing, so a blind tester can check that a press
 --     was SEEN without the probe talking over the game on every press.
 --
@@ -138,6 +139,15 @@ local function onAxis(e)
   log("gamepad pad %d axis %s %.2f (raw %.2f), age %d ms", e.pad, e.axis, e.value, e.raw, math.floor(e.age))
 end
 
+-- A combination, logged like a press: when it came relative to the downs of the same presses
+-- is read off the times in the log.
+local function onChord(e)
+  log(
+    "gamepad pad %d chord %s (%s), age %d ms, time %d",
+    e.pad, table.concat(e.buttons, "+"), table.concat(e.labels, "+"), math.floor(e.age), math.floor(e.time)
+  )
+end
+
 local function listenToValues()
   if values then
     return
@@ -148,8 +158,10 @@ local function listenToValues()
     -- A coarse step: every movement of a stick in 0.05 steps is a hundred lines a second and
     -- says nothing a quarter step does not. No `maxAge`: an axis value is never dropped.
     host.gamepad.on("axis", onAxis, { step = 0.25 }),
+    -- The two shoulder buttons together: LB+RB on an Xbox pad, L1+R1 on a PlayStation one.
+    host.gamepad.on("chord", onChord, { buttons = { "left_shoulder", "right_shoulder" }, maxAge = LATE }),
   }
-  log("gamepad: listening to buttons and sticks while a pad is connected")
+  log("gamepad: listening to buttons, sticks and left_shoulder+right_shoulder while a pad is connected")
 end
 
 local function stopListeningToValues()

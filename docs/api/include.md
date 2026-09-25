@@ -39,6 +39,9 @@ Semantics worth knowing:
 - Luau's own `require` is not a way to split a module: every file here is loaded under a name `require` does not accept, so a `require("./lib")` raises `require is not supported in this context`. Use `host.include`.
 - An include **cycle** raises an error naming the file rather than overflowing the stack.
 - Reported line numbers match the file.
+- **What raises**, besides the path rules above: a file that cannot be read raises `include '<rel>': <the system's reason>` — `include 'data/pack.luau': The system cannot find the file specified. (os error 2)` on an English Windows, in the language of Windows elsewhere, `… No such file or directory (os error 2)` on macOS — and so does a file that is not UTF-8 (`stream did not contain valid UTF-8`); a syntax error in the file raises Luau's message with the file's line; an error the file raises while it runs comes back out of `host.include` as it is. A failed include is not remembered: the next call tries the file again. An argument that is neither a string nor a number raises.
+- **Text encoding.** The file is UTF-8. One byte-order mark at its very start is skipped, so a file written by a tool that puts one there (.NET's `Encoding.UTF8`, PowerShell 5's `Out-File -Encoding utf8`) loads; the same holds for a module's entry file and a code dependency's. A second mark, or one anywhere else, is left for Luau, which rejects it (`Unicode character U+feff`).
+- **Cost.** The first include of a file in a VM reads it and compiles it synchronously, on the main thread, and then runs it; the time grows with the file, and a module's entry file waits for it. Later includes of the same file in that VM are a table lookup. A code module's files are read and compiled once in each VM its code runs in.
 
 ### Windows
 

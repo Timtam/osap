@@ -136,7 +136,9 @@ pub(crate) fn resolve_capture(owner: &ScreenDecl, deps: &[CodeDep]) -> (CaptureS
     }
     let mut declaring: Vec<(&CodeDep, CaptureSource)> = Vec::new();
     for d in deps {
-        if d.screen == ScreenDecl::default() {
+        // Only what the host reads counts as a declaration; a table of unknown keys alone is
+        // named in that dependency's own log line, not here.
+        if d.screen.capture.is_none() && d.screen.fallback.is_none() {
             continue;
         }
         if !d.reads_screen {
@@ -220,6 +222,19 @@ fn read_source_with(
 /// Called on every build of the VM, first load and reload alike, from the manifest just read:
 /// a reload after editing `[screen]` takes effect with nothing else to refresh.
 pub(crate) fn apply(lua: &Lua, id: &str, manifest: &ModuleManifest, deps: &mut [CodeDep]) {
+    let (src, lines) = plan(id, manifest, deps);
+    for l in &lines {
+        logging::line("capture", l);
+    }
+    // The author's question after declaring it is "does it change anything for this
+    // application?", and the first read of the freshly built VM answers it — see `read_source`.
+    let compare = Cell::new(matches!(src, CaptureSource::Duplication { .. }));
+    lua.set_app_data(VmCapture { src, who: id.to_string(), compare });
+}
+
+/// What [`apply`] decides for a VM, and every `[capture]` log line it writes about it, in
+/// order — apart from the VM, so that the lines themselves are tested.
+fn plan(id: &str, manifest: &ModuleManifest, deps: &mut [CodeDep]) -> (CaptureSource, Vec<String>) {
     let owner_deps: Vec<String> = manifest
         .dependencies
         .iter()
@@ -228,29 +243,53 @@ pub(crate) fn apply(lua: &Lua, id: &str, manifest: &ModuleManifest, deps: &mut [
         .collect();
     settle_depths(&owner_deps, deps);
     let (mut src, notes) = resolve_capture(&manifest.screen, deps);
-    let declared = manifest.screen != ScreenDecl::default() || deps.iter().any(|d| d.screen != ScreenDecl::default());
+    // Whether to say which source the module ended up with. A dependency counts only with what
+    // the host reads (`resolve_capture` skips a table of unknown keys alone, and so does this);
+    // the module's own table counts with unknown keys too, so a misspelt `captur` is answered
+    // with the source the module actually reads through.
+    let reads = |d: &ScreenDecl| d.capture.is_some() || d.fallback.is_some();
+    let declared =
+        reads(&manifest.screen) || !manifest.screen.unknown.is_empty() || deps.iter().any(|d| reads(&d.screen));
+    let mut lines = Vec::new();
+    // A misspelt key (`captur`) would otherwise leave nothing but the absence of a line to say
+    // the module reads the standard way. Named here, for this module's own table only: every
+    // dependency is loaded as a module of its own first and names its own.
+    if let Some(line) = unknown_keys_line(&manifest.screen) {
+        lines.push(format!("[{id}] {line}"));
+    }
     for n in &notes {
-        logging::line("capture", &format!("[{id}] {n}"));
+        lines.push(format!("[{id}] {n}"));
     }
     if src != CaptureSource::Standard && !cfg!(windows) {
         // Accepted and ignored off Windows: the declaration names a Windows mechanism, and on
         // this platform every read keeps going the one way it always has.
-        logging::line(
-            "capture",
-            &format!(
-                "[{id}] asks for desktop duplication, which exists on Windows only; on {} it reads the screen as it always has",
-                std::env::consts::OS
-            ),
-        );
+        lines.push(format!(
+            "[{id}] asks for desktop duplication, which exists on Windows only; on {} it reads the screen as it always has",
+            std::env::consts::OS
+        ));
         src = CaptureSource::Standard;
     }
     if declared {
-        logging::line("capture", &format!("[{id}] reads the screen {}", describe(src)));
+        lines.push(format!("[{id}] reads the screen {}", describe(src)));
     }
-    // The author's question after declaring it is "does it change anything for this
-    // application?", and the first read of the freshly built VM answers it — see `read_source`.
-    let compare = Cell::new(matches!(src, CaptureSource::Duplication { .. }));
-    lua.set_app_data(VmCapture { src, who: id.to_string(), compare });
+    (src, lines)
+}
+
+/// The one warning line for the keys of a `[screen]` table this host does not know, or `None`
+/// when there are none. The manifest still loads: a key a later host adds must not stop a
+/// module on this one.
+fn unknown_keys_line(decl: &ScreenDecl) -> Option<String> {
+    let quoted: Vec<String> = decl.unknown.iter().map(|k| format!("'{k}'")).collect();
+    let (last, rest) = quoted.split_last()?;
+    let (noun, named) = if rest.is_empty() {
+        ("a key", last.clone())
+    } else {
+        ("keys", format!("{} and {last}", rest.join(", ")))
+    };
+    Some(format!(
+        "[screen] has {noun} {named} this host does not know (it knows capture and fallback), so {} ignored; check the spelling",
+        if rest.is_empty() { "it is" } else { "they are" }
+    ))
 }
 
 fn describe(src: CaptureSource) -> &'static str {
@@ -359,20 +398,22 @@ pub(crate) fn frame_keys(tasks: impl Iterator<Item = FrameKey>) -> (Vec<FrameKey
     (keys, idx)
 }
 
-/// Captures every frame of a batch, each with the milliseconds it cost.
+/// Captures every frame of a batch, each with the milliseconds it cost — or why it could not,
+/// which every task of that frame is answered with.
 ///
 /// Standard regions are read one at a time, as they always were — each is a
 /// compositor-synchronised touch of the screen, and running them together would contend
 /// rather than overlap. The duplication regions of one source go in ONE call: one request to
 /// the capture thread and one GPU sync for all of them. Its time is booked to the first of
 /// them, so the batch's total stays right.
-pub(crate) fn capture_frames(capture: CaptureFn, keys: &[FrameKey]) -> Vec<(Option<CapturedImage>, u32)> {
-    let mut out: Vec<(Option<CapturedImage>, u32)> = keys.iter().map(|_| (None, 0)).collect();
+pub(crate) fn capture_frames(capture: CaptureFn, keys: &[FrameKey]) -> Vec<(Result<CapturedImage, String>, u32)> {
+    let missing = || Err(backend::CAPTURE_FAILED.to_string());
+    let mut out: Vec<(Result<CapturedImage, String>, u32)> = keys.iter().map(|_| (missing(), 0)).collect();
     let mut groups: Vec<(CaptureSource, Vec<usize>)> = Vec::new();
     for (i, (region, src)) in keys.iter().enumerate() {
         if *src == CaptureSource::Standard {
             let t0 = std::time::Instant::now();
-            let img = capture(std::slice::from_ref(region), *src).pop().flatten();
+            let img = capture(std::slice::from_ref(region), *src).pop().unwrap_or_else(missing);
             out[i] = (img, t0.elapsed().as_millis() as u32);
         } else {
             match groups.iter_mut().find(|(s, _)| s == src) {
@@ -399,7 +440,54 @@ mod tests {
     use std::sync::Mutex;
 
     fn decl(capture: Option<&str>, fallback: Option<&str>) -> ScreenDecl {
-        ScreenDecl { capture: capture.map(str::to_string), fallback: fallback.map(str::to_string) }
+        ScreenDecl { capture: capture.map(str::to_string), fallback: fallback.map(str::to_string), unknown: Vec::new() }
+    }
+
+    #[test]
+    fn unknown_keys_are_named_in_one_line() {
+        assert_eq!(unknown_keys_line(&decl(Some("duplication"), None)), None);
+        let one = ScreenDecl { unknown: vec!["captur".into()], ..decl(None, Some("none")) };
+        assert_eq!(
+            unknown_keys_line(&one).as_deref(),
+            Some("[screen] has a key 'captur' this host does not know (it knows capture and fallback), so it is ignored; check the spelling")
+        );
+        let three = ScreenDecl { unknown: vec!["a".into(), "b".into(), "c".into()], ..ScreenDecl::default() };
+        assert!(unknown_keys_line(&three).unwrap().contains("keys 'a', 'b' and 'c' this host does not know"));
+        // A table of unknown keys alone declares nothing: the dependency is not consulted.
+        let deps = [dep("runtime", three.clone(), true, 1, 1)];
+        let (src, notes) = resolve_capture(&ScreenDecl::default(), &deps);
+        assert_eq!(src, CaptureSource::Standard);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    /// The lines `apply` writes: a misspelt key of the module's own is named, with the source it
+    /// reads through after it; a dependency whose table holds nothing the host reads makes its
+    /// dependents say nothing at all, as every module that declares nothing says nothing.
+    #[test]
+    fn the_log_names_a_misspelt_key_and_stays_quiet_about_a_dependencys_stray_one() {
+        let manifest = |screen: &str| -> ModuleManifest {
+            toml::from_str(&format!("id = \"com.game.menu\"\nname = \"m\"\nversion = \"1.0.0\"\n{screen}")).unwrap()
+        };
+        let base = manifest("");
+        let misspelt = manifest("[screen]\ncaptur = \"duplication\"\n");
+        let (src, lines) = plan("com.game.menu", &misspelt, &mut []);
+        assert_eq!(src, CaptureSource::Standard);
+        assert_eq!(
+            lines,
+            vec![
+                "[com.game.menu] [screen] has a key 'captur' this host does not know (it knows capture and fallback), so it is ignored; check the spelling".to_string(),
+                "[com.game.menu] reads the screen the standard way".to_string(),
+            ]
+        );
+        let stray = ScreenDecl { unknown: vec!["some_later_key".into()], ..ScreenDecl::default() };
+        let mut deps = [dep("runtime", stray, true, 1, 1)];
+        let (src, lines) = plan("com.game.menu", &base, &mut deps);
+        assert_eq!(src, CaptureSource::Standard);
+        assert!(lines.is_empty(), "{lines:?}");
+        // A dependency that does declare something is still reported, stray keys or not.
+        let mut deps = [dep("runtime", ScreenDecl { unknown: vec!["x".into()], ..decl(Some("standard"), None) }, true, 1, 1)];
+        let (_, lines) = plan("com.game.menu", &base, &mut deps);
+        assert_eq!(lines.last().map(String::as_str), Some("[com.game.menu] reads the screen the standard way"));
     }
 
     fn dep(id: &str, screen: ScreenDecl, reads: bool, depth: u32, order: u32) -> CodeDep {
@@ -656,9 +744,9 @@ mod tests {
 
     static CALLS: Mutex<Vec<(usize, CaptureSource)>> = Mutex::new(Vec::new());
 
-    fn recording(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Option<CapturedImage>> {
+    fn recording(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Result<CapturedImage, String>> {
         CALLS.lock().unwrap().push((regions.len(), src));
-        regions.iter().map(|&(_, _, w, h)| Some(CapturedImage { w: w as u32, h: h as u32, rgba: vec![] })).collect()
+        regions.iter().map(|&(_, _, w, h)| Ok(CapturedImage { w: w as u32, h: h as u32, rgba: vec![] })).collect()
     }
 
     #[test]

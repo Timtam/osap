@@ -8,7 +8,9 @@ Typed, validated settings, declared by the module and edited by the user in the 
 
 `define` is the load-bearing call: it fixes the setting's kind from its default and carries the label, the bounds and the permitted choices, and **the module manager builds the settings dialog out of precisely that** — one native checkbox, number field or dropdown per setting, for a screen reader to read. Everything else works only on what was defined: `get` raises for a key that never was, and `onChange` fires for the dialog as well as for `set`, so nothing has to poll its own settings.
 
-A module sees only its own store, keyed by module id, which also means a code module's settings stay under the id that defined them rather than under whichever VM its code happens to be running in. `host.config` is the same table under a second name.
+A module sees only its own store, keyed by module id, which also means a code module's settings stay under the id that defined them rather than under whichever VM its code happens to be running in. **So a shared runtime's settings are one set for every game built on it**: a setting its code defines is stored under the runtime's id and appears under the runtime in the module manager, whichever game module's VM ran the `define`, and a `set` from one game changes it for all. A choice that must differ per game — which key repeats the menu, say — is defined by the game module's own entry and handed to the runtime (see [a runtime shared by game modules](./require.md#a-runtime-shared-by-game-modules)). `host.config` is the same table under a second name.
+
+All four calls work on an in-memory store on the main thread, in microseconds; only the save that follows a change touches the disk, on the next pass of the loop (see [`set`](#host-settings-set)).
 
 ## What to declare {#declare}
 
@@ -22,6 +24,8 @@ require = ["settings"]
 See [what that list is and is not](./index.md#capabilities).
 
 ## host.settings.define(key, default, opts?) {#host-settings-define}
+
+**Signature:** `host.settings.define(key: string, default: boolean | number | string, opts: { label: string?, min: number?, max: number?, oneOf: { string }? }?) -> boolean | number | string`
 
 Registers a setting `key` for this module, pins its kind from `default`, and
 returns the **current effective value** (`boolean | number | string`).
@@ -54,6 +58,8 @@ local mode  = host.settings.define("mode", "fast", { oneOf = { "fast", "safe" } 
 
 ## host.settings.get(key) {#host-settings-get}
 
+**Signature:** `host.settings.get(key: string) -> boolean | number | string`
+
 Returns the current stored value of a previously-defined setting
 (`boolean | number | string`). Raises an error if `key` was never `define`d, or
 if it has no stored value.
@@ -63,6 +69,8 @@ if host.settings.get("mode") == "safe" then ... end
 ```
 
 ## host.settings.set(key, value) {#host-settings-set}
+
+**Signature:** `host.settings.set(key: string, value: boolean | number | string) -> nil`
 
 Validates `value` against the setting's schema and writes it to the store
 (persisted to disk on the next event-loop tick), then fires any registered
@@ -88,6 +96,8 @@ The file is replaced whole on every save: the store is written to a temporary fi
 `settings.toml` is in the folder that holds the `.app`. The flush is `fcntl(F_FULLFSYNC)`, which APFS and HFS+ support and a network share (SMB, NFS) may not; there the save goes through unflushed, as described above. After the rename the folder itself is flushed as well, since on macOS a rename is only on disk once its folder is. The file is created with mode 0666 less the umask (usually `rw-r--r--`), so other accounts on the Mac can read it.
 
 ## host.settings.onChange(key, callback) {#host-settings-onchange}
+
+**Signature:** `host.settings.onChange(key: string, callback: (new: boolean | number | string, old: (boolean | number | string)?) -> ()) -> nil`
 
 Registers `callback` to run whenever this setting is set (via `set` or the
 settings GUI). Returns `nil`. Multiple callbacks may be registered per key.
@@ -122,6 +132,8 @@ end)
 ```
 
 ## host.config.get / host.config.set / host.config.define / host.config.onChange {#host-config-get}
+
+**Signature:** the same as [`host.settings`](#host-settings-define)'s four: `host.config.define(key, default, opts?)`, `host.config.get(key)`, `host.config.set(key, value)`, `host.config.onChange(key, callback)`.
 
 `host.config` is the **same table** as `host.settings` (a catalog-compatibility
 alias). `host.config.get(key)`, `host.config.set(key, value)`,

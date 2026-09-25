@@ -8,7 +8,10 @@
 //! **A broadcast, not a claim.** Nothing is consumed — the game gets every press whatever we
 //! do — so there is no owner to resolve the way a hotkey has one. Every enabled module whose
 //! listener matches gets the event, in registration order. "Only while my overlay is active"
-//! is the module's own lifecycle: register on activation, `off` on deactivation.
+//! is the module's own lifecycle: register on activation, `off` on deactivation. Combinations
+//! (`on("chord")`, the rule in `backend/gamepad/chord.rs`) are no exception: two listeners for
+//! the same buttons both fire, because the presses they are made of reached the game anyway and
+//! there is nothing to hand to one of them.
 //!
 //! **Ownership follows the VM, permission follows the author**, as for every other callback: a
 //! listener registered by a code dependency's code belongs to the module whose VM runs it and
@@ -16,12 +19,13 @@
 //! from the manifest of the module that wrote the code (`build_dep_host`).
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use mlua::{Function, Lua, RegistryKey, Table};
 
+use crate::backend::gamepad::chord::{Chord, PadNow, Pending};
 use crate::backend::gamepad::{self as gp, demand, names, Axis, Button, PadEvent, PadEventKind, PadInfo, PadState};
 use crate::{appcfg, call_guarded, clock_origin, logging, Shared};
 
@@ -31,6 +35,8 @@ pub(crate) enum Kind {
     Down,
     Up,
     Axis,
+    /// A combination of buttons held together; see `backend/gamepad/chord.rs`.
+    Chord,
     Connected,
     Disconnected,
 }
@@ -41,6 +47,7 @@ impl Kind {
             "down" => Kind::Down,
             "up" => Kind::Up,
             "axis" => Kind::Axis,
+            "chord" => Kind::Chord,
             "connected" => Kind::Connected,
             "disconnected" => Kind::Disconnected,
             _ => return None,
@@ -86,6 +93,8 @@ pub(crate) struct PadFilter {
     /// replay reads the pads under a different lock from the queue the real event waits in, so
     /// a pad can be in both.
     pub announced: HashSet<u8>,
+    /// For a `chord` listener: the combination and what it has done on each pad.
+    pub chord: Option<Chord>,
 }
 
 impl PadFilter {
@@ -102,6 +111,7 @@ impl PadFilter {
             held: HashSet::new(),
             replay_pending: kind == Kind::Connected,
             announced: HashSet::new(),
+            chord: None,
         }
     }
 
@@ -111,6 +121,9 @@ impl PadFilter {
         self.last.retain(|(p, _), _| *p != pad);
         self.held.retain(|(p, _)| *p != pad);
         self.announced.remove(&pad);
+        if let Some(c) = self.chord.as_mut() {
+            c.forget(pad);
+        }
     }
 
     /// One half of a stick (or a trigger), dead-zoned for this listener: the value to deliver,
@@ -241,7 +254,13 @@ pub(crate) fn dead_zoned(axis: Axis, value: f32, partner: f32, dz: f32) -> f32 {
 ///   in the same batch, only the newer event is used, since it carries the newer pair, so a
 ///   half is delivered at most once per batch. Axis values are never dropped for age;
 /// * a `connected` is delivered once per pad per connection — a pad already announced by the
-///   replay is not announced again by its real event; connections are never dropped for age.
+///   replay is not announced again by its real event; connections are never dropped for age;
+/// * a `chord` is delivered at the press that completes its set (see `chord.rs`), judged by the
+///   held set and the report number the event carries, if that press is no older than `maxAge`
+///   — or, with a hold time, remembered for [`chord_holds_due`]. A release of a member ends a
+///   running hold — cancelled if it came before the hold time was up, held out for the next
+///   tick if at or after — even while its module is disabled: bookkeeping again, and harmless,
+///   since a disabled module's holds are cancelled when it is disabled and on every tick.
 pub(crate) fn pad_deliveries<'a>(
     listeners: impl Iterator<Item = (i64, usize, &'a mut PadFilter)>,
     batch: &[PadEvent],
@@ -257,6 +276,9 @@ pub(crate) fn pad_deliveries<'a>(
             if matches!(ev.kind, PadEventKind::Disconnected(_)) {
                 f.forget_pad(ev.pad);
             }
+            if let (PadEventKind::Up(_), Some(c)) = (&ev.kind, f.chord.as_mut()) {
+                c.release(ev);
+            }
             if !enabled(*module_idx) || f.pad.is_some_and(|p| p != ev.pad) {
                 continue;
             }
@@ -271,6 +293,11 @@ pub(crate) fn pad_deliveries<'a>(
                     }
                     if f.kind == Kind::Down && fresh && f.wants_button(*b) {
                         out.push(deliver(None, false));
+                    }
+                    if let Some(c) = f.chord.as_mut() {
+                        if c.press(ev, fresh) {
+                            out.push(deliver(None, false));
+                        }
                     }
                 }
                 PadEventKind::Up(b) => {
@@ -365,11 +392,84 @@ pub(crate) fn replay_deliveries<'a>(
     out
 }
 
+/// The chords whose hold time is up, as (listener token, pad, the completion): for each chord
+/// listener of an enabled module with a hold running or held out, what [`Chord::due`] fires
+/// given what the hub knows of the pad now (`pad_now`). A disabled module's holds are cancelled
+/// instead — enabled again, it fires at the next completion, not at one it was not allowed to
+/// hear.
+pub(crate) fn chord_holds_due<'a>(
+    listeners: impl Iterator<Item = (i64, usize, &'a mut PadFilter)>,
+    now: Instant,
+    enabled: impl Fn(usize) -> bool,
+    pad_now: impl Fn(u8) -> Option<PadNow>,
+) -> Vec<(i64, u8, Pending)> {
+    let mut out = Vec::new();
+    for (token, module_idx, f) in listeners {
+        let max_age = f.max_age;
+        let Some(c) = f.chord.as_mut() else { continue };
+        if !c.has_pending() {
+            continue;
+        }
+        if !enabled(module_idx) {
+            c.cancel_holds();
+            continue;
+        }
+        for (pad, p) in c.due(now, max_age, &pad_now) {
+            out.push((token, pad, p));
+        }
+    }
+    out
+}
+
+/// Cancels the running holds of every chord listener whose module is disabled — at the moment
+/// it is disabled, from `refresh_gamepad`, so a module disabled and enabled again before the
+/// next tick does not keep a hold from before. [`chord_holds_due`] does the same on every tick.
+pub(crate) fn cancel_disabled_holds<'a>(
+    listeners: impl Iterator<Item = (usize, &'a mut PadFilter)>,
+    enabled: impl Fn(usize) -> bool,
+) {
+    for (module_idx, f) in listeners {
+        if let Some(c) = f.chord.as_mut().filter(|_| !enabled(module_idx)) {
+            c.cancel_holds();
+        }
+    }
+}
+
+/// What [`chord_holds_due`] found, as a batch for `deliver_pad_events`: one event and one
+/// delivery per chord to fire, in that order. The event stands for the completing press — its
+/// pad, its `time`, the pad's family for the labels — which is all `chord_table` reads for a
+/// chord listener; the kind, a `Down` of the set's first button (`first_button` of the
+/// listener's token), keeps it truthful for anybody who looks.
+fn hold_batch(
+    due: &[(i64, u8, Pending)],
+    first_button: impl Fn(i64) -> Option<Button>,
+) -> (Vec<PadEvent>, Vec<Delivery>) {
+    let batch = due
+        .iter()
+        .map(|(token, pad, p)| PadEvent {
+            pad: *pad,
+            kind: PadEventKind::Down(first_button(*token).unwrap_or(Button::South)),
+            at: p.at,
+            synthetic: false,
+            family: p.family,
+            held: BTreeSet::new(),
+            report: 0,
+        })
+        .collect();
+    let deliveries = due
+        .iter()
+        .enumerate()
+        .map(|(i, (token, _, _))| Delivery { token: *token, event: i, value: None, partner: false })
+        .collect();
+    (batch, deliveries)
+}
+
 /// The demand bits the enabled modules' listeners add up to.
 pub(crate) fn demand_bits(listeners: impl Iterator<Item = (usize, Kind)>, enabled: impl Fn(usize) -> bool) -> u8 {
     listeners.filter(|(idx, _)| enabled(*idx)).fold(0, |bits, (_, kind)| {
         bits | match kind {
-            Kind::Down | Kind::Up => demand::BUTTONS,
+            // A chord is made of presses: it needs every button event of the pad.
+            Kind::Down | Kind::Up | Kind::Chord => demand::BUTTONS,
             Kind::Axis => demand::AXES,
             Kind::Connected | Kind::Disconnected => demand::CONNECT,
         }
@@ -384,7 +484,8 @@ impl Shared {
     /// It also owes every `connected` listener a replay again. Called when a listener comes or
     /// goes and when a module is enabled or disabled, and the replay only announces pads the
     /// listener has not been told about — for a listener that is up to date it is nothing, and
-    /// for one whose module was disabled while a pad arrived it is exactly that pad.
+    /// for one whose module was disabled while a pad arrived it is exactly that pad. And it
+    /// cancels the combination holds of disabled modules ([`cancel_disabled_holds`]).
     pub(crate) fn refresh_gamepad(&self) {
         if !gp::started() {
             return;
@@ -393,6 +494,7 @@ impl Shared {
             let enabled = self.enabled.borrow();
             let is_on = |i: usize| enabled.get(i).copied().unwrap_or(false);
             let mut ls = self.pads.listeners.borrow_mut();
+            cancel_disabled_holds(ls.iter_mut().map(|l| (l.module_idx, &mut l.filter)), is_on);
             let mut replay = false;
             for l in ls.iter_mut().filter(|l| l.filter.kind == Kind::Connected) {
                 l.filter.replay_pending = true;
@@ -420,10 +522,12 @@ impl Shared {
     ///
     /// The epoch turns once per batch and only when a callback actually runs: a stick held off
     /// centre sends a value every drain, and turning the epoch for each would throw away every
-    /// memo in every module 66 times a second while nobody is listening. A delivered press or
-    /// release also turns the INPUT epoch, because unlike a captured key it reaches the game and
-    /// the game's screen changes — though a frame or more later, which is why the reference
-    /// tells modules not to cache the game's screen against `inputEpoch` alone.
+    /// memo in every module 66 times a second while nobody is listening. A delivered press,
+    /// release or combination also turns the INPUT epoch, because unlike a captured key it
+    /// reaches the game and the game's screen changes — though a frame or more later, which is
+    /// why the reference tells modules not to cache the game's screen against `inputEpoch`
+    /// alone. (A chord is delivered on the event of its completing press, so the check below
+    /// counts it.)
     pub(crate) fn dispatch_gamepad(&self, batch: Vec<PadEvent>) {
         let started = Instant::now();
         let deliveries = {
@@ -466,12 +570,58 @@ impl Shared {
         self.ev_counts.set(c);
     }
 
+    /// What the pads owe the modules on a tick rather than on a drain: the `connected` replays
+    /// and the combinations whose hold time is up. Called beside `fire_due_timers`, on the GUI
+    /// tick and on the headless one.
+    pub(crate) fn fire_pad_tick(&self) {
+        self.fire_pad_replays();
+        self.fire_chord_holds();
+    }
+
+    /// Fires the combinations whose hold time is up, and those held out when a member was let
+    /// go after it. On the tick, so a hold fires up to one tick (15 ms) after `holdMs`; judged
+    /// against the hub's record of the pad NOW, and left for the drain while a release of the
+    /// set is still waiting in the hub (`Hub::pad_now`, `Chord::due`).
+    ///
+    /// In the interactive lane, as `on_gamepad` dispatches a press: a held combination is a
+    /// person waiting for what it does, and a read its callback asks for must not queue behind
+    /// the polls (ocr/types.rs, `enter_priority`).
+    fn fire_chord_holds(&self) {
+        if !gp::started() {
+            return;
+        }
+        let _prio = crate::ocr::types::enter_priority(crate::ocr::types::Priority::Interactive);
+        let now = Instant::now();
+        let due = {
+            let enabled = self.enabled.borrow();
+            let mut ls = self.pads.listeners.borrow_mut();
+            chord_holds_due(
+                ls.iter_mut().map(|l| (l.token, l.module_idx, &mut l.filter)),
+                now,
+                |i| enabled.get(i).copied().unwrap_or(false),
+                |pad| gp::hub().pad_now(pad),
+            )
+        };
+        if due.is_empty() {
+            return;
+        }
+        // A combination is a press that reached the game, as in `dispatch_gamepad`.
+        self.bump_input_epoch();
+        let (batch, deliveries) = {
+            let ls = self.pads.listeners.borrow();
+            hold_batch(&due, |token| {
+                ls.iter().find(|l| l.token == token).and_then(|l| l.filter.chord.as_ref()).map(|c| c.buttons()[0])
+            })
+        };
+        self.deliver_pad_events(&batch, &deliveries);
+    }
+
     /// Delivers the `connected` replays owed since the last tick. On the tick rather than
     /// inside `on`, so a callback never runs in the middle of the call that registered it.
     /// The pads are read from the hub under a different lock from the queue, so a pad can be
     /// both listed here and still waiting as a real `connected`; the listener's `announced`
     /// set is what makes it hear about that pad once.
-    pub(crate) fn fire_pad_replays(&self) {
+    fn fire_pad_replays(&self) {
         if !self.pads.replay_due.replace(false) || !gp::started() {
             return;
         }
@@ -498,6 +648,8 @@ impl Shared {
                 at: now,
                 synthetic: true,
                 family: info.desc.family,
+                held: BTreeSet::new(),
+                report: 0,
             })
             .collect();
         let deliveries: Vec<Delivery> = due
@@ -517,13 +669,17 @@ impl Shared {
             let found = {
                 let ls = self.pads.listeners.borrow();
                 ls.iter().find(|l| l.token == d.token).and_then(|l| {
-                    l.lua.registry_value::<Function>(&l.cb).ok().map(|f| (l.module_idx, l.lua.clone(), f))
+                    let chord = l.filter.chord.as_ref().map(|c| c.buttons().to_vec());
+                    l.lua.registry_value::<Function>(&l.cb).ok().map(|f| (l.module_idx, l.lua.clone(), f, chord))
                 })
             };
-            let Some((idx, lua, f)) = found else { continue };
-            let result = event_table(&lua, &batch[d.event], d.value, d.partner, Instant::now())
-                .map_err(|e| e.to_string())
-                .and_then(|t| call_guarded(&f, t));
+            let Some((idx, lua, f, chord)) = found else { continue };
+            let now = Instant::now();
+            let table = match &chord {
+                Some(set) => chord_table(&lua, &batch[d.event], set, now),
+                None => event_table(&lua, &batch[d.event], d.value, d.partner, now),
+            };
+            let result = table.map_err(|e| e.to_string()).and_then(|t| call_guarded(&f, t));
             if let Err(e) = result {
                 self.report_callback_error(idx, "gamepad", &e);
             }
@@ -571,6 +727,27 @@ fn event_table(lua: &Lua, ev: &PadEvent, value: Option<f32>, partner: bool, now:
             t.set("info", info_table(lua, info)?)?;
         }
     }
+    Ok(t)
+}
+
+/// A combination's table: which pad, the buttons as the module named them and as they are
+/// printed on that pad, and the completing press's `time` — with `age` from it, so for a hold
+/// `age` is at least `holdMs`.
+fn chord_table(lua: &Lua, ev: &PadEvent, buttons: &[Button], now: Instant) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("type", "chord")?;
+    t.set("pad", ev.pad)?;
+    let names_t = lua.create_table()?;
+    let labels_t = lua.create_table()?;
+    for b in buttons {
+        names_t.push(names::button_name(*b))?;
+        labels_t.push(names::label(*b, ev.family))?;
+    }
+    t.set("buttons", names_t)?;
+    t.set("labels", labels_t)?;
+    t.set("time", clock_ms(ev.at))?;
+    t.set("age", now.saturating_duration_since(ev.at).as_millis() as i64)?;
+    t.set("synthetic", false)?;
     Ok(t)
 }
 
@@ -625,24 +802,33 @@ fn state_table(lua: &Lua, s: &PadState) -> mlua::Result<Table> {
 pub(crate) fn parse_filter(event: &str, opts: Option<&Table>) -> mlua::Result<PadFilter> {
     let kind = Kind::parse(event).ok_or_else(|| {
         mlua::Error::external(format!(
-            "host.gamepad.on: unknown event '{event}' — expected \"down\", \"up\", \"axis\", \"connected\" or \"disconnected\""
+            "host.gamepad.on: unknown event '{event}' — expected \"down\", \"up\", \"axis\", \"chord\", \"connected\" or \"disconnected\""
         ))
     })?;
     let mut f = PadFilter::new(kind);
-    let Some(opts) = opts else { return Ok(f) };
     let fail = |msg: String| mlua::Error::external(format!("host.gamepad.on(\"{event}\"): {msg}"));
+    let Some(opts) = opts else {
+        if kind == Kind::Chord {
+            return Err(fail(NO_CHORD_BUTTONS.to_string()));
+        }
+        return Ok(f);
+    };
     let allowed: &[&str] = match kind {
         Kind::Down | Kind::Up => &["pad", "buttons", "maxAge"],
+        // `buttons` is the combination here, and required.
+        Kind::Chord => &["pad", "buttons", "maxAge", "exact", "holdMs"],
         // No `maxAge`: see `PadFilter::max_age`. Refused rather than ignored, so a module that
         // sets it learns that it has no effect here.
         Kind::Axis => &["pad", "axes", "deadzone", "step"],
         Kind::Connected | Kind::Disconnected => &["pad"],
     };
+    let mut exact = false;
+    let mut hold = Duration::ZERO;
     for pair in opts.pairs::<mlua::Value, mlua::Value>() {
         let (k, v) = pair?;
         let key = match &k {
             mlua::Value::String(s) => s.to_str()?.to_string(),
-            other => return Err(fail(format!("option names are strings, not {}", other.type_name()))),
+            other => return Err(fail(format!("option names are strings, not {}", crate::json::luau_type(other)))),
         };
         if !allowed.contains(&key.as_str()) {
             return Err(fail(format!("'{key}' is not an option here; this event takes {}", allowed.join(", "))));
@@ -651,7 +837,7 @@ pub(crate) fn parse_filter(event: &str, opts: Option<&Table>) -> mlua::Result<Pa
             match v {
                 mlua::Value::Integer(i) => Ok(*i as f64),
                 mlua::Value::Number(n) => Ok(*n),
-                other => Err(fail(format!("'{key}' must be a number, not {}", other.type_name()))),
+                other => Err(fail(format!("'{key}' must be a number, not {}", crate::json::luau_type(other)))),
             }
         };
         match key.as_str() {
@@ -704,18 +890,60 @@ pub(crate) fn parse_filter(event: &str, opts: Option<&Table>) -> mlua::Result<Pa
                 if n.is_nan() || n < 0.0 {
                     return Err(fail(format!("maxAge is milliseconds and cannot be negative, not {n}")));
                 }
+                // Whole milliseconds, so anything below 1 is 0 — and every press is some time
+                // old when the pump gets to it, so 0 would be a listener that never fires.
+                if n < 1.0 {
+                    return Err(fail(format!(
+                        "maxAge must be at least 1, not {n}: every press is some time old when it is delivered, \
+                         so this would drop them all — leave it out for the default of 1000"
+                    )));
+                }
                 f.max_age = Duration::from_millis(n.min(u32::MAX as f64) as u64);
             }
+            "holdMs" => {
+                let n = number(&v)?;
+                if n.is_nan() || n < 0.0 {
+                    return Err(fail(format!("holdMs is milliseconds and cannot be negative, not {n}")));
+                }
+                hold = Duration::from_millis(n.min(u32::MAX as f64) as u64);
+            }
+            "exact" => match v {
+                mlua::Value::Boolean(b) => exact = b,
+                other => return Err(fail(format!("'exact' must be true or false, not {}", crate::json::luau_type(&other)))),
+            },
             _ => unreachable!("checked against `allowed` above"),
         }
+    }
+    if kind == Kind::Chord {
+        // The combination moves from the button filter into the chord: a chord listener is not
+        // a `down` listener for those buttons, and `wants_button` must not see it.
+        let Some(list) = f.buttons.take() else {
+            return Err(fail(NO_CHORD_BUTTONS.to_string()));
+        };
+        f.chord = Some(Chord::new(list, exact, hold).map_err(|e| fail(format!("buttons: {e}")))?);
     }
     Ok(f)
 }
 
+/// `left_shoulder+right_shoulder, exact, held 800 ms`, for the log.
+fn describe_chord(c: &Chord) -> String {
+    let mut s = c.buttons().iter().map(|b| names::button_name(*b)).collect::<Vec<_>>().join("+");
+    if c.exact() {
+        s.push_str(", exact");
+    }
+    if !c.hold().is_zero() {
+        s.push_str(&format!(", held {} ms", c.hold().as_millis()));
+    }
+    s
+}
+
+const NO_CHORD_BUTTONS: &str =
+    "opts.buttons is required — the buttons of the combination, at least two, like { \"left_shoulder\", \"right_shoulder\" }";
+
 fn string_list(v: &mlua::Value) -> Result<Vec<String>, String> {
     let t: Table = match v {
         mlua::Value::Table(t) => t.clone(),
-        other => return Err(format!("expected a list of names, not {}", other.type_name())),
+        other => return Err(format!("expected a list of names, not {}", crate::json::luau_type(other))),
     };
     let mut out = Vec::new();
     for s in t.sequence_values::<String>() {
@@ -770,6 +998,12 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
         lua.create_function(move |lua, (event, cb, opts): (String, Function, Option<Table>)| {
             let filter = parse_filter(&event, opts.as_ref())?;
             gp::ensure_started().map_err(mlua::Error::external)?;
+            if let Some(c) = filter.chord.as_ref() {
+                // Under trace: which combination a module waits for is the first thing to know
+                // when a tester says "LB and RB did nothing".
+                let id = sh.ids.borrow().get(idx).cloned().unwrap_or_else(|| "?".into());
+                logging::trace("gamepad", || format!("[{id}] listens for the combination {}", describe_chord(c)));
+            }
             let key = lua.create_registry_value(cb)?;
             let token = sh.pads.next_token.get() + 1;
             sh.pads.next_token.set(token);
@@ -840,7 +1074,27 @@ mod tests {
     }
 
     fn ev(pad: u8, kind: PadEventKind, at: Instant) -> PadEvent {
-        PadEvent { pad, kind, at, synthetic: false, family: Family::Xbox }
+        PadEvent { pad, kind, at, synthetic: false, family: Family::Xbox, held: BTreeSet::new(), report: 0 }
+    }
+
+    thread_local! {
+        static REPORT: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// A button event as a source reports it: with the set held after its report, in a report
+    /// of its own.
+    fn edge(pad: u8, kind: PadEventKind, held: &[Button], at: Instant) -> PadEvent {
+        let report = REPORT.with(|r| {
+            r.set(r.get() + 1);
+            r.get()
+        });
+        PadEvent { held: held.iter().copied().collect(), report, ..ev(pad, kind, at) }
+    }
+
+    fn chord_filter(buttons: &[Button], exact: bool, hold_ms: u64) -> PadFilter {
+        let mut f = PadFilter::new(Kind::Chord);
+        f.chord = Some(Chord::new(buttons.to_vec(), exact, Duration::from_millis(hold_ms)).unwrap());
+        f
     }
 
     fn info(index: u8) -> PadInfo {
@@ -1194,6 +1448,312 @@ mod tests {
         assert_eq!(demand_bits(ls.iter().copied(), |_| true), demand::BUTTONS | demand::AXES | demand::CONNECT);
         assert_eq!(demand_bits(ls.iter().copied(), |i| i != 1), demand::BUTTONS | demand::CONNECT);
         assert_eq!(demand_bits(ls.iter().copied(), |_| false), 0);
+        // A combination is made of presses, so it wants the button events — which is also what
+        // makes the Windows source poll a connected pad every 4 ms for it.
+        assert_eq!(demand_bits([(0, Kind::Chord)].into_iter(), |_| true), demand::BUTTONS);
+    }
+
+    /// The chord and the `down` events of the same presses both arrive: the chord on the event
+    /// of the press that completes the set, in registration order among the listeners of that
+    /// event — a `down` listener registered before the chord listener hears the press first.
+    #[test]
+    fn a_chord_fires_at_the_completing_press_beside_the_downs() {
+        use Button::{LeftShoulder as Lb, RightShoulder as Rb, South};
+        let now = t0();
+        let mut ls = vec![
+            (1, 0, PadFilter::new(Kind::Down)),
+            (2, 0, chord_filter(&[Lb, Rb], false, 0)),
+            (3, 1, PadFilter::new(Kind::Down)),
+        ];
+        let batch = [
+            edge(1, PadEventKind::Down(Rb), &[Rb], now),
+            edge(1, PadEventKind::Down(Lb), &[Lb, Rb], now),
+            // More buttons while the set is held: no second chord.
+            edge(1, PadEventKind::Down(South), &[South, Lb, Rb], now),
+            // Letting go of a member and pressing it again is a second one.
+            edge(1, PadEventKind::Up(Rb), &[South, Lb], now),
+            edge(1, PadEventKind::Down(Rb), &[South, Lb, Rb], now),
+        ];
+        assert_eq!(
+            run(&mut ls, &batch, now, &[true, true]),
+            vec![(1, 0), (3, 0), (1, 1), (2, 1), (3, 1), (1, 2), (3, 2), (1, 4), (2, 4), (3, 4)]
+        );
+    }
+
+    #[test]
+    fn a_chord_keeps_to_its_pad_its_max_age_and_its_module() {
+        use Button::{LeftShoulder as Lb, RightShoulder as Rb, South};
+        let now = t0();
+        let old = now - Duration::from_millis(1500);
+
+        // `pad = 2`: the same presses on pad 1 are nothing to it.
+        let mut on_pad2 = chord_filter(&[Lb, Rb], false, 0);
+        on_pad2.pad = Some(2);
+        let mut ls = vec![(1, 0, on_pad2)];
+        let batch = [edge(1, PadEventKind::Down(Lb), &[Lb, Rb], now), edge(2, PadEventKind::Down(Lb), &[Lb, Rb], now)];
+        assert_eq!(run(&mut ls, &batch, now, &[true]), vec![(1, 1)]);
+
+        // A completion older than `maxAge` is not delivered, and does not fire later at another
+        // press while the set is still held; a member let go and pressed again does.
+        let mut ls = vec![(1, 0, chord_filter(&[Lb, Rb], false, 0))];
+        let batch = [
+            edge(1, PadEventKind::Down(Rb), &[Lb, Rb], old),
+            edge(1, PadEventKind::Down(South), &[South, Lb, Rb], now),
+            edge(1, PadEventKind::Up(Lb), &[South, Rb], now),
+            edge(1, PadEventKind::Down(Lb), &[South, Lb, Rb], now),
+        ];
+        assert_eq!(run(&mut ls, &batch, now, &[true]), vec![(1, 3)]);
+
+        // Completed while enabled, a member let go while the module was disabled, pressed again
+        // after it was enabled: a new completion, and it fires.
+        let mut ls = vec![(1, 0, chord_filter(&[Lb, Rb], false, 0))];
+        assert_eq!(run(&mut ls, &[edge(1, PadEventKind::Down(Rb), &[Lb, Rb], now)], now, &[true]), vec![(1, 0)]);
+        assert!(run(&mut ls, &[edge(1, PadEventKind::Up(Rb), &[Lb], now)], now, &[false]).is_empty());
+        assert_eq!(run(&mut ls, &[edge(1, PadEventKind::Down(Rb), &[Lb, Rb], now)], now, &[true]), vec![(1, 0)]);
+        // And a completion while it is disabled is not delivered.
+        run(&mut ls, &[edge(1, PadEventKind::Up(Rb), &[Lb], now)], now, &[true]);
+        assert!(run(&mut ls, &[edge(1, PadEventKind::Down(Rb), &[Lb, Rb], now)], now, &[false]).is_empty());
+
+        // A pad that goes away is forgotten: the next pad on that index starts armed.
+        let mut ls = vec![(1, 0, chord_filter(&[Lb, Rb], false, 0))];
+        let batch = [
+            edge(1, PadEventKind::Down(Rb), &[Lb, Rb], now),
+            ev(1, PadEventKind::Disconnected(info(1)), now),
+            ev(1, PadEventKind::Connected(info(1)), now),
+            edge(1, PadEventKind::Down(Rb), &[Lb, Rb], now),
+        ];
+        assert_eq!(run(&mut ls, &batch, now, &[true]), vec![(1, 0), (1, 3)]);
+    }
+
+    /// LB and RB found down in ONE poll: two `down` events, each carrying both as held. The
+    /// chord comes once, with the first — and a `down` listener still gets both presses.
+    #[test]
+    fn a_chord_pressed_within_one_poll_fires_once() {
+        use Button::{LeftShoulder as Lb, RightShoulder as Rb};
+        let now = t0();
+        let mut ls = vec![(1, 0, chord_filter(&[Lb, Rb], false, 0)), (2, 0, PadFilter::new(Kind::Down))];
+        let lb = edge(1, PadEventKind::Down(Lb), &[Lb, Rb], now);
+        let rb = PadEvent { kind: PadEventKind::Down(Rb), ..lb.clone() };
+        assert_eq!(run(&mut ls, &[lb, rb], now, &[true]), vec![(1, 0), (2, 0), (2, 1)]);
+    }
+
+    /// The review's case: nobody listened for buttons while the module was disabled, so the
+    /// Windows source parked, and the release of RB was never reported — the source takes the
+    /// pad afresh as a baseline when it wakes. RB pressed again is a completion all the same.
+    #[test]
+    fn a_chord_fires_again_after_a_release_nobody_reported() {
+        use Button::{LeftShoulder as Lb, RightShoulder as Rb};
+        let now = t0();
+        let mut ls = vec![(1, 0, chord_filter(&[Lb, Rb], false, 0))];
+        assert_eq!(run(&mut ls, &[edge(1, PadEventKind::Down(Rb), &[Lb, Rb], now)], now, &[true]), vec![(1, 0)]);
+        // Disabled, parked, RB let go and the source woken again: no event at all. Then:
+        assert_eq!(run(&mut ls, &[edge(1, PadEventKind::Down(Rb), &[Lb, Rb], now)], now, &[true]), vec![(1, 0)]);
+    }
+
+    /// `chord_holds_due` against a hub that holds `held` and has the releases of `waiting` not
+    /// drained yet; returns (token, pad, the completing press's time).
+    fn holds_due(
+        ls: &mut [(i64, usize, PadFilter)],
+        at: Instant,
+        on: &[bool],
+        held: &[Button],
+        waiting: &[Button],
+    ) -> Vec<(i64, u8, Instant)> {
+        let now = PadNow { held: held.iter().copied().collect(), releases_waiting: waiting.iter().copied().collect() };
+        chord_holds_due(
+            ls.iter_mut().map(|(t, m, f)| (*t, *m, f)),
+            at,
+            |i| on.get(i).copied().unwrap_or(false),
+            move |_| Some(now.clone()),
+        )
+        .into_iter()
+        .map(|(token, pad, p)| (token, pad, p.at))
+        .collect()
+    }
+
+    /// The review's race, at the listener: Start let go at 790 ms of an 800 ms hold and pressed
+    /// again at 850 ms while a slow callback held the loop. The tick at 1090 ms sees the set held
+    /// again but the release still in the hub, and leaves the hold to the drain; the drain
+    /// cancels it and starts the new one, which fires once, 800 ms after its own press.
+    #[test]
+    fn a_held_chord_waits_for_a_release_still_in_the_hub() {
+        use Button::{Back, Start};
+        let t = t0();
+        let ms = Duration::from_millis;
+        let mut ls = vec![(1, 0, chord_filter(&[Back, Start], false, 800))];
+        run(&mut ls, &[edge(1, PadEventKind::Down(Start), &[Back, Start], t)], t, &[true]);
+        assert!(holds_due(&mut ls, t + ms(1090), &[true], &[Back, Start], &[Start]).is_empty());
+        let batch = [
+            edge(1, PadEventKind::Up(Start), &[Back], t + ms(790)),
+            edge(1, PadEventKind::Down(Start), &[Back, Start], t + ms(850)),
+        ];
+        assert!(run(&mut ls, &batch, t + ms(1090), &[true]).is_empty());
+        assert!(holds_due(&mut ls, t + ms(1105), &[true], &[Back, Start], &[]).is_empty(), "not the broken hold");
+        assert_eq!(holds_due(&mut ls, t + ms(1655), &[true], &[Back, Start], &[]), vec![(1, 1, t + ms(850))]);
+        assert!(holds_due(&mut ls, t + ms(1700), &[true], &[Back, Start], &[]).is_empty(), "once");
+    }
+
+    /// Let go 10 ms after the hold time was up, before the tick got to it: the `up` is delivered,
+    /// and the combination fires on the tick after that drain, with the completing press's time.
+    #[test]
+    fn a_held_chord_let_go_after_its_time_fires_on_the_next_tick() {
+        use Button::{Back, Start};
+        let t = t0();
+        let ms = Duration::from_millis;
+        let mut ls = vec![(1, 0, chord_filter(&[Back, Start], false, 800)), (2, 0, PadFilter::new(Kind::Up))];
+        run(&mut ls, &[edge(1, PadEventKind::Down(Start), &[Back, Start], t)], t, &[true]);
+        let up = [edge(1, PadEventKind::Up(Start), &[Back], t + ms(810))];
+        assert_eq!(run(&mut ls, &up, t + ms(812), &[true]), vec![(2, 0)], "the release, to the `up` listener");
+        assert_eq!(holds_due(&mut ls, t + ms(812), &[true], &[Back], &[]), vec![(1, 1, t)]);
+        // Disabled before the tick got to it: nothing.
+        let mut ls = vec![(1, 0, chord_filter(&[Back, Start], false, 800))];
+        run(&mut ls, &[edge(1, PadEventKind::Down(Start), &[Back, Start], t)], t, &[true]);
+        run(&mut ls, &up, t + ms(812), &[true]);
+        assert!(holds_due(&mut ls, t + ms(815), &[false], &[Back], &[]).is_empty());
+        assert!(holds_due(&mut ls, t + ms(830), &[true], &[Back], &[]).is_empty(), "cancelled, not kept");
+    }
+
+    /// The review's finding 5: a module disabled and enabled again before the next tick must not
+    /// keep a hold from before. `refresh_gamepad` runs this when a module is disabled.
+    #[test]
+    fn disabling_a_module_cancels_its_holds_at_once() {
+        use Button::{Back, Start};
+        let t = t0();
+        let mut ls = vec![
+            (1, 0, chord_filter(&[Back, Start], false, 600)),
+            (2, 1, chord_filter(&[Back, Start], false, 600)),
+        ];
+        run(&mut ls, &[edge(1, PadEventKind::Down(Start), &[Back, Start], t)], t, &[true, true]);
+        let on = [false, true];
+        cancel_disabled_holds(ls.iter_mut().map(|(_, m, f)| (*m, f)), |i| on[i]);
+        assert!(!ls[0].2.chord.as_ref().unwrap().has_pending(), "module 0 was disabled");
+        assert!(ls[1].2.chord.as_ref().unwrap().has_pending(), "module 1 was not");
+        // Enabled again before the tick: only module 1's hold fires.
+        let fired = holds_due(&mut ls, t + Duration::from_millis(610), &[true, true], &[Back, Start], &[]);
+        assert_eq!(fired, vec![(2, 1, t)]);
+    }
+
+    /// The listener side of a held combination: one event and one delivery per chord to fire,
+    /// standing for the completing press — its pad, its `time`, the pad's family for the labels.
+    #[test]
+    fn a_held_chord_is_delivered_as_its_completing_press() {
+        let t = t0();
+        let due: [(i64, u8, Pending); 2] = [
+            (5, 2, Pending { at: t, family: Family::PlayStation }),
+            (7, 1, Pending { at: t + Duration::from_millis(3), family: Family::Xbox }),
+        ];
+        let (batch, deliveries) = hold_batch(&due, |token| (token == 5).then_some(Button::RightShoulder));
+        assert_eq!(
+            deliveries,
+            vec![
+                Delivery { token: 5, event: 0, value: None, partner: false },
+                Delivery { token: 7, event: 1, value: None, partner: false },
+            ]
+        );
+        assert_eq!((batch[0].pad, batch[0].at, batch[0].family), (2, t, Family::PlayStation));
+        assert!(matches!(batch[0].kind, PadEventKind::Down(Button::RightShoulder)));
+        assert!(matches!(batch[1].kind, PadEventKind::Down(Button::South)), "a listener gone meanwhile");
+        assert!(!batch[0].synthetic && batch[0].held.is_empty() && batch[0].report == 0);
+        // What the callback gets from it: the listener's set, labelled for this pad, timed from
+        // the completing press.
+        let lua = Lua::new();
+        let later = t + Duration::from_millis(820);
+        let table = chord_table(&lua, &batch[0], &[Button::RightShoulder, Button::LeftShoulder], later).unwrap();
+        let labels: Vec<String> =
+            table.get::<Table>("labels").unwrap().sequence_values().collect::<mlua::Result<_>>().unwrap();
+        assert_eq!(labels, vec!["R1", "L1"]);
+        assert_eq!(table.get::<i64>("time").unwrap(), clock_ms(t));
+        assert_eq!(table.get::<i64>("age").unwrap(), 820);
+    }
+
+    /// A held combination reached the game like a press, so firing one turns over `inputEpoch`
+    /// (`dispatch_gamepad` does the same for a press). A check on the text, as the lane checks
+    /// in `lib.rs` are: `fire_chord_holds` needs the process-wide hub, which tests never touch.
+    #[test]
+    fn a_held_chord_turns_over_the_input_epoch() {
+        const SRC: &str = include_str!("gamepad_api.rs");
+        let start = SRC.find("    fn fire_chord_holds(&self) {").expect("fire_chord_holds");
+        let end = start + SRC[start..].find("\n    }\n").expect("its end");
+        let body = &SRC[start..end];
+        let bump = body.find("self.bump_input_epoch();").expect("fire_chord_holds does not turn over inputEpoch");
+        assert!(bump > body.find("if due.is_empty()").unwrap(), "only when a combination fires");
+        assert!(bump < body.find("self.deliver_pad_events(").unwrap(), "before the callbacks run");
+    }
+
+    #[test]
+    fn a_held_chord_is_fired_by_the_tick() {
+        use Button::{Back, Start};
+        let now = t0();
+        let mut ls = vec![(1, 0, chord_filter(&[Back, Start], false, 600)), (2, 1, chord_filter(&[Back, Start], false, 600))];
+        // The completion is remembered, not delivered.
+        assert!(run(&mut ls, &[edge(1, PadEventKind::Down(Start), &[Back, Start], now)], now, &[true, true]).is_empty());
+        let due = |ls: &mut Vec<(i64, usize, PadFilter)>, at: Instant, on: &[bool], held: &[Button]| {
+            holds_due(ls, at, on, held, &[])
+        };
+        assert!(due(&mut ls, now + Duration::from_millis(300), &[true, true], &[Back, Start]).is_empty(), "not yet");
+        // Module 1 is disabled by now: its hold is cancelled, not kept for later.
+        let got = due(&mut ls, now + Duration::from_millis(610), &[true, false], &[Back, Start]);
+        assert_eq!(got, vec![(1, 1, now)], "time is the completing press");
+        assert!(due(&mut ls, now + Duration::from_millis(900), &[true, true], &[Back, Start]).is_empty(), "once, and not the cancelled one");
+
+        // Let go before the time is up: nothing.
+        let mut ls = vec![(1, 0, chord_filter(&[Back, Start], false, 600))];
+        let batch = [
+            edge(1, PadEventKind::Down(Back), &[Back, Start], now),
+            edge(1, PadEventKind::Up(Start), &[Back], now + Duration::from_millis(200)),
+        ];
+        assert!(run(&mut ls, &batch, now, &[true]).is_empty());
+        assert!(due(&mut ls, now + Duration::from_millis(700), &[true], &[Back, Start]).is_empty());
+    }
+
+    #[test]
+    fn a_chord_table_names_the_buttons_as_given_and_as_printed() {
+        let lua = Lua::new();
+        let now = Instant::now();
+        let mut e = ev(2, PadEventKind::Down(Button::RightShoulder), now);
+        e.family = Family::PlayStation;
+        let t = chord_table(&lua, &e, &[Button::RightShoulder, Button::LeftShoulder], now + Duration::from_millis(11))
+            .unwrap();
+        assert_eq!(t.get::<String>("type").unwrap(), "chord");
+        assert_eq!(t.get::<i64>("pad").unwrap(), 2);
+        let list = |k: &str| -> Vec<String> {
+            t.get::<Table>(k).unwrap().sequence_values().collect::<mlua::Result<_>>().unwrap()
+        };
+        assert_eq!(list("buttons"), vec!["right_shoulder", "left_shoulder"]);
+        assert_eq!(list("labels"), vec!["R1", "L1"]);
+        assert_eq!(t.get::<i64>("age").unwrap(), 11);
+        assert!(t.get::<i64>("time").unwrap() >= 0);
+        assert!(!t.get::<bool>("synthetic").unwrap());
+    }
+
+    /// What the bindings raise for, and do not, on the argument conversions the reference
+    /// lists: the same Rust parameter types as `install` gives `state`, `off` and `on`, so a
+    /// change in the conversion library shows here rather than as a wrong sentence in the docs.
+    #[test]
+    fn argument_conversions_are_what_the_reference_says() {
+        let lua = Lua::new();
+        let state = lua.create_function(|_, pad: f64| Ok(pad)).unwrap();
+        let off = lua.create_function(|_, token: i64| Ok(token)).unwrap();
+        let on = lua.create_function(|_, (_e, _cb, _o): (String, Function, Option<Table>)| Ok(())).unwrap();
+        lua.globals().set("state", state).unwrap();
+        lua.globals().set("off", off).unwrap();
+        lua.globals().set("on", on).unwrap();
+        let ok = |src: &str| lua.load(src).exec().is_ok();
+        assert!(!ok("state(nil)"), "state(nil) raises");
+        assert!(!ok("state({})"), "state with a table raises");
+        assert!(ok("assert(state('2') == 2)"), "a numeric string is taken as the number");
+        assert!(!ok("state('two')"));
+        assert!(!ok("off(nil)"), "off(nil) raises");
+        assert!(!ok("off('x')"));
+        // Not refused: the conversion cuts a fraction off, so the reference only promises a
+        // raise for what is not a number at all.
+        assert!(ok("assert(off(1.5) == 1)"));
+        assert!(ok("assert(off('3') == 3)"), "a numeric string is taken as the number");
+        assert!(ok("assert(off(3) == 3)"));
+        assert!(!ok("on('down', nil)"), "the callback is required");
+        assert!(!ok("on(nil, function() end)"));
+        assert!(!ok("on('down', function() end, 5)"), "opts is a table or nil");
+        assert!(ok("on('down', function() end, nil)"));
     }
 
     /// The tables a callback and `state()` hand to Luau, field by field, as the reference page
@@ -1264,6 +1824,30 @@ mod tests {
         assert_eq!(f.deadzone, Some(0.0));
         assert!((f.step - 0.1).abs() < 1e-6);
         assert!(parse("connected", "").unwrap().replay_pending);
+        let f = parse(
+            "chord",
+            "{ buttons = { 'left_shoulder', 'right_shoulder' }, pad = 1, maxAge = 500, exact = true, holdMs = 600 }",
+        )
+        .unwrap();
+        let c = f.chord.as_ref().expect("a chord listener has a chord");
+        assert_eq!(c.buttons(), &[Button::LeftShoulder, Button::RightShoulder]);
+        assert!(c.exact());
+        assert_eq!(c.hold(), Duration::from_millis(600));
+        assert_eq!(describe_chord(c), "left_shoulder+right_shoulder, exact, held 600 ms");
+        assert_eq!((f.pad, f.max_age), (Some(1), Duration::from_millis(500)));
+        assert!(f.buttons.is_none(), "the set is the chord's, not a down filter");
+        let f = parse("chord", "{ buttons = { 'left_trigger', 'right_trigger' } }").unwrap();
+        let c = f.chord.as_ref().unwrap();
+        assert!(!c.exact() && c.hold().is_zero(), "defaults: not exact, no hold");
+        assert_eq!(f.max_age, Duration::from_millis(1000));
+        // Whole milliseconds, as the reference says: a fraction is cut off, and anything past
+        // 4294967295 counts as that.
+        let f = parse("chord", "{ buttons = { 'back', 'start' }, holdMs = 0.5, maxAge = 1.9 }").unwrap();
+        assert!(f.chord.as_ref().unwrap().hold().is_zero(), "holdMs = 0.5 fires at the press");
+        assert_eq!(f.max_age, Duration::from_millis(1));
+        let f = parse("chord", "{ buttons = { 'back', 'start' }, holdMs = math.huge, maxAge = math.huge }").unwrap();
+        assert_eq!(f.chord.as_ref().unwrap().hold(), Duration::from_millis(u32::MAX as u64));
+        assert_eq!(f.max_age, Duration::from_millis(u32::MAX as u64));
 
         for (event, src, needle) in [
             ("press", "", "unknown event"),
@@ -1277,7 +1861,29 @@ mod tests {
             ("down", "{ buttons = {} }", "empty"),
             ("down", "{ buttons = 'south' }", "list of names"),
             ("up", "{ maxAge = -1 }", "maxAge"),
+            ("down", "{ maxAge = 0 }", "maxAge must be at least 1"),
+            ("chord", "{ buttons = { 'back', 'start' }, maxAge = 0.5 }", "maxAge must be at least 1"),
+            (
+                "chord",
+                "{ buttons = { 'left_stick_up', 'left_stick_down' } }",
+                "'left_stick_up' and 'left_stick_down' are two directions of one stick",
+            ),
             ("axis", "{ maxAge = 100 }", "'maxAge' is not an option"),
+            ("axis", "{ step = 2.5 }", "step must be from 0 to 2"),
+            ("axis", "{ axes = {} }", "empty"),
+            ("chord", "", "opts.buttons is required"),
+            ("chord", "{ pad = 1 }", "opts.buttons is required"),
+            ("chord", "{ buttons = { 'south' } }", "at least 2"),
+            ("chord", "{ buttons = { 'south', 'south' } }", "'south' is named twice"),
+            ("chord", "{ buttons = { 'south', 'LB' } }", "unknown button 'LB'"),
+            ("chord", "{ buttons = { 'back', 'start' }, holdMs = -1 }", "holdMs"),
+            // Luau has one number type: a message never says "integer".
+            ("chord", "{ buttons = { 'back', 'start' }, exact = 1 }", "'exact' must be true or false, not number"),
+            ("down", "{ 'south' }", "option names are strings, not number"),
+            ("down", "{ buttons = 7 }", "expected a list of names, not number"),
+            ("chord", "{ buttons = { 'back', 'start' }, step = 1 }", "'step' is not an option"),
+            ("down", "{ exact = true }", "'exact' is not an option"),
+            ("down", "{ holdMs = 600 }", "'holdMs' is not an option"),
         ] {
             let err = parse(event, src).err().unwrap_or_else(|| panic!("{event} {src} was accepted"));
             assert!(err.contains(needle), "{event} {src}: {err}");

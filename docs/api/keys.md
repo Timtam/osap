@@ -144,7 +144,7 @@ claim("Cmd+S", "Store") -- the same key everywhere: Ctrl+S on Windows, Command+S
 
 `spec` in this platform's own words, for telling a user which key to press. `"spoken"`, the default, spells every modifier out — `"Control+Alt+P"`, `"Shift+Command+F9"`, `"Up Arrow"` — and is what the overlay runtime says when a control with a hotkey is focused. `"short"` uses the written abbreviations — `"Ctrl+Alt+P"`, `"Shift+Cmd+F9"`, `"Up"` — for a log line or a label. A tap is `"Alt pressed on its own"` spoken and `"Alt tap"` short.
 
-Returns `nil` for a spec that does not parse, and raises for a style other than the two, or for a `spec` that is neither a string nor a number. **A description is not a spec**: on a Mac `"Delete"` is the key the parser calls `Backspace`, so never feed one back into a call that takes a key. String work only, main thread, no capability needed (see [`normalize`](#host-keys-normalize)).
+Returns `nil` for a spec that does not parse. It raises for a `spec` that is neither a string nor a number, for an `opts` that is neither a table nor `nil`, and for a `style` other than the two: another string or a number (`host.keys.describe: style must be "spoken" or "short", …`), or a value that is not a string at all, such as `true` or a table. A `style` of `nil` is `"spoken"`. **A description is not a spec**: on a Mac `"Delete"` is the key the parser calls `Backspace`, so never feed one back into a call that takes a key. String work only, main thread, no capability needed (see [`normalize`](#host-keys-normalize)).
 
 ```luau
 -- Written once, and said the way each platform's user knows it:
@@ -183,7 +183,7 @@ The reasons are structural on purpose: they are what the platform does, never wh
 
 `opts.layout = false` leaves the keyboard layout unasked, so `altgr` and `composes` are never reported and nothing but the string is read. The overlay runtime asks that way, at every bind and every hotkey sync, because it needs only the reasons `register` raises for. Default `true`.
 
-Cost: string work, plus — only for the shapes that can be `altgr` or `composes`, and only with `layout` left on — one question to the keyboard layout. Main thread, like every Lua call. It raises for an argument that is neither a string nor a number, and for an `opts` that is not a table. No capability needed (see [`normalize`](#host-keys-normalize)); unlike `normalize` and `describe` it reads something besides the string, the character the current layout types with the chord.
+Cost: string work, plus — only for the shapes that can be `altgr` or `composes`, and only with `layout` left on — one question to the keyboard layout. Main thread, like every Lua call. It raises for a `spec` that is neither a string nor a number, for an `opts` that is neither a table nor `nil`, and for a `layout` that is not `true`, `false` or `nil` (`host.keys.check: layout is true or false, not a string` for `{ layout = "no" }`); `nil` is the default, `true`. No capability needed (see [`normalize`](#host-keys-normalize)); unlike `normalize` and `describe` it reads something besides the string, the character the current layout types with the chord.
 
 ```luau
 -- Before announcing a key a user will press.

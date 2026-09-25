@@ -10,7 +10,7 @@ It is the first thing to try on a new plug-in, because a tree gives names and re
 
 Two shapes account for nearly all the use of it. **Identity**, where `findAny` asks "which of these names is present" and reports *which*, so Kontakt learns the version it is attached to from the same call that recognises it at all. And **geometry**, where `locate` and `pluginLocate` hand back a point to click — ON:EAR is driven entirely off the rectangles in a `rawDump`, its five identically named preset slots picked out as the only elements sharing an exact left edge.
 
-It is a cross-process query and it is not free: a 53-element window takes about 30 ms to walk, and took 211 ms before the backend learned to fetch a node's properties in one request, while a raw walk into a hosted plug-in has measured 60–300 ms against a pixel's 17. Detection and activation can afford that; a focus step cannot. Every call runs on the event loop and holds it for that long.
+It is a cross-process query and it is not free: a 53-element window takes about 30 ms to walk, and took 211 ms before the backend learned to fetch a node's properties in one request, while a raw walk into a hosted plug-in has measured 60–300 ms against a pixel's 17 through the standard path. Detection and activation can afford that; a focus step cannot. Every call runs on the event loop and holds it for that long.
 
 `find`, `findAny` and `pluginLocate` are asked once per [epoch](./timer.md#host-epoch): a second identical call in the same epoch gets the first answer, a `false` or `nil` included, without asking the application again. The epoch turns over on OS events, on a `host.timer.after` callback coming due, on image results and on input the platform drives — but not on a [`host.timer.every`](./timer.md#host-timer-every) tick, so a poll can be handed an answer asked before the tick, and not on [`host.input.post`](./input.md#host-input-post), so a check repeated after a posted key in the same callback sees the answer from before it. The other calls here are asked afresh every time.
 
@@ -242,7 +242,7 @@ Control types are translated to accessibility roles, so an unmapped type at **ei
 
 Asks a named element what it reports about its **own** state, rather than inferring one from its control type. It exists because "the accessibility tree has nothing to offer here" turned out to be a conclusion drawn from the type — Kontakt's status-bar toggles publish as plain Buttons — by code that had only ever fetched Name, ClassName and ControlType and so had never observed the absence of a state, only assumed it. `nil` means the element was not found at all, which stays distinguishable from "found, and it says nothing".
 
-It is **expensive**: the same raw tree walk as `pluginLocate`, measured at 60–300 ms on the message pump against roughly 17 ms for a single pixel read. It is the fallback for what a cheap pixel probe cannot answer, never the primary route. And a missing `toggle` is not "off" — Kontakt's Side and Info panes carry no state at all, so a module that turned that into `false` would be inventing an answer.
+It is **expensive**: the same raw tree walk as `pluginLocate`, measured at 60–300 ms on the message pump against roughly 17 ms for a single pixel read through the standard path. It is the fallback for what a cheap pixel probe cannot answer, never the primary route. And a missing `toggle` is not "off" — Kontakt's Side and Info panes carry no state at all, so a module that turned that into `false` would be inventing an answer.
 
 ```luau
 local U = host.element.type

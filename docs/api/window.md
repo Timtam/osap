@@ -50,7 +50,7 @@ Returned by `host.window.list()`, `host.window.active()`, `host.window.find()`, 
 }
 ```
 
-`client` is the window's client area in screen pixels: `x`/`y` its origin, which overlay regions are expressed relative to, and `w`/`h` its size. It is also what a window region reads: `{ window = w, fraction = { x1, y1, x2, y2 } }` is a rectangle in fractions of `client.w` and `client.h`, from `client.x` and `client.y` (see [the Region form](./screen.md#region-form)), so the table must come from `host.window`, or at least carry a `client` with those four whole numbers.
+`client` is the window's client area in screen pixels: `x`/`y` its origin, which overlay regions are expressed relative to, and `w`/`h` its size. It is also what a window region reads: `{ window = w, fraction = { x1, y1, x2, y2 } }` is a rectangle in fractions of `client.w` and `client.h`, from `client.x` and `client.y` (see [the Region form](./screen.md#region-form)), so the table must come from `host.window`, or at least carry a `client` with those four whole numbers. Every `host.screen` and `host.ocr` call that takes a region takes that form, and [`host.screen.pixel`](./screen.md#host-screen-pixel) a point `{ window = w, fraction = { x, y } }`; an [overlay](./overlay.md) control's `region` and `ocrLabel` options take only corners, relative to the overlay's origin. The fractions resolve against the `client` the table carries at the call, never a fresh one: a table from `active()` is the one kept for the epoch (above), so in a [`host.timer.every`](./timer.md#host-timer-every) poll the rectangle is the one the window had when the epoch last turned over, and a window moved or resized since then without an event in between is read at its old place. `find` asks the operating system afresh on every call.
 
 ### Control table
 
@@ -91,6 +91,8 @@ A *matcher* is a declarative table passed to `host.window.find/findAll/test/onTr
 
 **Every other key is ignored without an error.** That includes a `class` at the top level, outside a platform block: `{ app = { name = "reaper" }, class = "REAPERwnd" }` matches every window REAPER has. The window class lives in the `windows` or `macos` block, where AutoHotkey's `ahk_class` would be. Keys from other designs — `controlClass`, `wmClass`, `exe` at the top level — are ignored the same way. A window table is plain data too: it has fields and no methods.
 
+**The keys above of the wrong type** are checked only by [`onTrigger`](#host-window-ontrigger), which raises when it registers. `find`, `findAll`, `test` and the overlay's bindings do not check: there an `app` given as a string constrains nothing — `{ app = "game.exe" }` matches every window — and neither does a string block for the platform in use (a block for another platform still makes the matcher fail, as any would); a `where` that is not a function is skipped; and an `os` that is not a table, an `app` that is a number or a boolean, or such a block for the platform in use, raises from inside the call.
+
 A **field matcher** is either a string (case-insensitive equality) or a table with one of:
 
 - `exact` — case-insensitive equality
@@ -114,7 +116,7 @@ local matcher = {
 
 ## host.window.list(filter?) {#host-window-list}
 
-`host.window.list(filter: { pids: { number }? }?) -> { Window }`
+**Signature:** `host.window.list(filter: { pids: { number }? }?) -> { Window }`
 
 Returns an array of [window tables](#window-table) for all enumerable top-level windows — or, with `{ pids = {…} }`, only the windows of those processes. `find` and `findAll` pass the pids of the applications a matcher names, so a module rarely calls this directly; when it does, and it knows the application, it should narrow the same way.
 
@@ -139,7 +141,7 @@ Every application listed is a call into that process for its `AXWindows`, each w
 
 ## host.window.apps() {#host-window-apps}
 
-`host.window.apps() -> { { pid: number, name: string, exe: string, bundleId: string } }`
+**Signature:** `host.window.apps() -> { { pid: number, name: string, exe: string, bundleId: string } }`
 
 The running applications, described the way a window table's `app` field describes them — so a matcher's `app` clause tests against either. Asks none of them anything: this is what lets `find` decide **which** applications to list windows from before a single cross-process question is put.
 
@@ -160,7 +162,7 @@ The workspace's own list of running applications, minus those whose activation p
 
 ## host.window.windowsOf(pid) {#host-window-windowsof}
 
-`host.window.windowsOf(pid: number) -> { { id: number, layer: number, class: string, x: number, y: number, w: number, h: number } }`
+**Signature:** `host.window.windowsOf(pid: number) -> { { id: number, layer: number, class: string, x: number, y: number, w: number, h: number } }`
 
 Every on-screen window a process owns, as the **window manager** lists them rather than as accessibility does. The difference is the point: a popup menu drawn as a window of its own is in this list from the moment it opens to the moment it closes, whether or not the application posts a notification about it or exposes it as a menu element. The overlay runtime's menu watch takes this list before clicking a control that opens a menu and compares on every tick while the menu is plausible — a window that is there now and was not then is the menu, and its going is the menu closing. That is the third detector, after the native-menu notification and the accessibility walk, and the one that works for a plugin whose menu neither of those can see, provided the menu is a window at all. A module needs it directly only for the same kind of question.
 
@@ -187,7 +189,7 @@ end
 
 ## host.window.active() {#host-window-active}
 
-`host.window.active() -> Window?`
+**Signature:** `host.window.active() -> Window?`
 
 Returns the [window table](#window-table) for the foreground window, or `nil` if there is none.
 
@@ -276,7 +278,7 @@ Minimised windows are additionally dropped from `list()` and `find()` here, so o
 
 ## host.window.controls(win?) {#host-window-controls}
 
-`host.window.controls(win: Window?) -> { Control }`
+**Signature:** `host.window.controls(win: Window?) -> { Control }`
 
 Returns the child [control tables](#control-table) of `win` (its `id` is used), or of the active window when omitted. Returns an empty table if no window applies. Used to detect embedded plugins by control class/geometry.
 
@@ -300,7 +302,7 @@ So a module that identifies a plug-in by scanning `controls()` for a *leaf* cont
 
 ## host.window.focusChain() {#host-window-focuschain}
 
-`host.window.focusChain() -> { Control }`
+**Signature:** `host.window.focusChain() -> { Control }`
 
 Returns [control tables](#control-table) from the currently focused element up to its top-level window. Used to detect that focus has entered an embedded plugin.
 
@@ -323,7 +325,7 @@ Depth is still not a fact about the plug-in. A one-link chain says the focus is 
 
 ## host.window.ownsPoint(id, x, y) {#host-window-ownspoint}
 
-`host.window.ownsPoint(id: number, x: number, y: number) -> boolean?`
+**Signature:** `host.window.ownsPoint(id: number, x: number, y: number) -> boolean?`
 
 Whether the window `id` belongs to is the one drawn at that screen point.
 
@@ -355,7 +357,7 @@ host.input.click(x, y)
 
 ## host.window.find(matcher) {#host-window-find}
 
-`host.window.find(matcher: Matcher) -> Window?`
+**Signature:** `host.window.find(matcher: Matcher) -> Window?`
 
 (prelude) Returns the first window that satisfies `matcher`, or `nil`.
 
@@ -367,7 +369,7 @@ local reaper = host.window.find({ app = { name = "reaper" } })
 
 ## host.window.findAll(matcher) {#host-window-findall}
 
-`host.window.findAll(matcher: Matcher) -> { Window }`
+**Signature:** `host.window.findAll(matcher: Matcher) -> { Window }`
 
 (prelude) Returns all windows that satisfy `matcher`, listed the same narrowed way as `find`.
 
@@ -377,7 +379,7 @@ local editors = host.window.findAll({ title = { contains = "Notepad" } })
 
 ## host.window.test(matcher, win) {#host-window-test}
 
-`host.window.test(matcher: Matcher, win: Window) -> boolean`
+**Signature:** `host.window.test(matcher: Matcher, win: Window) -> boolean`
 
 (prelude) Returns whether the given window table satisfies `matcher` (the same logic `find`/`findAll` apply). Used by overlay attach contexts.
 
@@ -388,17 +390,23 @@ if w and host.window.test({ windows = { class = "REAPERwnd" } }, w) then ... end
 
 ## host.window.onTrigger(matcher, opts, cb) {#host-window-ontrigger}
 
-`host.window.onTrigger(matcher: Matcher, opts: { on: string?, initial: boolean? }?, cb: (win: Window) -> ()) -> ()`
+**Signature:** `host.window.onTrigger(matcher: Matcher?, opts: { on: string?, initial: boolean? }?, cb: (win: Window) -> ()) -> ()`, or `host.window.onTrigger(matcher: Matcher?, cb: (win: Window) -> ()) -> ()`
 
-(prelude) Registers `cb` to fire on every foreground change for which the new active window satisfies `matcher`. The callback receives the matched [window table](#window-table). An empty matcher `{}` matches every window.
+(prelude) Registers `cb` to fire on every foreground change for which the new active window satisfies `matcher`. The callback receives the matched [window table](#window-table). An empty matcher `{}`, or `nil`, matches every window.
+
+**The options can be left out.** `onTrigger(matcher, cb)` is `onTrigger(matcher, nil, cb)`: it fires on every matching activation and asks for no report of the window already in front. A function in the second place is taken as the callback when there is no third argument.
+
+**A bad registration raises from `onTrigger` itself**, at the caller's line, and nothing is registered: a `cb` that is not a function (`host.window.onTrigger: the callback is a function, not a nil`), a `matcher` that is neither a table nor `nil`, an `opts` that is neither a table nor `nil`, and an `initial` that is not `true` or `false` (below). The matcher's keys whose type decides what they mean are checked too: an `app`, `os` or platform block (`windows`, `macos`, `linux`) that is not a table, an `app` inside a platform block that is not a table, and a `where` that is not a function raise — `{ app = "game.exe" }` raises `host.window.onTrigger: matcher.app is a table, not a string`, where it would otherwise fire for every window. Nothing else about a matcher is checked: a misspelt key is ignored, and a field matcher that is not a string or a table, or a table with none of its keys, matches nothing (see [Matchers](#matchers)).
+
+Registration is plain table work in the prelude, on the main thread, with no system call — except that `initial = true` queues the module for the report described next.
 
 **`initial = true` also reports the window already in front.** Without it, a window that is in front when the module loads, is enabled or is reloaded is not reported — only a foreground change after that. With it, that window is reported too, **once**, on the next pass of the loop:
 
 - **When.** After the module's load has finished — its entry file and `activate` have returned — so the callback can use what the file sets up after the registration. Again every time the module is enabled in the module manager, because to a module that was off whatever is in front is new — though at that moment the window in front is usually the manager itself, so a game behind it is reported at its next activation instead. And for a trigger registered later, from a timer say, on the pass after the registration. Never from inside `onTrigger` itself, and never while the module is disabled.
 - **Once per foreground.** An activation dispatched before that pass *is* the report — after an enable as well — so the trigger is not called a second time for the same window. A report that found no match, or no window in front, is used up as well — the matching window coming forward later is an ordinary activation.
 - **What it costs.** The foreground window is asked for once per pass, for every module owed a report together, and only when one of them has an `initial` trigger still waiting: enabling a module that has none asks nothing. The callbacks run on the main thread, inside the loop pass whose length the application logs past 250 ms, like every other trigger.
-- **The same window an activation hands over.** The callback gets the same window table, and a foreground window an activation never hands over — one without a title — is not reported; the report is used up all the same. Before the first matching callback of the pass, [`host.inputEpoch`](./timer.md#host-inputepoch) turns over once, however many modules the pass reports to, and each module that reads through desktop duplication has it opened before its own first matching callback — both as an activation does.
-- **What raises.** `initial` is `true` or `false`; anything else raises from `onTrigger`.
+- **The same window an activation hands over.** The callback gets the same window table, and a foreground window an activation never hands over — one without a title — is not reported; the report is used up all the same. Before the first matching callback of the pass, [`host.inputEpoch`](./timer.md#host-inputepoch) turns over once, however many modules the pass reports to, and each module that reads through desktop duplication has its opening started before its own first matching callback — the primary monitor's, and not while duplication is open already, backing off, overdue or stopped — both as an activation does. The opening runs in the background: the callback's event-loop reads do not wait for it, while a read on the image worker does; see [Which picture a read sees](./screen.md#which-picture-a-read-sees).
+- **What raises.** `initial` is `true` or `false`; anything else raises from `onTrigger`, as the other mistakes above do.
 
 What it does **not** do:
 
@@ -413,9 +421,14 @@ local REAPER = { app = { name = "reaper" } }
 host.window.onTrigger(REAPER, { initial = true }, function(w)
   host.speech.output("REAPER focused")
 end)
+
+-- Without options: only a REAPER window that comes forward from now on.
+host.window.onTrigger(REAPER, function(w)
+  host.log.info("REAPER in front: " .. w.title)
+end)
 ```
 
-In a `code_module` runtime the top level runs once in the runtime's own VM and once in every dependent's, so a trigger registered there is registered — and reported — once per VM; register from `activate`, which runs once, in the module's own VM (see [`host.require`](./require.md#host-require)). A poll that starts from `initial = true` and stops itself when the game leaves the front is the example under [`host.timer.cancel`](./timer.md#host-timer-cancel).
+**A trigger belongs to the VM that registers it**, and a `code_module`'s source runs in more than one: once in its own VM and once in every dependent's (see [`host.require`](./require.md#host-require)). A trigger registered at the top level of a shared runtime is therefore registered — and reported — once per VM. Where the trigger is the dependent's business, as a game's is, the runtime exports a function that registers it and each game module's entry calls that function once, in its own VM, with its own data: the trigger, and the poll and hotkey it starts, then belong to the game module, stop while it is disabled and go when it is reloaded. That shape, with a hotkey that works for any number of games on one runtime, is the example under [a runtime shared by game modules](./require.md#a-runtime-shared-by-game-modules). What must exist once per application goes into the runtime's `activate`, which runs in its own VM only. A poll that starts from `initial = true` and stops itself when the game leaves the front is the example under [`host.timer.cancel`](./timer.md#host-timer-cancel).
 
 ### Windows
 
@@ -437,9 +450,9 @@ When watching first starts, one focus round is run for the application already i
 
 ## host.window.onFocus(cb) {#host-window-onfocus}
 
-`host.window.onFocus(cb: () -> ()) -> ()`
+**Signature:** `host.window.onFocus(cb: () -> ()) -> ()`
 
-(prelude) Registers `cb` to fire whenever the keyboard focus moves — including within the same top-level window. Takes no arguments; the callback typically re-reads `host.window.active()` / `focusChain()`. Used to catch focus entering an embedded plugin without a foreground change. Like `onTrigger` it returns no handle, stays until the module is reloaded, and a callback that raises skips the module's later `onFocus` callbacks for that focus change.
+(prelude) Registers `cb` to fire whenever the keyboard focus moves — including within the same top-level window. Takes no arguments; the callback typically re-reads `host.window.active()` / `focusChain()`. Used to catch focus entering an embedded plugin without a foreground change. Like `onTrigger` it returns no handle, stays until the module is reloaded, and a callback that raises skips the module's later `onFocus` callbacks for that focus change. A `cb` that is not a function raises at once (`host.window.onFocus: the callback is a function, not a nil`), rather than when the focus next moves.
 
 ```luau
 host.window.onFocus(function()

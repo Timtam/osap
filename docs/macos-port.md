@@ -324,7 +324,8 @@ every click, and a partial one that forgot Vision would have left OCR boxes mirr
 is invisible on single-line text and wrong on everything else.
 
 **The first OCR call killing the keyboard.** Vision loads its model on the first request —
-routinely half a second to two seconds — and OCR runs synchronously on the pump thread. On
+routinely half a second to two seconds — and `recognize` and `recognizeMany` run synchronously on
+the pump thread. On
 a shared run loop that alone would have exceeded the tap's tolerance and disabled key
 capture, mid-session, in a way that reads as "it worked and then stopped". Warming Vision on
 a background thread at startup, as the Windows backend already does for its second engine,

@@ -14,7 +14,7 @@ Timers are how a module waits without blocking. `after` covers the settling time
 
 `host.epoch` is what an expensive reading should be memoized against instead of a clock. It moves whenever an OS event, a one-shot `after` coming due, or the module's own synthesised input could have changed the screen, so a cached answer is free within one dispatch and re-taken after the next such event — which "it was fresh 50 ms ago" cannot promise. An `every` tick does not move it, so a poll is handed what was cached before the tick until something else moves it.
 
-Where a wait is for a *value to change* rather than for a length of time, use the overlay's `O:watch` instead: a guessed delay is wrong in both directions.
+Where a wait is for a *value to change* rather than for a length of time, a guessed delay is wrong in both directions. An overlay has [`O:watch`](./overlay.md#o-watch) for it, which exists only on an overlay and runs only while that overlay is active. A module that is not an overlay — a game module on a shared runtime, say — has no change wait: it polls with [`every`](#host-timer-every), keeps one asynchronous read in flight (the example under [`matchCellsAsync`](./screen.md#host-screen-matchcellsasync)) and compares each reading with the last, or, after a press or an input it caused, reads in a burst until a reading differs or a deadline passes: either asking again straight from each asynchronous read's callback, as the menu example under [`host.gamepad.on`](./gamepad.md#host-gamepad-on) does, or with a few `after`s at growing delays.
 
 ## What to declare {#declare}
 
@@ -205,7 +205,7 @@ The same clock as on Windows, Rust's `std::time::Instant`.
 
 **Signature:** `host.inputEpoch() -> number`
 
-A counter that turns over only when something **acted** on the screen: input this platform drove, a window coming forward, or a window already in front being reported to an [`onTrigger { initial = true }`](./window.md#host-window-ontrigger) callback.
+A counter that turns over only when something **acted** on the screen: input this platform drove, a game-controller press, release or combination delivered to a [listener](./gamepad.md#host-gamepad-on), a window coming forward, or a window already in front being reported to an [`onTrigger { initial = true }`](./window.md#host-window-ontrigger) callback.
 
 `host.epoch` also moves when a one-shot timer comes due and on the user's own keystrokes, which is right for "re-resolve where the plug-in is" and far too eager for "what does this pixel say". A screen read costs a fixed compositor frame, so a property that only an action can change should be cached against this one instead.
 

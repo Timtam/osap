@@ -84,13 +84,13 @@ local function watch(via)
   local function read()
     n = n + 1
     local t0 = host.now()
-    local p = host.screen.profile({ region = region, axes = "columns" })
+    local p, why = host.screen.profile({ region = region, axes = "columns" })
     local ms = host.now() - t0
     total = total + ms
     if ms > slowest then slowest = ms end
     if not p then
       failed = failed + 1
-      line("read %d: FAILED after %d ms", n, ms)
+      line("read %d: FAILED after %d ms (%s)", n, ms, tostring(why))
     else
       local fp, isBlack = fingerprint(p.columns)
       if isBlack then black = black + 1 end

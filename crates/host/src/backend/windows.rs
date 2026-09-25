@@ -474,8 +474,8 @@ fn duplicate_with(
 
 /// The image worker's capture routine (`Backend::capture_fn`): a plain `fn`, so it is `Send`,
 /// and the duplication state it reaches is the engine thread's, not this backend's.
-fn capture_on_worker(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Option<CapturedImage>> {
-    capture_all(regions, src, Caller::Worker).into_iter().map(Result::ok).collect()
+fn capture_on_worker(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Result<CapturedImage, String>> {
+    capture_all(regions, src, Caller::Worker)
 }
 
 // ── host.ocr.read's two threads ─────────────────────────────────────────────────────────────
@@ -601,25 +601,32 @@ fn ensure_winrt() {
 }
 
 /// A pixel through `src`: `GetPixel` for the standard source, a 1x1 region of the duplicated
-/// picture otherwise. `None` only when duplication could not answer and the module forbade
-/// the fallback.
-fn pixel_through(x: i32, y: i32, src: CaptureSource) -> Option<(u8, u8, u8)> {
+/// picture otherwise. `Err` only when duplication could not answer and the module forbade
+/// the fallback: the reason, as [`unanswered`] words it for every other read.
+fn pixel_through(x: i32, y: i32, src: CaptureSource) -> Result<(u8, u8, u8), String> {
     let CaptureSource::Duplication { or_standard } = src else {
-        return Some(pixel_gdi(x, y));
+        return Ok(pixel_gdi(x, y));
     };
     // A point on no monitor has no picture in either path. `GetPixel` says CLR_INVALID there,
     // which `colorref_rgb` turns into black, the same black a region read gives off the
     // desktop — so the answer is the standard one, and the engine is not started for it.
     if off_every_monitor(x, y) {
-        return Some(pixel_gdi(x, y));
+        return Ok(pixel_gdi(x, y));
     }
     // Its fallback is `GetPixel`, not a 1x1 blit, so a module that allows the standard way
     // gets exactly the answer it got before.
     match dxgi::capture(&[(x, y, 1, 1)], Caller::Pump) {
-        Ok(images) => images.first().map(|c| (c.rgba[0], c.rgba[1], c.rgba[2])),
+        Ok(images) => images
+            .first()
+            .map(|c| (c.rgba[0], c.rgba[1], c.rgba[2]))
+            .ok_or_else(|| CAPTURE_FAILED.to_string()),
         Err(why) => {
             dxgi::note_fallback(why, or_standard);
-            or_standard.then(|| pixel_gdi(x, y))
+            if or_standard {
+                Ok(pixel_gdi(x, y))
+            } else {
+                Err(unanswered(why))
+            }
         }
     }
 }
@@ -919,7 +926,7 @@ impl Backend for WindowsBackend {
         unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
     }
 
-    fn pixel(&self, x: i32, y: i32, src: CaptureSource) -> Option<(u8, u8, u8)> {
+    fn pixel(&self, x: i32, y: i32, src: CaptureSource) -> Result<(u8, u8, u8), String> {
         pixel_through(x, y, src)
     }
 
@@ -947,8 +954,10 @@ impl Backend for WindowsBackend {
         true
     }
 
-    fn capture(&self, x: i32, y: i32, w: i32, h: i32, src: CaptureSource) -> Option<CapturedImage> {
-        capture_all(&[(x, y, w, h)], src, Caller::Pump).pop().and_then(Result::ok)
+    fn capture(&self, x: i32, y: i32, w: i32, h: i32, src: CaptureSource) -> Result<CapturedImage, String> {
+        capture_all(&[(x, y, w, h)], src, Caller::Pump)
+            .pop()
+            .unwrap_or_else(|| Err(CAPTURE_FAILED.to_string()))
     }
 
     fn capture_fn(&self) -> CaptureFn {
@@ -1013,14 +1022,14 @@ impl Backend for WindowsBackend {
         if regions.len() < 2 || regions.iter().any(|(_, _, w, h)| *w <= 0 || *h <= 0) {
             return one_each(self);
         }
-        let x0 = regions.iter().map(|r| r.0).min().unwrap_or(0);
-        let y0 = regions.iter().map(|r| r.1).min().unwrap_or(0);
-        let x1 = regions.iter().map(|r| r.0 + r.2).max().unwrap_or(0);
-        let y1 = regions.iter().map(|r| r.1 + r.3).max().unwrap_or(0);
-        let (bw, bh) = (x1 - x0, y1 - y0);
+        // No box that fits the coordinate range (two regions two billion pixels apart): one
+        // capture each, as for a degenerate region.
+        let Some((x0, y0, bw, bh)) = crate::region::bounding_box(regions) else {
+            return one_each(self);
+        };
         let big = match self.capture(x0, y0, bw, bh, CaptureSource::Standard) {
-            Some(c) => c,
-            None => return one_each(self),
+            Ok(c) => c,
+            Err(_) => return one_each(self),
         };
         // A capture that came back a different size than asked for was CLIPPED — the region ran
         // off a screen edge — and every offset computed below would then point somewhere else.
@@ -2848,5 +2857,48 @@ mod capture_tests {
         let standard = pixel_through(x, y, CaptureSource::Standard);
         assert_eq!(pixel_through(x, y, CaptureSource::Duplication { or_standard: false }), standard);
         assert_eq!(pixel_through(x, y, CaptureSource::Duplication { or_standard: true }), standard);
+    }
+
+    /// What a module is told when duplication had no picture is part of the API: every reason
+    /// `unanswered` can give is in docs/api/screen.md word for word, a number in it written
+    /// there as `…`. A reason reworded here and not there fails this test.
+    #[test]
+    fn every_reason_a_module_is_told_is_listed() {
+        const DOC: &str = include_str!("../../../../docs/api/screen.md");
+        let all = [
+            (Fallback::SwitchedOff, None),
+            (Fallback::Disabled, None),
+            (Fallback::Crashed, None),
+            (Fallback::NoThread, None),
+            (Fallback::Closing, None),
+            (Fallback::Opening, None),
+            (Fallback::Overdue, None),
+            (Fallback::Budget, None),
+            (Fallback::TooLarge, None),
+            (Fallback::Unsupported(0x887A_0004_u32 as i32), Some("0x887A0004")),
+            (Fallback::TooManyRecorders, None),
+            (Fallback::SecureDesktop, None),
+            (Fallback::AccessLost, None),
+            (Fallback::DeviceRemoved, None),
+            (Fallback::Rotated, None),
+            (Fallback::Topology, None),
+            (Fallback::NoFrameYet, None),
+            (Fallback::NoOutput, None),
+            (Fallback::Format(87), Some("87")),
+            (Fallback::Failed(0x8000_4005_u32 as i32), Some("0x80004005")),
+        ];
+        for (why, number) in all {
+            let told = unanswered(why);
+            assert!(told.starts_with(&format!("{DUPLICATION_UNANSWERED} — ")), "{told}");
+            let tail = why.describe();
+            let listed = match number {
+                Some(n) => tail.replacen(n, "…", 1),
+                None => tail.clone(),
+            };
+            assert!(DOC.contains(&listed), "docs/api/screen.md does not list the reason `{listed}` ({why:?})");
+        }
+        assert!(DOC.contains(DUPLICATION_UNANSWERED));
+        // And the one a region too large for duplication gets, beside it.
+        assert!(DOC.contains(&format!("{CAPTURE_FAILED}: {}", Fallback::TooLarge.describe())));
     }
 }

@@ -146,7 +146,7 @@ enum KeyKind {
 /// A value's type as Luau's `type()` names it, for an error. mlua keeps a whole number apart
 /// as an "integer" and a light userdata as a "lightuserdata"; Luau has neither type, and a
 /// message saying "not a integer" names nothing the author wrote.
-fn luau_type(v: &Value) -> &'static str {
+pub(crate) fn luau_type(v: &Value) -> &'static str {
     match v {
         Value::Integer(_) | Value::Number(_) => "number",
         Value::LightUserData(_) => "userdata",
@@ -446,9 +446,9 @@ mod tests {
     #[test]
     fn documents_become_plain_luau_values() {
         let lua = Lua::new();
-        let doc = r#"{ "name": "WarmSelection", "w": 10, "cells": [1, 2.5, -3],
+        let doc = r#"{ "name": "highlight", "w": 10, "cells": [1, 2.5, -3],
                        "on": true, "nested": { "a": "b" } }"#;
-        assert!(run(&lua, doc, "v.name == 'WarmSelection' and v.w == 10 and v.on == true"));
+        assert!(run(&lua, doc, "v.name == 'highlight' and v.w == 10 and v.on == true"));
         assert!(run(&lua, doc, "#v.cells == 3 and v.cells[2] == 2.5 and v.cells[3] == -3"));
         assert!(run(&lua, doc, "v.nested.a == 'b'"));
         // A plain table: no protected metatable in the way of a module's own.
@@ -475,6 +475,15 @@ mod tests {
         let text = lua.create_string(b"{ \"a\": \xEF\xBB\xBF1 }").unwrap();
         lua.globals().set("text", text).unwrap();
         assert!(lua.load("return decode(text)").eval::<Value>().is_err());
+    }
+
+    /// A key written twice in one object is not an error, and the last one wins — pinned,
+    /// because json.md says so and serde_json could change it.
+    #[test]
+    fn a_duplicate_key_takes_the_last_value() {
+        let lua = Lua::new();
+        assert!(run(&lua, r#"{ "a": 1, "b": 2, "a": 3 }"#, "v.a == 3 and v.b == 2"));
+        assert!(run(&lua, r#"{ "a": { "x": 1 }, "a": null }"#, "v.a == nil"));
     }
 
     #[test]

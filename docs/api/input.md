@@ -87,6 +87,15 @@ The event's modifier flags are **cleared**, so a click is a bare click whatever 
 
 Presses the mouse button at `(x1, y1)`, drags to `(x2, y2)`, and releases — with real, paced movement in between.
 
+**Signature:** `host.input.drag(x1: number, y1: number, x2: number, y2: number, opts: { button?: "left" | "right" | "middle" }?) -> nil`
+
+All four coordinates are integers. `opts.button` behaves exactly as in `click` (defaults to left). Returns `nil`.
+
+```luau
+host.input.drag(100, 100, 400, 300)
+host.input.drag(100, 100, 400, 300, { button = "middle" })
+```
+
 A drag is not a press, a warp and a release. On Windows the pointer is moved with injected move events rather than `SetCursorPos`, interpolated over sixteen steps with a few milliseconds between them, because two kinds of control tell the difference: one that watches for motion while its button is held sees injected events and can miss a warp entirely, and one that reads the *speed* of a drag answers an instantaneous jump with an enormous change. macOS posts a drag event between press and release, which it has always done. The pacing blocks the calling thread for about sixty milliseconds, which is only ever paid when somebody deliberately drags something.
 
 If a control needs a sustained press before it will react at all, use `mouseDown`/`mouseUp` with a timer instead — that is why those exist separately.
@@ -98,15 +107,6 @@ The pointer is moved with injected move events rather than `SetCursorPos`, inter
 ### macOS
 
 A single `Dragged` event is posted between press and release — no interpolation. That asymmetry is deliberate: a scrollbar needs one intermediate event and gets it. A control that only reacts to *continuous* movement would work on Windows and not here, and nothing has yet exercised the difference on a Mac.
-
-**Signature:** `host.input.drag(x1: number, y1: number, x2: number, y2: number, opts: { button?: "left" | "right" | "middle" }?) -> nil`
-
-All four coordinates are integers. `opts.button` behaves exactly as in `click` (defaults to left). Returns `nil`.
-
-```luau
-host.input.drag(100, 100, 400, 300)
-host.input.drag(100, 100, 400, 300, { button = "middle" })
-```
 
 ## host.input.scroll(x, y, amount) {#host-input-scroll}
 

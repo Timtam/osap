@@ -34,6 +34,8 @@
 //!
 //! The other form, corners in screen coordinates, is checked here too (`corners`), so that the
 //! one rule for both forms — what raises, what is answered — lives in one file with its tests.
+//! So is the arithmetic of the corners the older calls read loosely (`loose_corners`), and the
+//! point `host.screen.pixel` takes as fractions (`resolve_point`), which is this formula's start.
 //!
 //! Pure: no Lua, no OS. Borrowed by `crates/macos-check` so the Mac build type-checks it too.
 
@@ -143,6 +145,53 @@ pub(crate) fn resolve(client: Client, f: &Fraction) -> Result<ScreenRect, Unreso
         w: fit(b.x1 - b.x0)?,
         h: fit(b.y1 - b.y0)?,
     })
+}
+
+/// A point given as fractions of `client`: `host.screen.pixel`'s window form. Each coordinate is
+/// the region form's START formula, `clamp(floor(W * f), 0, W - 1)` from the client's origin, so
+/// the pixel `pixel` reads at `{ fx, fy }` is the top-left pixel a region starting at `fx, fy`
+/// reads, and it is never outside the client area. `fx` and `fy` are finite (the reader checks).
+pub(crate) fn resolve_point(client: Client, fx: f64, fy: f64) -> Result<(i32, i32), Unresolved> {
+    if client.w <= 0 || client.h <= 0 {
+        return Err(Unresolved::EmptyClient { w: client.w, h: client.h });
+    }
+    // `axis`'s start, literally: one f64 multiplication, floor, a saturating cast, the clamp.
+    let start = |len: i64, f: f64| (((len as f64) * f).floor() as i64).max(0).min(len - 1);
+    let fit = |origin: i64, off: i64| {
+        origin.checked_add(off).and_then(|v| i32::try_from(v).ok()).ok_or(Unresolved::OutOfRange)
+    };
+    Ok((fit(client.x, start(client.w, fx))?, fit(client.y, start(client.h, fy))?))
+}
+
+/// Corners as the calls that read them loosely have always taken them — the missing ones
+/// already defaulted by the reader — as a rectangle: `x2 - x1` wide and `y2 - y1` high, a
+/// negative size read as none. In 64 bits: a region from `x = -2e9` to `2e9` is wider than the
+/// coordinate range and is read as no rectangle, which is what the 32-bit subtraction this
+/// replaces gave in a release build (it wrapped negative) and what panicked in a debug one.
+pub(crate) fn loose_corners(x1: i32, y1: i32, x2: i32, y2: i32) -> ScreenRect {
+    let side = |a: i32, b: i32| {
+        let d = b as i64 - a as i64;
+        if (0..=i32::MAX as i64).contains(&d) {
+            d as i32
+        } else {
+            0
+        }
+    };
+    ScreenRect { x: x1, y: y1, w: side(x1, x2), h: side(y1, y2) }
+}
+
+/// The rectangle `(x, y, w, h)` that encloses every one of `regions`, for reading several with
+/// one capture — or `None` when there are none, or when that rectangle does not fit the 32-bit
+/// coordinate range (two regions two billion pixels apart), which the callers answer by reading
+/// each region on its own. Worked out in 64 bits, so it cannot overflow.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+pub(crate) fn bounding_box(regions: &[(i32, i32, i32, i32)]) -> Option<(i32, i32, i32, i32)> {
+    let x0 = regions.iter().map(|r| r.0 as i64).min()?;
+    let y0 = regions.iter().map(|r| r.1 as i64).min()?;
+    let x1 = regions.iter().map(|r| r.0 as i64 + r.2 as i64).max()?;
+    let y1 = regions.iter().map(|r| r.1 as i64 + r.3 as i64).max()?;
+    let fit = |v: i64| i32::try_from(v).ok();
+    Some((fit(x0)?, fit(y0)?, fit(x1 - x0)?, fit(y1 - y0)?))
 }
 
 /// A region as a module gives one, once `region_lua::read` has checked it: corners in screen
@@ -288,5 +337,50 @@ mod tests {
         assert_eq!(w.resolve(), Err(Unresolved::EmptyClient { w: 0, h: 0 }));
         let r = Region::Rect(ScreenRect { x: 1, y: 2, w: 3, h: 4 });
         assert_eq!(r.resolve(), Ok(ScreenRect { x: 1, y: 2, w: 3, h: 4 }));
+    }
+
+    /// `pixel`'s window form: the region's start formula, so a point and a region that start
+    /// at the same fractions start at the same pixel, and the point never leaves the client.
+    #[test]
+    fn a_point_resolves_like_a_regions_start() {
+        let c = Client { x: 100, y: 50, w: 1280, h: 1024 };
+        assert_eq!(resolve_point(c, 0.02, 0.33), Ok((100 + 25, 50 + 337)));
+        let f = frac(0.02, 0.33, 0.09, 0.86);
+        let r = resolve(c, &f).unwrap();
+        assert_eq!(resolve_point(c, f.x1, f.y1), Ok((r.x, r.y)), "the same pixel as the region's top-left");
+        // Clamped: the last column and row at 1.0 and beyond, the first below 0.
+        assert_eq!(resolve_point(c, 1.0, 1.5), Ok((100 + 1279, 50 + 1023)));
+        assert_eq!(resolve_point(c, -0.5, 0.0), Ok((100, 50)));
+        assert_eq!(resolve_point(c, 1e300, -1e300), Ok((100 + 1279, 50)));
+        // A minimised window has no pixel to read.
+        assert_eq!(resolve_point(Client { x: 0, y: 0, w: 0, h: 10 }, 0.5, 0.5), Err(Unresolved::EmptyClient { w: 0, h: 10 }));
+        assert_eq!(resolve_point(Client { x: i32::MAX as i64, y: 0, w: 10, h: 10 }, 0.5, 0.5), Err(Unresolved::OutOfRange));
+        // Negative origins, a monitor left of the primary.
+        assert_eq!(resolve_point(Client { x: -1920, y: -10, w: 800, h: 600 }, 0.5, 0.5), Ok((-1920 + 400, -10 + 300)));
+    }
+
+    /// The older calls' corners: exactly the subtraction they always did, in 64 bits.
+    #[test]
+    fn loose_corners_never_wrap() {
+        assert_eq!(loose_corners(10, 20, 110, 70), ScreenRect { x: 10, y: 20, w: 100, h: 50 });
+        assert_eq!(loose_corners(50, 50, 10, 10), ScreenRect { x: 50, y: 50, w: 0, h: 0 }, "turned around is empty");
+        // Wider than the coordinate range: no rectangle, as the release build's wrap gave, and
+        // no debug panic.
+        assert_eq!(loose_corners(-2_000_000_000, 0, 2_000_000_000, 10).w, 0);
+        assert_eq!(loose_corners(i32::MIN, i32::MIN, i32::MAX, i32::MAX), ScreenRect { x: i32::MIN, y: i32::MIN, w: 0, h: 0 });
+        assert_eq!(loose_corners(0, 0, i32::MAX, 1).w, i32::MAX);
+    }
+
+    /// The box several OCR regions are read with at once: what the 32-bit arithmetic it
+    /// replaces gave whenever that did not overflow, and no box — one capture each — where it
+    /// did (a debug build panicked there, on the event loop).
+    #[test]
+    fn a_bounding_box_that_does_not_fit_is_none() {
+        assert_eq!(bounding_box(&[(10, 20, 30, 40), (100, 5, 10, 10)]), Some((10, 5, 100, 55)));
+        assert_eq!(bounding_box(&[(-50, -60, 10, 10), (0, 0, 5, 5)]), Some((-50, -60, 55, 65)));
+        assert_eq!(bounding_box(&[]), None);
+        assert_eq!(bounding_box(&[(-2_000_000_000, 0, 10, 10), (2_000_000_000, 0, 10, 10)]), None);
+        assert_eq!(bounding_box(&[(0, i32::MIN, 1, 1), (0, i32::MAX - 1, 1, 1)]), None);
+        assert_eq!(bounding_box(&[(i32::MAX - 10, 0, 10, 1), (i32::MAX - 5, 0, 5, 1)]), Some((i32::MAX - 10, 0, 10, 1)));
     }
 }

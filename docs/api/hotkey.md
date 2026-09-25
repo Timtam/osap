@@ -10,6 +10,8 @@ A hotkey is claimed from the operating system and fires wherever the user is, wh
 
 A claim also outranks the application, which is a hazard as much as a feature: with Kontakt's file or snapshot menu open, Alt+P and Alt+M never reached the menu at all until the overlay learned to give its registrations back for as long as a menu is up. And the callback runs while the combination is still physically down, so a key or click synthesised inside it carries those modifiers unless you wait for them to be released.
 
+**Only the key that completes the combination is taken; its modifiers still reach the application in front.** They go down before that key, and nothing can know at that moment that a hotkey is coming, so the application sees every Ctrl, Alt, Shift or Win press of a hotkey as it would see any other. A game that uses Ctrl as a button acts on every Ctrl+… hotkey pressed while it is in front. Pick modifiers the application in front ignores, or a combination without the one it reacts to.
+
 The spec grammar is shared with `host.keys` and documented there. That includes the modifier roles: `Ctrl` is Command on a Mac and `Win` (`Meta`) is Control, so `"Ctrl+Shift+F9"` is Command+Shift+F9 there. It also includes the `"<modifier> tap"` form, which is a capture only and can never be held here (see below). A module that wants another combination on a Mac picks one with [`host.os.pick`](./os.md#host-os-pick). The key that puts the keyboard back into a plug-in window is Ctrl+Shift+Win+Alt+F6 on Windows and `Cmd+Shift+F6` on a Mac, because the four-modifier chord holds Control and Option on a Mac, which is VoiceOver's layer. [`host.keys.check`](./keys.md#host-keys-check) says before you register what the platform will do with a combination.
 
 A combination that is also captured with [`host.keys.capture`](./keys.md#host-keys-capture) is a platform question: see the Windows section of [`register`](#host-hotkey-register).
@@ -70,6 +72,29 @@ registration that would otherwise look like the newest claim on the combination.
 The practical consequence for an overlay: **do not announce a hotkey as available just
 because `register` returned an id.** It returns one either way.
 
+**A screen reader can take a chord before the host sees it.** JAWS and NVDA have keys of their
+own, and both can be extended with scripts and add-ons. When the screen reader acts on a chord
+first, the press never reaches the host — on Windows by neither of the two ways described
+below: `register` has returned an id, the callback never runs, and no dialog says so, because the host
+never learns of the press. Whether a press arrived is in the log — every hotkey press the host
+receives writes `[keys] hotkey <spec> arrived` before anything else happens — and the answer
+to one that never arrives is another combination. There is no list of screen-reader keys to
+check against, on purpose: it could never keep up with what users add
+([`host.keys.check`](./keys.md#host-keys-check) reports only what the platform itself does).
+
+**"Binding unavailable"** is the dialog for a combination the operating system refused because
+another program already holds it. The claim stays standing and is tried again whenever the host
+next works out who holds which key — at any module's next registration or release, and at
+every change to the enabled set — and each refusal is logged again (`[conflict] [<id>] hotkey
+'<spec>' rejected by OS: …`); the dialog comes once, until the module is disabled and enabled
+again. That program can be this application: a
+[headless run](../module-manager.md#headless-mode) started beside the windowed one registers its
+modules' keys as any other process would. A second windowed copy of this build or a later one
+cannot be the holder — starting the application again only brings the running copy's window
+forward (see [the module manager](../module-manager.md#starting-it-again-brings-the-window-forward)).
+A build from before that rule takes no lock and looks for none, so it can still run beside a
+newer copy and hold keys; quit it from its tray icon.
+
 ### Windows
 
 `RegisterHotKey`, with auto-repeat suppressed: the callback fires once per press, and holding the combination does not fire it again. Each role is the key of its name: `Ctrl` is Control and `Win` the Windows key.
@@ -109,7 +134,7 @@ A letter is the key that types it under the current keyboard layout — with Com
 
 **Signature:** `host.hotkey.unregister(id: number)` → `nil`
 
-Releases the OS hotkey and forgets the callback for the `id` returned by `register`. Unknown ids are ignored.
+Releases the OS hotkey and forgets the callback for the `id` returned by `register`. Unknown ids are ignored. The id is not checked against the calling module, so an id another module was given releases that module's hotkey; keep ids to yourself. `nil`, a boolean or a table as `id` raises, and a number with a fraction is cut to its whole part. The combination is then offered to the next standing claim on it at once, in the same call.
 
 ```luau
 host.hotkey.unregister(id)

@@ -97,7 +97,7 @@ Other control kinds, all origin-relative:
 
 Do not derive coordinates from another tool's numbers, and do not trust a value because *something* about it looks right. A cautionary tale from this repo: a set of toggles was calibrated by sampling colours, the colours matched, and the positions were taken to be right — they were 16 px off, on the caption row *under* the buttons. Three of five sampled near-black there and reported "off" forever, and the overlay had shipped like that.
 
-Start the app with `AUTOMATION_PLATFORM_CALIBRATE=1` and three keys arm on whichever overlay is active. They are written `Ctrl+Alt+Shift+…`: Ctrl+Alt+Shift on Windows, and Command+Option+Shift on a Mac (a spec's Ctrl is Command there), which is off Control+Option, VoiceOver's layer.
+Tick **Calibration keys in overlays** in the module manager's Application settings tab and reload the modules (or, for a launch without a window, start the app with `AUTOMATION_PLATFORM_CALIBRATE=1`), and three keys arm on whichever overlay is active. They are written `Ctrl+Alt+Shift+…`: Ctrl+Alt+Shift on Windows, and Command+Option+Shift on a Mac (a spec's Ctrl is Command there), which is off Control+Option, VoiceOver's layer.
 
 | Key | What it does |
 | --- | --- |

@@ -101,9 +101,21 @@ impl Error {
     }
 }
 
+/// `prism error 9: Internal backend error` — the code, and prism's own words for it.
+///
+/// The words are what a log reader needs: "prism error 9" sent somebody to the header to count
+/// enum members. They come from `prism_error_string`, a lookup in a static table that needs no
+/// context and accepts any value (one out of range is "Unknown error").
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "prism error {}", self.0)
+        // SAFETY: a pure lookup; the returned string is static and never freed.
+        let text = unsafe { sys::prism_error_string(self.0) };
+        if text.is_null() {
+            return write!(f, "prism error {}", self.0);
+        }
+        // SAFETY: non-null, NUL-terminated, and static (see above).
+        let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
+        write!(f, "prism error {}: {text}", self.0)
     }
 }
 

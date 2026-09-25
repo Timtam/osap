@@ -2568,8 +2568,8 @@ VM (`crates/host/src/capture_source.rs`); the engine on its own `dxgi-capture` t
 Application settings switch `desktop_duplication` (Windows, on by default); prewarm when a
 declaring module's window trigger fires; shutdown on exit. Design: the revised design of the
 2026-09-21 critique; API: `docs/api/screen.md#which-picture-a-read-sees`. Every verified
-plug-in overlay declares nothing and reads through GDI exactly as before. Nothing is committed
-until the maintainer confirms.
+plug-in overlay declares nothing and reads through GDI exactly as before. Committed in
+dee4164.
 
 **Measured so far** (2026-09-21, reference machine: GTX 1060 6GB, 1920x1080 at 60 Hz, one
 monitor; `cargo test -p host dxgi_ -- --ignored --nocapture`, a test build, not the app):
@@ -2598,24 +2598,60 @@ desktop GDI read. Duplication reads took about 33 ms at every size and GDI's ful
 ms, so the GPU was busy (M9). One run, not checked by looking at the screen: a lead for step 0
 and M4, not an answer.
 
-- [ ] **Step 0 — is OUR GDI path frozen for the game at all?** Nobody has measured it. His
-      finding came from his Python reader, whose GDI path may be a window DC, PrintWindow or
-      mss; ours is a screen-DC BitBlt of the composed image. Tool first, no sight needed: a
-      probe module that logs `host.screen.profile` means of the game window every 250 ms while
-      the title screen animates (changing = live, constant = frozen), plus the PresentMon
-      present mode. If our GDI path is live, duplication is a speed feature and the
-      `fallback = "none"` mode loses its reason.
+**Measured with the game** (2026-09-25, by the external developer on his machine, build
+c724ab7 plus `tools/capture-liveness-dxgi`, an uncommitted DXGI variant of
+`tools/capture-liveness` — see the open item below; full screen 1280x1024, AMD Radeon
+integrated graphics): through desktop duplication the game read LIVE — 40 of 40 and 39 of 40
+reads gave different pictures, where the standard GDI path had given 40 identical ones
+("Frozen"). Each 1280x1024 read took 6-7 ms, the slowest 11 ms — a whole
+`host.screen.profile` call over the client area (`axes = "columns"`), column reduction
+included, against about 23 ms for the same call through GDI; how it splits between capture
+and reduction was not measured; the Direct3D device took 32 ms to create, `DuplicateOutput`
+0 ms, the first picture came 4-16 ms after opening; after 30 s without a read the duplication
+was released and the next read reopened it without trouble. The hook key (Ctrl+Shift+F7)
+arrived with the game in front. So desktop duplication is the working source for such games;
+`docs/api/screen.md` and `docs/screen-frame-sharing-design.md` say so.
+
+- [x] **Step 0 — is OUR GDI path frozen for the game at all?** Yes. Measured 2026-09-21 on
+      the developer's machine with `tools/capture-liveness` (its fourth version: forty
+      `host.screen.profile` reads of the window in front, a quarter of a second apart, through
+      the standard GDI path): the game full screen at 1280x1024, 40 of 40 reads the same
+      picture ("Frozen") while the game was moving, about 23 ms per read. His own finding had
+      come from his C# reader's GDI capture; ours is a screen-DC BitBlt of the composed image
+      and reads the game frozen as well. So duplication is the fix, not a speed feature, and
+      `fallback = "none"` keeps its reason; M4 measured it live. The present mode
+      (PresentMon) was not taken; it stays open as M4b.
 - [ ] **M1** A read's cost inside the app: the pump round trip, small regions and full screen,
-      with the observation line's duplication clause. (Test-build figures above.)
+      with the observation line's duplication clause. (Test-build figures above.) In the
+      application (2026-09-25, the developer's machine, integrated AMD Radeon, the
+      fullscreen game running): a whole `profile` call over 1280x1024 through duplication
+      (`axes = "columns"`, column reduction included) 6-7 ms, the slowest 11 ms; the
+      capture's share was not measured — the observation line's duplication clause of such a
+      run would show it. Small regions in the application are still to be taken.
 - [ ] **M2** Device creation and `DuplicateOutput` inside the app, the memory the driver adds,
       and above all whether the first picture after opening arrives at once and is complete.
       Explain the 3.5-4.3 s device creations above — cold driver, the new executable, or a
-      debug build — and whether the app sees them.
+      debug build — and whether the app sees them. In the application on the developer's
+      machine (2026-09-25, M4, AMD Radeon integrated GPU): device 32 ms, `DuplicateOutput`
+      0 ms, the first picture 4-16 ms after opening, with the game moving; no multi-second
+      creation there. Completeness was not checked by eye. The memory the driver adds, the
+      3.5-4.3 s cases and a static screen (M16) are still open.
 - [ ] **M3** The same RGB bytes from both paths on Kontakt, Melodyne and the desktop, so
       existing templates would keep matching (temporarily add `[screen] capture =
       "duplication"` to their manifests; read the first-read comparison line).
-- [ ] **M4** With our implementation, the game is frozen through GDI and live through
-      duplication; its present mode (PresentMon) with and without a duplication held — does
+- [x] **M4** With our implementation, the game is frozen through GDI (step 0) and **live
+      through duplication** — measured 2026-09-25 on the developer's machine with build
+      c724ab7 and a duplication variant of `capture-liveness` (`[screen] capture =
+      "duplication"`, `fallback = "none"`, so a read duplication does not answer counts as
+      failed instead of going through GDI): in two runs 40 of 40 and 39 of 40 reads gave
+      different pictures ("Live"), where GDI had given 40 identical. The timings — each read,
+      the device, the first picture, the reopening after 30 s idle — are in the record above.
+      Ctrl+Shift+F7, taken through the keyboard hook, arrived
+      while the game was in front; whether the tool's registered Ctrl+Shift+F8 was pressed is
+      not reported (a registered Ctrl+Shift+F11 arrived on 2026-09-21). Duplication is the
+      working source for this game; the gate before handing the developer the build for his
+      menu reader is passed.
+- [ ] **M4b** The game's present mode (PresentMon) with and without a duplication held: does
       holding one force composition or add latency?
 - [ ] **M5** Recovery after the game's fullscreen toggle, a resolution change, UAC, Win+L,
       sleep and resume, and a hot-plugged monitor; what the fallback returns meanwhile.
@@ -2628,15 +2664,21 @@ and M4, not an answer.
       line that names the remedy (Graphics settings, the application, Power saving).
 - [ ] **M9** `Map` latency with a game holding the GPU at 100 %: are the pump's 60 ms, the
       worker's 250 ms and the 60 ms-per-300 ms budget (charged only beyond 5 ms per answered
-      read) right? The chance run above saw 33 ms per read.
+      read) right? The chance run above saw 33 ms per read. With the game of M4 in front on
+      an integrated AMD Radeon: 6-7 ms per 1280x1024 read (a whole `host.screen.profile` call
+      over the client area), the slowest 11 ms, well inside the pump's 60 ms. Whether that
+      game holds the GPU at 100 % is not known: its GPU load was not recorded.
 - [ ] **M10** Several monitors, negative coordinates, mixed DPI: coordinates and pixels match
       GDI; a region across two outputs is stitched correctly (the code path is unit-tested,
       never run on two monitors).
 - [ ] **M11** The cost of reopening after the 30 s idle release (the device is kept), and
-      after the device's own release at 5 minutes without a read.
+      after the device's own release at 5 minutes without a read. Seen in the application
+      (2026-09-25, M4): after 30 s without a read the duplication was released and the next
+      read reopened it without trouble; what the reopening cost was not reported on its own.
+      The device's own release at 5 minutes is still unseen.
 - [ ] **M12** Whether duplication works at all on a GitHub Windows runner (Basic Display
       Adapter) — the CI live-test step prints it.
-- [ ] **M13** With OBS display capture and his Python reader running, `DuplicateOutput` gets
+- [ ] **M13** With OBS display capture and his C# reader running, `DuplicateOutput` gets
       `NOT_CURRENTLY_AVAILABLE` and the fallback is clean.
 - [ ] **M14** `WAIT_TIMEOUT` never hides a changed screen: a game whose frames bypass
       composition (independent flip, MPO) would be frozen for duplication too, which is the
@@ -2663,9 +2705,13 @@ and M4, not an answer.
 - [ ] `tools/inspect` OCRs through GDI whatever the module being inspected declares, so an
       author inspecting a game that GDI reads frozen reads the frozen picture. Say so in its
       output, or let it take the source of the module it inspects.
+- [ ] Commit `tools/capture-liveness-dxgi` — the DXGI variant of `tools/capture-liveness` that
+      the 2026-09-25 measurement was made with, still untracked in the main checkout — or drop
+      it. It went to the developer on its own, because `package.ps1` ships only `modules/`.
 - [ ] Later (design step 9): `Req::WaitChange` — a dirty-rectangle watch for short-lived help
       bubbles and for announcing a toggle when it actually repaints; Windows.Graphics.Capture
-      per window if M4/M14 show duplication misses the game's frames; rotated monitors; the
+      per window if M14, or another game, shows duplication missing a game's frames (M4: this
+      game reads live); rotated monitors; the
       phase-2 question (duplication by default for every module), which needs M6 and a
       decision about holding one of a session's four duplication slots all day.
 - [ ] macOS: `[screen]` is accepted and ignored there. Whether ScreenCaptureKit (or the
@@ -2749,7 +2795,7 @@ Everything below needs a controller in a hand.
       keystrokes, and DS4Windows' exclusive mode hiding the device, both change what we see.
 - [ ] **The pygame 2 `joystick` column** in `docs/api/gamepad.md` (buttons 0–10, hat 0, axes
       0–5 for an Xbox 360 pad) is copied from pygame's own documentation, not from a run with
-      pygame and a pad; the GameMenuReader port is where it gets checked.
+      pygame and a pad; the game-menu reader port is where it gets checked.
 - [ ] **macOS, on the next Mac session, with a pad**: background delivery while an emulator is
       frontmost and we are an accessory app; the log line "background monitoring was …,
       requested, and macOS now reports …" (and that setting it on the first connect does not
@@ -2761,7 +2807,10 @@ Everything below needs a controller in a hand.
       of its own, so ours comes on top; what `buttonHome` does; the labels and positions per
       family — above all whether a Nintendo pad's `buttonA` is the bottom button; the Elite
       paddles' order (`paddleButton1…4` mapped to P1, P2, P3, P4 = right_paddle1,
-      right_paddle2, left_paddle1, left_paddle2); and `age` with the App Nap activity held.
+      right_paddle2, left_paddle1, left_paddle2); `age` with the App Nap activity held; and
+      what the `beginActivityWithOptions` call costs the event loop in the `on` that brings
+      the first `down`/`up`/`axis`/`chord` listener (`docs/api/gamepad.md` says only that it
+      is made there).
 - [ ] **Not built this round** (design steps 5, 7, 8): the Raw Input HID source for
       PlayStation, Nintendo and generic pads and its `gamepad_hid` switch in
       `appcfg::SWITCHES` — with the corrected precedent: SDL's RAWINPUT driver keeps only
@@ -2769,11 +2818,54 @@ Everything below needs a controller in a hand.
       `RIDEV_INPUTSINK` has no SDL backing and needs its own spike with a DS4 or DualSense,
       HID `ReadFile` (non-exclusive, never writing) being the fallback before SDL3. Then
       `O:onGamepad` in the overlay runtime (register on activation, release on deactivation).
-      Later: chords (left out of v1 on purpose — the game gets the chord too, and a hold is
-      `down` + `host.timer.after` + `state()`), an SDL `gamecontrollerdb.txt` import, an
-      IOHIDManager source on macOS for pads GameController does not list, and a capture
-      triggered by DXGI's next frame after a press. (The macOS CI job now fails on "gamepad
-      watcher failed" like the Windows probe step.)
+      Later: an SDL `gamecontrollerdb.txt` import, an IOHIDManager source on macOS for pads
+      GameController does not list, a capture triggered by DXGI's next frame after a press,
+      and waking the manager window's pump at once on a press instead of at its next 15 ms
+      tick — only if the probe's `age` lines call for it. (The macOS CI job now fails on
+      "gamepad watcher failed" like the Windows probe step.) Chords, once on this list, are
+      built — see the next item.
+- [x] **Button combinations as triggers** (2026-09-25): `host.gamepad.on("chord", cb,
+      { buttons = { … }, pad?, maxAge?, exact?, holdMs? })`, promised to the game-module
+      port and decided with the hotkey block ("gamepad chords as triggers for game
+      modules"); documented under "Button combinations" in `docs/api/gamepad.md`. The rule
+      is pure code in `backend/gamepad/chord.rs` (borrowed into `crates/macos-check` with the
+      rest of the backend), the listener side in `gamepad_api.rs`. It fires at a press of a
+      member after which the whole set is held on one pad, judged by the held set every
+      button event now carries (`PadEvent::held`) — so a button already down at connect, at
+      un-park or before the listener existed counts. A member cannot go down again without
+      going up, so that fires once per holding by itself; the one repeat left, two members
+      found down in one poll, is stopped by the report number the events share
+      (`PadEvent::report`). No "wait for the release" flag: a release the parked Windows
+      source never reported would have left it set and the next completion silent. A
+      broadcast like every other pad event, not the design's earliest-registration-wins
+      claim: nothing is consumed, the `down`s of the same presses are delivered as well, and
+      one module's combination must not silence another's. `exact` counts derived buttons;
+      `holdMs` is fired by the tick (`fire_pad_tick`) against the hub's state then, in the
+      interactive OCR lane like `on_gamepad`. Review round (2026-09-25): the tick leaves a
+      hold alone while a release of its set is still in the hub's queue (`Hub::pad_now`), so
+      a member let go and pressed again during a slow callback no longer fires the broken
+      hold; a member let go after `holdMs` but before the tick holds the hold out and it
+      fires on that tick instead of being dropped; disabling a module cancels its holds at
+      once (`refresh_gamepad`), not on the next tick; two directions of one stick axis in a
+      set raise, and so does `maxAge` below 1 (it would drop every press); `maxAge` and
+      `holdMs` are documented as whole milliseconds capped at 2^32-1. The probe logs
+      left_shoulder + right_shoulder.
+      Unit-tested, and started headless on a padless machine (2026-09-25): a chord listener
+      registers, every raise case raises with its message, `off` answers true then false,
+      and a chord listener alone keeps the headless loop running. No pad has pressed one;
+      the live checks are the next item.
+- [ ] **Combinations with a real pad** (Windows first, then the next Mac session): the
+      probe's `chord left_shoulder+right_shoulder` line comes once per holding, beside the
+      two `down` lines and with a `time` equal to the second one's; pressed within one 4 ms
+      poll it comes with the first `down` in name order; a resting stick or trigger never
+      blocks an `exact` combination (stick drift past 0.5 would — check how often a real
+      stick gets there); a `holdMs` combination arrives about `holdMs` + one tick after the
+      completing press, not at all when a member is let go early, and once (after its `up`)
+      when a member is let go just after `holdMs`; whether the probe's `age` lines ever show
+      the 100 ms+ stall during a hold that the queue check guards against; a combination still
+      fires after its module was disabled and enabled again with the set let go meanwhile
+      (the pad thread parks while nobody listens); on macOS the same, and whether
+      GameController reports two buttons pressed together in one change or two.
 - [x] **A comment to correct** (design side finding): `backend/windows.rs` said the low-level
       keyboard hook "runs on its own thread" while it ran on the pump thread, which was the only
       reason its thread-local queues worked. True now (2026-09-22): the hook has a thread of
@@ -2841,7 +2933,7 @@ Found while documenting — the behaviour is written down now, and wants fixing:
       check, refuses `\` and `:` as text on every platform, and uses the cleaned path as the
       cache key. Unit-tested (`include_tests`) on Windows; the same function runs on macOS, where
       the tests have not run.
-- [ ] **A `"<modifier> tap"` hotkey — and `F21`–`F24` on macOS — is reported as held by
+- [x] **A `"<modifier> tap"` hotkey — and `F21`–`F24` on macOS — is reported as held by
       "another application".** `host.hotkey.register` returns an id because `key_spec` parses
       the spec; the platform refuses it later in `refresh_hotkeys`, `report_os_conflict`'s
       dialog blames another application, and the claim is retried on every change to the
@@ -2851,6 +2943,12 @@ Found while documenting — the behaviour is written down now, and wants fixing:
       in its error, and the log has it, but the dialog blames another application. That one
       can become holdable after a layout switch, so it wants a reason of its own in the
       dialog (the backend's error classified, not matched as text) rather than a raise.
+  - Fixed (2026-09-22, f67628d): `host.hotkey.register` raises for a tap, for a key the
+      platform has no code for (F21–F24 on macOS) and for a chord the system keeps, before
+      anything is claimed (`backend::hotkey_claim_for`); and a letter no key of the current
+      macOS layout types is parked instead of refused (`backend/macos/hotkey.rs`, `register`)
+      and registered as soon as a layout that types it is selected, so neither reaches the
+      dialog. The macOS half has not run on a Mac: see "Verify on a Mac (letters by layout)".
 - [ ] **A capture whose hook or tap could not be installed stays registered.**
       `host.keys.capture` pushes its entry and refreshes the captured set before
       `watch_keys()`; when that raises (macOS without the Accessibility grant), the token is
@@ -3185,7 +3283,11 @@ update flows of `crates/host/src/gui.rs`.
 ## Timers, JSON encode and the window already in front (2026-09-22)
 
 Step 3, group A of the API work (the revised designs (a), (b) and (c) of the small-API
-critique). Built and unit-tested; nothing of it has run in the real application yet.
+critique). Built and unit-tested, and exercised by headless runs of the application
+(2026-09-22): `encode` and its errors, `cancel` (twice, with `nil`, from inside its own poll
+and within the same tick), `initial` reporting the window really in front, a late
+registration's report and the input epoch turning with it. Nothing of it has run with a
+window of the application open, or in a shipped module.
 
 - [x] **`host.timer.cancel(token)`**, with `after` and `every` returning the token
       (`crates/host/src/timers.rs`). Only the owning module's timers — the VM's owner, as
@@ -3379,6 +3481,9 @@ switch off" and "Keys"; the cross-platform critique's first issue).
       log (captured keys dead, "arrived through RegisterHotKey" lines in front of ordinary
       windows).
 - [ ] **Live (Windows), with NVDA:**
+  - Heard with NVDA before f67628d was committed: overlay navigation, NVDA's own keys,
+      Alt+letter hotkeys, the F5 and F6 keys and a second start. Which of the points below
+      that covered in detail was not written down, so they stay open;
   - an overlay's Alt+letter control hotkey (Kontakt's Alt+V, Alt+M) fires once, and
       REAPER's menu bar does not open when Alt comes up — the masking key's whole job;
       that NVDA says nothing for the masking key, with and without "speak command keys";
@@ -3405,9 +3510,11 @@ switch off" and "Keys"; the cross-platform critique's first issue).
       all three back;
   - with FilterKeys on and a two-second repeat delay, holding a hotkey fires it once, and
       the log's "counts as auto-repeat" line names about 2200 ms;
-  - WinUAE in front: a registered hotkey fires. Whether it helps in the developer's game
-      (the developer's game, a native remake, not WinUAE) is unmeasured; capture-liveness logs
-      which way a press came.
+  - WinUAE in front: a registered hotkey fires. In the developer's game (a native remake,
+      not WinUAE) both ways arrive while it is in front: a registered hotkey
+      (Ctrl+Shift+F11, 2026-09-21) and a key taken through the keyboard hook — the key
+      `tools/capture-liveness-dxgi` captures through it (`host.keys.capture`, Ctrl+Shift+F7,
+      2026-09-25). A registered hotkey matched in the hook was not what that run measured.
 - [x] **macOS: letters follow the keyboard layout.** `backend/macos/layout.rs` reads the
       selected layout (`TISCopyCurrentKeyboardLayoutInputSource`, the ASCII-capable one when
       it types fewer letters, `UCKeyTranslate` over 48 keys) at start and after
@@ -3578,8 +3685,12 @@ the `Mod`/`Global` tokens of the same morning.
 Step 4 of the API work: `host.screen.predicate`, `cells`, `matchCells` and `matchCellsAsync`,
 and the window-relative Region form, built to reproduce an outside game-menu reader's signatures
 bit for bit. The rules are in `crates/host/src/cells.rs` and `region.rs`, the bindings in
-`lib.rs`, the worker job in `image_search.rs`. Built and unit-tested; nothing of it has run in
-the real application yet.
+`lib.rs`, the worker job in `image_search.rs`. Built and unit-tested, and exercised by headless
+runs of the application (2026-09-22) against the desktop: the predicate's canonical form and
+its errors, the same region's cells twice with equal hex, `matchCells` answering index 1 at
+similarity 1.0, a 5x20 region giving 720 hex digits, a window region resolving, an empty
+client area answered `nil, reason`, and `matchCellsAsync` answering. Nothing of it has run
+with a window of the application open, or against a game.
 
 - [x] **`region.rs`:** `{ window = w, fraction = { x1, y1, x2, y2 } }` resolved from the window
       table's `client` with the reader's own formula in f64 (floor for starts, ceil for ends,
@@ -3636,14 +3747,41 @@ the real application yet.
       context changes a known sRGB patch (it would move every cell near a colour test's edges).
       The client rectangle a window region resolves against is derived there, not read, and has
       not been checked against a game window either.
-- [ ] **The other calls should take the window Region form too**, through `region_lua::read`
-      and `Region::resolve` (`host.ocr.read` does since the merge with the OCR step):
-      `host.screen.profile`, `imageSearch`, `imageSearchAsync`, `imageSearchEach` and its
-      entries' `within`, `imageSearchAll`, `imageSearchMulti`, `save`, `saveMarked`,
-      `template{ capture = ... }`, `host.ocr.recognize` and each `recognizeMany` region, and
-      `pixel` as a point form (`{ window, fraction = { x, y } }`). They read corners loosely
-      today; adopting the form means deciding per call whether their corners become strict too,
-      which changes what existing modules get.
+- [x] **The other calls take the window Region form too** (2026-09-25): `profile`,
+      `imageSearch`, `imageSearchAsync`, `imageSearchEach` and its entries' `within`,
+      `imageSearchAll`, `imageSearchMulti`, `save`, `saveMarked`, `template{ capture = ... }`,
+      `host.ocr.recognize` and each `recognizeMany` region read it through the one reader
+      (`region_lua::read_loose` hands the window form to `region_lua::read`), and `pixel` takes
+      a point `{ window, fraction = { x, y } }` (the region's start formula,
+      `region::resolve_point`). Decided per call: their corners stay loose, exactly as every
+      module in `modules/` and `tools/` passes them, but a table that is neither form (`{}`, a
+      `{ x, y, w, h }` bounds table) and a region that is not a table now raise, naming the
+      call and the argument, where they read the whole primary screen without a word. A
+      minimised window is answered in each call's failure shape. Unit-tested (`region_lua`,
+      `region`, `ocr_wiring_tests`, the template tests); the bindings' wiring is held by
+      `every_region_goes_through_the_one_reader`.
+- [x] **Failure reasons** (2026-09-25): a read that gets no picture says why — `pixel`,
+      `profile`, `imageSearch` and `template` add a reason after their `nil`, `save` and
+      `saveMarked` after `false`, `imageSearchMulti` as a third value, `imageSearchAll` after
+      its empty list, and the async callbacks as a second argument; the cells calls carry the
+      real cause instead of one fixed text. The words are `Fallback::describe`'s and the
+      standard path's, listed in `screen.md` "Failure reasons" and held to it by
+      `every_reason_a_module_is_told_is_listed` and `the_hosts_own_reasons_are_listed`. A
+      successful read still returns exactly one value.
+- [x] **`[screen]` unknown keys** (2026-09-25): a key the host does not know (`captur`) is
+      carried by the manifest reader and logged in one line naming it and the module; the
+      manifest still loads. A value of the wrong type fails the manifest, as before.
+- [ ] **Live, not yet seen:** a declaring module under `fallback = "none"` hearing the reasons
+      from `pixel`, `profile` and `imageSearchEach` (switch the setting off: every read must say
+      `it is switched off in Application settings`); the `[screen]` unknown-key line in the
+      log of a real module; `pixel`, `profile`, `save` and `imageSearchEach` with a window
+      region of a real window, and a minimised one; that a `fallback = "none"` module's first
+      synchronous read in an `onTrigger` callback (`{ initial = true }` included) answers
+      `it is still opening` while the prewarm's opening runs, and its first `matchCellsAsync`
+      or `imageSearchAsync` waits the opening out (`screen.md`, "Nothing waits for that
+      opening"); macOS: none of the window forms of these calls has run on a Mac (the
+      arithmetic is shared and unit-tested; the client rectangle there is derived, see the
+      macOS item above).
 - [ ] **Snapshots:** a `snapshot` key for the cells calls once snapshots exist. A region not
       wholly inside the snapshot must answer `nil, "the region is not inside the snapshot"`
       rather than be clipped, which would change every block.
@@ -3758,12 +3896,212 @@ What only a person, a Mac or a measurement can settle:
       code 0 in 1.5–4 s. The `read` build's own headless runs had all been stopped by PID, so
       they never reached this. Check whether the tray's Quit meets the same on this machine, and
       whether headless should open a voice at all when nothing is spoken.
-- [ ] **The older calls' region arithmetic can overflow** (found beside the `read` review, older
-      than it): `read_region` and `recognizeMany` in `lib.rs` compute `(x2 - x1).max(0)` in
-      `i32`, so one region from x = -2e9 to 2e9 panics in a debug build (on the event loop) and
-      becomes an empty region in a release one; the macOS `recognize_regions` adds and subtracts
-      the edges of several regions in `i32` the same way. `read` works in 64 bits (`region.rs`
-      `corners`, `Rect::union`); do the same there.
+- [x] **The older calls' region arithmetic can overflow** (found beside the `read` review, older
+      than it; fixed 2026-09-25): `read_region` and `recognizeMany` in `lib.rs` computed
+      `(x2 - x1).max(0)` in `i32`, so one region from x = -2e9 to 2e9 panicked in a debug build
+      (on the event loop) and became an empty region in a release one; the bounding box that
+      `ocr_regions` (Windows, `backend/windows.rs`) and `recognize_regions` (macOS) read several
+      regions with added and subtracted their edges in `i32` the same way, so two regions at
+      x = -2e9 and x = 2e9 panicked too. Now in 64 bits: `region::loose_corners` for the corners
+      (`read_region` is gone), keeping what the release build gave, and `region::bounding_box`
+      for the box, which answers a box that does not fit the coordinate range by reading each
+      region on its own. Unit-tested (`loose_corners_never_wrap`,
+      `a_bounding_box_that_does_not_fit_is_none`); the macOS half is type-checked only.
+
+## Speech, Luau sources and triggers, from the proof-of-concept audit (2026-09-25)
+
+Found while checking the documentation against what an external developer needs for a shared
+game runtime; built and unit-tested. The byte-order mark, the JSON duplicate-key rule and
+`onTrigger` ran in a headless run of the application (2026-09-25); the speech changes have not
+run with a screen reader.
+
+- [x] **`host.speech.output(text, {})` queued instead of interrupting.** The binding read
+      `t.get::<bool>("interrupt").unwrap_or(true)`, and mlua reads `nil` as `false`, so the
+      default applied only when `opts` itself was left out: `{}` and `{ interrupt = nil }`
+      queued, and a runtime passing `{ interrupt = pack.interrupt }` would lag behind fast
+      navigation. Now `opt_bool` in `lib.rs`: absent or `nil` is `true`, `true`/`false` are
+      themselves, anything else raises (`host.speech.output: interrupt is true or false, not a
+      number`). `host.keys.check`'s `layout` is read the same strict way — `{ layout = "no" }`
+      used to count as `true` without a word. Tests: `source_and_option_tests`
+      (`speech_interrupts_unless_told_not_to`, `a_boolean_option_is_strict`). Every call in
+      `modules/` and `tools/` passes a literal or a boolean expression, so none changes.
+- [x] **A UTF-8 byte-order mark made a `.luau` file fail to load** (Luau: "Unicode character
+      U+feff"); .NET's `Encoding.UTF8` and PowerShell 5's `Out-File -Encoding utf8` write one.
+      `read_luau_source` in `lib.rs` drops one leading mark for a module's entry file, a code
+      dependency's entry and every `host.include`; a second mark, or one further in, is left for
+      Luau. `module.toml` (the TOML parser) and `host.json.decode` already skipped one; both
+      are pinned by tests now (`a_manifest_with_a_byte_order_mark_loads` in module-manifest).
+      `host.resource.read` still returns the file as it is, mark included — documented.
+- [x] **`host.window.onTrigger(matcher, cb)` raised "attempt to index function value"**, and a
+      callback that was not a function was stored and failed only when the window came
+      forward. The prelude now takes the two-argument form, and raises at the caller's line for
+      a callback that is not a function, a matcher or `opts` that is neither a table nor `nil`;
+      `onFocus` checks its callback too. After review, `onTrigger` also raises for a matcher key
+      whose wrong type changed its meaning: an `app`, `os` or platform block that is not a
+      table, an `app` inside a platform block that is not a table, a `where` that is not a
+      function — `{ app = "game.exe" }` used to fire for every window. `find`, `findAll` and
+      `test` do not check (documented in window.md, Matchers). Tests:
+      `initial_trigger_tests::the_options_can_be_left_out`, `a_bad_registration_raises_at_once`,
+      `test_takes_a_misshapen_matcher_as_window_md_says`.
+- [x] **JAWS refused a line with prism error 9 (INTERNAL) and OneCore spoke for about 90 s
+      while JAWS kept running**, although `speech.md` promised the screen reader back "within
+      three seconds of coming back", and the log said "Usually this means the screen reader was
+      closed". What prism offers to tell the two cases apart is `IS_SUPPORTED_AT_RUNTIME`, which
+      creates a backend and asks without initialising it (JAWS: its `JFWUI2` window and the
+      class factory; NVDA: its RPC endpoint). Built (`speech/prism.rs`): a look that opens
+      nothing asks every reader that; while one is running the searcher keeps looking every
+      3 s for as long as it takes, and only when none is does it slow to 30 s after a minute
+      (`next_look`, `Search`, pure and tested). The refusal line names the reader, prism's error
+      in prism's own words (`prism error 9: Internal backend error`, from `prism_error_string`),
+      which call it was (speech alone, or speech and braille in one `output`), that the line and
+      the ones after it go to the plain voice, and the schedule; the stall line says the same.
+      The searcher logs its first finding (`JAWS is running but would not open (…)` or `no
+      screen reader is running`), each change, the pace dropping, and `back to …`. Also: the
+      same searcher runs when no screen reader was running at start, so one started later is
+      used without a restart; it stops at its next look once "Speak through the screen reader"
+      is unticked (the design doc said it did, and it did not) and a new one goes out when the
+      setting is on again (`searcher_due`, tested); lines a replaced worker still hands back are
+      no longer dropped with its channel (`leftovers`). The look's cost is estimated (about
+      twice the measured 24 ms sweep), not measured. `docs/api/speech.md` states the schedule.
+- [x] **Review of the recovery (2026-09-25).** Four faults found and fixed in
+      `speech/prism.rs` and `speech/mod.rs`:
+  - A searcher that found a reader which then refused a line before the event loop had seen
+    the path healthy (a line handed over in the same pass — the flapping error-9 state) left
+    the path with the plain voice for the rest of the session: `searcher_due` took "a
+    searcher was sent" for "it is still looking". It now counts one as looking only while
+    it has no reader in hand; a searcher stores `healthy` before releasing `reader`, and
+    `retry_if_due` reads `reader` (Acquire) first.
+  - Ticking "Speak through the screen reader" off and on with nothing said in between
+    looked only at the sleeping searcher's next look, up to 30 s later, although the page, the
+    log and the design doc said "at once": only `Speech::say` watched the tick. `pump` now
+    watches it on every pass. A replaced searcher asks before every look whether anybody is
+    still listening, so it neither looks again nor logs a find.
+  - A JAWS running and refusing at start-up was logged as "no screen reader is running", and
+    on opening as "JAWS was started after the application". The start-up line now says
+    `no screen reader would open`, the search's first look is always logged, and its find
+    reads `JAWS is open now; speaking through it from now on`.
+  - The strict `interrupt`/`layout` reads, the two byte-order-mark reads in `populate_vm`,
+    the searcher's stop, the read order in `retry_if_due` and the tick in `pump` were not
+    pinned where they are wired: `option_and_speech_wiring_tests` in `lib.rs`.
+- [x] **Decided (2026-09-25): the 3-second pace is bounded.** Only a reader whose runtime
+      check looks at the reader itself (NVDA, JAWS, ZoomText, PC-Talker, Sense Reader) keeps
+      it, for five minutes from the look that first saw it running and refusing, then every
+      10 s (about 0.5% of one core, estimated). ZDSR and Boy PC Reader, whose "running" is a
+      process-list match that includes their background services, get the pace of a search
+      that found none: 3 s for the first minute, then 30 s. `speech/prism.rs` (`next_look`,
+      `CHECKED_BY_THE_READER`, `Search::news_since`) with tests; `speech.md` and
+      `prism-speech-design.md` say the same. The elevated-JAWS case stays unverified.
+- [ ] **Live, Windows with JAWS: the recovery.** Only a real JAWS can say whether a JAWS in that
+      state counts as running (window and class factory present) — if it does, the log shows
+      `JAWS is running but would not open (…)` and it is used within about 3 s of opening
+      again; if not, the log shows `no screen reader is running` and the 30-second pace after a
+      minute applies, which would be worth knowing — and which error opening it gave meanwhile.
+      Also: whether `output`'s braille half (`BrailleString` through `RunFunction`) is what
+      failed; JAWS answers INTERNAL for either half, and the log cannot tell them apart.
+      Two more that only a machine with JAWS installed can show: the runtime check
+      (`CoGetClassObject` for the JAWS API class, then `FindWindow(JFWUI2)`) now runs on every
+      look that opens nothing, and again in each new prism context after a searcher is
+      replaced; prism-sys's cross-context safety test has only run where that class is not
+      registered, so this path, of the same kind as the earlier OneCore crash, has never run.
+      And a JAWS that opens but refuses every line makes every line start a new searcher (about
+      60 ms to open prism), writes `JAWS refused a line` and `back to JAWS` per line, and when
+      only braille failed says each line twice; the search no longer ends stuck on it, but
+      whether it happens is for this test.
+- [ ] **Consider: speech and braille as two calls.** prism's NVDA, JAWS and ZDSR `output` is
+      speak then braille (PC-Talker's too while a braille display is connected), and a failure
+      of either demotes the whole screen-reader path — so a braille
+      failure costs the user their screen reader's voice as well, and the line is said twice.
+      Calling `speak` and then `prism_backend_braille` ourselves would keep the voice when only
+      braille fails and let the log name the half. A design change to the one-strike rule;
+      decide before building.
+- [ ] **Live, Windows with NVDA: nothing changed for the ordinary path.** Start with NVDA
+      running, quit and restart NVDA: `back to NVDA` within about 3 s, as before; start the
+      application without a screen reader and start NVDA afterwards: `no screen reader would
+      open`, then `no screen reader is running`, then `NVDA is open now` within the first
+      minute's 3-second pace. Untick and tick "Speak through the screen reader" while it
+      searches, with nothing said in between: the log says it stopped (when a look fell between
+      the two), and ticking looks at once (`trying the screen reader again`).
+
+## The next steps of the API work: snapshots, own input, listening keys (2026-09-22)
+
+Steps 1 to 5 of the API work are built — the sections above, from "Desktop duplication" to
+"Text recognition off the event loop". What the maintainer decided for after them (2026-09-21),
+in this order, and what is not built:
+
+- [ ] **Step 6 — snapshots with change waits.** Planned, next. One captured frame, with the
+      time it was taken, that `pixel`, the cells calls, the image searches and `host.ocr.read`
+      can all read, so that a state detected and the text read after it come from one picture;
+      `host.screen.pixels` for many points of one frame; a `snapshot` key on the cells calls
+      ("Snapshots" under grid cells above); a snapshot taken a set time after an input, for a
+      help bubble that is on screen only for a moment (a game-menu reader reads 30, 80, 150 and
+      250 ms after a controller press, today with `host.timer.after` and one read each); and a
+      wait until a region changes, which for a module that is not an overlay does not exist
+      today (`O:watch` is the overlay's). Snapshots are taken on the one `screen-capture`
+      thread `host.ocr.read` already uses (decided: one capture thread for OCR and snapshots,
+      recognition on its own). Takes up "Screen snapshots" in the porting review, "Snapshots"
+      under grid cells and the snapshot part of "Not built yet from the design" under text
+      recognition; the dirty-rectangle `Req::WaitChange` under desktop duplication is the
+      Windows way to a change wait through duplication. Until it is built, the docs say what a
+      module does meanwhile: poll with `host.timer.every` and one asynchronous read in flight,
+      and read a short-lived picture with timed reads after the input.
+- [ ] **Step 7 — own input tagged, scan codes, hold, new key names** (`host.input.send`; item
+      e1 of the small-API design as the critique revised it). Not built:
+  - **Own input tagged.** Every `SendInput` of the host — keys and mouse — carries a tag in
+      `dwExtraInfo`, and every event the host posts on macOS a value in
+      `kCGEventSourceUserData`. The keyboard hook and the event tap let a tagged event through
+      without capturing it, arming a tap or counting it as a screen reader's modifier, so a
+      module never captures a key it sent itself, and a sent Insert or Numpad0 cannot make the
+      hook believe a screen reader's modifier is held. The screen-reader test becomes: the
+      modifier physically held (updated from untagged events only), or the key down and not
+      held by us; the modifier mask drops a modifier only we hold.
+  - **Scan codes:** `host.input.send(combo, { scan = true })` sends `KEYEVENTF_SCANCODE` with
+      the scan code `MapVirtualKeyExW(vk, MAPVK_VK_TO_VSC_EX)` gives for the foreground
+      thread's layout, plus `KEYEVENTF_EXTENDEDKEY` when it carries the E0 prefix — for games
+      that read DirectInput or Raw Input and ignore virtual keys. Accepted and ignored on macOS,
+      where a posted key code is already a key position. The default path stays as it is, so
+      Kontakt and Melodyne receive exactly what they receive today.
+  - **Hold:** `host.input.send(combo, { hold = ms })`, 1 to 10000. The downs go out in one
+      `SendInput` batch, the ups at their deadline from a release thread of their own (a heap
+      and a condition variable), independent of the event loop. Reference counts per virtual
+      key, so only the last holder sends the up; purge, disable, reload and exit release at
+      once; a crash cannot release, which the docs must say. On macOS the key goes down now
+      and up later, with the modifiers as flags on both events.
+  - **New key names:** `Insert`/`Ins`; `Numpad0`–`Numpad9`, `NumpadMultiply`, `NumpadAdd`,
+      `NumpadSubtract`, `NumpadDecimal`, `NumpadDivide`; punctuation by position under the W3C
+      `KeyboardEvent.code` names — `Minus`, `Equal`, `BracketLeft`, `BracketRight`,
+      `Backslash`, `Semicolon`, `Quote`, `Backquote`, `Comma`, `Period`, `Slash`,
+      `IntlBackslash`. The internal id stays the US-layout virtual key. Windows: `capture`
+      matches the twelve positional keys by `kb.scanCode` and the hook reports the internal
+      id; `send` converts through `MapVirtualKeyExW(scan, MAPVK_VSC_TO_VK_EX, foreground HKL)`
+      and `post` through the target thread's layout; `host.hotkey.register` refuses the
+      positional names. macOS accepts them all. No one-character aliases (`+` cannot be a key
+      in a `+`-joined grammar); text goes through `host.input.text`.
+  - **Tests:** name round trips and `every_key_the_shared_parser_accepts_is_mapped`; the
+      scan-code table; a tagged event passes a capture; the screen-reader test ignores keys
+      only we hold; reference counting; release on purge and disable; `register` refusing the
+      positional names on Windows.
+  - **Open questions, for a Mac and for the screen readers:** `IntlBackslash` and the ISO key
+      swap; whether games that read `GCKeyboard` or IOHID see posted keys; how NVDA and JAWS
+      treat an injected Insert or Numpad0; auto-repeat of a held key.
+- [ ] **`keyDown`, `keyUp` and `releaseHeld`** (item e2): later, when a module needs to hold a
+      key across calls. The same reference counts, release thread and releases as `hold`, with
+      `maxHold` 10000 ms by default; named `releaseHeld`, not `releaseAll`, beside
+      `host.keys.releaseAll`.
+- [ ] **`host.keywatch` — a keyboard observer that only listens** (decided 2026-09-21: later;
+      item d of the small-API design). Today `host.keys.capture` always takes the key away, and
+      there is no listen-only mode for ordinary keys. A namespace shaped like
+      `host.gamepad.on`/`off`, behind a capability of its own, `"keywatch"` — not folded into
+      `keys`, so the install review can tell "swallows Tab for its own interface" from "hears
+      the keys you press" — with a window or process scope required, named keys only,
+      synthesised keys left out by default, and no key ever logged. Windows: Raw Input for the
+      keyboard (usage page 0x01, usage 0x06, `RIDEV_INPUTSINK`) on a `keywatch` thread with a
+      message-only window, registered only while an enabled module listens; a
+      `WH_KEYBOARD_LL` hook that never swallows as the fallback. macOS: a listen-only event tap
+      on a thread of its own; the window scope holds per process only there, and Secure Event
+      Input hides password fields. Spike first: an elevated window in front (UIPI); whether a
+      key a low-level hook swallows — ours or a screen reader's — still reaches Raw Input;
+      `RIDEV_INPUTSINK` on a message-only window; `hDevice` and `ExtraInformation` of injected
+      keys; on macOS the target pid, VoiceOver and the injected source.
 
 ## Dev tools
 

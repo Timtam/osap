@@ -29,29 +29,50 @@ See [what that list is and is not](./index.md#capabilities).
 
 **Signature:** `host.speech.output(text: string, opts: { interrupt: boolean? }?)` → `nil`
 
-Speaks `text`; `opts.interrupt` defaults to `true` (omitting `opts` also means interrupt). Output is **not** echoed to the console — a screen reader reading the terminal would double the speech. The call itself does not check whether the module is enabled: a disabled module's callbacks are not called, but its entry file still runs at load, and a line spoken there is heard.
+Speaks `text`, cutting off what is being said unless `opts.interrupt` is `false`. Leaving `opts` out, passing `{}` and passing `{ interrupt = nil }` all interrupt; `false` queues behind what is being said. Output is **not** echoed to the console — a screen reader reading the terminal would double the speech. The call itself does not check whether the module is enabled: a disabled module's callbacks are not called, but its entry file still runs at load, and a line spoken there is heard.
 
 ```luau
 host.speech.output("Reverb enabled")
 host.speech.output("loading...", { interrupt = false })  -- queue, don't cut off
+-- A value read from a data file may be absent; nil interrupts, as leaving it out does.
+host.speech.output(item.name, { interrupt = pack.interrupt })
 ```
 
-**Where it comes out**, which the caller does not choose and does not need to know:
+**Nothing the speech engine does raises; wrong arguments do.** A screen reader that refuses a line, stops answering or is not running, and a voice that fails to open, end in the line going another way or in a log line — never in an error in the module's key handler. The arguments are checked at the call, and these raise: a `text` that is not a string — a number is accepted and spoken as its digits, `nil`, a boolean or a table raise — or a string that is not valid UTF-8; an `opts` that is neither a table nor `nil`; and an `interrupt` that is not `true`, `false` or `nil` (`{ interrupt = 1 }` raises `host.speech.output: interrupt is true or false, not a number`).
 
-- **Windows** — the running screen reader if there is one (NVDA, JAWS, ZoomText, ZDSR, PC-Talker, Boy PC Reader or Sense Reader), otherwise OneCore or SAPI. Speech reaches them through prism, compiled into the application, so nothing has to be installed alongside it. What is spoken also reaches a **braille display**, unless **Also send what is said to a braille display** is unticked in the Application settings tab. If the screen reader stops answering, the plain voice takes over within 300 ms and the screen reader is picked up again on its own, within three seconds of coming back.
-- **macOS** — the platform's own voice, unless **Speak through VoiceOver** is ticked in the Application settings tab. Ticked, the line goes to VoiceOver and arrives in the user's voice, at their rate, and **on their braille display**, which nothing else can do.
-
-  It is off until somebody asks for it, and the reason is the permission rather than the feature: the first line through this path is an Apple Event, and the first Apple Event makes macOS put an Automation consent dialog on screen. On by default, that dialog appears at startup — before the user has asked for anything, about a thing they may not want, in front of a person who cannot see it to dismiss it. Ticking the box is the request, and that is the moment to ask.
-
-  Two things then send a line to the platform's own voice anyway:
-  - **VoiceOver is not running.** Checked before every line, and deliberately not remembered: VoiceOver started later in the session simply starts being used. The check is also why the overlay cannot *start* VoiceOver — `tell application "VoiceOver"` would launch it, and a tool that switches on a screen reader nobody asked for is not acceptable behaviour.
-  - **VoiceOver refuses**, most often because AppleScript control is not allowed. The line comes back and is said by the fallback, the reason is logged **once**, and the path is parked for the session so no further line pays for a process launch that will fail. Ticking the setting again re-arms it.
-
-  Either way the line is said, and unticking the switch turns the path off again for anyone who prefers a second, distinct voice.
+**Cost.** The call hands the line to a speech thread and returns; it does not wait for the line to be said. It runs on the main thread, like every Lua call.
 
 `interrupt` governs the platform's own queue. On the VoiceOver path, whether an announcement also cuts off what VoiceOver is saying for its own reasons is VoiceOver's decision, not one this API can make.
 
-This call never raises: a failing speech engine must not take a module's key handler down with it.
+### Windows
+
+The line goes to the running screen reader if there is one (NVDA, JAWS, ZoomText, ZDSR, PC-Talker, Boy PC Reader or Sense Reader) and **Speak through the screen reader** is ticked in the Application settings tab, as it is by default; otherwise to OneCore, or SAPI where OneCore cannot open. Speech reaches them through prism, compiled into the application, so nothing has to be installed alongside it. What is spoken also reaches a **braille display**, unless **Also send what is said to a braille display** is unticked in the Application settings tab. An empty text, or one of spaces only, says nothing.
+
+**When the screen reader stops taking lines.** A line the screen reader refuses is said by the plain voice on the next pass of the loop, about 15 ms later, and so is a line it has not answered within 300 ms; a call that never returns is left waiting on a thread of its own. One refusal is enough: from then on every line goes to the plain voice until a screen reader has been opened afresh, and a reader that opens and then refuses again is looked for again in the same way. With braille on, NVDA, JAWS and ZDSR receive a line as two calls, speech and then braille, and so does PC-Talker while a braille display is connected to it; a failure of either call is a refusal — so when only the braille half failed, the screen reader has already spoken the line and the plain voice says it again.
+
+The screen reader is then looked for on a thread of its own, at once and after that:
+
+- **every 3 seconds for five minutes, and every 10 seconds after that, while a screen reader is running but will not open** — running as prism checks it without opening it: NVDA's control endpoint answers; JAWS's window is there and the class factory of its automation interface can be obtained; ZoomText's speech window is there; Sense Reader's window is there and the class factory of its automation interface can be obtained; PC-Talker's status call reports it running. The five minutes count from the look that first saw that reader running and refusing;
+- **every 3 seconds for the first minute, and every 30 seconds after that, while none is running.** ZDSR and Boy PC Reader count as not running here even when their check says they are: for them it is whether any of their processes runs, background services included, which says the reader is installed rather than in use.
+
+So a screen reader that answers again is used within about 3 seconds, or within about 10 seconds once it has refused for more than five minutes; one that was closed and started again is used within about 3 seconds when that happened within a minute of the search beginning, and within about 30 seconds later than that. The search itself never ends while nothing opens, but it never stays at the 3-second pace for longer than five minutes of one reader refusing, or the first minute otherwise. The same search runs when no screen reader opened when the application started, so one started afterwards — at a login where both start together, say — is used on the same schedule. It runs only while **Speak through the screen reader** is ticked: a search under way stops at its next look once the box is unticked, and ticking it again looks at once — on the next pass of the loop, about 15 ms later, whether or not anything is said.
+
+None of this runs on the main thread. A look is estimated at about 50 ms of the search's own thread: trying the screen readers in turn was measured at 24 ms on a machine with NVDA, and when none opens they are then asked whether they run, which is estimated at as much again. So the 3-second pace is estimated at about 1.6% of one core, the 10-second pace at about 0.5%, and the 30-second pace at about 0.2%. The search pays about 60 ms once, when it starts, to open prism; a reader that opens and refuses every line starts a new search, and pays that again, after each line.
+
+The log says what happened: which reader refused a line and prism's error for it (`JAWS refused a line (prism error 9: Internal backend error, …)`); at start-up with none open, `no screen reader would open` — the start-up look cannot tell a reader that is not running from one that runs and refuses; what the search's first look found (`JAWS is running but would not open (…)`, `ZDSR would not open (…); some of its processes run, but they include its background services…`, or `no screen reader is running`); when that changes; when the pace drops, to 10 or to 30 seconds; the reader once it opens — `back to JAWS` after a refusal or a stall, `JAWS is open now` for a search that began at start-up, `speaking through JAWS` after the box was ticked; and that the search stopped when the setting was unticked.
+
+### macOS
+
+The line goes to the platform's own voice, unless **Speak through VoiceOver** is ticked in the Application settings tab. Ticked, the line goes to VoiceOver and arrives in the user's voice, at their rate, and **on their braille display**, which nothing else can do. Every call also asks macOS whether VoiceOver is running, a lookup in its list of running applications by bundle identifier.
+
+It is off until somebody asks for it, and the reason is the permission rather than the feature: the first line through this path is an Apple Event, and the first Apple Event makes macOS put an Automation consent dialog on screen. On by default, that dialog appears at startup — before the user has asked for anything, about a thing they may not want, in front of a person who cannot see it to dismiss it. Ticking the box is the request, and that is the moment to ask.
+
+Two things then send a line to the platform's own voice anyway:
+
+- **VoiceOver is not running.** Checked before every line, and deliberately not remembered: VoiceOver started later in the session simply starts being used. The check is also why the overlay cannot *start* VoiceOver — `tell application "VoiceOver"` would launch it, and a tool that switches on a screen reader nobody asked for is not acceptable behaviour.
+- **VoiceOver refuses**, most often because AppleScript control is not allowed. The line comes back and is said by the fallback, the reason is logged **once**, and the path is parked for the session so no further line pays for a process launch that will fail. Ticking the setting again re-arms it.
+
+Either way the line is said, and unticking the switch turns the path off again for anyone who prefers a second, distinct voice.
 
 ---
 

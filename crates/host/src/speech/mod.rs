@@ -274,7 +274,8 @@ impl Speech {
             let on = crate::appcfg::screen_reader_speech();
             // Ticking the setting again asks for another try. Unlike VoiceOver's re-arm this
             // cannot simply raise a flag: the backend is dead and prism's binding to it is
-            // fixed for the instance's lifetime, so the whole worker is replaced.
+            // fixed for the instance's lifetime, so the whole worker is replaced. `pump` watches
+            // the same edge on every pass, so a tick with nothing said is seen too.
             if on && !self.last_switch.replace(on) {
                 self.prism.borrow_mut().rearm();
             } else {
@@ -488,16 +489,28 @@ impl Speech {
         // and where the screen reader is looked for again after it has gone.
         #[cfg(windows)]
         {
-            // Two statements rather than one loop: `refused` borrows, `retry_if_due` borrows
-            // mutably, and a `for` loop holds its borrow for the whole body.
-            let refused = self.prism.borrow().refused();
+            let on = crate::appcfg::screen_reader_speech();
+            // Ticking the setting again, watched here on every pass and not only when a line
+            // is said (`say`): ticking the box off and on with nothing said in between — the
+            // usual case, since ticking a box makes the application say nothing — must look
+            // at once, not at a sleeping searcher's next look up to 30 s later. Whichever of
+            // the two sees the edge first re-arms; the other then sees no edge.
+            if on && !self.last_switch.replace(on) {
+                self.prism.borrow_mut().rearm();
+            } else {
+                self.last_switch.set(on);
+            }
+            // Two statements rather than one loop: `refused` borrows mutably (it forgets the
+            // channels of replaced workers once they are done), as does `retry_if_due`, and a
+            // `for` loop holds its borrow for the whole body.
+            let refused = self.prism.borrow_mut().refused();
             for text in refused {
                 self.fallback.say(&text, false);
             }
             // Only while the setting is on: switched off, the screen-reader path is not
             // wanted, and starting a worker every few seconds to look for one would be work
             // done against the user's explicit answer.
-            if crate::appcfg::screen_reader_speech() {
+            if on {
                 self.prism.borrow_mut().retry_if_due();
             }
         }

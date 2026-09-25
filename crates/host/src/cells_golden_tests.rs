@@ -3,17 +3,17 @@
 //! His test package is a lossless frame of a commercial game plus what his reader computed
 //! from it: two signatures as hex, and a table of every block of each (edges, how many pixels
 //! passed, how many were looked at, the byte). The frame must never be committed, so the
-//! package lives in `crates/host/tests-data-local/gamemenureader-0.6.69/` (ignored by git) on
-//! the machines that have it, and this test SKIPS, saying why, everywhere else. The four
+//! package lives in a folder of its own under `crates/host/tests-data-local/` (ignored by git)
+//! on the machines that have it, and this test SKIPS, saying why, everywhere else. The four
 //! region cases of the package, which are only numbers, are also in `region.rs`'s own tests.
 //!
 //! What it proves is the reduction, byte for byte: bounds, every block's edges and counts,
 //! every cell, the hex. Not that a screen gives the same pixels here as in his reader — that is
 //! a question about capture, answered only by reading the same menu with both (TODO.md).
 //!
-//! Everything it needs to know about the package — the frame's file name and checksum, the
-//! vectors' names, regions and grids — is read from the package's `testvectors.json`, so this
-//! file names nothing from it.
+//! Everything it needs to know about the package — the folder, the frame's file name and
+//! checksum, the vectors' names, regions and grids — is found by what the folder holds and read
+//! from the package's `testvectors.json`, so this file names nothing from it.
 
 use std::path::{Path, PathBuf};
 
@@ -28,8 +28,21 @@ use crate::region::{self, Fraction};
 const WARM: &str = "(red >= 80 && red*10 >= green*13 && red*10 >= blue*12) || \
                     (red >= 100 && green >= 45 && blue <= 150 && red >= green && green >= blue)";
 
-fn package() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests-data-local").join("gamemenureader-0.6.69")
+/// Where local test data lives: `crates/host/tests-data-local/`, ignored by git.
+fn local_data() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests-data-local")
+}
+
+/// The package: the first folder under [`local_data`], in name order, that holds a
+/// `testvectors.json`; `None` when there is none, or no such folder at all.
+fn package() -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(local_data())
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.join("testvectors.json").is_file())
+        .collect();
+    dirs.sort();
+    dirs.into_iter().next()
 }
 
 /// His region object, `{ xStart, xEnd, yStart, yEnd }`.
@@ -54,16 +67,16 @@ fn crop(img: &CapturedImage, s: Sub) -> CapturedImage {
 
 #[test]
 fn cells_reproduce_the_readers_own_vectors() {
-    let dir = package();
-    let json = dir.join("testvectors.json");
-    let Ok(text) = std::fs::read_to_string(&json) else {
+    let Some(dir) = package() else {
         eprintln!(
-            "skipped: {} is not here. The reference frame and vectors are local test data that \
-             is never committed (see the top of crates/host/src/cells_golden_tests.rs).",
-            json.display()
+            "skipped: no folder under {} holds a testvectors.json. The reference frame and vectors \
+             are local test data that is never committed (see the top of \
+             crates/host/src/cells_golden_tests.rs).",
+            local_data().display()
         );
         return;
     };
+    let text = std::fs::read_to_string(dir.join("testvectors.json")).expect("testvectors.json");
     let tv: Value = serde_json::from_str(&text).expect("testvectors.json");
 
     // The frame, checked to be the one the vectors were computed from.

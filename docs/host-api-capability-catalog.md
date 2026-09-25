@@ -226,8 +226,8 @@ local p     = host.path("assets/images/serum2/preset.png")     -- real path (esc
 -- { label = "…", min = N, max = N, oneOf = { … } }. A persisted value wins over the default.
 local rate = host.settings.define("speechRate", 50, { label = "Speech rate", min = 0, max = 100 })
 local lang = host.settings.define("ocrLanguage", "German", { label = "OCR language", oneOf = { "German", "English" } })
--- (a name for the user, not an identifier: OCR's `lang` takes each platform engine's own
--- identifier, so the module maps the choice per platform with host.os.pick before it reads —
+-- (a name for the user, not an identifier: the module maps the choice to a language tag,
+-- "de" or "en", which OCR's `lang` matches against each platform's recogniser itself —
 -- not Tesseract's "eng"/"deu"; see api/ocr.md, Recognition language)
 host.settings.set("imageSearch", true)        -- validated against the schema; auto-persisted
 local on = host.settings.get("imageSearch")    -- errors if the key was never define()d
@@ -241,7 +241,7 @@ Each module sees only its own settings (keyed by module id; isolation is structu
 host.hotkey.register("Ctrl+Alt+P", fn, { context = "overlay:Serum 2" })  -- contextual
 host.hotkey.register("F1", fn, { context = "global" })
 ```
-macOS: **registered** hotkeys via Carbon `RegisterEventHotKey` (no Input Monitoring, no silent disable — prior art [VOCR](prior-art-vocr.md); context switch via re-register per scope). CGEventTap only for suppression/remapping/hotstrings (then Input Monitoring + health watchdog). Wayland: usually not available → check `available()`.
+macOS: **registered** hotkeys via Carbon `RegisterEventHotKey` (no Input Monitoring, no silent disable — prior art [VOCR](prior-art-vocr.md); context switch via re-register per scope). CGEventTap only for suppression/remapping/hotstrings (then Input Monitoring + health watchdog). Wayland: usually not available → check `available()`. *As built, `register(spec, fn)` takes no options: a hotkey is system-wide, and a context is the module registering while its window is in front and unregistering when it leaves. A spec's modifiers are roles — `Ctrl` is Command on a Mac — and there are no platform-neutral tokens; a module that wants another chord there uses [`host.os.pick`](api/os.md#host-os-pick) ([reference](api/hotkey.md)).*
 
 ### host.window — find & read windows/controls
 Window matching is **platform-gated** (parameters are named differently per OS — there is no universal "class"). Details + trigger system: [window-matching.md](window-matching.md).
@@ -283,7 +283,7 @@ Win: Windows.Graphics.Capture + SIMD-NCC · macOS: ScreenCaptureKit (Screen Reco
 local r = host.ocr.recognize({ region={540,13,608,23}, engine="best", lang="eng" })
 -- r = { text="Init", boxes={...} }
 ```
-Native by default (Windows.Media.Ocr / Apple Vision), ONNX fallback (study §2). Replaces ReaHotkey's Tesseract-exe invocation. *As built there is no `engine` option, the result has `words` rather than `boxes`, the call is synchronous on the event loop, and `lang` is each platform engine's own identifier (`"en-US"` on both; Tesseract's `"eng"` is in neither list), passed unchanged — omitted, Windows uses the user-profile languages — the first language in the user's preferred-language list that OCR supports — and macOS Vision's default. See [Recognition language](api/ocr.md#recognition-language).*
+Native by default (Windows.Media.Ocr / Apple Vision), ONNX fallback (study §2). Replaces ReaHotkey's Tesseract-exe invocation. *As built there is no `engine` option and the result has `words` rather than `boxes`. `recognize` is synchronous on the event loop; [`host.ocr.read`](api/ocr.md#host-ocr-read) photographs at the call and recognises on threads of its own, answering in a callback. `lang` is a BCP 47 language tag such as `"de"` or `"en"`, matched against the languages each platform's recogniser reads, so the same tag works on both; Tesseract's `"eng"` matches nothing and is answered as a language that is not available. Omitted, `read` uses the user's own language, and `recognize` Windows' user-profile languages or macOS Vision's default. See [Recognition language](api/ocr.md#recognition-language).*
 
 ### Accessibility elements of foreign apps — shipped as `host.element`
 
@@ -322,6 +322,7 @@ host.clipboard.read() ; host.clipboard.write(text)
 host.log.info(msg)  -- from the worker via IPC to the host
 host.timer.after(ms, fn)   -- synchronous model, scheduled host-side
 ```
+*As built, `host.timer.after` and `every` return a token that `host.timer.cancel` takes back ([reference](api/timer.md)), and `host.log.info` writes from the event loop, where every module runs — there is no worker process. `host.app` and `host.clipboard` do not exist.*
 
 ## 5. Versioning & Generation
 

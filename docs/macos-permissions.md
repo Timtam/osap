@@ -187,7 +187,8 @@ registered on both launches, never delivered, VoiceOver's error sound on every p
   F2, etc. as standard function keys" turned on, or the `fn` key held down.
 - The **calibrator's** keys are `Ctrl+Alt+Shift+S/T/V`: **Command-Option-Shift** on a Mac,
   where a spec's Ctrl is Command, off Control-Option, and Ctrl+Alt+Shift on Windows. They only
-  exist in a run started with `AUTOMATION_PLATFORM_CALIBRATE=1`.
+  exist once "Calibration keys in overlays" is ticked in Application settings and the modules
+  are reloaded (or in a run started with `AUTOMATION_PLATFORM_CALIBRATE=1`).
 - The log says once per chord — registered through Carbon or captured by the event tap —
   when a key is on VoiceOver's modifier while VoiceOver is running, and `host.keys.check`
   reports `"voiceover"` for any such chord whether VoiceOver is running or not.

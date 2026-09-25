@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 
 use super::HostEvents;
 
+pub mod chord;
 pub mod names;
 
 #[cfg(test)]
@@ -251,6 +252,18 @@ pub struct PadEvent {
     /// The pad's family, for the spoken label; the pad itself may be gone by the time a
     /// synthetic up is delivered.
     pub family: Family,
+    /// For a `Down` or `Up` a source reported: every button held on the pad right after the
+    /// report it came in, physical and derived — including buttons that never produced a press
+    /// because they were already down when the pad connected or the source woke from a park.
+    /// What a combination ([`chord`]) is completed against. Empty for every other event:
+    /// connections, axis values, and the synthetic ups of a pad that went away.
+    pub held: BTreeSet<Button>,
+    /// For a `Down` or `Up` a source reported: which report it came in, counted up across the
+    /// hub, so the edges of one report share the number and no two reports do. A combination
+    /// whose buttons all went down in one report is completed by each of those downs — they
+    /// all carry the same `held` — and this is what makes it fire at the first of them only.
+    /// 0 for every other event.
+    pub report: u64,
 }
 
 /// How a source names its device to the hub. Platform-specific in the same way as
@@ -309,6 +322,8 @@ struct HubState {
     axes: Vec<PadEvent>,
     /// Downs the cap refused, so their ups are refused with them. See [`Hub::push_button`].
     dropped_downs: HashSet<(u8, Button)>,
+    /// The last number given to a report that produced button events; see [`PadEvent::report`].
+    reports: u64,
     overflow_logged: bool,
     refused_logged: bool,
 }
@@ -502,7 +517,15 @@ impl Hub {
                 axes,
                 at,
             });
-            let ev = PadEvent { pad: index, kind: PadEventKind::Connected(info), at, synthetic: false, family };
+            let ev = PadEvent {
+                pad: index,
+                kind: PadEventKind::Connected(info),
+                at,
+                synthetic: false,
+                family,
+                held: BTreeSet::new(),
+                report: 0,
+            };
             let pushed = Self::push_button(&mut st, ev);
             (index, pushed, name, id)
         };
@@ -534,7 +557,7 @@ impl Hub {
             let Some(i) = st.pads.iter().position(|p| &p.key == key) else {
                 return;
             };
-            let (index, family, edges, moved) = {
+            let (index, family, edges, held, moved) = {
                 let pad = &mut st.pads[i];
                 pad.at = at;
                 for (axis, v) in &snap.axes {
@@ -572,18 +595,20 @@ impl Hub {
                         pad.reported.insert(*axis, *v);
                     }
                 }
-                (pad.info.index, pad.info.desc.family, edges, moved)
+                (pad.info.index, pad.info.desc.family, edges, after, moved)
             };
 
             let mut pushed = false;
-            if buttons_on {
+            if buttons_on && !edges.is_empty() {
+                st.reports += 1;
+                let report = st.reports;
                 for kind in edges {
-                    let ev = PadEvent { pad: index, kind, at, synthetic: false, family };
+                    let ev = PadEvent { pad: index, kind, at, synthetic: false, family, held: held.clone(), report };
                     pushed |= Self::push_button(&mut st, ev);
                 }
             }
             for kind in moved {
-                let ev = PadEvent { pad: index, kind, at, synthetic: false, family };
+                let ev = PadEvent { pad: index, kind, at, synthetic: false, family, held: BTreeSet::new(), report: 0 };
                 Self::push_axis(&mut st, ev);
             }
             pushed
@@ -608,7 +633,15 @@ impl Hub {
             if bits & demand::BUTTONS != 0 {
                 let held: BTreeSet<Button> = pad.physical.union(&pad.derived).copied().collect();
                 for b in held {
-                    let ev = PadEvent { pad: index, kind: PadEventKind::Up(b), at, synthetic: true, family };
+                    let ev = PadEvent {
+                        pad: index,
+                        kind: PadEventKind::Up(b),
+                        at,
+                        synthetic: true,
+                        family,
+                        held: BTreeSet::new(),
+                        report: 0,
+                    };
                     pushed |= Self::push_button(&mut st, ev);
                 }
             }
@@ -620,6 +653,8 @@ impl Hub {
                 at,
                 synthetic: false,
                 family,
+                held: BTreeSet::new(),
+                report: 0,
             };
             pushed |= Self::push_button(&mut st, ev);
             (index, name, pushed)
@@ -753,6 +788,26 @@ impl Hub {
             axes: p.axes.clone(),
             at: p.at,
         })
+    }
+
+    /// What a running combination hold is judged by on the tick ([`chord::Chord::due`]): the
+    /// buttons pad `index` holds now, and the releases of it still waiting to be drained —
+    /// under one lock, so a button that is no longer held and its release waiting are seen
+    /// together. `None` when there is no pad with that index. Walks the queue of button events,
+    /// at most [`QUEUE_CAP`] long, and nothing else.
+    pub fn pad_now(&self, index: u8) -> Option<chord::PadNow> {
+        let st = lock(&self.state);
+        let p = st.pads.iter().find(|p| p.info.index == index)?;
+        let releases_waiting = st
+            .queue
+            .iter()
+            .filter(|e| e.pad == index)
+            .filter_map(|e| match e.kind {
+                PadEventKind::Up(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        Some(chord::PadNow { held: p.physical.union(&p.derived).copied().collect(), releases_waiting })
     }
 }
 
@@ -982,6 +1037,80 @@ mod tests {
         // And a report that changes nothing produces nothing.
         f.set_buttons(1, &[Button::South, Button::Start, Button::East], 24);
         assert!(f.hub.drain().is_empty());
+    }
+
+    /// What a combination is completed against: every button event carries the whole held set
+    /// right after its report — a button held since the pad was plugged in included, although
+    /// it never produced a press — and nothing else carries one.
+    #[test]
+    fn a_button_event_carries_what_is_held_after_its_report() {
+        let f = Fake::new(demand::BUTTONS | demand::AXES);
+        f.connect_holding(1, &[Button::LeftShoulder]);
+        let connected = f.hub.drain();
+        assert!(connected[0].held.is_empty(), "a connection carries no held set");
+        f.press(1, Button::RightShoulder, 5);
+        // Two buttons in one report: both events carry the set after the whole report.
+        f.set_buttons(1, &[Button::LeftShoulder, Button::RightShoulder, Button::South, Button::East], 9);
+        f.release(1, Button::LeftShoulder, 12);
+        f.stick(1, Axis::LeftX, Axis::LeftY, 0.0, 0.9, 15);
+        let got = f.hub.drain();
+        let held = |i: usize| got[i].held.iter().map(|b| names::button_name(*b)).collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            kinds(&got),
+            vec![
+                "1 down right_shoulder",
+                "1 down south",
+                "1 down east",
+                "1 up left_shoulder",
+                "1 down left_stick_down",
+                "1 axis left_y 0.90"
+            ]
+        );
+        assert_eq!(held(0), "left_shoulder right_shoulder", "LB held since the connect counts");
+        assert_eq!(held(1), "south east left_shoulder right_shoulder");
+        assert_eq!(held(2), held(1));
+        assert_eq!(held(3), "south east right_shoulder");
+        assert_eq!(held(4), "south east right_shoulder left_stick_down", "derived buttons are held buttons");
+        assert!(got[5].held.is_empty(), "an axis value carries none");
+        // The two downs of one report share its number; every other report has its own.
+        let reports: Vec<u64> = got.iter().map(|e| e.report).collect();
+        assert_eq!(reports[1], reports[2], "south and east came in one report");
+        assert!(reports[0] > 0 && reports[0] < reports[1] && reports[1] < reports[3] && reports[3] < reports[4]);
+        assert_eq!(reports[5], 0, "an axis value is in no report of button events");
+        f.unplug(1, 20);
+        assert!(
+            f.hub.drain().iter().all(|e| e.held.is_empty() && e.report == 0),
+            "nor do the synthetic ups of an unplug"
+        );
+    }
+
+    /// What a combination hold is judged by on the tick: the held set, which is ahead of the
+    /// pump, and the releases the pump has not taken yet, which say by how much.
+    #[test]
+    fn pad_now_is_the_held_set_and_the_releases_not_drained() {
+        let f = Fake::new(demand::BUTTONS);
+        assert_eq!(f.hub.pad_now(1), None, "no pad");
+        f.connect_holding(1, &[Button::Back]);
+        f.press(1, Button::Start, 5);
+        f.hub.drain();
+        let now = f.hub.pad_now(1).unwrap();
+        assert_eq!(now.held, [Button::Back, Button::Start].into_iter().collect());
+        assert!(now.releases_waiting.is_empty());
+        // Start let go and pressed again, South pressed and let go, none of it drained: the
+        // hub holds Back and Start again, and says two releases are still to come.
+        f.release(1, Button::Start, 10);
+        f.press(1, Button::Start, 15);
+        f.press(1, Button::South, 20);
+        f.release(1, Button::South, 25);
+        let now = f.hub.pad_now(1).unwrap();
+        assert_eq!(now.held, [Button::Back, Button::Start].into_iter().collect());
+        assert_eq!(now.releases_waiting, [Button::Start, Button::South].into_iter().collect());
+        // Another pad's releases are its own.
+        f.connect_holding(2, &[Button::East]);
+        f.release(2, Button::East, 30);
+        assert!(!f.hub.pad_now(1).unwrap().releases_waiting.contains(&Button::East));
+        f.hub.drain();
+        assert!(f.hub.pad_now(1).unwrap().releases_waiting.is_empty(), "drained");
     }
 
     #[test]

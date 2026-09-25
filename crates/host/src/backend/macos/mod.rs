@@ -182,12 +182,15 @@ impl Backend for MacBackend {
     // "duplication"` names a Windows mechanism; here every read keeps going through
     // ScreenCaptureKit or CoreGraphics exactly as it did before the key existed, and the host
     // resolves such a module to the standard source before it ever gets this far.
-    fn pixel(&self, x: i32, y: i32, _src: CaptureSource) -> Option<(u8, u8, u8)> {
-        Some(capture::pixel(x, y))
+    fn pixel(&self, x: i32, y: i32, _src: CaptureSource) -> Result<(u8, u8, u8), String> {
+        Ok(capture::pixel(x, y))
     }
 
-    fn capture(&self, x: i32, y: i32, w: i32, h: i32, _src: CaptureSource) -> Option<CapturedImage> {
-        capture::capture_region(x, y, w, h)
+    // A failed capture says only that it failed: an empty region, one past `MAX_POINTS` (logged
+    // once by `capture.rs`), a region wholly off the desktop, or a capture the window server
+    // refused. The module is told `CAPTURE_FAILED`, as on the Windows standard path.
+    fn capture(&self, x: i32, y: i32, w: i32, h: i32, _src: CaptureSource) -> Result<CapturedImage, String> {
+        capture::capture_region(x, y, w, h).ok_or_else(|| super::CAPTURE_FAILED.to_string())
     }
 
     fn capture_fn(&self) -> CaptureFn {
@@ -422,8 +425,11 @@ impl Backend for MacBackend {
 /// The image worker's capture routine: each region captured on its own, in order, exactly as
 /// the worker did one at a time before it was handed several. The source is ignored — see
 /// `pixel` above.
-fn capture_many(regions: &[(i32, i32, i32, i32)], _src: CaptureSource) -> Vec<Option<CapturedImage>> {
-    regions.iter().map(|&(x, y, w, h)| capture::capture_region(x, y, w, h)).collect()
+fn capture_many(regions: &[(i32, i32, i32, i32)], _src: CaptureSource) -> Vec<Result<CapturedImage, String>> {
+    regions
+        .iter()
+        .map(|&(x, y, w, h)| capture::capture_region(x, y, w, h).ok_or_else(|| super::CAPTURE_FAILED.to_string()))
+        .collect()
 }
 
 /// The backend, as `platform()` hands it out.

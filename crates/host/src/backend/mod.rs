@@ -268,7 +268,7 @@ pub enum CaptureSource {
 }
 
 /// The capture routine the image worker holds ([`Backend::capture_fn`]): several regions from
-/// one source, one answer per region in the same order.
+/// one source, one answer per region in the same order — the picture, or why there is none.
 ///
 /// Several rather than one, because that is what the worker has in hand — every distinct
 /// region of a batch — and a duplication read of three regions is one request and one GPU
@@ -276,15 +276,17 @@ pub enum CaptureSource {
 /// and the worker never touches the `Rc` backend. Named once, so that everything which passes
 /// it along — the image worker, its batch runner, their tests — says `CaptureFn` and nothing
 /// more.
-pub type CaptureFn = fn(&[(i32, i32, i32, i32)], CaptureSource) -> Vec<Option<CapturedImage>>;
+pub type CaptureFn = fn(&[(i32, i32, i32, i32)], CaptureSource) -> Vec<Result<CapturedImage, String>>;
 
-/// The first words of every error the Windows capture path gives when the screen could not
-/// be read — a degenerate region, one too large, a failed read, and
-/// [`DUPLICATION_UNANSWERED`] too. The OCR binding does not decide by it: only
-/// `DUPLICATION_UNANSWERED` answers with an `error` field under `fallback = "none"`, and every
-/// other failure still raises (see `capture_source::answers_instead_of_raising`). Used by the
-/// Windows backend alone outside the tests, hence the allow elsewhere.
-#[cfg_attr(not(windows), allow(dead_code))]
+/// The first words of every error a capture gives when the screen could not be read — and,
+/// alone, the whole error of the standard path, which cannot say more: an empty region, one too
+/// large to allocate for, or a read the operating system refused. [`DUPLICATION_UNANSWERED`]
+/// starts with it too. These errors are what a module is told: the reason `pixel`, `profile`,
+/// the image searches, `save` and the cells calls return beside their `nil` or `false` — the
+/// vocabulary `docs/api/screen.md` lists under "Failure reasons". The OCR binding does not
+/// decide by it: only `DUPLICATION_UNANSWERED` answers with an `error` field under
+/// `fallback = "none"`, and every other failure still raises (see
+/// `capture_source::answers_instead_of_raising`).
 pub const CAPTURE_FAILED: &str = "screen capture failed";
 
 /// The first words of the one capture error a `fallback = "none"` module is answered for
@@ -709,12 +711,14 @@ pub trait Backend {
 
     /// Color (r, g, b) of the pixel at screen coordinates.
     ///
-    /// `None` only where the source can fail without a fallback — a Windows module that
-    /// declared `fallback = "none"` while duplication could not answer. The standard path
-    /// always has an answer, and the other backends always give one.
-    fn pixel(&self, x: i32, y: i32, src: CaptureSource) -> Option<(u8, u8, u8)>;
-    /// Captures a screen region into an RGBA image.
-    fn capture(&self, x: i32, y: i32, w: i32, h: i32, src: CaptureSource) -> Option<CapturedImage>;
+    /// `Err` only where the source can fail without a fallback — a Windows module that
+    /// declared `fallback = "none"` while duplication could not answer — with the reason, which
+    /// the module is told. The standard path always has an answer, and the other backends
+    /// always give one.
+    fn pixel(&self, x: i32, y: i32, src: CaptureSource) -> Result<(u8, u8, u8), String>;
+    /// Captures a screen region into an RGBA image, or says why it could not: an error that
+    /// begins with [`CAPTURE_FAILED`], which the module is told.
+    fn capture(&self, x: i32, y: i32, w: i32, h: i32, src: CaptureSource) -> Result<CapturedImage, String>;
 
     /// A pointer to the stateless screen-capture routine, so a worker thread can
     /// capture without holding the (`Rc`, non-`Send`) backend. Same result as

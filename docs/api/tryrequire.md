@@ -14,6 +14,8 @@ Nothing — this is available to every module. See [what the capability list is 
 
 ## host.tryRequire(id) {#host-tryrequire}
 
+**Signature:** `host.tryRequire(id: string) -> any?`
+
 Like [`host.require`](./require.md#host-require), but returns **nil** instead of raising when `id`
 isn't loaded — for an **optional dependency** (an id declared in the manifest's
 `optional_dependencies`, which is loaded, and for a `code_module` evaluated into this VM,
@@ -22,6 +24,14 @@ only when it is actually present). The module adapts to whether the dependency i
 - `id: string` — a module id, typically one from this module's `optional_dependencies`.
 - Returns: the dependency's exported object (functions intact for a `code_module`) if it
   is loaded, otherwise `nil`.
+- Raises only for an `id` that is neither a string nor a number. Cost and thread are those of
+  [`host.require`](./require.md#host-require): a table lookup on the main thread for a
+  `code_module`, a fresh copy of the data on every call for a legacy data dependency.
+- `nil` means the id is neither evaluated into this VM nor has a data export: the module is
+  not installed or did not load, or it is a `code_module` this module does not declare — its
+  code is evaluated only into modules that list it, and a table of functions has no data
+  export. List a `code_module` under `optional_dependencies` (or `dependencies`) for it to
+  come back with its functions.
 
 ```luau
 -- Kontakt optionally uses Komplete Kontrol to detect itself hosted in a standalone KK

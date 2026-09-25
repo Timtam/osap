@@ -90,12 +90,44 @@ pub struct ModuleManifest {
 /// capture = "duplication"   # "standard" (the default) or "duplication"
 /// fallback = "none"         # with "duplication": "standard" (the default) or "none"
 /// ```
-#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+///
+/// The same goes for a KEY it does not know — `captur`, or one a later host adds: carried by
+/// name in `unknown`, for the host to name in the log, and never a reason to refuse the
+/// manifest. A value of the wrong TYPE for a key it knows (`capture = true`) is different: that
+/// is not a string at all, and it fails the manifest as any other mistyped field does.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ScreenDecl {
-    #[serde(default)]
     pub capture: Option<String>,
-    #[serde(default)]
     pub fallback: Option<String>,
+    /// The table's other keys, in the order written.
+    pub unknown: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for ScreenDecl {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = ScreenDecl;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a [screen] table")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut m: A) -> std::result::Result<ScreenDecl, A::Error> {
+                let mut out = ScreenDecl::default();
+                while let Some(key) = m.next_key::<String>()? {
+                    match key.as_str() {
+                        "capture" => out.capture = Some(m.next_value()?),
+                        "fallback" => out.fallback = Some(m.next_value()?),
+                        _ => {
+                            m.next_value::<serde::de::IgnoredAny>()?;
+                            out.unknown.push(key);
+                        }
+                    }
+                }
+                Ok(out)
+            }
+        }
+        d.deserialize_map(V)
+    }
 }
 
 impl ModuleManifest {
@@ -672,6 +704,20 @@ version = \"1.0.0\"
         }
     }
 
+    /// A manifest written by a tool that puts a UTF-8 byte-order mark first (.NET's
+    /// `Encoding.UTF8`, PowerShell 5's `Out-File -Encoding utf8`) loads: the TOML parser skips
+    /// the mark. Pinned, because the documentation promises it and the host's Luau and JSON
+    /// readers skip one too.
+    #[test]
+    fn a_manifest_with_a_byte_order_mark_loads() {
+        let text = "\u{feff}id = \"com.x.y\"\nname = \"X\"\nversion = \"1.0.0\"\n";
+        let m = ModuleManifest::parse(text).expect("a leading byte-order mark is skipped");
+        assert_eq!(m.id, "com.x.y");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("module.toml"), text.as_bytes()).unwrap();
+        assert_eq!(LoadedModule::load_dir(dir.path()).expect("loads from a folder").manifest.id, "com.x.y");
+    }
+
     #[test]
     fn a_claim_includes_what_it_names_and_excludes_the_rest() {
         let m = manifest_with(&["windows", "macos"]);
@@ -733,6 +779,24 @@ some_later_key = 3
         .expect("an unknown value and an unknown key must not fail the manifest");
         assert_eq!(m.screen.capture.as_deref(), Some("window"));
         assert!(m.screen.fallback.is_none());
+        assert_eq!(m.screen.unknown, vec!["some_later_key".to_string()], "carried by name, for the log");
+    }
+
+    #[test]
+    fn a_misspelt_screen_key_is_carried_and_a_wrong_type_fails() {
+        let base = "id = \"com.x.y\"\nname = \"X\"\nversion = \"1.0.0\"\n\n[screen]\n";
+        let m = ModuleManifest::parse(&format!("{base}captur = \"duplication\"\nfallback = \"none\"\n"))
+            .expect("a misspelt key does not fail the manifest");
+        assert_eq!(m.screen.capture, None, "the misspelt key is not read as capture");
+        assert_eq!(m.screen.fallback.as_deref(), Some("none"));
+        assert_eq!(m.screen.unknown, vec!["captur".to_string()]);
+        for bad in ["capture = true\n", "fallback = 0\n", "capture = [\"duplication\"]\n"] {
+            let e = ModuleManifest::parse(&format!("{base}{bad}")).expect_err(bad);
+            assert!(format!("{e:#}").contains("invalid type"), "{bad}: {e:#}");
+        }
+        // No table, or an empty one, declares nothing and carries nothing.
+        let m = ModuleManifest::parse(base).unwrap();
+        assert_eq!(m.screen, ScreenDecl::default());
     }
 
     fn manifest_text(id: &str, version: &str, entry: Option<&str>) -> String {

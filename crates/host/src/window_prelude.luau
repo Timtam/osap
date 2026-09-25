@@ -197,13 +197,60 @@ local triggers = {}
 
 local focusCbs = {}
 
+-- The keys of a matcher whose type decides what it means, checked when a trigger registers.
+-- Each of these, given the wrong type, fails in a way nobody would guess from the matcher:
+-- `app = "game.exe"` (a string where a table goes) constrains nothing, so the trigger fires for
+-- every window; a platform block that is a string constrains nothing on its own platform; an
+-- `os` that is not a list raises from inside the dispatch when a window comes forward, as an
+-- error in some later event; a `where` that is not a function is skipped. A trigger is
+-- registered once and fires on every foreground change, which is why it raises here, at the
+-- caller's line. `find`, `findAll` and `test` do not check (window.md, Matchers).
+local function check_matcher_shape(m, call)
+  local function need(v, what, want)
+    if v ~= nil and type(v) ~= want then
+      -- Level 4: `need`, this function, the registering call, and then its caller.
+      error(call .. ": matcher." .. what .. " is a " .. want .. ", not a " .. type(v), 4)
+    end
+  end
+  need(m.app, "app", "table")
+  need(m.os, "os", "table")
+  need(m.where, "where", "function")
+  for _, p in ipairs(PLATFORMS) do
+    need(m[p], p, "table")
+    if m[p] ~= nil then
+      need(m[p].app, p .. ".app", "table")
+    end
+  end
+end
+
 -- `initial = true` also reports the window already in front — once, on the next tick, and not
 -- from inside this call: a callback often uses locals the file assigns further down, and a
 -- disabled module's callback must not run at all. The trigger is PRIMED here, and the host is
 -- asked for a report (`_requestInitial`, which queues this VM's owner for the tick); the host
 -- then calls `_dispatchInitial` with the window in front. A real activation dispatched first
 -- un-primes it, so the same foreground is never reported twice.
+--
+-- `onTrigger(matcher, cb)` is the same as `onTrigger(matcher, nil, cb)`: `host.ocr.read` lets
+-- its options be left out, and the two-argument form used to raise "attempt to index function
+-- value" from in here. Everything a registration can get wrong raises HERE, at the caller's
+-- line, and not from the first dispatch — a callback that is not a function used to be stored
+-- and fail only when the window came forward, as an error in some later event.
 function W.onTrigger(matcher, opts, cb)
+  if cb == nil and type(opts) == "function" then
+    opts, cb = nil, opts
+  end
+  if matcher ~= nil and type(matcher) ~= "table" then
+    error("host.window.onTrigger: the matcher is a table, not a " .. type(matcher), 2)
+  end
+  if matcher ~= nil then
+    check_matcher_shape(matcher, "host.window.onTrigger")
+  end
+  if opts ~= nil and type(opts) ~= "table" then
+    error("host.window.onTrigger: opts is a table or nil, not a " .. type(opts), 2)
+  end
+  if type(cb) ~= "function" then
+    error("host.window.onTrigger: the callback is a function, not a " .. type(cb), 2)
+  end
   opts = opts or {}
   if opts.initial ~= nil and type(opts.initial) ~= "boolean" then
     error("host.window.onTrigger: initial is true or false, not a " .. type(opts.initial), 2)
@@ -225,7 +272,11 @@ end
 
 -- Focus-change callbacks: fired when the keyboard focus moves, including within
 -- the same top-level window (used to detect focus entering an embedded plugin).
+-- The callback is checked here for the reason onTrigger's is.
 function W.onFocus(cb)
+  if type(cb) ~= "function" then
+    error("host.window.onFocus: the callback is a function, not a " .. type(cb), 2)
+  end
   focusCbs[#focusCbs + 1] = cb
 end
 
