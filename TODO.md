@@ -2599,9 +2599,9 @@ ms, so the GPU was busy (M9). One run, not checked by looking at the screen: a l
 and M4, not an answer.
 
 **Measured with the game** (2026-09-25, by the external developer on his machine, build
-c724ab7 plus `tools/capture-liveness-dxgi`, an uncommitted DXGI variant of
-`tools/capture-liveness` — see the open item below; full screen 1280x1024, AMD Radeon
-integrated graphics): through desktop duplication the game read LIVE — 40 of 40 and 39 of 40
+c724ab7 — since the history rewrite of 2026-09-25 that commit is 6413849 — plus
+`tools/capture-liveness-dxgi`, the DXGI variant of `tools/capture-liveness`; full screen
+1280x1024, AMD Radeon integrated graphics): through desktop duplication the game read LIVE — 40 of 40 and 39 of 40
 reads gave different pictures, where the standard GDI path had given 40 identical ones
 ("Frozen"). Each 1280x1024 read took 6-7 ms, the slowest 11 ms — a whole
 `host.screen.profile` call over the client area (`axes = "columns"`), column reduction
@@ -2641,7 +2641,7 @@ arrived with the game in front. So desktop duplication is the working source for
       "duplication"` to their manifests; read the first-read comparison line).
 - [x] **M4** With our implementation, the game is frozen through GDI (step 0) and **live
       through duplication** — measured 2026-09-25 on the developer's machine with build
-      c724ab7 and a duplication variant of `capture-liveness` (`[screen] capture =
+      c724ab7 (now 6413849) and a duplication variant of `capture-liveness` (`[screen] capture =
       "duplication"`, `fallback = "none"`, so a read duplication does not answer counts as
       failed instead of going through GDI): in two runs 40 of 40 and 39 of 40 reads gave
       different pictures ("Live"), where GDI had given 40 identical. The timings — each read,
@@ -2705,9 +2705,9 @@ arrived with the game in front. So desktop duplication is the working source for
 - [ ] `tools/inspect` OCRs through GDI whatever the module being inspected declares, so an
       author inspecting a game that GDI reads frozen reads the frozen picture. Say so in its
       output, or let it take the source of the module it inspects.
-- [ ] Commit `tools/capture-liveness-dxgi` — the DXGI variant of `tools/capture-liveness` that
-      the 2026-09-25 measurement was made with, still untracked in the main checkout — or drop
-      it. It went to the developer on its own, because `package.ps1` ships only `modules/`.
+- [x] `tools/capture-liveness-dxgi` — the DXGI variant of `tools/capture-liveness` that the
+      2026-09-25 measurement was made with — is committed (2026-09-25). It goes to a tester
+      on its own, because `package.ps1` ships only `modules/`.
 - [ ] Later (design step 9): `Req::WaitChange` — a dirty-rectangle watch for short-lived help
       bubbles and for announcing a toggle when it actually repaints; Windows.Graphics.Capture
       per window if M14, or another game, shows duplication missing a game's frames (M4: this
@@ -2943,7 +2943,7 @@ Found while documenting — the behaviour is written down now, and wants fixing:
       in its error, and the log has it, but the dialog blames another application. That one
       can become holdable after a layout switch, so it wants a reason of its own in the
       dialog (the backend's error classified, not matched as text) rather than a raise.
-  - Fixed (2026-09-22, f67628d): `host.hotkey.register` raises for a tap, for a key the
+  - Fixed (2026-09-22, d2b132f): `host.hotkey.register` raises for a tap, for a key the
       platform has no code for (F21–F24 on macOS) and for a chord the system keeps, before
       anything is claimed (`backend::hotkey_claim_for`); and a letter no key of the current
       macOS layout types is parked instead of refused (`backend/macos/hotkey.rs`, `register`)
@@ -3481,7 +3481,7 @@ switch off" and "Keys"; the cross-platform critique's first issue).
       log (captured keys dead, "arrived through RegisterHotKey" lines in front of ordinary
       windows).
 - [ ] **Live (Windows), with NVDA:**
-  - Heard with NVDA before f67628d was committed: overlay navigation, NVDA's own keys,
+  - Heard with NVDA before d2b132f was committed: overlay navigation, NVDA's own keys,
       Alt+letter hotkeys, the F5 and F6 keys and a second start. Which of the points below
       that covered in detail was not written down, so they stay open;
   - an overlay's Alt+letter control hotkey (Kontakt's Alt+V, Alt+M) fires once, and
