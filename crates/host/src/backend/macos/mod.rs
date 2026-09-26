@@ -53,6 +53,9 @@ mod queue;
 mod tap;
 mod watch;
 
+/// The backing-store image a snapshot keeps; `backend::frame` names it as the platform's.
+pub use capture::NativeImage;
+
 pub struct MacBackend;
 
 impl MacBackend {
@@ -197,6 +200,15 @@ impl Backend for MacBackend {
         capture_many
     }
 
+    // The source is ignored, as for every read here (see `pixel` above).
+    fn frame(&self, r: crate::ocr::types::Rect, _src: CaptureSource) -> Result<super::frame::Frame, String> {
+        capture::frame(r.x, r.y, r.w, r.h, false)
+    }
+
+    fn pixels(&self, pts: &[(i32, i32)], _src: CaptureSource) -> Result<Vec<(u8, u8, u8)>, String> {
+        capture::pixels(pts)
+    }
+
     fn ocr_worker(&self) -> super::OcrWorker {
         super::OcrWorker {
             present: true,
@@ -204,6 +216,9 @@ impl Backend for MacBackend {
             capture: ocr::capture_for_read,
             recognise: ocr::recognise_shot,
             languages: ocr::languages,
+            frames: ocr::frames_for_round,
+            display_of: capture::display_id_at,
+            shot_of: ocr::shot_of,
         }
     }
 

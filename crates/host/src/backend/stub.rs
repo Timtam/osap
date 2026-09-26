@@ -42,6 +42,11 @@ impl Backend for StubBackend {
         |regions, _| regions.iter().map(|_| Err(CAPTURE_FAILED.to_string())).collect()
     }
 
+    // Nothing to keep. `pixels` is the trait's, which fails through `capture` above.
+    fn frame(&self, _r: crate::ocr::types::Rect, _src: CaptureSource) -> Result<super::frame::Frame, String> {
+        Err(CAPTURE_FAILED.to_string())
+    }
+
     fn ocr(
         &self,
         _x: i32,

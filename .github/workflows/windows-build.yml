@@ -210,6 +210,12 @@ jobs:
             if (Select-String -Path $log -Pattern 'CAPTURE PROBE:.*THREW' -Quiet) {
               Write-Host "::warning::capture probe ($($run.Name)): a capture call raised"
             }
+            if (Select-String -Path $log -Pattern 'CAPTURE PROBE: snapshot 200x60 returned nil' -Quiet) {
+              Write-Host "::warning::capture probe ($($run.Name)): the snapshot on the pump returned nil"
+            }
+            if (-not (Select-String -Path $log -Pattern 'CAPTURE PROBE: snapshot callbacks (\d+) of \1 answered' -Quiet)) {
+              Write-Host "::warning::capture probe ($($run.Name)): a snapshot callback never came"
+            }
             if (Select-String -Path $log -Pattern '\[pump\] one iteration took' -Quiet) {
               Write-Host "::warning::capture probe ($($run.Name)): the pump stalled"
             }

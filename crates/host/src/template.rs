@@ -416,13 +416,23 @@ pub(crate) fn find(
     None
 }
 
-/// Every match of `t` at its own size, for deciding whether a template is safe to click
-/// blindly (`imageSearchAll`).
+/// Every match of `t` at its own size in the whole frame — [`find_all_in`] with no area, kept
+/// for the tests that hold it to the old binding's loop.
+#[cfg(test)]
+pub(crate) fn find_all(hay: &CapturedImage, t: &Decoded, tol: u8) -> Vec<(u32, u32)> {
+    find_all_in(hay, None, t, tol)
+}
+
+/// Every match of `t` at its own size inside `area` of `hay` (the whole frame when `None`), in
+/// the frame's own coordinates, for deciding whether a template is safe to click blindly
+/// (`imageSearchAll`).
 ///
 /// Non-overlapping along a row: after a hit the scan resumes past its right edge on that row,
 /// so one match is reported once rather than once per pixel of slop. The next row starts from
-/// the left again — unchanged from the binding this came out of.
-pub(crate) fn find_all(hay: &CapturedImage, t: &Decoded, tol: u8) -> Vec<(u32, u32)> {
+/// the area's left edge again — unchanged from the binding this came out of, which scanned the
+/// whole frame; with an area it scans exactly what a frame cut to that area would, offset by
+/// the area's corner.
+pub(crate) fn find_all_in(hay: &CapturedImage, area: Option<Rect>, t: &Decoded, tol: u8) -> Vec<(u32, u32)> {
     let Body::Dense { rgba, probes } = &t.body;
     let (tw, th) = (t.w, t.h);
     let mut out = Vec::new();
@@ -431,10 +441,12 @@ pub(crate) fn find_all(hay: &CapturedImage, t: &Decoded, tol: u8) -> Vec<(u32, u
     if tw == 0 || th == 0 || !frame_is_whole(hay) || rgba.len() < (tw as usize) * (th as usize) * 4 {
         return out;
     }
-    let mut y = 0;
-    while y + th <= hay.h {
-        let mut x = 0;
-        while x + tw <= hay.w {
+    let a = area.unwrap_or(Rect::full(hay.w, hay.h)).clipped_to(hay.w, hay.h);
+    let (right, bottom) = (a.x + a.w, a.y + a.h);
+    let mut y = a.y;
+    while y + th <= bottom {
+        let mut x = a.x;
+        while x + tw <= right {
             if matches_at(hay, x, y, tw, th, rgba, tol, probes) {
                 out.push((x, y));
                 x += tw;
@@ -832,6 +844,57 @@ mod tests {
         assert!((200..=500).contains(&matched), "{matched} of 600 cases matched");
         assert!(scaled_hits >= 20, "only {scaled_hits} scaled hits");
         assert!(masked_hits >= 20, "only {masked_hits} masked hits");
+    }
+
+    /// A frame cut to `a`: the oracle an area search is held to.
+    fn cut(hay: &CapturedImage, a: Rect) -> CapturedImage {
+        let mut rgba = Vec::new();
+        for y in a.y..a.y + a.h {
+            let o = ((y * hay.w + a.x) * 4) as usize;
+            rgba.extend_from_slice(&hay.rgba[o..o + (a.w * 4) as usize]);
+        }
+        frame(a.w, a.h, rgba)
+    }
+
+    /// `imageSearchAll`'s scan with no area is the old binding's loop, case for case; with an
+    /// area it finds exactly what the old loop finds in a frame cut to that area, offset by the
+    /// area's corner — which is how a snapshot's region is searched without copying it out.
+    #[test]
+    fn find_all_full_area_equals_legacy() {
+        let mut rng = Lcg(0x0a11_a4ea);
+        let mut hits = 0;
+        for i in 0..400 {
+            let (hay, tw, th, t, tol) = case(&mut rng);
+            let old_probes = reference::probe_order(tw, th, &t);
+            let old = reference::Decoded { w: tw, h: th, rgba: t.clone(), probes: old_probes };
+            let dec = Decoded::from_png_rgba(tw, th, t.clone());
+            let whole = reference::find_all(&hay, &old, tol);
+            assert_eq!(find_all_in(&hay, None, &dec, tol), whole, "case {i}: no area");
+            assert_eq!(find_all_in(&hay, Some(Rect::full(hay.w, hay.h)), &dec, tol), whole, "case {i}: the full area");
+            hits += whole.len();
+            let (x, y) = (rng.below(hay.w), rng.below(hay.h));
+            let a = Rect { x, y, w: 1 + rng.below(hay.w - x), h: 1 + rng.below(hay.h - y) };
+            let want: Vec<(u32, u32)> =
+                reference::find_all(&cut(&hay, a), &old, tol).into_iter().map(|(hx, hy)| (hx + a.x, hy + a.y)).collect();
+            assert_eq!(find_all_in(&hay, Some(a), &dec, tol), want, "case {i}: area {a:?}");
+        }
+        assert!(hits >= 100, "only {hits} hits: the comparison would prove little");
+    }
+
+    /// `find` in an area answers what `find` in the frame cut to that area answers, offset —
+    /// scales included, since both size a variant against the area.
+    #[test]
+    fn find_in_an_area_equals_find_in_the_cut_frame() {
+        let mut rng = Lcg(0x5ca1_ab1e);
+        for i in 0..300 {
+            let (hay, tw, th, t, tol) = case(&mut rng);
+            let dec = Arc::new(Decoded::from_png_rgba(tw, th, t));
+            let (x, y) = (rng.below(hay.w), rng.below(hay.h));
+            let a = Rect { x, y, w: 1 + rng.below(hay.w - x), h: 1 + rng.below(hay.h - y) };
+            let scales: &[f32] = if i % 2 == 0 { &[] } else { &[1.0, 0.5, 2.0] };
+            let want = find(&cut(&hay, a), None, &dec, tol, scales).map(|h| Hit { x: h.x + a.x, y: h.y + a.y, ..h });
+            assert_eq!(find(&hay, Some(a), &dec, tol, scales), want, "case {i}: area {a:?}");
+        }
     }
 
     /// The linear `probe_order` picks the same pixels, in the same order, as the sort it

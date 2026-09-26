@@ -787,6 +787,12 @@ pub(crate) fn of_capture(cap: &CapturedImage, w: i32, h: i32, spec: &CellSpec) -
     reduce(cap, Sub { x: 0, y: 0, w: cap.w, h: cap.h }, spec).map_err(|e| e.to_string())
 }
 
+/// The cells of `sub` of an image that holds more than the region — a snapshot, read where the
+/// region lies in it rather than copied out — or why there are none.
+pub(crate) fn of_sub(img: &CapturedImage, sub: Sub, spec: &CellSpec) -> Result<Vec<u8>, String> {
+    reduce(img, sub, spec).map_err(|e| e.to_string())
+}
+
 // ── Comparison ─────────────────────────────────────────────────────────────────────────
 
 /// `sum |a - b|`.
@@ -892,6 +898,16 @@ impl Matcher {
     /// The live cells of a capture that should be `w` x `h`, and their ranking.
     pub(crate) fn answer(&self, cap: &CapturedImage, w: i32, h: i32) -> Result<(Vec<u8>, Ranked), String> {
         let live = of_capture(cap, w, h, &self.spec)?;
+        self.ranked(live)
+    }
+
+    /// The live cells of `sub` of a larger image (a snapshot), and their ranking.
+    pub(crate) fn answer_sub(&self, img: &CapturedImage, sub: Sub) -> Result<(Vec<u8>, Ranked), String> {
+        let live = of_sub(img, sub, &self.spec)?;
+        self.ranked(live)
+    }
+
+    fn ranked(&self, live: Vec<u8>) -> Result<(Vec<u8>, Ranked), String> {
         let ranked = rank(&live, &self.states, &self.item_of).ok_or_else(|| "no states to compare".to_string())?;
         Ok((live, ranked))
     }
@@ -1446,6 +1462,30 @@ mod tests {
             reduce(&big, Sub { x: 7, y: 5, w: 23, h: 17 }, &spec).unwrap(),
             reduce(&small, Sub { x: 0, y: 0, w: 23, h: 17 }, &spec).unwrap()
         );
+    }
+
+    /// The snapshot calls: `of_sub` and `Matcher::answer_sub` read a region where it lies in a
+    /// larger picture and answer exactly what `of_capture` and `answer` answer for that region
+    /// captured on its own.
+    #[test]
+    fn of_sub_equals_of_capture_on_the_crop() {
+        let spec = CellSpec::new(10, 36, Predicate::parse(HIS).unwrap()).unwrap();
+        let mut seed = 7u64;
+        let big = image(64, 48, &mut seed);
+        for (x, y, w, h) in [(0u32, 0u32, 64u32, 48u32), (7, 5, 23, 17), (63, 47, 1, 1), (10, 0, 5, 48)] {
+            let mut rgba = Vec::new();
+            for row in y..y + h {
+                let o = ((row * 64 + x) * 4) as usize;
+                rgba.extend_from_slice(&big.rgba[o..o + (w * 4) as usize]);
+            }
+            let cut = CapturedImage { w, h, rgba };
+            let sub = Sub { x, y, w, h };
+            assert_eq!(of_sub(&big, sub, &spec), of_capture(&cut, w as i32, h as i32, &spec), "{sub:?}");
+            let states = boxed(&[&[0u8; 360], &[255u8; 360]]);
+            let m = Matcher { spec: spec.clone(), states, item_of: vec![0, 1] };
+            assert_eq!(m.answer_sub(&big, sub), m.answer(&cut, w as i32, h as i32), "{sub:?}");
+        }
+        assert_eq!(of_sub(&big, Sub { x: 60, y: 0, w: 5, h: 1 }, &spec), Err("the region is not inside the captured image".to_string()));
     }
 
     #[test]

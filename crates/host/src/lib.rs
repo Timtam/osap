@@ -25,6 +25,8 @@ pub mod logging;
 mod ocr;
 mod appcfg;
 mod portable;
+/// `host.screen.profile`'s reduction of a picture, per column and row, pure — see the file.
+mod profile;
 /// The window-relative Region form, `{ window, fraction }`, resolved to pixels, and the rule for
 /// strict corners — see the file.
 mod region;
@@ -32,6 +34,9 @@ mod region;
 mod region_lua;
 pub mod registry;
 mod settings;
+/// `host.screen.snapshot` and `pixels`: the Snapshot handle, its budget, and the rules every
+/// read of a snapshot applies — see the file.
+mod snapshot;
 mod speech;
 mod template;
 /// `host.timer`: pending timers, their tokens, and the firing rules — see the file.
@@ -211,6 +216,12 @@ struct Shared {
     image_results: std::sync::mpsc::Receiver<ImageResult>,
     pending_image: RefCell<HashMap<u64, PendingImage>>,
     next_image_id: Cell<u64>,
+    /// What every module's snapshots hold between them, against the application's budget
+    /// (snapshot.rs). Each VM keeps its own total in its app data beside this one.
+    snap_bytes: Rc<Cell<usize>>,
+    /// `host.screen.snapshotAsync`'s callbacks waiting for the capture thread, and the answers
+    /// decided without it (snapshot.rs).
+    snap_state: snapshot::SnapState,
     /// `host.ocr.read`: the capture and recognise threads (ocr/service.rs)...
     ocr: ocr::service::Service<backend::OcrShot>,
     /// ...and what the event loop keeps for them: the callbacks waiting, the answers decided
@@ -450,8 +461,14 @@ impl Shared {
     /// focus move, and against `epoch` that meant a fresh pixel read on every Tab —
     /// measured at 21-38 ms of the ~70 ms step. Pressing Tab cannot change which view
     /// Kontakt is in. Sending F10 can, and that goes through host.input, which bumps this.
+    ///
+    /// The `screen-capture` thread is told the new value (`Service::note_input_epoch`) before
+    /// anything acts, so a snapshot it takes carries the epoch as it stood once its capture was
+    /// back: input the host drives after that turns it over after the picture.
     fn bump_input_epoch(&self) {
-        self.input_epoch.set(self.input_epoch.get().wrapping_add(1));
+        let e = self.input_epoch.get().wrapping_add(1);
+        self.input_epoch.set(e);
+        self.ocr.note_input_epoch(e);
         self.bump_epoch();
     }
 
@@ -943,6 +960,7 @@ impl Shared {
         self.purge_pending_images(idx);
         // Its reads are dropped, not answered: the callbacks belong to the VM that is going.
         self.ocr_drop_owner(idx, true);
+        self.snap_drop_owner(idx);
         self.drop_pad_listeners(|i| i == idx);
         let mut to_resolve: Vec<String> = Vec::new();
         let mut deactivations: Vec<Function> = Vec::new();
@@ -1031,6 +1049,7 @@ impl Shared {
         // none. Enabled again, its polls simply read afresh.
         if !enabled {
             self.ocr_drop_owner(idx, false);
+            self.snap_drop_owner(idx);
         }
         // A disabled module must not stay the active overlay (and an enabled one
         // may now win): re-elect every arbiter slot it participates in.
@@ -1084,6 +1103,7 @@ impl Shared {
         self.timers.retain(|idx| idx < n);
         self.initial_pending.borrow_mut().retain(|(idx, _)| *idx < n);
         self.ocr_drop_from(n);
+        self.snap_drop_from(n);
         self.drop_pad_listeners(|idx| idx >= n);
         {
             // Drop arbiter claims owned by the rolled-back modules; clear a now-
@@ -3743,6 +3763,8 @@ impl Manager {
             image_results,
             pending_image: RefCell::new(HashMap::new()),
             next_image_id: Cell::new(0),
+            snap_bytes: Rc::new(Cell::new(0)),
+            snap_state: snapshot::SnapState::default(),
             ocr,
             ocr_state: ocr::lua::OcrState::default(),
             vm_gens: RefCell::new(HashMap::new()),
@@ -3841,6 +3863,7 @@ impl Manager {
         let has_own_work = !self.shared.timers.is_empty()
             || !self.shared.pending_image.borrow().is_empty()
             || self.shared.ocr_state.has_pending()
+            || self.shared.snap_state.has_pending()
             || self.shared.pads.has_listeners();
         let headless = appcfg::headless();
 
@@ -4044,6 +4067,9 @@ impl Manager {
                         let t = std::time::Instant::now();
                         shared.fire_ocr_results();
                         let ocr_ms = t.elapsed().as_millis();
+                        let t = std::time::Instant::now();
+                        shared.fire_snapshot_results();
+                        let snapshots_ms = t.elapsed().as_millis();
                         // `onTrigger { initial = true }`: the window already in front, for
                         // the triggers that asked since the last tick (at load, on enable, or
                         // from a timer earlier in this very tick). Inside the measured
@@ -4079,8 +4105,9 @@ impl Manager {
                                      {focus_ms} + gamepad {pad_ms} + everything else \
                                      {other_ms}, which is mostly key and hotkey dispatch; \
                                      timers {timers_ms}, image results {images_ms}, text \
-                                     recognition results {ocr_ms}, initial window report \
-                                     {initial_ms}) — {hazard}"
+                                     recognition results {ocr_ms}, snapshot results \
+                                     {snapshots_ms}, initial window report {initial_ms}) — \
+                                     {hazard}"
                                 ),
                             );
                         }
@@ -4562,6 +4589,7 @@ impl HostEvents for Dispatcher<'_> {
         self.shared.fire_pad_tick();
         self.shared.fire_image_results();
         self.shared.fire_ocr_results();
+        self.shared.fire_snapshot_results();
         self.dispatch_initial();
         if self.shared.recheck_requested.replace(false) {
             self.on_focus_change();
@@ -5854,19 +5882,30 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     screen.set(
         "pixel",
-        // pixel(x, y) or pixel({ window = w, fraction = { x, y } }) -> colour | nil, reason
-        lua.create_function(move |lua, (a, b): (mlua::Value, mlua::Value)| {
+        // pixel(x, y, opts?) or pixel({ window = w, fraction = { x, y } }, opts?) -> colour | nil, reason
+        lua.create_function(move |lua, (a, b, c): (mlua::Value, mlua::Value, mlua::Value)| {
             const F: &str = "host.screen.pixel";
+            // The options come after the point: third after two numbers, second after a table.
+            let opts = match &a {
+                mlua::Value::Table(_) => {
+                    if !c.is_nil() {
+                        return Err(mlua::Error::external(format!(
+                            "{F}: takes (x, y, opts?) or (point, opts?) with point {{ window = w, fraction = {{ x, y }} }}, not a point, {} and {}",
+                            describe_value(&b),
+                            describe_value(&c)
+                        )));
+                    }
+                    &b
+                }
+                _ => &c,
+            };
+            // Read before anything is answered, like every argument: a mistake in the options
+            // raises whether or not there is a pixel to read this time.
+            let snap = snapshot::strict_opts(opts, F)?;
             let (x, y) = match &a {
                 // The window form: the region form's start formula, resolved against the client
                 // area the table carries. A minimised window has no pixel: `nil, reason`.
                 mlua::Value::Table(_) => {
-                    if !b.is_nil() {
-                        return Err(mlua::Error::external(format!(
-                            "{F}: takes (x, y) or one point {{ window = w, fraction = {{ x, y }} }}, not a table and {}",
-                            describe_value(&b)
-                        )));
-                    }
                     let (client, fx, fy) =
                         region_lua::read_point(&a, "point").map_err(|m| mlua::Error::external(format!("{F}: {m}")))?;
                     match region::resolve_point(client, fx, fy) {
@@ -5877,6 +5916,14 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 // Screen coordinates, converted as they always were (see `pixel_coords`).
                 _ => pixel_coords(lua, &a, &b)?,
             };
+            // From a snapshot: its pixel, no screen touched and nothing counted — or `nil` and
+            // why when the point is not in it.
+            if let Some(frame) = snap {
+                return match frame.sample(x, y) {
+                    Some(px) => one_value(mlua::Value::Table(snapshot::colour_table(lua, px)?)),
+                    None => with_reason(lua, mlua::Value::Nil, snapshot::POINT_NOT_INSIDE.to_string()),
+                };
+            }
             // The source first, outside the timing below: in a module that reads through
             // desktop duplication, the first read also compares the two sources, once.
             let src = capture_source::read_source(lua, &*sh.backend, (x, y, 1, 1));
@@ -5894,18 +5941,22 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             // nil only for a module that declared `fallback = "none"` while desktop
             // duplication could not answer: no colour is better than the frozen one. The
             // reason says why, in the words the log uses.
-            let (r, g, b) = match px {
+            let px = match px {
                 Ok(c) => c,
                 Err(why) => return with_reason(lua, mlua::Value::Nil, why),
             };
-            let t = lua.create_table()?;
-            t.set("r", r)?;
-            t.set("g", g)?;
-            t.set("b", b)?;
-            t.set("hex", format!("#{r:02X}{g:02X}{b:02X}"))?;
-            one_value(mlua::Value::Table(t))
+            one_value(mlua::Value::Table(snapshot::colour_table(lua, px)?))
         })?,
     )?;
+    // host.screen.snapshot(opts) / host.screen.pixels(points, opts?) — one picture taken once and
+    // read by every call given `{ snapshot = s }`, and many points from as few captures as they
+    // allow. The rules are in snapshot.rs; registered HERE, by name, for check-docs.ps1 and
+    // tools/api-index.py, which read this file.
+    screen.set("snapshot", snapshot::snapshot(lua, shared)?)?;
+    screen.set("pixels", snapshot::pixels(lua, shared)?)?;
+    // host.screen.snapshotAsync(opts, cb) — the picture taken on the `screen-capture` thread that
+    // host.ocr.read photographs on: at once, at a set time, or when the region changes.
+    screen.set("snapshotAsync", snapshot::snapshot_async(lua, shared, idx)?)?;
     let sh = shared.clone();
     screen.set(
         "size",
@@ -5943,8 +5994,13 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         lua.create_function(move |lua, opts: Option<Table>| {
             const F: &str = "host.screen.profile";
             // Every argument is read before anything is answered, so a mistake in `axes`
-            // raises whether or not there is anything to read this time.
-            let region = opts_region(&*sh.backend, opts.as_ref(), F)?;
+            // raises whether or not there is anything to read this time. A snapshot first: a
+            // region left out is then the whole snapshot rather than the screen.
+            let snap = snapshot::from_opts(opts.as_ref(), F)?;
+            let region = match &snap {
+                Some(f) => snapshot::opts_region_in(opts.as_ref(), F, f)?,
+                None => opts_region(&*sh.backend, opts.as_ref(), F)?,
+            };
             let axes = opts
                 .as_ref()
                 .and_then(|o| o.get::<String>("axes").ok())
@@ -5968,24 +6024,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             if rw <= 0 || rh <= 0 {
                 return with_reason(lua, mlua::Value::Nil, format!("{EMPTY_REGION} ({rw}x{rh})"));
             }
-            let t0 = Instant::now();
-            let cap = match sh.backend.capture(rx, ry, rw, rh, capture_source::read_source(lua, &*sh.backend, (rx, ry, rw, rh))) {
-                Ok(c) => c,
-                Err(why) => return with_reason(lua, mlua::Value::Nil, why),
-            };
-            let (w, h) = (cap.w as usize, cap.h as usize);
-            // Trust the buffer only as far as it goes. Every index below is computed from w and
-            // h, so a capture that came back short — a clipped region, a backend that rounded a
-            // dimension — would index past the end, and a panic inside a Lua binding is not a
-            // module error that gets reported: it is the process. Answering nil is what every
-            // other failure in this function does.
-            if w == 0 || h == 0 || cap.rgba.len() < w * h * 4 {
-                return with_reason(lua, mlua::Value::Nil, SHORT_CAPTURE.to_string());
-            }
-            // Accumulators for both axes in ONE traversal: the capture is already the whole
-            // cost, and walking it twice to keep the code symmetrical would be the only part
-            // of this that scales with area.
-            // How many pixels in this column/row are darker than `dark`.
+            // How many pixels in each column/row are darker than `dark`.
             //
             // The third statistic, and for finding a SHAPE it is the only one of the three that
             // works. A mean over hundreds of rows dilutes a note-sized object to a couple of
@@ -5999,100 +6038,60 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 .as_ref()
                 .and_then(|o| o.get::<u8>("dark").ok())
                 .unwrap_or(128);
-            let (mut cdark, mut rdark) = (vec![0u32; w], vec![0u32; h]);
-            let (mut cmin, mut cmax) = (vec![255u8; w], vec![0u8; w]);
-            let (mut rmin, mut rmax) = (vec![255u8; h], vec![0u8; h]);
-            let (mut csum, mut rsum) = (vec![0u64; w], vec![0u64; h]);
-            let mut cch = vec![[0u64; 3]; w];
-            let mut rch = vec![[0u64; 3]; h];
-            for y in 0..h {
-                for x in 0..w {
-                    let o = (y * w + x) * 4;
-                    let (r, g, b) = (cap.rgba[o], cap.rgba[o + 1], cap.rgba[o + 2]);
-                    // ITU-R BT.601, so a coloured mark is weighted the way an eye would weight
-                    // it. Melodyne's chrome is neutral grey (r == g == b), where this agrees
-                    // with a plain average anyway; the note blobs are not.
-                    let l = ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000) as u8;
-                    if want_cols {
-                        if l < dark_t {
-                            cdark[x] += 1;
-                        }
-                        if l < cmin[x] {
-                            cmin[x] = l;
-                        }
-                        if l > cmax[x] {
-                            cmax[x] = l;
-                        }
-                        csum[x] += l as u64;
-                        cch[x][0] += r as u64;
-                        cch[x][1] += g as u64;
-                        cch[x][2] += b as u64;
-                    }
-                    if want_rows {
-                        if l < dark_t {
-                            rdark[y] += 1;
-                        }
-                        if l < rmin[y] {
-                            rmin[y] = l;
-                        }
-                        if l > rmax[y] {
-                            rmax[y] = l;
-                        }
-                        rsum[y] += l as u64;
-                        rch[y][0] += r as u64;
-                        rch[y][1] += g as u64;
-                        rch[y][2] += b as u64;
-                    }
-                }
-            }
-            // The means are REAL numbers, not truncated to a byte.
-            //
-            // Integer division looked harmless and is not: a mean over 522 rows moves by less
-            // than one whole unit when a note-sized shape changes inside it, so `as u8` would
-            // floor exactly the signal a caller is looking for down to zero. Lua numbers are
-            // doubles; there is nothing to save by rounding on the way in. `min` and `max` stay
-            // bytes because they ARE bytes — a particular pixel's value, not an average.
-            let axis = |lua: &Lua,
-                        min: &[u8],
-                        max: &[u8],
-                        dark: &[u32],
-                        sum: &[u64],
-                        ch: &[[u64; 3]],
-                        n: u64|
-             -> mlua::Result<Table> {
-                let n = n.max(1) as f64;
+            let t0 = Instant::now();
+            // The picture: the part of the snapshot the region covers, or a capture made now.
+            let pic = match snap {
+                Some(frame) => match snapshot::clip(&frame, region::ScreenRect { x: rx, y: ry, w: rw, h: rh }) {
+                    Ok(rect) => snapshot::Picture::Snap { frame, rect },
+                    Err(why) => return with_reason(lua, mlua::Value::Nil, why),
+                },
+                None => match sh.backend.capture(rx, ry, rw, rh, capture_source::read_source(lua, &*sh.backend, (rx, ry, rw, rh))) {
+                    Ok(img) => snapshot::Picture::Live { img, x: rx, y: ry },
+                    Err(why) => return with_reason(lua, mlua::Value::Nil, why),
+                },
+            };
+            // The reduction reads only the area it is given, and nothing at all from a buffer
+            // shorter than its own size: a capture that came back short — a clipped region, a
+            // backend that rounded a dimension — would otherwise index past the end, and a panic
+            // inside a Lua binding is not a module error that gets reported: it is the process.
+            // Answering nil is what every other failure in this function does.
+            let area = pic.area();
+            let Some((columns, rows)) = profile::profile(pic.image(), area, want_cols, want_rows, dark_t) else {
+                return with_reason(lua, mlua::Value::Nil, SHORT_CAPTURE.to_string());
+            };
+            let axis = |lua: &Lua, a: profile::Axis| -> mlua::Result<Table> {
                 let t = lua.create_table()?;
-                t.set("min", lua.create_sequence_from(min.iter().copied())?)?;
-                t.set("max", lua.create_sequence_from(max.iter().copied())?)?;
-                t.set("dark", lua.create_sequence_from(dark.iter().copied())?)?;
-                t.set(
-                    "mean",
-                    lua.create_sequence_from(sum.iter().map(|s| *s as f64 / n))?,
-                )?;
-                for (i, name) in ["r", "g", "b"].iter().enumerate() {
-                    t.set(
-                        *name,
-                        lua.create_sequence_from(ch.iter().map(|c| c[i] as f64 / n))?,
-                    )?;
-                }
+                t.set("min", lua.create_sequence_from(a.min)?)?;
+                t.set("max", lua.create_sequence_from(a.max)?)?;
+                t.set("dark", lua.create_sequence_from(a.dark)?)?;
+                t.set("mean", lua.create_sequence_from(a.mean)?)?;
+                t.set("r", lua.create_sequence_from(a.r)?)?;
+                t.set("g", lua.create_sequence_from(a.g)?)?;
+                t.set("b", lua.create_sequence_from(a.b)?)?;
                 Ok(t)
             };
+            // The rectangle read: the region asked for, or, on a snapshot, its part inside it.
+            let (ox, oy) = match &pic {
+                snapshot::Picture::Snap { rect, .. } => (rect.x, rect.y),
+                snapshot::Picture::Live { .. } => (rx, ry),
+            };
             let out = lua.create_table()?;
-            out.set("x", rx)?;
-            out.set("y", ry)?;
-            out.set("w", cap.w)?;
-            out.set("h", cap.h)?;
-            if want_cols {
-                out.set("columns", axis(lua, &cmin, &cmax, &cdark, &csum, &cch, h as u64)?)?;
+            out.set("x", ox)?;
+            out.set("y", oy)?;
+            out.set("w", area.w)?;
+            out.set("h", area.h)?;
+            if let Some(c) = columns {
+                out.set("columns", axis(lua, c)?)?;
             }
-            if want_rows {
-                out.set("rows", axis(lua, &rmin, &rmax, &rdark, &rsum, &rch, w as u64)?)?;
+            if let Some(r) = rows {
+                out.set("rows", axis(lua, r)?)?;
             }
             // Timed to HERE, not to the end of the capture. The capture is a fixed frame; the
             // traversal and the six sequences are the only part that grows with the region, and
             // leaving them outside the measurement would hide them from the one report this
-            // project uses to find event-loop stalls — while making this call look free.
-            {
+            // project uses to find event-loop stalls — while making this call look free. A
+            // snapshot's profile touched no screen and is not counted.
+            if pic.is_live() {
                 let mut obs = sh.observations();
                 obs.pixels += 1;
                 obs.pixel_us += t0.elapsed().as_micros();
@@ -6126,12 +6125,28 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             png_path_only("host.screen.saveMarked", &full)?;
             // A window region is resolved to its screen rectangle first; the marks stay in
             // screen coordinates whichever form the region takes.
-            let (rx, ry, rw, rh) = match opts_region(&*sh.backend, Some(&opts), "host.screen.saveMarked")? {
+            let snap = snapshot::from_opts(Some(&opts), "host.screen.saveMarked")?;
+            let region = match &snap {
+                Some(f) => snapshot::opts_region_in(Some(&opts), "host.screen.saveMarked", f)?,
+                None => opts_region(&*sh.backend, Some(&opts), "host.screen.saveMarked")?,
+            };
+            let (rx, ry, rw, rh) = match region {
                 Ok(r) => (r.x, r.y, r.w, r.h),
                 Err(why) => return with_reason(lua, mlua::Value::Boolean(false), why),
             };
-            let cap = match sh.backend.capture(rx, ry, rw, rh, capture_source::read_source(lua, &*sh.backend, (rx, ry, rw, rh))) {
-                Ok(cap) => cap,
+            let shot = match snap {
+                // On a snapshot, the part of the region inside it, copied out: the marks are
+                // then placed relative to that part's corner.
+                Some(frame) => snapshot::clip(&frame, region::ScreenRect { x: rx, y: ry, w: rw, h: rh }).and_then(|r| {
+                    frame.crop_image(r).map(|img| (r.x, r.y, img)).ok_or_else(|| snapshot::NO_OVERLAP.to_string())
+                }),
+                None => {
+                    let src = capture_source::read_source(lua, &*sh.backend, (rx, ry, rw, rh));
+                    sh.backend.capture(rx, ry, rw, rh, src).map(|img| (rx, ry, img))
+                }
+            };
+            let (rx, ry, cap) = match shot {
+                Ok(shot) => shot,
                 Err(why) => return with_reason(lua, mlua::Value::Boolean(false), why),
             };
             let Some(mut img) = image::RgbaImage::from_raw(cap.w, cap.h, cap.rgba) else {
@@ -6213,7 +6228,11 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 Ok(r) => r,
                 Err(why) => return nil_because(lua, why),
             };
-            match read_cells_with(&sh, lua, r, |cap| cells::of_capture(cap, r.w, r.h, &call.spec)) {
+            let got = match &call.snapshot {
+                Some(frame) => cells_of_snapshot(frame, r, |img, sub| cells::of_sub(img, sub, &call.spec)),
+                None => read_cells_with(&sh, lua, r, |cap| cells::of_capture(cap, r.w, r.h, &call.spec)),
+            };
+            match got {
                 Ok(bytes) => Ok((mlua::Value::Table(cells_table(lua, &bytes, r)?), mlua::Value::Nil)),
                 Err(why) => nil_because(lua, why),
             }
@@ -6234,7 +6253,11 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 Err(why) => return nil_because(lua, why),
             };
             let matcher = cells::Matcher { item_of: cells::items_of(&st.names), spec: call.spec, states: st.bytes };
-            match read_cells_with(&sh, lua, r, |cap| matcher.answer(cap, r.w, r.h)) {
+            let got = match &call.snapshot {
+                Some(frame) => cells_of_snapshot(frame, r, |img, sub| matcher.answer_sub(img, sub)),
+                None => read_cells_with(&sh, lua, r, |cap| matcher.answer(cap, r.w, r.h)),
+            };
+            match got {
                 Ok((live, ranked)) => Ok((
                     mlua::Value::Table(cells_match_table(lua, &live, r, &ranked, &st.names)?),
                     mlua::Value::Nil,
@@ -6261,7 +6284,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             };
             let matcher = cells::Matcher { item_of: cells::items_of(&st.names), spec: call.spec, states: st.bytes };
             let rect = call.rect.map(|r| (r.x, r.y, r.w, r.h));
-            image_search::enqueue_cells(&sh, lua, idx, cb, rect, matcher, st.names)
+            image_search::enqueue_cells(&sh, lua, idx, cb, rect, matcher, st.names, call.snapshot)
         })?,
     )?;
     // host.screen.save(path, opts?) — capture a screen region (opts.region, else the
@@ -6274,14 +6297,28 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         lua.create_function(move |lua, (path, opts): (String, Option<Table>)| {
             let full = sh.root(idx).join(&path);
             png_path_only("host.screen.save", &full)?;
-            let (rx, ry, rw, rh) = match opts_region(&*sh.backend, opts.as_ref(), "host.screen.save")? {
+            let snap = snapshot::from_opts(opts.as_ref(), "host.screen.save")?;
+            let region = match &snap {
+                Some(f) => snapshot::opts_region_in(opts.as_ref(), "host.screen.save", f)?,
+                None => opts_region(&*sh.backend, opts.as_ref(), "host.screen.save")?,
+            };
+            let (rx, ry, rw, rh) = match region {
                 Ok(r) => (r.x, r.y, r.w, r.h),
                 Err(why) => return with_reason(lua, mlua::Value::Boolean(false), why),
             };
+            // On a snapshot, the part of the region inside it, copied out; nothing is captured.
+            let shot = snap.map(|frame| {
+                snapshot::clip(&frame, region::ScreenRect { x: rx, y: ry, w: rw, h: rh })
+                    .and_then(|r| frame.crop_image(r).ok_or_else(|| snapshot::NO_OVERLAP.to_string()))
+            });
             // Through the module's own source, like every other read. In a module that reads
             // through duplication, a shot taken before it has opened is the standard picture
             // (or `false` under fallback = "none") — docs/api/screen.md says so.
-            match sh.backend.capture(rx, ry, rw, rh, capture_source::read_source(lua, &*sh.backend, (rx, ry, rw, rh))) {
+            let shot = match shot {
+                Some(shot) => shot,
+                None => sh.backend.capture(rx, ry, rw, rh, capture_source::read_source(lua, &*sh.backend, (rx, ry, rw, rh))),
+            };
+            match shot {
                 Ok(cap) => match image::RgbaImage::from_raw(cap.w, cap.h, cap.rgba) {
                     Some(img) => {
                         if let Some(dir) = full.parent() {
@@ -6329,6 +6366,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     ocr.set(
         "recognize",
         lua.create_function(move |lua, opts: Option<Table>| {
+            if let Some(o) = &opts {
+                refuse_snapshot(o, "host.ocr.recognize")?;
+            }
             // The failed shape, for what is routine rather than a mistake: a language nothing
             // here reads, a window region with nothing to read, no picture under
             // `fallback = "none"`.
@@ -6409,6 +6449,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "recognizeMany",
         lua.create_function(move |lua, opts: Table| {
             const F: &str = "host.ocr.recognizeMany";
+            refuse_snapshot(&opts, F)?;
             let regions: Table = opts.get("regions")?;
             let lang: Option<String> = opts.get::<String>("lang").ok();
             // Each region through the one reader: corners as this call always read them, or
@@ -7659,7 +7700,7 @@ impl<'de> serde::Deserialize<'de> for WholeIn {
     }
 }
 
-/// `opts` of the three cells calls, minus the region (read by hand).
+/// `opts` of the three cells calls, minus the region and the snapshot (read by hand).
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CellsOptsIn {
@@ -7669,6 +7710,10 @@ struct CellsOptsIn {
     cols: WholeIn,
     rows: WholeIn,
     predicate: String,
+    /// Only its name, so a misspelt key's message lists it among the keys it expected:
+    /// `read_cells_opts` puts `true` here for the snapshot `snapshot::from_value` reads.
+    #[serde(rename = "snapshot", default)]
+    _snapshot: Option<serde::de::IgnoredAny>,
 }
 
 /// Hex text, from a Luau string whatever its bytes; `cells::from_hex` judges it.
@@ -7765,28 +7810,35 @@ fn predicate_error(fname: &str, what: &str, src: &str, e: &cells::PredError) -> 
 /// What the three cells calls read from `opts`.
 struct CellsCall {
     /// Where to read — or why there is nothing to read this time, which the call answers as
-    /// `nil, reason` (an empty client area).
+    /// `nil, reason` (an empty client area; on a snapshot, a region not wholly inside it).
     rect: std::result::Result<region::ScreenRect, String>,
     spec: cells::CellSpec,
+    /// The snapshot to read instead of the screen, when `opts.snapshot` gave one.
+    snapshot: Option<Arc<backend::frame::Frame>>,
 }
 
-/// Reads `opts = { region, cols, rows, predicate }`, raising for every mistake in it.
+/// Reads `opts = { region, cols, rows, predicate, snapshot? }`, raising for every mistake in it.
 fn read_cells_opts(lua: &Lua, fname: &str, opts: mlua::Value) -> mlua::Result<CellsCall> {
     let err = |m: String| mlua::Error::external(format!("{fname}: {m}"));
     let mlua::Value::Table(t) = opts else {
         return Err(err(format!(
-            "opts must be a table {{ region, cols, rows, predicate }}, got {}",
+            "opts must be a table {{ region, cols, rows, predicate, snapshot? }}, got {}",
             describe_value(&opts)
         )));
     };
     // serde reads everything but the region, which `region_lua::read` reads below. It stands
-    // in as `true`, so a missing region is reported like any other missing option.
+    // in as `true`, so a missing region is reported like any other missing option. The snapshot
+    // is read by `snapshot::from_value`; it stands in as `true` too, so serde knows its name.
     let copy = lua.create_table()?;
     let mut region_value = mlua::Value::Nil;
+    let mut snapshot_value = mlua::Value::Nil;
     for pair in t.pairs::<mlua::Value, mlua::Value>() {
         let (k, v) = pair?;
         if matches!(&k, mlua::Value::String(s) if s.as_bytes().as_ref() == b"region") {
             region_value = v;
+            copy.raw_set(k, true)?;
+        } else if matches!(&k, mlua::Value::String(s) if s.as_bytes().as_ref() == b"snapshot") {
+            snapshot_value = v;
             copy.raw_set(k, true)?;
         } else {
             copy.raw_set(k, v)?;
@@ -7819,7 +7871,28 @@ fn read_cells_opts(lua: &Lua, fname: &str, opts: mlua::Value) -> mlua::Result<Ce
             }
         }
     }
-    Ok(CellsCall { rect, spec })
+    // On a snapshot the region must lie wholly inside it: cut to fit, every block of the grid
+    // would move and the cells would be a different signature.
+    let snapshot = snapshot::from_value(&snapshot_value, fname, "opts.snapshot")?;
+    if let (Some(frame), Ok(r)) = (&snapshot, &rect) {
+        if let Err(why) = snapshot::inside(frame, *r) {
+            rect = Err(why);
+        }
+    }
+    Ok(CellsCall { rect, spec, snapshot })
+}
+
+/// Reads the cells of `r` from a snapshot, where the region lies in it — no capture, not
+/// counted in the observation line. `r` is inside the snapshot (`read_cells_opts` saw to it).
+fn cells_of_snapshot<T>(
+    frame: &backend::frame::Frame,
+    r: region::ScreenRect,
+    reduce: impl FnOnce(&backend::CapturedImage, cells::Sub) -> std::result::Result<T, String>,
+) -> std::result::Result<T, String> {
+    match frame.area(ocr::types::Rect::new(r.x, r.y, r.w, r.h)) {
+        Some(a) => reduce(&frame.img, cells::Sub { x: a.x, y: a.y, w: a.w, h: a.h }),
+        None => Err(snapshot::NOT_INSIDE.to_string()),
+    }
 }
 
 /// The states a match compares against, decoded, with their names.
@@ -7894,6 +7967,17 @@ pub(crate) fn cells_match_table(
     t.set("runnerUp", ranked.runner_up)?;
     t.set("similarities", lua.create_sequence_from(ranked.all.iter().copied())?)?;
     Ok(t)
+}
+
+/// `recognize` and `recognizeMany` read the screen at the call and take no snapshot. Their other
+/// options are read loosely and an unknown key is ignored, but a `snapshot` raises: reading the
+/// live screen where the module asked for a picture it holds is the worse mistake of the two.
+fn refuse_snapshot(opts: &Table, fname: &str) -> mlua::Result<()> {
+    if opts.get::<mlua::Value>("snapshot")?.is_nil() {
+        Ok(())
+    } else {
+        Err(mlua::Error::external(format!("{fname}: takes no snapshot; host.ocr.read does")))
+    }
 }
 
 /// `nil, reason`: the answer of the cells calls when they could not look — two values always,
@@ -8043,6 +8127,11 @@ mod cells_binding_tests {
             ("return 5".to_string(), "opts must be a table"),
             (format!("return {{ {base} }}"), "missing field `region`"),
             (format!("return {{ region = {{ 0, 0, 10, 10 }}, {base}, rouding = 'even' }}"), "unknown field `rouding`"),
+            (
+                format!("return {{ region = {{ 0, 0, 10, 10 }}, {base}, snapshots = 1 }}"),
+                "unknown field `snapshots`, expected one of `region`, `cols`, `rows`, `predicate`, `snapshot`",
+            ),
+            (format!("return {{ region = {{ 0, 0, 10, 10 }}, {base}, snapshot = 1 }}"), "opts.snapshot must be a Snapshot, got 1"),
             ("return { region = { 0, 0, 10, 10 }, rows = 36, predicate = 'r >= 80' }".to_string(), "missing field `cols`"),
             ("return { region = { 0, 0, 10, 10 }, cols = 10.5, rows = 36, predicate = 'r >= 80' }".to_string(), "opts.cols: invalid value: floating point `10.5`, expected a whole number"),
             ("return { region = { 0, 0, 10, 10 }, cols = '10', rows = 36, predicate = 'r >= 80' }".to_string(), "opts.cols: invalid type: string"),
@@ -8255,12 +8344,14 @@ fn win_to_table(lua: &Lua, w: &WinInfo) -> mlua::Result<Table> {
 /// silently when the rule goes.
 #[cfg(test)]
 mod ocr_wiring_tests {
-    use super::{align_many, backend, one_value, pixel_coords, png_path_only, region, region_arg_on, with_reason};
+    use super::{align_many, backend, one_value, pixel_coords, png_path_only, refuse_snapshot, region, region_arg_on, with_reason};
     use mlua::Lua;
 
     const LIB: &str = include_str!("lib.rs");
     const IMAGES: &str = include_str!("image_search.rs");
     const GAMEPAD: &str = include_str!("gamepad_api.rs");
+    const SNAP: &str = include_str!("snapshot.rs");
+    const OCR_LUA: &str = include_str!("ocr/lua.rs");
 
     /// The text of the item that starts with `sig`, up to its closing brace at its own
     /// indentation.
@@ -8303,6 +8394,85 @@ mod ocr_wiring_tests {
         }
         let focus = bindings(api, "win").into_iter().find(|b| b.0 == "focus").expect("host.window.focus");
         assert!(focus.1.contains("sh.ocr_barrier(lua);"), "host.window.focus does not wait for the OCR barrier");
+        // The one barrier covers the snapshots' pictures too: it does not return early for a
+        // module whose only pending pictures are snapshots.
+        let barrier = body(OCR_LUA, "pub(crate) fn ocr_barrier(");
+        assert!(barrier.contains("self.snap_state.has_pending_for(o.idx)"), "the barrier skips a module's pending snapshots");
+    }
+
+    /// Both ticks, the GUI one and the headless one, deliver the snapshots' answers.
+    #[test]
+    fn both_ticks_fire_snapshot_results() {
+        let call = concat!("shared.fire_snapshot", "_results();");
+        assert!(body(LIB, "fn on_tick(&mut self)").contains(call), "the headless tick does not deliver snapshots");
+        let calls = LIB.matches(call).count();
+        assert_eq!(calls, 2, "lib.rs delivers snapshots {calls} times; the GUI tick and the headless one each do it once");
+        assert!(
+            LIB.contains(concat!("snapshot results \\", "\n")) && LIB.contains(concat!("{snapshots_", "ms}, initial window report")),
+            "the overrun line does not name the snapshots' share"
+        );
+    }
+
+    /// A module's snapshot requests are dropped, never delivered, when it is disabled, reloaded
+    /// or rolled back; and a pending one keeps the headless loop running.
+    #[test]
+    fn a_modules_snapshot_requests_go_with_it() {
+        assert!(body(LIB, "fn apply_enabled(").contains("self.snap_drop_owner(idx);"));
+        assert!(body(LIB, "fn purge_module(").contains("self.snap_drop_owner(idx);"));
+        assert!(body(LIB, "fn rollback_to(").contains("self.snap_drop_from(n);"));
+        assert!(body(LIB, "pub fn run(&mut self)").contains("self.shared.snap_state.has_pending()"));
+    }
+
+    /// A snapshot's callback runs in the lane of the dispatch that asked for it, as a text read's
+    /// and an image search's do.
+    #[test]
+    fn a_snapshot_callback_runs_in_its_lane() {
+        let deliver = body(SNAP, "fn deliver(");
+        let lane = deliver.find("let _prio = enter_priority(p.prio);").expect("no priority scope");
+        let call = deliver.find("call_back(&mut p, answer, process)").expect("no callback");
+        assert!(lane < call);
+        assert!(body(SNAP, "pub(crate) fn snap_async(").contains("prio: current_priority(),"));
+    }
+
+    /// Which requests hold their module's input is `snap_queue::holds_input`'s decision (tested
+    /// there), asked with what the call knows: whether it is timed, whether it is a change wait,
+    /// and whether its `from` can be compared with — never a flag of the call's own. Also what
+    /// the call does with its charge: reserved by the region's form (`snapshot::reserve_for`,
+    /// tested there), and given back when the application's limit refuses the request.
+    #[test]
+    fn snap_async_asks_holds_input_with_what_the_call_knows() {
+        let f = body(SNAP, "pub(crate) fn snap_async(");
+        assert!(f.contains("snap_queue::from_usable(f, rect, &c.watch, source)"));
+        assert!(f.contains("snap_queue::holds_input(at.is_some(), true, usable)"), "a change wait");
+        assert!(f.contains("snap_queue::holds_input(at.is_some(), false, false)"), "a plain or timed request");
+        assert_eq!(f.matches("holds_input(").count(), 2, "every request's holds comes from holds_input");
+        // The budget by the form the region was given in: a window region's overrun is answered.
+        assert!(f.contains("reserve_for(lua, &self.snap_bytes, reservation_for(*r, change), FA, &args.form)?"));
+        // A request the application's limit refuses gives its charge back before it is queued.
+        let refused = &f[f.find("if let Some(why) = refused {").expect("the refusal")..];
+        let queued = refused.find("st.ready.borrow_mut().push((p, why));").expect("queued");
+        assert!(refused[..queued].contains("p.res = None;"), "the charge goes back first");
+        // The epoch a picture is handed to the module with is the one stamped when it was taken.
+        assert!(body(LIB, "fn bump_input_epoch(").contains("self.ocr.note_input_epoch(e);"));
+    }
+
+    /// `recognize` and `recognizeMany` refuse a `snapshot` key before anything else, and only
+    /// that key: their other unknown keys are ignored as they always were.
+    #[test]
+    fn recognize_refuses_a_snapshot_key() {
+        let lua = Lua::new();
+        let t: mlua::Table = lua.load("return { region = { 0, 0, 1, 1 }, colour = 3 }").eval().unwrap();
+        assert!(refuse_snapshot(&t, "host.ocr.recognize").is_ok());
+        t.set("snapshot", 1).unwrap();
+        let e = refuse_snapshot(&t, "host.ocr.recognize").unwrap_err().to_string();
+        assert!(e.contains("host.ocr.recognize: takes no snapshot; host.ocr.read does"), "{e}");
+        let api = body(LIB, "fn install_host_api(");
+        let ocr = bindings(api, "ocr");
+        let text = |name: &str| ocr.iter().find(|b| b.0 == name).unwrap_or_else(|| panic!("host.ocr.{name}")).1;
+        let first = text("recognize").find("refuse_snapshot(o, \"host.ocr.recognize\")?;").expect("recognize");
+        assert!(first < text("recognize").find("opts_region(").unwrap(), "recognize reads its region before refusing");
+        let first = text("recognizeMany").find("refuse_snapshot(&opts, F)?;").expect("recognizeMany");
+        assert!(first < text("recognizeMany").find("opts.get(\"regions\")").unwrap());
     }
 
     /// Somebody waiting: every dispatch a person causes runs in the interactive lane, and an
@@ -8399,6 +8569,77 @@ mod ocr_wiring_tests {
         }
         assert!(body(IMAGES, "fn image_search_each(").contains("format!(\"entries[{}].within\""));
         assert!(ocr_text("recognizeMany").contains("format!(\"opts.regions[{}]\""));
+        // Snapshots: `snapshot` and `crop` read the Region form strictly, `pixels` its points
+        // through the one point reader, and every call given a snapshot reads its region through
+        // the same loose reader with the snapshot's edges as the defaults.
+        assert!(text("snapshot").contains("snapshot::snapshot(lua, shared)"), "host.screen.snapshot");
+        assert!(text("pixels").contains("snapshot::pixels(lua, shared)"), "host.screen.pixels");
+        assert!(body(SNAP, "fn read_opts(").contains("region_lua::read(&t.get::<Value>(\"region\")?, \"opts.region\")"));
+        assert!(body(SNAP, "fn crop(").contains("region_lua::read(v, \"the region\")"));
+        assert!(body(SNAP, "fn read_point_list(").contains("region_lua::read_point_any("));
+        assert!(body(SNAP, "fn loose_region(").contains("region_lua::read_loose_within("));
+        assert!(body(SNAP, "fn opts_region_in(").contains("loose_region("));
+        for name in ["profile", "save", "saveMarked"] {
+            assert!(text(name).contains("snapshot::opts_region_in("), "host.screen.{name} reads a snapshot's region another way");
+        }
+        for f in ["fn image_search(", "fn image_search_multi(", "fn image_search_async(", "fn image_search_each(", "fn image_search_all("] {
+            assert!(body(IMAGES, f).contains("snapshot_region(opts.as_ref()"), "`{f}` reads a snapshot's region another way");
+        }
+        assert!(body(IMAGES, "fn snapshot_region(").contains("snapshot::opts_region_in("));
+        assert!(body(IMAGES, "fn image_search_each(").contains("snapshot::loose_region(&r, F, &format!(\"entries[{}].within\""));
+        assert!(body(IMAGES, "fn parse_spec(").contains("region_lua::read_loose_within(&v, \"capture\""), "template{{ capture, snapshot }}");
+        assert!(body(LIB, "fn read_cells_opts(").contains("snapshot::inside(frame, *r)"), "the cells calls cut a snapshot's region");
+        // snapshotAsync: its region and each `watch` region strictly, through the one reader.
+        assert!(text("snapshotAsync").contains("snapshot::snapshot_async(lua, shared, idx)"), "host.screen.snapshotAsync");
+        assert!(body(SNAP, "pub(crate) fn parse_async(").contains("region_lua::read(&region_v, \"opts.region\")"));
+        assert!(body(SNAP, "fn read_watch(").contains("region_lua::read(&item, &format!(\"{W}[{i}]\"))"));
+    }
+
+    /// `pixel`'s options are read strictly, before anything is answered, and a read of a
+    /// snapshot touches no screen: no capture and no count in the observation line, in `pixel`,
+    /// `pixels`, `profile` and the cells calls.
+    #[test]
+    fn pixel_opts_are_strict_and_a_snapshot_read_touches_no_screen() {
+        let api = body(LIB, "fn install_host_api(");
+        let screen = bindings(api, "screen");
+        let text = |name: &str| screen.iter().find(|b| b.0 == name).unwrap_or_else(|| panic!("host.screen.{name}")).1;
+        let pixel = text("pixel");
+        let opts = pixel.find("let snap = snapshot::strict_opts(opts, F)?;").expect("pixel reads its options strictly");
+        let answered = pixel.find("return with_reason(").expect("pixel answers nil and why");
+        assert!(opts < answered, "pixel reads its options after it may already have answered");
+        let branch = pixel.find("if let Some(frame) = snap {").expect("pixel's snapshot branch");
+        let live = pixel.find("sh.backend.pixel(").expect("pixel's live read");
+        assert!(branch < live && !pixel[branch..live].contains("observations()"), "a snapshot's pixel is counted as a screen read");
+        assert!(text("profile").contains("if pic.is_live() {"), "a snapshot's profile is counted as a screen read");
+        assert!(!body(LIB, "fn cells_of_snapshot<T>(").contains("observations()"));
+        // `pixel(x, y)` takes its options third and `pixel(point)` second; without them the call
+        // reaches the live read as it always did: the source for the one pixel, then the backend.
+        assert!(pixel.contains("_ => &c,"), "pixel(x, y) reads its options from somewhere else");
+        let live = &pixel[branch..];
+        let src = live.find("capture_source::read_source(lua, &*sh.backend, (x, y, 1, 1));").expect("pixel's source, for its one pixel");
+        let read = live.find("sh.backend.pixel(x, y, src);").expect("pixel's live read");
+        assert!(src < read, "pixel reads before it knows its source");
+        let read = body(SNAP, "fn read_pixels(");
+        let snap = read.find("else if let Some(frame) = snap {").expect("pixels' snapshot branch");
+        let live = read.find("match live(&at)").expect("pixels' live read");
+        assert!(snap < live && !read.contains("observations()"));
+    }
+
+    /// `host.screen.profile` puts each statistic under its own name, in the order the reference
+    /// lists them. `profile::tests` holds the values; a swapped key would pass those.
+    #[test]
+    fn profile_sets_each_statistic_under_its_own_name() {
+        let api = body(LIB, "fn install_host_api(");
+        let profile = bindings(api, "screen").into_iter().find(|b| b.0 == "profile").expect("host.screen.profile").1;
+        let mut at = 0;
+        for k in ["min", "max", "dark", "mean", "r", "g", "b"] {
+            let line = format!("t.set(\"{k}\", lua.create_sequence_from(a.{k})?)?;");
+            let i = profile[at..].find(&line).unwrap_or_else(|| panic!("host.screen.profile no longer sets `{k}` from a.{k}, after the ones before it"));
+            at += i + line.len();
+        }
+        for k in ["x", "y", "w", "h", "columns", "rows"] {
+            assert!(profile.contains(&format!("out.set(\"{k}\", ")), "host.screen.profile no longer sets `{k}`");
+        }
     }
 
     /// The reader every call above goes through, with a call's name and argument: the window
@@ -8461,6 +8702,10 @@ mod ocr_wiring_tests {
             let check = t.find(&format!("png_path_only(\"host.screen.{name}\", &full)?;")).unwrap_or_else(|| panic!("host.screen.{name} does not check its path"));
             let capture = t.find("sh.backend.capture(").expect("a capture");
             assert!(check < capture, "host.screen.{name} checks its path only after capturing");
+            // And before the picture is a snapshot's, too.
+            let snap = t.find("snapshot::from_opts(").expect("a snapshot");
+            let cut = t.find("frame.crop_image(").expect("a snapshot's picture");
+            assert!(check < snap && check < cut, "host.screen.{name} checks its path only after reading a snapshot");
         }
     }
 

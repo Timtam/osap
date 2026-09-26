@@ -1,4 +1,5 @@
-//! Screen reading: the size of the display, one pixel, and a region as an image.
+//! Screen reading: the size of the display, one pixel, a region as an image, and a region kept
+//! as a snapshot's frame with the backing-store image beside it (`frame`, `NativeImage`).
 //!
 //! The unit rule lives here. A capture is asked for in points and must come back as
 //! **exactly** that many pixels — `w * h * 4` bytes of tightly packed top-down RGBA, alpha
@@ -40,10 +41,10 @@ use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_foundation::NSError;
 use objc2_screen_capture_kit::SCScreenshotManager;
 use objc2_core_graphics::{
-    CGBitmapContextCreate, CGColorSpace, CGContext, CGDirectDisplayID, CGDisplayBounds, CGError,
-    CGGetDisplaysWithPoint, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo,
-    CGGetActiveDisplayList, CGInterpolationQuality, CGMainDisplayID, CGPreflightScreenCaptureAccess,
-    CGWindowImageOption, CGWindowListOption,
+    CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext, CGDirectDisplayID,
+    CGDisplayBounds, CGError, CGGetDisplaysWithPoint, CGImage, CGImageAlphaInfo,
+    CGImageByteOrderInfo, CGGetActiveDisplayList, CGInterpolationQuality, CGMainDisplayID,
+    CGPreflightScreenCaptureAccess, CGWindowImageOption, CGWindowListOption,
 };
 
 // WHERE A CAPTURE COMES FROM, in order: ScreenCaptureKit, then the two older functions —
@@ -67,7 +68,9 @@ use objc2_core_graphics::{
 // time switches ScreenCaptureKit off for the session rather than stalling every capture after
 // it.
 
-use crate::backend::CapturedImage;
+use crate::backend::frame::{Frame, FrameVia};
+use crate::backend::{CapturedImage, CAPTURE_FAILED};
+use crate::ocr::types::Rect;
 
 /// How much of the screen a `pixel()` read grabs, in points, and where the asked-for point
 /// sits inside it.
@@ -372,7 +375,7 @@ pub fn capture_backing(x: i32, y: i32, w: i32, h: i32) -> Option<(CFRetained<CGI
         );
     }
     // The image is owned outright, so it outlives the pool; see `capture_rgba`.
-    let captured = objc2::rc::autoreleasepool(|_| grab(x, y, vw, vh, true));
+    let captured = objc2::rc::autoreleasepool(|_| grab(x, y, vw, vh, true)).map(|g| (g.image, g.scale));
     // THE Retina measurement, at line level. The "first screen capture" line belongs to the
     // pixel path, whose scale depends on which capture function served it and need not be the
     // display's; this is the image OCR actually reads, and its scale is the one every word box
@@ -506,6 +509,14 @@ fn display_at(x: i32, y: i32) -> Option<(CGDirectDisplayID, i32, i32, i32, i32)>
     ))
 }
 
+/// `OcrWorker::display_of`: the display the point lies on, 0 for none. The snapshot lane never
+/// makes one capture of regions whose centres lie on two displays, which can differ in scale —
+/// a union across them would be drawn at one scale or refused as clipped. Thread-safe: Core
+/// Graphics' display queries may be asked from any thread.
+pub fn display_id_at(x: i32, y: i32) -> u32 {
+    display_at(x, y).map_or(0, |d| d.0)
+}
+
 /// A region of the screen as exactly `w * h` pixels of tightly packed top-down RGBA.
 fn capture_rgba(x: i32, y: i32, w: i32, h: i32) -> Option<Vec<u8>> {
     if !PERMISSION_PREFLIGHTED.swap(true, Ordering::Relaxed) {
@@ -527,9 +538,9 @@ fn capture_rgba(x: i32, y: i32, w: i32, h: i32) -> Option<Vec<u8>> {
     // the rest stays the black that a Windows capture of off-screen area also produces.
     let (vx, vy, vw, vh) = on_screen_part(x, y, w, h)?;
     let (rgba, scale) = objc2::rc::autoreleasepool(|_| {
-        let (image, scale) = grab(vx, vy, vw, vh, false)?;
-        let rgba = image_to_rgba(&image, w, h, vx - x, vy - y, vw, vh)?;
-        Some((rgba, scale))
+        let g = grab(vx, vy, vw, vh, false)?;
+        let rgba = image_to_rgba(&g.image, w, h, vx - x, vy - y, vw, vh)?;
+        Some((rgba, g.scale))
     })?;
     if (vx, vy, vw, vh) != (x, y, w, h) && !CLIPPED_REPORTED.swap(true, Ordering::Relaxed) {
         crate::logging::line(
@@ -595,7 +606,7 @@ fn capture_rgba(x: i32, y: i32, w: i32, h: i32) -> Option<Vec<u8>> {
 /// reached past the edge of the desktop — and is refused rather than stretched, because a
 /// stretched capture is a coordinate lie of exactly the kind this file exists to prevent,
 /// and the host handles `None` as "no match" everywhere.
-fn grab(x: i32, y: i32, w: i32, h: i32, best: bool) -> Option<(CFRetained<CGImage>, f64)> {
+fn grab(x: i32, y: i32, w: i32, h: i32, best: bool) -> Option<Grabbed> {
     let rect = CGRect::new(
         CGPoint::new(x as f64, y as f64),
         CGSize::new(w as f64, h as f64),
@@ -607,7 +618,7 @@ fn grab(x: i32, y: i32, w: i32, h: i32, best: bool) -> Option<(CFRetained<CGImag
             SckOutcome::Image(image) => {
                 if let Some(scale) = uniform_scale(&image, w, h) {
                     note_path_used(PATH_SCK, "ScreenCaptureKit captureImageInRect");
-                    return Some((image, scale));
+                    return Some(Grabbed { image, scale, via: FrameVia::ScreenCaptureKit });
                 }
                 crate::logging::trace("macos", || {
                     format!(
@@ -663,7 +674,7 @@ fn grab(x: i32, y: i32, w: i32, h: i32, best: bool) -> Option<(CFRetained<CGImag
             let image = unsafe { CFRetained::from_raw(p) };
             if let Some(scale) = uniform_scale(&image, w, h) {
                 note_path_used(PATH_WINDOW_LIST, "CGWindowListCreateImage (looked up at run time)");
-                return Some((image, scale));
+                return Some(Grabbed { image, scale, via: FrameVia::CoreGraphics });
             }
             crate::logging::trace("macos", || {
                 format!(
@@ -710,7 +721,135 @@ fn grab(x: i32, y: i32, w: i32, h: i32, best: bool) -> Option<(CFRetained<CGImag
         );
     }
     note_path_used(PATH_DISPLAY, "CGDisplayCreateImageForRect (looked up at run time)");
-    Some((image, scale))
+    Some(Grabbed { image, scale, via: FrameVia::CoreGraphics })
+}
+
+/// One capture as `grab` returns it: the image, the scale it came back at (measured from the
+/// image), and which of the three paths answered — which a snapshot reports as `s.via`.
+struct Grabbed {
+    image: CFRetained<CGImage>,
+    scale: f64,
+    via: FrameVia,
+}
+
+// ── Snapshots ───────────────────────────────────────────────────────────────────────────────
+
+/// The backing-store image a snapshot keeps beside its point-sized pixels: the picture the
+/// window server returned, at the display's own resolution, of the part of the snapshot that
+/// was on the desktop. What a text recogniser reading a snapshot reads, so that it is as sharp
+/// as a live read (`capture_backing`), where the point-sized pixels would have lost the detail
+/// that makes a small read-out legible.
+pub struct NativeImage {
+    pub image: CFRetained<CGImage>,
+    /// Pixels per point, measured from the image, as `capture_backing` measures it.
+    pub scale: f64,
+    /// The on-screen part of the snapshot the image covers, in points.
+    pub on: Rect,
+}
+
+impl NativeImage {
+    /// The on-screen part of the snapshot the image covers, in points.
+    pub fn covers(&self) -> Rect {
+        self.on
+    }
+
+    /// What the image holds, at four bytes a backing pixel.
+    pub fn bytes(&self) -> usize {
+        CGImage::width(Some(&self.image)) * CGImage::height(Some(&self.image)) * 4
+    }
+
+    /// The part of the image under `r` (points), drawn into a bitmap of its own — never
+    /// `CGImageCreateWithImageInRect`, which would keep the whole parent image alive behind a
+    /// small crop. `None` when `r` misses the on-screen part, or Core Graphics refuses.
+    pub fn crop(&self, r: Rect) -> Option<NativeImage> {
+        let part = self.on.intersect(&r)?;
+        let (iw, ih) = (CGImage::width(Some(&self.image)), CGImage::height(Some(&self.image)));
+        let px = (((part.x - self.on.x) as f64) * self.scale).round() as usize;
+        let py = (((part.y - self.on.y) as f64) * self.scale).round() as usize;
+        let pw = (((part.w as f64) * self.scale).round() as usize).max(1).min(iw.saturating_sub(px));
+        let ph = (((part.h as f64) * self.scale).round() as usize).max(1).min(ih.saturating_sub(py));
+        if pw == 0 || ph == 0 {
+            return None;
+        }
+        objc2::rc::autoreleasepool(|_| {
+            let space = CGColorSpace::new_device_rgb()?;
+            let bitmap_info: u32 = CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0;
+            // SAFETY: a null buffer asks Core Graphics to allocate one of its own, with a row
+            // length of its choosing (0); nothing here reads it but `CGBitmapContextCreateImage`.
+            let ctx = unsafe {
+                CGBitmapContextCreate(core::ptr::null_mut(), pw, ph, 8, 0, Some(&space), bitmap_info)
+            }?;
+            // Whole backing pixels onto whole pixels: nothing to interpolate, and nothing may be.
+            CGContext::set_interpolation_quality(Some(&ctx), CGInterpolationQuality::None);
+            // The whole image drawn at its own size, shifted so that backing row `py` (top-down)
+            // is the context's top row — Core Graphics counts up from the bottom.
+            let bottom = ph as f64 + py as f64 - ih as f64;
+            CGContext::draw_image(
+                Some(&ctx),
+                CGRect::new(CGPoint::new(-(px as f64), bottom), CGSize::new(iw as f64, ih as f64)),
+                Some(&self.image),
+            );
+            let image = CGBitmapContextCreateImage(Some(&ctx))?;
+            Some(NativeImage { image, scale: self.scale, on: part })
+        })
+    }
+}
+
+/// A snapshot of `x, y, w, h` (points) for `host.screen.snapshot`: ONE capture at the backing
+/// store's resolution, drawn down to the point-sized pixels every read of the snapshot uses —
+/// black where the region leaves the desktop, alpha opaque, as `capture_rgba` gives them — and
+/// kept beside them as the frame's [`NativeImage`]. `poll` is for a caller that asks again and
+/// again, which the flat-picture watch would misread: it runs only when `poll` is false.
+///
+/// On the calling thread, inside an autorelease pool. A region wholly off the desktop, one past
+/// `MAX_POINTS`, and a capture every path refused answer [`CAPTURE_FAILED`].
+pub fn frame(x: i32, y: i32, w: i32, h: i32, poll: bool) -> Result<Frame, String> {
+    let failed = || CAPTURE_FAILED.to_string();
+    if w <= 0 || h <= 0 || w as i64 * h as i64 > MAX_POINTS {
+        return Err(failed());
+    }
+    if !PERMISSION_PREFLIGHTED.swap(true, Ordering::Relaxed) {
+        check_screen_recording("first capture of the session");
+    }
+    let (vx, vy, vw, vh) = on_screen_part(x, y, w, h).ok_or_else(failed)?;
+    let started = Instant::now();
+    let got = objc2::rc::autoreleasepool(|_| {
+        let g = grab(vx, vy, vw, vh, true)?;
+        let rgba = image_to_rgba(&g.image, w, h, vx - x, vy - y, vw, vh)?;
+        Some((g, rgba))
+    });
+    let (g, rgba) = got.ok_or_else(failed)?;
+    if !poll {
+        watch_for_blank(&rgba, w, h);
+    }
+    crate::logging::trace("macos", || {
+        format!(
+            "snapshot {w}x{h} points at {x},{y}: {:.2}x, {} ms, via {}",
+            g.scale,
+            started.elapsed().as_millis(),
+            g.via.word()
+        )
+    });
+    let native = NativeImage { image: g.image, scale: g.scale, on: Rect::new(vx, vy, vw, vh) };
+    let img = CapturedImage { w: w as u32, h: h as u32, rgba };
+    Frame::from_image(Rect::new(x, y, w, h), img, Instant::now(), g.via, Some(native)).ok_or_else(failed)
+}
+
+/// The colours at `pts` for `host.screen.pixels`. A point on no display — off the desktop, or
+/// in the gap between two displays of different sizes, which `desktop_bounds` counts as inside —
+/// reads black with nothing captured for it, as `pixel()` answers it; so a stray point neither
+/// fails the call nor widens a capture. The others: the rectangles `frame::plan_points` plans
+/// for them, each captured at point resolution like any region read, and sampled. Not through
+/// `pixel()`'s tile, and without the flat-picture watch, which a handful of probe points would
+/// trip.
+pub fn pixels(pts: &[(i32, i32)]) -> Result<Vec<(u8, u8, u8)>, String> {
+    use crate::backend::frame;
+    frame::black_where_off(pts, |x, y| display_at(x, y).is_none(), |on| {
+        frame::read_points(on, |r| {
+            let (w, h) = (r.w as u32, r.h as u32);
+            capture_rgba(r.x, r.y, r.w, r.h).map(|rgba| CapturedImage { w, h, rgba }).ok_or_else(|| CAPTURE_FAILED.to_string())
+        })
+    })
 }
 
 const PATH_SCK: u32 = 1;

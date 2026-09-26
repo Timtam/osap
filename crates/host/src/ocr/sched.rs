@@ -104,6 +104,27 @@ pub struct Submitted {
 pub const TOO_MANY: &str = "too many reads waiting — put regions that belong together in one \
                             call (up to 64)";
 
+/// Which kind of waiting capture goes first on the capture thread — the order `take_capture`
+/// has always taken OCR pictures in. The snapshot lane beside it (`snap_queue.rs`) ranks its own
+/// requests by the same classes, so the two are weighed against each other with one rule
+/// (`snap_queue::choose`): a lower class first, then the one due earlier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Class {
+    /// A module about to act waits for it (`expedite`).
+    Urgent,
+    /// A background request that has waited `AGING`.
+    Aged,
+    Interactive,
+    Background,
+}
+
+/// The capture a queue would take next: its class, and since when it has been due.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cand {
+    pub class: Class,
+    pub due: Instant,
+}
+
 /// What the recognise stage is handed.
 pub struct Started<S, P> {
     pub id: JobId,
@@ -155,43 +176,8 @@ impl<S: Clone + PartialEq, P> Scheduler<S, P> {
     /// Takes `ticket`'s request for `spec`.
     pub fn submit(&mut self, spec: S, ticket: Ticket, now: Instant) -> Submitted {
         let mut out = Submitted::default();
-
-        // Latest wins per key.
-        if let Some(key) = ticket.key.as_deref() {
-            out.stale = self.supersede(ticket.owner, key);
-        }
-
-        // Room for this VM: the oldest unkeyed ticket that has not started makes way, or, when
-        // every one has a key, the new one is refused.
-        let mine = self
-            .jobs
-            .iter()
-            .flat_map(|j| j.tickets.iter())
-            .filter(|t| t.owner == ticket.owner)
-            .count();
-        if mine >= PER_OWNER {
-            // Ticket ids are handed out in order, so the smallest is the oldest.
-            let victim = self
-                .jobs
-                .iter()
-                .filter(|j| j.stage != Stage::Recognising)
-                .flat_map(|j| j.tickets.iter())
-                .filter(|t| t.owner == ticket.owner && t.key.is_none())
-                .map(|t| t.id)
-                .min();
-            match victim {
-                Some(v) => {
-                    for job in &mut self.jobs {
-                        job.tickets.retain(|t| t.id != v);
-                    }
-                    out.evicted.push(v);
-                    self.tickets_removed();
-                }
-                None => {
-                    out.refused = Some(TOO_MANY.to_string());
-                    return out;
-                }
-            }
+        if !self.admit(&ticket, &mut out) {
+            return out;
         }
 
         // The same request, not yet photographed: one picture for both, taken after both calls.
@@ -232,6 +218,84 @@ impl<S: Clone + PartialEq, P> Scheduler<S, P> {
         out
     }
 
+    /// Takes `ticket`'s request for `spec` whose pixels are already there — a read of a snapshot
+    /// the module holds. Nothing is photographed: the job starts captured, waiting for the
+    /// recogniser, and its bytes count in the picture budget like any captured job's. The same
+    /// rules as `submit` for keys and for the two limits; it never joins another job and nothing
+    /// joins it, since its picture is its own.
+    pub fn submit_captured(&mut self, spec: S, ticket: Ticket, pixels: P, bytes: usize, now: Instant) -> Submitted {
+        let mut out = Submitted::default();
+        if !self.admit(&ticket, &mut out) {
+            return out;
+        }
+        if self.jobs.len() >= TOTAL {
+            out.refused = Some(format!(
+                "too many reads waiting in the whole application ({TOTAL}); this one was not taken"
+            ));
+            return out;
+        }
+        let id = self.next_job;
+        self.next_job += 1;
+        self.jobs.push(Job {
+            id,
+            spec,
+            prio: ticket.prio,
+            urgent: false,
+            tickets: vec![ticket],
+            stage: Stage::Captured,
+            asked: now,
+            capture_started: Some(now),
+            captured_at: Some(now),
+            pixels: Some(pixels),
+            bytes,
+        });
+        out.job = Some(id);
+        out
+    }
+
+    /// What every submission shares: latest wins per key, and room for the VM. `false` when the
+    /// new ticket is refused (`out.refused` says why).
+    fn admit(&mut self, ticket: &Ticket, out: &mut Submitted) -> bool {
+        // Latest wins per key.
+        if let Some(key) = ticket.key.as_deref() {
+            out.stale = self.supersede(ticket.owner, key);
+        }
+
+        // Room for this VM: the oldest unkeyed ticket that has not started makes way, or, when
+        // every one has a key, the new one is refused.
+        let mine = self
+            .jobs
+            .iter()
+            .flat_map(|j| j.tickets.iter())
+            .filter(|t| t.owner == ticket.owner)
+            .count();
+        if mine >= PER_OWNER {
+            // Ticket ids are handed out in order, so the smallest is the oldest.
+            let victim = self
+                .jobs
+                .iter()
+                .filter(|j| j.stage != Stage::Recognising)
+                .flat_map(|j| j.tickets.iter())
+                .filter(|t| t.owner == ticket.owner && t.key.is_none())
+                .map(|t| t.id)
+                .min();
+            match victim {
+                Some(v) => {
+                    for job in &mut self.jobs {
+                        job.tickets.retain(|t| t.id != v);
+                    }
+                    out.evicted.push(v);
+                    self.tickets_removed();
+                }
+                None => {
+                    out.refused = Some(TOO_MANY.to_string());
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// Latest wins per key: `owner`'s tickets with `key` whose job has not started recognising
     /// are taken off, to be answered stale. Done by every `submit` with a key, and on its own for
     /// a newer read the host answers without the queue (one with nothing to photograph).
@@ -264,27 +328,42 @@ impl<S: Clone + PartialEq, P> Scheduler<S, P> {
         }
     }
 
-    /// The next job to photograph: an urgent one (`expedite`) whatever the budget; then a
-    /// background job that has waited `AGING`; then interactive ones; then the rest in the order
-    /// asked. Background jobs only while the picture budget is not exceeded.
-    pub fn take_capture(&mut self, over_budget: bool, now: Instant) -> Option<(JobId, S)> {
+    /// The next job to photograph, and its class: an urgent one (`expedite`) whatever the
+    /// budget; then a background job that has waited `AGING`; then interactive ones; then the
+    /// rest in the order asked. Background jobs only while the picture budget is not exceeded.
+    fn pick_capture(&self, over_budget: bool, now: Instant) -> Option<(usize, Class)> {
         let waiting = |j: &Job<S, P>| j.stage == Stage::AwaitCapture;
         let background = |j: &Job<S, P>| waiting(j) && j.prio == Priority::Background;
-        let pick = self
-            .jobs
-            .iter()
-            .position(|j| waiting(j) && j.urgent)
-            .or_else(|| {
-                (!over_budget)
-                    .then(|| {
-                        self.jobs
-                            .iter()
-                            .position(|j| background(j) && now.saturating_duration_since(j.asked) >= AGING)
-                    })
-                    .flatten()
-            })
-            .or_else(|| self.jobs.iter().position(|j| waiting(j) && j.prio == Priority::Interactive))
-            .or_else(|| (!over_budget).then(|| self.jobs.iter().position(waiting)).flatten())?;
+        if let Some(i) = self.jobs.iter().position(|j| waiting(j) && j.urgent) {
+            return Some((i, Class::Urgent));
+        }
+        if !over_budget {
+            if let Some(i) =
+                self.jobs.iter().position(|j| background(j) && now.saturating_duration_since(j.asked) >= AGING)
+            {
+                return Some((i, Class::Aged));
+            }
+        }
+        if let Some(i) = self.jobs.iter().position(|j| waiting(j) && j.prio == Priority::Interactive) {
+            return Some((i, Class::Interactive));
+        }
+        if !over_budget {
+            if let Some(i) = self.jobs.iter().position(waiting) {
+                return Some((i, Class::Background));
+            }
+        }
+        None
+    }
+
+    /// What `take_capture` would take now, without taking it: its class, and when it was asked
+    /// for. The capture thread weighs it against the snapshot lane's next request.
+    pub fn peek_capture(&self, over_budget: bool, now: Instant) -> Option<Cand> {
+        self.pick_capture(over_budget, now).map(|(i, class)| Cand { class, due: self.jobs[i].asked })
+    }
+
+    /// The next job to photograph (see `pick_capture`), moved to the capturing stage.
+    pub fn take_capture(&mut self, over_budget: bool, now: Instant) -> Option<(JobId, S)> {
+        let (pick, _) = self.pick_capture(over_budget, now)?;
         let job = &mut self.jobs[pick];
         job.stage = Stage::Capturing;
         job.capture_started = Some(now);
@@ -788,6 +867,76 @@ mod tests {
         s.submit("mine", bg(1, A, None), now);
         s.take_capture(false, now).unwrap();
         assert!(!s.expedite(A.idx));
+    }
+
+    /// `peek_capture` names the job `take_capture` then takes, with its class, in every one of
+    /// the orders above: urgent, aged, interactive, background, and nothing over the budget.
+    #[test]
+    fn peek_capture_agrees_with_take_capture() {
+        let t0 = Instant::now();
+        let later = t0 + AGING + Duration::from_millis(1);
+        let mut s = Sched::new();
+        assert_eq!(s.peek_capture(false, t0), None);
+        s.submit("poll", bg(1, A, None), t0);
+        s.submit("tab", fg(2, B, None), t0);
+        s.submit("mine", bg(3, C, None), t0);
+        assert!(s.expedite(C.idx));
+        let cases: [(bool, Instant, Class, &str); 4] = [
+            (true, t0, Class::Urgent, "mine"),
+            (false, later, Class::Aged, "poll"),
+            (true, later, Class::Interactive, "tab"),
+            (false, t0, Class::Background, "late"),
+        ];
+        for (over, now, class, want) in cases {
+            if want == "late" {
+                s.submit("late", bg(4, A, None), now);
+            }
+            let peeked = s.peek_capture(over, now).expect("something to take");
+            assert_eq!(peeked.class, class, "{want}");
+            assert_eq!(peeked.due, t0, "{want}: the time it was asked for");
+            let (_, spec) = s.take_capture(over, now).unwrap();
+            assert_eq!(spec, want);
+        }
+        assert_eq!(s.peek_capture(false, t0), None);
+        let mut s = Sched::new();
+        s.submit("poll", bg(1, A, None), t0);
+        assert_eq!(s.peek_capture(true, later), None, "a background picture waits for the budget, aged or not");
+    }
+
+    /// A read of a snapshot: no capture, straight to the recogniser, its bytes in the budget;
+    /// superseded by its key and bounded by the caps like any read; never joined.
+    #[test]
+    fn submit_captured_skips_capture_and_follows_keys_and_caps() {
+        let now = Instant::now();
+        let mut s = Sched::new();
+        let out = s.submit_captured("menu", bg(1, A, Some("k")), 7, 4096, now);
+        let id = out.job.unwrap();
+        assert!(!out.joined && out.refused.is_none());
+        assert_eq!(s.stage(id), Some(Stage::Captured));
+        assert!(s.barrier_clear(A.idx), "nothing to photograph: the input barrier does not wait for it");
+        assert_eq!(s.captured_bytes(), 4096);
+        assert!(s.take_capture(false, now).is_none(), "nothing to capture");
+        // The same spec live does not join it: its picture is the snapshot's, not a new one.
+        let live = s.submit("menu", bg(2, B, None), now);
+        assert!(!live.joined);
+        // The key supersedes it before it is recognised.
+        let again = s.submit_captured("menu", bg(3, A, Some("k")), 8, 10, now);
+        assert_eq!(again.stale, vec![1]);
+        assert_eq!(s.captured_bytes(), 10);
+        let started = s.next_recognise(now).unwrap();
+        assert_eq!(started.pixels, 8);
+        // The caps: A's seventeenth unkeyed read evicts its oldest unkeyed one.
+        let mut s = Sched::new();
+        for i in 0..PER_OWNER as u64 {
+            s.submit_captured("x", bg(i + 1, A, None), 0, 1, now);
+        }
+        let out = s.submit_captured("y", bg(99, A, None), 0, 1, now);
+        assert_eq!(out.evicted, vec![1]);
+        let mut s: Scheduler<u64, u32> = Scheduler::new();
+        for i in 0..TOTAL as u64 {
+            s.submit(i, bg(i + 1, Owner { idx: (i / 8) as usize, gen: 1 }, None), now);
+        }
+        assert!(s.submit_captured(9999, bg(5000, Owner { idx: 99, gen: 1 }, None), 0, 1, now).refused.is_some());
     }
 
     /// The poll that is slower than its own period: a keyed read every 150 ms against a

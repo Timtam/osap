@@ -2914,12 +2914,14 @@ Planned — the API pages say these do not exist:
       Built 2026-09-22, reported on the next tick rather than at once — see the same section.
 - [x] **`host.json.encode`**, with `host.json.array` for the empty list. Built 2026-09-22; a
       table with both an array and a hash part raises, naming the place — see the same section.
-- [ ] **Screen snapshots**: an explicit frame handle — one capture, then several `pixel` reads
-      and searches against it — idea B of `docs/screen-frame-sharing-design.md`. Today on
-      Windows every `host.screen.pixel` call is a screen read of its own (about 16.7 ms on the
-      standard path), on macOS only reads inside the last 256×96 tile within 5 ms share one,
-      and no call reads several points from one capture. `host.screen.cells`
-      (built 2026-09-22, "Grid cells and window regions" below) covers the block-statistics half.
+- [x] **Screen snapshots**: an explicit frame handle — one capture, then several `pixel` reads
+      and searches against it — idea B of `docs/screen-frame-sharing-design.md`. Built
+      2026-09-26: `host.screen.snapshot`, read by every screen call given `{ snapshot = s }`, and
+      `host.screen.pixels` for several points from one capture — see "Screen snapshots, the
+      synchronous core" below; the same day `host.screen.snapshotAsync` (off the event loop, at a
+      set time, or as a change wait) and `host.ocr.read` on a snapshot — see "Snapshots taken
+      off the event loop, and change waits". `host.screen.cells` (built 2026-09-22, "Grid cells and window
+      regions" below) covers the block-statistics half.
 
 Found while documenting — the behaviour is written down now, and wants fixing:
 
@@ -3782,9 +3784,11 @@ with a window of the application open, or against a game.
       opening"); macOS: none of the window forms of these calls has run on a Mac (the
       arithmetic is shared and unit-tested; the client rectangle there is derived, see the
       macOS item above).
-- [ ] **Snapshots:** a `snapshot` key for the cells calls once snapshots exist. A region not
+- [x] **Snapshots:** a `snapshot` key for the cells calls once snapshots exist. A region not
       wholly inside the snapshot must answer `nil, "the region is not inside the snapshot"`
-      rather than be clipped, which would change every block.
+      rather than be clipped, which would change every block. Built 2026-09-26: `opts.snapshot`
+      on `cells`, `matchCells` and `matchCellsAsync`, exactly so (`read_cells_opts` in lib.rs;
+      the reduction reads the region where it lies in the snapshot, `cells::of_sub`).
 - [ ] **An in-repo benchmark of `cells::reduce`.** The 8 ns a pixel in `screen.md` was measured
       with a scratch crate that borrowed `cells.rs` (release build, i7-8700K); an `#[ignore]`
       test would keep the number true when the code changes.
@@ -3853,8 +3857,10 @@ What only a person, a Mac or a measurement can settle:
       thread (ScreenCaptureKit's answer while the pump is not the thread waiting), rows from
       Vision's observations, `languages()` and `resolveLanguage("de")`.
 - [ ] **Not built yet from the design:** the capture-probe `read` line and its CI assertion
-      (informational on Windows first); a log nudge for a module polling `recognize` from a
-      timer; the await form (`host.task`); snapshots on the `screen-capture` thread; `expect`.
+      (informational on Windows first; the probe reads a snapshot with `read` since 2026-09-26,
+      but not the live screen); a log nudge for a module polling `recognize` from a timer; the
+      await form (`host.task`); `expect`. Snapshots on the `screen-capture` thread are built
+      (2026-09-26, "Snapshots taken off the event loop, and change waits").
 - [x] **At the merge with the cells step: one strict region reader.**
       `crates/host/src/region_lua.rs` is the one reader, used by the cells calls and by `read`;
       the rule for corners is `region::corners` in the pure `region.rs`, which the macOS check
@@ -4028,7 +4034,7 @@ Steps 1 to 5 of the API work are built — the sections above, from "Desktop dup
 "Text recognition off the event loop". What the maintainer decided for after them (2026-09-21),
 in this order, and what is not built:
 
-- [ ] **Step 6 — snapshots with change waits.** Planned, next. One captured frame, with the
+- [x] **Step 6 — snapshots with change waits.** Built 2026-09-26. One captured frame, with the
       time it was taken, that `pixel`, the cells calls, the image searches and `host.ocr.read`
       can all read, so that a state detected and the text read after it come from one picture;
       `host.screen.pixels` for many points of one frame; a `snapshot` key on the cells calls
@@ -4041,9 +4047,16 @@ in this order, and what is not built:
       recognition on its own). Takes up "Screen snapshots" in the porting review, "Snapshots"
       under grid cells and the snapshot part of "Not built yet from the design" under text
       recognition; the dirty-rectangle `Req::WaitChange` under desktop duplication is the
-      Windows way to a change wait through duplication. Until it is built, the docs say what a
-      module does meanwhile: poll with `host.timer.every` and one asynchronous read in flight,
-      and read a short-lived picture with timed reads after the input.
+      Windows way to a change wait through duplication; the change waits built poll instead, on
+      every path, and the engine is unchanged (S7′ decides whether it is needed).
+      **Both halves are built** (2026-09-26): the synchronous core ("Screen snapshots, the
+      synchronous core" below) — the handle and its budget, `host.screen.pixels`, and the
+      `snapshot` key on `pixel`, `profile`, the five image searches, `template{ capture }`, the
+      cells calls, `save` and `saveMarked` — and the asynchronous half ("Snapshots taken off the
+      event loop, and change waits" below) — `host.screen.snapshotAsync` on the `screen-capture`
+      thread, as a lane beside the OCR captures with the input barrier over both, at once, at a
+      set time or as a change wait, and `host.ocr.read` on a snapshot. What is left are the
+      measurements and live checks listed in those two sections.
 - [ ] **Step 7 — own input tagged, scan codes, hold, new key names** (`host.input.send`; item
       e1 of the small-API design as the critique revised it). Not built:
   - **Own input tagged.** Every `SendInput` of the host — keys and mouse — carries a tag in
@@ -4102,6 +4115,246 @@ in this order, and what is not built:
       key a low-level hook swallows — ours or a screen reader's — still reaches Raw Input;
       `RIDEV_INPUTSINK` on a message-only window; `hDevice` and `ExtraInformation` of injected
       keys; on macOS the target pid, VoiceOver and the injected source.
+
+## Screen snapshots, the synchronous core (2026-09-26)
+
+The first half of step 6 is built: `host.screen.snapshot` takes one picture on the event loop, and
+every screen call given `{ snapshot = s }` reads that picture instead of the screen — `pixel`, the
+new `host.screen.pixels`, `profile`, the five image searches (the two asynchronous ones on the
+image worker, without a capture), `template{ capture, snapshot }`, the three cells calls, `save`
+and `saveMarked` (snapshot.rs, backend/frame.rs, docs/api/screen.md "Reading a snapshot"). A read
+of a region cuts it to the snapshot; a point, a template and a grid of cells need theirs wholly
+inside. Snapshots are charged against 128 MiB per module VM and 512 MiB in all. The live paths
+of the older calls are the code they were, the profile loop and `imageSearchAll`'s scan moved
+into `profile.rs` and `template::find_all_in` and held to copies of the old code by tests. The
+asynchronous half is built too: "Snapshots taken off the event loop, and change waits" below.
+What only a person, a Mac or a measurement can settle:
+
+- [ ] **S1** — a `BitBlt` of a box gives exactly `GetPixel`'s colour at every point on screen:
+      `pixels` reads through a capture, `pixel` through `GetPixel`. Written as the ignored test
+      `snapshot_live_pixels_equal_getpixel` (windows.rs, on the test window `dxgi_live` paints;
+      `cargo test -p host snapshot_live -- --ignored --nocapture`), not run yet. Also whether a
+      `BitBlt` of a box that reaches off every monitor reads black there (`pixels` never asks
+      for a point on no monitor; `pixel` and the docs say region reads are black there).
+- [ ] **S2** — `pixels` of eight close points costs one screen touch (one `pixel`'s 16.7 ms on
+      the standard path; the same ignored test prints both), and what points spread over the
+      screen cost at 1080p and 4K: one capture per 2048x976 tile they reach
+      (`frame::plan_points`), two on a 1080p primary screen and up to six at 4K. A headless run
+      on this machine's 1080p screen is recorded under "Screen snapshots, the synchronous core"
+      below; the per-capture times at 4K are not measured.
+- [ ] **S4** — two snapshots of a still screen are byte-identical within one path, and a GDI
+      snapshot against a duplication one of the same region: the basis of a change wait's
+      `tolerance`. Written as the ignored test `snapshot_live_still_frames_are_identical`
+      (windows.rs), not run yet.
+- [x] **S9** — collector pacing: `snapshot::tests::unreleased_10hz_poll_stays_under_the_cap`
+      takes 300 unreleased snapshots in one VM three ways and never raises: 2 MiB snapshots in a
+      bare VM (heap 0.3 MB) and in one holding about 25 MB of live strings, and 8 MiB snapshots
+      in the latter. At most two were held at once every time (4.0 and 16.0 MiB), so the
+      collector steps alone keep a poll that forgets `release()` far under the budget. What a
+      call costs apart from its (fake) capture — the reservation, the collector's step and the
+      handle — release build, three runs, 2026-09-26: bare VM 0.11–0.21 ms on average, at most
+      1.1 ms; 25 MB heap 1.9–2.3 ms on average with 2 MiB snapshots, 3.1–3.2 ms with 8 MiB ones,
+      at most 6.5 ms. The debug build: 0.24 ms and 3.3–3.6 ms on average, at most 5.8 ms. The
+      step is clamped to the heap's size, since Luau pays at most one heap's worth of debt per
+      step call anyway (`gc_kbytes`). Not measured: a heap of many small tables, which the
+      collector traverses rather than skips as it does strings, and a heap of 100 MB or more.
+- [ ] **S10** — the PNG encode of `save` from a snapshot, against a live `save` of the region.
+- [ ] **Mac, first run (S8, S11):** a `snapshot` and `pixels` from a headless probe on a Retina
+      Mac — the backing image a snapshot keeps (`NativeImage`) and its `crop`, drawn into a new
+      bitmap (never run); `via` reporting `screencapturekit` or `coregraphics`; what 30 held
+      snapshots of a window cost in memory against the fivefold estimate; before macOS 15.2,
+      whether the older functions' best-resolution grab (a snapshot) and their nominal one (every
+      other read) give the same point values; `pixels` reading black for a point off the desktop
+      and for one in the gap between two displays of different sizes (`capture::pixels` asks
+      `display_at` for each point), and whether a capture `frame::plan_points` plans across such
+      a gap comes back whole — a clipped one fails the whole call, where the same points read one
+      `pixel` at a time would each be answered.
+- [ ] **Decided while planning, for the maintainer to confirm:** the region of `snapshot` and
+      `crop` is required and read strictly (no whole-screen default); a template cut from a
+      snapshot needs its region wholly inside; `pixels` reads its points strictly (whole
+      numbers, where `pixel(x, y)` cuts a fraction); macOS snapshots keep the backing image
+      (up to five times the memory, for OCR on a snapshot as sharp as a live read); the pixels
+      an asynchronous search keeps of a released snapshot are not charged; a search on a
+      snapshot held while its module was disabled is made again on the same snapshot. Those two
+      together mean a disabled module's held searches keep their snapshots' pixels, uncharged,
+      for as long as it stays disabled: bounded in number (nothing new is queued meanwhile), not
+      in time.
+- [ ] **Snapshot reads in the observation line.** `profile`, `cells` and `matchCells` on a
+      snapshot do their reduction on the event loop, and it is not timed: the observation line
+      counts screen touches, and a read of a snapshot touches none. So a module that reduces a
+      large snapshot often stalls the event loop without the log saying so. A field of its own
+      for them (`snap_us`, say) would.
+- [x] **capture-probe** has its snapshot lines (2026-09-26): a `snapshot`, `pixels` of three
+      points beside `pixel` of the same points, from the screen and from the snapshot, a `save`
+      of the snapshot, a plain `snapshotAsync`, a change wait on a still screen and a
+      `host.ocr.read` on the snapshot, and the line `snapshot callbacks N of M answered` before
+      "still alive after capturing", which the macOS jobs require to say N = M and the Windows
+      job warns about. The two `snapshotAsync` requests are asked first, whatever the snapshot on
+      the pump does, and the read of that snapshot only when it exists; M counts only the asks
+      that did not raise (3, or 2 without the snapshot). A snapshot that returns nil on the
+      pump, and a call that raised (`THREW`, checked before the count), are errors of their own
+      on the Macs, so neither is ever reported as a callback that did not come (2026-09-26). No
+      CI run has taken a snapshot on a Mac yet.
+- [x] **Headless check of `pixels` after the tile plan** (debug build, 1920x1080, 2026-09-26):
+      three close points took 18 ms (one capture), two far apart 33 ms (two 1x1 captures), the
+      four corners and the centre 136 ms and a 32x32 grid of 1024 points over the whole screen
+      216 ms (two captures each, one per row of tiles; a debug build, whose per-pixel work grows
+      with the area, and release times are not measured). Every colour equalled a snapshot of
+      the screen taken just before, and a point on no monitor read black beside one read as
+      the snapshot reads it.
+
+## Snapshots taken off the event loop, and change waits (2026-09-26)
+
+The second half of step 6 is built: `host.screen.snapshotAsync` takes a snapshot on the
+`screen-capture` thread `host.ocr.read` photographs on — at once, at a set time (`at`, on
+`host.now()`'s clock), or as a change wait (`change`: round after round until at least
+`minPixels` of the watched pixels differ from `from`, or from the wait's first picture, by more
+than `tolerance`; optionally until they stand still for `settle`; at most 2 s) — and
+`host.ocr.read { snapshot = s }` recognises a snapshot without a capture (ocr/change.rs,
+ocr/snap_queue.rs, ocr/service.rs, snapshot.rs; docs/api/screen.md "host.screen.snapshotAsync",
+docs/api/ocr.md "On a snapshot"). One capture thread for both, one priority rule, one input
+barrier; the DXGI engine is unchanged and change waits poll on every path
+(docs/screen-frame-sharing-design.md, section 6). The callback is `cb(snap, why, info)`, exactly
+once, and dropped for a module disabled, reloaded or removed first. Built with unit tests of
+the wait, the lane, the scheduler's two new calls, the service (a test of the capture
+loop on a stepped clock among them) and the Luau side. What only a person, a Mac or a measurement
+can settle:
+
+- [ ] **S3** — change-wait rounds through the standard path: their pacing (a GDI capture costs a
+      compositor frame, so rounds run back to back) and the CPU the `screen-capture` thread uses
+      during a 2 s wait, on an idle desktop and with a game in front; and how late the thread
+      wakes for a round or an `at` on Windows — a condition variable's timeout follows the system
+      timer, 15.6 ms at the default resolution, and the docs say "up to one timer tick". Whether a
+      background application's timer is coarsened further.
+- [ ] **S5 (Mac)** — ScreenCaptureKit in a loop: whether two captures of a still screen are
+      identical (the basis of `tolerance` there), what a capture costs per round and in CPU,
+      whether every call returns a new composition, and whether the screen-recording indicator in
+      the menu bar (and the title-bar icon of Apple forum thread 732962) flickers or stays lit
+      during a wait — which a blind tester would never hear and everybody else would see. Decides
+      `MIN_ROUND_MACOS` (33 ms, a guess) and whether macOS needs a default tolerance of its own.
+- [ ] **S6** — with the external developer's game, through desktop duplication, which reads it
+      live: from a D-pad press to the first changed picture (`e.time` against `snap.time`), how
+      long a help bubble stays up, which `watch` region catches the cursor without the game's own
+      animation, and which reads the bubble more reliably: timed pictures (30, 80, 150,
+      250 ms), a change wait with `settle = 0` — which answers the first frame of a bubble that
+      fades in, which the check for the bubble may then reject — or one with a `settle` of
+      30–50 ms, which the docs' example uses. And whether two quick D-pad presses make the menu
+      example say the item before the real one (the second press's wait compares with a `from`
+      that predates the first press's move) with `settle = 50`, and whether its second picture,
+      150 ms after the answer, corrects it.
+- [ ] **S7′** — a change wait through desktop duplication: the cost of a polling round (a round
+      that finds no newly composed frame compares the kept one again), and whether a game
+      redraws its whole window every frame — which decides whether a dirty-rectangle wait
+      (`capture_next`, the reserved `Req::WaitChange`) would help at all.
+- [ ] **S12** — the game's own frame times (PresentMon) while a 2 s standard-path change wait
+      captures back to back beside it.
+- [ ] **S13** — whether `BitBlt` from two or three threads at once (the event loop, the image
+      worker, `screen-capture`) overlaps or serialises, now that a change wait captures beside
+      the other two.
+- [ ] **Live test, written and not run:** `snapshot_live_change_wait_sees_repaint` (windows.rs;
+      `cargo test -p host snapshot_live -- --ignored --nocapture`): a change wait over a test
+      window sees a second window appear 100 ms later, `changed`, within 100–400 ms.
+- [ ] **Mac, first run of the asynchronous half:** a `snapshotAsync` and a change wait from a
+      headless probe — `capture::frame` called on the `screen-capture` thread (ScreenCaptureKit's
+      answer while the pump is not the thread waiting), `poll` skipping the flat-picture watch,
+      `via` reporting; `host.ocr.read` on a snapshot reading the kept backing image
+      (`Shot::Shared` from the `NativeImage`, cut by `render`), a snapshot whose region reached
+      off the desktop included; the rebase when ScreenCaptureKit and Core Graphics alternate;
+      `capture::display_id_at` keeping the regions of two displays out of one capture (never
+      run: on a Mac with a Retina and a non-Retina display, two requests whose regions lie one on
+      each should be two captures, and a change wait on each should come back at its own
+      display's scale); what a change wait holds — its newest picture with the backing image, the
+      baseline and a still spell's first picture as point-sized copies — against the 7-fold
+      charge. The capture probe's macOS jobs require every snapshot callback it asked for.
+- [ ] **NVDA and JAWS with a real module:** a callback spoken promptly after a D-pad press
+      (press, change, speech), and a click held behind a plain `snapshotAsync` by the input
+      barrier (read, then act), under load — Melodyne's selection watcher polling beside it.
+- [ ] **Decided while planning, for the maintainer to confirm:** the callback is `cb(snap, why, info)`, not `cb(snap, info)` with `info.error`; a newer
+      request with the same key answers the older one `nil` and a reason even when its picture was
+      already taken (no `newer` as `host.ocr.read` has); `at` is a `host.now()` time, not a delay;
+      the input barrier covers plain requests and a change wait's first picture without `from` or
+      `at`, not timed requests or waits with `from`; `host.ocr.read` on a snapshot cuts each region
+      to the snapshot, and a region with nothing in it fails alone; `recognize` and
+      `recognizeMany` raise for a `snapshot` key instead of ignoring it; `snapshotAsync`'s keys are
+      their own (a text read with the same key never replaces one); per module the oldest request
+      is ended, in the whole application the newest refused; the change wait lives in
+      `ocr/change.rs`, beside the thread that drives it.
+- [x] **Headless check of the asynchronous half** (debug build, 1920x1080, standard path,
+      2026-09-26): a plain `snapshotAsync` of 300x100 was answered 24 ms after the call, its
+      picture taken 7 ms after it; `at = host.now() + 150` was taken 170 ms after the call; a
+      change wait of 250 ms on a still region ended at 253 ms with 14 pictures, one of 200 ms
+      against a snapshot with 12, both unchanged; the capture probe's change wait of 300 ms took
+      18 pictures, 17.2 ms a round — the standard path's compositor frame, back to back; a text
+      read of a snapshot answered in 23–151 ms, a region cut to the snapshot read as the part
+      inside it and one wholly outside failed with the reason; a key replaced the older request;
+      of twenty plain requests and five change waits asked in one callback, eight requests and
+      one wait were ended by the module's limits and the rest answered with a picture; 33
+      callbacks for 33 requests; every mistake raised with its message; the probe's three
+      snapshot callbacks came. Release times are not measured.
+- [ ] **Decided while fixing the review of the asynchronous half (2026-09-26), for the
+      maintainer to confirm:** a change that undoes itself before a `settle` spell ends — a
+      flash, a cursor that moved off and back — is no change, and the wait looks on (`changed` is
+      never said of a picture equal to the baseline); `snap.inputEpoch` is `host.inputEpoch()`
+      once the picture was taken, not at the call, for `snapshotAsync` read on the
+      `screen-capture` thread from a mirror the event loop updates before it acts; a standard
+      round is ONE capture — the most urgent request's, shared by the due requests inside it or
+      within a 2,000,000-pixel union of it, on one display — and the rest go next, so an urgent
+      picture never waits behind other modules' large captures; a change wait keeps its baseline
+      and a still spell's first picture as point-sized copies of the watched box and its newest
+      picture cut to its region, and is charged 3 × `w * h * 4` on Windows and 7 × on macOS
+      (was 3 × and 15 ×); a request ended by a key or a limit gives its bytes back at once; a
+      newer keyed request made by a callback in the same delivery batch supersedes an older answer
+      in it; a wait with a `from` that cannot be its baseline (not holding every watched region,
+      or taken another way than the module reads) holds input like one without; a read of a
+      snapshot counts the part its regions cover in the 256 MB picture budget; desktop
+      duplication falling back plans the standard captures of a round as a standard round is.
+- [x] **Review of the asynchronous half, fixed** (2026-09-26): the sixteen findings of the
+      adversarial review — the points above, the docs of `inputEpoch`, of the effective size limits (a
+      change wait at most 11,184,810 pixels on Windows and 4,793,490 points on macOS in an
+      otherwise empty budget, a plain request 33,554,432 pixels or 6,710,886 points), of
+      `info.frames` for a request ended early, of the exit and of 251 rounds; the bubble example
+      checks the picture for the bubble; a panic anywhere in a round's own code answers every
+      request of it; new tests for each, the ones the review found would not fail when their fix
+      was reverted included.
+- [ ] **Decided while fixing the final reviews of step 6 (2026-09-26), for the maintainer to
+      confirm:** the budget for a window region is answered, not raised — `snapshot`, a
+      snapshot's `crop` and `snapshotAsync` answer `nil` and `at the window's current size this
+      module's snapshots would hold …` (or the application's sentence), as the size limit is
+      answered for a window region, and log it for `snapshotAsync` once per module every 10 s;
+      corners still raise. So a poll of a window maximised on a 4K display (a change wait, the
+      kept `last` and a poll in flight come to about 158 MiB of full-window pictures) no longer
+      puts an error dialog over the game from a controller callback. A `minPixels` larger than
+      the pixels a change wait watches raises when the region and every `watch` region are
+      corners, and is answered `at the window's current size the change wait watches … pixels,
+      fewer than its minPixels …` when a window decides it — before, such a wait ran to its
+      timeout every time, and a `watch` of one pixel with the default `minPixels = 4` was one.
+      A request the application's limit refuses ends none of its module's requests: the limit
+      is counted as it stands once the module's own oldest has ended, and when it refuses all
+      the same, nothing is ended; a refused request gives its charge back at once. The docs'
+      menu example waits with `settle = 50` and reads once more 150 ms after the answer, gated on
+      the game being in front; the bubble example uses `settle = 40`.
+- [x] **Final reviews of step 6, fixed** (2026-09-26): the unit tests that assumed Windows'
+      least time between rounds (8 ms, where macOS has 33 ms) or its estimate factor (1, where
+      macOS reserves five times the pixels) derive them now — `over_budget_…`,
+      `process_cap_spans_vms`, `reservation_refunds_when_the_capture_fails`,
+      `a_failed_capture_fails_plain_and_steps_waits` and
+      `a_stream_of_interactive_rounds_lets_an_aged_ocr_capture_through`; the whole host test
+      suite was also run on Windows with macOS's values of `min_round`, `first_choice_via` and
+      `ESTIMATE_FACTOR` put in by hand, and passed. The docs: what `settle` does for a bubble,
+      the burst of presses, the strictly read corners of `snapshotAsync` and its `watch`, what
+      `crop` raises for, which `snapshotAsync` holds input, `host.epoch` turning over for text
+      reads and snapshot answers, the priority a `snapshotAsync` inherits, macOS's rebase
+      between ScreenCaptureKit and Core Graphics, a `from` kept whole when it is exactly the
+      watched part, and that nothing but a newer key or a disable cancels a request.
+- [ ] **Later, not built:** a dirty-rectangle change wait through desktop duplication
+      (`capture_next`, `Req::WaitChange`) after S7′; change waits through an `SCStream` on macOS
+      after S5; `info.first`, the first changed picture kept beside the settled one; `s:bytes()`,
+      after the template work's R0; `host.screen.diff(a, b)`; a tile for `pixel` on Windows; the
+      image worker's captures on `screen-capture`; a capture triggered on the input thread itself,
+      at the press (after S6); a content cache for text recognition, keyed by a hash of the
+      recogniser's input and `lang`; a call that cancels a module's pending `snapshotAsync` by
+      its key without asking again (now only a newer request with the key, which is itself
+      taken, or disabling the module ends one).
 
 ## Dev tools
 

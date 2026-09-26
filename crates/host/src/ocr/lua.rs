@@ -16,10 +16,13 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Instant;
 
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 
+use crate::backend::frame::Frame;
+use crate::backend::CaptureSource;
 use crate::image_search::vm_owner;
 use crate::region::Region;
 use crate::{call_guarded, capture_source, logging, region_lua, Shared};
@@ -29,6 +32,22 @@ use super::policy::{self, MAX_CALL_PIXELS, MAX_REGIONS};
 use super::sched::{Owner, Ticket, TicketId, TOO_MANY};
 use super::service::{Done, Spec};
 use super::types::{current_priority, enter_priority, Priority, Reading, Rect, Status};
+
+/// A snapshot a read was handed: compared by identity, shown by its rectangle.
+#[derive(Clone)]
+pub(crate) struct SnapArg(pub Arc<Frame>);
+
+impl PartialEq for SnapArg {
+    fn eq(&self, other: &SnapArg) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::fmt::Debug for SnapArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SnapArg({:?})", self.0.rect)
+    }
+}
 
 /// What a `host.ocr.read` call asked for, once its arguments passed.
 #[derive(Debug, PartialEq)]
@@ -41,6 +60,8 @@ pub(crate) struct ReadArgs {
     pub list: bool,
     pub lang: LangReq,
     pub key: Option<String>,
+    /// Read this snapshot instead of photographing the screen.
+    pub snapshot: Option<SnapArg>,
 }
 
 fn bad(msg: impl std::fmt::Display) -> mlua::Error {
@@ -234,7 +255,7 @@ pub(crate) fn parse_read(what: &Value, opts: &Value) -> mlua::Result<ReadArgs> {
         }
     }
 
-    let (mut lang, mut key) = (LangReq::Default, None);
+    let (mut lang, mut key, mut snapshot) = (LangReq::Default, None, None);
     match opts {
         Value::Nil => {}
         Value::Table(o) => {
@@ -242,7 +263,7 @@ pub(crate) fn parse_read(what: &Value, opts: &Value) -> mlua::Result<ReadArgs> {
                 let (k, v) = pair?;
                 let name = match &k {
                     Value::String(s) => s.to_str()?.to_string(),
-                    _ => return Err(bad("options have only the fields `lang` and `key`")),
+                    _ => return Err(bad("options have only the fields `lang`, `key` and `snapshot`")),
                 };
                 match name.as_str() {
                     "lang" => lang = lang_request(&v, "host.ocr.read")?,
@@ -251,9 +272,11 @@ pub(crate) fn parse_read(what: &Value, opts: &Value) -> mlua::Result<ReadArgs> {
                         Value::String(_) => return Err(bad("`key` is empty")),
                         other => return Err(bad(format!("`key` must be a string, got {}", other.type_name()))),
                     },
+                    // A Snapshot, not released: anything else raises, a Template handle included.
+                    "snapshot" => snapshot = crate::snapshot::from_value(&v, "host.ocr.read", "opts.snapshot")?.map(SnapArg),
                     other => {
                         return Err(bad(format!(
-                            "unknown option '{other}' — the options are `lang` and `key`"
+                            "unknown option '{other}' — the options are `lang`, `key` and `snapshot`"
                         )))
                     }
                 }
@@ -266,7 +289,25 @@ pub(crate) fn parse_read(what: &Value, opts: &Value) -> mlua::Result<ReadArgs> {
             )))
         }
     }
-    Ok(ReadArgs { entries, list: is_list, lang, key })
+    Ok(ReadArgs { entries, list: is_list, lang, key, snapshot })
+}
+
+/// The regions of a read of a snapshot, cut to the part of it the recogniser can read
+/// (`Frame::ocr_rect`): a region reads what of it the snapshot holds, and one of which it holds
+/// nothing is not read — its reading fails with the reason, as a window region with no rectangle
+/// does, and the call's other regions are read.
+pub(crate) fn clip_to_snapshot(
+    entries: Vec<(Option<String>, Result<Rect, String>)>,
+    frame: &Frame,
+) -> Vec<(Option<String>, Result<Rect, String>)> {
+    let readable = frame.ocr_rect();
+    entries
+        .into_iter()
+        .map(|(name, r)| {
+            let r = r.and_then(|r| readable.intersect(&r).ok_or_else(|| crate::snapshot::NO_OVERLAP.to_string()));
+            (name, r)
+        })
+        .collect()
 }
 
 /// One reading as the table a callback receives.
@@ -399,8 +440,8 @@ impl OcrState {
 }
 
 /// Whether an answer for `owner` may be called back: its VM is still the one that asked (not
-/// reloaded, not rolled back), and its module is enabled.
-fn deliverable(owner: Owner, gens: &HashMap<usize, u64>, enabled: &[bool]) -> bool {
+/// reloaded, not rolled back), and its module is enabled. Shared with `snapshotAsync`.
+pub(crate) fn deliverable(owner: Owner, gens: &HashMap<usize, u64>, enabled: &[bool]) -> bool {
     gens.get(&owner.idx) == Some(&owner.gen) && enabled.get(owner.idx).copied().unwrap_or(false)
 }
 
@@ -476,8 +517,9 @@ pub(crate) fn legacy_lang(
 }
 
 /// The VM a binding runs in, as `register_vm` tagged it — or, for a state it never tagged, the
-/// binding's own index at that index's current generation (the image search's rule).
-fn owner_of(lua: &Lua, gens: &HashMap<usize, u64>, scope: usize) -> Owner {
+/// binding's own index at that index's current generation (the image search's rule). Shared
+/// with `snapshotAsync`.
+pub(crate) fn owner_of(lua: &Lua, gens: &HashMap<usize, u64>, scope: usize) -> Owner {
     match vm_owner(lua) {
         Some(o) => Owner { idx: o.idx, gen: o.gen },
         None => Owner { idx: scope, gen: gens.get(&scope).copied().unwrap_or(0) },
@@ -496,7 +538,13 @@ impl Shared {
             Value::Function(f) => f,
             other => return Err(bad(format!("the callback (last argument) must be a function, got {}", other.type_name()))),
         };
-        let args = parse_read(&what, &opts)?;
+        let mut args = parse_read(&what, &opts)?;
+        // On a snapshot: each region cut to what of it the snapshot holds, before anything else
+        // looks at them — a region it holds nothing of is answered like an unresolved one.
+        let frame = args.snapshot.take().map(|s| s.0);
+        if let Some(f) = &frame {
+            args.entries = clip_to_snapshot(std::mem::take(&mut args.entries), f);
+        }
         let owner = owner_of(lua, &self.vm_gens.borrow(), scope);
         let prio = current_priority();
         let rects: Vec<Rect> = args.entries.iter().map(|(_, r)| r.clone().unwrap_or_default()).collect();
@@ -540,12 +588,21 @@ impl Shared {
             ready.push((id, Status::Failed, None));
             return Ok(());
         }
-        let first = rects.iter().find(|r| !r.is_empty()).copied().unwrap_or_default();
-        let source = capture_source::read_source(lua, &*self.backend, first.tuple());
-        let out = self.ocr.submit(
-            Spec { regions: rects, lang: args.lang, source },
-            Ticket { id, owner, key: args.key.clone(), prio },
-        );
+        let ticket = Ticket { id, owner, key: args.key.clone(), prio };
+        let out = match frame {
+            // Nothing to photograph and no source to choose: the snapshot is the picture, and a
+            // read of it makes no first-read comparison.
+            Some(f) => self.ocr.submit_on_frame(
+                Spec { regions: rects, lang: args.lang, source: CaptureSource::Standard },
+                ticket,
+                f,
+            ),
+            None => {
+                let first = rects.iter().find(|r| !r.is_empty()).copied().unwrap_or_default();
+                let source = capture_source::read_source(lua, &*self.backend, first.tuple());
+                self.ocr.submit(Spec { regions: rects, lang: args.lang, source }, ticket)
+            }
+        };
         // After the queue answered, and only when it took the read. Nothing is delivered before
         // the next tick, so no answer can be judged against a key recorded too late.
         note_newest(&mut st.key_seq.borrow_mut(), owner, args.key.as_deref(), id, out.refused.is_none());
@@ -724,11 +781,14 @@ impl Shared {
     }
 
     /// The input barrier: before `host.input.*` or `host.window.focus` acts for the module that
-    /// owns `lua`, its pending OCR pictures are taken — up to `policy::BARRIER`. A module that
-    /// reads a field and then clicks it gets the field as it was before the click.
+    /// owns `lua`, its pending pictures are taken — its text reads', its plain snapshots' and the
+    /// first of its change waits without `from` — up to `policy::BARRIER`. A module that reads a
+    /// field and then clicks it gets the field as it was before the click.
     pub(crate) fn ocr_barrier(&self, lua: &Lua) {
         let Some(o) = vm_owner(lua) else { return };
-        if !self.ocr_state.pending.borrow().values().any(|p| p.owner.idx == o.idx) {
+        if !self.ocr_state.pending.borrow().values().any(|p| p.owner.idx == o.idx)
+            && !self.snap_state.has_pending_for(o.idx)
+        {
             return;
         }
         let started = Instant::now();
@@ -738,8 +798,8 @@ impl Shared {
                 logging::line(
                     "ocr",
                     &format!(
-                        "[{id}] input waited {} ms for its pending text-recognition picture and went \
-                         ahead without it; said once",
+                        "[{id}] input waited {} ms for its pending picture (a text read's or a \
+                         snapshot's) and went ahead without it; said once",
                         started.elapsed().as_millis()
                     ),
                 );
@@ -947,6 +1007,40 @@ mod tests {
         fails(&lua, "return { 0, 0, 1, 1 }", "return { lang = { 'de', 5 } }", "must be a string");
         fails(&lua, "return { 0, 0, 1, 1 }", "return { key = 5 }", "`key` must be a string");
         fails(&lua, "return { 0, 0, 1, 1 }", "return 'de'", "options must be a table");
+    }
+
+    /// `snapshot` is the third option: a Snapshot, anything else raising, and named in the
+    /// message for an unknown option.
+    #[test]
+    fn the_snapshot_option_is_accepted_and_named_in_the_unknown_option_message() {
+        let lua = Lua::new();
+        let h = crate::snapshot::test_handle(&lua, crate::snapshot::test_frame(0, 0, 50, 40));
+        lua.globals().set("s", h).unwrap();
+        let a = parse(&lua, "return { 0, 0, 10, 10 }", "return { snapshot = s, key = 'menu' }").unwrap();
+        assert!(a.snapshot.is_some() && a.key.as_deref() == Some("menu"));
+        assert!(parse(&lua, "return { 0, 0, 10, 10 }", "return nil").unwrap().snapshot.is_none());
+        fails(&lua, "return { 0, 0, 1, 1 }", "return { snap = s }", "unknown option 'snap' — the options are `lang`, `key` and `snapshot`");
+        fails(&lua, "return { 0, 0, 1, 1 }", "return { snapshot = 5 }", "host.ocr.read: opts.snapshot must be a Snapshot, got 5");
+        lua.load("s:release()").exec().unwrap();
+        fails(&lua, "return { 0, 0, 1, 1 }", "return { snapshot = s }", "host.ocr.read: opts.snapshot: the snapshot was released");
+    }
+
+    /// On a snapshot each region reads the part the snapshot holds; one it holds nothing of fails
+    /// with the reason, and an unresolved window region keeps its own.
+    #[test]
+    fn regions_are_clipped_to_the_snapshot_and_no_overlap_fails_that_region() {
+        let frame = crate::snapshot::test_frame(100, 100, 200, 100);
+        let entries = vec![
+            (Some("inside".to_string()), Ok(Rect::new(120, 110, 20, 10))),
+            (None, Ok(Rect::new(250, 150, 100, 100))),
+            (None, Ok(Rect::new(0, 0, 50, 50))),
+            (None, Err("the window's client area is empty (0x0)".to_string())),
+        ];
+        let out = clip_to_snapshot(entries, &frame);
+        assert_eq!(out[0], (Some("inside".to_string()), Ok(Rect::new(120, 110, 20, 10))));
+        assert_eq!(out[1].1, Ok(Rect::new(250, 150, 50, 50)), "cut to the snapshot");
+        assert_eq!(out[2].1, Err(crate::snapshot::NO_OVERLAP.to_string()));
+        assert_eq!(out[3].1, Err("the window's client area is empty (0x0)".to_string()));
     }
 
     /// Delivered only to the VM that asked, while its module is enabled: a reload (a new

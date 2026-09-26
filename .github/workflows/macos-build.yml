@@ -505,12 +505,28 @@ jobs:
             echo "::error::the capture probe did not report back after capturing"
             exit 1
           fi
-          if ! grep -q "screen capture paths on this macOS:" automation-platform.log; then
-            echo "::error::no capture ever reached capture.rs — the probe's reads were refused before asking the system"
+          # A call that raised says so first: it is not a callback that never came.
+          if grep -q "CAPTURE PROBE: .*THREW" automation-platform.log; then
+            echo "::error::a capture call threw: $(grep 'CAPTURE PROBE: .*THREW' automation-platform.log)"
             exit 1
           fi
-          if grep -q "CAPTURE PROBE: .*THREW" automation-platform.log; then
-            echo "::error::a capture call threw"
+          # The answers from the screen-capture thread: a snapshotAsync and a change wait, always
+          # asked, and a text read of the snapshot taken on the pump when there is one. The probe
+          # says how many came of how many were asked without raising; a missing one is a thread
+          # that never called back. A snapshot that failed on the pump is its own error, not a
+          # missing callback.
+          if grep -q "CAPTURE PROBE: snapshot 200x60 returned nil" automation-platform.log; then
+            echo "::error::the snapshot on the pump thread returned nil: $(grep 'CAPTURE PROBE: snapshot 200x60' automation-platform.log)"
+            exit 1
+          fi
+          counts=$(grep -o "CAPTURE PROBE: snapshot callbacks [0-9]* of [0-9]* answered" automation-platform.log | head -n1 | awk '{print $5, $7}')
+          set -- $counts
+          if [ -z "$counts" ] || [ "$1" != "$2" ]; then
+            echo "::error::a snapshot callback never came: $(grep 'CAPTURE PROBE: snapshot callbacks' automation-platform.log || echo 'no count at all')"
+            exit 1
+          fi
+          if ! grep -q "screen capture paths on this macOS:" automation-platform.log; then
+            echo "::error::no capture ever reached capture.rs — the probe's reads were refused before asking the system"
             exit 1
           fi
           if grep -q "ScreenCaptureKit did not answer" automation-platform.log; then
@@ -614,6 +630,21 @@ jobs:
           launch "$GITHUB_WORKSPACE/tools/capture-probe"
           grep -q "CAPTURE PROBE: still alive after capturing" automation-platform.log \
             || { echo "::error::the capture probe did not report back on the newer macOS"; exit 1; }
+          if grep -q "CAPTURE PROBE: snapshot 200x60 \(THREW\|returned nil\)" automation-platform.log; then
+            echo "::error::the snapshot on the pump thread failed on the newer macOS: $(grep 'CAPTURE PROBE: snapshot 200x60' automation-platform.log)"
+            exit 1
+          fi
+          # An asynchronous ask that raised is not counted as asked, so it is looked for here.
+          if grep -q "CAPTURE PROBE: \(snapshotAsync\|change wait\|read of the snapshot\) THREW" automation-platform.log; then
+            echo "::error::a snapshot call threw on the newer macOS: $(grep 'CAPTURE PROBE: .*THREW' automation-platform.log)"
+            exit 1
+          fi
+          counts=$(grep -o "CAPTURE PROBE: snapshot callbacks [0-9]* of [0-9]* answered" automation-platform.log | head -n1 | awk '{print $5, $7}')
+          set -- $counts
+          if [ -z "$counts" ] || [ "$1" != "$2" ]; then
+            echo "::error::a snapshot callback never came on the newer macOS: $(grep 'CAPTURE PROBE: snapshot callbacks' automation-platform.log || echo 'no count at all')"
+            exit 1
+          fi
           if grep -q "ScreenCaptureKit did not answer" automation-platform.log; then
             echo "::error::ScreenCaptureKit did not answer while the pump thread waited, on the newer macOS"
             exit 1

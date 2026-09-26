@@ -47,7 +47,8 @@ NS_BLURB = {
     'host.window': 'Finding windows and the surfaces inside them, and reacting when the focus '
                    'moves.',
     'host.screen': 'Reading pixels, profiling a region, reducing one to a grid of cells, and '
-                   'finding an image within one.',
+                   'finding an image within one — from the screen, or from a snapshot of it '
+                   'read several times.',
     'host.ocr': 'Recognising text in a screen region.',
     'host.element': 'Querying the accessibility tree an application publishes.',
     'host.input': 'Synthesising mouse and keyboard input.',
@@ -345,18 +346,22 @@ CAPABILITIES = [
     '[`host.screen.matchCells`](screen.md#host-screen-matchcells): its colour test is pasted as '
     'written, its regions are window fractions, its signatures are hex, and the similarity '
     'and the runner-up come back for the module\'s own thresholds.',
-    '- **A reader that keeps a frame and reads many points from it.** On Windows every '
+    '- **A reader that keeps a frame and reads many points from it.** Keep one: '
+    '[`host.screen.snapshot`](screen.md#host-screen-snapshot) takes a picture that every screen '
+    'call given `{ snapshot = s }` reads, and [`pixels`](screen.md#host-screen-pixels) reads many '
+    'points from as few captures as they allow. Without them, on Windows every '
     '[`pixel`](screen.md#host-screen-pixel) call is a screen read of its own; on macOS only '
-    'reads close together in place and time share one. No call reads many points from one '
-    'capture.',
-    '- **A reader that captures one frame per poll and runs every test on it.** No call hands '
-    'out a frame to test against. [`matchCellsAsync`](screen.md#host-screen-matchcellsasync) and '
-    'the asynchronous image searches share a picture only when they ask for the same region, '
-    'read the same way, and fall into the same batch of the image worker (the requests waiting '
-    'when it becomes free, and those in the next 5 ms); two [`host.ocr.read`](ocr.md#host-ocr-read) '
-    'calls share one only when they ask for the same thing before the first is taken, and never '
-    'with those. Otherwise each call takes a picture of its own, so detecting a state and '
-    'reading its text are two pictures, taken at two moments.',
+    'reads close together in place and time share one.',
+    '- **A reader that captures one frame per poll and runs every test on it.** Take one '
+    '[`snapshot`](screen.md#host-screen-snapshot) per poll — or '
+    '[`snapshotAsync`](screen.md#host-screen-snapshotasync), off the event loop and able to wait '
+    'until part of the screen changes — and pass it to every test, '
+    '[`host.ocr.read`](ocr.md#host-ocr-read) included: they all read that one picture. Without '
+    'one, [`matchCellsAsync`](screen.md#host-screen-matchcellsasync) and the asynchronous image '
+    'searches share a picture only when they ask for the same region, read the same way, and '
+    'fall into the same batch of the image worker, and two `host.ocr.read` calls only when they '
+    'ask for the same thing before the first is taken; otherwise detecting a state and reading '
+    'its text are two pictures, taken at two moments.',
     '- **Tesseract or other OCR language codes.** `lang` is a language tag such as `"de"` or '
     '`"de-DE"`, matched against what the platform\'s recogniser reads. A three-letter code such '
     'as `"eng"` is a well-formed tag that no recogniser lists, so it does not raise: the read is '
@@ -377,8 +382,9 @@ CAPABILITIES = [
     'interrupts one that does not return. The slow work of '
     '[`host.ocr.read`](ocr.md#host-ocr-read), '
     '[`matchCellsAsync`](screen.md#host-screen-matchcellsasync), '
-    '[`imageSearchAsync`](screen.md#host-screen-imagesearchasync) and '
-    '[`imageSearchEach`](screen.md#host-screen-imagesearcheach) runs on threads of the host\'s '
+    '[`imageSearchAsync`](screen.md#host-screen-imagesearchasync), '
+    '[`imageSearchEach`](screen.md#host-screen-imagesearcheach) and '
+    '[`snapshotAsync`](screen.md#host-screen-snapshotasync) runs on threads of the host\'s '
     'own and answers in a callback; the other screen and OCR calls hold the loop until they '
     'return. Which call runs where: [Threads](../module-runtime-and-lifecycle.md#threads).',
     '- **A manifest that names its target window.** `module.toml` has no window or process '

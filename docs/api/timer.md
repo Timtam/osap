@@ -154,7 +154,7 @@ The system switches off an event tap whose thread stops answering, and keys go u
 
 **Signature:** `host.epoch() -> number`
 
-A counter that changes whenever the world may have: an OS event dispatched into a module (hotkey, key, window activation, focus change, controller event), a one-shot [`after`](#host-timer-after) coming due, an async image result arriving, [`host.window.focus`](./window.md#host-window-focus), or the module itself driving input (click, move, drag, scroll, key send, typing). A [`host.timer.every`](#host-timer-every) tick does not move it, and neither does [`host.input.post`](./input.md#host-input-post).
+A counter that changes whenever the world may have: an OS event dispatched into a module (hotkey, key, window activation, focus change, controller event), a one-shot [`after`](#host-timer-after) coming due, an async image result, a [text read](./ocr.md#host-ocr-read)'s readings or a [`snapshotAsync`](./screen.md#host-screen-snapshotasync) answer arriving (once for all that arrive together), [`host.window.focus`](./window.md#host-window-focus), or the module itself driving input (click, move, drag, scroll, key send, typing). A [`host.timer.every`](#host-timer-every) tick does not move it, and neither does [`host.input.post`](./input.md#host-input-post).
 
 Memoize an expensive observation against it, so repeats within one dispatch are free while a genuinely new situation is always re-observed:
 

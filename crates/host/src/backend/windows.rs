@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicI32, AtomicBool, AtomicIsize, AtomicU32, Ordering}
 use std::sync::{Mutex, MutexGuard};
 
 use super::dxgi::{self, Caller, Fallback};
+use super::frame::{self, Frame, FrameVia};
 use super::hotkey_hook::{self, Down, Mods, OsPress, Route, NO_ID};
 use super::{
     Backend, CaptureFn, CaptureSource, CapturedImage, ControlInfo, DumpNode, HostEvents,
@@ -478,7 +479,153 @@ fn capture_on_worker(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Ve
     capture_all(regions, src, Caller::Worker)
 }
 
+// ── Snapshots ───────────────────────────────────────────────────────────────────────────────
+
+/// [`capture_all`] as frames: every region from `src`, one answer each, in order, each frame
+/// recording the path that actually answered it — `Duplication` only for a picture duplication
+/// gave, `Gdi` for the standard path and for the fallback to it. The same decisions as
+/// `capture_all`, fallback and reasons included; `caller` is who waits (`Caller::Pump` on the
+/// event loop).
+fn frames_all(regions: &[(i32, i32, i32, i32)], src: CaptureSource, caller: Caller) -> Vec<Result<Frame, String>> {
+    frames_with(regions, src, |rects| duplicate(rects, caller), |&(x, y, w, h)| {
+        capture_screen(x, y, w, h).ok_or_else(|| CAPTURE_FAILED.to_string())
+    })
+}
+
+/// [`frames_all`] with the duplication request and the standard capture passed in, so the
+/// mapping can be tested without a graphics card or a screen.
+fn frames_with(
+    regions: &[(i32, i32, i32, i32)],
+    src: CaptureSource,
+    dup: impl FnOnce(&[(i32, i32, i32, i32)]) -> Result<Vec<Result<CapturedImage, String>>, Fallback>,
+    gdi: impl Fn(&(i32, i32, i32, i32)) -> Result<CapturedImage, String>,
+) -> Vec<Result<Frame, String>> {
+    // The moment the picture came back, and a picture exactly the region's size or none: a
+    // frame is read by index arithmetic, and a short one must never be kept.
+    let kept = |r: &(i32, i32, i32, i32), img: Result<CapturedImage, String>, via: FrameVia| {
+        img.and_then(|img| {
+            Frame::from_image(Rect::from_tuple(*r), img, std::time::Instant::now(), via, None)
+                .ok_or_else(|| CAPTURE_FAILED.to_string())
+        })
+    };
+    let CaptureSource::Duplication { or_standard } = src else {
+        return regions.iter().map(|r| kept(r, gdi(r), FrameVia::Gdi)).collect();
+    };
+    match dup(regions) {
+        Ok(images) => regions.iter().zip(images).map(|(r, img)| kept(r, img, FrameVia::Duplication)).collect(),
+        Err(why) => {
+            dxgi::note_fallback(why, or_standard);
+            if !or_standard {
+                return regions.iter().map(|_| Err(unanswered(why))).collect();
+            }
+            // `standard_instead`'s rule: too large for duplication is too large for its fallback
+            // too. The rest are planned as a standard round is — a region inside another's
+            // capture cut from it, unions up to `UNION_MAX` pixels — so a round of several
+            // regions that duplication could not answer costs a compositor frame per planned
+            // capture, not one per region.
+            let too_large = |&(_, _, w, h): &(i32, i32, i32, i32)| w > 0 && h > 0 && !dxgi::fits(w, h);
+            let asked: Vec<usize> = (0..regions.len()).filter(|&i| !too_large(&regions[i])).collect();
+            let rects: Vec<Rect> = asked.iter().map(|&i| Rect::from_tuple(regions[i])).collect();
+            let (plan, at) = crate::ocr::snap_queue::group(&rects, crate::ocr::policy::UNION_MAX);
+            let mut shots: Vec<Option<Result<Frame, String>>> =
+                plan.iter().map(|p| Some(kept(&p.tuple(), gdi(&p.tuple()), FrameVia::Gdi))).collect();
+            let mut users = vec![0usize; plan.len()];
+            for &k in &at {
+                users[k] += 1;
+            }
+            let mut out: Vec<Result<Frame, String>> =
+                regions.iter().map(|_| Err(format!("{CAPTURE_FAILED}: {}", Fallback::TooLarge.describe()))).collect();
+            for (n, &i) in asked.iter().enumerate() {
+                let (k, r) = (at[n], rects[n]);
+                // The one region of a capture of exactly it takes the frame itself.
+                let whole = users[k] == 1 && matches!(&shots[k], Some(Ok(f)) if f.rect == r);
+                out[i] = if whole {
+                    shots[k].take().unwrap_or_else(|| Err(CAPTURE_FAILED.to_string()))
+                } else {
+                    match &shots[k] {
+                        Some(Ok(f)) => f.crop(r).ok_or_else(|| CAPTURE_FAILED.to_string()),
+                        Some(Err(e)) => Err(e.clone()),
+                        None => Err(CAPTURE_FAILED.to_string()),
+                    }
+                };
+            }
+            out
+        }
+    }
+}
+
+/// The colours at `pts` for `host.screen.pixels`, never through `GetPixel`. A point on no
+/// monitor has no picture in either path and reads black, as `pixel_through` answers it, with
+/// nothing captured or asked for it (`frame::black_where_off`). The others: the standard path
+/// captures the rectangles `frame::plan_points` plans for them — one `BitBlt` of the box they
+/// lie in when it is small, one per 2048x976 tile they reach otherwise; desktop duplication gets
+/// each of them as a 1x1 piece of ONE request, and when it cannot answer they are read the
+/// standard way or fail with the reason, as the module's `fallback` says.
+fn pixels_through(pts: &[(i32, i32)], src: CaptureSource) -> Result<Vec<(u8, u8, u8)>, String> {
+    pixels_with(pts, src, |rects| dxgi::capture(rects, Caller::Pump), off_every_monitor, |r| {
+        capture_screen(r.x, r.y, r.w, r.h).ok_or_else(|| CAPTURE_FAILED.to_string())
+    })
+}
+
+/// [`pixels_through`] with the engine, the monitor test and the standard capture passed in.
+fn pixels_with(
+    pts: &[(i32, i32)],
+    src: CaptureSource,
+    dup: impl FnOnce(&[(i32, i32, i32, i32)]) -> Result<Vec<CapturedImage>, Fallback>,
+    off: impl Fn(i32, i32) -> bool,
+    gdi: impl FnMut(Rect) -> Result<CapturedImage, String>,
+) -> Result<Vec<(u8, u8, u8)>, String> {
+    frame::black_where_off(pts, off, |on| match src {
+        CaptureSource::Standard => frame::read_points(on, gdi),
+        CaptureSource::Duplication { or_standard } => {
+            // Each distinct point once, in the order first asked, in one request.
+            let mut asked: Vec<(i32, i32, i32, i32)> = Vec::new();
+            let mut slot: std::collections::HashMap<(i32, i32), usize> = std::collections::HashMap::new();
+            for &(x, y) in on {
+                if !slot.contains_key(&(x, y)) {
+                    slot.insert((x, y), asked.len());
+                    asked.push((x, y, 1, 1));
+                }
+            }
+            match dup(&asked) {
+                Ok(images) if images.len() == asked.len() => on
+                    .iter()
+                    .map(|p| {
+                        let img = &images[slot[p]];
+                        img.rgba.get(0..3).map(|c| (c[0], c[1], c[2])).ok_or_else(|| CAPTURE_FAILED.to_string())
+                    })
+                    .collect(),
+                Ok(_) => Err(CAPTURE_FAILED.to_string()),
+                Err(why) => {
+                    dxgi::note_fallback(why, or_standard);
+                    if !or_standard {
+                        return Err(unanswered(why));
+                    }
+                    frame::read_points(on, gdi)
+                }
+            }
+        }
+    })
+}
+
 // ── host.ocr.read's two threads ─────────────────────────────────────────────────────────────
+
+/// The snapshot rounds' capture (`OcrWorker::frames`), on the capture thread: `frames_all` as
+/// the image worker's reads wait for desktop duplication — up to 250 ms — with the path each
+/// frame came from. `poll` means nothing here.
+fn frames_on_capture_thread(regions: &[(i32, i32, i32, i32)], src: CaptureSource, _poll: bool) -> Vec<Result<Frame, String>> {
+    frames_all(regions, src, Caller::Worker)
+}
+
+/// A read of a snapshot (`OcrWorker::shot_of`): each region's pixels copied out of the frame, as
+/// the capture stage would have handed them over. A region not inside it — which the binding has
+/// already cut to it, so only an empty one — fails in its own slot.
+fn ocr_shot_of(frame: &Frame, regions: &[(i32, i32, i32, i32)]) -> OcrShot {
+    regions
+        .iter()
+        .map(|&r| frame.crop_image(Rect::from_tuple(r)).ok_or_else(|| CAPTURE_FAILED.to_string()))
+        .collect()
+}
 
 /// The capture stage of `host.ocr.read` (`OcrWorker::capture`), on its own thread: every region
 /// of one read from one moment, and roughly how many bytes that is.
@@ -964,6 +1111,14 @@ impl Backend for WindowsBackend {
         capture_on_worker
     }
 
+    fn frame(&self, r: Rect, src: CaptureSource) -> Result<Frame, String> {
+        frames_all(&[r.tuple()], src, Caller::Pump).pop().unwrap_or_else(|| Err(CAPTURE_FAILED.to_string()))
+    }
+
+    fn pixels(&self, pts: &[(i32, i32)], src: CaptureSource) -> Result<Vec<(u8, u8, u8)>, String> {
+        pixels_through(pts, src)
+    }
+
     fn ocr_worker(&self) -> OcrWorker {
         OcrWorker {
             present: true,
@@ -971,6 +1126,10 @@ impl Backend for WindowsBackend {
             capture: ocr_capture,
             recognise: ocr_recognise,
             languages: ocr_languages,
+            frames: frames_on_capture_thread,
+            // One standard capture may span monitors here: `BitBlt` of the virtual screen.
+            display_of: |_, _| 0,
+            shot_of: ocr_shot_of,
         }
     }
 
@@ -2843,6 +3002,268 @@ mod capture_tests {
         let got = duplicate_with(&[(0, 0, 4, 4)], |_| Err(Fallback::SecureDesktop));
         assert_eq!(got.err(), Some(Fallback::SecureDesktop));
         assert!(unanswered(Fallback::SecureDesktop).starts_with(DUPLICATION_UNANSWERED));
+    }
+
+    /// A snapshot's frame is `capture_all`'s picture with the path that answered it: the same
+    /// fallback decisions, the same reasons, and `via` telling duplication from the standard
+    /// path it fell back to. `Opening` is a quiet reason, so the test writes no log line.
+    #[test]
+    fn frames_all_maps_duplication_failures_like_capture_all() {
+        let gdi = |&(_, _, w, h): &(i32, i32, i32, i32)| -> Result<CapturedImage, String> {
+            if w > 0 && h > 0 { Ok(img(w, h)) } else { Err(CAPTURE_FAILED.to_string()) }
+        };
+        let regions = [(0, 0, 4, 4), (5, 5, 0, 4)];
+        let standard = frames_with(&regions, CaptureSource::Standard, |_| panic!("duplication was asked"), gdi);
+        let f = standard[0].as_ref().expect("a frame");
+        assert_eq!((f.rect, f.via), (Rect::new(0, 0, 4, 4), FrameVia::Gdi));
+        assert!(f.img.rgba.chunks_exact(4).all(|p| p[3] == 255), "alpha forced opaque");
+        assert_eq!(standard[1].as_ref().err().map(String::as_str), Some(CAPTURE_FAILED));
+
+        let dup_ok = |rects: &[(i32, i32, i32, i32)]| -> Result<Vec<Result<CapturedImage, String>>, Fallback> {
+            duplicate_with(rects, |r| Ok(r.iter().map(|&(_, _, w, h)| img(w, h)).collect()))
+        };
+        let both = CaptureSource::Duplication { or_standard: true };
+        let got = frames_with(&regions, both, dup_ok, gdi);
+        assert_eq!(got[0].as_ref().map(|f| f.via).ok(), Some(FrameVia::Duplication));
+        assert_eq!(got[1].as_ref().err().map(String::as_str), Some(CAPTURE_FAILED), "a degenerate region fails on its own");
+
+        let lost = |_: &[(i32, i32, i32, i32)]| -> Result<Vec<Result<CapturedImage, String>>, Fallback> { Err(Fallback::Opening) };
+        let got = frames_with(&[(0, 0, 4, 4), (0, 0, 60_000, 60_000)], both, lost, gdi);
+        assert_eq!(got[0].as_ref().map(|f| f.via).ok(), Some(FrameVia::Gdi), "read the standard way, and it says so");
+        let too_large = got[1].as_ref().err().unwrap();
+        assert!(too_large.starts_with(CAPTURE_FAILED) && too_large.contains("40 million"), "{too_large}");
+
+        // Several regions duplication could not answer: planned as a standard round is — one
+        // capture of two close regions and of one inside them, a far one on its own — each cut
+        // out, every frame saying it came the standard way.
+        let asked = std::cell::RefCell::new(Vec::new());
+        let gdi_logged = |r: &(i32, i32, i32, i32)| -> Result<CapturedImage, String> {
+            asked.borrow_mut().push(*r);
+            gdi(r)
+        };
+        let group = [(0, 0, 4, 4), (10, 0, 4, 4), (1, 1, 2, 2), (3000, 3000, 4, 4)];
+        let got = frames_with(&group, both, lost, gdi_logged);
+        assert_eq!(*asked.borrow(), vec![(0, 0, 14, 4), (3000, 3000, 4, 4)], "one capture per planned rectangle");
+        let rects: Vec<Rect> = got.iter().map(|f| f.as_ref().expect("a frame").rect).collect();
+        assert_eq!(rects, group.iter().map(|&t| Rect::from_tuple(t)).collect::<Vec<_>>(), "each region, in order");
+        assert!(got.iter().all(|f| f.as_ref().unwrap().via == FrameVia::Gdi));
+
+        let none = CaptureSource::Duplication { or_standard: false };
+        let got = frames_with(&[(0, 0, 4, 4)], none, lost, |_| panic!("the standard path was asked"));
+        let why = got[0].as_ref().err().unwrap();
+        assert!(why.starts_with(DUPLICATION_UNANSWERED) && why.ends_with("it is still opening"), "{why}");
+
+        let short = frames_with(&[(0, 0, 4, 4)], CaptureSource::Standard, |_| unreachable!(), |_| Ok(img(4, 3)));
+        assert_eq!(short[0].as_ref().err().map(String::as_str), Some(CAPTURE_FAILED), "a picture of the wrong size is not kept");
+    }
+
+    /// `pixels`: the standard path captures the planned rectangles and samples them; desktop
+    /// duplication gets every distinct point on a monitor as one 1x1 piece of ONE request, a
+    /// point on no monitor reads black without asking it, and a request it cannot answer falls
+    /// back or fails as the module's `fallback` says.
+    #[test]
+    fn pixels_plan_per_source() {
+        // A picture whose pixel at screen (x, y) is (x, y, 9), whatever rectangle is captured.
+        fn shot(r: Rect) -> CapturedImage {
+            let mut rgba = Vec::new();
+            for y in r.y..r.y + r.h {
+                for x in r.x..r.x + r.w {
+                    rgba.extend_from_slice(&[x as u8, y as u8, 9, 255]);
+                }
+            }
+            CapturedImage { w: r.w as u32, h: r.h as u32, rgba }
+        }
+        let mut captured = Vec::new();
+        let near = pixels_with(&[(10, 10), (12, 14)], CaptureSource::Standard, |_| panic!("duplication"), |_, _| false, |r| {
+            captured.push(r);
+            Ok(shot(r))
+        });
+        assert_eq!(near, Ok(vec![(10, 10, 9), (12, 14, 9)]));
+        assert_eq!(captured, vec![Rect::new(10, 10, 3, 5)], "one capture of the box the points lie in");
+
+        let off = |x: i32, _: i32| x < 0;
+        let mut captured = Vec::new();
+        let away = pixels_with(&[(-9, 0), (10, 10), (-5, 3)], CaptureSource::Standard, |_| panic!("duplication"), off, |r| {
+            captured.push(r);
+            Ok(shot(r))
+        });
+        assert_eq!(away, Ok(vec![(0, 0, 0), (10, 10, 9), (0, 0, 0)]), "black on no monitor, in the order asked");
+        assert_eq!(captured, vec![Rect::new(10, 10, 1, 1)], "nothing captured for a point on no monitor");
+
+        let mut sent = Vec::new();
+        let dup = CaptureSource::Duplication { or_standard: false };
+        let got = pixels_with(
+            &[(3, 4), (-50, 4), (3, 4), (7, 8)],
+            dup,
+            |rects| {
+                sent = rects.to_vec();
+                Ok(rects.iter().map(|&r| shot(Rect::from_tuple(r))).collect())
+            },
+            off,
+            |_| panic!("the standard path"),
+        );
+        assert_eq!(got, Ok(vec![(3, 4, 9), (0, 0, 0), (3, 4, 9), (7, 8, 9)]));
+        assert_eq!(sent, vec![(3, 4, 1, 1), (7, 8, 1, 1)], "each point on a monitor once, in one request");
+        let all_off = pixels_with(&[(-1, 0)], dup, |_| panic!("duplication asked for a point on no monitor"), off, |_| panic!("gdi"));
+        assert_eq!(all_off, Ok(vec![(0, 0, 0)]));
+
+        let lost = |_: &[(i32, i32, i32, i32)]| -> Result<Vec<CapturedImage>, Fallback> { Err(Fallback::Overdue) };
+        let fell_back = pixels_with(&[(5, 6)], CaptureSource::Duplication { or_standard: true }, lost, off, |r| Ok(shot(r)));
+        assert_eq!(fell_back, Ok(vec![(5, 6, 9)]));
+        let failed = pixels_with(&[(5, 6)], dup, lost, off, |_| panic!("gdi under fallback = none"));
+        assert!(failed.unwrap_err().starts_with(DUPLICATION_UNANSWERED));
+        assert_eq!(pixels_with(&[], dup, |_| panic!("asked"), off, |_| panic!("gdi")), Ok(Vec::new()));
+    }
+
+    // ---- Live, on a real desktop: `cargo test -p host snapshot_live -- --ignored --nocapture` --
+    //
+    // What only a screen can say about snapshots and `pixels` (S1, S2, S4 in TODO.md), on the
+    // test window `dxgi.rs` paints: four quadrants of known colours, no fade-in. Informational
+    // where the session decides (a runner whose GDI sees nothing, M19); failing only where the
+    // answer would be the host's own fault.
+
+    /// The centre of each quadrant of the test window at `(x, y, w, h)`, as screen points.
+    fn quadrant_points(x: i32, y: i32, w: i32, h: i32) -> Vec<(i32, i32)> {
+        (0..4).map(|i| (x + (i % 2) * w / 2 + w / 4, y + (i / 2) * h / 2 + h / 4)).collect()
+    }
+
+    /// S1 and S2: `pixels` — one `BitBlt` of the box — gives exactly what `GetPixel` gives at each
+    /// point, and costs one capture where eight `pixel` calls cost eight.
+    #[test]
+    #[ignore = "needs a real desktop session: cargo test -p host snapshot_live -- --ignored --nocapture"]
+    fn snapshot_live_pixels_equal_getpixel() {
+        use super::super::dxgi::tests::{dpi_aware, TestWindow, COLOURS};
+        dpi_aware();
+        let (x, y, w, h) = (200, 200, 240, 120);
+        let win = TestWindow::show(x, y, w, h);
+        win.settle(std::time::Duration::from_millis(300));
+        let mut pts = quadrant_points(x, y, w, h);
+        pts.extend(quadrant_points(x + 10, y + 5, w - 20, h - 10));
+        let t = std::time::Instant::now();
+        let got = pixels_through(&pts, CaptureSource::Standard);
+        let one = t.elapsed();
+        let t = std::time::Instant::now();
+        let each: Vec<(u8, u8, u8)> = pts.iter().map(|&(px, py)| pixel_gdi(px, py)).collect();
+        let eight = t.elapsed();
+        println!(
+            "SNAPSHOT LIVE: pixels of {} points in {:.1} ms, {} GetPixel calls in {:.1} ms",
+            pts.len(),
+            one.as_secs_f64() * 1000.0,
+            pts.len(),
+            eight.as_secs_f64() * 1000.0
+        );
+        let got = got.expect("the standard path always answers");
+        if got[..4] != COLOURS[..] {
+            println!("::warning::SNAPSHOT LIVE: the capture does not see the test window's colours here (M19): {got:?}");
+        }
+        assert_eq!(got, each, "a BitBlt of the box reads what GetPixel reads at every point (S1)");
+    }
+
+    /// S4: two snapshots of a still window are byte-identical within one path; and how a
+    /// standard snapshot compares with a duplication one of the same region.
+    #[test]
+    #[ignore = "needs a real desktop session: cargo test -p host snapshot_live -- --ignored --nocapture"]
+    fn snapshot_live_still_frames_are_identical() {
+        use super::super::dxgi::tests::{dpi_aware, TestWindow};
+        dpi_aware();
+        crate::appcfg::set("desktop_duplication", true);
+        let (x, y, w, h) = (200, 200, 240, 120);
+        let win = TestWindow::show(x, y, w, h);
+        win.settle(std::time::Duration::from_millis(300));
+        let region = [(x, y, w, h)];
+        let a = frames_all(&region, CaptureSource::Standard, Caller::Worker).pop().unwrap().expect("a standard frame");
+        let b = frames_all(&region, CaptureSource::Standard, Caller::Worker).pop().unwrap().expect("a standard frame");
+        assert_eq!((a.via, b.via), (FrameVia::Gdi, FrameVia::Gdi));
+        assert!(a.img.rgba == b.img.rgba, "two standard snapshots of a still window differ");
+        let dup = CaptureSource::Duplication { or_standard: false };
+        let mut got = None;
+        for _ in 0..40 {
+            match frames_all(&region, dup, Caller::Worker).pop().unwrap() {
+                Ok(f) => {
+                    got = Some(f);
+                    break;
+                }
+                Err(why) => {
+                    println!("SNAPSHOT LIVE: duplication: {why}");
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        }
+        let Some(d) = got else {
+            println!("::warning::SNAPSHOT LIVE: desktop duplication did not answer in this session (M12)");
+            return;
+        };
+        assert_eq!(d.via, FrameVia::Duplication);
+        match dxgi::compare(&a.img, &d.img) {
+            Some((pct, worst, ls, ld)) => println!(
+                "SNAPSHOT LIVE: {pct:.2} % of pixels differ between the standard and the duplication snapshot, by up to {worst}; mean luminance {ls:.1} and {ld:.1}"
+            ),
+            None => panic!("a standard and a duplication snapshot of one region differ in size"),
+        }
+    }
+
+    /// A change wait over a still window sees a second window appear beside it 100 ms later:
+    /// the real standard capture, through the snapshot lane as the capture thread drives it, on
+    /// a thread of its own while this one paints.
+    #[test]
+    #[ignore = "needs a real desktop session: cargo test -p host snapshot_live -- --ignored --nocapture"]
+    fn snapshot_live_change_wait_sees_repaint() {
+        use super::super::dxgi::tests::{dpi_aware, TestWindow};
+        use crate::ocr::change::{ChangeSpec, Wait};
+        use crate::ocr::sched::Owner;
+        use crate::ocr::snap_queue::{SnapKind, SnapLane, SnapOutcome, SnapReq, SnapTicket};
+        use crate::ocr::types::Priority;
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+        dpi_aware();
+        let (x, y, w, h) = (240, 240, 200, 100);
+        let first = TestWindow::show(x, y, w, h);
+        first.settle(Duration::from_millis(300));
+        let region = Rect::new(x, y, w, h);
+        let asked = Instant::now();
+        let spec = ChangeSpec { tolerance: 16, min_pixels: 4, settle: Duration::ZERO, timeout: Duration::from_millis(1000) };
+        let req = SnapReq {
+            ticket: SnapTicket { id: 1, owner: Owner { idx: 0, gen: 1 }, prio: Priority::Interactive },
+            region,
+            source: CaptureSource::Standard,
+            kind: SnapKind::Change { wait: Box::new(Wait::new(region, &[], spec, None, asked)), start: asked },
+            asked,
+            holds: true,
+            cancel: Arc::new(AtomicBool::new(false)),
+        };
+        let rounds = std::thread::spawn(move || {
+            let mut lane = SnapLane::default();
+            lane.submit(req);
+            loop {
+                let now = Instant::now();
+                match lane.take(now) {
+                    Some(round) => {
+                        let frames = frames_all(&round.tuples(), round.source, Caller::Worker);
+                        let done = round.run(frames, Instant::now(), 0);
+                        if let Some(d) = lane.finish(done, Instant::now()).pop() {
+                            return d;
+                        }
+                    }
+                    None => std::thread::sleep(
+                        lane.next_wake().map_or(Duration::from_millis(1), |t| t.saturating_duration_since(now)),
+                    ),
+                }
+            }
+        });
+        first.settle(Duration::from_millis(100));
+        let second = TestWindow::show(x + w / 2, y, w, h);
+        second.settle(Duration::from_millis(1000));
+        let d = rounds.join().expect("the round thread");
+        match d.outcome {
+            SnapOutcome::Picture { frame, frames, change: Some(c) } => {
+                let waited = frame.taken.duration_since(asked);
+                println!("SNAPSHOT LIVE: the change was seen {} ms after the wait began, in {frames} rounds", waited.as_millis());
+                assert!(c.changed && c.settled);
+                assert!(waited >= Duration::from_millis(100) && waited < Duration::from_millis(400), "{waited:?}");
+            }
+            _ => panic!("the change wait gave no picture"),
+        }
+        drop(second);
     }
 
     #[test]

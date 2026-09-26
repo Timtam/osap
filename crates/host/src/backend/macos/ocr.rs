@@ -428,6 +428,8 @@ pub enum Shot {
     Shared { big: CFRetained<CGImage>, scale: f64, origin: (i32, i32) },
     /// Per region, in order: its capture and scale, or `None` when it could not be taken.
     Each(Vec<Option<(CFRetained<CGImage>, f64)>>),
+    /// Nothing to read, and why: a snapshot that kept no backing image.
+    Failed(String),
 }
 
 impl Default for Shot {
@@ -451,6 +453,30 @@ pub fn thread_init(role: OcrThread) {
                 &format!("ocr: the recognise thread kept its quality of service ({rc})"),
             );
         }
+    }
+}
+
+/// A snapshot round's captures (`OcrWorker::frames`), on the capture thread: one
+/// `capture::frame` per rectangle, each at the display's own resolution and kept beside its
+/// point-sized pixels. The source is ignored here, as everywhere on this platform; `poll` skips
+/// the flat-picture watch for a change wait's rounds.
+pub fn frames_for_round(
+    regions: &[(i32, i32, i32, i32)],
+    _src: CaptureSource,
+    poll: bool,
+) -> Vec<Result<crate::backend::frame::Frame, String>> {
+    regions.iter().map(|&(x, y, w, h)| super::capture::frame(x, y, w, h, poll)).collect()
+}
+
+/// A read of a snapshot (`OcrWorker::shot_of`): the backing image the snapshot kept, as the
+/// capture stage's shared capture — so the read is as sharp as a live one. The regions arrive cut
+/// to the part the image covers (`Frame::ocr_rect`); a region the image does not hold after all
+/// fails in its own slot when it is cut out (`render`). A snapshot without a backing image — none
+/// is made without one on this platform — answers every region with the reason.
+pub fn shot_of(frame: &crate::backend::frame::Frame, _regions: &[(i32, i32, i32, i32)]) -> Shot {
+    match &frame.native {
+        Some(n) => Shot::Shared { big: n.image.clone(), scale: n.scale, origin: (n.on.x, n.on.y) },
+        None => Shot::Failed("this snapshot kept no picture at the display's resolution to read text from".to_string()),
     }
 }
 
@@ -527,6 +553,7 @@ pub fn recognise_shot(
                         None => Err("could not cut this region out of the shared capture".to_string()),
                     }
                 }
+                Shot::Failed(why) => Err(why.clone()),
                 Shot::Each(each) => match each.get(i).and_then(|c| c.as_ref()) {
                     Some((native, scale)) => recognize_captured(
                         native, *scale, x, y, w, h, ctx.lang, started, debug, &ladder,

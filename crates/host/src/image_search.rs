@@ -21,10 +21,13 @@ use mlua::{
 };
 use rayon::prelude::*;
 
+use crate::backend::frame::Frame;
 use crate::backend::{CaptureFn, CaptureSource, CapturedImage};
 use crate::capture_source;
 use crate::cells;
+use crate::ocr::types as geo;
 use crate::region::{self, ScreenRect};
+use crate::snapshot::{self, Picture};
 use crate::template::{self, Decoded, Rect};
 use crate::{
     call_guarded, cells_match_table, logging, one_value, opts_region, read_scales, region_arg, region_lua, with_reason,
@@ -255,9 +258,10 @@ fn release(gone: impl IntoIterator<Item = PendingImage>) {
 
 // ── The worker ─────────────────────────────────────────────────────────────────────────
 
-/// A queued async search. The worker CAPTURES `region` itself (off the main thread) then
-/// matches `entries` against it; `region` = (x, y, w, h) in screen coords, whose (x, y) is
-/// added back into every reported hit.
+/// A queued async search. The worker CAPTURES its region itself (off the main thread) then
+/// matches `entries` against it — or, given a snapshot, reads the snapshot and captures
+/// nothing. The region is (x, y, w, h) in screen coords, whose (x, y) is added back into every
+/// reported hit.
 ///
 /// In `Mode::First` the entries are tried in order against the SAME captured frame and the
 /// first hit wins — several renderings of the same thing (a dialog's close glyph as two plugin
@@ -267,13 +271,28 @@ fn release(gone: impl IntoIterator<Item = PendingImage>) {
 #[derive(Clone)]
 pub(crate) struct ImageTask {
     pub(crate) id: u64,
-    pub(crate) region: (i32, i32, i32, i32),
-    /// How the asking module's VM reads the screen (`capture_source.rs`). Part of the frame's
-    /// identity in a batch: the same region read two ways is two frames. Travels with the
-    /// task, so a held search sent again on re-enable reads the way it was first asked to.
-    pub(crate) source: CaptureSource,
+    /// What the task reads.
+    pub(crate) hay: Haystack,
     /// What is done with the frame.
     pub(crate) job: Job,
+}
+
+/// What a task reads.
+#[derive(Clone)]
+pub(crate) enum Haystack {
+    /// The screen, captured by the worker: every task there was before snapshots.
+    Screen {
+        region: (i32, i32, i32, i32),
+        /// How the asking module's VM reads the screen (`capture_source.rs`). Part of the
+        /// frame's identity in a batch: the same region read two ways is two frames. Travels
+        /// with the task, so a held search sent again on re-enable reads the way it was first
+        /// asked to.
+        source: CaptureSource,
+    },
+    /// A snapshot the module passed, read where `region` lies in it — already cut to it at the
+    /// call — and never captured. Shared with the module's handle, not copied: a snapshot
+    /// released while the task waits keeps its pixels until the task is done.
+    Frame { frame: Arc<Frame>, region: geo::Rect },
 }
 
 /// What the worker does with a task's frame.
@@ -309,11 +328,32 @@ pub(crate) struct CellsJob {
 }
 
 impl ImageTask {
-    /// Whether the worker reads the screen for this task.
+    /// Whether the worker reads the screen for this task: never for a snapshot's. The batch asks
+    /// `screen_key`; the tests ask this.
+    #[cfg(test)]
     fn captures(&self) -> bool {
-        match &self.job {
-            Job::Search { unresolved, .. } => unresolved.is_none(),
-            Job::Cells(c) => c.unresolved.is_none(),
+        self.screen_key().is_some()
+    }
+
+    /// The frame the worker captures for this task — its region and source — or `None` when
+    /// it captures nothing: a snapshot's task, and one answered with why there is nothing to read.
+    fn screen_key(&self) -> Option<capture_source::FrameKey> {
+        let unresolved = match &self.job {
+            Job::Search { unresolved, .. } => unresolved.is_some(),
+            Job::Cells(c) => c.unresolved.is_some(),
+        };
+        match &self.hay {
+            Haystack::Screen { region, source } if !unresolved => Some((*region, *source)),
+            _ => None,
+        }
+    }
+
+    /// The screen rectangle the task reads: where its hits are measured from and what a cells
+    /// answer reports.
+    pub(crate) fn region(&self) -> (i32, i32, i32, i32) {
+        match &self.hay {
+            Haystack::Screen { region, .. } => *region,
+            Haystack::Frame { region, .. } => region.tuple(),
         }
     }
 
@@ -472,13 +512,13 @@ fn run_batch(batch: &[ImageTask], capture: CaptureFn) -> Vec<ImageResult> {
     // capture_source::capture_frames.
     let batch_len = batch.len() as u32;
     // Only the tasks that read the screen get a frame: a cells task whose window had no client
-    // area is answered without one.
-    let reading: Vec<usize> = (0..batch.len()).filter(|&i| batch[i].captures()).collect();
-    let (keys, frame_of_reading) =
-        capture_source::frame_keys(reading.iter().map(|&i| (batch[i].region, batch[i].source)));
+    // area is answered without one, and a snapshot's task reads the snapshot.
+    let reading: Vec<(usize, capture_source::FrameKey)> =
+        batch.iter().enumerate().filter_map(|(i, t)| t.screen_key().map(|k| (i, k))).collect();
+    let (keys, frame_of_reading) = capture_source::frame_keys(reading.iter().map(|(_, k)| *k));
     let frames: Vec<(Result<CapturedImage, String>, u32)> = capture_source::capture_frames(capture, &keys);
     let mut frame_of: Vec<Option<usize>> = vec![None; batch.len()];
-    for (&i, &f) in reading.iter().zip(&frame_of_reading) {
+    for (&(i, _), &f) in reading.iter().zip(&frame_of_reading) {
         frame_of[i] = Some(f);
     }
     let plan: Vec<(&ImageTask, Option<usize>)> = batch.iter().zip(frame_of).collect();
@@ -509,21 +549,50 @@ fn run_batch(batch: &[ImageTask], capture: CaptureFn) -> Vec<ImageResult> {
         .collect()
 }
 
-/// One task against its frame: the picture, or why the capture failed; `None` for a task that
-/// was not captured (an unresolved one, which carries its own reason).
+/// What a task's matching reads: a picture, where its top-left pixel is on screen, and the part
+/// of it the task's region covers — `None` for all of it, a capture of exactly the region, which
+/// is every task there was before snapshots and is read exactly as it always was.
+struct Pic<'a> {
+    img: &'a CapturedImage,
+    origin: (i32, i32),
+    area: Option<Rect>,
+}
+
+/// The picture a task reads: its snapshot, or the frame the batch captured for it (or why that
+/// capture failed; `None` when none was made for it).
+fn picture<'a>(t: &'a ImageTask, shot: Option<Result<&'a CapturedImage, &'a str>>) -> Result<Pic<'a>, String> {
+    match &t.hay {
+        // Its region was cut to the snapshot at the call; a region outside it cannot get here.
+        Haystack::Frame { frame, region } => match frame.area(*region) {
+            Some(a) => Ok(Pic {
+                img: &frame.img,
+                origin: (frame.rect.x, frame.rect.y),
+                area: Some(Rect { x: a.x, y: a.y, w: a.w, h: a.h }),
+            }),
+            None => Err(snapshot::NO_OVERLAP.to_string()),
+        },
+        Haystack::Screen { region, .. } => match shot {
+            Some(Ok(img)) => Ok(Pic { img, origin: (region.0, region.1), area: None }),
+            Some(Err(why)) => Err(why.to_string()),
+            None => Err(crate::backend::CAPTURE_FAILED.to_string()),
+        },
+    }
+}
+
+/// One task against its picture: the frame the batch captured for it, or why the capture
+/// failed; `None` for a task that was not captured (an unresolved one, which carries its own
+/// reason, and a snapshot's, which reads the snapshot).
 fn answer(t: &ImageTask, frame: Option<Result<&CapturedImage, &str>>) -> Outcome {
     match &t.job {
-        Job::Search { entries, tol, scales, mode, unresolved } => Outcome::Search(match (unresolved, frame) {
-            (Some(why), _) => Err(why.clone()),
-            (None, Some(Ok(cap))) => Ok(match_task(t.region, entries, *tol, scales, *mode, cap)),
-            (None, Some(Err(why))) => Err(why.to_string()),
-            (None, None) => Err(crate::backend::CAPTURE_FAILED.to_string()),
+        Job::Search { entries, tol, scales, mode, unresolved } => Outcome::Search(match unresolved {
+            Some(why) => Err(why.clone()),
+            None => picture(t, frame).map(|pic| match_task(&pic, entries, *tol, scales, *mode)),
         }),
         Job::Cells(job) => Outcome::Cells(cells_task(t, job, frame)),
     }
 }
 
-/// A `matchCellsAsync` against its frame. A panic in the reduction is answered, like a
+/// A `matchCellsAsync` against its picture. A panic in the reduction is answered, like a
 /// template's, rather than taking the worker with it.
 fn cells_task(
     t: &ImageTask,
@@ -533,13 +602,13 @@ fn cells_task(
     if let Some(why) = &job.unresolved {
         return Err(why.clone());
     }
-    let cap = match frame {
-        Some(Ok(cap)) => cap,
-        Some(Err(why)) => return Err(why.to_string()),
-        None => return Err(crate::backend::CAPTURE_FAILED.to_string()),
-    };
-    let (_, _, w, h) = t.region;
-    match logging::contain(|| job.matcher.answer(cap, w, h)) {
+    let pic = picture(t, frame)?;
+    let (_, _, w, h) = t.region();
+    match logging::contain(|| match pic.area {
+        // A capture of exactly the region, held to that size as it always was.
+        None => job.matcher.answer(pic.img, w, h),
+        Some(a) => job.matcher.answer_sub(pic.img, cells::Sub { x: a.x, y: a.y, w: a.w, h: a.h }),
+    }) {
         Ok(answer) => answer,
         Err(report) => {
             contained("a cells match", "it was answered nil", &report);
@@ -548,23 +617,29 @@ fn cells_task(
     }
 }
 
-/// One search against its captured frame.
+/// One search against its picture.
 fn match_task(
-    region: (i32, i32, i32, i32),
+    pic: &Pic,
     entries: &[(Arc<Decoded>, Option<Rect>)],
     tol: u8,
     scales: &[f32],
     mode: Mode,
-    cap: &CapturedImage,
 ) -> Vec<Option<ScreenHit>> {
-    let (rx, ry, _, _) = region;
+    let (ox, oy) = pic.origin;
     let one = |n: usize, (dec, within): &(Arc<Decoded>, Option<Rect>)| -> Option<ScreenHit> {
+        // A `within` is relative to the region; in a snapshot the region starts at the area's
+        // corner, and it was cut to the region at the call, so it stays inside the area.
+        let area = match (within, pic.area) {
+            (Some(w), Some(b)) => Some(Rect { x: b.x + w.x, y: b.y + w.y, w: w.w, h: w.h }),
+            (Some(w), None) => Some(*w),
+            (None, b) => b,
+        };
         // Per entry, so one template that trips something cannot take its neighbours' answers
         // with it. On whichever pool thread runs it: `contain` marks the thread it runs on.
-        match logging::contain(|| template::find(cap, *within, dec, tol, scales)) {
+        match logging::contain(|| template::find(pic.img, area, dec, tol, scales)) {
             Ok(hit) => hit.map(|h| ScreenHit {
-                x: rx + h.x as i32,
-                y: ry + h.y as i32,
+                x: ox + h.x as i32,
+                y: oy + h.y as i32,
                 w: h.w,
                 h: h.h,
                 n: n + 1,
@@ -721,7 +796,7 @@ fn result_args(lua: &Lua, task: &ImageTask, names: &[Option<String>], outcome: O
         // it exactly as before.
         (Job::Search { .. }, Outcome::Search(Err(why))) => vec![Value::Nil, reason(lua, why)],
         (_, Outcome::Cells(Ok((live, ranked)))) => {
-            let (x, y, w, h) = task.region;
+            let (x, y, w, h) = task.region();
             match cells_match_table(lua, &live, ScreenRect { x, y, w, h }, &ranked, names) {
                 Ok(t) => vec![Value::Table(t), Value::Nil],
                 Err(e) => vec![Value::Nil, reason(lua, format!("internal error: {e}"))],
@@ -892,7 +967,8 @@ impl UserData for TemplateHandle {
 /// Where a template's pixels come from.
 enum Source {
     Bytes { rgba: bool, data: Vec<u8>, w: u32, h: u32 },
-    Capture { x: i32, y: i32, w: i32, h: i32 },
+    /// The screen now — or, with `snapshot`, that snapshot's pixels, cut out, never captured.
+    Capture { x: i32, y: i32, w: i32, h: i32, snapshot: Option<Arc<Frame>> },
     /// A `capture` given as a window region that has nothing to capture this time — an empty
     /// client area, or one so large that the region is past a template's size limit. Answered
     /// `nil, reason`, like a failed capture: the window's size is a run-time condition.
@@ -934,10 +1010,12 @@ fn whole(v: &Value, field: &str) -> mlua::Result<i64> {
 /// that is silently ignored — a misspelt `rbga`, a `tolerance` this version does not take —
 /// is a template that does something other than what its author reads in it. The `capture`
 /// region is read by the Region form's one reader, as every other call's is: corners the way
-/// `opts.region` takes them, or a window region resolved here, at the call.
+/// `opts.region` takes them, or a window region resolved here, at the call. With `snapshot`,
+/// a corner left out is the snapshot's edge, and the template is cut from that snapshot.
 fn parse_spec(spec: &Table, sw: i32, sh: i32) -> mlua::Result<ParsedSpec> {
     let mut name = None;
     let (mut w, mut h) = (None, None);
+    let mut snapshot_value: Option<Value> = None;
     let mut sources: Vec<(String, Value)> = Vec::new();
     for pair in spec.clone().pairs::<Value, Value>() {
         let (k, v) = pair?;
@@ -968,11 +1046,12 @@ fn parse_spec(spec: &Table, sw: i32, sh: i32) -> mlua::Result<ParsedSpec> {
             },
             "w" => w = Some(whole(&v, "w")?),
             "h" => h = Some(whole(&v, "h")?),
+            "snapshot" => snapshot_value = Some(v),
             "rgba" | "rgb" | "capture" | "file" => sources.push((key, v)),
             other => {
                 return Err(spec_err(format!(
                     "unknown field '{other}'; a spec takes name and exactly one of rgba, rgb, \
-                     capture or file"
+                     capture or file (and snapshot with capture)"
                 )))
             }
         }
@@ -987,6 +1066,17 @@ fn parse_spec(spec: &Table, sw: i32, sh: i32) -> mlua::Result<ParsedSpec> {
         }));
     }
     let (key, v) = sources.pop().expect("exactly one source");
+    // A snapshot is something to cut a template FROM, so it goes with `capture` and nothing
+    // else; read (and refused when it is not one, or was released) before anything is cut.
+    let snap = match snapshot_value {
+        None => None,
+        Some(s) if key == "capture" => snapshot::from_value(&s, "host.screen.template", "snapshot")?,
+        Some(_) => {
+            return Err(spec_err(format!(
+                "snapshot belongs with capture: a template is cut from a snapshot with {{ capture = region, snapshot = s }}, not built from {key}"
+            )))
+        }
+    };
     let source = match key.as_str() {
         "rgba" | "rgb" => {
             let (Some(w), Some(h)) = (w, h) else {
@@ -1019,7 +1109,14 @@ fn parse_spec(spec: &Table, sw: i32, sh: i32) -> mlua::Result<ParsedSpec> {
             if !matches!(v, Value::Table(_)) {
                 return Err(spec_err(format!("capture must be a region, got a {}", crate::json::luau_type(&v))));
             }
-            let given = region_lua::read_loose(&v, "capture", (sw, sh)).map_err(spec_err)?;
+            let given = match &snap {
+                // A corner left out is the snapshot's edge.
+                Some(f) => {
+                    let e = f.rect;
+                    region_lua::read_loose_within(&v, "capture", (e.x, e.y, e.right(), e.bottom())).map_err(spec_err)?
+                }
+                None => region_lua::read_loose(&v, "capture", (sw, sh)).map_err(spec_err)?,
+            };
             match given.resolve() {
                 Ok(r) => {
                     // Checked BEFORE capturing: the limit is what the capture would produce, and
@@ -1028,7 +1125,7 @@ fn parse_spec(spec: &Table, sw: i32, sh: i32) -> mlua::Result<ParsedSpec> {
                     // region's size is the window's, so it is answered instead.
                     let size = template::check_size(r.w.max(0) as u32, r.h.max(0) as u32);
                     match (size, &given) {
-                        (Ok(()), _) => Source::Capture { x: r.x, y: r.y, w: r.w, h: r.h },
+                        (Ok(()), _) => Source::Capture { x: r.x, y: r.y, w: r.w, h: r.h, snapshot: snap },
                         (Err(e), region::Region::Rect(_)) => return Err(spec_err(e)),
                         (Err(e), region::Region::Window(..)) => {
                             // `e` names the size itself: "5000x10 is too large; …".
@@ -1086,9 +1183,15 @@ fn build_handle(
                 .map_err(spec_err)?;
             (Arc::new(dec), charge)
         }
-        Source::Capture { x, y, w, h } => {
+        Source::Capture { x, y, w, h, snapshot: snap } => {
             let charge = reserve(lua, &budget, template::dense_bytes(w as u32, h as u32))?;
-            let cap = match capture(x, y, w, h) {
+            let got = match snap {
+                // Cut from the snapshot, whole or not at all: a template cut from a clipped
+                // rectangle would be a different template.
+                Some(frame) => frame.crop_image(geo::Rect::new(x, y, w, h)).ok_or_else(|| snapshot::NOT_INSIDE.to_string()),
+                None => capture(x, y, w, h),
+            };
+            let cap = match got {
                 Ok(cap) => cap,
                 Err(why) => return with_reason(lua, Value::Nil, why),
             };
@@ -1224,10 +1327,26 @@ fn search_region(
     Ok(opts_region(&*sh.backend, opts, fname)?.map(|r| (r.x, r.y, r.w, r.h)))
 }
 
+/// `opts.region` of a search on a snapshot: read with the snapshot's edges as its defaults (a
+/// region left out is the whole snapshot), then cut to the snapshot — the rectangle, or why
+/// there is nothing of it to read (a window region with none this time, or no overlap).
+fn snapshot_region(opts: Option<&Table>, fname: &str, frame: &Frame) -> mlua::Result<Result<(i32, i32, i32, i32), String>> {
+    Ok(snapshot::opts_region_in(opts, fname, frame)?.and_then(|r| snapshot::clip(frame, r)).map(|r| r.tuple()))
+}
+
 /// Captures `region` through this VM's source on the event loop, for the synchronous searches.
 fn capture_now(sh: &Shared, lua: &Lua, (x, y, w, h): (i32, i32, i32, i32)) -> Result<CapturedImage, String> {
     let src = capture_source::read_source(lua, &*sh.backend, (x, y, w, h));
     sh.backend.capture(x, y, w, h, src)
+}
+
+/// What a synchronous search reads: `region` of the snapshot when it was given one — already
+/// cut to it, and nothing is captured — or a capture of `region` made now.
+fn picture_now(sh: &Shared, lua: &Lua, snap: Option<Arc<Frame>>, region: (i32, i32, i32, i32)) -> Result<Picture, String> {
+    match snap {
+        Some(frame) => Ok(Picture::Snap { frame, rect: geo::Rect::from_tuple(region) }),
+        None => capture_now(sh, lua, region).map(|img| Picture::Live { img, x: region.0, y: region.1 }),
+    }
 }
 
 /// `host.screen.imageSearch(template, opts?) -> Hit | nil, reason?`, synchronous. `nil` alone
@@ -1237,18 +1356,24 @@ pub(crate) fn image_search(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::
     lua.create_function(move |lua, (tv, opts): (Value, Option<Table>)| {
         let load = |p: &str| sh.load_template(&sh.root(idx).join(p));
         let (tmpl, name) = resolve_with(&tv, "imageSearch", &load)?;
-        let (rx, ry, rw, rh) = match search_region(&sh, opts.as_ref(), "host.screen.imageSearch")? {
+        let snap = snapshot::from_opts(opts.as_ref(), "host.screen.imageSearch")?;
+        let region = match &snap {
+            Some(f) => snapshot_region(opts.as_ref(), "host.screen.imageSearch", f)?,
+            None => search_region(&sh, opts.as_ref(), "host.screen.imageSearch")?,
+        };
+        let region = match region {
             Ok(r) => r,
             Err(why) => return with_reason(lua, Value::Nil, why),
         };
-        let cap = match capture_now(&sh, lua, (rx, ry, rw, rh)) {
-            Ok(cap) => cap,
+        let pic = match picture_now(&sh, lua, snap, region) {
+            Ok(pic) => pic,
             Err(why) => return with_reason(lua, Value::Nil, why),
         };
         let tol = read_tol(opts.as_ref());
         let scales = read_scales(opts.as_ref());
-        match template::find(&cap, None, &tmpl, tol, &scales) {
-            Some(h) => one_value(Value::Table(hit_table(lua, rx + h.x as i32, ry + h.y as i32, h.w, h.h, 1, name.as_deref())?)),
+        let (ox, oy) = pic.origin();
+        match template::find(pic.image(), pic.search_area(), &tmpl, tol, &scales) {
+            Some(h) => one_value(Value::Table(hit_table(lua, ox + h.x as i32, oy + h.y as i32, h.w, h.h, 1, name.as_deref())?)),
             // Looked, and it is not there: `nil` alone, as always.
             None => one_value(Value::Nil),
         }
@@ -1273,24 +1398,51 @@ pub(crate) fn image_search_multi(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> 
         let could_not_look = |why: String| -> mlua::Result<MultiValue> {
             Ok(MultiValue::from_vec(vec![Value::Nil, Value::Nil, reason(lua, why)]))
         };
-        let (rx, ry, rw, rh) = match search_region(&sh, opts.as_ref(), "host.screen.imageSearchMulti")? {
+        let snap = snapshot::from_opts(opts.as_ref(), "host.screen.imageSearchMulti")?;
+        let region = match &snap {
+            Some(f) => snapshot_region(opts.as_ref(), "host.screen.imageSearchMulti", f)?,
+            None => search_region(&sh, opts.as_ref(), "host.screen.imageSearchMulti")?,
+        };
+        let region = match region {
             Ok(r) => r,
             Err(why) => return could_not_look(why),
         };
-        let cap = match capture_now(&sh, lua, (rx, ry, rw, rh)) {
-            Ok(cap) => cap,
+        let pic = match picture_now(&sh, lua, snap, region) {
+            Ok(pic) => pic,
             Err(why) => return could_not_look(why),
         };
         let tol = read_tol(opts.as_ref());
         let scales = read_scales(opts.as_ref());
+        let (ox, oy) = pic.origin();
         for (i, (tmpl, name)) in list.iter().enumerate() {
-            if let Some(h) = template::find(&cap, None, tmpl, tol, &scales) {
-                let t = hit_table(lua, rx + h.x as i32, ry + h.y as i32, h.w, h.h, i + 1, name.as_deref())?;
+            if let Some(h) = template::find(pic.image(), pic.search_area(), tmpl, tol, &scales) {
+                let t = hit_table(lua, ox + h.x as i32, oy + h.y as i32, h.w, h.h, i + 1, name.as_deref())?;
                 return Ok(MultiValue::from_vec(vec![Value::Integer(i as i64 + 1), Value::Table(t)]));
             }
         }
         Ok(MultiValue::from_vec(vec![Value::Nil, Value::Nil]))
     })
+}
+
+/// What a queued task reads, decided here on the main thread — the worker never sees a Lua
+/// state: `region` of the snapshot when the call was given one (already cut to it or found
+/// inside it at the call), which is never captured and never asks the module's source; else
+/// `region` of the screen through this VM's source. `region` may instead be why there is
+/// nothing to read this time, answered on the worker without a capture.
+fn haystack(
+    sh: &Shared,
+    lua: &Lua,
+    snap: Option<Arc<Frame>>,
+    region: Result<(i32, i32, i32, i32), String>,
+) -> (Haystack, Option<String>) {
+    match (snap, region) {
+        (Some(frame), Ok(r)) => (Haystack::Frame { frame, region: geo::Rect::from_tuple(r) }, None),
+        (Some(frame), Err(why)) => (Haystack::Frame { frame, region: geo::Rect::default() }, Some(why)),
+        (None, Ok(r)) => (Haystack::Screen { region: r, source: capture_source::read_source(lua, &*sh.backend, r) }, None),
+        (None, Err(why)) => {
+            (Haystack::Screen { region: (0, 0, 0, 0), source: capture_source::vm_source(lua) }, Some(why))
+        }
+    }
 }
 
 /// Queues a task for the worker, with its callback waiting on this side. `region` may instead
@@ -1307,22 +1459,21 @@ fn enqueue(
     names: Vec<Option<String>>,
     opts: Option<&Table>,
     mode: Mode,
+    snap: Option<Arc<Frame>>,
 ) -> mlua::Result<()> {
     let tol = read_tol(opts);
     let scales = read_scales(opts);
-    // Which picture the worker reads for this VM, decided here on the main thread: the worker
-    // never sees a Lua state. The one place both async searches set it.
-    let (region, source, unresolved) = match region {
-        Ok(r) => (r, capture_source::read_source(lua, &*sh.backend, r), None),
-        Err(why) => ((0, 0, 0, 0), capture_source::vm_source(lua), Some(why)),
-    };
-    submit(sh, lua, scope, cb, names, region, source, Job::Search { entries, tol, scales, mode, unresolved })
+    // The one place both async searches decide what the worker reads.
+    let (hay, unresolved) = haystack(sh, lua, snap, region);
+    submit(sh, lua, scope, cb, names, hay, Job::Search { entries, tol, scales, mode, unresolved })
 }
 
-/// Queues `host.screen.matchCellsAsync`: the worker captures `rect` through this VM's source,
-/// reduces it to cells and ranks them against the matcher's states. `rect` may instead be why
-/// there is nothing to read this time; that is answered on the worker's next batch without a
-/// capture, so the callback comes on a later tick either way.
+/// Queues `host.screen.matchCellsAsync`: the worker captures `rect` through this VM's source —
+/// or reads it where it lies in `snap` — reduces it to cells and ranks them against the
+/// matcher's states. `rect` may instead be why there is nothing to read this time; that is
+/// answered on the worker's next batch without a capture, so the callback comes on a later
+/// tick either way.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn enqueue_cells(
     sh: &Shared,
     lua: &Lua,
@@ -1331,13 +1482,11 @@ pub(crate) fn enqueue_cells(
     rect: Result<(i32, i32, i32, i32), String>,
     matcher: cells::Matcher,
     names: Vec<Option<String>>,
+    snap: Option<Arc<Frame>>,
 ) -> mlua::Result<()> {
-    let (region, source, unresolved) = match rect {
-        Ok(r) => (r, capture_source::read_source(lua, &*sh.backend, r), None),
-        Err(why) => ((0, 0, 0, 0), capture_source::vm_source(lua), Some(why)),
-    };
+    let (hay, unresolved) = haystack(sh, lua, snap, rect);
     let job = Job::Cells(Arc::new(CellsJob { matcher: Arc::new(matcher), unresolved }));
-    submit(sh, lua, scope, cb, names, region, source, job)
+    submit(sh, lua, scope, cb, names, hay, job)
 }
 
 /// Sends a task to the worker, with its callback waiting on this side.
@@ -1348,8 +1497,7 @@ fn submit(
     scope: usize,
     cb: Function,
     names: Vec<Option<String>>,
-    region: (i32, i32, i32, i32),
-    source: CaptureSource,
+    hay: Haystack,
     job: Job,
 ) -> mlua::Result<()> {
     // The worker captures the region itself and ALWAYS posts a result (a failed capture
@@ -1357,7 +1505,7 @@ fn submit(
     // always drained.
     let id = sh.next_image_id.get() + 1;
     sh.next_image_id.set(id);
-    let task = ImageTask { id, region, source, job };
+    let task = ImageTask { id, hay, job };
     let entry = pending(lua, &sh.vm_gens.borrow(), scope, cb, names, task.clone())?;
     sh.pending_image.borrow_mut().insert(id, entry);
     if sh.image_tasks.send(task).is_err() {
@@ -1391,9 +1539,13 @@ pub(crate) fn image_search_async(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> 
         if list.is_empty() {
             return Err(mlua::Error::external("imageSearchAsync: no template given".to_string()));
         }
-        let region = search_region(&sh, opts.as_ref(), "host.screen.imageSearchAsync")?;
+        let snap = snapshot::from_opts(opts.as_ref(), "host.screen.imageSearchAsync")?;
+        let region = match &snap {
+            Some(f) => snapshot_region(opts.as_ref(), "host.screen.imageSearchAsync", f)?,
+            None => search_region(&sh, opts.as_ref(), "host.screen.imageSearchAsync")?,
+        };
         let (entries, names) = list.into_iter().map(|(d, n)| ((d, None), n)).unzip();
-        enqueue(&sh, lua, idx, cb, region, entries, names, opts.as_ref(), Mode::First)
+        enqueue(&sh, lua, idx, cb, region, entries, names, opts.as_ref(), Mode::First, snap)
     })
 }
 
@@ -1412,7 +1564,11 @@ pub(crate) fn image_search_each(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> m
     lua.create_function(move |lua, (list, opts, cb): (Table, Option<Table>, Function)| {
         const F: &str = "host.screen.imageSearchEach";
         let load = |p: &str| sh.load_template(&sh.root(idx).join(p));
-        let region = search_region(&sh, opts.as_ref(), F)?;
+        let snap = snapshot::from_opts(opts.as_ref(), F)?;
+        let region = match &snap {
+            Some(f) => snapshot_region(opts.as_ref(), F, f)?,
+            None => search_region(&sh, opts.as_ref(), F)?,
+        };
         // Where the entries' `within` are cut to; nothing when the region itself is not read.
         let frame = region.clone().unwrap_or((0, 0, 0, 0));
         let mut entries = Vec::new();
@@ -1434,9 +1590,13 @@ pub(crate) fn image_search_each(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> m
                     let within = match e.get::<Value>("within")? {
                         Value::Nil => None,
                         r @ Value::Table(_) => {
-                            // The one reader, as for `opts.region`. A window `within` whose window
-                            // has nothing to read this time is an empty part: that entry is `false`.
-                            let part = region_arg(&*sh.backend, &r, F, &format!("entries[{}].within", i + 1))?;
+                            // The one reader, as for `opts.region` — on a snapshot with its edges
+                            // as the defaults. A window `within` whose window has nothing to read
+                            // this time is an empty part: that entry is `false`.
+                            let part = match &snap {
+                                Some(f) => snapshot::loose_region(&r, F, &format!("entries[{}].within", i + 1), f)?,
+                                None => region_arg(&*sh.backend, &r, F, &format!("entries[{}].within", i + 1))?,
+                            };
                             Some(match part {
                                 Ok(p) => within_frame(frame, (p.x, p.y, p.w, p.h)),
                                 Err(_) => Rect { x: 0, y: 0, w: 0, h: 0 },
@@ -1472,7 +1632,7 @@ pub(crate) fn image_search_each(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> m
         if entries.is_empty() {
             return Err(mlua::Error::external("imageSearchEach: no template given".to_string()));
         }
-        enqueue(&sh, lua, idx, cb, region, entries, names, opts.as_ref(), Mode::Each)
+        enqueue(&sh, lua, idx, cb, region, entries, names, opts.as_ref(), Mode::Each, snap)
     })
 }
 
@@ -1492,19 +1652,24 @@ pub(crate) fn image_search_all(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> ml
     lua.create_function(move |lua, (tv, opts): (Value, Option<Table>)| {
         let load = |p: &str| sh.load_template(&sh.root(idx).join(p));
         let (tmpl, name) = resolve_with(&tv, "imageSearchAll", &load)?;
-        let region = search_region(&sh, opts.as_ref(), "host.screen.imageSearchAll")?;
+        let snap = snapshot::from_opts(opts.as_ref(), "host.screen.imageSearchAll")?;
+        let region = match &snap {
+            Some(f) => snapshot_region(opts.as_ref(), "host.screen.imageSearchAll", f)?,
+            None => search_region(&sh, opts.as_ref(), "host.screen.imageSearchAll")?,
+        };
         let tol = read_tol(opts.as_ref());
         let out = lua.create_table()?;
-        let (rx, ry, rw, rh) = match region {
+        let region = match region {
             Ok(r) => r,
             Err(why) => return with_reason(lua, Value::Table(out), why),
         };
-        let cap = match capture_now(&sh, lua, (rx, ry, rw, rh)) {
-            Ok(cap) => cap,
+        let pic = match picture_now(&sh, lua, snap, region) {
+            Ok(pic) => pic,
             Err(why) => return with_reason(lua, Value::Table(out), why),
         };
-        for (i, (x, y)) in template::find_all(&cap, &tmpl, tol).into_iter().enumerate() {
-            let t = hit_table(lua, rx + x as i32, ry + y as i32, tmpl.w, tmpl.h, 1, name.as_deref())?;
+        let (ox, oy) = pic.origin();
+        for (i, (x, y)) in template::find_all_in(pic.image(), pic.search_area(), &tmpl, tol).into_iter().enumerate() {
+            let t = hit_table(lua, ox + x as i32, oy + y as i32, tmpl.w, tmpl.h, 1, name.as_deref())?;
             out.raw_set(i + 1, t)?;
         }
         one_value(Value::Table(out))
@@ -1858,16 +2023,16 @@ mod tests {
         map.get_mut(&10).unwrap().held = true;
         // It was asked through desktop duplication: sent again, it reads the same way, not the
         // default the task type would give a rebuilt task.
-        map.get_mut(&10).unwrap().task.source = CaptureSource::Duplication { or_standard: false };
+        set_source(&mut map.get_mut(&10).unwrap().task, CaptureSource::Duplication { or_standard: false });
         map.get_mut(&11).unwrap().held = true;
         // 11 was held for an older VM at the same index.
         map.get_mut(&11).unwrap().gen = 5;
         // 12 is still in flight: its answer is on its way and must not be asked for twice.
         let (again, stale) = unhold(&mut map, 2, gens.get(&2).copied());
         assert_eq!(again.iter().map(|t| t.id).collect::<Vec<_>>(), vec![10]);
-        assert_eq!(again[0].region, (0, 0, 10, 10), "the same search");
+        assert_eq!(again[0].region(), (0, 0, 10, 10), "the same search");
         assert_eq!(
-            again[0].source,
+            source_of(&again[0]),
             CaptureSource::Duplication { or_standard: false },
             "read the way it was first asked to"
         );
@@ -1932,11 +2097,28 @@ mod tests {
         let states: Vec<Box<[u8]>> = vec![vec![0u8; 4].into(), vec![255u8; 4].into()];
         let matcher = cells::Matcher { spec, states, item_of: vec![0, 1] };
         let job = Job::Cells(Arc::new(CellsJob { matcher: Arc::new(matcher), unresolved: unresolved.map(str::to_string) }));
-        ImageTask { id, region, source: CaptureSource::Standard, job }
+        ImageTask { id, hay: Haystack::Screen { region, source: CaptureSource::Standard }, job }
     }
 
     fn task(id: u64, region: (i32, i32, i32, i32), entries: Vec<(Arc<Decoded>, Option<Rect>)>, mode: Mode) -> ImageTask {
-        ImageTask { id, region, source: CaptureSource::Standard, job: Job::Search { entries, tol: 0, scales: Vec::new(), mode, unresolved: None } }
+        ImageTask {
+            id,
+            hay: Haystack::Screen { region, source: CaptureSource::Standard },
+            job: Job::Search { entries, tol: 0, scales: Vec::new(), mode, unresolved: None },
+        }
+    }
+
+    /// A screen task read through `source` instead.
+    fn set_source(t: &mut ImageTask, source: CaptureSource) {
+        let region = t.region();
+        t.hay = Haystack::Screen { region, source };
+    }
+
+    fn source_of(t: &ImageTask) -> CaptureSource {
+        match &t.hay {
+            Haystack::Screen { source, .. } => *source,
+            Haystack::Frame { .. } => panic!("a snapshot's task has no source"),
+        }
     }
 
     fn dot(rgb: [u8; 3]) -> Arc<Decoded> {
@@ -2044,9 +2226,9 @@ mod tests {
         let red = || vec![(dot([255, 0, 0]), None)];
         let region = (0, 0, 10, 10);
         let mut dup = task(2, region, red(), Mode::First);
-        dup.source = CaptureSource::Duplication { or_standard: true };
+        set_source(&mut dup, CaptureSource::Duplication { or_standard: true });
         let mut none = task(3, region, red(), Mode::First);
-        none.source = CaptureSource::Duplication { or_standard: false };
+        set_source(&mut none, CaptureSource::Duplication { or_standard: false });
         let out = run_batch(&[task(1, region, red(), Mode::First), dup, none], by_source);
         assert_eq!(out[0].found(), Ok(vec![Some(ScreenHit { x: 3, y: 2, w: 1, h: 1, n: 1 })]));
         assert_eq!(out[1].found(), Ok(vec![None]), "not the standard frame of the same region");
@@ -2098,7 +2280,7 @@ mod tests {
         let cells_here = cells_matching(2, region, None);
         let unresolved = cells_matching(3, (0, 0, 0, 0), Some("the window's client area is empty (0x0)"));
         let mut not_read = cells_matching(4, region, None);
-        not_read.source = CaptureSource::Duplication { or_standard: false };
+        set_source(&mut not_read, CaptureSource::Duplication { or_standard: false });
         // Only the two frames that are read are asked for, once each: the unresolved task is
         // never captured.
         fn record(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Result<CapturedImage, String>> {
@@ -2126,6 +2308,195 @@ mod tests {
         };
         let out = run_batch(&[cells_matching(5, region, None)], short);
         assert!(out[0].cells().as_ref().unwrap_err().contains("came back 3x3, not the region's 10x10"));
+    }
+
+    // ── snapshots ──────────────────────────────────────────────────────────────────────
+
+    /// A screen with a red pixel at (103, 202) and a green one at (108, 205) on grey: what any
+    /// capture of any region of it gives, and what a snapshot of it holds.
+    fn scene(x: i32, y: i32, w: i32, h: i32) -> CapturedImage {
+        let mut c = opaque(w as u32, h as u32, [50, 50, 50]);
+        for (sx, sy, rgb) in [(103, 202, [255, 0, 0]), (108, 205, [0, 255, 0])] {
+            if (x..x + w).contains(&sx) && (y..y + h).contains(&sy) {
+                let i = (((sy - y) * w + (sx - x)) * 4) as usize;
+                c.rgba[i..i + 3].copy_from_slice(&rgb);
+            }
+        }
+        c
+    }
+
+    fn scene_capture(regions: &[(i32, i32, i32, i32)], _: CaptureSource) -> Vec<Result<CapturedImage, String>> {
+        regions.iter().map(|&(x, y, w, h)| Ok(scene(x, y, w, h))).collect()
+    }
+
+    fn no_capture(_: &[(i32, i32, i32, i32)], _: CaptureSource) -> Vec<Result<CapturedImage, String>> {
+        panic!("a snapshot's task was captured")
+    }
+
+    /// A snapshot of the scene at (100, 200), 20x12.
+    fn scene_frame() -> Arc<Frame> {
+        let r = geo::Rect::new(100, 200, 20, 12);
+        let f = Frame::from_image(r, scene(100, 200, 20, 12), Instant::now(), crate::backend::frame::FrameVia::Gdi, None);
+        Arc::new(f.expect("a whole frame"))
+    }
+
+    fn on_frame(mut t: ImageTask, frame: &Arc<Frame>) -> ImageTask {
+        let region = geo::Rect::from_tuple(t.region());
+        t.hay = Haystack::Frame { frame: frame.clone(), region };
+        t
+    }
+
+    /// The same search against a snapshot and against a live capture of the same region of the
+    /// same screen finds the same hits at the same screen positions — for the whole snapshot and
+    /// for parts of it, with `within`, in both modes.
+    #[test]
+    fn snapshot_and_live_haystack_same_hits() {
+        let frame = scene_frame();
+        let red = || vec![(dot([255, 0, 0]), None)];
+        for region in [(100, 200, 20, 12), (102, 201, 10, 8), (103, 202, 1, 1), (104, 200, 16, 12)] {
+            let live = run_batch(&[task(1, region, red(), Mode::First)], scene_capture);
+            let snap = run_batch(&[on_frame(task(1, region, red(), Mode::First), &frame)], no_capture);
+            assert_eq!(snap[0].found(), live[0].found(), "{region:?}");
+            let entries = vec![
+                (dot([255, 0, 0]), None),
+                (dot([0, 255, 0]), None),
+                (dot([0, 255, 0]), Some(within_frame(region, (106, 203, 200, 200)))),
+                (dot([255, 0, 0]), Some(within_frame(region, (106, 203, 200, 200)))),
+            ];
+            let live = run_batch(&[task(2, region, entries.clone(), Mode::Each)], scene_capture);
+            let snap = run_batch(&[on_frame(task(2, region, entries, Mode::Each), &frame)], no_capture);
+            assert_eq!(snap[0].found(), live[0].found(), "{region:?}, each");
+        }
+        let whole = run_batch(&[on_frame(task(3, (100, 200, 20, 12), red(), Mode::First), &frame)], no_capture);
+        assert_eq!(whole[0].found(), Ok(vec![Some(ScreenHit { x: 103, y: 202, w: 1, h: 1, n: 1 })]));
+    }
+
+    /// A snapshot's task never reaches the capture routine, costs no capture time, and does not
+    /// take a frame from a screen task of the same region in its batch.
+    #[test]
+    fn a_frame_task_takes_no_capture() {
+        thread_local! {
+            static ASKED: std::cell::RefCell<Vec<(i32, i32, i32, i32)>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        fn record(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> Vec<Result<CapturedImage, String>> {
+            ASKED.with(|a| a.borrow_mut().extend(regions.iter().copied()));
+            scene_capture(regions, src)
+        }
+        let frame = scene_frame();
+        let region = (100, 200, 20, 12);
+        let red = || vec![(dot([255, 0, 0]), None)];
+        let only = run_batch(&[on_frame(task(1, region, red(), Mode::First), &frame)], no_capture);
+        assert_eq!(only[0].capture_ms, 0);
+        let out = run_batch(&[on_frame(task(1, region, red(), Mode::First), &frame), task(2, region, red(), Mode::First)], record);
+        assert_eq!(ASKED.with(|a| a.borrow().clone()), vec![region], "only the screen task is captured");
+        assert_eq!(out[0].found(), out[1].found());
+    }
+
+    /// Hits on a snapshot are screen positions: the snapshot's corner plus where they lie in it,
+    /// whatever part of it the region is.
+    #[test]
+    fn frame_task_hits_are_screen_coordinates() {
+        let frame = scene_frame();
+        let green = vec![(dot([0, 255, 0]), None)];
+        let out = run_batch(&[on_frame(task(1, (105, 204, 5, 3), green, Mode::First), &frame)], no_capture);
+        assert_eq!(out[0].found(), Ok(vec![Some(ScreenHit { x: 108, y: 205, w: 1, h: 1, n: 1 })]));
+        // A region of the snapshot the dot is not in: looked, and not there.
+        let out = run_batch(&[on_frame(task(2, (110, 200, 5, 3), vec![(dot([0, 255, 0]), None)], Mode::First), &frame)], no_capture);
+        assert_eq!(out[0].found(), Ok(vec![None]));
+    }
+
+    /// A snapshot region that had nothing to read at the call — no overlap, or a minimised
+    /// window — is answered with that reason on the worker, without a capture.
+    #[test]
+    fn a_frame_region_with_no_overlap_is_answered_without_capture() {
+        let frame = scene_frame();
+        let mut t = on_frame(task(1, (0, 0, 0, 0), vec![(dot([255, 0, 0]), None)], Mode::Each), &frame);
+        let Job::Search { unresolved, .. } = &mut t.job else { unreachable!() };
+        *unresolved = Some(snapshot::NO_OVERLAP.to_string());
+        assert!(!t.captures());
+        let out = run_batch(&[t], no_capture);
+        assert_eq!(out[0].found(), Err(snapshot::NO_OVERLAP.to_string()));
+    }
+
+    /// A cells match on a snapshot reads the region where it lies in it: the same answer as a
+    /// capture of that region.
+    #[test]
+    fn a_frame_cells_task_equals_the_live_one() {
+        let frame = scene_frame();
+        for region in [(100, 200, 20, 12), (101, 201, 5, 5)] {
+            let live = run_batch(&[cells_matching(1, region, None)], scene_capture);
+            let snap = run_batch(&[on_frame(cells_matching(1, region, None), &frame)], no_capture);
+            assert_eq!(snap[0].cells(), live[0].cells(), "{region:?}");
+            assert!(snap[0].cells().is_ok());
+        }
+    }
+
+    /// A search on a snapshot held while its module was disabled is sent again as it was — the
+    /// same picture, which gives the same answer however long the module was off.
+    #[test]
+    fn a_held_frame_search_is_resent_as_is() {
+        let lua = Lua::new();
+        let _ = lua.try_set_app_data(VmOwner { idx: 2, gen: 6 });
+        let gens: HashMap<usize, u64> = [(2, 6)].into_iter().collect();
+        let frame = scene_frame();
+        let cb: Function = lua.load("return function() end").eval().unwrap();
+        let t = on_frame(task(30, (100, 200, 20, 12), vec![(dot([255, 0, 0]), None)], Mode::First), &frame);
+        let mut p = pending(&lua, &gens, 2, cb, vec![None], t).unwrap();
+        p.held = true;
+        let mut map: HashMap<u64, PendingImage> = [(30, p)].into_iter().collect();
+        let (again, stale) = unhold(&mut map, 2, Some(6));
+        assert!(stale.is_empty());
+        let Haystack::Frame { frame: f, region } = &again[0].hay else { panic!("sent again as a screen search") };
+        assert!(Arc::ptr_eq(f, &frame), "the same picture");
+        assert_eq!(*region, geo::Rect::new(100, 200, 20, 12));
+        release(map.into_values());
+    }
+
+    /// `template{ capture, snapshot }` cuts the template out of the snapshot — whole or not at
+    /// all — without capturing, with the snapshot's edges as the defaults of the corners.
+    #[test]
+    fn template_capture_from_a_snapshot_is_inside_or_nil() {
+        let lua = Lua::new();
+        lua.globals().set("s", snapshot::test_handle(&lua, snapshot::test_frame(100, 50, 40, 30))).unwrap();
+        let cut = |src: &str| {
+            let s = spec(&lua, src).unwrap();
+            build_handle(&lua, s, no_file, |_, _, _, _| panic!("the screen was captured")).unwrap().into_vec()
+        };
+        let got = cut("return { capture = { 110, 60, 114, 63 }, snapshot = s, name = 'cut' }");
+        let Value::UserData(ud) = &got[0] else { panic!("expected a handle") };
+        {
+            let h = ud.borrow::<TemplateHandle>().unwrap();
+            assert_eq!((h.dec.w, h.dec.h, h.name.as_deref()), (4, 3, Some("cut")));
+            let template::Body::Dense { rgba, .. } = &h.dec.body;
+            assert_eq!(&rgba[0..4], &[110, 60, 50, 255], "the snapshot's pixel at screen (110, 60)");
+        }
+        let held = budget(&lua).get();
+        assert_eq!(held, template::dense_bytes(4, 3));
+        let past = cut("return { capture = { 130, 60, 150, 70 }, snapshot = s }");
+        assert!(past[0].is_nil());
+        assert_eq!(past[1].as_string().unwrap().to_string_lossy(), snapshot::NOT_INSIDE, "not cut to fit: refused");
+        assert_eq!(budget(&lua).get(), held, "and its reservation given back");
+        let edges = cut("return { capture = { x1 = 120, y1 = 70 }, snapshot = s }");
+        let Value::UserData(ud) = &edges[0] else { panic!("expected a handle") };
+        let h = ud.borrow::<TemplateHandle>().unwrap();
+        assert_eq!((h.dec.w, h.dec.h), (20, 10), "to the snapshot's right and bottom edges");
+    }
+
+    #[test]
+    fn snapshot_is_only_allowed_with_capture() {
+        let lua = Lua::new();
+        lua.globals().set("s", snapshot::test_handle(&lua, snapshot::test_frame(0, 0, 4, 4))).unwrap();
+        let e = err_text(spec(&lua, "return { file = 'a.png', snapshot = s }"));
+        assert!(e.contains("host.screen.template: snapshot belongs with capture"), "{e}");
+        let e = err_text(spec(&lua, "return { rgb = 'abc', w = 1, h = 1, snapshot = s }"));
+        assert!(e.contains("snapshot belongs with capture"), "{e}");
+        let e = err_text(spec(&lua, "return { capture = { 0, 0, 1, 1 }, snapshot = 5 }"));
+        assert!(e.contains("host.screen.template: snapshot must be a Snapshot, got 5"), "{e}");
+        lua.load("s:release()").exec().unwrap();
+        let e = err_text(spec(&lua, "return { capture = { 0, 0, 1, 1 }, snapshot = s }"));
+        assert!(e.contains("host.screen.template: snapshot: the snapshot was released"), "{e}");
+        let e = err_text(spec(&lua, "return { capture = { 0, 0, 1, 1 }, snapshots = 1 }"));
+        assert!(e.contains("unknown field 'snapshots'"), "{e}");
     }
 
     /// A search whose window region had nothing to read at the call (a minimised window) is

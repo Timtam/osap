@@ -27,7 +27,12 @@
 //! reason`, a `"failed"` reading, an `error` field) — never an error dialog over the application
 //! being read.
 //!
-//! `read_point` is `host.screen.pixel`'s window form, `{ window = w, fraction = { x, y } }`.
+//! A read of a snapshot takes the same two readers; the loose one's defaults are then the
+//! snapshot's edges instead of the primary screen's (`read_loose_within`), so a region left out
+//! is the whole snapshot.
+//!
+//! `read_point` is `host.screen.pixel`'s window form, `{ window = w, fraction = { x, y } }`;
+//! `read_point_any` is one point of `host.screen.pixels`, that form or `{ x, y }`, strictly.
 //!
 //! Host only: it reads Luau values. The rules that need no Luau — resolving a window region or
 //! point, checking corners, the loose corners' arithmetic — are in `region.rs`, which the macOS
@@ -226,8 +231,16 @@ pub(crate) fn read(v: &Value, what: &str) -> Result<Region, String> {
 ///   `y2` — and `x2 - x1` wide, a negative size read as none (`region::loose_corners`);
 /// - anything else raises: a table with none of those keys, and a value that is not a table.
 pub(crate) fn read_loose(v: &Value, what: &str, (sw, sh): (i32, i32)) -> Result<Region, String> {
+    read_loose_within(v, what, (0, 0, sw, sh))
+}
+
+/// [`read_loose`] with the defaults given as corners `(x1, y1, x2, y2)`: `nil` is that
+/// rectangle, and a corner missing or not a number takes its own default from it. The primary
+/// screen's `(0, 0, w, h)` for a live read; a snapshot's edges for a read of one, so that a
+/// region left out is the whole snapshot.
+pub(crate) fn read_loose_within(v: &Value, what: &str, (dx1, dy1, dx2, dy2): (i32, i32, i32, i32)) -> Result<Region, String> {
     let t = match v {
-        Value::Nil => return Ok(Region::Rect(region::loose_corners(0, 0, sw, sh))),
+        Value::Nil => return Ok(Region::Rect(region::loose_corners(dx1, dy1, dx2, dy2))),
         Value::Table(t) => t,
         other => return Err(not_a_table(what, other)),
     };
@@ -270,11 +283,56 @@ pub(crate) fn read_loose(v: &Value, what: &str, (sw, sh): (i32, i32)) -> Result<
         t.get::<i32>(name).or_else(|_| t.get::<i32>(at)).unwrap_or(default)
     };
     Ok(Region::Rect(region::loose_corners(
-        corner("x1", 1, 0),
-        corner("y1", 2, 0),
-        corner("x2", 3, sw),
-        corner("y2", 4, sh),
+        corner("x1", 1, dx1),
+        corner("y1", 2, dy1),
+        corner("x2", 3, dx2),
+        corner("y2", 4, dy2),
     )))
+}
+
+/// A point as `host.screen.pixels` takes one: screen coordinates, or fractions of a window's
+/// client area, resolved when the read is made.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum PointArg {
+    Screen(i32, i32),
+    Window(Client, f64, f64),
+}
+
+impl PointArg {
+    /// The pixel to read now; a window point may have none this time (a minimised window).
+    pub(crate) fn resolve(&self) -> Result<(i32, i32), region::Unresolved> {
+        match *self {
+            PointArg::Screen(x, y) => Ok((x, y)),
+            PointArg::Window(c, fx, fy) => region::resolve_point(c, fx, fy),
+        }
+    }
+}
+
+/// Reads a point strictly: `{ x, y }` or `{ x = …, y = … }` in screen coordinates — whole
+/// numbers inside the 32-bit coordinate range, written one way, nothing else — or the window
+/// form exactly as [`read_point`] reads it.
+pub(crate) fn read_point_any(v: &Value, what: &str) -> Result<PointArg, String> {
+    let Value::Table(t) = v else {
+        return Err(format!(
+            "{what} must be a table, {{ x, y }} or {{ window = w, fraction = {{ x, y }} }}, got {}",
+            describe_value(v)
+        ));
+    };
+    if window_form(t) {
+        let (client, fx, fy) = read_point(v, what)?;
+        return Ok(PointArg::Window(client, fx, fy));
+    }
+    let q = entries(t, what, &POINT_SHAPE)?;
+    let mut xy = [0i32; 2];
+    for ((v, name), slot) in q.iter().zip(POINT_SHAPE.names).zip(xy.iter_mut()) {
+        *slot = whole_value(v).and_then(|n| i32::try_from(n).ok()).ok_or_else(|| {
+            format!(
+                "{what}.{name} must be a whole number within the coordinate range (-2147483648 to 2147483647), got {}",
+                describe_value(v)
+            )
+        })?;
+    }
+    Ok(PointArg::Screen(xy[0], xy[1]))
 }
 
 /// Reads `host.screen.pixel`'s window form strictly: `{ window = w, fraction = { x, y } }` (or
@@ -426,6 +484,56 @@ mod tests {
         // A table with only a corner of the wrong type is still corners: that corner defaults,
         // as it always has.
         assert_eq!(loose_src(&lua, "return { x1 = 'left' }"), rect(0, 0, 1920, 1080));
+    }
+
+    /// A snapshot's defaults: `nil` is the whole snapshot, and a corner left out takes the
+    /// snapshot's edge — while everything else reads exactly as `read_loose` reads it.
+    #[test]
+    fn read_loose_within_defaults() {
+        let lua = Lua::new();
+        let within = |src: &str| {
+            let v: Value = lua.load(src).eval().unwrap();
+            read_loose_within(&v, "opts.region", (100, 50, 740, 530))
+        };
+        assert_eq!(within("return nil"), rect(100, 50, 640, 480), "the whole snapshot");
+        assert_eq!(within("return { x1 = 200 }"), rect(200, 50, 540, 480), "the missing corners are its edges");
+        assert_eq!(within("return { x2 = 300, y2 = 60 }"), rect(100, 50, 200, 10));
+        assert_eq!(within("return { 0, 0, 10, 10 }"), rect(0, 0, 10, 10), "given corners are not moved");
+        assert!(within("return {}").unwrap_err().contains("it is empty"), "a table that is neither form still raises");
+        // `read_loose` is this with the screen's corners: nothing about it changed.
+        let v: Value = lua.load("return { x1 = 100 }").eval().unwrap();
+        assert_eq!(read_loose(&v, "r", SCREEN), read_loose_within(&v, "r", (0, 0, SCREEN.0, SCREEN.1)));
+    }
+
+    /// A point of `host.screen.pixels`: screen coordinates strictly, or the window form as
+    /// `pixel` reads it; a mistake names the point.
+    #[test]
+    fn read_point_any_forms_and_mistakes() {
+        let lua = Lua::new();
+        let any = |src: &str| {
+            let v: Value = lua.load(src).eval().unwrap();
+            read_point_any(&v, "points[2]")
+        };
+        assert_eq!(any("return { 10, -20 }"), Ok(PointArg::Screen(10, -20)));
+        assert_eq!(any("return { x = 10.0, y = 20 }"), Ok(PointArg::Screen(10, 20)));
+        let w = any("return { window = { client = { x = 100, y = 50, w = 200, h = 100 } }, fraction = { 0.5, 0.5 } }").unwrap();
+        assert_eq!(w.resolve(), Ok((200, 100)));
+        let min = any("return { window = { client = { x = 0, y = 0, w = 0, h = 0 } }, fraction = { 0, 0 } }").unwrap();
+        assert_eq!(min.resolve().unwrap_err().to_string(), "the window's client area is empty (0x0)");
+        for (src, want) in [
+            ("return 5", "points[2] must be a table, { x, y } or { window = w, fraction = { x, y } }, got 5"),
+            ("return { 1.5, 2 }", "points[2].x must be a whole number within the coordinate range (-2147483648 to 2147483647), got 1.5"),
+            ("return { 1, 1e10 }", "points[2].y must be a whole number within the coordinate range"),
+            ("return { 1, '2' }", "points[2].y must be a whole number"),
+            ("return { 1 }", "points[2].y is missing; both are needed, x and y"),
+            ("return { 1, 2, 3 }", "points[2] has an entry at 3"),
+            ("return { x = 1, 2 }", "mixes named and positional coordinates"),
+            ("return { x = 1, y = 2, z = 3 }", "points[2] has a key 'z'"),
+            ("return { window = { client = { x = 0, y = 0, w = 9, h = 9 } }, fraction = { 0, 0 }, x = 1 }", "a key 'x' beside window and fraction"),
+        ] {
+            let e = any(src).unwrap_err();
+            assert!(e.contains(want), "{src}:\n  got  {e}\n  want {want}");
+        }
     }
 
     fn point_src(lua: &Lua, src: &str) -> Result<(Client, f64, f64), String> {

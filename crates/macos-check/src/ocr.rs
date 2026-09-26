@@ -25,3 +25,11 @@ pub mod sched;
 
 #[path = "../../host/src/ocr/pipeline.rs"]
 pub mod pipeline;
+
+/// The change wait and the snapshot lane that share the capture thread with the text reads:
+/// pure, apart from the frame type, which on this target carries the macOS backing image.
+#[path = "../../host/src/ocr/change.rs"]
+pub mod change;
+
+#[path = "../../host/src/ocr/snap_queue.rs"]
+pub mod snap_queue;

@@ -12,6 +12,10 @@ use std::rc::Rc;
 /// Game controllers, observed from the background. Outside the [`Backend`] trait on purpose.
 pub mod gamepad;
 
+/// A capture kept as a value — what `host.screen.snapshot` holds — and the geometry every read
+/// of one uses. Pure; see the file.
+pub mod frame;
+
 #[cfg(windows)]
 mod windows;
 /// Registered hotkeys matched in the low-level keyboard hook as well as by `RegisterHotKey`:
@@ -377,6 +381,12 @@ pub type OcrShot = macos::ocr::Shot;
 #[cfg(not(any(windows, target_os = "macos")))]
 pub type OcrShot = ();
 
+/// The snapshot rounds' capture routine ([`OcrWorker::frames`]): several regions from one
+/// source, one frame per region in the same order — or why there is none — recording which path
+/// answered each. `poll` is true when every request of the round is a change wait, which asks
+/// again and again: macOS then skips its flat-picture watch. A plain `fn`, so it is `Send`.
+pub type FramesFn = fn(&[(i32, i32, i32, i32)], CaptureSource, bool) -> Vec<Result<frame::Frame, String>>;
+
 /// Which of the two OCR threads is starting — see [`OcrWorker::init_thread`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OcrThread {
@@ -453,6 +463,18 @@ pub struct OcrWorker<S = OcrShot> {
     pub recognise: fn(&S, &[(i32, i32, i32, i32)], &Recognise) -> Vec<Result<OcrText, String>>,
     /// The languages the engine reads and the user prefers. Called on the recognise thread.
     pub languages: fn() -> crate::ocr::lang::Languages,
+    /// Photographs a snapshot round, on the capture thread: `host.screen.snapshotAsync`'s
+    /// pictures and change waits share the thread with the text reads' captures.
+    pub frames: FramesFn,
+    /// Which display the screen point lies on, as a number two points on one display share: the
+    /// capture thread never plans one capture of regions on two displays, which on macOS can
+    /// differ in scale. 0 for every point where one capture may span displays (Windows), and
+    /// on macOS for a point on none. On the capture thread, under its lock: cheap.
+    pub display_of: fn(i32, i32) -> u32,
+    /// The pixels a read of a snapshot hands the recogniser: the parts of `frame` under the
+    /// regions — which lie inside [`frame::Frame::ocr_rect`] — in the shape `recognise` takes, as
+    /// if they had just been captured. On the recognise thread; nothing is captured.
+    pub shot_of: fn(&frame::Frame, &[(i32, i32, i32, i32)]) -> S,
 }
 
 impl<S> Clone for OcrWorker<S> {
@@ -463,7 +485,8 @@ impl<S> Clone for OcrWorker<S> {
 impl<S> Copy for OcrWorker<S> {}
 
 impl OcrWorker {
-    /// The worker of a platform without a recogniser: nothing is captured, every region fails.
+    /// The worker of a platform without a recogniser: nothing is captured, every region fails,
+    /// and so does every snapshot the capture thread would take.
     pub fn none() -> OcrWorker {
         OcrWorker {
             present: false,
@@ -471,6 +494,9 @@ impl OcrWorker {
             capture: |_, _| (OcrShot::default(), 0),
             recognise: |_, regions, _| regions.iter().map(|_| Err(NO_RECOGNISER.to_string())).collect(),
             languages: crate::ocr::lang::Languages::default,
+            frames: |regions, _, _| regions.iter().map(|_| Err(CAPTURE_FAILED.to_string())).collect(),
+            display_of: |_, _| 0,
+            shot_of: |_, _| OcrShot::default(),
         }
     }
 }
@@ -724,6 +750,22 @@ pub trait Backend {
     /// capture without holding the (`Rc`, non-`Send`) backend. Same result as
     /// `capture` per region, callable off the main thread (used by the async image worker).
     fn capture_fn(&self) -> CaptureFn;
+
+    /// Captures `r` through `src` as a [`frame::Frame`], on the calling thread (the event loop):
+    /// the pixels as `capture` gives them, when they came back, which path answered, and on
+    /// macOS the backing-store image beside them. What `host.screen.snapshot` keeps. An error
+    /// begins with [`CAPTURE_FAILED`], as `capture`'s does, and is what the module is told.
+    fn frame(&self, r: crate::ocr::types::Rect, src: CaptureSource) -> Result<frame::Frame, String>;
+
+    /// The colours at `pts`, in order, read from as few captures as [`frame::plan_points`]
+    /// allows — never a point read of its own, so a point on no monitor reads black as a region
+    /// read gives it. All or nothing: one capture that fails fails the call, with its reason.
+    ///
+    /// The default captures each planned rectangle through `capture`; a backend overrides it
+    /// where it can do better (Windows asks desktop duplication for every point in one request).
+    fn pixels(&self, pts: &[(i32, i32)], src: CaptureSource) -> Result<Vec<(u8, u8, u8)>, String> {
+        frame::read_points(pts, |r| self.capture(r.x, r.y, r.w, r.h, src))
+    }
 
     /// Recognizes text in a screen region.
     fn ocr(

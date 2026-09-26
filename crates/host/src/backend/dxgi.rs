@@ -1916,8 +1916,9 @@ fn observe_frame(info: &DXGI_OUTDUPL_FRAME_INFO, geom: OutputGeom) {
     }
 }
 
+/// `pub(super)` for the live test window, which the snapshot tests in `windows.rs` paint too.
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     fn out(left: i32, top: i32, w: i32, h: i32) -> OutputGeom {
@@ -2303,7 +2304,7 @@ mod tests {
 
     /// The test binary has no manifest, so it is not DPI-aware unless it says so; the
     /// application is (per-monitor v2), and both paths must be compared in that space.
-    fn dpi_aware() {
+    pub(in crate::backend) fn dpi_aware() {
         use windows_sys::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| unsafe {
@@ -2311,13 +2312,13 @@ mod tests {
         });
     }
 
-    const COLOURS: [(u8, u8, u8); 4] = [(220, 30, 40), (30, 200, 60), (40, 60, 230), (128, 128, 128)];
+    pub(in crate::backend) const COLOURS: [(u8, u8, u8); 4] = [(220, 30, 40), (30, 200, 60), (40, 60, 230), (128, 128, 128)];
 
     /// A topmost popup painted in four known colours, one per quadrant.
-    struct TestWindow(windows_sys::Win32::Foundation::HWND);
+    pub(in crate::backend) struct TestWindow(windows_sys::Win32::Foundation::HWND);
 
     impl TestWindow {
-        fn show(x: i32, y: i32, w: i32, h: i32) -> Self {
+        pub(in crate::backend) fn show(x: i32, y: i32, w: i32, h: i32) -> Self {
             use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
             use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED};
             use windows_sys::Win32::Graphics::Gdi::{
@@ -2386,7 +2387,7 @@ mod tests {
             }
         }
 
-        fn settle(&self, for_: Duration) {
+        pub(in crate::backend) fn settle(&self, for_: Duration) {
             use windows_sys::Win32::Graphics::Dwm::DwmFlush;
             use windows_sys::Win32::UI::WindowsAndMessaging::{DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE};
             let until = Instant::now() + for_;

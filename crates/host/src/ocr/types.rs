@@ -65,6 +65,35 @@ impl Rect {
         Rect::new(x, y, capped(right - x as i64), capped(bottom - y as i64))
     }
 
+    /// The part both cover, or `None` when they do not meet — an empty rectangle meets nothing.
+    ///
+    /// In 64 bits, like `union`: a corner near the end of the coordinate range plus its size
+    /// does not fit an `i32`. The answer always does, since it lies inside both.
+    pub fn intersect(&self, other: &Rect) -> Option<Rect> {
+        if self.is_empty() || other.is_empty() {
+            return None;
+        }
+        let x0 = (self.x as i64).max(other.x as i64);
+        let y0 = (self.y as i64).max(other.y as i64);
+        let x1 = (self.x as i64 + self.w as i64).min(other.x as i64 + other.w as i64);
+        let y1 = (self.y as i64 + self.h as i64).min(other.y as i64 + other.h as i64);
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        Some(Rect::new(x0 as i32, y0 as i32, (x1 - x0) as i32, (y1 - y0) as i32))
+    }
+
+    /// Whether `other` lies wholly inside this one. An empty rectangle is inside nothing, and
+    /// nothing is inside an empty one. In 64 bits.
+    pub fn contains(&self, other: &Rect) -> bool {
+        !self.is_empty()
+            && !other.is_empty()
+            && other.x as i64 >= self.x as i64
+            && other.y as i64 >= self.y as i64
+            && other.x as i64 + other.w as i64 <= self.x as i64 + self.w as i64
+            && other.y as i64 + other.h as i64 <= self.y as i64 + self.h as i64
+    }
+
     /// The tuple the backend's capture and OCR calls take.
     pub fn tuple(&self) -> (i32, i32, i32, i32) {
         (self.x, self.y, self.w, self.h)
@@ -264,6 +293,34 @@ mod tests {
         assert!(!u.is_empty());
         let edge = Rect::new(i32::MAX - 5, 0, 5, 5).union(&Rect::new(0, 0, 1, 1));
         assert_eq!(edge, Rect::new(0, 0, i32::MAX, 5));
+    }
+
+    /// What a snapshot's reads decide by: where a region meets the picture, and whether it lies
+    /// wholly inside it — at the far ends of the coordinate range too, where a corner plus its
+    /// size does not fit an `i32`.
+    #[test]
+    fn intersect_and_contains_in_64_bits() {
+        let a = Rect::new(10, 20, 100, 50);
+        assert_eq!(a.intersect(&Rect::new(0, 0, 20, 30)), Some(Rect::new(10, 20, 10, 10)));
+        assert_eq!(a.intersect(&Rect::new(50, 30, 10, 10)), Some(Rect::new(50, 30, 10, 10)), "inside: itself");
+        assert_eq!(a.intersect(&a), Some(a));
+        assert_eq!(a.intersect(&Rect::new(110, 20, 5, 5)), None, "touching the right edge is not meeting");
+        assert_eq!(a.intersect(&Rect::new(10, 70, 5, 5)), None, "nor the bottom edge");
+        assert_eq!(a.intersect(&Rect::new(20, 30, 0, 5)), None, "an empty rectangle meets nothing");
+        assert_eq!(Rect::default().intersect(&a), None);
+        assert!(a.contains(&Rect::new(10, 20, 100, 50)), "itself");
+        assert!(a.contains(&Rect::new(109, 69, 1, 1)), "its last pixel");
+        assert!(!a.contains(&Rect::new(109, 69, 2, 1)), "one past it");
+        assert!(!a.contains(&Rect::new(9, 20, 1, 1)));
+        assert!(!a.contains(&Rect::new(20, 30, 0, 0)), "an empty rectangle is inside nothing");
+        assert!(!Rect::default().contains(&Rect::default()));
+        // Far out: corners whose ends overflow 32 bits.
+        let edge = Rect::new(i32::MAX - 10, i32::MAX - 10, 10, 10);
+        assert!(edge.contains(&Rect::new(i32::MAX - 1, i32::MAX - 1, 1, 1)));
+        assert!(!edge.contains(&Rect::new(i32::MAX - 1, i32::MAX - 1, 2, 2)), "its end is past i32::MAX");
+        assert_eq!(edge.intersect(&Rect::new(i32::MAX - 5, 0, i32::MAX, i32::MAX)), Some(Rect::new(i32::MAX - 5, i32::MAX - 10, 5, 10)));
+        let left = Rect::new(i32::MIN, i32::MIN, 10, 10);
+        assert_eq!(left.intersect(&Rect::new(i32::MIN + 5, i32::MIN + 5, 100, 100)), Some(Rect::new(i32::MIN + 5, i32::MIN + 5, 5, 5)));
     }
 
     #[test]

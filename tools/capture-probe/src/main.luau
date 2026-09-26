@@ -38,6 +38,112 @@ local function describe(v)
   return tostring(v)
 end
 
+-- Snapshots: answers that come back from the `screen-capture` thread in a callback — a plain
+-- `snapshotAsync` and a change wait on a screen nobody touches, asked first and whatever else
+-- happens, and a text read of the snapshot taken on the pump, asked only when that snapshot
+-- exists — and that one picture read several ways. The job compares the callbacks that came with
+-- the ones asked for: a missing one is a thread that never answered, never a snapshot that failed
+-- on the pump, which has a line of its own, nor a call that raised, which says THREW and is not
+-- counted as asked.
+local SNAP_REGION = { 0, 0, 200, 60 }
+local POINTS = { { 10, 10 }, { 100, 30 }, { 199, 59 } }
+local answered = 0
+local expected = 0
+
+local function askTheThread()
+  local t3 = now()
+  local oka, aerr = pcall(host.screen.snapshotAsync, { region = SNAP_REGION }, function(s, why2, info)
+    answered = answered + 1
+    report("snapshotAsync answered after %d ms: %s (waited %d ms, %d picture(s))",
+      now() - t3, s and tostring(s) or ("nil, " .. tostring(why2)), info.waited, info.frames)
+    if s then s:release() end
+  end)
+  if oka then expected = expected + 1 else report("snapshotAsync THREW: %s", tostring(aerr)) end
+
+  local t4 = now()
+  local okw, werr = pcall(host.screen.snapshotAsync, { region = SNAP_REGION, change = { timeout = 300 } },
+    function(s, why2, info)
+      answered = answered + 1
+      report("change wait answered after %d ms: %s, changed=%s settled=%s rebased=%s, %d picture(s), %.1f ms a round",
+        now() - t4, s and "a picture" or ("nil, " .. tostring(why2)), tostring(info.changed), tostring(info.settled),
+        tostring(info.rebased), info.frames, info.frames > 0 and info.waited / info.frames or 0)
+      if s then s:release() end
+    end)
+  if okw then expected = expected + 1 else report("change wait THREW: %s", tostring(werr)) end
+end
+
+local function snapshotLines()
+  askTheThread()
+
+  local t = now()
+  local ok, snap, why = pcall(host.screen.snapshot, { region = SNAP_REGION })
+  if not ok then
+    report("snapshot 200x60 THREW: %s", tostring(snap))
+    return
+  end
+  if not snap then
+    report("snapshot 200x60 returned nil in %d ms: %s", now() - t, tostring(why))
+    return
+  end
+  report("snapshot 200x60 returned in %d ms: %s", now() - t, tostring(snap))
+
+  local t1 = now()
+  local okl, live, lwhy = pcall(host.screen.pixels, POINTS)
+  if okl then
+    report("pixels of 3 points from the screen in %d ms: %s", now() - t1, live and "3 colours" or ("nil, " .. tostring(lwhy)))
+  else
+    report("pixels from the screen THREW: %s", tostring(live))
+  end
+  local oks, fromSnap = pcall(host.screen.pixels, POINTS, { snapshot = snap })
+  if not oks then
+    report("pixels from the snapshot THREW: %s", tostring(fromSnap))
+  else
+    local agree = fromSnap ~= nil
+    for i, p in ipairs(POINTS) do
+      local okp, c = pcall(host.screen.pixel, p[1], p[2], { snapshot = snap })
+      if not okp then
+        report("pixel from the snapshot THREW: %s", tostring(c))
+        agree = false
+        break
+      end
+      if not (c and fromSnap and c.hex == fromSnap[i].hex) then agree = false end
+    end
+    report("pixels and pixel from the snapshot %s", agree and "agree" or "DIFFER")
+  end
+
+  local t2 = now()
+  local oksv, saved, swhy = pcall(host.screen.save, "probe-snapshot.png", { snapshot = snap })
+  if oksv then
+    report("save of the snapshot returned in %d ms: %s%s", now() - t2, tostring(saved), swhy and (", " .. swhy) or "")
+  else
+    report("save of the snapshot THREW: %s", tostring(saved))
+  end
+
+  local t5 = now()
+  local oko, oerr = pcall(host.ocr.read, SNAP_REGION, { snapshot = snap }, function(r)
+    answered = answered + 1
+    report("read of the snapshot answered after %d ms: %s, %d word(s)%s",
+      now() - t5, r.status, #r.words, r.error and (", " .. r.error) or "")
+  end)
+  if oko then expected = expected + 1 else report("read of the snapshot THREW: %s", tostring(oerr)) end
+  snap:release()
+end
+
+-- Calls `k` once the snapshot callbacks asked for have come, or five seconds have passed, after
+-- saying how many came of how many.
+local function afterSnapshots(k)
+  local started = now()
+  local function look()
+    if answered >= expected or now() - started > 5000 then
+      report("snapshot callbacks %d of %d answered", answered, expected)
+      k()
+    else
+      host.timer.after(100, look)
+    end
+  end
+  host.timer.after(100, look)
+end
+
 -- After the loop has turned once, so the capture is asked from the pump exactly as an overlay
 -- would ask it, not from inside module loading.
 host.timer.after(1500, function()
@@ -62,8 +168,11 @@ host.timer.after(1500, function()
   local ok3, px2 = pcall(host.screen.pixel, 600, 400)
   report("pixel(600,400) %s in %d ms: %s", ok3 and "returned" or "THREW", now() - t2, describe(px2))
 
-  -- A line only a live process can write, after every call that could have stopped it.
-  host.timer.after(1500, function()
+  snapshotLines()
+
+  -- A line only a live process can write, after every call that could have stopped it — the
+  -- snapshot callbacks included, which come from another thread.
+  afterSnapshots(function()
     report("still alive after capturing")
 
     -- Late reads, for the Windows job's copy of this probe that declares desktop duplication.

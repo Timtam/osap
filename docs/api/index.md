@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 148 entries.
+Every call the platform offers a module, in one place. 152 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -52,12 +52,12 @@ Where habits from other tools mislead, and the section that says what happens he
 
 - **A score-based image matcher** (OpenCV and the like). There is no score or threshold: every template pixel that is not transparent must be within `tolerance` on each colour channel, and the first position in row order wins — [`imageSearch`](screen.md#host-screen-imagesearch). For several templates against one frame, [`imageSearchEach`](screen.md#host-screen-imagesearcheach). Template files are PNG only; [`host.screen.template`](screen.md#host-screen-template) builds one from bytes.
 - **A reader that compares grid signatures by similarity** (a region cut into blocks, each the share of pixels passing a colour test). That is [`host.screen.matchCells`](screen.md#host-screen-matchcells): its colour test is pasted as written, its regions are window fractions, its signatures are hex, and the similarity and the runner-up come back for the module's own thresholds.
-- **A reader that keeps a frame and reads many points from it.** On Windows every [`pixel`](screen.md#host-screen-pixel) call is a screen read of its own; on macOS only reads close together in place and time share one. No call reads many points from one capture.
-- **A reader that captures one frame per poll and runs every test on it.** No call hands out a frame to test against. [`matchCellsAsync`](screen.md#host-screen-matchcellsasync) and the asynchronous image searches share a picture only when they ask for the same region, read the same way, and fall into the same batch of the image worker (the requests waiting when it becomes free, and those in the next 5 ms); two [`host.ocr.read`](ocr.md#host-ocr-read) calls share one only when they ask for the same thing before the first is taken, and never with those. Otherwise each call takes a picture of its own, so detecting a state and reading its text are two pictures, taken at two moments.
+- **A reader that keeps a frame and reads many points from it.** Keep one: [`host.screen.snapshot`](screen.md#host-screen-snapshot) takes a picture that every screen call given `{ snapshot = s }` reads, and [`pixels`](screen.md#host-screen-pixels) reads many points from as few captures as they allow. Without them, on Windows every [`pixel`](screen.md#host-screen-pixel) call is a screen read of its own; on macOS only reads close together in place and time share one.
+- **A reader that captures one frame per poll and runs every test on it.** Take one [`snapshot`](screen.md#host-screen-snapshot) per poll — or [`snapshotAsync`](screen.md#host-screen-snapshotasync), off the event loop and able to wait until part of the screen changes — and pass it to every test, [`host.ocr.read`](ocr.md#host-ocr-read) included: they all read that one picture. Without one, [`matchCellsAsync`](screen.md#host-screen-matchcellsasync) and the asynchronous image searches share a picture only when they ask for the same region, read the same way, and fall into the same batch of the image worker, and two `host.ocr.read` calls only when they ask for the same thing before the first is taken; otherwise detecting a state and reading its text are two pictures, taken at two moments.
 - **Tesseract or other OCR language codes.** `lang` is a language tag such as `"de"` or `"de-DE"`, matched against what the platform's recogniser reads. A three-letter code such as `"eng"` is a well-formed tag that no recogniser lists, so it does not raise: the read is answered `"failed"`, naming the languages that are there. Write `"en"` — [Recognition language](ocr.md#recognition-language). [`host.ocr.read`](ocr.md#host-ocr-read) recognises off the event loop and answers in a callback; only `recognize` and `recognizeMany` block it.
 - **AutoHotkey.** `ahk_class` belongs inside the `windows` block of a [matcher](window.md#matchers); `SetTimer` is [`host.timer.every`](timer.md#host-timer-every), stopped with [`host.timer.cancel`](timer.md#host-timer-cancel); `Send` is [`host.input.send`](input.md#host-input-send), virtual keys only; `ImageSearch`'s second corner is exclusive here.
 - **A keyboard hook that only listens.** A [capture](keys.md#host-keys-capture) takes the key away; there is no listen-only mode for ordinary keys, only the `"<modifier> tap"` form watches without taking.
-- **A script host with threads or async.** Every callback runs on one thread, and nothing interrupts one that does not return. The slow work of [`host.ocr.read`](ocr.md#host-ocr-read), [`matchCellsAsync`](screen.md#host-screen-matchcellsasync), [`imageSearchAsync`](screen.md#host-screen-imagesearchasync) and [`imageSearchEach`](screen.md#host-screen-imagesearcheach) runs on threads of the host's own and answers in a callback; the other screen and OCR calls hold the loop until they return. Which call runs where: [Threads](../module-runtime-and-lifecycle.md#threads).
+- **A script host with threads or async.** Every callback runs on one thread, and nothing interrupts one that does not return. The slow work of [`host.ocr.read`](ocr.md#host-ocr-read), [`matchCellsAsync`](screen.md#host-screen-matchcellsasync), [`imageSearchAsync`](screen.md#host-screen-imagesearchasync), [`imageSearchEach`](screen.md#host-screen-imagesearcheach) and [`snapshotAsync`](screen.md#host-screen-snapshotasync) runs on threads of the host's own and answers in a callback; the other screen and OCR calls hold the loop until they return. Which call runs where: [Threads](../module-runtime-and-lifecycle.md#threads).
 - **A manifest that names its target window.** `module.toml` has no window or process field; matching is Luau — see the [manifest](../module-package-format.md).
 
 
@@ -116,7 +116,7 @@ Finding windows and the surfaces inside them, and reacting when the focus moves.
 
 ## host.screen
 
-Reading pixels, profiling a region, reducing one to a grid of cells, and finding an image within one.
+Reading pixels, profiling a region, reducing one to a grid of cells, and finding an image within one — from the screen, or from a snapshot of it read several times.
 
 | | |
 |---|---|
@@ -128,12 +128,15 @@ Reading pixels, profiling a region, reducing one to a grid of cells, and finding
 | [`host.screen.imageSearchMulti(templates, opts?)`](screen#host-screen-imagesearchmulti) | Captures the region **once** and tries each template against that one frame, returning two values |
 | [`host.screen.matchCells(opts, states)`](screen#host-screen-matchcells) | Reads the region exactly as `cells` does, and says which of `states` it looks most like. |
 | [`host.screen.matchCellsAsync(opts, states, cb)`](screen#host-screen-matchcellsasync) | `matchCells`, with the capture, the reduction and the comparison on the image worker thread. |
-| [`host.screen.pixel(x, y)`](screen#host-screen-pixel) | Reads the colour of one screen pixel |
+| [`host.screen.pixel(x, y, opts?)`](screen#host-screen-pixel) | Reads the colour of one screen pixel |
+| [`host.screen.pixels(points, opts?)`](screen#host-screen-pixels) | Reads the colour at every point of `points` and returns them as one list, in the order asked — one value, and nothing after it. |
 | [`host.screen.predicate(expr)`](screen#host-screen-predicate) | Checks a colour test for the cells calls and returns it in its canonical form, or raises, naming the column, when it does not parse. |
 | [`host.screen.profile(opts?)`](screen#host-screen-profile) | Takes **one** capture of `opts.region` and reduces each of its columns and rows to a few statistics |
 | [`host.screen.save(path, opts?)`](screen#host-screen-save) | Captures `opts.region` and writes it to `path` as a PNG |
 | [`host.screen.saveMarked(path, opts)`](screen#host-screen-savemarked) | Everything `save` does |
 | [`host.screen.size()`](screen#host-screen-size) | Returns the primary screen dimensions in pixels as `{ w, h }`. |
+| [`host.screen.snapshot(opts)`](screen#host-screen-snapshot) | Takes one picture of `opts.region` now and keeps it. |
+| [`host.screen.snapshotAsync(opts, cb)`](screen#host-screen-snapshotasync) | Takes the picture `snapshot` takes, off the event loop, and hands it to `cb` on a later tick |
 | [`host.screen.template(spec)`](screen#host-screen-template) | Builds a template in memory, for every search below to take wherever it takes a path. |
 
 ## host.ocr
@@ -373,6 +376,7 @@ The shapes and grammars the calls above are written in.
 | [`Key spec string format`](keys#key-spec-string-format) | One grammar, read by one parser, for every call that takes a key |
 | [`Matchers`](window#matchers) | A *matcher* is a declarative table passed to `host.window.find/findAll/test/onTrigger`, and to the overlay's bindings. |
 | [`Plugin base + library overlays (the cell model)`](overlay#plugin-base-library-overlays) | A plugin is not one overlay. |
+| [`Reading a snapshot`](screen#reading-a-snapshot) | A call given `{ snapshot = s }` reads the picture `s` holds instead of the screen. |
 | [`Recognition language`](ocr#recognition-language) | What `lang` means, and what leaving it out means. |
 | [`Region form`](screen#region-form) | A region is a rectangle on screen, written in one of two forms: by its **corners**, or as **fractions of a window's client area**. |
 | [`Table shapes`](window#table-shapes) | Returned by `host.window.list()`, `host.window.active()`, `host.window.find()`, `host.window.findAll()`, and passed to trigger/test callbacks. |

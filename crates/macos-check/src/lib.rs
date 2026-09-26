@@ -39,6 +39,11 @@ pub mod region;
 #[path = "../../host/src/cells.rs"]
 pub mod cells;
 
+/// `host.screen.profile`'s reduction, pure, borrowed for the reason `cells.rs` is: it reads the
+/// capture type and a snapshot's `Area`, both of which the macOS backend defines the other half of.
+#[path = "../../host/src/profile.rs"]
+pub mod profile;
+
 /// Names what `lib.rs`, `region_lua.rs` and `ocr/lua.rs` call in the cells and region files, for
 /// the reason `checked` names the backend: an unreferenced item only warns, and a signature the
 /// host no longer matches would otherwise reach the macOS CI job first. Written as typed bindings
@@ -52,6 +57,9 @@ pub fn cells_calls() {
     let _: fn(&backend::CapturedImage, i32, i32, &cells::CellSpec) -> Result<Vec<u8>, String> = cells::of_capture;
     let _: fn(&cells::Matcher, &backend::CapturedImage, i32, i32) -> Result<(Vec<u8>, cells::Ranked), String> =
         cells::Matcher::answer;
+    let _: fn(&backend::CapturedImage, cells::Sub, &cells::CellSpec) -> Result<Vec<u8>, String> = cells::of_sub;
+    let _: fn(&cells::Matcher, &backend::CapturedImage, cells::Sub) -> Result<(Vec<u8>, cells::Ranked), String> =
+        cells::Matcher::answer_sub;
     let _ = |spec: cells::CellSpec| cells::Matcher { spec, states: Vec::new(), item_of: Vec::new() };
     let _: fn(&[u8], usize) -> Result<Vec<u8>, cells::HexError> = cells::from_hex;
     let _: fn(&[u8]) -> String = cells::to_hex;
@@ -69,9 +77,83 @@ pub fn cells_calls() {
     let _ = (cells::MAX_SIDE, cells::MAX_STATES, cells::MAX_REGION_PIXELS);
 }
 
+/// Names what `snapshot.rs`, `image_search.rs` and `lib.rs` call in a snapshot's frame and the
+/// profile reduction, for the reason `cells_calls` exists: the frame is where the macOS backend's
+/// `NativeImage` meets the host's pure geometry, and a signature the host no longer matches
+/// would otherwise reach the macOS CI job first.
+#[allow(clippy::type_complexity)]
+pub fn frame_calls() {
+    use backend::frame::{self, Area, Frame, FrameVia, NativeImage};
+    use ocr::types::Rect;
+    let _: fn(Rect, backend::CapturedImage, std::time::Instant, FrameVia, Option<NativeImage>) -> Option<Frame> =
+        Frame::from_image;
+    let _: fn(&Frame, Rect) -> bool = Frame::contains;
+    let _: fn(&Frame, i32, i32) -> bool = Frame::contains_point;
+    let _: fn(&Frame, Rect) -> Option<Rect> = Frame::clip;
+    let _: fn(&Frame, Rect) -> Option<Area> = Frame::area;
+    let _: fn(&Frame, i32, i32) -> Option<(u8, u8, u8)> = Frame::sample;
+    let _: fn(&Frame, Rect) -> Option<backend::CapturedImage> = Frame::crop_image;
+    let _: fn(&Frame, Rect) -> Option<Frame> = Frame::crop;
+    let _: fn(&Frame, Rect) -> Option<Frame> = Frame::pixels_only;
+    let _: fn(&Frame) -> usize = Frame::bytes;
+    let _: fn(&Frame) -> Rect = Frame::ocr_rect;
+    let _: fn(&NativeImage) -> usize = NativeImage::bytes;
+    let _: fn(&NativeImage, Rect) -> Option<NativeImage> = NativeImage::crop;
+    let _: fn(&NativeImage) -> Rect = NativeImage::covers;
+    let _: fn(FrameVia) -> &'static str = FrameVia::word;
+    let _: fn(&[(i32, i32)]) -> Option<Rect> = frame::bbox;
+    let _: fn(&[(i32, i32)]) -> Vec<Rect> = frame::plan_points;
+    let _: fn(&Rect, &Rect) -> Option<Rect> = Rect::intersect;
+    let _: fn(&Rect, &Rect) -> bool = Rect::contains;
+    let _: fn(&backend::CapturedImage, Area, bool, bool, u8) -> Option<(Option<profile::Axis>, Option<profile::Axis>)> =
+        profile::profile;
+}
+
+/// Names what `ocr/service.rs` and `snapshot.rs` call in the change wait and the snapshot lane,
+/// for the reason `frame_calls` exists: those two files are not borrowed, and a signature they no
+/// longer match would otherwise reach the macOS CI job first.
+#[allow(clippy::type_complexity)]
+pub fn snapshot_lane_calls() {
+    use backend::frame::Frame;
+    use ocr::change::{ChangeSpec, Wait};
+    use ocr::sched::{Cand, Scheduler};
+    use ocr::snap_queue::{self, Pick, Round, RoundDone, SnapDone, SnapLane, SnapReq};
+    use ocr::types::Rect;
+    use std::sync::Arc;
+    use std::time::Instant;
+    let _: fn(Rect, &[Rect], ChangeSpec, Option<Arc<Frame>>, Instant) -> Wait = Wait::new;
+    let _: fn(fn(i32, i32) -> u32) -> SnapLane = SnapLane::new;
+    let _: fn(&mut SnapLane, SnapReq) = SnapLane::submit;
+    let _: fn(&SnapLane, Instant) -> Option<Cand> = SnapLane::candidate;
+    let _: fn(&mut SnapLane, Instant) -> Option<Round> = SnapLane::take;
+    let _: fn(&SnapLane) -> Option<Instant> = SnapLane::next_wake;
+    let _: fn(&mut SnapLane, Instant) -> Vec<SnapDone> = SnapLane::sweep_cancelled;
+    let _: fn(&SnapLane, usize) -> bool = SnapLane::barrier_clear;
+    let _: fn(&mut SnapLane, usize) -> bool = SnapLane::expedite;
+    let _: fn(&mut SnapLane, RoundDone, Instant) -> Vec<SnapDone> = SnapLane::finish;
+    let _: fn(Round, Vec<Result<Frame, String>>, Instant, u64) -> RoundDone = Round::run;
+    let _: fn(bool, bool, bool) -> bool = snap_queue::holds_input;
+    let _: fn(&Frame, Rect, &[Rect], backend::CaptureSource) -> bool = snap_queue::from_usable;
+    let _: fn(&[Rect], i64) -> (Vec<Rect>, Vec<usize>) = snap_queue::group;
+    let _: fn(Round, &str, Instant) -> RoundDone = Round::fail;
+    let _: fn(&Round) -> Vec<(i32, i32, i32, i32)> = Round::tuples;
+    let _: fn(Option<Cand>, Option<Cand>) -> Option<Pick> = snap_queue::choose;
+    let _: fn(&Scheduler<u8, u8>, bool, Instant) -> Option<Cand> = Scheduler::peek_capture;
+    let _: fn(&mut Scheduler<u8, u8>, u8, ocr::sched::Ticket, u8, usize, Instant) -> ocr::sched::Submitted =
+        Scheduler::submit_captured;
+}
+
 /// The pure OCR files — types, languages, the capture plan, the queue and the shape a module is
 /// handed — which the macOS backend names. See the file.
 pub mod ocr;
+
+/// The two helpers `host`'s lib.rs gives its tests for a panic raised on purpose, which the
+/// borrowed `ocr/snap_queue.rs` tests use to show a round that panics is still answered. Here
+/// the panic is simply printed: `--tests` only has to build them.
+#[cfg(test)]
+pub(crate) const EXPECTED_PANIC: &str = "expected by a test: ";
+#[cfg(test)]
+pub(crate) fn quiet_expected_panics() {}
 
 /// The VoiceOver speech path, borrowed for the same reason — it talks to an application
 /// that does not exist on this machine, through a binary that does not either.
