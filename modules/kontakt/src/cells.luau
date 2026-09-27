@@ -189,7 +189,9 @@ for vIdx, v in ipairs(D.VARIANTS) do
       control = {
         windows = D.QT_PLUGIN,
         linux = D.QT_PLUGIN,
-        macos = D.macosPanel(v.name, geo.UIA_FILE_MENU[v.name], G.fileMenu),
+        -- A Kontakt 7 that publishes nothing there at all (a Mac log of 2026-09-27) is found
+        -- by its top row read as text instead; see detect.macosPanel.
+        macos = D.macosPanel(v.name, geo.UIA_FILE_MENU[v.name], G.fileMenu, G.headerWords),
       },
       identify = bareOfVersion(vIdx),
       -- Relational (it asks whether a KK is also present), so it must NOT be cached per

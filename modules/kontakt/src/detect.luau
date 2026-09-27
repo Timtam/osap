@@ -263,6 +263,9 @@ end
 --
 -- `name` and `at` come from the cell: the button to look for and where the authored geometry
 -- puts its centre. A version without a measured anchor passes nil and stays inert here.
+-- `header` is the pair of words the text fallback below looks for — first where `at` is, the
+-- second to its right — or nil for a version whose top row has not been measured as text
+-- (Kontakt 8, whose file-menu button is a wordmark).
 -- Whether this VM writes the anchor lines. Kontakt's code runs in its own VM and again inside
 -- every library module that depends on it (four today), each with its own copy of this memo, so
 -- one window change wrote every anchor line five times. Only Kontakt's own VM logs — see
@@ -275,12 +278,105 @@ end
 -- the winner apart would need `host.arbiter`, which this module does not declare.
 local logAnchors = false
 
-local function macosPanel(version, name, at)
+-- ── …and when it publishes nothing: its header, read as text ──────────────────
+-- A Mac log of 2026-09-27 had Kontakt 7 in REAPER's FX chain publish NOTHING, on three
+-- presses of the focus shortcut over 73 seconds: no FILE button, "0 focusable candidates" —
+-- so no overlay, while the standalone Kontakt 7 on the same Mac published its header by name
+-- half a minute after it started. Whether that is the silent first minutes the third session
+-- saw, or a Kontakt that never publishes inside a host on that machine, the log cannot say;
+-- either way the panel can be found without accessibility, because Kontakt 7 prints its menu
+-- bar: FILE and LIBRARY, side by side, in its own top row.
+--
+-- So when the button is not there, the top of the window is read as text — off the event
+-- loop (`host.ocr.read`), in English, whose words these are — and FILE's centre stands in for
+-- the button's. Measured on the Windows calibration shot of Kontakt 7, whose chrome Kontakt
+-- draws itself: FILE's letters span x 164–188, y 15–23, a centre of (176, 19) — the same point
+-- the third session's accessibility read gave the button, (176, 19), against the authored
+-- {175, 19}. A word Vision boxes is within a point or two of its ink (the probe's own
+-- text-against-elements lines: 0 to 2 points on buttons), so the corner comes out as close as
+-- the button's does. LIBRARY must stand to FILE's right on the same row, 35 to 90 points on
+-- (56 in the shot), so a FILE anywhere else — a preset, a track name — anchors nothing.
+--
+-- The band: the window's top 160 points, its full width. Kontakt's top row sits at content
+-- y 71 in REAPER's FX chain (panel at 52, row at 19) and at 41 in a floating window (22 and
+-- 19), and the FX list's left edge moves when its divider is dragged — so the band takes both,
+-- and nothing about REAPER's geometry is assumed.
+--
+-- Asked again at the next evaluation after a miss, never on a timer: an embedded overlay is
+-- evaluated when the focus moves, which is when a Kontakt that was not on screen may have
+-- come onto it (the FX list's selection moved to it). One read at a time per window, and
+-- every VM that runs this code asks the same question of the same pixels, which the host
+-- answers with one picture and one recognition. An answer that anchors asks the overlays to
+-- look again (`host.window.recheck`), because nothing else would: the read's answer is not
+-- a focus change.
+local HEADER_BAND = 160
+local function findHeaderWord(words, first, second)
+  for _, a in ipairs(words or {}) do
+    if string.upper(a.text or "") == first then
+      local ay = a.y + a.h / 2
+      for _, b in ipairs(words) do
+        if string.upper(b.text or "") == second then
+          local gap = (b.x + b.w / 2) - (a.x + a.w / 2)
+          local by = b.y + b.h / 2
+          if gap >= 35 and gap <= 90 and math.abs(by - ay) <= math.max(a.h, b.h) / 2 then
+            return math.floor(a.x + a.w / 2 + 0.5), math.floor(ay + 0.5)
+          end
+        end
+      end
+    end
+  end
+  return nil
+end
+
+local function macosPanel(version, name, at, header)
   if not (name and at) then return nil end
   -- `missed` and `outside` are separate on purpose: a window that publishes nothing during
   -- Kontakt's silent first minute and later publishes a button that will not anchor has two
   -- different stories, and one flag would keep the second one out of the log.
   local offsets, missed, outside = {}, {}, {}
+  -- The text fallback's own: a read waiting per window, and a miss said once per window.
+  local reading, unread = {}, {}
+  local function readHeader(active, key)
+    if not header or reading[key] then return end
+    local cx, cy = math.floor(active.client.x), math.floor(active.client.y)
+    local w = math.floor(active.client.w)
+    local h = math.min(math.floor(active.client.h), HEADER_BAND)
+    if w <= 0 or h <= 0 then return end
+    reading[key] = true
+    host.ocr.read({ cx, cy, cx + w, cy + h }, { lang = "en", key = "kontakt-header:" .. key }, function(r)
+      reading[key] = nil
+      local fx, fy = nil, nil
+      if r.status == "text" then fx, fy = findHeaderWord(r.words, header[1], header[2]) end
+      if not fx then
+        if logAnchors and not unread[key] then
+          unread[key] = true
+          host.log.info(string.format(
+            "[kontakt] no %s %s row in the top %d points of '%s' either (%s%s) — not anchoring; read again the next time it is evaluated",
+            header[1], header[2], h, tostring(active.title), tostring(r.status),
+            r.error and (": " .. r.error) or ""))
+        end
+        return
+      end
+      -- Against the origin the picture was taken at: the window may have moved since.
+      local dx, dy = fx - at[1] - cx, fy - at[2] - cy
+      if dx < 0 or dy < 0 or dx >= w or dy >= active.client.h then
+        if logAnchors and not outside[key] then
+          outside[key] = true
+          host.log.info(string.format(
+            "[kontakt] %s read at %d,%d in '%s' puts %s's panel corner at %d,%d, outside the window — not anchoring",
+            header[1], fx, fy, tostring(active.title), version, dx, dy))
+        end
+        return
+      end
+      offsets[key] = { dx, dy }
+      if logAnchors then
+        host.log.info(string.format(
+          "[kontakt] %s panel in '%s' anchored by its header text: %s read at %d,%d puts the corner %d,%d from the content origin",
+          version, tostring(active.title), header[1], fx, fy, dx, dy))
+      end
+      host.window.recheck()
+    end)
+  end
   local function panel(active, dx, dy)
     local x, y = active.client.x + dx, active.client.y + dy
     local w, h = active.client.w - dx, active.client.h - dy
@@ -308,10 +404,13 @@ local function macosPanel(version, name, at)
         -- it changed size in between, and the log could not say so.
         if logAnchors then
           host.log.info(string.format(
-            "[kontakt] '%s' (%dx%d) publishes no button named %s — %s's panel cannot be anchored in it yet",
-            tostring(active.title), active.client.w, active.client.h, name, version))
+            "[kontakt] '%s' (%dx%d) publishes no button named %s — %s",
+            tostring(active.title), active.client.w, active.client.h, name,
+            header and ("reading its top row for " .. header[1] .. " " .. header[2] .. " instead")
+              or (version .. "'s panel cannot be anchored in it yet")))
         end
       end
+      readHeader(active, key)
       return nil
     end
     local dx, dy = p.x - at[1] - active.client.x, p.y - at[2] - active.client.y

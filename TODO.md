@@ -4462,6 +4462,34 @@ decision, hooked into one interface the overlay runtime provides.
       Polyphony and Pitchbend range. LAST, Cinematic Studio Strings, which has no snapshots:
       "Snapshot menu" and Return once. If the overlay is silent afterwards (no hotkeys, Tab
       going to Kontakt), switch to another application and back (Alt+Tab, then Alt+Tab again).
+- [ ] **Kontakt 7 in REAPER on a Mac, anchored by its header text — unverified (2026-09-27).**
+      A tester's log of that day had Kontakt 7 in REAPER's FX chain publish no accessibility
+      element at all (no FILE button, "0 focusable candidates" on three presses of Cmd+Shift+F6
+      over 73 s), so the in-DAW overlay never came, while the same Mac's standalone Kontakt 7
+      published its header half a minute after starting. `detect.macosPanel` now reads the
+      window's top 160 points as text when the button is missing and anchors on FILE with
+      LIBRARY to its right (`geometry.headerWords`). At the next Mac session: Kontakt 7 in the
+      FX chain and in a floating window; the log should say "anchored by its header text" with
+      a corner of about 240,52 in the chain (where REAPER's own layout put the panel on that
+      Mac: 272,112 in a window whose content began at 32,60) and about 0,22 when floating; compare it with the button's corner when Kontakt does publish ("FILE at …
+      puts the corner"). The first word read is FILE's centre, measured at (176,19) on the
+      Windows shot against the authored {175,19}.
+- [ ] **REAPER's floating plug-in windows on a Mac — origin 0,22 unverified (2026-09-27).**
+      Cmd+Shift+F6 and every macOS host matcher took REAPER's FX chain only (`FX: …`); the same
+      log had it pressed five times over a floating VPS Avenger, answering "could not find a
+      plugin window". `daw-hosts` now matches both (`^%u[%u%d]*i?: `, the format first:
+      `VST3i: …`), and a floating window's plug-in origin is 0,22 — from the probe's toolbar
+      elements (content y 1–22) and the same plug-in's text in Logic, not from a picture. Check
+      with sforzando floated out of its chain: its log line "plugin origin inside the FX
+      window: 0,22" and its read-outs landing; and Cmd+Shift+F6 over a floating window.
+- [ ] **Logic Pro as a host.** The same log has Cmd+Shift+F6 pressed three times over a Logic
+      plug-in window (`AXWindow/AXDialog/`, titled by the channel strip, "Inst 1"), and no
+      matcher knows Logic at all, so no embedded overlay can come there either. Needs a probe
+      of Kontakt 7 and sforzando in Logic: the window's identity (bundle `com.apple.logic10`,
+      subrole AXDialog — but which other Logic windows are dialogs?), the plug-in's origin
+      below Logic's header row (the probe's header elements end at screen y 114 in a window at
+      y 30, and Logic's content origin came out equal to the frame), and whether Logic hands
+      the keyboard to a plug-in view at all.
 - [ ] **Kontakt's classic-view hotkeys came late** (2026-09-26 log): after switching Kontakt 8 to
       classic view, the rack controls' hotkeys (Alt+M/P/N, Ctrl+P/N, Ctrl+Shift+P/N, Alt+E/8/9)
       were not registered for about a minute — no "is now held" line between the switch and the

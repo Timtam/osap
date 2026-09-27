@@ -15,6 +15,10 @@ local GEOMETRY = {
     -- them apart through the plugin's UIA tree — which an embedded Kontakt does not have.
     -- So this is only offered where UIA resolves the real button: the standalone header.
     shop = { 440, 19 },
+    -- The top row as TEXT, for a Mac whose Kontakt publishes no accessibility element inside
+    -- a DAW (detect.macosPanel's fallback): FILE where `fileMenu` is, LIBRARY to its right.
+    -- The calibration shot puts the letters' centres at (176, 19) and (231, 19).
+    headerWords = { "FILE", "LIBRARY" },
   },
   ["Kontakt 8"] = {
     fileMenu = { 86, 19 }, -- the KONTAKT wordmark

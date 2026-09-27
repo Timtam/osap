@@ -28,15 +28,27 @@ local reaper_chrome = {
   "^#32770$", -- the host (FX chain) dialog window itself
 }
 
+-- REAPER's plug-in windows, by title. Two kinds, the same on both platforms: the FX chain,
+-- `FX: Track 1 "Kontakt 7"`, with REAPER's FX list down its left side; and a plug-in floated
+-- out of it — which is where REAPER puts an instrument inserted on a new track — titled by
+-- its format first: `VST3i: VPS Avenger (keilwerth Audio / Vengeance Sound) (34 out) - Track
+-- 1 "VPS Avenger"`. The formats are VST, VSTi, VST3, VST3i, AU, AUi, CLAP, CLAPi, JS, LV2 and
+-- LV2i, so one pattern takes both kinds: capitals and digits, an optional i, then ": ". It was
+-- `contains "FX: "` alone until a Mac log of 2026-09-27 had the shortcut below pressed five
+-- times in a REAPER whose only plug-in window was a floating VPS Avenger, answering "could not
+-- find a plugin window" each time.
+local REAPER_PLUGIN_TITLE = { pattern = "^%u[%u%d]*i?: " }
+
 -- The macOS block on the first entry is what lets a plugin be embedded in REAPER there at
 -- all: a matcher with a platform block for one system and none for the other says "not
 -- here" on the other, so without it every embedded binding's host test failed before the
--- platform's own control lookup was ever reached. REAPER's FX window on a Mac is a standard
--- window titled `FX: Track N "<plugin>"`; the chrome list is Win32 classes and is simply
--- inert there — the runtime asks the same question geometrically.
+-- platform's own control lookup was ever reached. REAPER's plug-in windows on a Mac are
+-- standard windows with the titles above (its main window is `AXUnknown`, and none of them);
+-- the chrome list is Win32 classes and is simply inert there — the runtime asks the same
+-- question geometrically.
 local reaper = {
   { app = { exe = { contains = "reaper" } }, windows = { class = { contains = "#32770" } },
-    macos = { title = { contains = "FX: " }, axSubrole = "AXStandardWindow" },
+    macos = { title = REAPER_PLUGIN_TITLE, axSubrole = "AXStandardWindow" },
     chrome = reaper_chrome },
   { app = { exe = { contains = "reaper" } }, windows = { class = { contains = "REAPERb32host" } }, chrome = reaper_chrome },
 }
@@ -53,9 +65,9 @@ for _, h in ipairs(ableton) do all[#all + 1] = h end
 
 -- The window a plugin's UI is drawn in, as opposed to the DAW's main window.
 --
--- Matched by TITLE rather than by class, because that is the one thing both platforms agree
--- on: REAPER names its plugin window `FX: Track 1 "sforzando"` on Windows and on macOS
--- alike. It is also the only thing that works on macOS at all — a probe of REAPER's FX window
+-- Matched by TITLE, because that is the one thing both platforms agree on: REAPER names its
+-- plugin windows `FX: Track 1 "sforzando"` and `VSTi: sforzando (…) - Track 1` on Windows and
+-- on macOS alike. It is also the only thing that works on macOS at all — a probe of REAPER's FX window
 -- there found 22 accessibility elements, all of them REAPER's own chrome, and nothing
 -- whatsoever belonging to the plugin.
 -- Where the plugin's own panel begins inside REAPER's FX window, as { dx, dy } relative to
@@ -75,7 +87,19 @@ local REAPER_TOP_INSET = 52
 local REAPER_LIST_GAP = 9
 local REAPER_LEFT_FALLBACK = 240
 
+-- A FLOATING plug-in window has no FX list: the plug-in spans the whole width, under one row
+-- of REAPER's own controls (the preset menu, Param, the outputs, UI, FX Active). Taken from
+-- the probe of a floating VPS Avenger on the 2026-09-27 Mac log, not from a picture: that row's
+-- elements span content y 1 to 22 (screen 61–82, content origin 60), and the same plug-in's
+-- text read in Logic's window and in REAPER's puts its top within a few points of 22 — so 22,
+-- with no horizontal inset. Unverified on a plug-in with a known layout; the origin a module
+-- derives from it is logged (sforzando: "plugin origin inside the FX window").
+local REAPER_FLOAT_TOP_INSET = 22
+
 local function reaperPluginOrigin(win)
+  if win and win.title and string.sub(win.title, 1, 4) ~= "FX: " then
+    return { 0, REAPER_FLOAT_TOP_INSET }
+  end
   local dx = REAPER_LEFT_FALLBACK
   local surfaces = host.window.controls(win)
   local list = surfaces and surfaces[1]
@@ -85,8 +109,12 @@ local function reaperPluginOrigin(win)
   return { dx, REAPER_TOP_INSET }
 end
 
+-- REAPER's entry takes both kinds of plug-in window (REAPER_PLUGIN_TITLE), and the class and
+-- subrole keep the title pattern off REAPER's main window, whose title is the project's name.
 local plugin_windows = {
-  { app = { exe = { contains = "reaper" } }, title = { contains = "FX: " }, pluginOrigin = reaperPluginOrigin },
+  { app = { exe = { contains = "reaper" } }, title = REAPER_PLUGIN_TITLE,
+    windows = { class = { contains = "#32770" } }, macos = { axSubrole = "AXStandardWindow" },
+    pluginOrigin = reaperPluginOrigin },
   { app = { exe = { contains = "Ableton Live" } }, windows = { class = { contains = "Vst3PlugWindow" } } },
 }
 
@@ -288,6 +316,14 @@ local function focusPluginWindow()
   -- "could not find", not "none open": on macOS an application that did not answer a
   -- moment ago is left out of the listing for a few seconds, and its windows with it. The
   -- log names the application it did not ask.
+  --
+  -- And a line of our own, because the speech leaves none: the 2026-09-27 Mac log has twelve
+  -- presses of this key that say "arrived" and nothing after — over a floating REAPER window
+  -- this did not know yet, over Logic, over Komplete Kontrol on its own — and could not tell
+  -- which of them found nothing and which did something unlogged.
+  local front = host.window.active()
+  host.log.info(("[daw-hosts] no plug-in window found (REAPER's FX chain and floating plug-in windows, Ableton's plug-in windows); in front: '%s' (%s)"):format(
+    tostring(front and front.title), tostring(front and front.app and front.app.name)))
   host.speech.output("could not find a plugin window")
 end
 
