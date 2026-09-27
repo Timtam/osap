@@ -142,7 +142,7 @@ What a callback that takes too long costs beyond delaying everything else on the
 
 ### Windows
 
-Captured keys and hotkeys wait: the keyboard hook swallows them on its own thread at once, and their callbacks run when the loop is free again, late by as long as it was busy. The user's typing elsewhere is not delayed, and a captured key does not slip through to the application. What the loop's stalls no longer reach is the hook itself: Windows documents that a low-level hook which keeps timing out can be removed without notice, and since its thread does nothing but answer it, that takes a machine too loaded to schedule it. The host never checks the hook again once it is installed, so after such a removal no key would be captured for the rest of the session; a hotkey press that then arrives through `RegisterHotKey` alone is written to the log.
+Captured keys and hotkeys wait: the keyboard hook swallows them on its own thread at once, and their callbacks run when the loop is free again, late by as long as it was busy. The user's typing elsewhere is not delayed, and a captured key does not slip through to the application. What the loop's stalls no longer reach is the hook itself: Windows documents that a low-level hook which keeps timing out can be removed without notice, and since its thread does nothing but answer it, that takes a machine too loaded to schedule it. After such a removal no key is captured until the host installs the hook again, which its keyboard watch does once it has seen the hook miss five physical key-downs in a row, as it does after every resume and unlock (see [`host.keys.capture`](./keys.md#host-keys-capture)); a hotkey press that arrives through `RegisterHotKey` alone meanwhile is written to the log.
 
 ### macOS
 

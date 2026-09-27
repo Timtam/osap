@@ -98,7 +98,10 @@ windows-sys = { version = "0.61.2", features = ["Win32_UI_Input_KeyboardAndMouse
     "Win32_Security_Authorization", "Win32_System_RemoteDesktop", "Win32_Storage_FileSystem",
     # `GetTickCount`, for how late the keyboard hook ran against the key event it was handed:
     # both are on the tick clock, and the pairing of a late hook with its WM_HOTKEY needs that.
-    "Win32_System_SystemInformation"] }
+    "Win32_System_SystemInformation",
+    # The keyboard hook's watch (backend/hook_watch_thread.rs): suspend/resume notifications, and
+    # which desktop has the keyboard (the lock screen and a UAC prompt's secure desktop).
+    "Win32_System_Power", "Win32_System_StationsAndDesktops"] }
 # The pipe's security descriptor is written as SDDL, and interprocess takes it as widestring's
 # `U16CStr` (instance.rs). Already in the lock through interprocess.
 widestring = "1"

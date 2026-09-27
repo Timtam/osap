@@ -6,6 +6,36 @@
 //! a tap that has quietly died looks exactly like an overlay that stopped working for no
 //! reason.
 //!
+//! **Over days of uptime** the tap can fail in four ways, and each has an answer here:
+//!
+//! - *Switched off, and the system says so* (`kCGEventTapDisabledByTimeout`,
+//!   `kCGEventTapDisabledByUserInput`, delivered through the callback): re-enabled in the
+//!   callback at once; the log line is written afterwards, by the run-loop observer, because a
+//!   file write inside the callback — just after a wake, with the disk still spinning up — is
+//!   the kind of delay that switches a tap off again.
+//! - *Switched off without a word*: the watchdog asks `CGEventTapIsEnabled` at most every two
+//!   seconds and re-enables it.
+//! - *Its mach port invalid* — the tap is gone, and re-enabling a dead port does nothing, so a
+//!   watchdog that only re-enabled would announce a repair every two seconds while no key
+//!   arrived: the tap is created again (`recreate`). One that stays off after being re-enabled
+//!   is created again once; if the new one is off as well — a permission, or secure input — it
+//!   is left alone until the tap reports itself on or one of the moments below, rather than
+//!   created again every two seconds.
+//! - *Asleep, locked, switched away from* — the moments the tap is most likely to have been
+//!   touched: on `NSWorkspaceDidWakeNotification`, `NSWorkspaceSessionDidBecomeActiveNotification`
+//!   (fast user switching back to this user) and the distributed `com.apple.screenIsUnlocked`,
+//!   the watchdog checks at the next turn of the run loop without waiting for its two seconds,
+//!   and says what it found. While the screen is locked, or another user's session is in front,
+//!   the tap sees no keys at all; that is the system's secure input, not a fault, and nothing is
+//!   done about it.
+//!
+//! Unlike Windows, where a removed low-level hook leaves no trace and needs a witness to notice
+//! (see `backend/hook_watch.rs`), each of these four the application can see for itself. One
+//! failure it cannot: a tap that is valid and enabled and never called — Input Monitoring
+//! withdrawn, or never granted on the versions that ask for it separately. Nothing here
+//! witnesses that; the line written when the tap is installed says to check Input Monitoring
+//! when no key is ever captured after it.
+//!
 //! Matching is EXACT: the pressed modifier state must equal the mask, so a capture of "Tab"
 //! does not swallow Command-Tab. Both halves of a suppressed key are swallowed — letting
 //! the key-up through hands the application underneath an orphan release.
@@ -22,10 +52,16 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicPtr, AtomicU32, AtomicU64
 use std::sync::{Mutex, OnceLock, TryLockError};
 use std::time::Instant;
 
-use objc2_core_foundation::{
-    kCFRunLoopCommonModes, CFMachPort, CFRetained, CFRunLoop, CFRunLoopActivity, CFRunLoopMode,
-    CFRunLoopObserver,
+use block2::RcBlock;
+use objc2_app_kit::{
+    NSWorkspace, NSWorkspaceDidWakeNotification, NSWorkspaceSessionDidBecomeActiveNotification,
 };
+use objc2_core_foundation::{
+    kCFRunLoopCommonModes, CFDictionary, CFMachPort, CFNotificationCenter,
+    CFNotificationSuspensionBehavior, CFRetained, CFRunLoop, CFRunLoopActivity, CFRunLoopMode,
+    CFRunLoopObserver, CFString,
+};
+use objc2_foundation::{NSNotification, NSNotificationName, NSOperationQueue};
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventTapInformation, CGEventTapLocation,
     CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy, CGEventType, CGError,
@@ -102,8 +138,9 @@ static FIRST_SUPPRESSION: AtomicBool = AtomicBool::new(false);
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
 /// The tap's mach port, kept as a raw pointer so the callback and the watchdog can re-enable
-/// it. The retain taken at creation is never released: the tap lives as long as the process,
-/// and a dangling port here would be dereferenced from inside an OS callback.
+/// it. The retain taken at creation is released only by [`recreate`], after it has swapped a
+/// new port in: the tap lives as long as the process, and a dangling port here would be
+/// dereferenced from inside an OS callback.
 static PORT: AtomicPtr<CFMachPort> = AtomicPtr::new(std::ptr::null_mut());
 
 /// The (vk, mask) pairs the overlay currently wants. Replaced wholesale by the host.
@@ -143,6 +180,28 @@ static SUPPRESSED_HI: AtomicU64 = AtomicU64::new(0);
 /// How often the system has switched the tap off. A number that keeps climbing is the
 /// early warning that something on this thread is too slow, not a curiosity.
 static REENABLES: AtomicU32 = AtomicU32::new(0);
+
+/// How often the system said it switched the tap off, by each of its two reasons, since the
+/// observer last wrote it down — counted in the callback, written by [`report_disabled`].
+static DISABLED_BY_TIMEOUT: AtomicU32 = AtomicU32::new(0);
+static DISABLED_BY_USER_INPUT: AtomicU32 = AtomicU32::new(0);
+
+/// How often the tap had to be created again (see [`recreate`]).
+static RECREATES: AtomicU32 = AtomicU32::new(0);
+/// A failed re-creation has been said; cleared by the next one that works.
+static RECREATE_FAILURE_SAID: AtomicBool = AtomicBool::new(false);
+/// The tap was created again because it stayed off, and the new one is off as well. Until the
+/// tap reports itself on, or a wake, an unlock or this session becoming active again asks for a
+/// fresh look, it is not created again: whatever keeps it off (a permission, secure input)
+/// would keep every new one off too, and each round would cost a line and a port.
+static STAYS_OFF: AtomicBool = AtomicBool::new(false);
+
+/// Why the tap is to be checked at the next turn of the run loop rather than within the
+/// watchdog's two seconds: bits set by the notifications [`subscribe_system_events`] asks for.
+static RECHECK: AtomicU32 = AtomicU32::new(0);
+const RECHECK_WAKE: u32 = 1;
+const RECHECK_UNLOCK: u32 = 2;
+const RECHECK_SESSION: u32 = 4;
 
 static LAST_HEALTH_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_LOCK_FAIL_MS: AtomicU64 = AtomicU64::new(0);
@@ -241,71 +300,21 @@ pub fn install() -> Result<(), String> {
     if INSTALLED.swap(true, Ordering::SeqCst) {
         return Ok(()); // already installed; `host.keys.capture` re-arms this on every call
     }
-
-    // Created with `Default` rather than `ListenOnly`, which is the whole point: a listening
-    // tap sees the key and cannot stop it, and an overlay that speaks the control under Tab
-    // while the plugin also acts on the Tab is worse than no overlay.
-    //
-    // Head-inserted at the HID location so we are ahead of anything else that taps, and so
-    // the suppression happens before the window server has decided who the key belongs to.
-    // The consequence to know: keys this platform synthesises through `CGEvent::post` come
-    // back through here as well, exactly as a Windows low-level hook sees `SendInput`.
-    let port = unsafe {
-        CGEvent::tap_create(
-            CGEventTapLocation::HIDEventTap,
-            CGEventTapPlacement::HeadInsertEventTap,
-            CGEventTapOptions::Default,
-            TAP_MASK,
-            Some(tap_callback),
-            std::ptr::null_mut(),
-        )
+    let (port, run_loop, enabled) = match create_and_attach() {
+        Ok(created) => created,
+        Err(msg) => {
+            INSTALLED.store(false, Ordering::SeqCst);
+            logging::line("macos", &msg);
+            return Err(msg);
+        }
     };
-    let Some(port) = port else {
-        INSTALLED.store(false, Ordering::SeqCst);
-        // Almost always a permission, and the failure is total: without a tap nothing is
-        // captured and nothing is suppressed, so every overlay looks dead while the
-        // application underneath behaves perfectly normally. Name both switches — which one
-        // is required depends on the macOS version, and a tester cannot see the dialog.
-        let trusted = unsafe { objc2_application_services::AXIsProcessTrusted() };
-        let msg = format!(
-            "CGEventTapCreate refused (AXIsProcessTrusted = {trusted}) — grant this \
-             application Accessibility AND Input Monitoring in System Settings > Privacy & \
-             Security; until then no key can be captured or suppressed"
-        );
-        logging::line("macos", &msg);
-        return Err(msg);
-    };
-
     report_tap_list();
-
-    let Some(source) = CFMachPort::new_run_loop_source(None, Some(&port), 0) else {
-        INSTALLED.store(false, Ordering::SeqCst);
-        let msg = "CFMachPortCreateRunLoopSource failed for the event tap".to_string();
-        logging::line("macos", &msg);
-        return Err(msg);
-    };
-
-    // The MAIN run loop, which wxWidgets already runs: a tap only fires while a run loop is
-    // running in a mode its source was added to, and this application has no other loop to
-    // put it on. Common modes rather than the default one, because AppKit switches the main
-    // loop into its own modes while a menu is tracking or a modal panel is up — the moments
-    // an overlay most needs its keys.
-    let Some(run_loop) = CFRunLoop::main().or_else(CFRunLoop::current) else {
-        INSTALLED.store(false, Ordering::SeqCst);
-        let msg = "no CFRunLoop to attach the event tap to".to_string();
-        logging::line("macos", &msg);
-        return Err(msg);
-    };
-    let mode = unsafe { kCFRunLoopCommonModes };
-    run_loop.add_source(Some(&source), mode);
-
-    CGEvent::tap_enable(&port, true);
-    let enabled = CGEvent::tap_is_enabled(&port);
 
     // The run loop retains the source, so letting ours go is right. The port is kept by
     // hand: `tap_enable` needs it from inside the callback, where there is nothing to own it.
     PORT.store(CFRetained::into_raw(port).as_ptr(), Ordering::SeqCst);
-    install_watchdog(&run_loop, mode);
+    install_watchdog(&run_loop, unsafe { kCFRunLoopCommonModes });
+    subscribe_system_events();
 
     // Creation succeeding is not proof that keys will arrive: on the versions where Input
     // Monitoring is a separate switch, a tap can be created and simply never fire. The line
@@ -326,6 +335,200 @@ pub fn install() -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Creates the tap, puts its source on the main run loop and enables it: the port, the run
+/// loop, and whether the tap reports itself enabled. `Err` is the line for the log.
+///
+/// Created with `Default` rather than `ListenOnly`, which is the whole point: a listening
+/// tap sees the key and cannot stop it, and an overlay that speaks the control under Tab
+/// while the plugin also acts on the Tab is worse than no overlay.
+///
+/// Head-inserted at the HID location so we are ahead of anything else that taps, and so
+/// the suppression happens before the window server has decided who the key belongs to.
+/// The consequence to know: keys this platform synthesises through `CGEvent::post` come
+/// back through here as well, exactly as a Windows low-level hook sees `SendInput`.
+fn create_and_attach() -> Result<(CFRetained<CFMachPort>, CFRetained<CFRunLoop>, bool), String> {
+    let port = unsafe {
+        CGEvent::tap_create(
+            CGEventTapLocation::HIDEventTap,
+            CGEventTapPlacement::HeadInsertEventTap,
+            CGEventTapOptions::Default,
+            TAP_MASK,
+            Some(tap_callback),
+            std::ptr::null_mut(),
+        )
+    };
+    let Some(port) = port else {
+        // Almost always a permission, and the failure is total: without a tap nothing is
+        // captured and nothing is suppressed, so every overlay looks dead while the
+        // application underneath behaves perfectly normally. Name both switches — which one
+        // is required depends on the macOS version, and a tester cannot see the dialog.
+        let trusted = unsafe { objc2_application_services::AXIsProcessTrusted() };
+        return Err(format!(
+            "CGEventTapCreate refused (AXIsProcessTrusted = {trusted}) — grant this \
+             application Accessibility AND Input Monitoring in System Settings > Privacy & \
+             Security; until then no key can be captured or suppressed"
+        ));
+    };
+    let Some(source) = CFMachPort::new_run_loop_source(None, Some(&port), 0) else {
+        return Err("CFMachPortCreateRunLoopSource failed for the event tap".to_string());
+    };
+    // The MAIN run loop, which wxWidgets already runs: a tap only fires while a run loop is
+    // running in a mode its source was added to, and this application has no other loop to
+    // put it on. Common modes rather than the default one, because AppKit switches the main
+    // loop into its own modes while a menu is tracking or a modal panel is up — the moments
+    // an overlay most needs its keys.
+    let Some(run_loop) = CFRunLoop::main().or_else(CFRunLoop::current) else {
+        return Err("no CFRunLoop to attach the event tap to".to_string());
+    };
+    run_loop.add_source(Some(&source), unsafe { kCFRunLoopCommonModes });
+    CGEvent::tap_enable(&port, true);
+    let enabled = CGEvent::tap_is_enabled(&port);
+    Ok((port, run_loop, enabled))
+}
+
+/// Creates the tap again, because the one we have cannot be brought back: its mach port is
+/// invalid, or it stays switched off after being re-enabled. The new tap is at the head of the
+/// taps again; the captured set, the scope and the menu flag are statics it reads as the old one
+/// did, and what the old one remembered of held keys is forgotten.
+///
+/// Main thread only (the observer and the pump), never inside the callback — the old port is
+/// invalidated here, which removes its source from the run loop and the tap from the system.
+/// Its retain is then released: [`PORT`] no longer holds it, and everything that reads
+/// [`PORT`] — the callback, the watchdog, this — runs on the main thread, so nothing can be
+/// holding the old pointer while it goes.
+///
+/// When the new tap reports itself off as well, [`STAYS_OFF`] is set: the watchdog then leaves
+/// it alone until it reports itself on, or a wake, an unlock or this session becoming active
+/// again asks for a fresh look.
+fn recreate(why: &str) {
+    match create_and_attach() {
+        Ok((port, _run_loop, enabled)) => {
+            let old = PORT.swap(CFRetained::into_raw(port).as_ptr(), Ordering::SeqCst);
+            if let Some(old) = NonNull::new(old) {
+                // SAFETY: the pointer came from `CFRetained::into_raw`, and this is the one
+                // place its retain is given back — after the swap above took it out of `PORT`.
+                let old = unsafe { CFRetained::from_raw(old) };
+                old.invalidate();
+                drop(old);
+            }
+            forget_held_keys();
+            RECREATE_FAILURE_SAID.store(false, Ordering::Relaxed);
+            let n = RECREATES.fetch_add(1, Ordering::Relaxed) + 1;
+            let stays_off = !enabled;
+            STAYS_OFF.store(stays_off, Ordering::Relaxed);
+            logging::line(
+                "macos",
+                &format!(
+                    "the event tap was created again ({why}) — #{n}, enabled = {enabled}; it is \
+                     at the head of the taps again, and the captured keys carried over{}",
+                    if stays_off {
+                        ". The new tap is off as well — a permission, or secure input: it is not \
+                         created again until it reports itself on, or the Mac wakes, the screen \
+                         is unlocked or this session becomes active again"
+                    } else {
+                        ""
+                    }
+                ),
+            );
+        }
+        Err(msg) => {
+            if !RECREATE_FAILURE_SAID.swap(true, Ordering::Relaxed) {
+                logging::line(
+                    "macos",
+                    &format!(
+                        "the event tap had to be created again ({why}) and could not be: {msg}. \
+                         Keys are not captured; tried again at every watchdog check, and said \
+                         again only once it works"
+                    ),
+                );
+            }
+        }
+    }
+}
+
+/// Asks for the three moments the tap is most likely to have been touched — the Mac woke, the
+/// screen was unlocked, this user's session became active again — so that the watchdog checks
+/// at the next turn of the run loop instead of within its two seconds, and says what it found.
+/// Each notification only sets a bit; the check is [`health_check`]'s. Leaked subscriptions,
+/// like `watch`'s: they last as long as the process.
+fn subscribe_system_events() {
+    let centre = NSWorkspace::sharedWorkspace().notificationCenter();
+    let names: [(&NSNotificationName, u32); 2] = unsafe {
+        [
+            (NSWorkspaceDidWakeNotification, RECHECK_WAKE),
+            (NSWorkspaceSessionDidBecomeActiveNotification, RECHECK_SESSION),
+        ]
+    };
+    for (name, bit) in names {
+        // Delivered on the main queue, which is the thread the watchdog runs on. The block
+        // sets a bit and cannot panic.
+        let block = RcBlock::new(move |_notification: NonNull<NSNotification>| {
+            RECHECK.fetch_or(bit, Ordering::Relaxed);
+        });
+        let token = unsafe {
+            centre.addObserverForName_object_queue_usingBlock(
+                Some(name),
+                None,
+                Some(&NSOperationQueue::mainQueue()),
+                &block,
+            )
+        };
+        core::mem::forget(token);
+    }
+    // The screen lock has no public notification; this distributed one is what the system
+    // posts, and what every utility that cares listens for. Delivered immediately even while
+    // this accessory application is in the background, as the layout change is (layout.rs).
+    match CFNotificationCenter::distributed_center() {
+        Some(centre) => {
+            let name = CFString::from_static_str("com.apple.screenIsUnlocked");
+            // SAFETY: the observer is the address of a static; the callback matches
+            // `CFNotificationCallback`; the centre keeps its own reference to the name.
+            unsafe {
+                centre.add_observer(
+                    &UNLOCK_OBSERVER as *const u8 as *const c_void,
+                    Some(on_screen_unlocked),
+                    Some(&name),
+                    core::ptr::null(),
+                    CFNotificationSuspensionBehavior::DeliverImmediately,
+                );
+            }
+        }
+        None => logging::line(
+            "macos",
+            "no distributed notification centre, so the event tap is not checked at once when \
+             the screen is unlocked (the watchdog still checks it within two seconds)",
+        ),
+    }
+}
+
+/// The observer identity for the unlock notification: any stable address will do.
+static UNLOCK_OBSERVER: u8 = 0;
+
+unsafe extern "C-unwind" fn on_screen_unlocked(
+    _centre: *mut CFNotificationCenter,
+    _observer: *mut c_void,
+    _name: *const CFString,
+    _object: *const c_void,
+    _info: *const CFDictionary,
+) {
+    RECHECK.fetch_or(RECHECK_UNLOCK, Ordering::Relaxed);
+}
+
+/// The moments a set of [`RECHECK`] bits stands for, for the log.
+fn recheck_words(bits: u32) -> String {
+    let mut words = Vec::new();
+    if bits & RECHECK_WAKE != 0 {
+        words.push("the Mac woke from sleep");
+    }
+    if bits & RECHECK_UNLOCK != 0 {
+        words.push("the screen was unlocked");
+    }
+    if bits & RECHECK_SESSION != 0 {
+        words.push("this user's session became active again");
+    }
+    words.join(", ")
 }
 
 /// Replaces the whole captured set. Called on every focus move inside an overlay, so it
@@ -448,23 +651,95 @@ pub fn set_menu_open(open: bool) {
 /// in-callback re-enable below covers the case where the system tells us; this covers the
 /// case where it does not, and where nobody would otherwise notice until the user reported
 /// that the overlay had gone quiet.
+///
+/// A wake, an unlock or this session becoming active again ([`subscribe_system_events`]) makes
+/// the next call check at once, past the rate limit, and write what it found even when the tap
+/// is fine — the line a live test of a sleep or a lock looks for.
 pub fn health_check() {
     let port = PORT.load(Ordering::Relaxed);
-    if port.is_null() || !due(&LAST_HEALTH_MS, 2000) {
+    if port.is_null() {
         return;
     }
-    // SAFETY: the pointer came from a `CFRetained` whose retain is never released.
+    let asked = RECHECK.swap(0, Ordering::Relaxed);
+    if asked == 0 && !due(&LAST_HEALTH_MS, 2000) {
+        return;
+    }
+    let who = if asked == 0 {
+        "the watchdog".to_string()
+    } else {
+        format!("the check after {}", recheck_words(asked))
+    };
+    if asked != 0 {
+        // A wake, an unlock or the session back: whatever kept the tap off may be over, so a
+        // tap that stays off is worth one more new one.
+        STAYS_OFF.store(false, Ordering::Relaxed);
+    }
+    // SAFETY: the pointer came from a `CFRetained` whose retain only `recreate` releases, on
+    // this thread, after swapping it out of `PORT`.
     let port = unsafe { &*port };
+    if !port.is_valid() {
+        // Always: an invalid port is a tap that is gone, and nothing but a new one brings it
+        // back. The old one's retain is released with it.
+        recreate(&format!("{who} found its mach port invalid — the tap was gone"));
+        return;
+    }
     if !CGEvent::tap_is_enabled(port) {
         CGEvent::tap_enable(port, true);
         forget_held_keys();
         let n = REENABLES.fetch_add(1, Ordering::Relaxed) + 1;
+        if !CGEvent::tap_is_enabled(port) {
+            // Created again once; a new tap that is off as well is left alone (STAYS_OFF).
+            if !STAYS_OFF.load(Ordering::Relaxed) {
+                recreate(&format!(
+                    "{who} found it switched off, and it stayed off when re-enabled (#{n})"
+                ));
+            }
+            return;
+        }
+        STAYS_OFF.store(false, Ordering::Relaxed);
         logging::line(
             "macos",
             &format!(
-                "the event tap had been switched off and the watchdog found it (re-enable \
-                 #{n}) — keys were not being captured until now; something on this thread is \
-                 taking too long"
+                "the event tap had been switched off and {who} found it (re-enable #{n}) — keys \
+                 were not being captured until now; something on this thread is taking too long, \
+                 or the system switched it off around a sleep or a lock"
+            ),
+        );
+        return;
+    }
+    STAYS_OFF.store(false, Ordering::Relaxed);
+    if asked != 0 {
+        logging::line(
+            "macos",
+            &format!("{}: the event tap was checked and is valid and enabled", recheck_words(asked)),
+        );
+    }
+}
+
+/// Writes what the callback counted when the system switched the tap off — see the callback
+/// for why not there. Called by the observer on every turn of the run loop: two relaxed loads
+/// when there is nothing to say.
+fn report_disabled() {
+    let timeouts = DISABLED_BY_TIMEOUT.swap(0, Ordering::Relaxed);
+    let user_input = DISABLED_BY_USER_INPUT.swap(0, Ordering::Relaxed);
+    let total = REENABLES.load(Ordering::Relaxed);
+    if timeouts > 0 {
+        logging::line(
+            "macos",
+            &format!(
+                "the system disabled the event tap {timeouts} time(s) because a callback took \
+                 longer than it was willing to wait — re-enabled in the callback each time \
+                 ({total} re-enable(s) this session)"
+            ),
+        );
+    }
+    if user_input > 0 {
+        logging::line(
+            "macos",
+            &format!(
+                "the system disabled the event tap {user_input} time(s) \
+                 (kCGEventTapDisabledByUserInput) — re-enabled in the callback each time \
+                 ({total} re-enable(s) this session)"
             ),
         );
     }
@@ -502,6 +777,7 @@ unsafe extern "C-unwind" fn watchdog_observer(
     _activity: CFRunLoopActivity,
     _info: *mut c_void,
 ) {
+    report_disabled();
     health_check();
     report_lateness();
 }
@@ -519,24 +795,25 @@ unsafe extern "C-unwind" fn tap_callback(
     let pass = event.as_ptr();
 
     // The system announces its own damage through the tap. Neither of these recovers on its
-    // own, and both are silent everywhere else.
+    // own, and both are silent everywhere else. Re-enabled here and now; the line in the log
+    // is written by the run-loop observer (`report_disabled`), not here: the tap is back on
+    // the moment `tap_enable` returns, and every key from then on waits for this callback to
+    // return — a file write in here, just after a wake with the disk still spinning up, is
+    // exactly the delay that switches it off again.
     if etype == CGEventType::TapDisabledByTimeout || etype == CGEventType::TapDisabledByUserInput {
-        let why = if etype == CGEventType::TapDisabledByTimeout {
-            "a callback took longer than the system was willing to wait"
+        if etype == CGEventType::TapDisabledByTimeout {
+            DISABLED_BY_TIMEOUT.fetch_add(1, Ordering::Relaxed);
         } else {
-            "kCGEventTapDisabledByUserInput"
-        };
-        let n = REENABLES.fetch_add(1, Ordering::Relaxed) + 1;
+            DISABLED_BY_USER_INPUT.fetch_add(1, Ordering::Relaxed);
+        }
+        REENABLES.fetch_add(1, Ordering::Relaxed);
         let port = PORT.load(Ordering::Relaxed);
         if !port.is_null() {
-            // SAFETY: the pointer came from a `CFRetained` that is never released.
+            // SAFETY: the pointer came from a `CFRetained` whose retain only `recreate`
+            // releases, on this same thread, after swapping it out of `PORT`.
             CGEvent::tap_enable(unsafe { &*port }, true);
         }
         forget_held_keys();
-        logging::line(
-            "macos",
-            &format!("the system disabled the event tap ({why}) — re-enabled (#{n})"),
-        );
         return pass;
     }
 

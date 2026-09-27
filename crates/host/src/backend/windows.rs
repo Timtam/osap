@@ -1,7 +1,8 @@
 //! Windows implementation of the platform [`Backend`](super::Backend):
 //! window enumeration (Win32), global hotkeys (`RegisterHotKey` + `GetMessage`, and matched
 //! in the low-level keyboard hook as well — see `hotkey_hook.rs`), the low-level keyboard
-//! hook on a thread of its own (`keyboard_hook_thread`),
+//! hook on a thread of its own (`keyboard_hook_thread`) and the watch that installs it again when
+//! Windows removed it (`hook_watch.rs`, `hook_watch_thread.rs`),
 //! foreground-change events (`SetWinEventHook`), and screen capture (GDI, or desktop
 //! duplication for the modules that declare it — see `dxgi.rs`).
 
@@ -11,6 +12,8 @@ use std::sync::{Mutex, MutexGuard};
 
 use super::dxgi::{self, Caller, Fallback};
 use super::frame::{self, Frame, FrameVia};
+use super::hook_watch;
+use super::hook_watch_thread;
 use super::hotkey_hook::{self, Down, Mods, OsPress, Route, NO_ID};
 use super::{
     Backend, CaptureFn, CaptureSource, CapturedImage, ControlInfo, DumpNode, HostEvents,
@@ -58,7 +61,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WindowFromPoint,
     GUI_INMENUMODE, GUI_POPUPMENUMODE, GUI_SYSTEMMENUMODE,
     PostMessageW, PostThreadMessageW, RegisterClassW, SetCursorPos, SetWindowsHookExW,
-    TranslateMessage,
+    TranslateMessage, UnhookWindowsHookEx, HHOOK,
     EVENT_OBJECT_FOCUS, EVENT_OBJECT_NAMECHANGE, EVENT_SYSTEM_FOREGROUND, GA_PARENT, GA_ROOT,
     GUITHREADINFO,
     HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, SM_CXSCREEN, SM_CYSCREEN,
@@ -165,7 +168,21 @@ const VK_MASK_KEY: u16 = 0xE8;
 /// reader's, we see the modifier go down and record it here before it is eaten. If the screen
 /// reader's runs first, it eats the whole combination and we never see the second key at all,
 /// which is the same outcome by a different route.
+///
+/// **It can be left standing.** The hook sees only the key-ups of keys going to a window it is
+/// called for. NVDA+N shows how that goes wrong: Insert goes down in front of the plugin, NVDA's
+/// menu comes to the front, and Insert goes up to the menu — a window of a UIAccess program,
+/// one integrity level above ours, whose input the hook of an ordinary process is not called
+/// for. Left alone, the record would say "held" until Insert next went up in front of a window
+/// the hook sees, and every captured key meanwhile would be let through to the screen reader: the
+/// overlay would look dead while its hotkeys still worked. So the keyboard watch has it
+/// forgotten whenever the keyboard goes where the hook cannot follow
+/// ([`forget_keys_held_out_of_sight`]), and a captured key let through because of it says so
+/// in the log, with how long ago the modifier was seen going down (`report_capture_passes`).
 static SCREEN_READER_MOD_DOWN: AtomicBool = AtomicBool::new(false);
+/// The tick at which the hook last saw a screen reader's modifier go down, for the log line
+/// that says a captured key was let through because of it.
+static SCREEN_READER_MOD_DOWN_AT: AtomicU32 = AtomicU32::new(0);
 
 static KEY_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 static FG_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -1441,6 +1458,11 @@ impl Backend for WindowsBackend {
         // Built, and the old set freed, outside the lock, so the hook waits for a swap and
         // nothing more.
         let keys = keys.to_vec();
+        if keys.is_empty() {
+            // No overlay holds keys any more: the next one's first let-through is explained
+            // again, even in the same window (`report_capture_passes`).
+            PASS_SAID_FOR.with(|said| said.set([None; 5]));
+        }
         let old = std::mem::replace(&mut *locked(&CAPTURED_KEYS), keys);
         drop(old);
     }
@@ -1574,14 +1596,16 @@ impl Backend for WindowsBackend {
     }
 
     /// Starts the keyboard hook's thread and waits for it to say whether the hook is in —
-    /// see `keyboard_hook_thread`. Idempotent: every capture and every granted hotkey asks.
+    /// see `keyboard_hook_thread` — and then the watch that installs it again whenever Windows
+    /// may have removed it (`hook_watch_thread`). Idempotent: every capture and every granted
+    /// hotkey asks.
     fn watch_keys(&self) -> Result<(), String> {
         if KEY_HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
             return Ok(()); // already installed
         }
         // The thread the hook wakes when it has queued something: this one, the pump.
         PUMP_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
-        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<u32, String>>(1);
         let result = match std::thread::Builder::new()
             .name("keyboard-hook".to_string())
             .spawn(move || keyboard_hook_thread(ready_tx))
@@ -1594,14 +1618,17 @@ impl Backend for WindowsBackend {
             }),
         };
         match &result {
-            Ok(()) => crate::logging::line(
-                "keys",
-                "the keyboard hook is installed, on a thread of its own that does nothing but \
-                 answer it, so a busy main thread does not hold up the keyboard",
-            ),
+            Ok(hook_thread) => {
+                crate::logging::line(
+                    "keys",
+                    "the keyboard hook is installed, on a thread of its own that does nothing but \
+                     answer it, so a busy main thread does not hold up the keyboard",
+                );
+                hook_watch_thread::start(*hook_thread);
+            }
             Err(_) => KEY_HOOK_INSTALLED.store(false, Ordering::SeqCst),
         }
-        result
+        result.map(|_| ())
     }
 
     /// The headless loop: wait for input, but never for longer than one tick.
@@ -1679,6 +1706,7 @@ impl Backend for WindowsBackend {
         for (vk, mask) in pending_keys {
             events.on_key(vk, mask);
         }
+        report_capture_passes();
         // Game controllers, from the hub their own thread feeds (never a thread-local: that
         // thread is not this one). After the activations, so a press is handled against the
         // window that is in front now.
@@ -1878,6 +1906,118 @@ fn note_menu_pass(vk: u32, mask: u8) {
     }
 }
 
+/// Why the hook let a captured key-down through to the application instead of taking it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PassWhy {
+    /// The hook's own record says a screen reader's modifier is held.
+    ReaderRecorded = 0,
+    /// The system says a screen reader's modifier is down (`GetAsyncKeyState`).
+    ReaderDown = 1,
+    /// The captures are scoped to a window that is not in front.
+    OutOfScope = 2,
+    /// The window in front is in menu mode (`GetGUIThreadInfo`).
+    MenuMode = 3,
+    /// A menu was declared open (`host.keys.menuOpen`).
+    MenuFlag = 4,
+}
+
+/// A captured key-down the hook let through, and the state it decided by.
+#[derive(Clone, Copy, Debug)]
+struct PassNote {
+    vk: u32,
+    mask: u8,
+    why: PassWhy,
+    foreground: isize,
+    scope: isize,
+    /// For [`PassWhy::ReaderRecorded`]: how long ago the hook saw the modifier go down.
+    reader_ms: u32,
+}
+
+/// Captured key-downs the hook let through, for the pump to explain in the log
+/// ([`report_capture_passes`]). Every one of these rules exists for a reason, and each can also
+/// be left standing by a state that went stale — a screen reader's modifier whose key-up went
+/// elsewhere, a scope pinned to a window no longer in front, a menu flag nobody cleared — and
+/// then the overlay looks dead while nothing says why. Without these lines the log of such a
+/// session could not be told from one whose keyboard hook Windows had removed.
+static CAPTURE_PASS: Mutex<Vec<PassNote>> = Mutex::new(Vec::new());
+const CAPTURE_PASS_MAX: usize = 32;
+
+fn note_capture_pass(note: PassNote) {
+    if let Ok(mut m) = CAPTURE_PASS.lock() {
+        if m.len() < CAPTURE_PASS_MAX {
+            m.push(note);
+        }
+    }
+}
+
+thread_local! {
+    /// (The pump.) The window in front each reason in [`PassWhy`] was last explained for, so
+    /// that each is said once per window rather than once per key. Forgotten when the captured
+    /// set is emptied, so the next overlay's first pass is said again even in the same window.
+    static PASS_SAID_FOR: Cell<[Option<isize>; 5]> = const { Cell::new([None; 5]) };
+}
+
+/// Writes what [`CAPTURE_PASS`] gathered: one line per reason and window in front, for as long
+/// as keys stay captured. On the pump, which drains the hook's other queues too.
+fn report_capture_passes() {
+    let notes = CAPTURE_PASS.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
+    for n in notes {
+        let first = PASS_SAID_FOR.with(|said| {
+            let mut s = said.get();
+            let first = s[n.why as usize] != Some(n.foreground);
+            s[n.why as usize] = Some(n.foreground);
+            said.set(s);
+            first
+        });
+        if first {
+            crate::logging::line("keys", &capture_pass_line(&n));
+        }
+    }
+}
+
+fn capture_pass_line(n: &PassNote) -> String {
+    let key = super::vk_name(n.vk).unwrap_or_else(|| "a key".to_string());
+    let why = match n.why {
+        PassWhy::ReaderRecorded => format!(
+            "the hook has a screen reader's modifier (Insert, numpad 0 or Caps Lock) recorded as \
+             held — it saw one go down {} ms ago and has not seen it go up — and a keystroke made \
+             with it is the screen reader's",
+            n.reader_ms
+        ),
+        PassWhy::ReaderDown => "a screen reader's modifier (Insert, numpad 0 or Caps Lock) is down \
+                                as far as the system knows, and a keystroke made with it is the \
+                                screen reader's"
+            .to_string(),
+        PassWhy::OutOfScope => format!(
+            "the captures are scoped to window {:#x} (host.keys.scope) and window {:#x} is in \
+             front",
+            n.scope, n.foreground
+        ),
+        PassWhy::MenuMode => "the window in front is in menu mode (a Win32 menu is open)".to_string(),
+        PassWhy::MenuFlag => "a menu is declared open (host.keys.menuOpen(true))".to_string(),
+    };
+    format!(
+        "captured {key} (vk {:#04x}/m{}) was let through to the application: {why}. Said once \
+         per reason and window in front while keys are captured",
+        n.vk, n.mask
+    )
+}
+
+/// Whether the hook swallows a captured key it matched in scope, with no menu open: a key-down
+/// always, a key-up only when its key-down was swallowed too. `down_reached_system` asks
+/// `GetAsyncKeyState`, which inside a low-level hook does not yet include the event in hand —
+/// so for a key-up it says whether the key-down went through to the system. A key-down the hook
+/// swallowed never set it.
+///
+/// Why it matters: a key-down that got past the hook — pressed before the capture was made,
+/// while a menu was open, or while Windows had removed the hook and the watch was installing it
+/// again — reached the application. Swallowing its key-up would leave the application holding
+/// the key, and the system too: the key would read as down everywhere, and its next press
+/// would arrive as a repeat, for as long as the capture stood.
+fn swallow_captured(is_down: bool, down_reached_system: impl FnOnce() -> bool) -> bool {
+    is_down || !down_reached_system()
+}
+
 /// True while a standard Win32 popup menu (class "#32768") is open — ReaHotkey's
 /// `WinExist("ahk_class #32768")` check. While a menu is up, captured navigation
 /// keys must pass through to it: its window is owned by the plugin, so the
@@ -1922,8 +2062,16 @@ fn popup_menu_open() -> bool {
 /// core, cannot keep it from being scheduled: it runs for microseconds per keystroke, which
 /// takes nothing from anybody.
 ///
-/// It never ends, and never needs to: Windows removes the hook with the process.
-fn keyboard_hook_thread(ready: std::sync::mpsc::SyncSender<Result<(), String>>) {
+/// **Installed again, here, when the watch asks.** Windows removes a low-level hook that timed
+/// out without telling it; the watch (`hook_watch_thread`) asks after every resume and unlock,
+/// and when raw input shows the hook has stopped being called (`hook_watch`), and posts `hook_watch_thread::WM_APP_REHOOK` to
+/// this thread — the only message ever posted to it — and [`reinstall`] swaps the hook. It is
+/// the one other thing this thread does, a few times in a session at most. The answer goes back
+/// to the watch, which writes the log line: no file is written on this thread.
+///
+/// It never ends, and never needs to: Windows removes the hook with the process. It answers
+/// `ready` with its thread id, for the watch to post to.
+fn keyboard_hook_thread(ready: std::sync::mpsc::SyncSender<Result<u32, String>>) {
     unsafe {
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
         let hmod = GetModuleHandleW(std::ptr::null());
@@ -1933,15 +2081,116 @@ fn keyboard_hook_thread(ready: std::sync::mpsc::SyncSender<Result<(), String>>) 
             let _ = ready.send(Err(format!("SetWindowsHookExW(WH_KEYBOARD_LL) failed (error {error})")));
             return;
         }
-        let _ = ready.send(Ok(()));
+        HOOK.with(|h| h.set(hook));
+        let _ = ready.send(Ok(GetCurrentThreadId()));
         drop(ready);
-        // Nothing is ever posted to this thread. GetMessageW is where Windows delivers the
-        // hook's calls, as sent messages, and it returns only for a posted one.
+        // GetMessageW is where Windows delivers the hook's calls, as sent messages, and it
+        // returns only for a posted one — which is the watch's request to install the hook
+        // again, and nothing else.
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            if msg.hwnd.is_null() && msg.message == hook_watch_thread::WM_APP_REHOOK {
+                reinstall(hmod, msg.wParam);
+                continue;
+            }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+    }
+}
+
+thread_local! {
+    /// (The hook's thread.) The hook currently installed, for taking it out when a new one
+    /// replaces it.
+    static HOOK: Cell<HHOOK> = const { Cell::new(std::ptr::null_mut()) };
+    /// (The hook's thread.) Hooks of ours an earlier re-install could not take out, tried again
+    /// at every later one — see `hook_watch::swap`. Empty unless `UnhookWindowsHookEx` refused
+    /// twice in one re-install, which nothing documented makes it do.
+    static STALE_HOOKS: RefCell<Vec<HHOOK>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Installs the hook again, on the hook's thread, for the reason the watch gave (`reason`, as
+/// encoded), and reports the outcome back to the watch.
+///
+/// **New first, then old out** (`hook_watch::swap`, where the order is tested). Between the
+/// calls this thread handles no message, so no hook call is delivered to it: a key event that
+/// arrives in between waits for the NEW hook, which is first in the chain, and when that call
+/// returns through `CallNextHookEx` the old hook is already out of the chain — so no key is
+/// handled twice, and none passes with no hook of ours at all. If the new one cannot be
+/// installed, the old one stays: it may still work. If the old one cannot be taken out, the
+/// new one is taken out again, rather than leave two of ours handling every key twice.
+///
+/// **What carries over.** Everything the application set — the captured set, the granted
+/// hotkeys, the scope, the menu flags — is in statics the new hook reads exactly as the old one
+/// did. What the old hook remembered of keys going by is forgotten ([`forget_seen_keys`]) only
+/// when Windows had removed it: a hook still installed saw every key-up, and forgetting its
+/// record would drop a screen reader's modifier held across the swap.
+unsafe fn reinstall(hmod: HMODULE, reason: usize) {
+    let current = HOOK.with(|h| h.get());
+    let (now, outcome) = STALE_HOOKS.with(|stale| {
+        hook_watch::swap(
+            current,
+            &mut stale.borrow_mut(),
+            || {
+                let new = SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_keyboard_proc), hmod, 0);
+                if new.is_null() {
+                    Err(GetLastError())
+                } else {
+                    Ok(new)
+                }
+            },
+            |hook| if UnhookWindowsHookEx(hook) != 0 { Ok(()) } else { Err(GetLastError()) },
+        )
+    });
+    HOOK.with(|h| h.set(now));
+    if outcome.forget_seen_keys() {
+        forget_seen_keys();
+    }
+    hook_watch_thread::report(reason, outcome);
+}
+
+/// (The hook's thread.) What a re-installed hook forgets of the keys the old one saw go by when
+/// Windows had removed the old one — the ones whose key-up it missed, and which would otherwise
+/// stay wrong for good:
+///
+/// - a **screen reader's modifier** seen going down and never up, and a **pending modifier
+///   tap** ([`forget_keys_held_out_of_sight`]);
+/// - the **modifiers as the hook saw them go by**, which a late call is judged by (a call on
+///   time asks the system and brings the record in line anyway).
+///
+/// Everything else carries over as it is. The captured set, the granted hotkeys, the scope and
+/// the menu flags are the application's. The hotkeys' record of held keys already treats a
+/// press remembered for longer than the auto-repeat threshold as released (see
+/// `hotkey_hook::REPEAT_MS`), so a lost key-up costs nothing there, and forgetting it would
+/// make the repeat of a hotkey held across the swap fire it a second time. The keys owed their
+/// key-up for a screen reader (`SCREEN_READER_PASSED`) stay owed: letting a stray key-up
+/// through is harmless, swallowing an owed one leaves the application holding a key.
+fn forget_seen_keys() {
+    forget_keys_held_out_of_sight();
+    HOOK_MODS.with(|m| m.set(Mods::default()));
+}
+
+/// The keyboard went where the hook is not called — a window of a higher integrity level came
+/// to the front, the session was locked, disconnected or suspended, or Windows removed the
+/// hook — so a key the hook saw go down may go up unseen. Forgets what the hook recorded as held
+/// from key-downs alone: a **screen reader's modifier** (else every captured key would be let
+/// through to the screen reader until that modifier next went up in front of a window the hook
+/// sees) and a **pending modifier tap** (else a tap could fire at a release that ends a
+/// combination). Returns how long ago the screen reader's modifier was seen going down, when
+/// it was recorded as held, for the watch's log line.
+///
+/// Any thread: two atomics. The watch calls it on those events; the hook's thread after a
+/// re-install that found the old hook gone. The cost of forgetting too much is one keystroke
+/// made while a screen reader's modifier was held across such a moment, which is then taken by
+/// a capture of it instead of going to the screen reader.
+pub(super) fn forget_keys_held_out_of_sight() -> Option<u32> {
+    TAP_ARMED.store(0, Ordering::Relaxed);
+    if SCREEN_READER_MOD_DOWN.swap(false, Ordering::Relaxed) {
+        // SAFETY: reads the tick clock.
+        let now = unsafe { GetTickCount() };
+        Some(now.wrapping_sub(SCREEN_READER_MOD_DOWN_AT.load(Ordering::Relaxed)))
+    } else {
+        None
     }
 }
 
@@ -1958,6 +2207,10 @@ fn wake_pump() {
 /// Runs on the hook's own thread (`keyboard_hook_thread`) for every key event on the machine.
 unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
+        // First, for every event of every kind: the watch compares when the hook was last
+        // called with the key-downs raw input saw (`hook_watch`). One relaxed store.
+        let now = GetTickCount();
+        hook_watch_thread::note_hook_call(now);
         let kb = &*(lparam as *const KBDLLHOOKSTRUCT);
         let vk = kb.vkCode;
         let msg = wparam as u32;
@@ -1967,8 +2220,7 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
             // How late this call is. Nearly always 0: the thread does nothing else. When the
             // machine was too loaded to schedule it, the events queued meanwhile arrive in
             // order, late, and each is judged as of its own moment — see `hotkey_hook`.
-            let late =
-                hotkey_hook::lateness(GetTickCount(), kb.time, kb.flags & LLKHF_INJECTED != 0);
+            let late = hotkey_hook::lateness(now, kb.time, kb.flags & LLKHF_INJECTED != 0);
             // GetAsyncKeyState, NOT GetKeyState: a low-level hook runs on the thread
             // that installed it, and GetKeyState reports that THREAD's view of the
             // keyboard — updated only by the messages it retrieves. Our thread never
@@ -2017,6 +2269,9 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
             // layouts respectively, and JAWS's. Recorded on the way past, whatever anyone
             // downstream does with it.
             if vk == 0x2D || vk == 0x60 || vk == 0x14 {
+                if is_down {
+                    SCREEN_READER_MOD_DOWN_AT.store(now, Ordering::Relaxed);
+                }
                 SCREEN_READER_MOD_DOWN.store(is_down, Ordering::Relaxed);
             }
             // Which modifier is this, as `key_spec` names it? The hook reports the SIDE that
@@ -2122,11 +2377,11 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                 //
                 // Only ever passes MORE through, and only while one of those keys is
                 // physically down, so it cannot take a key away from an overlay: nobody
-                // navigates one holding Insert.
-                let screen_reader_held = SCREEN_READER_MOD_DOWN.load(Ordering::Relaxed)
-                    || down(0x2D)
-                    || down(0x60)
-                    || down(0x14);
+                // navigates one holding Insert. The hook's own record can outlive the key —
+                // see SCREEN_READER_MOD_DOWN for how, and what forgets it — so a key let
+                // through because of it is noted with how old the record is.
+                let recorded = SCREEN_READER_MOD_DOWN.load(Ordering::Relaxed);
+                let screen_reader_held = recorded || down(0x2D) || down(0x60) || down(0x14);
                 let owes_up = !is_down && SCREEN_READER_PASSED.with(|s| s.borrow().contains(&vk));
                 if screen_reader_held || owes_up {
                     SCREEN_READER_PASSED.with(|s| {
@@ -2139,6 +2394,16 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                             v.retain(|&k| k != vk);
                         }
                     });
+                    if is_down && screen_reader_held {
+                        note_capture_pass(PassNote {
+                            vk,
+                            mask,
+                            why: if recorded { PassWhy::ReaderRecorded } else { PassWhy::ReaderDown },
+                            foreground: GetForegroundWindow() as isize,
+                            scope: KEY_SCOPE.load(Ordering::Relaxed),
+                            reader_ms: now.wrapping_sub(SCREEN_READER_MOD_DOWN_AT.load(Ordering::Relaxed)),
+                        });
+                    }
                     if hotkeys_filed && is_down {
                         note_captured_down(kb, vk, mask, late, true);
                     }
@@ -2150,8 +2415,11 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                 // let Tab/Enter/arrows reach the menu natively — the menu window is
                 // owned by the plugin, so the foreground doesn't change.
                 let scope = KEY_SCOPE.load(Ordering::Relaxed);
-                let in_scope = scope == 0 || GetForegroundWindow() as isize == scope;
-                if in_scope && !popup_menu_open() && !MENU_OPEN.load(Ordering::Relaxed) {
+                let foreground = GetForegroundWindow() as isize;
+                let in_scope = scope == 0 || foreground == scope;
+                let menu_mode = in_scope && popup_menu_open();
+                let menu_flag = in_scope && !menu_mode && MENU_OPEN.load(Ordering::Relaxed);
+                if in_scope && !menu_mode && !menu_flag {
                     if is_down {
                         locked(&KEY_QUEUE).push((vk, mask));
                         wake_pump();
@@ -2159,12 +2427,33 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                             note_captured_down(kb, vk, mask, late, false);
                         }
                     }
-                    return 1; // suppress the matched combo (down + up)
-                } else if in_scope && is_down && !menu_key_noted {
-                    // Let through because a menu is open. Remembered, not discarded: the
-                    // overlay runtime asks for these to log which keys reached the menu, and
-                    // whether it was still there after an Escape. See `take_menu_pass_through`.
-                    note_menu_pass(vk, mask);
+                    // Suppress the matched combination — the key-up only when its key-down was
+                    // suppressed too (see `swallow_captured`).
+                    if swallow_captured(is_down, || down(vk as u16)) {
+                        return 1;
+                    }
+                } else if is_down {
+                    note_capture_pass(PassNote {
+                        vk,
+                        mask,
+                        why: if !in_scope {
+                            PassWhy::OutOfScope
+                        } else if menu_mode {
+                            PassWhy::MenuMode
+                        } else {
+                            PassWhy::MenuFlag
+                        },
+                        foreground,
+                        scope,
+                        reader_ms: 0,
+                    });
+                    if in_scope && !menu_key_noted {
+                        // Let through because a menu is open. Remembered, not discarded: the
+                        // overlay runtime asks for these to log which keys reached the menu,
+                        // and whether it was still there after an Escape. See
+                        // `take_menu_pass_through`.
+                        note_menu_pass(vk, mask);
+                    }
                 }
             }
             // A registered hotkey, matched here as well as by RegisterHotKey — see
@@ -2345,7 +2634,8 @@ fn settle_hotkey(id: i32, route: Route) -> bool {
                         // elevated window in front — a hook of an ordinary process is not
                         // called for input to it, RegisterHotKey is, which is why it stays —
                         // a hook running late, whose own press then follows and is dropped
-                        // with a line of its own, or a hook Windows removed after it timed out.
+                        // with a line of its own, or a hook Windows removed after it timed out,
+                        // which the keyboard watch installs again (`hook_watch`).
                         crate::logging::line(
                             "keys",
                             &format!(
@@ -2354,7 +2644,8 @@ fn settle_hotkey(id: i32, route: Route) -> bool {
                                  window is in front, or the hook ran late (a \"not dispatched a \
                                  second time\" line then follows), or Windows has removed the \
                                  hook after it timed out (captured keys would then have stopped \
-                                 too)"
+                                 too, until the keyboard watch installs it again: a \"keyboard \
+                                 hook was installed again\" line)"
                             ),
                         );
                     }
@@ -2975,6 +3266,111 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
             .then(|| tight.as_ref().map(|t| (t.off_x as i32, t.off_y as i32, t.cw as i32, t.ch as i32)))
             .flatten();
         Ok(OcrText { text, words, lines, fallback, skipped: false })
+}
+
+/// What the keyboard hook keeps and forgets when the watch installs it again.
+#[cfg(test)]
+mod hook_carry_over_tests {
+    use super::*;
+    use crate::backend::MASK_ALT;
+
+    /// What a re-install keeps and what it forgets: `forget_seen_keys`, which the hook's thread
+    /// runs right after the swap. Sets the backend's statics, which no other test touches, and
+    /// no hook is installed in a test run; puts them back afterwards.
+    #[test]
+    fn a_reinstall_keeps_the_application_s_keys_and_forgets_what_the_old_hook_saw() {
+        let captured = vec![(0x09u32, 0u8), (0x09, 1), (0x0D, 0)];
+        *locked(&CAPTURED_KEYS) = captured.clone();
+        {
+            let mut t = locked(&HOOK_HOTKEYS);
+            // Alt+V granted (MOD_ALT is 0x1), and pressed: the hook fired it and swallows its
+            // repeats from here on.
+            assert!(hotkey_hook::file_if_granted(&mut t, true, 7, 0x56, 0x1));
+            assert_eq!(t.as_mut().unwrap().on_down(0x56, MASK_ALT, 1_000), Down::Fire(7));
+        }
+        SCREEN_READER_MOD_DOWN.store(true, Ordering::Relaxed);
+        TAP_ARMED.store(0xA4, Ordering::Relaxed);
+        HOOK_MODS.with(|m| {
+            let mut mods = Mods::default();
+            mods.on_key(0xA4, true);
+            m.set(mods);
+        });
+        SCREEN_READER_PASSED.with(|s| s.borrow_mut().push(0x20));
+
+        // What the watch does when the keyboard goes where the hook is not called: the two
+        // atomics, and how old the screen reader's record was.
+        // SAFETY: reads the tick clock.
+        let now = unsafe { GetTickCount() };
+        SCREEN_READER_MOD_DOWN_AT.store(now.wrapping_sub(5_000), Ordering::Relaxed);
+        let age = forget_keys_held_out_of_sight().expect("the modifier was recorded as held");
+        assert!((5_000..60_000).contains(&age), "{age}");
+        assert_eq!(forget_keys_held_out_of_sight(), None, "nothing left to forget");
+        assert_eq!(TAP_ARMED.load(Ordering::Relaxed), 0);
+        assert_eq!(HOOK_MODS.with(|m| m.get()), {
+            let mut mods = Mods::default();
+            mods.on_key(0xA4, true);
+            mods
+        }, "the hook thread's record is the hook thread's to forget");
+
+        SCREEN_READER_MOD_DOWN.store(true, Ordering::Relaxed);
+        TAP_ARMED.store(0xA4, Ordering::Relaxed);
+        forget_seen_keys();
+
+        // The application's: the captured set and the granted hotkeys, as they were.
+        assert_eq!(*locked(&CAPTURED_KEYS), captured);
+        {
+            let mut t = locked(&HOOK_HOTKEYS);
+            let t = t.as_mut().unwrap();
+            assert!(t.holds(7));
+            assert_eq!(t.lookup(0x56, MASK_ALT), 7);
+            // Alt+V held across the swap: its repeat is still a repeat, not a second press.
+            assert_eq!(t.on_down(0x56, MASK_ALT, 1_030), Down::Repeat);
+        }
+        // Still owed its key-up.
+        assert!(SCREEN_READER_PASSED.with(|s| s.borrow().contains(&0x20)));
+        // What the old hook saw go by, whose key-ups it may have missed: forgotten.
+        assert!(!SCREEN_READER_MOD_DOWN.load(Ordering::Relaxed));
+        assert_eq!(TAP_ARMED.load(Ordering::Relaxed), 0);
+        assert_eq!(HOOK_MODS.with(|m| m.get()), Mods::default());
+
+        locked(&CAPTURED_KEYS).clear();
+        *locked(&HOOK_HOTKEYS) = None;
+        SCREEN_READER_PASSED.with(|s| s.borrow_mut().clear());
+    }
+
+    /// A captured key-up follows its key-down: swallowed only when the key-down was.
+    #[test]
+    fn a_captured_key_up_is_swallowed_only_when_its_key_down_was() {
+        assert!(swallow_captured(true, || panic!("a key-down does not ask")));
+        assert!(swallow_captured(false, || false), "the key-down was swallowed");
+        assert!(
+            !swallow_captured(false, || true),
+            "the key-down reached the application — before the capture, or while the hook was \
+             being installed again — so its key-up must too"
+        );
+    }
+
+    #[test]
+    fn a_let_through_says_why() {
+        let note = |why, reader_ms| PassNote {
+            vk: 0x09,
+            mask: 0,
+            why,
+            foreground: 0x1234,
+            scope: 0x5678,
+            reader_ms,
+        };
+        let l = capture_pass_line(&note(PassWhy::ReaderRecorded, 36_000_000));
+        assert!(l.starts_with("captured Tab (vk 0x09/m0) was let through"), "{l}");
+        assert!(l.contains("recorded as held"), "{l}");
+        assert!(l.contains("36000000 ms ago"), "{l}");
+        let l = capture_pass_line(&note(PassWhy::OutOfScope, 0));
+        assert!(l.contains("scoped to window 0x5678"), "{l}");
+        assert!(l.contains("window 0x1234 is in front"), "{l}");
+        assert!(capture_pass_line(&note(PassWhy::MenuMode, 0)).contains("menu mode"));
+        assert!(capture_pass_line(&note(PassWhy::MenuFlag, 0)).contains("host.keys.menuOpen"));
+        assert!(capture_pass_line(&note(PassWhy::ReaderDown, 0)).contains("as far as the system"));
+    }
 }
 
 /// `host.window.foreground()` on Windows: what counts as on screen, and the reading itself on

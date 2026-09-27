@@ -23,6 +23,14 @@ mod windows;
 /// Windows builds. See the file.
 #[cfg(windows)]
 mod hotkey_hook;
+/// Keeping the keyboard hook alive for days: when to install it again, and the comparison of
+/// raw input with the hook's calls that notices a hook Windows removed. Pure; see the file.
+#[cfg(windows)]
+mod hook_watch;
+/// The thread that watches the keyboard hook on Windows — raw input, session and power
+/// notifications — and asks the hook's thread to install it again. See the file.
+#[cfg(windows)]
+mod hook_watch_thread;
 /// DXGI Desktop Duplication, the second way of reading the screen on Windows — for the modules
 /// that declare `[screen] capture = "duplication"`, and for nothing else. See the file.
 #[cfg(windows)]

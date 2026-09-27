@@ -2956,7 +2956,7 @@ Found while documenting — the behaviour is written down now, and wants fixing:
       `watch_keys()`; when that raises (macOS without the Accessibility grant), the token is
       lost with the error, and the key is suppressed and dispatched once a later capture
       installs the tap. Register the entry only after `watch_keys()` succeeded.
-- [ ] **The keyboard hook is installed once and never checked.** Windows documents that a
+- [x] **The keyboard hook is installed once and never checked.** Windows documents that a
       low-level hook that keeps timing out can be removed without notice; `KEY_HOOK_INSTALLED`
       would stay true and every capture would stop for the session with nothing logged. Not
       observed; worth a check after a long pump stall.
@@ -2968,6 +2968,9 @@ Found while documenting — the behaviour is written down now, and wants fixing:
       per window in front (`settle_hotkey`) — which also happens, harmlessly, in front of an
       elevated window. Still nothing re-installs the hook; see "Re-install a keyboard hook
       Windows removed" in the section on hotkeys in the keyboard hook.
+      Fixed (2026-09-27), after a session whose captured keys stopped: installed again after
+      every resume and unlock, and when a raw-input witness sees it miss three key-downs in a row
+      — see "The keyboard hook over days of uptime (2026-09-27)".
 - [x] **A module without the `window` capability breaks window delivery for itself.**
       `on_window_activate`, `on_focus_change` and `window_has_triggers` (`lib.rs`) reach the
       prelude through `lua.globals().get("host")`, which after load is the module's GATED view
@@ -3477,7 +3480,8 @@ switch off" and "Keys"; the cross-platform critique's first issue).
       thread-locals behind short locks. `docs/api` (hotkey, keys, timer, ocr, screen, speech),
       `module-runtime-and-lifecycle.md`, `module-manager.md` and the pump's overrun line say
       so.
-- [ ] **Re-install a keyboard hook Windows removed.** Not built. The only signal is a
+- [x] **Re-install a keyboard hook Windows removed.** Built 2026-09-27 (end of this item).
+      Until then the only signal was a
       `WM_HOTKEY` the hook should have seen, and with the hook on its own thread several
       harmless cases look the same: a hook running late, whose `WM_HOTKEY` now usually arrives
       first (the two come from two threads); an elevated window in front, which would need an
@@ -3486,6 +3490,11 @@ switch off" and "Keys"; the cross-platform critique's first issue).
       screen reader's in the chain, mid-session. Worth building if a removal is ever seen in a
       log (captured keys dead, "arrived through RegisterHotKey" lines in front of ordinary
       windows).
+      Built (2026-09-27), after a session ten hours old whose captured keys stopped: the witness is
+      raw input compared with the hook's calls rather than `WM_HOTKEY`, so none of the three
+      cases above reaches it, and the re-install's place ahead of a screen reader's hook is the
+      order the application has when it starts after the screen reader, and is said in the log
+      — see "The keyboard hook over days of uptime (2026-09-27)".
 - [ ] **Live (Windows), with NVDA:**
   - Heard with NVDA before d2b132f was committed: overlay navigation, NVDA's own keys,
       Alt+letter hotkeys, the F5 and F6 keys and a second start. Which of the points below
@@ -4427,11 +4436,17 @@ decision, hooked into one interface the overlay runtime provides.
       panel, not a menu; the hold gave the keys away for its length there, and no longer does.)
   - Kontakt nested in Komplete Kontrol: its own snapshot dropdown (a leaf to accessibility; no
       log of it exists). Probably hold-only; phase 2 covers it with the bare Kontakt's picture.
-- [ ] **Phase 2 — picture tests for self-drawn menus.** Kontakt's snapshot menu, File and View
-      menus; sforzando's lists where newWindow does not see them. From the menu shots taken with
-      calibration on: one test per menu, a pixel colour or an image only the open menu has.
-      Then drop the accessibility tests from Kontakt's lists where a picture test covers the
-      menu.
+- [ ] **Phase 2 — picture tests for self-drawn menus: macOS only (decided 2026-09-27).** On
+      Windows every module's menus are already seen by a real test, measured with the shots and
+      logs of 2026-09-27: sforzando's three lists are native `#32768` menus (`nativePopup`, and
+      `newWindow` sees them too), Komplete Kontrol's menu in a DAW is a popup window
+      (`newWindow`), and Kontakt's Qt menus, the full snapshot menu of an instrument with
+      snapshots and the empty one of an instrument without, are seen by
+      `accessibilityAfterPress`. So no picture test on Windows. On macOS no test sees Kontakt's
+      File and View menus (drawn inside the window): build a picture test for them from shots
+      taken ON A MAC at the next session (Retina, points, macOS rendering differ from the
+      Windows shots), and list them in that session's plan. sforzando on macOS: `newWindow`
+      saw its lists in the 09-18 session; confirm there.
   - How to take the shots: tick "Calibration keys in overlays" in the module manager's
       Application settings tab and reload the modules. Then press the control, wait two
       seconds without a key, and close the menu with Escape; the log's
@@ -4748,6 +4763,173 @@ gh's own jq against the real runs. Only a run shows:
       the header saying the file was not used.
 - [ ] "Re-run all jobs" on a run: the macOS upload replaces the first attempt's file (overwrite
       by the file's name), and `newer-macos` downloads the new one.
+
+## The keyboard hook over days of uptime (2026-09-27)
+
+A session started at about three in the morning was used ten hours later: the overlay activated
+and registered its captured keys (`captured set: vk 0x09/m0 … vk 0x09/m1 …`), and not one Tab
+or Shift+Tab reached it — no `[keys] dispatch` line at all — while every `RegisterHotKey` hotkey
+still worked; a restart fixed it. A `WH_KEYBOARD_LL` hook Windows removed without a word ("on
+Windows 7 and later, the hook is silently removed without being called", Microsoft's
+`LowLevelKeyboardProc` page) fits that, and nothing installed it again. But the log does not prove
+it: had the hook been gone and a held hotkey (Alt+M, Alt+S …) been pressed, `settle_hotkey` would
+have written "arrived through RegisterHotKey, not through the keyboard hook", and there is no such
+line. A screen reader's modifier the hook had recorded as held fits every line as well:
+`SCREEN_READER_MOD_DOWN` is set and cleared only by the hook seeing Insert go down and up, and the
+hook is not called for keys going to NVDA's menu or dialogs (UIAccess, one integrity level above
+ours) — NVDA+N, then Insert released in the menu, left it set, and from then on every captured key
+was let through to the plugin and every hook hotkey passed on to `RegisterHotKey` as "expected",
+with no line; a restart cleared it. A capture scope pinned to a window no longer in front, or a
+menu flag left on, fit too. The application is expected to run for hours, if not days, so all of
+them are handled below. Asked of the maintainer: was a hotkey pressed while Tab was dead, and was
+an NVDA menu or dialog (NVDA+N, NVDA+F7, NVDA+Ctrl+G …) or an elevated window used just before?
+
+- [x] **Windows: installed again when it is known to be lost.** A thread `keyboard-watch`
+      (`backend/hook_watch_thread.rs`) with a message-only window of its own registers for
+      suspend/resume (`RegisterSuspendResumeNotification` with a callback — a message-only
+      window gets no broadcast `WM_POWERBROADCAST`) and for session changes
+      (`WTSRegisterSessionNotification`), and on `PBT_APMRESUMEAUTOMATIC`, `WTS_SESSION_UNLOCK`,
+      `WTS_CONSOLE_CONNECT` and `WTS_REMOTE_CONNECT` posts `WM_APP_REHOOK` to the hook's thread.
+      That thread installs the new hook first and then takes the old one out — it handles no
+      message in between, so no key is handled twice and none passes with no hook of ours —
+      forgets what the old one saw go by (a screen reader's modifier held, a pending modifier
+      tap, the modifier record late calls are judged by) when Windows had removed it, and keeps
+      everything the application set; the hotkeys' record of held keys carries over, since a key-up lost with the old hook
+      costs nothing there (`hook_carry_over_tests`). It writes no file: the outcome goes back to
+      the watch, which writes the line.
+- [x] **Windows: a hook removed while the machine stayed on is noticed.** The same thread
+      registers the keyboard as raw input (`RIDEV_INPUTSINK`, without `RIDEV_NOLEGACY` or
+      `RIDEV_NOHOTKEYS`) and compares each physical key-down — a device handle (injected input
+      has none), a make, a real key — with when the hook was last called
+      (`backend/hook_watch.rs`, pure, with tests): each key-down is judged by whether the hook
+      was called since the key-down before it, with a second of slack, so a late hook and a
+      late witness both count as alive. Three in a row that it was not called for, in front of
+      a window the hook can see — the desktop with the keyboard is ours, the foreground
+      process's integrity level is not above ours (an elevated program, a UIAccess screen
+      reader's dialogs) — install it again. Counted, never timed; each re-install the witness
+      asks for doubles the count for the next one, up to 320, until the hook confirms it by
+      being called. Each re-install
+      writes one `keys` line: the reason (`resumed`, `unlocked`, `the hook stopped seeing keys
+      the system delivered: N key-downs …`), whether the old hook was still installed or
+      Windows had already removed it (`UnhookWindowsHookEx` answering
+      `ERROR_INVALID_HOOK_HANDLE`), and that it is first in the chain again; a failed one the
+      `SetWindowsHookExW` error. No crate: `multiinput` busy-waits its thread (a one-nanosecond
+      sleep in a loop, for days) and owns its window. Docs: `docs/api/keys.md` (When Windows
+      drops the hook), `hotkey.md`, `timer.md`.
+- [x] **macOS: the event tap over days** (`backend/macos/tap.rs`). The `TapDisabledBy*` line was
+      written inside the callback, where a file write just after a wake can get the tap
+      switched off again: now counted there and written by the run-loop observer. A tap whose
+      mach port is invalid, or that stays off when re-enabled, is created again — the watchdog
+      only ever re-enabled, which does nothing to a dead port and would have announced a repair
+      every two seconds. After `NSWorkspaceDidWakeNotification`,
+      `NSWorkspaceSessionDidBecomeActiveNotification` and the distributed
+      `com.apple.screenIsUnlocked`, the tap is checked at once and the result logged.
+      Type-checked only (`cargo check --target aarch64-apple-darwin -p macos-check`, with and
+      without `--tests`).
+- [x] **Windows: a screen reader's modifier recorded as held is forgotten when the keyboard goes
+      where the hook is not called** (review of the above, finding 1). The watch also registers
+      `EVENT_SYSTEM_FOREGROUND` (out of context, on its own thread, so an OCR call on the pump
+      cannot delay it): when a window whose integrity level is above ours — or unreadable —
+      comes to the front, and at every session change and suspend/resume, the backend forgets
+      `SCREEN_READER_MOD_DOWN` and `TAP_ARMED` (`forget_keys_held_out_of_sight`); said once per
+      session with how long ago the modifier was seen going down. `hook_watch::keys_go_unseen`.
+      Rejected alternative: "held only while its auto-repeat keeps arriving" — pressing a second
+      key stops the modifier's repeat, so NVDA+Up, Up with Insert held would lose the second
+      press.
+- [x] **Windows: why a captured key was let through is logged** — screen reader's modifier
+      recorded as held (with its age in ms) or physically down, out of scope (both window
+      handles), menu mode, `menuOpen(true)`; once per reason and window in front, reset when the
+      captured set empties (`report_capture_passes`). The next "overlay dead, hotkeys alive" log
+      tells these apart from a removed hook.
+- [x] **Windows: a captured key-up follows a key-down that reached the application**
+      (`swallow_captured`: `GetAsyncKeyState` in the hook does not yet include the event, so for
+      a key-up it says whether the key-down got through). Before, the key-down that made the fifth
+      miss reached the plugin, the new hook swallowed its key-up, and Tab or Space stayed held
+      system-wide for as long as the capture stood.
+- [x] **Windows: the watch cannot be switched off by one lost reply.** The witness raises its bar
+      when it asks, not when the reply comes; a witness request is posted again while one is
+      pending; a reply the hook's thread cannot post is kept in an atomic and read at the next
+      key-down or change (`LOST_REPLY`); an undecodable reply still clears the request.
+- [x] **Windows: no two hooks of ours in the chain.** `hook_watch::swap` (tested with a fake chain):
+      new first, then old out; old refusing with another error than 1404 → the new one is taken
+      out again (`Outcome::Reverted`); only if that fails too do both stay, the old one kept and
+      tried again at every later swap. What the old hook recorded is forgotten only when Windows
+      had removed it (`Outcome::forget_seen_keys`).
+- [x] **Windows: a refused session registration is retried at the 1st, 2nd, 4th, 8th … key-down**
+      (`hook_watch::retry_at`), not at every one.
+- [x] **macOS: a tap that comes back off is not re-created every two seconds.** An invalid port is
+      always re-created; one that stays off is re-created once, and a new one that is off too is
+      left alone (`STAYS_OFF`) until it reports itself on or a wake/unlock/session-active asks;
+      the old port's retain is released after `invalidate`. The module comment no longer claims
+      every macOS failure is visible: a valid, enabled tap that never fires (Input Monitoring)
+      has no witness.
+- [x] **Decided (maintainer, 2026-09-27):** every resume, unlock and connect installs the hook
+      again whether or not it was lost (ahead of NVDA's each time, which is the order a host
+      started after the screen reader has anyway); and three counted misses, not five, make a
+      re-install (`MISSES_TO_REHOOK`), so three real keystrokes at most reach the plugin first.
+- [ ] **Live (Windows), with NVDA:**
+  - **first, on the build that was running on 2026-09-27** (it settles what happened): NVDA
+      started before the application, an overlay active (Komplete Kontrol in REAPER), press
+      NVDA+N, Escape, then Tab. If Tab reaches the plugin instead of the overlay until an NVDA
+      key is pressed in REAPER, the stuck modifier record was the cause. On the new build: Tab
+      works at once, and the log has one `a window the keyboard hook is not called for came to
+      the front … recorded as held … forgotten` line;
+  - NVDA+Space in an overlay: one `captured Space (vk 0x20/m0) was let through to the
+      application: the hook has a screen reader's modifier … recorded as held — it saw one go
+      down N ms ago` line with a small N, and NVDA leaves focus mode as before;
+  - the watch's start line: `Raw input yes; session notifications yes; suspend/resume
+      notifications yes; foreground events yes`, and the process's level (`0x2000` for an
+      ordinary start);
+  - a **sleep/resume** cycle: after waking, one `the keyboard hook was installed again
+      (resumed: …)` line, saying whether the old hook was still installed or already removed —
+      the first real answer to whether a sleep loses the hook; captured Tab works in an overlay
+      straight away; NVDA+T, NVDA+Space and browse-mode arrows behave as before;
+  - a **lock/unlock** (Windows+L, then the PIN): one `unlocked:` line, and typing the PIN adds
+      no `the hook stopped seeing keys` line. The unlock line is also the only proof that
+      `WM_WTSSESSION_CHANGE` reaches a message-only window; if it never comes, the session
+      registration moves to a hidden top-level window;
+  - a **forced hook timeout, on a test machine only — never on the maintainer's**: suspend the
+      whole process (Process Explorer, Suspend), type about fifteen keys in Notepad — each
+      waits a second for the hook — and resume it, then type a few more keys. Expected: one
+      `the hook stopped seeing keys the system delivered: 3 key-downs …` line saying Windows had
+      already removed the old hook, and a captured Tab working again after it. (Whether it
+      comes from the queued key-downs or from the next few depends on whether Windows still
+      delivers the timed-out calls after the resume: late calls count as the hook alive.)
+      Microsoft does not say after how many timeouts it removes a hook, so if no line comes,
+      type more keys while suspended. After the line, open Notepad and hold nothing: typing
+      Tab there must give one tab per press (a Tab left held by the re-install would repeat);
+  - **NVDA restarted after the app**, then twenty browse-mode arrows on a web page: no `the
+      hook stopped seeing keys` line. That settles what Microsoft does not document: whether
+      raw input sees a key a hook ahead of ours swallows. If the line does appear, once, with
+      "the old hook was still installed", it does — then say so in `hook_watch.rs` and
+      `docs/api/keys.md` (the effect is one re-install that puts our hook ahead of NVDA's, as at
+      start). The same question for the other programs that install key-swallowing hooks when
+      they get focus: a **Remote Desktop client** full-screen with "apply Windows key
+      combinations: on the remote computer", a **VM console** (Hyper-V, VMware or VirtualBox)
+      and an **AutoHotkey script** started after the app — twenty keys in each, and no `stopped
+      seeing keys` line. If one appears, the host's hotkeys would fire inside that window after
+      it (our hook first again, hotkeys ignore the scope): document it, or leave those windows
+      out of the count;
+  - twenty keys typed in an **elevated** command prompt and in NVDA's settings dialog: no
+      `the hook stopped seeing keys` line;
+  - a **Remote Desktop** connection to the session: one `connected to a remote client` line,
+      and captured keys work over the connection. Keys arriving over RDP may carry no device
+      handle in raw input, which leaves the witness deaf there (harmless: connect and unlock
+      still install the hook again); note whether a forced timeout over RDP gives a `stopped
+      seeing keys` line.
+- [ ] **Next Mac session:**
+  - sleep the Mac and wake it: `the Mac woke from sleep: the event tap was checked and is valid
+      and enabled` (or a repair line), and a captured Tab works at once;
+  - lock the screen (Control+Command+Q) and unlock it: `the screen was unlocked: …`;
+  - switch to another user and back: `this user's session became active again: …`;
+  - a main-thread stall of over a second (a probe OCR loop) while pressing keys: `the system
+      disabled the event tap N time(s) because a callback took longer …` appears after the
+      stall, and the tap works right after;
+  - withdraw Accessibility from the application while it runs, then give it back. Not known
+      which the system does: switch the tap off (re-enable lines, then at most one `created
+      again … The new tap is off as well` line and silence), or invalidate its port (`the event
+      tap had to be created again … and could not be` once, then `the event tap was created
+      again` after the grant is back). Either way no line every two seconds.
 
 ## Dev tools
 
