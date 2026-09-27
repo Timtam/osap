@@ -92,7 +92,11 @@ Then, for something a person can actually run:
 ```
 
 That produces `dist/AutomationPlatform/` with the `.app`, the modules beside it, and a
-README — and a zip of the same. Read [macos-permissions.md](macos-permissions.md) before
+README — and a zip of the same. When the documentation site has been built
+(`cd docs-site && npm ci && npm run build`) and PowerShell 7 (`pwsh`) is installed, the
+documentation goes beside them as `docs/`: pages that `docs-offline.ps1` converts to work from
+the folder, without a server. Without either, the package is made without it, and the script
+says which is missing. Read [macos-permissions.md](macos-permissions.md) before
 launching it, because two of the three ways this can fail look nothing like permissions.
 
 ## Running it without packaging
@@ -136,8 +140,9 @@ knowing which one catches what:
   compiled for macOS at all, since the check crate deliberately excludes it.
   It does not run on its own: every push to `main` that touches code runs the **Build** workflow
   (`.github/workflows/build.yml`), which runs it beside the Windows build, so a run that
-  succeeds holds both downloads — `automation-platform-<version>-<commit>-macos` and
-  `…-windows`.
+  succeeds holds both downloads — `automation-platform-<version>-<commit>-macos.zip` and
+  `…-windows`. The macOS one is the zip `ditto` made, uploaded as it is, so one unpacking
+  gives the folder with the `.app`, the modules, the documentation and the README.
 
 If you are changing macOS code, assume the check is necessary and the CI run is the proof.
 
@@ -181,11 +186,19 @@ download it came from:
 
 The same build is at the end of the Modules window's title
 (`Automation Platform — Modules (0.1.0, build 6c95c8b)`) and near the top of the package's
-`README.txt`. It is the commit in the download's name, which
-`package-macos.sh` writes into `build-info.txt` beside the `.app` (`--commit`, or this
-checkout's commit when left out). When the CI job reused an earlier run's executable because
-no Rust had changed, the log adds `(binary built from <commit>)`. A binary run straight from
-`target/` has no `build-info.txt` and names the commit it was compiled from, with `-modified`
-when the working tree had uncommitted changes. A packaged `.app` that cannot find the file
-says so on the next line: it has been moved away from its folder, or macOS is running a
-translocated copy, and the build named is then only the executable's own.
+`README.txt`, where `package-macos.sh` writes it (`--commit`, or this checkout's commit when
+left out). It is the commit the executable was compiled from, with `-modified` when the working
+tree had uncommitted changes, and in a download it is the commit in the download's name.
+
+When the CI job reused an earlier run's executable because no Rust had changed, the executable
+knows only that earlier commit. The job then writes a `build-info.txt` beside the `.app` naming
+the download's commit, the log gives that one and adds `(binary built from <commit>)`, and the
+README's `Build:` line says both. No other package has the file. A reused `.app` that cannot
+find it, because it has been moved away from its folder or macOS is running a translocated copy
+(the log's `translocated` line says so), names only its executable's commit.
+
+The application uses the file only when its `binary=` line names the executable beside it. One
+left in the folder by an older download that a newer one was unpacked over (to keep
+`settings.toml` and the log) names another executable, or none, and would otherwise pass the new
+build off as the old one; it is not used, the log says so on the line after the build, and the
+build named is the executable's own.

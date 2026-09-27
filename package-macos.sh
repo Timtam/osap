@@ -8,8 +8,8 @@
 #   ./package-macos.sh --universal     join an Intel and an Apple-silicon build into one
 #                                      binary (both must already exist — see below)
 #   ./package-macos.sh --commit 6c95c8b
-#                                      name the build for that commit (CI passes the run's
-#                                      own); left out, it is this checkout's, marked
+#                                      name the build in the README for that commit (CI passes
+#                                      the run's own); left out, it is this checkout's, marked
 #                                      -modified when the working tree has uncommitted changes
 #
 # This has to run ON a Mac (it compiles). Nobody on the project owns one, so it is also run
@@ -36,17 +36,21 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# The build this package is, so that a report can be matched to the download it came from. The
-# application reads it from build-info.txt (written below) into the header every session writes
-# to its log, and into the title of its Modules window; see crates/host/src/build_info.rs.
-# Asked the same way the executable asks when it is compiled (crates/app/src/main.rs), so a
-# package made here from a clean checkout names the same build as the executable inside it.
+# The build this package is, so that a report can be matched to the download it came from. It
+# goes into the README's `Build:` line below. The application names its build itself, in the
+# header every session writes to its log and in the title of its Modules window: the commit
+# compiled into the executable (crates/app/src/main.rs, crates/host/src/build_info.rs). No
+# build-info.txt is written beside the .app, because this script packages the executable of
+# the checkout it runs in, so the two are the same build. The CI job writes one only when it
+# reuses an earlier run's executable (.github/workflows/macos-build.yml).
+# Asked the same way the executable asks when it is compiled, so a package made here from a
+# clean checkout names the same build in its README as the executable inside it does.
 if [ -z "$commit" ]; then
   commit="$(git -C "$root" describe --always --abbrev=7 --dirty=-modified --exclude='*' 2>/dev/null || true)"
   [ -n "$commit" ] || commit="unknown"
 fi
-# It goes into a file the application reads and into a window title, and the application
-# ignores anything else, so a bad value is refused here rather than shipped unread.
+# It is what a tester quotes from the README, so a value no build could have is refused here
+# rather than shipped.
 case "$commit" in
   ''|*[!A-Za-z0-9._+-]*)
     echo "--commit '$commit' is not a commit: letters, digits and -._+ only" >&2; exit 2 ;;
@@ -203,12 +207,21 @@ if [ -d "$keep/modules" ]; then
 fi
 rm -rf "$keep"
 
-# The documentation, if it has been built. Skipped rather than fatal: a tester without docs
-# still has a working application.
-if [ -d "$root/docs-site/build" ]; then
-  cp -R "$root/docs-site/build" "$stage/docs"
-  echo "Docs copied. NOTE: the offline rewrite (docs-offline.ps1) has no shell port yet —"
-  echo "  these pages still contain absolute /osap/ links."
+# The documentation, made to work from the folder rather than from a web server, by the same
+# conversion package.ps1 runs — see docs-offline.ps1 for why that is a conversion and not a
+# copy. It is a PowerShell script, run here by PowerShell 7 (`pwsh`), which GitHub's macOS
+# runners have and a Mac of your own gets from Microsoft's installer package. Skipped rather
+# than fatal when the site has never been built or there is no pwsh: a tester without docs
+# still has a working application, and failing the whole package over them would be the wrong
+# trade. A copy of the site as it is would not do instead: its links point at a server.
+if [ ! -d "$root/docs-site/build" ]; then
+  echo "No built docs at docs-site/build — packaging without them."
+  echo "  Build them once with:  (cd docs-site && npm ci && npm run build)"
+elif ! command -v pwsh >/dev/null 2>&1; then
+  echo "No PowerShell 7 (pwsh) to make the built docs work from a folder — packaging without them."
+  echo "  Microsoft's installer package for macOS: https://aka.ms/powershell-release?tag=stable"
+else
+  pwsh -NoProfile -NonInteractive -File "$root/docs-offline.ps1" -Out "$stage/docs"
 fi
 
 # Signing, and why it decides whether testing is bearable.
@@ -251,15 +264,15 @@ if command -v codesign >/dev/null 2>&1; then
   codesign -dv --verbose=2 "$app" 2>&1 | grep -E "^(Authority|Signature)=" | sed 's/^/  /' || true
 fi
 
-# Beside the .app, where the application looks for it, and NOT inside it: the CI job writes
-# this file again when it reuses an earlier build's executable, and a file added to the bundle
-# after signing would break the signature. Re-signing would give an ad-hoc signed app a new
-# identity, and with it cost the tester every permission he has granted.
-cat > "$stage/build-info.txt" <<INFO
-# The commit this package was made from. Automation Platform reads it at start and names it
-# in every session's header in automation-platform.log and in the title of its Modules window.
-commit=$commit
-INFO
+# The README's line about the documentation, only when there is documentation: a package made
+# without it would otherwise point a tester at a file that does not exist.
+docs_note=""
+if [ -f "$stage/docs/index.html" ]; then
+  docs_note="The documentation is in docs/index.html — open it in a browser. It works from
+this folder; no internet connection and no server are needed.
+
+"
+fi
 
 # The build comes first, because it is what a report has to name. The "Build:" line is also
 # rewritten by the CI job when it reuses an executable (.github/workflows/macos-build.yml), so
@@ -320,7 +333,7 @@ behave as if the application is broken, so please do them all.
 
 Speech goes through the system voice, or through VoiceOver if it is running.
 
-$shipped module(s) included.
+$docs_note$shipped module(s) included.
 TXT
 
 label="${version:-$(date +%Y-%m-%d)}"

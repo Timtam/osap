@@ -4,9 +4,9 @@
 #   .\package.ps1 -Version 0.3.0  name the zip for that version instead of the date
 #   .\package.ps1 -NoZip          stage only, for looking at what would ship
 #   .\package.ps1 -NoBuild        package whatever is already in target\release
-#   .\package.ps1 -Commit 6c95c8b name the build for that commit (CI passes the run's own);
-#                                 left out, it is this checkout's, marked -modified when the
-#                                 working tree has uncommitted changes
+#   .\package.ps1 -Commit 6c95c8b name the build in the README for that commit (CI passes the
+#                                 run's own); left out, it is this checkout's, marked -modified
+#                                 when the working tree has uncommitted changes
 #
 # The layout is the one the app already expects when it is started with no arguments: it
 # looks for `modules` NEXT TO THE EXECUTABLE (registry::modules_dir), so a tester runs the
@@ -25,12 +25,15 @@ $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 $rel = Join-Path $root "target\release"
 
-# The build this package is, so that a report can be matched to the download it came from. The
-# application reads it from build-info.txt (written below) into the header every session writes
-# to its log, and into the title of its Modules window; see crates/host/src/build_info.rs.
+# The build this package is, so that a report can be matched to the download it came from. It
+# goes into the README's `Build:` line below. The application names its build itself, in the
+# header every session writes to its log and in the title of its Modules window: the commit
+# compiled into the executable (crates/app/src/main.rs, crates/host/src/build_info.rs). No
+# build-info.txt is written beside it, because this script packages the executable of the
+# checkout it runs in, so the two are the same build.
 #
-# Asked the same way the executable asks when it is compiled (crates/app/src/main.rs), so a
-# package made here from a clean checkout names the same build as the executable inside it.
+# Asked the same way the executable asks when it is compiled, so a package made here from a
+# clean checkout names the same build in its README as the executable inside it does.
 if (-not $Commit) {
   try { $Commit = (git -C $root describe --always --abbrev=7 --dirty=-modified '--exclude=*' 2>$null) } catch { $Commit = $null }
   if (-not $Commit) { $Commit = "unknown" }
@@ -38,8 +41,8 @@ if (-not $Commit) {
   $global:LASTEXITCODE = 0
 }
 $Commit = "$Commit".Trim()
-# It goes into a file the application reads and into a window title, and the application
-# ignores anything else, so a bad value is refused here rather than shipped unread.
+# It is what a tester quotes from the README, so a value no build could have is refused here
+# rather than shipped.
 if ($Commit -notmatch '^[A-Za-z0-9._+-]{1,64}$') {
   throw "-Commit '$Commit' is not a commit: letters, digits and -._+ only, at most 64"
 }
@@ -170,14 +173,6 @@ whose licences are in the prism\ folder beside this file — fmt 12.2.1, highway
 simdutf 9.0.0, concurrentqueue, dr_wav, moderncom, djinni, NVGT, and NV Access's NVDA
 controller RPC definitions — and its own NOTICE is in prism-NOTICE.txt.
 "@ | Set-Content (Join-Path $licences "README.txt") -Encoding UTF8
-
-# Beside the executable, where the application looks for it. Plain ASCII, so no editor or
-# PowerShell version adds a byte-order mark it would have to skip (it skips one anyway).
-@"
-# The commit this package was made from. Automation Platform reads it at start and names it
-# in every session's header in automation-platform.log and in the title of its Modules window.
-commit=$Commit
-"@ | Set-Content (Join-Path $stage "build-info.txt") -Encoding ascii
 
 # A note for whoever unpacks it. Short on purpose: the two things that actually go wrong are
 # extracting somewhere unwritable and expecting a console window. The build comes first,

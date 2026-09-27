@@ -31,7 +31,7 @@ on:
         required: true
         type: string
       commit:
-        description: 'the seven-character commit in that name, which the package records as its build'
+        description: 'the seven-character commit in that name, which the package README names as its build'
         required: true
         type: string
 
@@ -110,9 +110,10 @@ jobs:
           if (-not (Select-String -Path $log -Pattern 'HEADLESS TIMER: fired' -Quiet)) {
             throw 'host.timer did not fire in headless mode — the event loop is not ticking'
           }
-          # Which build the executable says it is. target/release has no build-info.txt, so
-          # this is the commit compiled into it (crates/app/src/main.rs), and it should be this
-          # run's, unmodified. A warning rather than a failure: a wrong build number is worth
+          # Which build the executable says it is: the commit compiled into it
+          # (crates/app/src/main.rs), since neither target/release nor the package has a
+          # build-info.txt beside it. It is the build a tester's log will name, and it should be
+          # this run's, unmodified. A warning rather than a failure: a wrong build number is worth
           # seeing, not worth the download. `-modified` would mean something in the checkout
           # had changed before the executable was compiled; the status below says what.
           $header = Select-String -Path $log -Pattern '\[host\] version' | Select-Object -Last 1
@@ -235,7 +236,10 @@ jobs:
       # tester with no internet still has it. `package.ps1` packages without it rather than
       # failing — a tester without docs still has a working application — but an artifact that
       # quietly lacks what its own README points at is not what should leave here.
-      - uses: actions/setup-node@v4
+      #
+      # The macOS job builds the same site the same way and runs the same conversion, so both
+      # downloads carry the same pages.
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -247,27 +251,35 @@ jobs:
           npm ci
           npm run build
 
-      # With this run's commit as the build, which package.ps1 writes into build-info.txt beside
-      # the executable and into the README. Checked, because the download's name promises it.
+      # With this run's commit as the build, which package.ps1 writes into the README's `Build:`
+      # line. The executable names the commit compiled into it, which "The capability gate still
+      # holds" above compared with this one, and the package carries no build-info.txt to say
+      # otherwise. Checked, because the download's name promises it.
       - name: Package
         env:
           COMMIT: ${{ inputs.commit }}
         run: |
           ./package.ps1 -NoBuild -Commit $env:COMMIT
-          if (-not (Select-String -Path dist/AutomationPlatform/build-info.txt -Pattern "^commit=$env:COMMIT$" -Quiet)) {
-            throw "build-info.txt in the package does not say commit=$env:COMMIT"
+          if (-not (Select-String -Path dist/AutomationPlatform/README.txt -Pattern "^Build: $env:COMMIT$" -Quiet)) {
+            throw "README.txt in the package does not say Build: $env:COMMIT"
           }
 
       # What a tester downloads. The same staging `package.ps1` produces locally, so a problem
       # in it shows up here rather than in somebody's hands.
       #
       # Named for the version and the commit, e.g. automation-platform-0.1.0-865c4a3-windows,
-      # beside the run's -macos download of the same name.
+      # beside the run's -macos.zip download of the same name.
+      #
+      # The folder, which GitHub zips on the way up: one zip, with the folder's contents at its
+      # top, and Explorer's "Extract all" puts them into a folder named after the download.
+      # Nothing in it needs what GitHub's zip loses and the macOS download has to keep (Unix
+      # permissions, a signed bundle's extended attributes), so it goes up as the folder rather
+      # than as a zip made here and uploaded as it is, which is what the macOS job does.
       #
       # `overwrite`, because the name belongs to the run, not to the attempt: re-running this job
       # would otherwise stop right here on the download the first attempt already left in the
       # run, having built everything again for nothing.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.artifact-prefix }}-windows
           path: dist/AutomationPlatform

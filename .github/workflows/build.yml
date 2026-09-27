@@ -47,6 +47,9 @@ on:
       - 'Cargo.lock'
       - 'package.ps1'
       - 'package-macos.sh'
+      # Both packaging scripts run it to put the documentation into the downloads, so it is
+      # watched like them.
+      - 'docs-offline.ps1'
       - '.github/workflows/build.yml'
       - '.github/workflows/windows-build.yml'
       - '.github/workflows/macos-build.yml'
@@ -70,8 +73,9 @@ permissions:
 
 jobs:
   # The name both downloads carry: automation-platform-<version>-<commit>-windows and
-  # automation-platform-<version>-<commit>-macos. Worked out once, here, so the two cannot
-  # disagree, and handed to each platform as the part before its suffix.
+  # automation-platform-<version>-<commit>-macos.zip (the macOS download is the zip file itself,
+  # see its upload in macos-build.yml, and is named after it). Worked out once, here, so the two
+  # cannot disagree, and handed to each platform as the part before its suffix.
   #
   # The version is the application's, from crates/app/Cargo.toml, the package that builds the
   # executable. Neither packaging script reads a version (both take one as an argument and fall
@@ -85,10 +89,12 @@ jobs:
   # `git rev-parse --short` would choose, so the name has one shape from run to run.
   #
   # The same seven characters are also handed over on their own, as `commit`: both packaging
-  # scripts write them into the package (build-info.txt), and the application names that build
-  # in its log header and its window title, so a report can be matched to the download it came
-  # from. They matter most on macOS, where the job may reuse an earlier run's executable; the
-  # executable then knows only its own commit, and the package is what says it is this one.
+  # scripts write them into the package's README as its `Build:` line, and the application
+  # names the same build in its log header and its window title, from the commit compiled into
+  # it, so a report can be matched to the download it came from. They matter most on macOS,
+  # where the job may reuse an earlier run's executable; the executable then knows only its own
+  # commit, and the job writes this one into a build-info.txt beside the .app, which the
+  # application names instead.
   version:
     name: Name the downloads
     runs-on: ubuntu-latest
@@ -143,7 +149,7 @@ jobs:
           prefix="automation-platform-$app-$commit"
           echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
-          echo "this run's downloads: $prefix-windows and $prefix-macos, both build $commit"
+          echo "this run's downloads: $prefix-windows and $prefix-macos.zip, both build $commit"
 
   windows:
     name: Windows

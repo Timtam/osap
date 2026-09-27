@@ -3096,6 +3096,9 @@ those expire. Nothing triggers the two files on their own any more.
 
 ## Build numbers (2026-09-21)
 
+Since 2026-09-27 only a macOS package whose executable CI reused carries `build-info.txt`;
+see "The downloads (2026-09-27)" below.
+
 The executable carries the commit it was compiled from (`git-version`, in `crates/app`), and
 each package carries the commit it was made from in `build-info.txt` beside the executable or
 the `.app`, written by `package.ps1 -Commit` / `package-macos.sh --commit`, which CI passes from
@@ -3107,7 +3110,8 @@ scratch folder); these only a real run can show:
 - [ ] The Windows job's capability step prints `log header: ... build <this run's commit>` with
       no warning. A `-modified` warning there means the runner's checkout changed before the
       compile; the `git status` below it says which file.
-- [ ] The macOS job's module load prints the same, read from `build-info.txt` beside the `.app`.
+- [ ] The macOS job's module load prints the same: the executable's own commit when the job
+      built it, and the one `build-info.txt` beside the `.app` names when it reused one.
 - [ ] The first Luau-only push after this: the reuse step says "the package is build X, its
       executable was built from Y", the log header says `build X (binary built from Y)`, and
       the downloaded README's `Build:` line says both.
@@ -4673,6 +4677,77 @@ decision, hooked into one interface the overlay runtime provides.
       Likewise `verifyMenuOpened` says "Snapshot menu did not open" from one accessibility check
       350 ms after the click: an announcement, not menu state, but a fixed delay deciding what
       is said; phase 2's picture test is the better witness for it too.
+
+## The downloads (2026-09-27)
+
+Three things about a Build run's downloads, from the maintainer's first look at them:
+
+- [x] **The macOS download had no documentation.** The macOS job now builds the site as the
+      Windows one does, and `package-macos.sh` runs `docs-offline.ps1` under the runner's
+      PowerShell 7, the conversion `package.ps1` runs. The script no longer assumes Windows: it
+      makes `-Out` absolute and writes its paths with forward slashes (its output on Windows is
+      byte for byte what it was, under pwsh 7 and under 5.1). A reused executable's package gets
+      this commit's documentation as it gets this commit's modules ("The documentation, into the
+      reused package"). "Zip the download" refuses a package without `docs/index.html`.
+- [x] **The macOS download was a zip inside a zip**, because GitHub zipped the uploaded zip
+      again, and Archive Utility did not unpack the inner one properly. The zip `ditto` makes is
+      now the artifact itself: `upload-artifact@v7` with `archive: false`, named
+      `automation-platform-<version>-<commit>-macos.zip` (and `name` set to the same, because
+      `overwrite` deletes by `name`, not by the file). `newer-macos` fetches it with
+      `download-artifact@v8` and `skip-decompress: true`: without that, v8 unzips anything served
+      as `application/zip`, which this is, with an unzip that keeps no permissions. The reuse step
+      fetches it through the REST API (`gh api .../artifacts/<id>/zip`) rather than
+      `gh run download`, which unzips with its own unzip, and builds past a download of the older
+      `-macos` kind. The Windows download stays the folder that GitHub zips: one zip already.
+- [x] **`build-info.txt` is gone from every package but a macOS one whose executable CI reused.**
+      The executable knows its own commit, and both packaging scripts package the executable of
+      their own checkout. The Windows job checks the README's `Build:` line instead of the file.
+      The reuse step takes a fresh package's executable commit from the run that made it (checked
+      against that package's README `Build:` line) and a reused package's from `binary=`, and a
+      re-run that reuses its own first attempt now leaves no file. The log header's "no
+      build-info.txt beside the .app" line is gone: every fresh macOS package would have said it.
+- [x] **A `build-info.txt` left over from an older download is not used.** Unpacking a new
+      download over an older folder, to keep `settings.toml` and the log, used to replace the
+      file; now that fresh packages have none, the old one stays, and it would have named the
+      old build in the log header and the Modules window's title. The application takes the file
+      only when its `binary=` line (which the reuse step always writes) names the executable's
+      own commit, `-modified` or not; otherwise the header names the executable's commit and the
+      next line says the file is left over (`build_info::read`, unit-tested).
+- [x] **A re-run that finds its own executable in a later run's package** (run B reused run
+      A's executable, then "Re-run all jobs" on A) removed B's file but left B's README naming
+      build B. The reuse step now sets the README's `Build:` line back to this run's commit in
+      that case too.
+
+Checked here: the workflows parse and every `run:` block passes `bash -n` or the PowerShell
+parser; `check-macos.ps1`; the `build_info` and `portable` unit tests, compiled on their own;
+`package.ps1 -NoBuild -NoZip` with placeholder binaries (no build-info.txt, docs present, the new
+README check passes and fails for a wrong commit); `package-macos.sh --no-build --no-zip` on
+Linux with and without a `pwsh` (docs and the README's line about them, or neither); the reuse
+step, extracted from the workflow and run under `bash -e` with gh and ditto stood in for, through
+seven cases (a fresh earlier package, a reused one, a README naming another commit, a re-run of
+itself, the older `-macos` kind, a failed download, none at all); its artifact query through
+gh's own jq against the real runs. Only a run shows:
+
+- [ ] The first run with this change builds the Mac executable: the newest earlier macOS
+      download is of the older `-macos` kind, and the reuse step says so and builds. "Build
+      the documentation" passes on the Mac, the Package step prints `Docs: N page(s), N
+      rewritten` from pwsh, and "Zip the download" lists `docs` and no `build-info.txt`, then
+      writes `automation-platform-<version>-<commit>-macos.zip`.
+- [ ] The run's page lists that file as the macOS artifact, and downloading it in a browser
+      gives the zip itself: a double-click in Finder makes the `AutomationPlatform` folder, with
+      the `.app`, `docs/index.html`, `modules` and `README.txt`, and nothing else zipped inside.
+- [ ] `newer-macos` on 14 and 26: the download step reports a raw file (not an extraction), the
+      unpack step finds the executable runnable, no inner zip, the documentation, and the
+      signature verifying (a warning otherwise), and the log header names this run's build.
+- [ ] Windows: the Package step's README check passes, the download has no `build-info.txt`,
+      and the capability step's log header still names this run's commit.
+- [ ] The first Luau-only push after that reuses: "reused the build from …", "The documentation,
+      into the reused package" runs, "Zip the download" lists `build-info.txt`, `newer-macos`'s
+      "Unpack it the way a tester does" prints it with `commit=` and `binary=`, and the
+      downloaded README's `Build:` line and the log header say both commits, with no line after
+      the header saying the file was not used.
+- [ ] "Re-run all jobs" on a run: the macOS upload replaces the first attempt's file (overwrite
+      by the file's name), and `newer-macos` downloads the new one.
 
 ## Dev tools
 
