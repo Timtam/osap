@@ -42,6 +42,10 @@
 //! `SetForegroundWindow` most likely does for another process's window, not measured — unless a
 //! scenario says it lands at once; `list()` lists titled windows only; and a `pollMatch` poll can
 //! be run (`T.poll`), which turns nothing over either.
+//!
+//! The same scripted host carries the plug-in's own focus ring (`host.element.focusStep`) and
+//! `host.ocr.read`, answered when a scenario says so, for the Tab pass-through's scenarios in
+//! `overlay_passthrough_tests.rs`, which run through `run_with` with helpers of their own.
 
 use mlua::{Function, Lua, Table};
 
@@ -132,6 +136,13 @@ local S = {
   epoch = 0,
   every = nil,
   after = {},
+  -- The Tab pass-through (overlay_passthrough_tests.rs): the plug-in's own focus ring as
+  -- host.element.focusStep walks it, and every host.ocr.read asked.
+  ring = nil,       -- { { name, bounds? }, … }: the stops focusStep steps through
+  ringAt = 0,       -- the stop the plug-in's keyboard focus is on; 0 before the first step
+  focusSteps = 0,   -- host.element.focusStep calls
+  reads = {},       -- { region, key, cb, asked, answered } per host.ocr.read, in order
+  readRaises = nil, -- a message host.ocr.read raises with, when set
 }
 T.S = S
 
@@ -227,6 +238,54 @@ T.host = strict("host", {
       S.finds += 1
       if type(S.find) == "function" then return S.find(id) end
       return S.find
+    end,
+    -- Moves the plug-in's keyboard focus one stop along S.ring, wrapping at the ends as both
+    -- backends do, and says where it landed: nil with no ring. From outside the ring, forwards
+    -- is the first stop and backwards the last. `bounds` is handed over as a table of its own,
+    -- and left out for a stop that has none, as the host leaves it out.
+    focusStep = function(id, dir)
+      assert(id == S.origin.id, "focusStep asks about the overlay's own window")
+      S.focusSteps += 1
+      local ring = S.ring
+      if not ring or #ring == 0 then return nil end
+      local n = #ring
+      if S.ringAt == 0 then
+        S.ringAt = dir >= 0 and 1 or n
+      elseif dir >= 0 then
+        S.ringAt = S.ringAt % n + 1
+      else
+        S.ringAt = (S.ringAt - 2) % n + 1
+      end
+      local stop = ring[S.ringAt]
+      local b = stop.bounds
+      return { name = stop.name, ctype = stop.ctype or 50000, index = S.ringAt, count = n,
+        bounds = b and { x = b.x, y = b.y, w = b.w, h = b.h } or nil }
+    end,
+  }),
+  -- host.ocr.read, asked and answered later (T.answer in overlay_passthrough_tests.rs). Its
+  -- arguments are checked as the host checks them — corners as whole numbers, not empty or
+  -- turned around; only lang, key and snapshot; a key that is a non-empty string — so a call the
+  -- host would refuse is refused here too.
+  ocr = strict("host.ocr", {
+    read = function(what, opts, cb)
+      if type(opts) == "function" then cb, opts = opts, nil end
+      assert(type(what) == "table" and #what == 4, "host.ocr.read: the scripted host reads corners { x1, y1, x2, y2 }")
+      for k = 1, 4 do
+        local v = what[k]
+        assert(type(v) == "number" and v == math.floor(v),
+          "host.ocr.read: corner " .. k .. " is not a whole number: " .. tostring(v))
+      end
+      assert(what[3] > what[1] and what[4] > what[2], "host.ocr.read: corners empty or turned around")
+      for k in pairs(opts or {}) do
+        assert(k == "key" or k == "lang" or k == "snapshot",
+          "host.ocr.read: an option other than lang, key and snapshot: " .. tostring(k))
+      end
+      local key = opts and opts.key
+      assert(key == nil or (type(key) == "string" and key ~= ""), "host.ocr.read: key is not a non-empty string")
+      assert(type(cb) == "function", "host.ocr.read: cb is not a function")
+      if S.readRaises then error(S.readRaises, 0) end
+      S.reads[#S.reads + 1] = { region = { what[1], what[2], what[3], what[4] }, key = key, cb = cb,
+        asked = S.now, answered = false }
     end,
   }),
   window = strict("host.window", {
@@ -595,6 +654,12 @@ fn run_mac(scenario: &str) {
 }
 
 fn run_on(os: &str, scenario: &str) {
+    run_with(os, "", scenario)
+}
+
+/// `run_on`, with `prelude` run first as a chunk of its own, with `T` already global: the
+/// helpers a sibling test file adds to the harness (`overlay_passthrough_tests.rs`).
+pub(crate) fn run_with(os: &str, prelude: &str, scenario: &str) {
     let lua = Lua::new();
     let t: Table = lua.load(HARNESS).set_name("harness").eval().expect("the harness loads");
     let host: Table = t.get("host").unwrap();
@@ -608,6 +673,9 @@ fn run_on(os: &str, scenario: &str) {
     let o: Table = wrapped.call(host).expect("the runtime loads against the scripted host");
     t.set("O", o).unwrap();
     lua.globals().set("T", t).unwrap();
+    if let Err(e) = lua.load(prelude).set_name("prelude").exec() {
+        panic!("{e}");
+    }
     if let Err(e) = lua.load(scenario).set_name("scenario").exec() {
         panic!("{e}");
     }

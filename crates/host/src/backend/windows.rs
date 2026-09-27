@@ -1163,7 +1163,7 @@ impl Backend for WindowsBackend {
         super::uia::element_class_nav_point(hwnd, class_substr, ctype, child, sibling)
     }
 
-    fn element_focus_step(&self, hwnd: isize, direction: i32) -> Option<(String, i32, i32, i32)> {
+    fn element_focus_step(&self, hwnd: isize, direction: i32) -> Option<super::FocusStep> {
         super::uia::element_focus_step(hwnd, direction)
     }
 

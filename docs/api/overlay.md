@@ -434,7 +434,7 @@ ov:addHotspotToggle({
 
 ## O\:focusNext() {#o-focusnext}
 
-Moves focus to the next control (wrapping) and speaks it, moving the mouse onto OCR controls if `hoverToRead` is set. No-op when there are no controls. Returns nothing.
+Moves focus to the next control (wrapping) and speaks it, moving the mouse onto OCR controls if `hoverToRead` is set. No-op when there are no controls. Returns nothing. On a [pass-through](#o-addpassthrough) stop it steps through the plug-in's own controls instead, as Tab does there, and `focusPrev` back.
 
 Tab is already bound to this by the runtime, so a module calls it only to give the ring a second, more natural key.
 
@@ -447,7 +447,7 @@ end)
 
 ## O\:focusPrev() {#o-focusprev}
 
-Moves focus to the previous control (wrapping) and speaks it. No-op when empty. Returns nothing.
+Moves focus to the previous control (wrapping) and speaks it. No-op when empty. Returns nothing. On a [pass-through](#o-addpassthrough) stop whose walk has gone into the plug-in it steps one element back, as Shift+Tab does there — and on the element the walk went in on, back out onto the stop.
 
 ```luau
 -- The mirror of the above, and worth having for the wrap: with nothing focused yet this
@@ -457,6 +457,62 @@ host.hotkey.register("Alt+Left", function()
   if ov.active then ov:focusPrev() end
 end)
 ```
+
+## O\:addPassThrough(opts) {#o-addpassthrough}
+
+**Signature:** `O:addPassThrough(opts: { label: string?, when: ((overlay) -> boolean)?, readUnnamed: boolean? }?) -> Control` · `O:enableUiaPassThrough(opts?) -> Overlay`
+
+Appends a stop that hands Tab to the plug-in's own focusable elements, for a plug-in window that does not move focus on Tab by itself. In Kontakt standalone it is the only way into Kontakt's native controls, and Kontakt's standalone overlay ends with it, as "Kontakt controls". Like every control it is added before the overlay binds; afterwards it raises.
+
+- `label` — what the stop is called; `"Plugin controls"` when left out.
+- `when` — as for every control: the stop is in the ring only while it returns exactly `true`.
+- `readUnnamed` — read a stop that has no name off the screen, below. On unless it is `false`; `nil` and anything else leave it on.
+
+Returns the control table, `{ kind = "passthrough", label, when, readUnnamed }`. `O:enableUiaPassThrough(opts)` is the old spelling: it adds the same control with the same `opts`, and returns the overlay.
+
+**Tab and Shift+Tab.** Arriving on the stop says `"<label>, Tab to step through them"`. Tab from there moves the plug-in's own keyboard focus one element on with [`host.element.focusStep`](./element.md#host-element-focusstep), and the screen reader announces the element from the focus event; each further Tab moves on one element, and Shift+Tab one back. Once every element has been visited, Tab goes on to the overlay's next control without touching the plug-in's focus; Shift+Tab on the element Tab went in on comes back out onto the stop; Shift+Tab on the stop itself goes back through the overlay's controls, never into the plug-in. Arriving on the stop again starts the walk afresh. How a walk is counted — in steps, against a ring that may change size as it is walked — is under [`host.element.focusStep`](./element.md#host-element-focusstep). While the stop has the focus, Space and Return are not the overlay's: they reach the plug-in's element, which is where a check box is ticked or a list opened.
+
+**What is spoken.** A stop with a name is the screen reader's: the overlay says nothing about it. A stop whose name has no visible character — empty, or made only of white space, control characters and characters that show nothing, such as a no-break space, a zero-width space or a byte-order mark — is announced by the screen reader as its role and little more, so with `readUnnamed` the overlay reads what the plug-in drew there:
+
+- The rectangle `focusStep` gives for the element (`bounds`), widened to whole numbers — the near edges down, the far edges up — and cut to the rectangle of the overlay's origin, the plug-in window (its `bounds`, see [`O:origin()`](#o-origin)): what lies beyond is another window's. Nothing is read when there is no rectangle, when it lies outside the window, or when what is left is under 2 across or down. It is not cut to a scroll view: an element scrolled out of its list's view is read where it lies (see [`host.element.focusStep`](./element.md#host-element-focusstep)).
+- It is read with [`host.ocr.read`](./ocr.md#host-ocr-read), in the user's language. The picture is taken at the step, normally within one screen frame of it, so it shows what the plug-in has drawn by then. The read is made in the VM of the module that owns the overlay (the runtime is a `code_module`), so it is that module's: it counts toward the module's 16 reads waiting or running at once, and the module's next `host.input.*` or `host.window.focus` call waits up to 50 ms for its picture, as after any read. Its `key` is one per overlay, so a later step's read replaces one that has not started recognising yet; the keys are `"com.platform.overlay passthrough 1"`, `"… 2"` and so on, one per overlay in the order they first read, and a module does not use keys that begin `"com.platform.overlay "` for its own reads.
+- When the answer is text, rows with nothing but white space are skipped, and the first **two** of the rest, top to bottom, each trimmed and joined with `", "`, are spoken with `interrupt = false`: the line does not cut off what is being said. Whether it then waits for the screen reader's own announcement of the element or is said beside it is the speech path's — see the platform sections. Further rows are dropped. Nothing is spoken for a region that is blank, one the recogniser read nothing in or only white space, or a read that failed.
+- It is spoken only while nothing the overlay can see has moved on: the answer is not superseded (`newer`); the overlay is still active, on the same window, and has not left the front since, not even to come back to that window; the stop still has the overlay's focus and the keyboard is still in the plug-in; and no further Tab or Shift+Tab has reached the stop since the step. There is no deadline: an answer is spoken whenever it comes, as long as all of that holds, and dropped when any of it does not.
+- Two things the overlay does not see. The checks are made when the answer arrives, not when the line is heard: a line queued behind a long announcement is said when that ends, after a Tab that came in between, and nothing takes it back. And a key that goes to the plug-in's element itself — Space, Return, an arrow key — never reaches the overlay, so a reading taken before such a key can be spoken after it, and says what the element showed before the key.
+
+**Cost.** One OCR read per unnamed stop landed on; none for a stop with a name, or with `readUnnamed = false`. On the event loop it costs queueing the read and, when the answer comes, the checks above. Those resolve the overlay's origin afresh, because the answer's arrival turns the [epoch](./timer.md#host-epoch) over: for a standalone overlay that is one [`host.window.active`](./window.md#host-window-active) query, which touches no screen; for an embedded one it is the full resolve of the plug-in's control — measured at about 11 ms for Kontakt's in a DAW — unless something else in the same epoch has resolved it already. The capture and the recognition run on the two OCR threads, and a Tab does not wait for them; what they cost is under each platform below. The step itself costs what `focusStep` costs.
+
+**The log.** Every step writes a line — `[passthrough] Synth: Tab -> stop 5 of 12 '', 3 into the lap` — and, with `readUnnamed`, every unnamed stop one more, saying what became of it, with the element's control type (the `ctype` of [`host.element.focusStep`](./element.md#host-element-focusstep)) and the text quoted up to 80 bytes. The lines below are made up, in the real format:
+
+```text
+[passthrough] Synth: stop 5 of 12 (type 50000) has no name; read at 812,240 64x22 in 38 ms: "Init Patch", spoken
+[passthrough] Synth: stop 6 of 12 (type 50033) has no name; read at 812,270 200x90 in 41 ms: "Filter, Cutoff" (2 of 3 rows), not spoken: a later step asked for another read
+[passthrough] Synth: stop 7 of 12 (type 50000) has no name; read at 790,300 30x30 in 25 ms: nothing drawn there
+[passthrough] Synth: stop 8 of 12 (type 50000) has no name and no rectangle; nothing to read
+```
+
+`read at` gives the region read, in screen coordinates, and `in` the time from the step to the answer; `(2 of N rows)` counts the rows that were not blank. After `read at …`, the other endings are `the recogniser read nothing`, `no text (only white space)`, `no text (<status>)` for a status this page does not list, `the read failed (<error>)` and `not recognised, a later step's read replaced it`; and `"…", not spoken:` followed by `a later step asked for another read`, `the overlay is no longer active`, `the overlay left the front and came back since`, `the overlay is on another window now`, `the focus has left the pass-through`, `the keyboard has left the plugin's controls` or `a later key moved on`. With nothing read, the line ends `its rectangle x,y wxh is outside the plugin's window`, `… is under 2 across or down`, or `… is under 2 across or down inside the plugin's window (x,y wxh)` when the window's edge is what left too little — each followed by `, nothing to read` — or `its rectangle x,y wxh could not be read: <error>` when the read was refused at the call.
+
+```luau
+-- Kontakt standalone's header, last stop: Kontakt's own controls, unnamed ones read aloud.
+ov:addPassThrough({ label = "Kontakt controls" })
+
+-- A plug-in whose unnamed elements are images with no text in them: reading them would only
+-- ever say nothing, so leave them to the screen reader.
+ov:addPassThrough({ label = "Synth controls", readUnnamed = false })
+```
+
+### Windows
+
+`bounds` is the element's UI Automation rectangle, read once, right after the focus has landed: a scroll the plug-in animates after that is not in it (see [`host.element.focusStep`](./element.md#host-element-focusstep)). The capture is a fixed ~17 ms screen frame through the standard path, and the recognition 4–6 ms for a small read-out, tens to hundreds of milliseconds for a large region (see [`host.ocr.read`](./ocr.md#host-ocr-read)).
+
+With **Speak through the screen reader** ticked in the Application settings tab, as it is by default, and a screen reader running — NVDA, say — the line goes to the screen reader, without cutting off what it is saying: when its announcement of the element has begun, the line waits behind it. When the answer comes first, which a small element's read can, what becomes of the line once the screen reader handles the focus event is the screen reader's decision. With the box unticked, or no screen reader running, the line goes to the plain voice — a second voice beside the screen reader, which can talk over its announcement (see [`host.speech.output`](./speech.md#host-speech-output)).
+
+### macOS
+
+`bounds` is the element's Accessibility frame as the walk read it, before the focus moved. The recognition is Vision's, with its retry ladder abandoned after 250 ms (see [`host.ocr.read`](./ocr.md#host-ocr-read)).
+
+The line goes to the platform's own voice unless **Speak through VoiceOver** is ticked in the Application settings tab (see [`host.speech.output`](./speech.md#host-speech-output)): through the platform's own voice it is a second voice beside VoiceOver, and can overlap VoiceOver's announcement of the element rather than follow it; through VoiceOver, whether it waits behind that announcement is VoiceOver's decision.
 
 ## O\:activate(index) {#o-activate}
 

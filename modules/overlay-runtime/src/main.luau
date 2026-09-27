@@ -124,6 +124,9 @@ function O.new(label)
       -- differs — i.e. a genuinely NEW window opened — but resumes where the user was
       -- when it's the SAME window regaining focus (Alt+Tab out and back). See _activate.
       _lastActiveId = false,
+      -- How many times the overlay has come to the front: one more on every _activate, so a
+      -- reply asked for in one stay in front can tell it is not in that stay any more.
+      _stay = 0,
       -- Token of the dynamically (re)captured Space key, or false. Space activates the
       -- focused control like Return, but is released while an editable field is focused
       -- so the user can type spaces into it — see _syncSpaceCapture.
@@ -1447,6 +1450,19 @@ local function hintFor(c, state)
   return c.hint[state]
 end
 
+-- Text a recogniser read, made fit for one log line: rows joined with a space, and at most 80
+-- bytes of it, cut on a character, not a byte — a split UTF-8 sequence is not a string the log
+-- binding accepts, and the log line must never be what breaks the announcement. One helper for
+-- every line that quotes a reading (a focused OCR control's `[read]`, an unnamed pass-through
+-- stop's `[passthrough]`), so the two quote alike.
+local function forLog(text)
+  local shown = ((text or ""):gsub("[\r\n]+", " "))
+  if #shown > 80 then
+    shown = shown:sub(1, 80):gsub("[\192-\255][\128-\191]*$", "") .. "…"
+  end
+  return shown
+end
+
 -- `queued` says this announcement was not asked for by a keypress, so it must not cut off
 -- whatever is already being said.
 --
@@ -1484,10 +1500,11 @@ local function speakControl(self, index, moveMouse, withHint, queued)
   end
   -- A pass-through announces that Tab goes INTO the plugin from here, because nothing else
   -- would tell the user that: what follows is the plugin's own focus ring, announced by
-  -- the screen reader rather than by us, and it is not obvious that Tab will come back out
-  -- again at the end. Landing on it also restarts the lap, so entering it, leaving by
-  -- hotkey and coming back walks the whole thing again rather than resuming mid-way — and
-  -- Shift+Tab from here goes back through the overlay, never into the plugin.
+  -- the screen reader rather than by us (bar what an unnamed stop shows, read off the
+  -- screen), and it is not obvious that Tab will come back out again at the end. Landing on
+  -- it also restarts the lap, so entering it, leaving by hotkey and coming back walks the
+  -- whole thing again rather than resuming mid-way — and Shift+Tab from here goes back
+  -- through the overlay, never into the plugin.
   if c.kind == "passthrough" then
     c._net, c._at, c._n, c._leaveOn = nil, nil, nil, nil
     host.speech.output((c.label or "") .. ", Tab to step through them", { interrupt = true })
@@ -1561,12 +1578,7 @@ local function speakControl(self, index, moveMouse, withHint, queued)
     -- Reads here follow a keystroke — a focus step or an activation — never a timer tick, so
     -- one line per read is one line per key. A watcher re-reading the same region at 500 ms
     -- would have to gate this on the text changing, or write two lines a second for nothing.
-    local shown = ((r.text or ""):gsub("[\r\n]+", " "))
-    if #shown > 80 then
-      -- Cut on a character, not a byte: a split UTF-8 sequence is not a string the log
-      -- binding accepts, and the log line must never be what breaks the announcement.
-      shown = shown:sub(1, 80):gsub("[\192-\255][\128-\191]*$", "") .. "…"
-    end
+    local shown = forLog(r.text)
     local words = r.words and #r.words or 0
     host.log.info(string.format(
       "[read] '%s' = \"%s\" (region %s,%s %sx%s, %d ms, %d %s)",
@@ -1755,15 +1767,20 @@ end
 --
 -- As a control: Tab reaches it like any other and announces it; Tab again enters the
 -- plugin's OWN focus ring and walks it (host.element.focusStep, which raises a real focus
--- event, so the screen reader announces each element and we deliberately do not); once
+-- event, so the screen reader announces each element and we do not name it again); once
 -- every stop has been visited, Tab carries on through the rest of the overlay's controls,
 -- and Shift+Tab walks back out the way it came. For a plugin window that does not move
 -- focus on Tab by itself (Kontakt standalone), this is the only way into its native controls.
+--
+-- `readUnnamed` (default on; only `false` turns it off): a stop that publishes no name is
+-- read off the screen, in its own rectangle, and what it shows is spoken without cutting off
+-- what is being said — see readUnnamedStop.
 function Overlay:addPassThrough(opts)
   return add(self, {
     kind = "passthrough",
     label = (opts and opts.label) or "Plugin controls",
     when = opts and opts.when,
+    readUnnamed = not (opts and opts.readUnnamed == false),
   })
 end
 
@@ -1772,6 +1789,206 @@ function Overlay:enableUiaPassThrough(opts)
   assertUnbound(self, "enableUiaPassThrough")
   self:addPassThrough(opts)
   return self
+end
+
+-- The characters a name can be made of and still show nothing, as UTF-8 byte patterns: Luau's
+-- %s knows only ASCII white space, and a toolkit can put any of these where a label was left
+-- blank — a no-break space most often, a zero-width space or a byte-order mark from text that
+-- was pasted in. Each is a lead byte and what follows it, and a lead byte is never the middle
+-- of another character, so no pattern can match inside a visible one.
+local INVISIBLE = {
+  "\194[\160\173]",       -- U+00A0 no-break space, U+00AD soft hyphen
+  "\225\154\128",         -- U+1680 ogham space mark
+  "\225\160\142",         -- U+180E mongolian vowel separator
+  "\226\128[\128-\143]",  -- U+2000–U+200F spaces, zero-width space and joiners, direction marks
+  "\226\128[\168-\175]",  -- U+2028–U+202F separators, direction embeddings, narrow no-break space
+  "\226\129[\159-\164]",  -- U+205F–U+2064 mathematical space, word joiner, invisible operators
+  "\226\129[\166-\175]",  -- U+2066–U+206F direction isolates, deprecated format characters
+  "\227\128\128",         -- U+3000 ideographic space
+  "\239\187\191",         -- U+FEFF zero-width no-break space (a byte-order mark)
+}
+
+-- Whether a name gives the screen reader anything to say. nil, "" and a name of nothing but
+-- white space, control characters and the INVISIBLE ones above do not.
+local function hasVisibleText(s)
+  if type(s) ~= "string" then return false end
+  for _, p in ipairs(INVISIBLE) do s = s:gsub(p, " ") end
+  return s:find("[^%s%c]") ~= nil
+end
+
+local function trim(s)
+  return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+-- How many rows of an unnamed stop's text are spoken. See readUnnamedStop.
+local UNNAMED_ROWS = 2
+
+-- One `host.ocr.read` key per overlay, so a later step's read supersedes an earlier one that has
+-- not been recognised yet. Numbered rather than made from the label, which two overlays of one
+-- module may share. Keys are the module's — this code runs in the VM of the module that owns
+-- the overlay, and a read's key supersedes that module's own reads with the same key — so each
+-- is named after this runtime, where a module's own key will not be: overlay.md reserves them.
+local passThroughKeys = 0
+
+-- A stop in the plugin's own ring that publishes NO NAME, read off the screen and spoken.
+--
+-- The screen reader announces every stop from the focus event, and for a named one that is the
+-- whole announcement: the overlay says nothing over it. A stop without a name, though, is
+-- announced as its role and nothing else. A Mac tester's log of Kontakt 7 standalone
+-- (2026-09-27) had the ring mostly made of those — "[passthrough] Kontakt 7: Tab -> stop 15 of
+-- 29 '', …", with FILE, LIBRARY, VIEW, SHOP, Search, Brand, Sound Type and Character the ones
+-- that had a name — and the verdict was that the ring was unlabelled and not much use. What
+-- such a stop does have is a place: focusStep hands back the landed element's rectangle, and
+-- whatever the plugin drew there — a preset's name, a library's title — is what a sighted user
+-- reads it by. So that rectangle is read, and its text is said after the screen reader's own
+-- announcement, or beside it.
+--
+-- * Off the event loop (host.ocr.read): the Tab returns at once, and the screen reader starts
+--   on the focus while the text is being recognised. The line is QUEUED (interrupt = false),
+--   so it does not cut that announcement off. Whether it then waits for it is the speech
+--   path's: a screen reader that takes the line queues it or not as it does; the Mac's own
+--   voice is a second voice beside VoiceOver, and can overlap it (overlay.md, per platform).
+-- * Cut to the plugin window's rectangle before it is read: an element can reach past the
+--   window (a list row scrolled out of its view is still published), and what is drawn there
+--   is another window's text — announcing that as this stop's would be a plain lie about what
+--   is in front of the user. The cut also keeps a region inside the read's pixel limit, where
+--   a raise would end this Tab's handling half way. Under 2 across or down, nothing is read.
+--   What the cut cannot catch is a row scrolled out of its list's view but still inside the
+--   window: the Mac ring admits such rows (TODO.md, the Mac mini session), and what is drawn
+--   where one lies is another control. Whether that happens, and whether the focus scrolls it into
+--   view first, only the live check can say; the host reports the element's own rectangle.
+-- * The first two rows only, top to bottom: a stop is a control, and a control's text is a
+--   line or two. A large unnamed element — a whole list — reads as many rows as it shows, and
+--   the rest is dropped rather than read out on every step through it.
+-- * Spoken only while nothing the overlay can see has moved on: not superseded by a later read
+--   (`newer`), the overlay still active on the same window and in front without a break since
+--   (`_stay`), the pass-through still focused and still inside the plugin, and no later key on
+--   it since. Two fast Tabs must not have the first stop's text read out while the second is
+--   focused. Nothing here waits on a timer: an answer is taken when it comes, or dropped as no
+--   longer true. What it cannot see: a key that goes to the plugin's element itself (Space,
+--   Return, an arrow on the stop are the plugin's, not the overlay's), and the speech queue —
+--   the checks are made when the answer arrives, and a line queued behind a long announcement
+--   is heard when that ends, after a Tab that came in between. TODO.md has both.
+-- * One `[passthrough]` line per stop read, whatever became of it, so a log says what each
+--   unnamed stop showed and why anything was not said. It gives the stop's control type, so a
+--   log can say which kinds of element have no name and what they read as.
+--
+-- `ctrl` is the overlay's origin the step was made in: the plugin window.
+local function readUnnamedStop(self, c, r, ctrl)
+  local label = tostring(self.label)
+  local head = string.format("[passthrough] %s: stop %d of %d (type %s) has no name", label,
+    r.index, r.count, tostring(r.ctype))
+  local b = r.bounds
+  if type(b) ~= "table" or type(b.x) ~= "number" or type(b.y) ~= "number"
+      or type(b.w) ~= "number" or type(b.h) ~= "number" then
+    host.log.info(head .. " and no rectangle; nothing to read")
+    return
+  end
+  -- Whole numbers covering the element: a point's fraction on a Mac widens the region rather
+  -- than cutting the element's edge off.
+  local x1, y1 = math.floor(b.x), math.floor(b.y)
+  local x2, y2 = math.ceil(b.x + b.w), math.ceil(b.y + b.h)
+  local whole = { x1, y1, x2, y2 }
+  local wb = ctrl.bounds
+  if type(wb) == "table" and type(wb.x) == "number" and type(wb.y) == "number"
+      and type(wb.w) == "number" and type(wb.h) == "number" then
+    x1, y1 = math.max(x1, math.floor(wb.x)), math.max(y1, math.floor(wb.y))
+    x2, y2 = math.min(x2, math.ceil(wb.x + wb.w)), math.min(y2, math.ceil(wb.y + wb.h))
+  end
+  local where = string.format("%d,%d %dx%d", x1, y1, x2 - x1, y2 - y1)
+  if x2 - x1 < 2 or y2 - y1 < 2 then
+    -- The element's own rectangle, and — when the window's edge is what made it too small — the
+    -- part of it inside the window, so the line does not call a 120-wide rectangle under 2.
+    local cut = x1 ~= whole[1] or y1 ~= whole[2] or x2 ~= whole[3] or y2 ~= whole[4]
+    local why
+    if x2 <= x1 or y2 <= y1 then
+      why = "outside the plugin's window"
+    elseif cut then
+      why = "under 2 across or down inside the plugin's window (" .. where .. ")"
+    else
+      why = "under 2 across or down"
+    end
+    host.log.info(string.format("%s; its rectangle %s,%s %sx%s is %s, nothing to read", head,
+      tostring(b.x), tostring(b.y), tostring(b.w), tostring(b.h), why))
+    return
+  end
+  if not self._passThroughKey then
+    passThroughKeys += 1
+    self._passThroughKey = "com.platform.overlay passthrough " .. passThroughKeys
+  end
+  local seq, at, pinned, stay = c._seq, self.focus, ctrl.id, self._stay
+  local t0 = host.now and host.now() or 0
+  local ok, err = pcall(host.ocr.read, { x1, y1, x2, y2 }, { key = self._passThroughKey }, function(reading)
+    local ms = (host.now and host.now() or 0) - t0
+    local function note(what)
+      host.log.info(string.format("%s; read at %s in %d ms: %s", head, where, ms, what))
+    end
+    if reading.status == "stale" then
+      note("not recognised, a later step's read replaced it")
+      return
+    end
+    if reading.status == "failed" then
+      note("the read failed (" .. tostring(reading.error) .. ")")
+      return
+    end
+    if reading.status == "blank" then
+      note("nothing drawn there")
+      return
+    end
+    if reading.status == "none" then
+      note("the recogniser read nothing")
+      return
+    end
+    if reading.status ~= "text" then
+      note("no text (" .. tostring(reading.status) .. ")")
+      return
+    end
+    local rows, n = {}, 0
+    for _, line in ipairs(reading.lines or {}) do
+      local t = trim(tostring(line.text or ""))
+      if t ~= "" then
+        n += 1
+        if #rows < UNNAMED_ROWS then rows[#rows + 1] = t end
+      end
+    end
+    local text = trim(table.concat(rows, ", "))
+    if text == "" then
+      note("no text (only white space)")
+      return
+    end
+    local quoted = string.format("\"%s\"%s", forLog(text),
+      n > UNNAMED_ROWS and string.format(" (%d of %d rows)", UNNAMED_ROWS, n) or "")
+    local why = nil
+    if reading.newer then
+      why = "a later step asked for another read"
+    elseif not self.active then
+      why = "the overlay is no longer active"
+    elseif self._stay ~= stay then
+      -- Out of the front and back on the same window — Alt+Tab, another overlay holding the
+      -- slot for a while, a recheck that lost the match and found it again. Everything below
+      -- still holds then: the focus resumes on the pass-through and the lap is not cleared until
+      -- the stop is announced again, ANNOUNCE_DELAY later. An answer from before is about a
+      -- stop the user heard before leaving, and would be said over their return.
+      why = "the overlay left the front and came back since"
+    elseif self:hwnd() ~= pinned then
+      why = "the overlay is on another window now"
+    elseif self.focus ~= at or self.controls[at] ~= c then
+      why = "the focus has left the pass-through"
+    elseif c._net == nil then
+      why = "the keyboard has left the plugin's controls"
+    elseif c._seq ~= seq then
+      why = "a later key moved on"
+    end
+    if why then
+      note(quoted .. ", not spoken: " .. why)
+      return
+    end
+    host.speech.output(text, { interrupt = false })
+    note(quoted .. ", spoken")
+  end)
+  if not ok then
+    host.log.info(string.format("%s; its rectangle %s could not be read: %s", head, where, tostring(err)))
+  end
 end
 
 -- One Tab inside the focused pass-through control. True when it consumed the key (focus
@@ -1800,6 +2017,9 @@ function Overlay:_stepPassThrough(dir)
   if not (c and c.kind == "passthrough" and isVisible(self, c)) then return false end
   local ctrl = self:origin()
   if not (ctrl and ctrl.id) then return false end
+  -- Every key this stop handles counts, whatever it does, so an unnamed stop's text that
+  -- arrives after another press is known to be about a stop the user has already left.
+  c._seq = (c._seq or 0) + 1
   local inside = c._net ~= nil
   local key = dir >= 0 and "Tab" or "Shift+Tab"
   local function clear()
@@ -1852,6 +2072,8 @@ function Overlay:_stepPassThrough(dir)
   host.log.info(string.format("[passthrough] %s: %s -> stop %d of %d '%s', %d into the lap%s",
     tostring(self.label), key, r.index, r.count, tostring(r.name), c._net,
     c._leaveOn and ", the next Tab leaves" or ""))
+  -- A named stop is the screen reader's to announce, and it does. One with no name is read.
+  if c.readUnnamed and not hasVisibleText(r.name) then readUnnamedStop(self, c, r, ctrl) end
   return true
 end
 
@@ -2839,6 +3061,10 @@ local ANNOUNCE_DELAY = 350
 function Overlay:_activate()
   if self.active then return end
   self.active = true
+  -- Which stay in front this is. An answer that was asked for in an earlier one — an unnamed
+  -- pass-through stop's text (readUnnamedStop) — is not spoken in this one, even when every
+  -- other check says the overlay is where it was.
+  self._stay += 1
   if host.timer then
     host.timer.after(CONFIRM_DELAY, function()
       if not self.active then return end

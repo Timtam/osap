@@ -17,6 +17,9 @@ mod cells_golden_tests;
 /// The overlay runtime's menu tests (modules/overlay-runtime), run against a scripted host.
 #[cfg(test)]
 mod overlay_menu_tests;
+/// The Tab pass-through's unnamed stops, read by OCR, against the same scripted host.
+#[cfg(test)]
+mod overlay_passthrough_tests;
 mod gui;
 mod image_search;
 /// One running copy per user: the lock, and the request a second start sends — see the file.
@@ -6086,23 +6089,17 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             },
         )?,
     )?;
-    // host.element.focusStep(hwnd, direction) -> { name, ctype, index, count } | nil —
+    // host.element.focusStep(hwnd, direction) -> { name, ctype, index, count, bounds? } | nil —
     // Tab pass-through for a standalone plugin window: SetFocus the next (direction>=0)
     // / previous keyboard-focusable descendant relative to the current focus, wrapping
-    // at the ends, and return the newly focused element so the overlay can announce it.
+    // at the ends, and return the newly focused element — where it is included, so a
+    // caller can read what a stop with no name shows (see `focus_step_table`).
     let sh = shared.clone();
     uia.set(
         "focusStep",
         lua.create_function(move |lua, (hwnd, direction): (isize, i32)| {
             match sh.backend.element_focus_step(hwnd, direction) {
-                Some((name, ctype, index, count)) => {
-                    let t = lua.create_table()?;
-                    t.set("name", name)?;
-                    t.set("ctype", ctype)?;
-                    t.set("index", index)?;
-                    t.set("count", count)?;
-                    Ok(Some(t))
-                }
+                Some(step) => Ok(Some(focus_step_table(lua, step)?)),
                 None => Ok(None),
             }
         })?,
@@ -8566,6 +8563,31 @@ fn dump_node_to_table(lua: &Lua, n: backend::DumpNode) -> mlua::Result<Table> {
     Ok(t)
 }
 
+/// Where `host.element.focusStep` landed, as Lua sees it: `{ name, ctype, index, count,
+/// bounds? }`.
+///
+/// `bounds` is `{ x, y, w, h }` in screen coordinates and is left OUT — not zeros, unlike a
+/// dump's — when the platform gave no rectangle or an empty one ([`backend::FocusBounds::new`]).
+/// A dump's zeros are a row in a diagnostic listing; this one is read by code that acts on it,
+/// and a rectangle of zeros handed to an OCR read raises there, where a missing one is a plain
+/// `if` at the caller. Separate from the binding so the shape is tested without a backend.
+fn focus_step_table(lua: &Lua, step: backend::FocusStep) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("name", step.name)?;
+    t.set("ctype", step.ctype)?;
+    t.set("index", step.index)?;
+    t.set("count", step.count)?;
+    if let Some(r) = step.bounds {
+        let b = lua.create_table()?;
+        b.set("x", r.x)?;
+        b.set("y", r.y)?;
+        b.set("w", r.w)?;
+        b.set("h", r.h)?;
+        t.set("bounds", b)?;
+    }
+    Ok(t)
+}
+
 fn win_to_table(lua: &Lua, w: &WinInfo) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     t.set("id", w.hwnd)?;
@@ -8698,6 +8720,86 @@ mod foreground_binding_tests {
         for not in ["observations", "bump_epoch", "ocr_barrier"] {
             assert!(!f.contains(not), "foreground_fn reaches `{not}`");
         }
+    }
+}
+
+/// `host.element.focusStep`'s answer as a module sees it. The binding itself needs a `Shared`,
+/// whose speech engines a test must not open, and every backend's focus step moves a real
+/// keyboard focus — so the table is built by `focus_step_table`, tested here with the backend's
+/// answer written out, and the binding is checked to go through it.
+#[cfg(test)]
+mod focus_step_binding_tests {
+    use super::ocr_wiring_tests::{bindings, body};
+    use super::*;
+
+    fn shape(step: backend::FocusStep) -> String {
+        let lua = Lua::new();
+        let t = focus_step_table(&lua, step).unwrap();
+        lua.globals().set("r", t).unwrap();
+        lua.load(
+            r#"
+            local keys = {}
+            for k in pairs(r) do keys[#keys + 1] = k end
+            table.sort(keys)
+            local b = r.bounds
+            return table.concat(keys, ",") .. "=" .. r.name .. "/" .. r.ctype .. "/" .. r.index
+              .. "/" .. r.count .. (b and string.format(" at %s,%s %sx%s", tostring(b.x),
+              tostring(b.y), tostring(b.w), tostring(b.h)) or " nowhere")
+            "#,
+        )
+        .eval()
+        .unwrap()
+    }
+
+    /// With a rectangle: `bounds = { x, y, w, h }` beside the four fields it always had, whole
+    /// numbers as whole numbers (Windows), a point's fraction kept (macOS).
+    #[test]
+    fn the_landed_elements_rectangle_is_its_bounds() {
+        let step = |bounds| backend::FocusStep { name: "FILE".into(), ctype: 50000, index: 3, count: 29, bounds };
+        assert_eq!(
+            shape(step(backend::FocusBounds::new(812.0, 240.0, 64.0, 22.0))),
+            "bounds,count,ctype,index,name=FILE/50000/3/29 at 812,240 64x22"
+        );
+        assert_eq!(
+            shape(step(backend::FocusBounds::new(100.5, 60.0, 31.5, 18.0))),
+            "bounds,count,ctype,index,name=FILE/50000/3/29 at 100.5,60 31.5x18"
+        );
+    }
+
+    /// Without one the field is absent — not a table of zeros — and an unnamed stop's name is
+    /// the empty string, not nil.
+    #[test]
+    fn no_rectangle_is_no_bounds_field() {
+        let step = backend::FocusStep { name: String::new(), ctype: 50033, index: 15, count: 29, bounds: None };
+        assert_eq!(shape(step), "count,ctype,index,name=/50033/15/29 nowhere");
+    }
+
+    /// The one rule both backends go through: empty, turned around or not finite is no rectangle.
+    #[test]
+    fn an_empty_or_unreadable_rectangle_is_none() {
+        assert!(backend::FocusBounds::new(0.0, 0.0, 1.0, 1.0).is_some());
+        assert!(backend::FocusBounds::new(-1920.0, -40.0, 30.0, 20.0).is_some(), "left of the primary display is a place");
+        for (x, y, w, h) in [
+            (10.0, 10.0, 0.0, 20.0),
+            (10.0, 10.0, 20.0, 0.0),
+            (10.0, 10.0, -5.0, 20.0),
+            (10.0, 10.0, 20.0, -5.0),
+            (f64::NAN, 10.0, 20.0, 20.0),
+            (10.0, f64::INFINITY, 20.0, 20.0),
+            (10.0, 10.0, f64::NAN, 20.0),
+        ] {
+            assert_eq!(backend::FocusBounds::new(x, y, w, h), None, "{x},{y} {w}x{h}");
+        }
+    }
+
+    /// The binding hands the backend's answer to `focus_step_table` and nothing else builds it.
+    #[test]
+    fn the_binding_builds_its_answer_with_focus_step_table() {
+        const LIB: &str = include_str!("lib.rs");
+        let api = body(LIB, "fn install_host_api(");
+        let (_, text) = bindings(api, "uia").into_iter().find(|b| b.0 == "focusStep").expect("host.element.focusStep");
+        assert!(text.contains("sh.backend.element_focus_step(hwnd, direction)"), "{text}");
+        assert!(text.contains("Some(step) => Ok(Some(focus_step_table(lua, step)?))"), "{text}");
     }
 }
 

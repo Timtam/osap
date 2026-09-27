@@ -5631,6 +5631,75 @@ in 12.3); Info.plist carries `NSInputMonitoringUsageDescription`. What only a Ma
       activity is plain, `SETUP` belongs among the latency-critical reasons
       (`activity_reasons.rs`, `LATENCY_CRITICAL`).
 
+## Unnamed pass-through stops, read by OCR (2026-09-27)
+
+A Mac tester's log of Kontakt 7 standalone had the pass-through's ring mostly made of stops with
+no name (`[passthrough] Kontakt 7: Tab -> stop 15 of 29 '', …`; FILE, LIBRARY, VIEW, SHOP,
+Search, Brand, Sound Type and Character had one), so the screen reader said a role and little
+else. Built, and tested against the scripted host (`overlay_passthrough_tests.rs`), not yet run
+on either system: `host.element.focusStep` hands back the landed element's `bounds`, and
+`Overlay:addPassThrough` (`readUnnamed`, on by default) reads the rectangle of a stop whose name
+has no visible character with `host.ocr.read`, cut to the plug-in window, and says its first two
+rows queued (`interrupt = false`) — only while nothing has moved on, with no timer. One
+`[passthrough] … (type N) has no name; …` line per such stop says what it read and what became
+of it. Named stops are unchanged. What only the real systems can answer:
+
+- [ ] **Windows, NVDA, Kontakt 7 and 8 standalone.** Walk "Kontakt controls" once each: which
+      stops have no name there at all (the `-> stop N of M ''` lines — the Mac count need not
+      hold on Windows, whose ring is scoped to the content area), what each reads as and its
+      `(type N)`, and what is heard: NVDA's own announcement first and the text after it, or the
+      text cut off. The read can answer before NVDA has handled the focus event (a small
+      element's read answers in a few tens of milliseconds), and whether NVDA's announcement
+      then cancels the queued line is unknown. If it does, the answer is found in the order of
+      events, not in a delay. Also listen for a value said twice: an unnamed edit field or combo
+      box whose value NVDA announces itself, and whose text the overlay then reads out again.
+- [ ] **Are the rectangles where the element is drawn — UIA's on Windows, Accessibility's on the
+      Mac?** Switch on **Calibration keys in overlays** in the Application settings tab and
+      reload the modules; walk a few unnamed stops, and on one of them press the calibration
+      shot key — Ctrl+Alt+Shift+S, Command+Option+Shift+S on a Mac — which saves a picture of
+      the plug-in window into the module's `calibration/` folder. Send that PNG back with the
+      log's `read at x,y wxh` lines: the regions are compared against the picture here, which
+      cannot be done by ear. A stop that logs `no rectangle` is one the platform gave no
+      rectangle for; one that logs `outside the plugin's window` has a rectangle, and it lies
+      outside the window — a row scrolled out of view, say.
+- [ ] **Does a list scroll when the focus reaches one of its rows, and is the row read where it
+      is?** On Windows `bounds` is read once, right after the focus has landed, so a scroll the
+      list animates after that is not in it; on a Mac `bounds` is from before the focus moved,
+      and the ring admits rows below their list's viewport (the Mac mini session above: 16 of
+      2708 presets exposed). On both systems, in Kontakt 8 standalone, Tab into the preset list
+      and on through its rows until the stops leave the list, and send the log. A row read
+      where it was, not where it is, shows as a `read at` region at the row's old place, a
+      spoken text that is another row's or another control's, or a line that ends `outside the
+      plugin's window`. That decides whether `bounds` needs a viewport cut — the macOS
+      `focus_step` viewport filter in the Mac mini item above, and the same on Windows if its
+      lists show it too.
+- [ ] **The next Mac session, VoiceOver, Kontakt 7 standalone.** The order and the overlap of
+      the two announcements: with Speak through VoiceOver off the text is the system voice, a
+      second voice that can talk over VoiceOver's announcement of the element; with it on,
+      whether VoiceOver queues it behind its own is VoiceOver's decision. Both ways, once,
+      noted by ear.
+- [ ] **What a large unnamed element reads as** — a whole list, a browser pane, a scroll area.
+      Two rows of a list may be noise rather than a name, and a host row joins what stands side
+      by side, so two rows of a wide element can be a long line said on every landing. The
+      `(2 of N rows)`, the region's size and the `(type N)` in the log say how much there was
+      and of what kind. Whether that calls for a limit on length, size or role is decided on
+      the log, not in advance.
+- [ ] **A key that goes to the plug-in, straight after Tab.** Space or an arrow key on an unnamed
+      stop, pressed before its text is heard: the overlay does not see such a key, so the text
+      read before it can be said after it — after a dropdown's list has been announced, or with
+      the value it had before the arrow. Note whether that happens and whether it misleads.
+- [ ] **The cost, and Tab held down.** The `in N ms` of every outcome line, on both systems, for
+      a button and for a list. With Tab held down, the older reads end as `not spoken: a later
+      step asked for another read`, as `not recognised, a later step's read replaced it`, or —
+      when the next stop has a name, so no newer read was asked for — as `not spoken: a later
+      key moved on`; all three are right, and nothing is said about a stop already left. What
+      the log cannot show is the speech queue: the checks are made when an answer arrives, so a
+      line accepted then waits behind whatever is being said and is heard after any Tab that
+      came in between, with nothing to take it back. Listen for text heard a stop or two late.
+      If it is, what would fix it is general, not the overlay's: a way to have a queued line
+      dropped when a newer one of the same kind is said — a host speech question, to be
+      decided then.
+
 ## Dev tools
 
 - [x] **OCR window inspector (first version):** `tools/inspect` — **Ctrl+Alt+I** OCRs the focused window's client area and logs every recognized word with its **client-relative coordinates** (+ saves the capture with `AUTOMATION_PLATFORM_OCR_DEBUG=1`). Calibrates overlay regions and reveals where hardcoded (e.g. ReaHotkey) coordinates land vs the real controls. Resolved the sforzando polyphony case (the region was correct; the failures were the hover scrub-value — fixed by `hoverToRead`-off — and UWP OCR being blind to *single* digits). ✓ (2026-06-21)

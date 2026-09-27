@@ -302,9 +302,11 @@ Siblings are counted within the parent's own children, and a step off either end
 
 ## host.element.focusStep(hwnd, direction) {#host-element-focusstep}
 
-**Signature:** `host.element.focusStep(hwnd: number, direction: number) -> { name: string, ctype: number, index: number, count: number } | nil`
+**Signature:** `host.element.focusStep(hwnd: number, direction: number) -> { name: string, ctype: number, index: number, count: number, bounds: { x: number, y: number, w: number, h: number }? } | nil`
 
-**This one writes.** It enumerates the visible, keyboard-focusable descendants of `hwnd`'s content area and *moves keyboard focus* to the next (`direction >= 0`) or previous one, wrapping at the ends, returning the element it landed on. It is the Tab pass-through for a standalone plug-in window that does not move focus on Tab by itself (Kontakt standalone), and it is the only way into such a window's native controls. Because it raises a real focus event, the screen reader announces the element — so the overlay must deliberately stay quiet rather than speaking `name` itself.
+**This one writes.** It enumerates the visible, keyboard-focusable descendants of `hwnd`'s content area and *moves keyboard focus* to the next (`direction >= 0`) or previous one, wrapping at the ends, returning the element it landed on. It is the Tab pass-through for a standalone plug-in window that does not move focus on Tab by itself (Kontakt standalone), and it is the only way into such a window's native controls. Because it raises a real focus event, the screen reader announces the element — so a caller does not speak `name` over it. What the screen reader cannot announce is a name the element does not have, and a plug-in's controls often have none, being drawn rather than labelled: `name` is `""` then, or whatever the toolkit published in its place — white space, a no-break space — since the host hands the name on as it is. [`Overlay:addPassThrough`](./overlay.md#o-addpassthrough) stays quiet on a stop with a name, and reads what is drawn in `bounds` for a stop whose name has no visible character.
+
+`bounds` is the rectangle of the element the focus landed on, in screen coordinates — the space [`host.ocr.read`](./ocr.md#host-ocr-read) regions and [`host.input.click`](./input.md#host-input-click) take on the platform: `x`, `y` its top-left corner, `w`, `h` its size. It is **absent** (`nil`) when the platform gave no rectangle for the element, an empty one (`w` or `h` not above zero) or one whose numbers are not finite; it is never a table of zeros, unlike a dump's `bounds`. The host does not cut it to the window, to the screen or to a scroll view: it is the rectangle the platform reports. For an element that reaches past its window — a list longer than its view — that reaches past the window too, and an element scrolled out of its list's view is reported where it lies, over whatever else is drawn there. A caller that reads the rectangle cuts it to the window first, as the example does. Whether the numbers are whole, and when they were read, differs by platform — see below.
 
 Candidates are re-enumerated every step, since the tree changes shape as the user moves; and a candidate that accepts the focus request without actually taking it is skipped, verified by reading focus straight back. What the ring is scoped to differs by platform — see below. It **wraps**, so "every stop has been visited" is not something it reports — the caller counts it. `Overlay:addPassThrough` counts net steps forward since Tab went in, taking the distance between two results' 1-based `index` values while `count` holds (so stops that refused the focus and were stepped over still count — except any skipped by the very first step, since this call does not say where it started from, which can cost one repeat of the entry element), and hands Tab back once that reaches `count`. It hands the key back **without** calling this, because calling it would move the plug-in's focus again and the screen reader would name an element over the overlay's own announcement. Shift+Tab comes back out the way Tab went in: on the element Tab went in on, it returns to the pass-through stop without calling this either. A `count` that changes mid-lap means the plug-in's tree changed (a panel was shown or hidden); the lap is measured against the latest `count`, so it can end early but never go on for ever. `nil` means nothing in the scope accepted focus at all. A module normally gets this through `Overlay:addPassThrough`.
 
@@ -329,13 +331,38 @@ c._leaveOn = (dir >= 0 and c._net >= r.count) and 1 or nil
 return true
 ```
 
+```luau
+-- A stop with no name: read what is drawn where it is, and say it without cutting off the
+-- screen reader. Needs "element", "ocr", "speech" and "window" in the manifest.
+local win = host.window.active()                            -- the plug-in's window, in front
+local r = win and host.element.focusStep(win.id, 1)
+if r and not r.name:find("%S") and r.bounds then
+  local b, wb = r.bounds, win.bounds
+  -- Whole numbers covering the element (a Mac's may carry a fraction), cut to the window:
+  -- what lies past it is another window's text, and a huge list would pass the read's limit.
+  local x1, y1 = math.max(math.floor(b.x), wb.x), math.max(math.floor(b.y), wb.y)
+  local x2 = math.min(math.ceil(b.x + b.w), wb.x + wb.w)
+  local y2 = math.min(math.ceil(b.y + b.h), wb.y + wb.h)
+  if x2 - x1 >= 2 and y2 - y1 >= 2 then
+    host.ocr.read({ x1, y1, x2, y2 }, { key = "stop" }, function(reading)
+      if reading.newer or reading.status ~= "text" then return end   -- Tab again, or nothing there
+      host.speech.output(reading.lines[1].text, { interrupt = false })
+    end)
+  end
+end
+```
+
 ### Windows
 
 The ring is scoped to the window's first child — ReaHotkey's content area — which drops the frame and the menu bar without a control-type blocklist. Candidates are the descendants the provider reports as keyboard-focusable and not off-screen, and focus is moved with UIA's own `SetFocus`. No traversal budget of ours applies — the whole content subtree is enumerated however large it is.
 
+`bounds` is the landed element's `CurrentBoundingRectangle`, read once, right after the focus has landed and been read back, at the cost of one more cross-process property read per step. It has whatever the plug-in did to the element while taking the focus — a list it scrolled to the element inside its focus handling puts the element where it is now — but a scroll the plug-in animates after that is not waited for: the rectangle is the one at that read. Whole physical pixels: the application is per-monitor DPI aware, so UIA hands it the same unscaled coordinates the screen reads use.
+
 ### macOS
 
 The ring is the **whole window**, minus the window's own close, minimise, zoom and full-screen buttons, which are skipped by subrole along with anything under them. Not the first child, as on Windows: on macOS that is whatever the application published first, and in a standalone Kontakt 7 it is Kontakt's logo — a button with no children, which made the ring empty. The menu bar is not inside a window on this platform, so nothing else needs excluding. Focus is moved by setting `AXFocused`, and a candidate qualifies when that attribute is *settable* and the element has a non-zero rectangle. The walk is bounded at **800 nodes and depth 20** — tighter than the other calls here, because it runs per keystroke. Elements below depth 20 are simply not in the ring, with nothing in the log to say so; running out of the 800-node budget does produce one line, once per session.
+
+`bounds` is the element's `AXPosition` and `AXSize` as the walk read them, in the same request as its name, so it costs nothing more — and it is where the element was **before** the focus moved: one that scrolls itself into view to take the focus is reported where it was. The walk does not look at scroll views, so a row below its list's viewport is in the ring, and is reported where it lies — where something else is drawn. Points, top-left of the primary display, as Accessibility reports them, which can carry a fraction; widen them to whole numbers before reading the region, as the example does. Every candidate needs a non-zero rectangle to be in the ring, so a stop landed on here has `bounds` unless Accessibility reported numbers that are not finite.
 
 ## host.element.focusWithin(hwnd, rect) {#host-element-focuswithin}
 

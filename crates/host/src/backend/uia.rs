@@ -768,9 +768,9 @@ unsafe fn find_by_class(
 /// candidate that does not actually take focus (a container that redirects it, an item
 /// that ignores SetFocus) is skipped — verified by reading focus straight back. Re-
 /// enumerated every step, so it tracks a tree that shifts as the user navigates. Returns
-/// the newly focused element's (Name, ControlType, 1-based index, count) to announce, or
-/// None if the scope has no focusable descendant that accepts focus.
-pub fn element_focus_step(hwnd: isize, direction: i32) -> Option<(String, i32, i32, i32)> {
+/// the newly focused element's Name, ControlType, 1-based index, the count and its
+/// bounding rectangle, or None if the scope has no focusable descendant that accepts focus.
+pub fn element_focus_step(hwnd: isize, direction: i32) -> Option<super::FocusStep> {
     AUTOMATION.with(|cell| unsafe {
         let borrow = automation(cell);
         let automation = borrow.as_ref()?;
@@ -845,7 +845,24 @@ pub fn element_focus_step(hwnd: isize, direction: i32) -> Option<(String, i32, i
                 if landed {
                     let name = el.CurrentName().map(|b| b.to_string()).unwrap_or_default();
                     let ctype = el.CurrentControlType().map(|t| t.0).unwrap_or(0);
-                    return Some((name, ctype, idx + 1, count));
+                    // Read once, AFTER the focus landed and was read back, so it has whatever the
+                    // provider did to the element while it took the focus — a list scrolled to
+                    // it inside SetFocus is where it is now, not where the enumeration found it.
+                    // A scroll the plug-in animates afterwards is not waited for: nothing here
+                    // waits on a clock, and the element is reported where it is at this read.
+                    // One more cross-process property read per step. Physical pixels, the space
+                    // every capture here uses: the application is per-monitor DPI aware (its
+                    // manifest), and UIA hands such a client unscaled coordinates.
+                    let bounds = el.CurrentBoundingRectangle().ok().and_then(|r| {
+                        // Subtracted as floats: a provider's nonsense edges cannot overflow here.
+                        super::FocusBounds::new(
+                            r.left as f64,
+                            r.top as f64,
+                            r.right as f64 - r.left as f64,
+                            r.bottom as f64 - r.top as f64,
+                        )
+                    });
+                    return Some(super::FocusStep { name, ctype, index: idx + 1, count, bounds });
                 }
             }
         }

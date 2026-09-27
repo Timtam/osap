@@ -3139,8 +3139,16 @@ pub fn class_nav_point(
 ///    come round again; that ring trapped a tester in Kontakt 8's 90 stops.)
 ///
 /// It also has to raise a real focus event, which setting `AXFocused` does — the screen
-/// reader announces the element and the overlay deliberately stays quiet.
-pub fn focus_step(hwnd: isize, direction: i32) -> Option<(String, i32, i32, i32)> {
+/// reader announces the element, and the overlay says nothing over it about a stop with a name.
+///
+/// The landed element's rectangle goes back with it, from the walk's snapshot: position and
+/// size were fetched in the same batched request as the name, so it costs no round trip. It
+/// is where the element was when the walk read it, before the focus moved — an element that
+/// scrolls itself into view to take the focus is reported where it was. Nor is it cut to a
+/// scroll view: a row below its list's viewport, which this walk admits, is reported where it
+/// lies, over whatever is drawn there. The element's own rectangle, as decided; whether a
+/// viewport cut is needed waits for the live check in TODO.md.
+pub fn focus_step(hwnd: isize, direction: i32) -> Option<crate::backend::FocusStep> {
     let root = root_of(hwnd, "focus_step")?;
     let t = Instant::now();
     // The whole window — see point 1 above for why not its first child on this platform.
@@ -3243,7 +3251,11 @@ pub fn focus_step(hwnd: isize, direction: i32) -> Option<(String, i32, i32, i32)
                 ),
             );
         }
-        return Some((name, ctype, idx + 1, count));
+        // Points, top-left of the primary display: the space OCR regions and clicks use here.
+        let bounds = snap.rect.and_then(|r| {
+            crate::backend::FocusBounds::new(r.origin.x, r.origin.y, r.size.width, r.size.height)
+        });
+        return Some(crate::backend::FocusStep { name, ctype, index: idx + 1, count, bounds });
     }
     crate::logging::line(
         "macos",

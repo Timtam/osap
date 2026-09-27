@@ -601,6 +601,57 @@ pub struct DumpNode {
     pub h: i32,
 }
 
+/// Where [`Backend::element_focus_step`] left the keyboard: the element the focus landed on.
+///
+/// A struct rather than the tuple it was, because it gained a fifth field that is itself
+/// optional, and `(name, ctype, index, count, bounds)` is the kind of tuple that gets two of
+/// its integers swapped at a call site without a compiler noticing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FocusStep {
+    /// The element's name as the platform publishes it (UIA's Name; `AXTitle`, else
+    /// `AXDescription`). Often empty: a plug-in's own controls are mostly drawn, not labelled.
+    pub name: String,
+    pub ctype: i32,
+    /// 1-based, and stable for an element while the ring keeps its shape.
+    pub index: i32,
+    pub count: i32,
+    /// The landed element's rectangle — see [`FocusBounds`].
+    pub bounds: Option<FocusBounds>,
+}
+
+/// The rectangle of the element a focus step landed on, in screen coordinates: the space
+/// `host.ocr.read` regions and `host.input.click` use on the platform — pixels on Windows,
+/// points on macOS (which may carry a fraction there; the caller rounds).
+///
+/// It exists so that a stop that publishes NO NAME can still be told apart: the one thing the
+/// accessibility tree does say about it is where it is. In a Mac tester's log of 2026-09-27,
+/// Kontakt 7 standalone's ring of 29 stops was mostly stops with no name — FILE, LIBRARY, VIEW,
+/// SHOP, Search, Brand, Sound Type and Character were the ones with one — so the screen reader
+/// said a role and little else, and the overlay runtime now reads such a stop's text off the
+/// screen in this rectangle. Nothing here knows about that: it is the element's geometry, for
+/// any caller.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FocusBounds {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+impl FocusBounds {
+    /// The rectangle, or `None` when there is none worth handing on: an empty one (`w` or `h`
+    /// not above zero — a collapsed element, or UIA's answer for one with no place on screen)
+    /// or one whose numbers are not finite. One rule for every backend, so `nil` means the same
+    /// on both systems.
+    pub fn new(x: f64, y: f64, w: f64, h: f64) -> Option<FocusBounds> {
+        let finite = x.is_finite() && y.is_finite() && w.is_finite() && h.is_finite();
+        if !finite || w <= 0.0 || h <= 0.0 {
+            return None;
+        }
+        Some(FocusBounds { x, y, w, h })
+    }
+}
+
 /// Mouse button for input synthesis.
 pub enum MouseButton {
     Left,
@@ -806,9 +857,10 @@ pub trait Backend {
 
     /// Tab pass-through for a standalone plugin window: SetFocus the next
     /// (`direction` >= 0) / previous keyboard-focusable descendant relative to the one
-    /// focused now, wrapping at the ends, and return its (Name, ControlType, 1-based
-    /// index, count) to announce. None if the window has no focusable descendants.
-    fn element_focus_step(&self, hwnd: isize, direction: i32) -> Option<(String, i32, i32, i32)>;
+    /// focused now, wrapping at the ends, and say where the focus landed — its name, control
+    /// type, 1-based index, the ring's count and its rectangle ([`FocusStep`]). None if the
+    /// window has no focusable descendant that takes the focus.
+    fn element_focus_step(&self, hwnd: isize, direction: i32) -> Option<FocusStep>;
 
     /// Give keyboard focus to the first focusable element of `hwnd` whose centre lies inside
     /// the rectangle (screen coordinates), and say which — `(name, control type)`.

@@ -156,7 +156,7 @@ impl Backend for StubBackend {
     ) -> Option<(i32, i32)> {
         None
     }
-    fn element_focus_step(&self, _hwnd: isize, _direction: i32) -> Option<(String, i32, i32, i32)> {
+    fn element_focus_step(&self, _hwnd: isize, _direction: i32) -> Option<super::FocusStep> {
         None
     }
     fn set_captured_keys(&self, _keys: &[(u32, u8)]) {}
