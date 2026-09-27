@@ -166,16 +166,21 @@ had been asked to send.
 
 ## When something goes wrong
 
-Send `automation-platform.log`. It sits beside the `.app` — or, if that folder was not
-writable, in `~/Library/Application Support/AutomationPlatform/`; the log's own first lines
-say which. For much more detail:
+Send `automation-platform.log`. It sits beside the `.app` (beside the original one when macOS
+runs a translocated copy, see [below](#translocation)) — or, if that folder was not writable, in
+`~/Library/Application Support/AutomationPlatform/`; the log's own first lines say which. For
+much more detail:
 
 ```bash
 AUTOMATION_PLATFORM_TRACE=1 open AutomationPlatform.app
 ```
 
 The first block of the log is an account of the machine as the application sees it. Most
-questions we would ask are already answered there.
+questions we would ask are already answered there. It is written when the application starts,
+at the top of the file that session began in. After 8 MB the log goes on in a new file whose
+first line is `log continued`, and the earlier part — that first block with it — is moved to
+`automation-platform.log.1` beside it; so send that file too when it is there. After a second
+8 MB the first block is gone: quitting and reopening the application writes it again.
 
 Its second line, after `session start`, is the build, which is how a report is matched to the
 download it came from:
@@ -195,10 +200,51 @@ knows only that earlier commit. The job then writes a `build-info.txt` beside th
 the download's commit, the log gives that one and adds `(binary built from <commit>)`, and the
 README's `Build:` line says both. No other package has the file. A reused `.app` that cannot
 find it, because it has been moved away from its folder or macOS is running a translocated copy
-(the log's `translocated` line says so), names only its executable's commit.
+whose original it could not find (the log's `translocated` line says so, see
+[below](#translocation)), names only its executable's commit.
 
 The application uses the file only when its `binary=` line names the executable beside it. One
 left in the folder by an older download that a newer one was unpacked over (to keep
 `settings.toml` and the log) names another executable, or none, and would otherwise pass the new
 build off as the old one; it is not used, the log says so on the line after the build, and the
 build named is the executable's own.
+
+### Opened with the quarantine flag still set {#translocation}
+
+A download opened without removing its quarantine flag — with Open on the Finder's context
+menu, or Open Anyway in Privacy & Security, instead of the `xattr` line in the README — is run by
+macOS from a read-only copy of the `.app` alone, at a random path under
+`/private/var/folders/…/AppTranslocation/`. This is App Translocation, and macOS makes a new copy
+at every launch until the flag is removed. The folder around the copy holds nothing else.
+
+So the application asks the Security framework where the original `.app` is, before it reads
+anything from its folder, and uses the folder around the original for its modules,
+`settings.toml` and log — the log, as anywhere, only when that folder can be written, which the
+`app folder` line says. The header says what happened, on the line after the executable (and the
+`[env]` block repeats the `translocated` line):
+
+```text
+[host] executable /private/var/folders/…/AppTranslocation/…/d/AutomationPlatform.app/Contents/MacOS/automation-platform
+[host] translocated: YES — macOS is running a read-only copy of the .app from …, because it was opened with its download quarantine flag still set. The original is /Users/…/AutomationPlatform/AutomationPlatform.app, and the folder around it is the application's folder (the log's `app folder` line says whether it can be written). …
+[host] app folder /Users/…/AutomationPlatform (writable)
+[host] modules folder /Users/…/AutomationPlatform/modules: 12 folders
+```
+
+An `.app` that runs where it is says `translocated: no`; a loose binary out of `target/` says
+nothing. The two functions that answer, `SecTranslocateIsTranslocatedURL` and
+`SecTranslocateCreateOriginalPathForURL`, are not in the SDK's public headers and are looked up by
+name when the application starts rather than linked, so a macOS without them still starts. When
+they are missing, or cannot find the original, the line says `YES` and why, and the application
+uses the folder around the copy: no module loads, settings changes are not saved (the log says
+`cannot save settings to …` at the first one), and the log goes to
+`~/Library/Application Support/AutomationPlatform/` because the copy's folder cannot be written.
+The same happens when they answer "not translocated" for an `.app` that runs from under
+`AppTranslocation`: the path is not overruled by an answer that contradicts it. Removing the flag
+is the clean way in every case; the line repeats how.
+
+**An `.app` moved out of its folder** — dragged into Applications on its own, say — reads the
+`modules` folder beside it in its new place, where there is none. The header's `modules folder`
+line names the folder it looked in and says `does not exist`, and the `no modules to load` line
+names it again and says what that means. The header line says the same in a start with module
+folders on the command line, which does not read that folder at all. Put the `.app` back beside
+its `modules` folder, or move the whole folder.

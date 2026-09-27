@@ -252,6 +252,80 @@ fn forget_front(pid: i32) {
     LAST_FRONT.with(|m| m.borrow_mut().forget(pid));
 }
 
+/// Forgets everything kept about a process that has quit — its executable name, bundle id,
+/// busy quarantine and remembered window — before macOS can hand its pid to another process.
+/// Kept, a remembered name would describe the new process as the old one: pids wrap at 99,999
+/// and a Mac starts thousands of processes a day, so over days of uptime a window trigger could
+/// match the wrong application. Called from `system.rs` when the workspace says it quit.
+pub(super) fn forget_process(pid: i32) {
+    EXE_BY_PID.with(|c| c.borrow_mut().remove(&pid));
+    BUNDLE_BY_PID.with(|c| c.borrow_mut().remove(&pid));
+    BUSY_UNTIL.with(|b| b.borrow_mut().remove(&pid));
+    forget_front(pid);
+}
+
+/// Forgets what is kept per handle for handles the table dropped (`handles::sweep`,
+/// `handles::forget_pid`): the content-rect offsets and the focus ring's one line.
+pub(super) fn forget_handles(dropped: &[isize]) {
+    if dropped.is_empty() {
+        return;
+    }
+    INSET_BY_HANDLE.with(|c| {
+        let mut c = c.borrow_mut();
+        for h in dropped {
+            c.remove(h);
+        }
+    });
+    RING_REPORTED.with(|r| {
+        let mut r = r.borrow_mut();
+        for h in dropped {
+            r.remove(h);
+        }
+    });
+}
+
+/// Every window number the window server has, on screen or not — one system-wide call and no
+/// message to any application, which is what lets a handle-table sweep keep a window paired
+/// with a `CGWindowID` without asking its application (`handles::sweep`). `None` when the list
+/// comes back empty or not at all; a number missing from it is not taken as proof by itself,
+/// only as a reason to ask the application.
+pub(super) fn window_numbers() -> Option<HashSet<u32>> {
+    let list = CGWindowListCopyWindowInfo(CGWindowListOption::OptionAll, 0)?;
+    // SAFETY: CGWindowListCopyWindowInfo is documented to return an array of dictionaries.
+    let typed: &CFArray<CFDictionary> = unsafe { list.cast_unchecked::<CFDictionary>() };
+    let out: HashSet<u32> = (0..typed.len().min(8192))
+        .filter_map(|i| typed.get(i))
+        .filter_map(|dict| dict_i64(&dict, unsafe { kCGWindowNumber }))
+        .map(|n| n as u32)
+        .filter(|&n| n != 0)
+        .collect();
+    (!out.is_empty()).then_some(out)
+}
+
+/// Whether a window's application says the element no longer exists — the one question a
+/// handle-table sweep asks per window it cannot settle from the window list (`handles::sweep`). `Some(true)` for
+/// `kAXErrorInvalidUIElement`, `Some(false)` for an answer about it, `None` when there was no
+/// answer (a busy application goes into the quarantine as with every read) or one that proves
+/// nothing either way — the caller then keeps the window.
+pub(super) fn element_gone(el: &AXUIElement) -> Option<bool> {
+    let mut raw: *const CFType = core::ptr::null();
+    // SAFETY: a live element and a live out-pointer; the value, if any, is ours to release.
+    let err = unsafe { el.copy_attribute_value(a_role(), NonNull::from(&mut raw)) };
+    if let Some(p) = NonNull::new(raw.cast_mut()) {
+        // Copy rule: released here, as `attribute` does by owning it.
+        drop(unsafe { CFRetained::from_raw(p) });
+    }
+    match err {
+        AXError::Success | AXError::NoValue | AXError::AttributeUnsupported => Some(false),
+        AXError::InvalidUIElement => Some(true),
+        AXError::CannotComplete => {
+            note_busy(element_pid(el));
+            None
+        }
+        _ => None,
+    }
+}
+
 /// Says that an answer came out of memory rather than out of the application.
 ///
 /// At line level rather than trace: a remembered window may since have moved, and a session
@@ -410,10 +484,12 @@ thread_local! {
     /// derivation is reported once per class rather than once per call.
     static INSET_REPORTED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     /// Frame-to-content edge offsets by window handle — see `content_rect`. Bounded by the
-    /// handle table, which sweeps its own dead entries; a stale offset for a handle that is
-    /// never asked about again costs four floats.
+    /// handle table: a handle it drops is forgotten here too (`forget_handles`).
     static INSET_BY_HANDLE: RefCell<HashMap<isize, (f64, f64, f64, f64)>> =
         RefCell::new(HashMap::new());
+    /// The windows whose focus ring has been described in the log (`focus_step`), once each.
+    /// Forgotten with their handles (`forget_handles`).
+    static RING_REPORTED: RefCell<HashSet<isize>> = RefCell::new(HashSet::new());
     /// UIA control types with no macOS mapping, reported once each.
     static UNMAPPED_REPORTED: RefCell<HashSet<i32>> = RefCell::new(HashSet::new());
 }
@@ -2133,8 +2209,10 @@ pub(super) fn window_id(handle: isize) -> u32 {
         }
     }
     if found != 0 {
-        // Re-interning the same element only fills the id in; the handle does not change.
-        handles::intern(entry.element, entry.pid, found);
+        // Only the id is filled in: re-interning would also make the handle a window of its
+        // own, which for a control handle whose frame matched is wrong — it would no longer go
+        // with the window it lies in.
+        handles::set_window_id(handle, found);
         crate::logging::line(
             "macos",
             &format!("window {handle} paired with CGWindowID {found} by frame and owner"),
@@ -2183,14 +2261,20 @@ fn dict_rect(dict: &CFDictionary) -> Option<CGRect> {
 // Structure
 // ---------------------------------------------------------------------------------------
 
-fn control_info(el: CFRetained<AXUIElement>, snap: &Snap, pid: i32) -> Option<ControlInfo> {
+/// `owner` is the handle of the window the element lies in (0 when not known yet); an
+/// `AXWindow` is interned as a window of its own. See `handle_table.rs` for what that buys.
+fn control_info(el: CFRetained<AXUIElement>, snap: &Snap, pid: i32, owner: isize) -> Option<ControlInfo> {
     let frame = snap.rect?;
     if frame.size.width <= 0.0 || frame.size.height <= 0.0 {
         return None; // an element with no rectangle is not a surface
     }
     let (x, y, w, h) = rect_i32(frame);
     let class = join_class(snap);
-    let hwnd = handles::intern(el.clone(), pid, 0);
+    let hwnd = if snap.role == "AXWindow" {
+        handles::intern(el.clone(), pid, 0)
+    } else {
+        handles::intern_in(el.clone(), pid, owner)
+    };
     // There is no frame-versus-client distinction below the window: an accessibility
     // element's rectangle is its content, with no border and no title bar of its own. The
     // Windows backend reports the same thing for the borderless windows plugins use —
@@ -2271,6 +2355,9 @@ pub fn window_controls(hwnd: isize) -> Vec<ControlInfo> {
     if skip_busy(pid, "window_controls") {
         return Vec::new();
     }
+    // The window every surface found lies in: this handle's own window — itself, when a module
+    // hands in a window, which is what it does.
+    let owner = entry.owner;
     let mut out: Vec<ControlInfo> = Vec::new();
     let mut budget = Budget::new(CONTROL_NODES, HOT_DEADLINE);
     walk(
@@ -2284,7 +2371,7 @@ pub fn window_controls(hwnd: isize) -> Vec<ControlInfo> {
             }
             // The window itself is the root, not one of its own controls.
             if depth > 0 && is_surface(&snap.role) {
-                if let Some(c) = control_info(el.retain(), snap, pid) {
+                if let Some(c) = control_info(el.retain(), snap, pid, owner) {
                     out.push(c);
                 }
             }
@@ -2416,7 +2503,7 @@ pub fn window_focus_chain() -> Vec<ControlInfo> {
             break;
         }
         let is_window = snap.role == "AXWindow";
-        if let Some(c) = control_info(cur.clone(), &snap, pid) {
+        if let Some(c) = control_info(cur.clone(), &snap, pid, 0) {
             out.push(c);
         }
         if is_window {
@@ -2454,6 +2541,12 @@ pub fn window_focus_chain() -> Vec<ControlInfo> {
                 client_h: ch,
             });
         }
+    }
+    // The links were interned before their window was reached; they lie in the window at the
+    // end of the chain, which is what lets a sweep drop them with it (`handle_table.rs`).
+    if let Some(window) = out.last().map(|c| c.hwnd).filter(|&w| handles::owner_of(w) == w) {
+        let links: Vec<isize> = out.iter().map(|c| c.hwnd).collect();
+        handles::adopt(&links, window);
     }
     let ms = t.elapsed().as_millis();
     crate::logging::trace("macos", || {
@@ -3138,10 +3231,6 @@ pub fn focus_step(hwnd: isize, direction: i32) -> Option<(String, i32, i32, i32)
         // plugin's own controls took the keyboard would rest on the tester's notes alone. The
         // count is the other half of the answer: a ring of three and a ring of thirty are
         // different plugins to navigate.
-        thread_local! {
-            static RING_REPORTED: RefCell<std::collections::HashSet<isize>> =
-                RefCell::new(std::collections::HashSet::new());
-        }
         if RING_REPORTED.with(|r| r.borrow_mut().insert(hwnd)) {
             crate::logging::line(
                 "macos",

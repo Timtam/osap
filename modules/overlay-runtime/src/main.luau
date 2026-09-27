@@ -632,6 +632,9 @@ function Overlay:landmark(image, opts)
   -- has gone stale is a few units of tolerance away. So a full-region miss re-runs the same
   -- search once at three times the tolerance, and says something only if THAT hits.
   local probedOrigin = nil
+  -- Set while the searches answer "could not look" (see the callback), so that is logged once
+  -- per spell rather than at every poll.
+  local unanswered = false
   return self:gate(function(origin)
     if not image or not origin or not origin.client or not origin.bounds then
       lastHit, matched = nil, false
@@ -661,8 +664,23 @@ function Overlay:landmark(image, opts)
       -- region, and trying many scales over that (each a fresh full-region scan +
       -- resize) is far too slow and starves the worker when 1.0 misses. Scaling is for
       -- small regions (gtoggle); the wordmark is captured at this setup, so 1.0 fits.
-      host.screen.imageSearchAsync(image, { region = region, tolerance = MATCH_TOLERANCE }, function(hit)
+      host.screen.imageSearchAsync(image, { region = region, tolerance = MATCH_TOLERANCE }, function(hit, why)
         pending = false
+        -- "Could not look" is not "not there". A reason means no search was made — the capture
+        -- failed, or the search was ended because the module had too many waiting — so it says
+        -- nothing about the landmark, and the last verdict stands until a search is made at the
+        -- next pass. Read as a miss, it would tear down an overlay whose library is plainly
+        -- loaded, and a gate whose search was ended at every poll could never be detected.
+        if hit == nil and why ~= nil then
+          if not unanswered then
+            unanswered = true
+            host.log.info(("[landmark] %s: could not look (%s); the last verdict (%s) stands until "
+              .. "a search can be made"):format(tostring(self.label), tostring(why),
+              matched and "found" or "not found"))
+          end
+          return
+        end
+        unanswered = false
         -- A miss in the STICKY box is not the same as "gone". The box is the last hit ±6 px,
         -- so anything that repaints the landmark — a hover highlight, a value redraw, the
         -- panel scrolling a pixel — misses there while the library is plainly still loaded.
@@ -1299,7 +1317,14 @@ end
 -- Same measurement as the synchronous versions above and the same verdict, only off the
 -- main thread: one capture of the control's own region, every template matched against
 -- that single frame. `done(nil)` when there is nothing to say — a toggle whose templates
--- both miss has no state to report, and inventing one is worse than silence.
+-- both miss has no state to report, and inventing one is worse than silence. And when the
+-- search could not be made at all (`why`: the capture failed, or the module had too many
+-- searches waiting): that is no answer, and "not found" would be a claim nobody checked.
+local function couldNotLook(c, why)
+  host.log.info(("[%s] '%s': could not look (%s), so no value is said"):format(
+    tostring(c.kind), tostring(c.label), tostring(why)))
+end
+
 local function valueOfNow(self, c, done)
   local ox, oy = originOf(self, c)
   local opts = {
@@ -1314,7 +1339,8 @@ local function valueOfNow(self, c, done)
     addTemplates(templates, labels, c.onImage, "on")
     addTemplates(templates, labels, c.offImage, "off")
     if #templates == 0 then return done(nil) end
-    host.screen.imageSearchAsync(templates, opts, function(hit)
+    host.screen.imageSearchAsync(templates, opts, function(hit, why)
+      if hit == nil and why ~= nil then couldNotLook(c, why) end
       done(hit and labels[hit.n] or nil)
     end)
     return
@@ -1334,7 +1360,11 @@ local function valueOfNow(self, c, done)
       if why then return done(why) end
     end
     opts.region = searchRect(self, c)
-    host.screen.imageSearchAsync(asList(c.image), opts, function(hit)
+    host.screen.imageSearchAsync(asList(c.image), opts, function(hit, why)
+      if not hit and why ~= nil then
+        couldNotLook(c, why)
+        return done(nil)
+      end
       if not hit then
         -- "not found" is the whole value of this control type, so when it says that, it has to
         -- say enough to check it. A region in the wrong coordinate frame, a scale the thing is
@@ -1384,7 +1414,11 @@ local function valueOfNow(self, c, done)
   -- A slider: its value IS where the thumb is drawn. "not found" rather than a number
   -- when it cannot be located — a percentage invented from a failed search is worse than
   -- an admission, because it sounds right.
-  host.screen.imageSearchAsync(asList(c.thumbImage), opts, function(hit)
+  host.screen.imageSearchAsync(asList(c.thumbImage), opts, function(hit, why)
+    if not hit and why ~= nil then
+      couldNotLook(c, why)
+      return done(nil)
+    end
     if not hit then return done("not found") end
     local pct = sliderPercent(self, c, { cx = hit.x + math.floor(hit.w / 2) })
     done(pct and (tostring(pct) .. " percent") or "not found")
@@ -1956,7 +1990,7 @@ function Overlay:activate(index)
       region = searchRect(self, c),
       tolerance = c.tolerance or MATCH_TOLERANCE,
       scales = c.scales or MATCH_SCALES,
-    }, function(hit)
+    }, function(hit, why)
       if not (self.active and self:hwnd() == pinned) then
         -- Found, and deliberately NOT clicked, which was silent until it cost a diagnosis:
         -- a refusal that says nothing is indistinguishable from a search that never answered.
@@ -1964,6 +1998,13 @@ function Overlay:activate(index)
           "[gbutton] '%s': the overlay moved on before the search answered; not clicking",
           tostring(c.label)
         ))
+        return
+      end
+      if not hit and why ~= nil then
+        -- No search was made (the capture failed, or too many were waiting), so "not found"
+        -- would be a guess. Said all the same: the acknowledgement already went out.
+        couldNotLook(c, why)
+        host.speech.output((c.label or "Control") .. " could not be looked for, try again", { interrupt = true })
         return
       end
       if not hit then
@@ -3453,17 +3494,62 @@ end
 --
 -- `opts.key(origin)` extends the cache key beyond the window handle, for a property that
 -- survives a window MOVE but not a RESIZE (a host that repositions its embedded plugin).
+--
+-- It keeps the MEMO_CAP windows asked about most recently and forgets the rest: a window that
+-- closed is never asked about again, and the application runs for days, one entry per plug-in
+-- window ever opened (and per size, with `opts.key`). A window forgotten and asked about again
+-- is simply worked out again.
+local MEMO_CAP = 64
+
+-- How many times in a row an embedded binding's `identify` may answer nil ("could not tell
+-- yet") for one control before that is taken as no — see attachEmbedded.
+local IDENTIFY_UNDECIDED_MAX = 8
+
+-- A table of at most `cap` entries that forgets the one used least recently when a new one
+-- comes. `nil` is never stored — every caller treats it as "not known". Forgetting costs one
+-- pass over the `cap` entries, only when a new key arrives at a full table.
+local function boundedCache(cap)
+  local values, used, n, clock = {}, {}, 0, 0
+  local c = {}
+  function c.get(k)
+    local v = values[k]
+    if v ~= nil then
+      clock += 1
+      used[k] = clock
+    end
+    return v
+  end
+  function c.set(k, v)
+    if values[k] == nil then
+      if n >= cap then
+        local oldest, at = nil, math.huge
+        for key, u in pairs(used) do
+          if u < at then oldest, at = key, u end
+        end
+        if oldest ~= nil then
+          values[oldest], used[oldest] = nil, nil
+          n -= 1
+        end
+      end
+      n += 1
+    end
+    clock += 1
+    values[k], used[k] = v, clock
+  end
+  return c
+end
+
 function O.memoByOrigin(fn, opts)
-  local cache = {}
+  local cache = boundedCache(MEMO_CAP)
   local keyOf = opts and opts.key
   return function(origin, ...)
     if not (origin and origin.id) then return fn(origin, ...) end
     local k = origin.id
     if keyOf then k = tostring(k) .. "|" .. tostring(keyOf(origin)) end
-    local hit = cache[k]
+    local hit = cache.get(k)
     if hit ~= nil then return hit end
     local v = fn(origin, ...)
-    if v ~= nil then cache[k] = v end
+    if v ~= nil then cache.set(k, v) end
     return v
   end
 end
@@ -3671,7 +3757,19 @@ function Overlay:attachEmbedded(spec, opts)
   -- container HWND is stable, would otherwise keep its first (host-less) verdict and
   -- the overlay would never attach.
   local cacheId = spec.cacheIdentity ~= false
-  local idCache = {}
+  -- Per control id, the verdict of `identify` — true or false. `nil` ("could not tell yet":
+  -- UIA not ready the instant a plug-in appears) is NOT a verdict and is asked again at the next
+  -- recheck: stored as false, as it once was, it kept an overlay off a Kontakt it would have
+  -- recognised a moment later, for as long as that window lived. Bounded like memoByOrigin.
+  --
+  -- But only IDENTIFY_UNDECIDED_MAX times in a row. A plain Lua `identify` says "no" by
+  -- returning nothing (`if found then return true end`), and asked again at every recheck —
+  -- every focus event and every pollMatch tick — its UIA search or OCR read (a UIA search of an
+  -- Electron window measured 0.65-0.88 s) would run on the event loop for as long as the window
+  -- is open. A count, not a clock: the rechecks a window gets, not how long it has been open.
+  local idCache = boundedCache(MEMO_CAP)
+  -- Per control id, how many "could not tell yet" in a row; the first is logged.
+  local idUndecided = boundedCache(MEMO_CAP)
   local function pluginControl()
     local active = host.window.active()
     if not active then return nil end
@@ -3743,14 +3841,39 @@ function Overlay:attachEmbedded(spec, opts)
         if not identify then return c end
         local ok
         if cacheId then
-          ok = idCache[c.id]
+          ok = idCache.get(c.id)
           if ok == nil then
-            ok = identify(c) == true
-            idCache[c.id] = ok
-            if host.log then
-              host.log.info(string.format(
-                "attachEmbedded: matched control [%s] id=%d, identify=%s", c.class, c.id, tostring(ok)
-              ))
+            local verdict = identify(c)
+            if verdict ~= nil then
+              ok = verdict == true
+              idCache.set(c.id, ok)
+              idUndecided.set(c.id, 0)
+              if host.log then
+                host.log.info(string.format(
+                  "attachEmbedded: matched control [%s] id=%d, identify=%s", c.class, c.id, tostring(ok)
+                ))
+              end
+            else
+              -- Not now; asked again at the next recheck — up to IDENTIFY_UNDECIDED_MAX in a row.
+              ok = false
+              local n = (idUndecided.get(c.id) or 0) + 1
+              idUndecided.set(c.id, n)
+              if n >= IDENTIFY_UNDECIDED_MAX then
+                idCache.set(c.id, false)
+                if host.log then
+                  host.log.info(string.format(
+                    "attachEmbedded: matched control [%s] id=%d, identify could not tell %d times in a row, "
+                      .. "so it is taken as no, as false would be, for as long as this control is kept "
+                      .. "(an identify that means no should return false)",
+                    c.class, c.id, n
+                  ))
+                end
+              elseif n == 1 and host.log then
+                host.log.info(string.format(
+                  "attachEmbedded: matched control [%s] id=%d, identify could not tell yet — asked again at the next recheck, up to %d times in a row",
+                  c.class, c.id, IDENTIFY_UNDECIDED_MAX
+                ))
+              end
             end
           end
         else
@@ -5029,11 +5152,39 @@ end
 -- opens waits for no capture and no PNG; one pressed at 600 or 1500 ms waits for one or two
 -- PNGs. The timing is a measuring instrument, not menu state: nothing reads these pictures but
 -- the person calibrating.
+--
+-- TWICE PER CONTROL PER SESSION. The question the pictures answer — what this menu looks like
+-- open — does not change on the tenth opening, and a session of days calibrating wrote three
+-- PNGs of a plug-in window at every one: 85 MB in `calibration/` in two days. So the first two
+-- openings of each control (per overlay, per VM) are photographed, and the next says once that
+-- the rest are not. A reload of the module starts the count again.
+--
+-- Counted per overlay and control OBJECT, not per label: Kontakt builds an overlay per version
+-- and per library from the same names, and two overlays that share a label would otherwise
+-- share one count of two. Keys held weakly, so the count never keeps an overlay alive.
+local MENU_SHOTS_PER_CONTROL = 2
+local menuShotsTaken = setmetatable({}, { __mode = "k" })
 function Overlay:_menuShots(c)
   local who, what = tostring(self.label), tostring(c and c.label or "control")
   local o = self:origin()
   if not (o and o.client and o.bounds) then
     host.log.info(("[calibrate] '%s' '%s': no active origin, so no menu shots"):format(who, what))
+    return
+  end
+  local mine = menuShotsTaken[self]
+  if not mine then
+    mine = setmetatable({}, { __mode = "k" })
+    menuShotsTaken[self] = mine
+  end
+  -- A press with no control known is counted under the overlay itself.
+  local key = c or self
+  local taken = mine[key] or 0
+  mine[key] = taken + 1
+  if taken >= MENU_SHOTS_PER_CONTROL then
+    if taken == MENU_SHOTS_PER_CONTROL then
+      host.log.info(("[calibrate] '%s' '%s': menu shots were taken of its first %d openings; later "
+        .. "ones are not photographed until the module is reloaded"):format(who, what, MENU_SHOTS_PER_CONTROL))
+    end
     return
   end
   local b = o.bounds

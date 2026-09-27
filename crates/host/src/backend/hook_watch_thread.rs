@@ -1,7 +1,10 @@
-//! The keyboard hook's watch on Windows: one thread named `keyboard-watch`, with a message-only
-//! window that hears four things and asks the hook's thread to install the hook again when
-//! one of them says it is needed. The decisions are in [`super::hook_watch`]; this file is the
-//! plumbing around them.
+//! The keyboard hook's watch on Windows: one thread named `keyboard-watch`, started with the
+//! event loop whether or not a hook is ever installed. Its message-only window hears four things
+//! and, once the hook is installed, asks the hook's thread to install it again when one of them
+//! says it is needed; the session and power notifications among them, and the display
+//! broadcasts a second, hidden top-level window hears, are also the host's system events (the
+//! last section below). The decisions are in [`super::hook_watch`]; this file is the plumbing
+//! around them.
 //!
 //! - **Raw Input from the keyboard** (usage page 1, usage 6, `RIDEV_INPUTSINK`, so it arrives
 //!   whichever window is in front). Posted to this window, never waited for, so no timeout can
@@ -39,6 +42,19 @@
 //! outcome back here ([`report`]); the log line is written on this thread, because a file write
 //! on the hook's thread just after a resume — with the disk still spinning up — is exactly the
 //! kind of delay that gets a hook removed.
+//!
+//! **The host's system events come from here too** (`crate::system_events`). The session and
+//! suspend/resume notifications are the ones the watch already registers, so they are not
+//! registered twice: each is also pushed for the event loop, which writes the `[system]` line
+//! and re-checks what it caches. So the thread starts with the event loop ([`start_system`]),
+//! whether or not a hook is ever installed, and the hook's part — raw input, the foreground
+//! events, the witness — is armed when the hook is ([`start`]). The display, scale, work-area and
+//! taskbar changes are broadcast to top-level windows only, which a message-only window is not,
+//! so the thread has a second window for them: top-level, hidden, never shown and never
+//! activated (`WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`), which window enumeration skips as it skips
+//! every invisible window. Broadcasts are sent messages, so a program that broadcasts waits for
+//! this thread — which does nothing else, rather than for the event loop, which can be inside an
+//! OCR call.
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering};
@@ -70,11 +86,13 @@ use windows_sys::Win32::UI::Input::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetForegroundWindow, GetMessageTime,
     GetMessageW, GetWindowThreadProcessId, PostMessageW, PostThreadMessageW, RegisterClassW,
-    DEVICE_NOTIFY_CALLBACK, EVENT_SYSTEM_FOREGROUND, HWND_MESSAGE, MSG, WINEVENT_OUTOFCONTEXT,
-    WM_APP, WM_INPUT, WM_WTSSESSION_CHANGE, WNDCLASSW,
+    RegisterWindowMessageW, DEVICE_NOTIFY_CALLBACK, EVENT_SYSTEM_FOREGROUND, HWND_MESSAGE, MSG,
+    WINEVENT_OUTOFCONTEXT, WM_APP, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_INPUT, WM_SETTINGCHANGE,
+    WM_WTSSESSION_CHANGE, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use super::hook_watch::{self, Change, Outcome, Reason, Verdict, Witness};
+use crate::system_events::{self, SystemEvent};
 
 /// Posted to the hook's thread (a thread message, no window): install the hook again. `WPARAM`
 /// is the [`Reason`], encoded. Handled in `keyboard_hook_thread`'s loop.
@@ -84,6 +102,16 @@ const WM_APP_POWER: u32 = WM_APP + 0x52;
 /// Posted here by the hook's thread: `WPARAM` the reason as it was asked, `LPARAM` the
 /// [`Outcome`], encoded.
 const WM_APP_REHOOKED: u32 = WM_APP + 0x53;
+/// Posted here by [`start`] when the thread was already running for the system events: arm the
+/// hook's part now.
+const WM_APP_ARM_KEYS: u32 = WM_APP + 0x54;
+
+/// The hook exists and its part of the watch is wanted: set by [`start`] before it posts
+/// [`WM_APP_ARM_KEYS`], read by the thread once its window exists, so whichever comes first the
+/// part is armed (and armed once: `arm_keys` does nothing the second time).
+static KEYS_WANTED: AtomicBool = AtomicBool::new(false);
+/// The message id `RegisterWindowMessageW("TaskbarCreated")` gave, 0 until the thread asked.
+static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
 /// The tick of the hook's latest call, with the lowest bit set so that 0 means "never called".
 /// One relaxed store per call, from inside the hook; a millisecond of precision lost against a
@@ -119,14 +147,36 @@ fn call_of_record(record: u32) -> Option<u32> {
     (record != 0).then_some(record)
 }
 
-/// Starts the watch for the hook installed on `hook_thread`. Once per process; later calls do
-/// nothing. Does not wait for the thread: nothing the caller does depends on it, and the pump
-/// is the caller.
+/// Starts the watch for the hook installed on `hook_thread`: the thread, if the system events
+/// have not started it already, and the hook's part of it. Later calls change the thread asked
+/// for re-installs and nothing else. Does not wait for the thread: nothing the caller does
+/// depends on it, and the pump is the caller.
 pub(super) fn start(hook_thread: u32) {
     HOOK_THREAD.store(hook_thread, Ordering::SeqCst);
-    if STARTED.swap(true, Ordering::SeqCst) {
+    KEYS_WANTED.store(true, Ordering::SeqCst);
+    if !STARTED.swap(true, Ordering::SeqCst) {
+        spawn();
         return;
     }
+    // Running already, for the system events. Its window may not exist yet; then the thread
+    // reads KEYS_WANTED itself once it does.
+    let hwnd = WATCH_HWND.load(Ordering::SeqCst);
+    if hwnd != 0 {
+        // SAFETY: posting to our own message-only window.
+        unsafe { PostMessageW(hwnd as HWND, WM_APP_ARM_KEYS, 0, 0) };
+    }
+}
+
+/// Starts the thread for the system events alone (`crate::system_events`), when the hook has
+/// not started it already. Once per process; installs no hook and registers no raw input — the
+/// hook's part waits for [`start`].
+pub(super) fn start_system() {
+    if !STARTED.swap(true, Ordering::SeqCst) {
+        spawn();
+    }
+}
+
+fn spawn() {
     let spawned = std::thread::Builder::new().name("keyboard-watch".to_string()).spawn(|| {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
         WATCH_HWND.store(0, Ordering::SeqCst);
@@ -140,7 +190,8 @@ pub(super) fn start(hook_thread: u32) {
                 "keys",
                 &format!(
                     "the keyboard watch stopped after a panic ({text}); a keyboard hook Windows \
-                     removes is not installed again until the application restarts"
+                     removes is not installed again, and sleep, lock and display changes are not \
+                     heard, until the application restarts"
                 ),
             );
         }
@@ -150,7 +201,8 @@ pub(super) fn start(hook_thread: u32) {
             "keys",
             &format!(
                 "could not start the keyboard watch's thread ({e}); a keyboard hook Windows \
-                 removes is not installed again until the application restarts"
+                 removes is not installed again, and sleep, lock and display changes are not \
+                 heard, until the application restarts"
             ),
         );
     }
@@ -181,6 +233,23 @@ struct Look {
 }
 
 struct State {
+    /// The hook's part, armed when the hook is installed ([`arm_keys`]); `None` while no hook
+    /// exists, and then only the system events are heard.
+    keys: Option<Keys>,
+    /// `WTSRegisterSessionNotification` refused, with this error, and not accepted since. Tried
+    /// again at the key-downs [`hook_watch::retry_at`] picks, counted in `keys_since_refusal`,
+    /// and at every other notification the thread gets (a display change, a suspend).
+    session_refused: Option<u32>,
+    keys_since_refusal: u64,
+    /// What `RegisterSuspendResumeNotification` answered, for the hook's line.
+    power: Result<(), u32>,
+    /// Said that a screen reader's modifier the hook recorded as held was forgotten (once per
+    /// process: NVDA's menu alone does it every time it is opened with Insert).
+    said_forgot: bool,
+}
+
+/// The hook's part of the watch.
+struct Keys {
     witness: Witness,
     look: Look,
     /// A re-install asked of the hook's thread and not answered yet.
@@ -189,13 +258,6 @@ struct State {
     said_unanswered: bool,
     /// Said that a request could not be posted.
     said_post_failed: bool,
-    /// `WTSRegisterSessionNotification` refused, with this error, and not accepted since. Tried
-    /// again at the key-downs [`hook_watch::retry_at`] picks, counted in `keys_since_refusal`.
-    session_refused: Option<u32>,
-    keys_since_refusal: u64,
-    /// Said that a screen reader's modifier the hook recorded as held was forgotten (once per
-    /// process: NVDA's menu alone does it every time it is opened with Insert).
-    said_forgot: bool,
 }
 
 thread_local! {
@@ -211,16 +273,65 @@ fn run() {
             "keys",
             &format!(
                 "could not create the keyboard watch's window (error {err}); a keyboard hook \
-                 Windows removes is not installed again until the application restarts"
+                 Windows removes is not installed again, and sleep and lock are not heard, until \
+                 the application restarts"
             ),
         );
         return;
     }
     WATCH_HWND.store(hwnd as isize, Ordering::SeqCst);
 
-    let raw = register_raw_input(hwnd);
     let session = register_session(hwnd);
     let power = register_power();
+    let broadcasts = create_broadcast_window();
+    let said = |r: &Result<(), u32>| match r {
+        Ok(()) => "yes".to_string(),
+        Err(e) => format!("NO (error {e})"),
+    };
+    crate::logging::line(
+        "system",
+        &format!(
+            "sleep, lock, connections and display changes are heard on the keyboard watch's \
+             thread: session notifications {}{}; suspend/resume notifications {}; display, \
+             scale, work-area and taskbar broadcasts {} (a hidden window of its own that is \
+             never shown)",
+            said(&session),
+            if session.is_err() { " — tried again at every other notification and key-down" } else { "" },
+            said(&power),
+            said(&broadcasts),
+        ),
+    );
+    STATE.with(|s| {
+        *s.borrow_mut() = Some(State {
+            keys: None,
+            session_refused: session.err(),
+            keys_since_refusal: 0,
+            power,
+            said_forgot: false,
+        });
+    });
+    if KEYS_WANTED.load(Ordering::SeqCst) {
+        arm_keys();
+    }
+
+    let mut msg: MSG = unsafe { std::mem::zeroed() };
+    // SAFETY: a standard message loop on this thread's own queue.
+    unsafe {
+        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
+/// Arms the hook's part of the watch: raw input from the keyboard, the foreground events, and
+/// what the witness needs to know about this process. Once: a second call does nothing.
+fn arm_keys() {
+    let armed = STATE.with(|s| s.borrow().as_ref().is_some_and(|s| s.keys.is_some()));
+    if armed {
+        return;
+    }
+    let hwnd = WATCH_HWND.load(Ordering::SeqCst) as HWND;
+    let raw = register_raw_input(hwnd);
     let foreground = register_foreground().map(|_| ());
     // SAFETY: the pseudo-handle of this process, and this thread's own desktop; neither is
     // closed (neither needs to be).
@@ -231,46 +342,39 @@ fn run() {
         Ok(()) => "yes".to_string(),
         Err(e) => format!("NO (error {e})"),
     };
-    crate::logging::line(
-        "keys",
-        &format!(
-            "keyboard watch: raw input from the keyboard is compared with the hook's calls, and \
-             the hook is installed again after it misses {} key-downs in a row, and after a \
-             resume or an unlock. Raw input {}; session notifications {}{}; suspend/resume \
-             notifications {}; foreground events {}; this process's integrity level {}; \
-             desktop {}",
-            hook_watch::MISSES_TO_REHOOK,
-            said(&raw),
-            said(&session),
-            if session.is_err() { " — tried again at the 1st, 2nd, 4th, 8th … key-down" } else { "" },
-            said(&power),
-            said(&foreground),
-            own_level.map_or("unknown — no key is counted".to_string(), |l| format!("{l:#06x}")),
-            desktop
-                .as_ref()
-                .map_or("unknown — no key is counted".to_string(), |d| String::from_utf16_lossy(d)),
-        ),
-    );
-    STATE.with(|s| {
-        *s.borrow_mut() = Some(State {
+    with_state(|s| {
+        let session: Result<(), u32> = match s.session_refused {
+            Some(e) => Err(e),
+            None => Ok(()),
+        };
+        crate::logging::line(
+            "keys",
+            &format!(
+                "keyboard watch: raw input from the keyboard is compared with the hook's calls, \
+                 and the hook is installed again after it misses {} key-downs in a row, and after \
+                 a resume or an unlock. Raw input {}; session notifications {}{}; suspend/resume \
+                 notifications {}; foreground events {}; this process's integrity level {}; \
+                 desktop {}",
+                hook_watch::MISSES_TO_REHOOK,
+                said(&raw),
+                said(&session),
+                if session.is_err() { " — tried again at the 1st, 2nd, 4th, 8th … key-down" } else { "" },
+                said(&s.power),
+                said(&foreground),
+                own_level.map_or("unknown — no key is counted".to_string(), |l| format!("{l:#06x}")),
+                desktop
+                    .as_ref()
+                    .map_or("unknown — no key is counted".to_string(), |d| String::from_utf16_lossy(d)),
+            ),
+        );
+        s.keys = Some(Keys {
             witness: Witness::default(),
             look: Look { own_level, desktop, cache: None },
             pending: None,
             said_unanswered: false,
             said_post_failed: false,
-            session_refused: session.err(),
-            keys_since_refusal: 0,
-            said_forgot: false,
         });
     });
-
-    let mut msg: MSG = unsafe { std::mem::zeroed() };
-    // SAFETY: a standard message loop on this thread's own queue.
-    unsafe {
-        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
-            DispatchMessageW(&msg);
-        }
-    }
 }
 
 fn create_window() -> HWND {
@@ -306,6 +410,55 @@ fn create_window() -> HWND {
             hmod,
             std::ptr::null(),
         )
+    }
+}
+
+/// The window the broadcasts reach — display, scale, work-area and taskbar changes — which a
+/// message-only window does not: top-level, hidden, never shown, never activated, no title, no
+/// size. Also registers the `TaskbarCreated` message, whose id is only known once asked for.
+fn create_broadcast_window() -> Result<(), u32> {
+    let taskbar: Vec<u16> = "TaskbarCreated\0".encode_utf16().collect();
+    // SAFETY: a NUL-terminated name; the id is the same for every caller in the session.
+    TASKBAR_CREATED.store(unsafe { RegisterWindowMessageW(taskbar.as_ptr()) }, Ordering::Relaxed);
+    // SAFETY: registering a class and creating a window on this thread; the class name outlives
+    // both calls. The window is never shown (no WS_VISIBLE, no ShowWindow), so nothing sees it,
+    // and it lives as long as the process.
+    let hwnd = unsafe {
+        let hmod = GetModuleHandleW(std::ptr::null());
+        let class_name: Vec<u16> = "AutomationPlatformSystemWatch\0".encode_utf16().collect();
+        let wc = WNDCLASSW {
+            style: 0,
+            lpfnWndProc: Some(broadcast_wndproc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: hmod,
+            hIcon: std::ptr::null_mut(),
+            hCursor: std::ptr::null_mut(),
+            hbrBackground: std::ptr::null_mut(),
+            lpszMenuName: std::ptr::null(),
+            lpszClassName: class_name.as_ptr(),
+        };
+        RegisterClassW(&wc);
+        CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            class_name.as_ptr(),
+            std::ptr::null(),
+            WS_POPUP,
+            0,
+            0,
+            0,
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            hmod,
+            std::ptr::null(),
+        )
+    };
+    if hwnd.is_null() {
+        // SAFETY: plain error query.
+        Err(unsafe { GetLastError() })
+    } else {
+        Ok(())
     }
 }
 
@@ -407,8 +560,10 @@ unsafe extern "system" fn foreground_changed(
     // Unwinding out of a callback of the system's is an abort; see `watch_wndproc`.
     let caught = std::panic::catch_unwind(|| {
         with_state(|s| {
-            let level = level_of_window(&mut s.look, hwnd as isize);
-            if hook_watch::keys_go_unseen(s.look.own_level, level.flatten()) {
+            let State { keys, said_forgot, .. } = s;
+            let Some(k) = keys.as_mut() else { return };
+            let level = level_of_window(&mut k.look, hwnd as isize);
+            if hook_watch::keys_go_unseen(k.look.own_level, level.flatten()) {
                 let what = format!(
                     "a window the keyboard hook is not called for came to the front ({})",
                     match level.flatten() {
@@ -416,7 +571,7 @@ unsafe extern "system" fn foreground_changed(
                         None => "its integrity level could not be read".to_string(),
                     }
                 );
-                forget_out_of_sight(s, &what);
+                forget_out_of_sight(said_forgot, &what);
             }
         });
     });
@@ -432,12 +587,12 @@ unsafe extern "system" fn foreground_changed(
 /// what the hook recorded as held from key-downs alone. Said once per process when that
 /// included a screen reader's modifier — the line that tells a session whose captured keys all
 /// went to the screen reader from one whose hook Windows removed.
-fn forget_out_of_sight(s: &mut State, what: &str) {
+fn forget_out_of_sight(said_forgot: &mut bool, what: &str) {
     let Some(age) = super::windows::forget_keys_held_out_of_sight() else {
         return;
     };
-    if !s.said_forgot {
-        s.said_forgot = true;
+    if !*said_forgot {
+        *said_forgot = true;
         crate::logging::line(
             "keys",
             &format!(
@@ -469,15 +624,22 @@ unsafe extern "system" fn watch_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
     // the watch at most, never the process that carries the user's keyboard overlay.
     let caught = std::panic::catch_unwind(|| match msg {
         WM_INPUT => on_raw_input(lparam as HRAWINPUT),
-        WM_WTSSESSION_CHANGE => on_change(
-            hook_watch::on_session_change(wparam as u32),
-            &format!("the session changed (WTS event {})", wparam as u32),
-        ),
-        WM_APP_POWER => on_change(
-            hook_watch::on_power(wparam as u32),
-            &format!("the machine suspended or resumed (PBT event {:#x})", wparam as u32),
-        ),
+        WM_WTSSESSION_CHANGE => {
+            system(system_events::from_wts(wparam as u32));
+            on_change(
+                hook_watch::on_session_change(wparam as u32),
+                &format!("the session changed (WTS event {})", wparam as u32),
+            )
+        }
+        WM_APP_POWER => {
+            system(system_events::from_pbt(wparam as u32));
+            on_change(
+                hook_watch::on_power(wparam as u32),
+                &format!("the machine suspended or resumed (PBT event {:#x})", wparam as u32),
+            )
+        }
         WM_APP_REHOOKED => on_rehooked(wparam, lparam),
+        WM_APP_ARM_KEYS => arm_keys(),
         _ => {}
     });
     if caught.is_err() {
@@ -487,9 +649,58 @@ unsafe extern "system" fn watch_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
         }
     }
     match msg {
-        WM_APP_POWER | WM_APP_REHOOKED => 0,
+        WM_APP_POWER | WM_APP_REHOOKED | WM_APP_ARM_KEYS => 0,
         // WM_INPUT goes on to DefWindowProcW as well, which is how the system frees the input.
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+/// The hidden top-level window's procedure: the broadcasts a message-only window does not get.
+/// Everything goes on to `DefWindowProcW` as well, which answers each as any window would.
+unsafe extern "system" fn broadcast_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let caught = std::panic::catch_unwind(|| {
+        let taskbar = TASKBAR_CREATED.load(Ordering::Relaxed);
+        match msg {
+            WM_DISPLAYCHANGE => system(Some(SystemEvent::DisplaysChanged)),
+            WM_DPICHANGED => system(Some(SystemEvent::Scale)),
+            WM_SETTINGCHANGE => system(system_events::from_setting(wparam as u32)),
+            m if taskbar != 0 && m == taskbar => system(Some(SystemEvent::TaskbarCreated)),
+            _ => {}
+        }
+    });
+    if caught.is_err() {
+        static SAID: AtomicBool = AtomicBool::new(false);
+        if !SAID.swap(true, Ordering::Relaxed) {
+            crate::logging::line("system", &format!("the system-event window panicked handling message {msg:#x}"));
+        }
+    }
+    DefWindowProcW(hwnd, msg, wparam, lparam)
+}
+
+/// Pushes a system event for the event loop and wakes it; `None` is a notification that means
+/// nothing to the host. A session registration refused earlier is tried again here as well,
+/// since without a hook no key-down comes to try it.
+fn system(event: Option<SystemEvent>) {
+    let Some(event) = event else { return };
+    system_events::push(event);
+    super::windows::wake_pump();
+    with_state(retry_session);
+}
+
+/// Tries a refused session registration again, and says so when it is accepted now.
+fn retry_session(s: &mut State) {
+    let Some(refused) = s.session_refused else { return };
+    let hwnd = WATCH_HWND.load(Ordering::SeqCst) as HWND;
+    if register_session(hwnd).is_ok() {
+        s.session_refused = None;
+        crate::logging::line(
+            "system",
+            &format!(
+                "session notifications registered now, after they were refused (error {refused}; \
+                 {} key-down(s) since)",
+                s.keys_since_refusal
+            ),
+        );
     }
 }
 
@@ -547,27 +758,17 @@ fn on_raw_input(handle: HRAWINPUT) {
     let time = unsafe { hook_watch::event_time(GetMessageTime() as u32, GetTickCount()) };
     take_lost_reply();
     with_state(|s| {
-        if let Some(refused) = s.session_refused {
+        if s.session_refused.is_some() {
             s.keys_since_refusal += 1;
             if hook_watch::retry_at(s.keys_since_refusal) {
-                let hwnd = WATCH_HWND.load(Ordering::SeqCst) as HWND;
-                if register_session(hwnd).is_ok() {
-                    s.session_refused = None;
-                    crate::logging::line(
-                        "keys",
-                        &format!(
-                            "keyboard watch: session notifications registered now, at key-down {} \
-                             after they were refused (error {refused})",
-                            s.keys_since_refusal
-                        ),
-                    );
-                }
+                retry_session(s);
             }
         }
-        let look = &mut s.look;
-        let verdict = s.witness.key_down(time, last_hook_call(), || hook_can_see_now(look));
+        let Some(k) = s.keys.as_mut() else { return };
+        let look = &mut k.look;
+        let verdict = k.witness.key_down(time, last_hook_call(), || hook_can_see_now(look));
         if let Verdict::Rehook { downs } = verdict {
-            request(s, Reason::Missed { downs });
+            request(k, Reason::Missed { downs });
         }
     });
 }
@@ -576,18 +777,23 @@ fn on_raw_input(handle: HRAWINPUT) {
 /// took the keyboard somewhere the hook is not called, or brings it back from there, so what the
 /// hook recorded as held is forgotten at each; a re-install is asked for where
 /// [`hook_watch::on_session_change`] and [`hook_watch::on_power`] say so.
+///
+/// With no hook installed (the hook's part not armed) there is nothing to install again, and
+/// only the system event, pushed by the caller, remains.
 fn on_change(change: Change, what: &str) {
     take_lost_reply();
     with_state(|s| {
+        let State { keys, said_forgot, .. } = s;
+        let Some(k) = keys.as_mut() else { return };
         if change != Change::Nothing {
-            forget_out_of_sight(s, what);
+            forget_out_of_sight(said_forgot, what);
         }
         match change {
             Change::Rehook(reason) => {
-                s.witness.restart();
-                request(s, reason);
+                k.witness.restart();
+                request(k, reason);
             }
-            Change::Restart => s.witness.restart(),
+            Change::Restart => k.witness.restart(),
             Change::Nothing => {}
         }
     });
@@ -600,7 +806,7 @@ fn on_change(change: Change, what: &str) {
 /// the same: it comes only after the bar, raised by the request before it, has been reached
 /// again, so a reply that went missing costs one round of missed key-downs, never the feature —
 /// and a second swap does no harm. That the reply is overdue is said once.
-fn request(s: &mut State, reason: Reason) {
+fn request(s: &mut Keys, reason: Reason) {
     if let Some(asked) = s.pending {
         if !matches!(reason, Reason::Missed { .. }) {
             return;
@@ -647,7 +853,11 @@ fn on_rehooked(wparam: WPARAM, lparam: LPARAM) {
         (Some(reason), Some(outcome)) => settle(reason, outcome),
         // Nothing posts one that does not decode; the request is answered all the same, so
         // the next one is not held back by it.
-        _ => with_state(|s| s.pending = None),
+        _ => with_state(|s| {
+            if let Some(k) = s.keys.as_mut() {
+                k.pending = None;
+            }
+        }),
     }
 }
 
@@ -659,10 +869,11 @@ fn settle(reason: Reason, outcome: Outcome) {
     let by_witness = matches!(reason, Reason::Missed { .. });
     let mut needed = hook_watch::MISSES_TO_REHOOK;
     with_state(|s| {
-        s.pending = None;
-        s.said_unanswered = false;
-        s.witness.rehooked(by_witness, outcome.installed(), now);
-        needed = s.witness.needed();
+        let Some(k) = s.keys.as_mut() else { return };
+        k.pending = None;
+        k.said_unanswered = false;
+        k.witness.rehooked(by_witness, outcome.installed(), now);
+        needed = k.witness.needed();
     });
     let mut text = hook_watch::line(reason, outcome);
     if needed != hook_watch::MISSES_TO_REHOOK {

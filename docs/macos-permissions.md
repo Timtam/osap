@@ -14,26 +14,25 @@ page is what to grant, how to check, and what each absence looks like.*
 | --- | --- | --- |
 | **Accessibility** | reading and clicking anything | every plugin looks empty; no overlay ever activates |
 | **Screen Recording** | capture, image search, OCR | **captures silently return the desktop wallpaper** — never an error |
-| **Input Monitoring** | intercepting and suppressing keys | overlay keys reach the plugin instead of the overlay |
+| **Input Monitoring** | intercepting and suppressing keys, if it is needed next to Accessibility (not measured yet) | overlay keys reach the plugin instead of the overlay |
 | **Automation** → VoiceOver | speaking *through* VoiceOver | the setting is on and the overlay still speaks in its own voice |
 
 Only the first two need granting for the platform to work at all; **Automation** is asked
-for separately, and only if you switch on "Speak through VoiceOver". **Input Monitoring normally follows the Accessibility
-grant** rather than needing one of its own — observed across three sessions on one machine:
-it read *unknown* before Accessibility was granted, *granted* immediately afterwards without
-that pane ever being opened, and denied again once a rebuild invalidated the Accessibility
-grant. It is listed because it can be switched off independently, and because if it ever
-disagrees with Accessibility, that disagreement is itself the finding.
+for separately, and only if you switch on "Speak through VoiceOver". **Input Monitoring** is
+not asked for at start: the key capture is the kind Accessibility governs, and whether this
+application needs Input Monitoring next to it has not been measured yet. Its line in the log
+and on the Permissions page reads Input Monitoring's own state, and *unknown* there means macOS
+has not been asked. (Builds before 2026-09-27 read the posting side of the same check instead —
+the Accessibility side — which is why their logs showed "Input Monitoring" following
+Accessibility. The log now reports that one on a line of its own, `hid post events`.)
 
 The pane is called **System Settings → Privacy & Security** on Ventura and later, and
 **System Preferences → Security & Privacy → Privacy** on Monterey and earlier. The log names
-whichever one this machine actually has.
+whichever one this machine actually has. From macOS 15 the Screen Recording list is called
+**Screen & System Audio Recording**.
 
-**On Monterey, expect no Screen Recording prompt.** The application asks for the permission
-at launch, and asking is what normally enrols it in that list — but on macOS 12 the request
-frequently raises no dialog and adds no entry. Measured, and reported independently by a
-second person for a different permission on the same OS version. Add it by hand: unlock the
-padlock, press **+**, choose `AutomationPlatform.app`.
+**Grant Accessibility first.** Nothing works without it, and it is also what the Screen
+Recording request waits for — see the next section.
 
 Whether the application has to be restarted afterwards depends on the permission, and both
 halves were measured on a Mac mini with macOS 14.5 on 2026-09-18:
@@ -43,9 +42,121 @@ halves were measured on a Mac mini with macOS 14.5 on 2026-09-18:
 - **Screen Recording does not.** macOS hands it only to a process that started *after* it was
   granted, so **quit and reopen the application** after granting it. The running one keeps
   the old answer; this is the most common reason a permission appears not to have worked.
-- **Input Monitoring** usually follows Accessibility by itself. If *Re-check now* still shows
-  it missing, quit and reopen — this one has not been measured either way.
+- **Input Monitoring**: if *Re-check now* still shows it missing after granting it, quit and
+  reopen — this one has not been measured either way.
 - **Automation** (VoiceOver speech) needs no restart.
+
+## How the application gets into the Screen Recording list
+
+macOS lists an application under Screen Recording only once it has **asked** for the
+permission. Checking whether it has it is not asking, and enrols nothing. So the application
+asks by itself, once per run:
+
+- **as soon as it is up** — after its window and its startup announcement — when
+  Accessibility is already granted;
+- otherwise **the moment Accessibility is granted** while it runs (it looks once a second,
+  and keeps App Nap from stretching that second while it waits: the grant is made with its
+  window covered, which is when macOS naps an application without a Dock icon). It waits,
+  and keeps App Nap away, for as long as Accessibility is missing — the whole session, when
+  it is never granted — with an activity that is not latency-critical, so the waiting costs
+  no more battery than keeping App Nap away does.
+  Never while the Accessibility dialog may still be on screen: two system dialogs would stand
+  on top of each other, and somebody listening hears one of them. On a first launch the order
+  is therefore Accessibility, then Screen Recording.
+
+That request is **`CGRequestScreenCaptureAccess`**, the documented one. It returns at once;
+the dialog, where macOS shows one, is drawn by the system, and its button that opens the
+settings leads to the list.
+
+There is a second, different way to ask: a **capture request**. The application asks
+ScreenCaptureKit for its list of what can be captured, on a thread of its own, and waits at
+most five seconds for the answer — it is the first thing Apple's own capture sample does, and
+that sample's documentation says the system prompts on its first run. Where ScreenCaptureKit
+does not answer, the application also captures one point through the older Core Graphics
+functions (found by name at run time, like every use of them here). On macOS 13 and later it
+does not do that otherwise: macOS 15 added alerts of its own for those functions, and a second
+dialog about the same thing is one too many.
+
+| macOS | Asked by itself | The Screen Recording button, pressed |
+| --- | --- | --- |
+| 11, and 12.0 – 12.2 | nothing: the application does not open there. Its minimum is 12.3 (`LSMinimumSystemVersion`), because it needs ScreenCaptureKit, which arrived in 12.3 | — |
+| 12.3 – 12.7 | the documented request; a second later the capture request; a second after that, one point through the older functions. On macOS 12 the documented request alone was measured to raise no dialog and add no entry. | opens the list, since the first request makes all three; pressed before it, it makes them |
+| 13 and later | the documented request alone | first press: the capture request (and the older functions, only if ScreenCaptureKit does not answer); next press: opens the list |
+
+### The Screen Recording button
+
+**"Open the Screen Recording settings"** on the Permissions page makes the next request the
+application has left in this run, one per press — and **a press that has just asked does not
+open the settings**. The request may have put a dialog on screen, and a settings window opened
+on top of it would take the focus, and VoiceOver, away from that dialog. The page says instead
+that macOS has been asked, that the dialog's button leads to the list, and that pressing again
+if no dialog came up asks the second way, or, once everything has been asked, opens the list.
+With Screen Recording granted, the button opens the list at once. Pressed before the automatic
+request — while Accessibility is still missing — its first press is the documented request, and
+the automatic one is then not made.
+
+None of this can report whether an entry was added — no public call answers that — so the
+log ends with what is left to do. After the automatic request on macOS 13 and later:
+
+```
+screen recording: asked with CGRequestScreenCaptureAccess (now that Accessibility is granted); it answered not granted
+screen recording: if a dialog came up, its button that opens the settings leads to the list. If none did, or the application is not in the list, press 'Open the Screen Recording settings' on the Permissions page: it asks a second way. Failing that: open System Settings > Privacy & Security > Screen Recording, press the + button under the list, …
+```
+
+and after the capture request:
+
+```
+screen recording: asking a second way (from the Permissions page): a capture request
+screen recording: asked ScreenCaptureKit for what can be captured, and it answered 'declined' (… -3801: "…") — its word for not permitted, …
+screen recording: if this application is not in the list: open System Settings > Privacy & Security > Screen Recording, press the + button under the list, …
+```
+
+If ScreenCaptureKit answers with a number of displays and windows instead — which it normally
+does only for an application allowed to capture — the "NOT granted" before it may be the answer
+the system gave the process when it started, which it keeps until the application is started
+again.
+
+### If the entry still does not appear
+
+Add it by hand. It is the fallback, and it always works:
+
+1. Open the Screen Recording list: **System Settings → Privacy & Security → Screen Recording**
+   (Screen & System Audio Recording from macOS 15); on Monterey **System Preferences →
+   Security & Privacy → Privacy → Screen Recording**, and unlock the padlock at the bottom
+   first.
+2. Press **+** under the list, choose `AutomationPlatform.app`, and switch it on.
+3. Quit the application and open it again.
+
+Before that, read the `launched by` line of the log's startup block. It should begin with
+`launchd`: the application was opened with `open` or from the Finder. If it names a shell,
+the application was started from a terminal, and macOS asks about — and lists — the
+application responsible for it, which is that terminal. Quit it and open the `.app` with
+`open` or from the Finder.
+
+If the entry **is** in the list and switched on, and the log still says "NOT granted" in a run
+started after that, the entry belongs to an earlier build — see
+[below](#when-the-switch-is-on-and-the-application-still-cannot-use-it).
+
+## Input Monitoring
+
+It is **not asked for at start**, and nothing asks for it but its button: the key capture is
+the kind Accessibility governs, and whether this application needs Input Monitoring next to
+Accessibility has not been measured. If keys an overlay has claimed reach the plugin while
+Accessibility is granted, press **"Open the Input Monitoring settings"** on the Permissions
+page. Like the Screen Recording button, it asks one way per press, and a press that has just
+asked leaves the settings shut:
+
+- with Accessibility missing, it asks nothing, says to grant Accessibility first, and opens
+  the list;
+- *granted*, or *denied* — which means the application is in the list, switched off — it
+  opens the list;
+- *unknown*: the first press asks with `CGRequestListenEventAccess`, the second with IOKit's
+  `IOHIDRequestAccess` for listening, and the third opens the list.
+
+Unlike Screen Recording's, its state can be read, and the log writes it before and after each
+request: *unknown* turning into *denied* is the sign that the application is now in the list,
+switched off. If it is not in the list even after both, add it with **+** the same way as
+above.
 
 ## Checking, without being able to see
 
@@ -53,17 +164,28 @@ The application asks the system what it has been granted and writes the answer t
 at every startup, in a block near the top:
 
 ```
-[env] accessibility: trusted
+[env] accessibility: granted
 [env] screen recording: granted
+[env] input monitoring: unknown — macOS has not been asked (the Permissions page's button asks)
+[env] hid post events: granted (IOHIDCheckAccess for posting events, the Accessibility side — …)
 [env] display 1: 1512x982 pt, scale 2.0 (primary)
 [env] voiceover: running
+[env] translocated: no
 [env] bundle: com.automationplatform.app
+[env] launched by: launchd — opened with `open` or from the Finder, …
 ```
 
 That block is the first thing to read when something does not work, and the first thing to
-send. It sits beside the `.app` as `automation-platform.log`, or in
+send. It is written when the application starts; after 8 MB the log goes on in a new file, and
+the part with the block is moved to `automation-platform.log.1` — send both — and after a
+second 8 MB it is gone, until the application is reopened. It sits beside the `.app` as
+`automation-platform.log`, or in
 `~/Library/Application Support/AutomationPlatform/` if the folder beside the app was not
-writable — the log's own header says which one it chose.
+writable — the log's own header says which one it chose. A download opened without removing
+its quarantine flag runs from a copy macOS made elsewhere; the log then goes beside the original
+`.app` when macOS can say where that is, and `translocated` says `YES`, where both are, and why
+if the original could not be found (see
+[building-on-macos.md](building-on-macos.md#translocation)).
 
 ## Why each one is asked for
 
@@ -80,14 +202,12 @@ as empty, and nothing anywhere reports a permission problem. The application tri
 this and say so, but the check cannot be perfect — if captures are behaving oddly, check
 this switch first.
 
-**Input Monitoring** is needed only for keys the overlay *takes away* from the plugin —
-and, as above, is usually granted implicitly with Accessibility, since a process trusted for
-Accessibility is allowed to listen to events. What follows is what its absence would mean if
-it ever were absent on its own:
-Tab, the arrows, Space inside an overlay. Global shortcuts do **not** need it: those are
+**Input Monitoring** would matter only for keys the overlay *takes away* from the plugin —
+Tab, the arrows, Space inside an overlay — and whether they need it next to Accessibility is
+not known yet (see [above](#input-monitoring)). Global shortcuts do **not** need it: those are
 registered through an older, narrower mechanism precisely so the main interaction keeps
-working before the fussiest permission has been granted. So an application with
-Accessibility but not Input Monitoring is half-alive: shortcuts open overlays, and
+working before the fussiest permission has been granted. So if it is needed, an application
+with Accessibility but not Input Monitoring is half-alive: shortcuts open overlays, and
 navigating inside one leaks keys to the plugin.
 
 ## Automation, and why it is the quietest of the four
@@ -143,9 +263,25 @@ The log names the identity in play:
 Compare that `cdhash` between two runs. If it changed and the permissions stopped working,
 that is the entire explanation, and there is nothing else to look for.
 
-The remedy is to make the record match the application again: **remove the entry from the
-list (select it, press −), then add it back**, and restart the application. Toggling the
-switch off and on is usually not enough — the stale requirement stays attached to the entry.
+The remedy is to make the record match the application again. Quit the application and run,
+in Terminal:
+
+```
+tccutil reset ScreenCapture com.automationplatform.app
+```
+
+`Accessibility` or `ListenEvent` in place of `ScreenCapture` does the same for the other two.
+Always with the bundle id: without it, `tccutil reset` takes that permission from every
+application on the Mac. Then open the application again; the entry is gone, and its own
+request can add it anew — if none does, add it with **+** as above. Toggling the switch off
+and on is usually not enough: the stale requirement stays attached to the entry. Removing the
+entry with **−** and adding it back with **+** works as well, but after **−** macOS has been
+reported to raise no dialog for that application's own request until the Mac is restarted
+(Apple developer forums, thread 818415), so add it back by hand straight away.
+
+The log's Screen Recording lines say this too, because with an ad-hoc signed build — every
+download from CI — it is the common case: the previous build's entry is in the list, switched
+on, and belongs to an application that no longer exists.
 
 `./macos-signing-identity.sh` stops it recurring.
 
@@ -156,8 +292,8 @@ name. An ad-hoc signature — `codesign -s -`, the default here — derives that
 the contents of the binary, so **every rebuild is a different application** and all three
 permissions are forgotten. Measured on a tester's second run: everything back to "NOT
 granted", and the probe reporting no focused window because accessibility reads were being
-refused. On Monterey that also means re-adding the app to Screen Recording by hand, since no
-prompt appears there.
+refused. And whenever the requests [above](#how-the-application-gets-into-the-screen-recording-list)
+do not put the new build into the Screen Recording list, that means adding it by hand again.
 
 `./macos-signing-identity.sh` fixes it in a minute. It creates a local self-signed
 certificate, after which the identity is "this bundle id, signed by this certificate" —

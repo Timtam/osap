@@ -22,8 +22,8 @@
 //!   is left alone until the tap reports itself on or one of the moments below, rather than
 //!   created again every two seconds.
 //! - *Asleep, locked, switched away from* — the moments the tap is most likely to have been
-//!   touched: on `NSWorkspaceDidWakeNotification`, `NSWorkspaceSessionDidBecomeActiveNotification`
-//!   (fast user switching back to this user) and the distributed `com.apple.screenIsUnlocked`,
+//!   touched: when the Mac wakes, the screen is unlocked or this user's session becomes active
+//!   again after fast user switching (`system.rs` hears all three and calls [`recheck_soon`]),
 //!   the watchdog checks at the next turn of the run loop without waiting for its two seconds,
 //!   and says what it found. While the screen is locked, or another user's session is in front,
 //!   the tap sees no keys at all; that is the system's secure input, not a fault, and nothing is
@@ -52,16 +52,10 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicPtr, AtomicU32, AtomicU64
 use std::sync::{Mutex, OnceLock, TryLockError};
 use std::time::Instant;
 
-use block2::RcBlock;
-use objc2_app_kit::{
-    NSWorkspace, NSWorkspaceDidWakeNotification, NSWorkspaceSessionDidBecomeActiveNotification,
-};
 use objc2_core_foundation::{
-    kCFRunLoopCommonModes, CFDictionary, CFMachPort, CFNotificationCenter,
-    CFNotificationSuspensionBehavior, CFRetained, CFRunLoop, CFRunLoopActivity, CFRunLoopMode,
-    CFRunLoopObserver, CFString,
+    kCFRunLoopCommonModes, CFMachPort, CFRetained, CFRunLoop, CFRunLoopActivity, CFRunLoopMode,
+    CFRunLoopObserver,
 };
-use objc2_foundation::{NSNotification, NSNotificationName, NSOperationQueue};
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventTapInformation, CGEventTapLocation,
     CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy, CGEventType, CGError,
@@ -197,11 +191,12 @@ static RECREATE_FAILURE_SAID: AtomicBool = AtomicBool::new(false);
 static STAYS_OFF: AtomicBool = AtomicBool::new(false);
 
 /// Why the tap is to be checked at the next turn of the run loop rather than within the
-/// watchdog's two seconds: bits set by the notifications [`subscribe_system_events`] asks for.
+/// watchdog's two seconds: bits set through [`recheck_soon`] when `system.rs` hears of a wake,
+/// an unlock or the session coming back.
 static RECHECK: AtomicU32 = AtomicU32::new(0);
-const RECHECK_WAKE: u32 = 1;
-const RECHECK_UNLOCK: u32 = 2;
-const RECHECK_SESSION: u32 = 4;
+pub(super) const RECHECK_WAKE: u32 = 1;
+pub(super) const RECHECK_UNLOCK: u32 = 2;
+pub(super) const RECHECK_SESSION: u32 = 4;
 
 static LAST_HEALTH_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_LOCK_FAIL_MS: AtomicU64 = AtomicU64::new(0);
@@ -314,7 +309,6 @@ pub fn install() -> Result<(), String> {
     // hand: `tap_enable` needs it from inside the callback, where there is nothing to own it.
     PORT.store(CFRetained::into_raw(port).as_ptr(), Ordering::SeqCst);
     install_watchdog(&run_loop, unsafe { kCFRunLoopCommonModes });
-    subscribe_system_events();
 
     // Creation succeeding is not proof that keys will arrive: on the versions where Input
     // Monitoring is a separate switch, a tap can be created and simply never fire. The line
@@ -362,13 +356,16 @@ fn create_and_attach() -> Result<(CFRetained<CFMachPort>, CFRetained<CFRunLoop>,
     let Some(port) = port else {
         // Almost always a permission, and the failure is total: without a tap nothing is
         // captured and nothing is suppressed, so every overlay looks dead while the
-        // application underneath behaves perfectly normally. Name both switches — which one
-        // is required depends on the macOS version, and a tester cannot see the dialog.
+        // application underneath behaves perfectly normally. Accessibility is the one known to
+        // refuse the tap; whether Input Monitoring is needed as well has not been measured
+        // (docs/macos-permissions.md, "Input Monitoring"), so it is named as the next thing to
+        // try rather than as a requirement — a tester cannot see the dialog.
         let trusted = unsafe { objc2_application_services::AXIsProcessTrusted() };
         return Err(format!(
             "CGEventTapCreate refused (AXIsProcessTrusted = {trusted}) — grant this \
-             application Accessibility AND Input Monitoring in System Settings > Privacy & \
-             Security; until then no key can be captured or suppressed"
+             application Accessibility in System Settings > Privacy & Security, and Input \
+             Monitoring too if keys are still not captured after that; until then no key can be \
+             captured or suppressed"
         ));
     };
     let Some(source) = CFMachPort::new_run_loop_source(None, Some(&port), 0) else {
@@ -448,72 +445,16 @@ fn recreate(why: &str) {
     }
 }
 
-/// Asks for the three moments the tap is most likely to have been touched — the Mac woke, the
-/// screen was unlocked, this user's session became active again — so that the watchdog checks
-/// at the next turn of the run loop instead of within its two seconds, and says what it found.
-/// Each notification only sets a bit; the check is [`health_check`]'s. Leaked subscriptions,
-/// like `watch`'s: they last as long as the process.
-fn subscribe_system_events() {
-    let centre = NSWorkspace::sharedWorkspace().notificationCenter();
-    let names: [(&NSNotificationName, u32); 2] = unsafe {
-        [
-            (NSWorkspaceDidWakeNotification, RECHECK_WAKE),
-            (NSWorkspaceSessionDidBecomeActiveNotification, RECHECK_SESSION),
-        ]
-    };
-    for (name, bit) in names {
-        // Delivered on the main queue, which is the thread the watchdog runs on. The block
-        // sets a bit and cannot panic.
-        let block = RcBlock::new(move |_notification: NonNull<NSNotification>| {
-            RECHECK.fetch_or(bit, Ordering::Relaxed);
-        });
-        let token = unsafe {
-            centre.addObserverForName_object_queue_usingBlock(
-                Some(name),
-                None,
-                Some(&NSOperationQueue::mainQueue()),
-                &block,
-            )
-        };
-        core::mem::forget(token);
+/// Checks the tap at the next turn of the run loop rather than within the watchdog's two
+/// seconds, and writes what was found even when it is fine, because `bits` — a wake, an unlock,
+/// this session active again — is a moment the tap is most likely to have been touched.
+/// Called by `system.rs`, which hears those moments for the whole backend. Nothing is asked
+/// before the tap exists: the first check after its installation would otherwise report on a
+/// wake it never went through.
+pub(super) fn recheck_soon(bits: u32) {
+    if INSTALLED.load(Ordering::SeqCst) {
+        RECHECK.fetch_or(bits, Ordering::Relaxed);
     }
-    // The screen lock has no public notification; this distributed one is what the system
-    // posts, and what every utility that cares listens for. Delivered immediately even while
-    // this accessory application is in the background, as the layout change is (layout.rs).
-    match CFNotificationCenter::distributed_center() {
-        Some(centre) => {
-            let name = CFString::from_static_str("com.apple.screenIsUnlocked");
-            // SAFETY: the observer is the address of a static; the callback matches
-            // `CFNotificationCallback`; the centre keeps its own reference to the name.
-            unsafe {
-                centre.add_observer(
-                    &UNLOCK_OBSERVER as *const u8 as *const c_void,
-                    Some(on_screen_unlocked),
-                    Some(&name),
-                    core::ptr::null(),
-                    CFNotificationSuspensionBehavior::DeliverImmediately,
-                );
-            }
-        }
-        None => logging::line(
-            "macos",
-            "no distributed notification centre, so the event tap is not checked at once when \
-             the screen is unlocked (the watchdog still checks it within two seconds)",
-        ),
-    }
-}
-
-/// The observer identity for the unlock notification: any stable address will do.
-static UNLOCK_OBSERVER: u8 = 0;
-
-unsafe extern "C-unwind" fn on_screen_unlocked(
-    _centre: *mut CFNotificationCenter,
-    _observer: *mut c_void,
-    _name: *const CFString,
-    _object: *const c_void,
-    _info: *const CFDictionary,
-) {
-    RECHECK.fetch_or(RECHECK_UNLOCK, Ordering::Relaxed);
 }
 
 /// The moments a set of [`RECHECK`] bits stands for, for the log.
@@ -547,6 +488,9 @@ pub fn set_captured_keys(keys: &[(u32, u8)]) {
     let n = held.len();
     drop(held);
     logging::trace("macos", || format!("tap: {n} captured key(s)"));
+    // While anything is captured, App Nap is kept away: a napped main thread hands these keys
+    // over late, and a tap that answers too late is switched off (see `activity.rs`).
+    super::activity::want(super::activity::KEYS, n > 0);
     // A captured chord on VoiceOver's modifier fails the same way a registered one does —
     // the tap never sees the press — and is explained the same way, once per chord. The
     // permissions page says the log warns for captures as well as registrations, and a
@@ -652,7 +596,7 @@ pub fn set_menu_open(open: bool) {
 /// case where it does not, and where nobody would otherwise notice until the user reported
 /// that the overlay had gone quiet.
 ///
-/// A wake, an unlock or this session becoming active again ([`subscribe_system_events`]) makes
+/// A wake, an unlock or this session becoming active again ([`recheck_soon`]) makes
 /// the next call check at once, past the rate limit, and write what it found even when the tap
 /// is fine — the line a live test of a sleep or a lock looks for.
 pub fn health_check() {
@@ -917,7 +861,7 @@ unsafe extern "C-unwind" fn tap_callback(
         logging::line(
             "macos",
             &format!(
- "the event tap suppressed its first key (vk {vk:#04x} mask {mask}) — the tap is live and Input Monitoring is granted"
+ "the event tap suppressed its first key (vk {vk:#04x} mask {mask}) — the tap is live, with whatever permissions it needs"
             ),
         );
     }

@@ -32,14 +32,14 @@ use core::ptr::NonNull;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::mpsc::channel;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use objc2::runtime::AnyClass;
 use objc2::sel;
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_foundation::NSError;
-use objc2_screen_capture_kit::SCScreenshotManager;
+use objc2_screen_capture_kit::{SCScreenshotManager, SCShareableContent};
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext, CGDirectDisplayID,
     CGDisplayBounds, CGError, CGGetDisplaysWithPoint, CGImage, CGImageAlphaInfo,
@@ -65,9 +65,12 @@ use objc2_core_graphics::{
 // turns that back into a straight answer by waiting on a channel with a deadline. Whether the
 // handler can arrive while the waiting thread is the main thread is not documented anywhere;
 // the CI job's capture probe asks exactly that on a Mac, and a capture that does not answer in
-// time switches ScreenCaptureKit off for the session rather than stalling every capture after
-// it.
+// time keeps ScreenCaptureKit out for a while (`backoff.rs`: 30 s, doubling to ten minutes, with
+// the next probe brought forward by a wake or a display change) rather than stalling every
+// capture after it. The probe that asks it again is not waited for where an older function can
+// answer the read (`sck_probe`).
 
+use super::backoff::{Attempt, Backoff};
 use crate::backend::frame::{Frame, FrameVia};
 use crate::backend::{CapturedImage, CAPTURE_FAILED};
 use crate::ocr::types::Rect;
@@ -129,19 +132,57 @@ static PATHS_REPORTED: AtomicBool = AtomicBool::new(false);
 /// Which path first delivered an image, one bit per path, so each is named once.
 static PATH_USED: AtomicU32 = AtomicU32::new(0);
 static SCK_ERROR_REPORTED: AtomicBool = AtomicBool::new(false);
-/// ScreenCaptureKit did not answer within `SCK_TIMEOUT` once, and is not asked again this
-/// session: a capture that stalls is paid once, not on every keystroke that reads the screen.
-static SCK_DISABLED: AtomicBool = AtomicBool::new(false);
+/// Whether ScreenCaptureKit is asked: after a capture that did not answer within `SCK_TIMEOUT`
+/// it is not, for 30 seconds, then a minute, doubling to ten minutes, and one probe asks when
+/// that is over (`backoff.rs`). The timeout that starts a back-off is paid once, by the
+/// captures that were waiting at that moment; a probe is waited for only on a macOS without the
+/// older functions (`grab`). Not once for the whole session, as it used to be, which a single
+/// slow capture after a wake made the rest of a days-long session's.
+static SCK_BACKOFF: Mutex<Backoff> =
+    Mutex::new(Backoff::new(SCK_BACKOFF_FIRST, SCK_BACKOFF_CAP, SCK_TIMEOUT));
+const SCK_BACKOFF_FIRST: Duration = Duration::from_secs(30);
+const SCK_BACKOFF_CAP: Duration = Duration::from_secs(600);
 static NO_CAPTURE_REPORTED: AtomicBool = AtomicBool::new(false);
 
 /// How long a ScreenCaptureKit capture may take before it is given up on.
 ///
 /// A capture that returns normally costs tens of milliseconds; this bound is for the one that
-/// never returns, and it is the whole cost of finding that out — paid once, because the first
-/// timeout switches ScreenCaptureKit off for the session. A pump stalled this long can get the
-/// event tap switched off by the system; tap.rs re-enables it on the notice the system sends,
-/// so that too costs one line in the log rather than a dead overlay.
+/// never returns, and it is the whole cost of finding that out — paid when a back-off starts
+/// (`SCK_BACKOFF`). A pump stalled this long can get the event tap switched off by the system;
+/// tap.rs re-enables it on the notice the system sends, so that too costs one line in the log
+/// rather than a dead overlay.
 const SCK_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// The back-off's lock. Never held across a capture or a log line: every caller takes its
+/// answer out of the guard first, so a thread writing to the log file does not hold up another
+/// that is about to capture.
+fn sck_backoff() -> std::sync::MutexGuard<'static, Backoff> {
+    // Only a panic while the lock was held could poison it, and nothing under it panics.
+    SCK_BACKOFF.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Brings the next ScreenCaptureKit probe forward, because `why` — the Mac woke, the screen was
+/// unlocked, the displays changed — is the kind of moment whose slow capture started the
+/// back-off (`Backoff::clear`: once per step, at the step's level). Said in the log when it did.
+pub(super) fn clear_sck_backoff(why: &str) {
+    let moved = sck_backoff().clear(Instant::now());
+    if let Some(wait) = moved {
+        crate::logging::line(
+            "macos",
+            &format!(
+                "{why}: ScreenCaptureKit is asked again at the next capture rather than at the end \
+                 of its {} s back-off; if it does not answer, the back-off goes on as before",
+                wait.as_secs()
+            ),
+        );
+    }
+}
+
+/// Whether an older capture function exists on this macOS to answer a read ScreenCaptureKit
+/// is not asked for.
+fn older_capture_available() -> bool {
+    window_list_create_image().is_some() || display_create_image_for_rect().is_some()
+}
 static OVERSIZE_REPORTED: AtomicBool = AtomicBool::new(false);
 
 /// Last reported primary-display size, so a change is a log line and a repeat is not.
@@ -613,8 +654,50 @@ fn grab(x: i32, y: i32, w: i32, h: i32, best: bool) -> Option<Grabbed> {
     );
     report_capture_paths();
 
-    if sck_rect_capture_available() && !SCK_DISABLED.load(Ordering::Relaxed) {
-        match sck_capture(rect) {
+    let attempt = if sck_rect_capture_available() {
+        sck_backoff().attempt(Instant::now())
+    } else {
+        Attempt::Skip
+    };
+    if let Attempt::Missed(wait) = attempt {
+        crate::logging::line(
+            "macos",
+            &format!(
+                "ScreenCaptureKit did not answer the capture that asked it again after its \
+                 back-off within {} ms. It is not asked for {} s; captures go to the older \
+                 functions meanwhile. Each probe that is not answered doubles the wait, up to {} s.",
+                SCK_TIMEOUT.as_millis(),
+                wait.as_secs(),
+                SCK_BACKOFF_CAP.as_secs()
+            ),
+        );
+    }
+    // Whether this read waits for ScreenCaptureKit. A probe does not, where an older function
+    // can answer the read instead: it is sent, the read goes on below, and the probe's own
+    // handler says whether it came back in time. Only a macOS without the older functions has
+    // nothing else to answer the read with, and waits.
+    let waits = match attempt {
+        Attempt::Ask => true,
+        Attempt::Probe(since) if older_capture_available() => {
+            sck_probe(rect, since);
+            false
+        }
+        Attempt::Probe(_) => true,
+        Attempt::Skip | Attempt::Missed(_) => false,
+    };
+    if waits {
+        let outcome = sck_capture(rect);
+        // An answer within the deadline — a picture or an error — ends a back-off: what it
+        // guards against is the wait, and this one did not wait.
+        let ended = !matches!(outcome, SckOutcome::TimedOut) && sck_backoff().answered();
+        if ended {
+            crate::logging::line(
+                "macos",
+                "ScreenCaptureKit answered within its deadline again, after its back-off; it is \
+                 asked first again from now on",
+            );
+        }
+        match outcome {
             SckOutcome::Image(image) => {
                 if let Some(scale) = uniform_scale(&image, w, h) {
                     note_path_used(PATH_SCK, "ScreenCaptureKit captureImageInRect");
@@ -643,17 +726,28 @@ fn grab(x: i32, y: i32, w: i32, h: i32, best: bool) -> Option<Grabbed> {
                 }
             }
             SckOutcome::TimedOut => {
-                SCK_DISABLED.store(true, Ordering::Relaxed);
-                crate::logging::line(
-                    "macos",
-                    &format!(
-                        "ScreenCaptureKit did not answer a {w}x{h} capture at {x},{y} within {} ms \
-                         — its answer may need the very thread that is waiting for it. It is not \
-                         asked again this session; captures go to the older functions, where \
-                         this macOS still has them.",
-                        SCK_TIMEOUT.as_millis()
-                    ),
-                );
+                // `None`: another capture's timeout already started this back-off, or lengthened
+                // it — several captures waiting at once time out together, as one outage. Taken
+                // out of the guard before the line is written.
+                let started = sck_backoff().timed_out(Instant::now());
+                if let Some(wait) = started {
+                    crate::logging::line(
+                        "macos",
+                        &format!(
+                            "ScreenCaptureKit did not answer a {w}x{h} capture at {x},{y} within {} \
+                             ms{} — its answer may need the very thread that is waiting for it, or \
+                             the window server is busy (a wake, a display change). It is not asked \
+                             for {} s; captures go to the older functions meanwhile, where this macOS \
+                             still has them. Each probe that is not answered doubles the wait, up to \
+                             {} s; a wake, an unlock or a display change brings the next probe \
+                             forward.",
+                            SCK_TIMEOUT.as_millis(),
+                            if matches!(attempt, Attempt::Probe(_)) { ", asked again after its back-off," } else { "" },
+                            wait.as_secs(),
+                            SCK_BACKOFF_CAP.as_secs()
+                        ),
+                    );
+                }
             }
         }
     }
@@ -691,6 +785,8 @@ fn grab(x: i32, y: i32, w: i32, h: i32, best: bool) -> Option<Grabbed> {
     // subtracted first; on the primary display that subtraction is zero, which is the common
     // case and the one that stays right even if this convention is the other way round.
     let Some(create) = display_create_image_for_rect() else {
+        // Only when ScreenCaptureKit is absent for good; one backing off comes back (and on
+        // this macOS, with nothing else to answer, its probes are waited for).
         if !sck_rect_capture_available() && window_list_create_image().is_none()
             && !NO_CAPTURE_REPORTED.swap(true, Ordering::Relaxed)
         {
@@ -932,6 +1028,149 @@ fn sck_capture(rect: CGRect) -> SckOutcome {
         Ok(Err(why)) => SckOutcome::Error(why),
         Err(_) => SckOutcome::TimedOut,
     }
+}
+
+/// Asks ScreenCaptureKit for `rect` after a back-off without waiting for the answer: the probe
+/// that started at `since`. Its handler, on a queue of the framework's, reports the answer —
+/// a picture or an error, either way an answer — to the back-off, which counts it only within
+/// the deadline; a probe that never answers is written off by the next capture's
+/// `Backoff::attempt` at twice the deadline. The picture is not kept: the read this probe rode
+/// on is answered by the older functions. At most one probe is out at a time, and one that is
+/// never answered leaves its handler with the framework — one small block per probe, at most
+/// one every ten minutes once the back-off has reached its cap.
+fn sck_probe(rect: CGRect, since: Instant) {
+    let handler = block2::RcBlock::new(move |_image: *mut CGImage, _error: *mut NSError| {
+        // Taken out of the guard before the line is written, as everywhere else.
+        let ended = sck_backoff().probe_answered(since, Instant::now());
+        if ended {
+            crate::logging::line(
+                "macos",
+                "ScreenCaptureKit answered a probe within its deadline, after its back-off; it is \
+                 asked first again from now on",
+            );
+        }
+    });
+    // SAFETY: availability was checked by `sck_rect_capture_available` before this is called;
+    // the block outlives the call because the framework copies it; the image and the error are
+    // the framework's for the duration of the handler and are not touched.
+    unsafe { SCScreenshotManager::captureImageInRect_completionHandler(rect, Some(&*handler)) };
+}
+
+// ── The Screen Recording request's two capture requests ────────────────────────────────────
+//
+// Made at most once per process by `perm`'s request thread, after `CGRequestScreenCaptureAccess`
+// — by the Permissions page's button pressed again, or straight after it on macOS 12 — and for
+// one reason: TCC puts an application into the Screen Recording list when it REQUESTS a capture,
+// and the documented request alone was measured on macOS 12.7.6 to add nothing. What is decided
+// about them without a Mac — which to make, and what each answer is called — is in `enrol.rs`.
+
+/// Asks ScreenCaptureKit for the displays and windows this process could capture, and waits for
+/// the answer up to `wait`.
+///
+/// The question Apple's own capture sample ("Capturing screen content in macOS") puts first,
+/// and that sample's documentation says the system prompts on its first run: getting the
+/// shareable content is a capture request as far as TCC is concerned, whatever is done with the
+/// content afterwards. Nothing is — only the counts go to the log.
+///
+/// **Blocks the calling thread for up to `wait`**, so it is called from the request's own thread
+/// and never from the one carrying the event tap. The answer arrives on a queue of the
+/// framework's; a thread that has given up by then drops it, as `sck_capture` does.
+///
+/// The class is looked up by name first: on a macOS older than 12.3 there is none, and on this
+/// objc2 naming a class that does not exist aborts the process rather than returning nothing.
+///
+/// Not a capture, as far as ScreenCaptureKit's back-off (`SCK_BACKOFF`) is concerned: that
+/// guards the waits of the reads a module depends on, and this request waits on a thread of its
+/// own, bounded, for no read — so its answer neither ends a back-off nor starts one. Where it
+/// does not answer in time, back-off or not, the older functions make the request instead
+/// (`enrol::legacy_reason`).
+pub(super) fn ask_for_shareable_content(wait: Duration) -> super::enrol::SckAnswer {
+    use super::enrol::SckAnswer;
+    let present = AnyClass::get(c"SCShareableContent").is_some_and(|c| {
+        c.metaclass().responds_to(sel!(getShareableContentWithCompletionHandler:))
+    });
+    if !present {
+        return SckAnswer::Absent;
+    }
+    let (tx, rx) = channel::<SckAnswer>();
+    let handler = block2::RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
+        // SAFETY: nil or a live object for the duration of this call, both of them.
+        let answer = match unsafe { content.as_ref() } {
+            // SAFETY: plain property reads of a live object.
+            Some(c) => SckAnswer::Content {
+                displays: unsafe { c.displays() }.count(),
+                windows: unsafe { c.windows() }.count(),
+            },
+            None => match unsafe { error.as_ref() } {
+                Some(e) => SckAnswer::Refused {
+                    domain: e.domain().to_string(),
+                    code: e.code(),
+                    text: e.localizedDescription().to_string(),
+                },
+                None => SckAnswer::Refused {
+                    domain: String::new(),
+                    code: 0,
+                    text: "no content and no error was returned".to_string(),
+                },
+            },
+        };
+        let _ = tx.send(answer);
+    });
+    let started = Instant::now();
+    // SAFETY: the class and the selector were found above; the block outlives the call because
+    // the framework copies it.
+    unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&handler) };
+    rx.recv_timeout(wait)
+        .unwrap_or_else(|_| SckAnswer::TimedOut { ms: started.elapsed().as_millis() })
+}
+
+/// Captures one point in the middle of the main display through the older capture functions —
+/// the window-list one where this macOS still has it, the display one otherwise.
+///
+/// The middle, because that is where another application's window is likeliest to be, and a
+/// capture that could show another application is what the permission governs. The image is
+/// released unread: without the permission it comes back all the same, showing the desktop, so
+/// whether one came back says the request was made, not how it was answered.
+///
+/// Looked up by name like every other use of these two functions here, never linked — see the
+/// note at the top of this file.
+pub(super) fn legacy_one_point() -> super::enrol::LegacyAnswer {
+    use super::enrol::LegacyAnswer;
+    let main = CGMainDisplayID();
+    let b = CGDisplayBounds(main);
+    let (half_w, half_h) = ((b.size.width / 2.0).floor(), (b.size.height / 2.0).floor());
+    let one = CGSize::new(1.0, 1.0);
+    let adopt = |raw: *mut CGImage| match NonNull::new(raw) {
+        Some(p) => {
+            // SAFETY: a +1 reference from a Create function, released at once.
+            drop(unsafe { CFRetained::from_raw(p) });
+            true
+        }
+        None => false,
+    };
+    if let Some(create) = window_list_create_image() {
+        let via = "CGWindowListCreateImage";
+        let rect = CGRect::new(CGPoint::new(b.origin.x + half_w, b.origin.y + half_h), one);
+        // SAFETY: the documented C signature, as in `grab`; the result follows the Create rule.
+        let raw = unsafe {
+            create(
+                rect,
+                CGWindowListOption::OptionOnScreenOnly.0,
+                0,
+                CGWindowImageOption::NominalResolution.0,
+            )
+        };
+        return if adopt(raw) { LegacyAnswer::Image { via } } else { LegacyAnswer::NoImage { via } };
+    }
+    if let Some(create) = display_create_image_for_rect() {
+        let via = "CGDisplayCreateImageForRect";
+        // Display-local, as `grab` passes it.
+        let rect = CGRect::new(CGPoint::new(half_w, half_h), one);
+        // SAFETY: as above.
+        let raw = unsafe { create(main, rect) };
+        return if adopt(raw) { LegacyAnswer::Image { via } } else { LegacyAnswer::NoImage { via } };
+    }
+    LegacyAnswer::Absent
 }
 
 type WindowListCreateImageFn = unsafe extern "C" fn(CGRect, u32, u32, u32) -> *mut CGImage;

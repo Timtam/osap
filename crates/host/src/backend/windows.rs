@@ -901,19 +901,48 @@ fn common_controls() -> String {
     }
 }
 
+/// A DPI as the scale Windows Settings shows: 96 is 100 %.
+fn percent(dpi: u32) -> String {
+    format!("{}%", (dpi as f32 / 96.0 * 100.0).round() as i32)
+}
+
+/// A monitor as (left, top, right, bottom) in physical pixels, and its effective DPI now.
+type MonitorDpi = ((i32, i32, i32, i32), Option<u32>);
+
+/// Every monitor, as (left, top, right, bottom) in physical pixels, with its effective DPI now
+/// (`None` when Windows would not say). Local calls, microseconds.
+fn monitors_with_dpi() -> Vec<MonitorDpi> {
+    use windows_sys::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+    unsafe extern "system" fn each(m: HMONITOR, _: HDC, r: *mut RECT, data: LPARAM) -> windows_sys::core::BOOL {
+        // SAFETY: `data` is the Vec below, alive for the whole enumeration, and `r` the monitor
+        // rectangle the system hands every callback.
+        let v = unsafe { &mut *(data as *mut Vec<MonitorDpi>) };
+        if let Some(r) = unsafe { r.as_ref() } {
+            let (mut x, mut y) = (0u32, 0u32);
+            // SAFETY: the monitor handle the system just handed over; two out-parameters.
+            let dpi = (unsafe { GetDpiForMonitor(m, MDT_EFFECTIVE_DPI, &mut x, &mut y) } >= 0).then_some(x);
+            v.push(((r.left, r.top, r.right, r.bottom), dpi));
+        }
+        1
+    }
+    let mut v: Vec<MonitorDpi> = Vec::new();
+    // SAFETY: every monitor of the desktop, into the Vec above.
+    unsafe {
+        EnumDisplayMonitors(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            Some(each),
+            &mut v as *mut Vec<MonitorDpi> as LPARAM,
+        );
+    }
+    v
+}
+
+
 impl Backend for WindowsBackend {
     fn environment(&self) -> Vec<(String, String)> {
-        let mut out = Vec::new();
-        let (w, h) = self.screen_size();
-        out.push(("display".to_string(), format!("{w}x{h} px (primary)")));
-        // Whether we are DPI-aware decides whether every coordinate in every module is
-        // real or scaled behind our back — the manifest asks for per-monitor v2, and this
-        // is the line that proves it took.
-        let dpi = unsafe { GetDpiForSystem() };
-        out.push((
-            "system dpi".to_string(),
-            format!("{dpi} ({}%)", (dpi as f32 / 96.0 * 100.0).round() as i32),
-        ));
+        let mut out = self.display_environment();
         out.push(("common controls".to_string(), common_controls()));
         // No "screen reader" line here any more. It asked whether `nvdaControllerClient64`
         // or `SAAPI64` was loaded in this process, which was a fair proxy only while Tolk
@@ -923,6 +952,48 @@ impl Backend for WindowsBackend {
         // later, and it is a better answer: which backend WILL speak, rather than which DLL
         // happens to be in memory.
         out
+    }
+
+    /// The primary display's size, the system DPI, and every monitor with its own scale.
+    ///
+    /// "system dpi" is fixed for the session in a per-monitor-aware process: Windows reports the
+    /// DPI the session started with until the user signs out, whatever the scale is changed to
+    /// since. So the monitors line gives each monitor's effective DPI now — what a scale change
+    /// changed, written again after one (`system_events`).
+    fn display_environment(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let (w, h) = self.screen_size();
+        out.push(("display".to_string(), format!("{w}x{h} px (primary)")));
+        // Whether we are DPI-aware decides whether every coordinate in every module is
+        // real or scaled behind our back — the manifest asks for per-monitor v2, and this
+        // is the line that proves it took.
+        let dpi = unsafe { GetDpiForSystem() };
+        out.push(("system dpi".to_string(), format!("{dpi} ({})", percent(dpi))));
+        let monitors = monitors_with_dpi();
+        out.push((
+            "monitors".to_string(),
+            format!(
+                "{}: {}",
+                monitors.len(),
+                monitors
+                    .iter()
+                    .map(|((l, t, r, b), dpi)| match dpi {
+                        Some(d) => format!("({l},{t})-({r},{b}) {d} dpi ({})", percent(*d)),
+                        None => format!("({l},{t})-({r},{b}) dpi unknown"),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
+        out
+    }
+
+    /// Starts the keyboard watch's thread for the system events alone, unless the hook started
+    /// it already — see `hook_watch_thread`. The pump is the thread that asks, and the one the
+    /// watch wakes when it has queued an event.
+    fn watch_system(&self) {
+        PUMP_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
+        hook_watch_thread::start_system();
     }
 
     fn enumerate_windows(&self) -> Vec<WinInfo> {
@@ -1687,6 +1758,19 @@ impl Backend for WindowsBackend {
     }
 
     fn pump_pending(&self, events: &mut dyn HostEvents) {
+        // What the operating system did to the session — a sleep, an unlock, a display change —
+        // first, so the window events after it are handled against a world already re-checked.
+        // Desktop duplication's back-off and hang count are this backend's own to reset, before
+        // anything asks it for a picture again — in full after a resume, an unlock or a
+        // connection, and bounded when the batch holds nothing but display and scale changes,
+        // which a display whose link keeps dropping sends every few seconds.
+        let system = crate::system_events::take();
+        if !system.is_empty() {
+            if system.iter().any(|s| s.event.rechecks_capture()) {
+                dxgi::system_changed(system.iter().any(|s| s.event.rechecks_capture() && !s.event.may_storm()));
+            }
+            events.on_system(system);
+        }
         let hotkeys: Vec<(i32, Route)> = locked(&HOTKEY_QUEUE).drain(..).collect();
         for (id, route) in hotkeys {
             if settle_hotkey(id, route) {
@@ -2194,8 +2278,9 @@ pub(super) fn forget_keys_held_out_of_sight() -> Option<u32> {
     }
 }
 
-/// Wakes the pump after the hook queued something for it.
-fn wake_pump() {
+/// Wakes the pump after the hook — or the keyboard watch, with a system event — queued something
+/// for it. Nothing when the loop has not said which thread it is yet.
+pub(super) fn wake_pump() {
     let tid = PUMP_THREAD.load(Ordering::Relaxed);
     if tid != 0 {
         unsafe {
@@ -3143,28 +3228,16 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
         // Run the neural recognizer (PaddleOCR via ONNX Runtime) CONCURRENTLY for
         // small regions. Its result is used only when Windows.Media.Ocr comes back
         // empty — notably a lone digit, which WinRT rejects regardless of size — so
-        // that case costs about max(winrt, paddle) instead of their sum. When WinRT
-        // succeeds the background thread just finishes unused (negligible at human
-        // focus rates). WinRT stays the trusted primary and the only multi-word path.
+        // that case costs about max(winrt, paddle) instead of their sum. WinRT stays the
+        // trusted primary and the only multi-word path.
         //
-        // Counted from before the spawn until the thread is done, because a thread nobody
-        // joins can still be inside ONNX Runtime when the application exits; `run` waits for
-        // the count to reach zero (see `paddle_ocr::InFlight`). Not started at all once that
-        // wait has begun: `start` answers `None` then, and the system engine reads alone.
-        let paddle = small
-            .then(|| {
-                let running = super::paddle_ocr::IN_FLIGHT.start()?;
-                let probe = CapturedImage {
-                    w: cap.w,
-                    h: cap.h,
-                    rgba: cap.rgba.clone(),
-                };
-                Some(std::thread::spawn(move || {
-                    let _running = running;
-                    super::paddle_ocr::recognize(&probe)
-                }))
-            })
-            .flatten();
+        // Handed to the one recogniser thread (`paddle_ocr::ask`) before WinRT starts, and
+        // cancelled by dropping the handle when WinRT answered or the region is blank: a
+        // recognition not started yet is skipped, one started stops before the session if it
+        // can. It used to be a thread per region, left to run to the end unread. Counted from
+        // the hand-over until it is done (see `paddle_ocr::InFlight`), and not asked at all
+        // once the exit's wait has begun: the system engine then reads alone.
+        let paddle = small.then(|| super::paddle_ocr::ask(cap)).flatten();
 
         let t_tight = std::time::Instant::now();
         let tight = if small { Some(tighten(cap)) } else { None };
@@ -3177,10 +3250,10 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
         // something else was: the neural fallback, given a rectangle with no content in it,
         // returns a plausible-looking string rather than nothing, and both the primary and
         // the fallback were being asked. Answering here saves the primary recognition on a
-        // region there was never anything to read in. It does NOT save the fallback's: that
-        // thread was spawned above, before the crop that finds the region blank, so it runs to
-        // the end and its answer is dropped with the handle (it stays counted in
-        // `paddle_ocr::IN_FLIGHT` until then, like any other it is not waited for).
+        // region there was never anything to read in, and the fallback's too as far as it can:
+        // the region was handed to the recogniser above, before the crop that finds it blank,
+        // and dropping the handle cancels it — skipped if the recogniser has not reached it,
+        // stopped before the session if it has.
         if tight.as_ref().is_some_and(|t| t.blank) {
             drop(paddle);
             // `skipped` is how a caller learns this branch was taken: no engine's answer was
@@ -3209,10 +3282,10 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
         // runs concurrently, so the join costs whatever is LEFT of paddle after WinRT finished,
         // which is zero when paddle was quicker and everything when it was not.
         let mut wait_ms = 0.0;
-        if let Some(handle) = paddle {
+        if let Some(asked) = paddle {
             if text.trim().is_empty() {
                 let t_wait = std::time::Instant::now();
-                let got = handle.join().ok().flatten();
+                let got = asked.wait();
                 wait_ms = t_wait.elapsed().as_secs_f64() * 1000.0;
                 if let Some(t) = got {
                     text = t;
@@ -3221,8 +3294,9 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
                     used_paddle = true;
                 }
             }
-            // else: WinRT won; the paddle thread finishes in the background, counted in
-            // `paddle_ocr::IN_FLIGHT` until it does.
+            // else: WinRT won, and `asked` is dropped here, which cancels the recognition —
+            // skipped, or stopped at its next check; one already inside the session finishes
+            // unread, counted in `paddle_ocr::IN_FLIGHT` until it does.
         }
         // Behind TRACE as well as the OCR-debug switch. Saving the images is for "was the region
         // right"; the timings answer "where did the time go", which is a different question and

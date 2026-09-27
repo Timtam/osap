@@ -946,6 +946,9 @@ pub fn run_gui(
         // page be compiled and clicked on the machine it was written on. Windows needs no such
         // grants, so it gets no page.
         let mut perm_page: Option<usize> = None;
+        // Shared with the permission buttons, which say what a press did when it left the pane
+        // shut, and still called once below for the startup announcement.
+        let announce: std::rc::Rc<dyn Fn(&str)> = std::rc::Rc::new(announce);
         if !crate::backend::permissions().is_empty() {
             let perm_tab = ScrolledWindow::builder(&notebook).build();
             perm_tab.set_scroll_rate(0, 10);
@@ -963,15 +966,25 @@ pub fn run_gui(
                     .with_label(&format!("Open the {} settings", p.name))
                     .build();
                 let (anchor, name, can_ask) = (p.anchor, p.name, p.can_ask);
+                let announce = announce.clone();
                 btn.on_click(move |_| {
-                    // The system's own dialog first where there is one: it grants in place,
-                    // where the pane needs the application found in a list and ticked. Falling
-                    // through to the pane either way, because a prompt macOS decides not to
-                    // show a second time leaves nothing on screen at all.
-                    if can_ask {
-                        crate::backend::ask_for(name);
+                    // The system's own request first where there is one left: it is what puts
+                    // the application into the pane's list, and its dialog, where macOS shows
+                    // one, leads to the right pane. A press that has just asked leaves the pane
+                    // shut — opened now, it would take the focus from that dialog — and says
+                    // so; the next press, with nothing left to ask, opens it, because a prompt
+                    // macOS decides not to show leaves nothing on screen at all.
+                    let asked = if can_ask {
+                        crate::backend::ask_for(name)
+                    } else {
+                        crate::backend::Asked::PANE
+                    };
+                    if asked.open_pane {
+                        crate::backend::open_pane(anchor);
                     }
-                    crate::backend::open_pane(anchor);
+                    if let Some(text) = asked.say {
+                        announce(text);
+                    }
                 });
                 ps.add(&btn, 0, SizerFlag::Left | SizerFlag::Bottom, 10);
                 lines.push(line);
@@ -984,9 +997,11 @@ pub fn run_gui(
                         "Accessibility takes effect at once: grant it, then press Re-check \
                          now. Screen Recording does not: after granting it, quit the \
                          application and open it again, because macOS hands that one only \
-                         to a process that started after the grant. Input Monitoring usually \
-                         follows Accessibility by itself; if it still reads as missing after \
-                         Re-check now, quit and open the application again.",
+                         to a process that started after the grant. If Input Monitoring still \
+                         reads as missing after Re-check now, quit and open the application \
+                         again as well. The Screen Recording and Input Monitoring buttons ask \
+                         macOS first, one way per press, and open the settings once nothing is \
+                         left to ask.",
                     )
                     .build(),
                 0,
@@ -1627,12 +1642,20 @@ pub fn run_gui(
             show_manager(&frame);
             // The order matters and the tester found out how: on macOS 14.5 this application
             // did not appear in the Screen Recording list at all until Accessibility had
-            // been granted, after which it was there. Said here, because the person setting
-            // this up is looking for a switch that is not on the pane yet.
+            // been granted, after which it was there. It is also the order the application
+            // asks in now — Screen Recording the moment Accessibility is granted, so that the
+            // two system dialogs never stand on top of each other (backend/macos/perm.rs).
+            // Said here, because the person setting this up is looking for a switch that is
+            // not on the pane yet.
             let order = if missing.contains(&"Accessibility") && missing.len() > 1 {
-                " Grant Accessibility first: the Screen Recording list shows this \
-                 application only afterwards. On newer macOS that list is called Screen \
-                 and System Audio Recording."
+                " Grant Accessibility first: Screen Recording is asked for as soon as it is, \
+                 and asking is what normally puts this application into the Screen Recording \
+                 list. On newer macOS that list is called Screen and System Audio Recording."
+            } else if missing.contains(&"Screen Recording") {
+                // Accessibility is granted, so the request goes out on the first tick, right
+                // after this: its dialog is the next thing on screen.
+                " macOS may ask for Screen Recording in a dialog of its own in a moment; its \
+                 button that opens the settings leads to the list."
             } else {
                 ""
             };

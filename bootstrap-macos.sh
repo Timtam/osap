@@ -124,9 +124,12 @@ behave as if the application is broken:
      Nothing visible happens. It is a menu-bar application, not a window. With VoiceOver,
      VO-M twice reaches the menu-bar extras.
 
-  2. Grant Accessibility and Screen Recording in
-     System Settings > Privacy & Security, then QUIT AND REOPEN the application. macOS only
-     gives a newly granted permission to a process that started after it was granted.
+  2. Grant Accessibility first, then Screen Recording, in
+     System Settings > Privacy & Security. The application asks for Screen Recording as soon
+     as Accessibility is granted, which is what normally puts it into that list; if it is not
+     there, its button on the Permissions page asks again, and failing that, press + under
+     the list and choose the app. Then QUIT AND REOPEN the application: macOS only gives
+     Screen Recording to a process that started after it was granted.
 
   3. Everything it knows about this Mac is written to
          $root/dist/AutomationPlatform/automation-platform.log

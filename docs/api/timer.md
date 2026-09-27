@@ -142,7 +142,7 @@ What a callback that takes too long costs beyond delaying everything else on the
 
 ### Windows
 
-Captured keys and hotkeys wait: the keyboard hook swallows them on its own thread at once, and their callbacks run when the loop is free again, late by as long as it was busy. The user's typing elsewhere is not delayed, and a captured key does not slip through to the application. What the loop's stalls no longer reach is the hook itself: Windows documents that a low-level hook which keeps timing out can be removed without notice, and since its thread does nothing but answer it, that takes a machine too loaded to schedule it. After such a removal no key is captured until the host installs the hook again, which its keyboard watch does once it has seen the hook miss five physical key-downs in a row, as it does after every resume and unlock (see [`host.keys.capture`](./keys.md#host-keys-capture)); a hotkey press that arrives through `RegisterHotKey` alone meanwhile is written to the log.
+Captured keys and hotkeys wait: the keyboard hook swallows them on its own thread at once, and their callbacks run when the loop is free again, late by as long as it was busy. The user's typing elsewhere is not delayed, and a captured key does not slip through to the application. What the loop's stalls no longer reach is the hook itself: Windows documents that a low-level hook which keeps timing out can be removed without notice, and since its thread does nothing but answer it, that takes a machine too loaded to schedule it. After such a removal no key is captured until the host installs the hook again, which its keyboard watch does once it has seen the hook miss three physical key-downs in a row, as it does after every resume and unlock (see [`host.keys.capture`](./keys.md#host-keys-capture)); a hotkey press that arrives through `RegisterHotKey` alone meanwhile is written to the log.
 
 ### macOS
 
@@ -173,11 +173,11 @@ Deliberately **not** time-based, and it does not advance on an idle tick. A stal
 
 ### Windows
 
-A counter in the host; reading it makes no system call.
+A counter in the host; reading it makes no system call. It also turns over when the machine resumes from sleep or is about to sleep, when the session is locked, unlocked, connected or disconnected, when the displays, a display's scale or the work area change, and when the taskbar is created again because Explorer restarted — with `inputEpoch` below, since what was on the screen before may not be what is there after. A display change that keeps coming — a TV or receiver in standby dropping its link — turns it over every time it comes, although the log counts the repeats rather than writing each.
 
 ### macOS
 
-The same counter, moved by the same events as on Windows.
+The same counter, and it turns over at the same kinds of moment, as macOS reports them — when the event loop hears that the Mac is going to sleep or has woken, the screen was locked or unlocked, this user's session was switched away from or is back at the console, the displays went to sleep or woke, or the display configuration changed (a display added, removed, moved or mirrored, or its mode or scale changed — macOS has no separate scale, work-area or taskbar event). Events the event loop hears in one turn turn it over once for all of them, and the window in front reported again and the focus round that follow turn it over again, as any activation and focus change do: a module sees a new value after each of these moments, not a fixed number of turns per event. Each of those events is also a `[system]` line in the log. A display change that keeps coming turns the counter over every time it comes, while the log writes it in full once and then counts it, with a line a minute at most, as on Windows; a wake writes what is still counted and starts the count afresh, because the clock it runs on stops while the Mac sleeps.
 
 ## host.now() {#host-now}
 
@@ -218,8 +218,8 @@ end
 
 ### Windows
 
-A counter in the host; reading it makes no system call.
+A counter in the host; reading it makes no system call. It turns over at the sleep, session, display and taskbar changes listed under [`host.epoch`](#host-epoch) as well: a pixel read before a resolution or scale change is not a pixel of the screen after it.
 
 ### macOS
 
-The same counter, moved by the same events as on Windows.
+The same counter, moved by the same events as on Windows, and also by each of the moments that move [`host.epoch()`](#host-epoch) on macOS: sleep and wake, the screen locked and unlocked, the session switched away from and back, the displays asleep and awake, and a change of display configuration — at each of these moments, when the event loop hears of it (events heard in one turn of the loop turn it over once for all of them). A picture or a reading cached before one of them may show a screen that is no longer there.

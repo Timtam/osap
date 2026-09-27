@@ -784,6 +784,7 @@ dependencies = [
  "objc2-core-services",
  "objc2-foundation",
  "objc2-game-controller",
+ "objc2-io-kit",
  "objc2-screen-capture-kit",
  "objc2-vision",
  "ort",
@@ -794,6 +795,7 @@ dependencies = [
  "rayon",
  "rodio",
  "rusty-xinput",
+ "same-file",
  "semver",
  "serde",
  "serde_json",
@@ -1340,9 +1342,11 @@ dependencies = [
  "objc2-core-services",
  "objc2-foundation",
  "objc2-game-controller",
+ "objc2-io-kit",
  "objc2-screen-capture-kit",
  "objc2-vision",
  "os_info",
+ "same-file",
  "winnow",
 ]
 
@@ -1856,6 +1860,15 @@ dependencies = [
  "objc2",
  "objc2-core-foundation",
  "objc2-core-graphics",
+]
+
+[[package]]
+name = "objc2-io-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33fafba39597d6dc1fb709123dfa8289d39406734be322956a69f0931c73bb15"
+dependencies = [
+ "objc2-core-foundation",
 ]
 
 [[package]]

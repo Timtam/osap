@@ -66,7 +66,10 @@ esac
 # is fixed once and never edited casually.
 BUNDLE_ID="com.automationplatform.app"
 APP_NAME="AutomationPlatform"
-MIN_MACOS="12.0"
+# 12.3, not 12.0: the executable links ScreenCaptureKit (captures, and the Screen Recording
+# request), which arrived in 12.3 and is a required load — on 12.0 to 12.2 the application could
+# not start at all, and this way the Finder says why instead of the process dying unexplained.
+MIN_MACOS="12.3"
 
 rel="$root/target/release"
 if [ "$do_build" = "1" ]; then
@@ -146,6 +149,14 @@ chmod +x "$app/Contents/MacOS/automation-platform"
 #
 # NSHighResolutionCapable matters more than it looks: without it the system runs the app
 # through a 1x scaler, which would make every captured pixel a lie on a Retina display.
+#
+# No NSAppSleepDisabled, on purpose. An LSUIElement application in the background is an App Nap
+# candidate, and a napped main thread hands captured keys over late; the host holds a
+# latency-critical activity against that while keys are captured or a controller is listened to,
+# and a plain one while a first setup's Screen Recording request waits for Accessibility
+# (crates/host/src/backend/macos/activity.rs). The plist key would keep App Nap away for the
+# whole session, including the hours in which nothing is captured — time a laptop's battery pays
+# for.
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -165,6 +176,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
 	<string>Automation Platform reads the controls of music plugins so it can describe them aloud.</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Automation Platform speaks through VoiceOver when VoiceOver is running.</string>
+	<key>NSInputMonitoringUsageDescription</key>
+	<string>Automation Platform takes the keys an overlay uses, so that they do not reach the plugin underneath.</string>
 </dict>
 </plist>
 PLIST
@@ -229,10 +242,10 @@ fi
 # macOS records Accessibility, Screen Recording and Input Monitoring against an
 # application's CODE IDENTITY. For an ad-hoc signature that identity is derived from the
 # contents of the binary, so every rebuild is a different application and all three
-# permissions have to be granted again — on Monterey including adding the app to Screen
-# Recording by hand, because the prompt does not appear there. Measured on a tester's second
-# run: every permission back to "NOT granted", and the probe reporting no focused window
-# because accessibility reads were refused.
+# permissions have to be granted again — including adding the app to Screen Recording by hand
+# wherever the application's own requests do not put it into that list (docs/macos-
+# permissions.md). Measured on a tester's second run: every permission back to "NOT granted",
+# and the probe reporting no focused window because accessibility reads were refused.
 #
 # A local self-signed certificate makes the identity "this bundle id, signed by this
 # certificate", and neither half changes when the code does. So it is used when it exists —
@@ -295,6 +308,12 @@ behave as if the application is broken, so please do them all.
 
 2. Remove the download quarantine flag, or macOS will refuse to open the app:
        xattr -dr com.apple.quarantine "$APP_NAME.app"
+   If you have already opened it without this step (with Open on the right-click
+   menu, or Open Anyway in System Settings), macOS runs a read-only copy of it from a
+   hidden folder, a new one at every launch. The application then asks macOS where
+   the original is and uses this folder all the same, and its log's "translocated"
+   line says whether that worked. Do this step anyway, then quit the application and
+   open it again.
 
 3. Open $APP_NAME.app. It is a menu-bar application, not a window — with VoiceOver,
    press VO-M twice to reach the menu-bar extras. On a fresh copy it does not stay
@@ -305,19 +324,25 @@ behave as if the application is broken, so please do them all.
    granted by the application itself, and the Permissions page lists all four with
    what each one costs while it is missing:
      - Accessibility      — without it, nothing can be read or clicked. GRANT THIS
-                            FIRST: until it is granted, this application may not
-                            appear in the Screen Recording list at all.
+                            FIRST: the application asks for Screen Recording as soon
+                            as it is granted, and asking is what normally puts it
+                            into the Screen Recording list.
      - Screen Recording   — without it, screen capture silently returns a picture of
                             the wallpaper instead of failing, so this one is worth
-                            checking twice.
-     - Input Monitoring   — without it, the overlay's own keys reach the plugin
-                            instead of the overlay.
+                            checking twice. If the application is not in that list,
+                            its button on the Permissions page asks again; if it is
+                            still not there, press + under the list, choose
+                            $APP_NAME.app and switch it on (on Monterey, unlock the
+                            padlock first).
+     - Input Monitoring   — only if the overlay's own keys reach the plugin instead of
+                            the overlay: whether it is needed next to Accessibility is
+                            not known yet. Its button on the Permissions page asks.
      - Automation         — only asked for when you tick "Speak through VoiceOver"
                             in Application settings; leave it alone otherwise.
    Accessibility takes effect at once: press "Re-check now" on the Permissions page.
    After granting Screen Recording, QUIT AND REOPEN the application: macOS hands that one
-   only to a process that started after it was granted. Input Monitoring usually follows
-   Accessibility; if Re-check still shows it missing, quit and reopen as well.
+   only to a process that started after it was granted. If Re-check still shows Input
+   Monitoring missing after granting it, quit and reopen as well.
 
 5. To record a plugin window for us: put it in front and press
        Command-Shift-F9

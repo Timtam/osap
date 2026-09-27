@@ -93,7 +93,7 @@ The file is replaced whole on every save: the store is written to a temporary fi
 
 ### macOS
 
-`settings.toml` is in the folder that holds the `.app`. The flush is `fcntl(F_FULLFSYNC)`, which APFS and HFS+ support and a network share (SMB, NFS) may not; there the save goes through unflushed, as described above. After the rename the folder itself is flushed as well, since on macOS a rename is only on disk once its folder is. The file is created with mode 0666 less the umask (usually `rw-r--r--`), so other accounts on the Mac can read it.
+`settings.toml` is in the folder that holds the `.app` — the original `.app` when macOS runs a translocated copy of it and can say where the original is; otherwise the copy's folder, where nothing can be saved (see [building on macOS](../building-on-macos.md#translocation)). The flush is `fcntl(F_FULLFSYNC)`, which APFS and HFS+ support and a network share (SMB, NFS) may not; there the save goes through unflushed, as described above. After the rename the folder itself is flushed as well, since on macOS a rename is only on disk once its folder is. The file is created with mode 0666 less the umask (usually `rw-r--r--`), so other accounts on the Mac can read it.
 
 ## host.settings.onChange(key, callback) {#host-settings-onchange}
 

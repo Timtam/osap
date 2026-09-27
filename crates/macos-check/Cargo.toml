@@ -39,6 +39,8 @@ anyhow = "1"
 log = "0.4"
 os_info = { version = "3.15", default-features = false }
 interprocess = "2.4.4"
+# `logging.rs` asks whether the log's path still names its open file before it rotates it.
+same-file = "1.0.6"
 # `cells.rs` (host.screen.cells) parses its predicate with winnow and exchanges cells as hex;
 # both are in host's [dependencies], so they are repeated here like the three above.
 winnow = "1.0.3"
@@ -85,7 +87,20 @@ features = ["CGBase", "CGEvent", "CGEventTypes", "CGEventSource", "CGDirectDispl
 [target.'cfg(target_os = "macos")'.dependencies.objc2-screen-capture-kit]
 version = "0.3"
 default-features = false
-features = ["std", "block2", "objc2-core-foundation", "objc2-core-graphics", "SCScreenshotManager"]
+features = ["std", "block2", "objc2-core-foundation", "objc2-core-graphics", "SCScreenshotManager",
+    # The Screen Recording request's own capture request: asking for the shareable content is what
+    # TCC counts as a request to capture, and what puts the application into that list (perm.rs).
+    "SCShareableContent"]
+
+# IOKit's two Input Monitoring calls, `IOHIDCheckAccess` and `IOHIDRequestAccess` (backend/macos/
+# perm.rs), with their request and access types as named constants. They were looked up by name
+# with a hand-written request number, and that number was the posting side's — the Accessibility
+# half of the same check — so the application never read Input Monitoring at all. Both calls
+# exist from macOS 10.15, below the oldest macOS this application starts on.
+[target.'cfg(target_os = "macos")'.dependencies.objc2-io-kit]
+version = "0.3"
+default-features = false
+features = ["std", "hidsystem"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-vision]
 version = "0.3"

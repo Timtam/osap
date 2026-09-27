@@ -3863,7 +3863,10 @@ What only a person, a Mac or a measurement can settle:
 - [ ] **O15** — how often WinRT and the neural recogniser disagree on small regions both read.
 - [ ] **O18** — whether the two threads are throttled when the application is in the background:
       Windows power throttling (EcoQoS) on battery, macOS App Nap; and on macOS whether the
-      user-initiated quality of service the recognise thread asks for changes anything.
+      user-initiated quality of service the recognise thread asks for changes anything. (macOS:
+      since 2026-09-27 a latency-critical activity against App Nap is held while keys are
+      captured or a controller is listened to — `backend/macos/activity.rs`, see "macOS over
+      days of uptime"; the question stands for the hours in which nothing is captured.)
 - [ ] **O19** — the cost of deciding the small-text path by the content crop instead of the
       region's size (up to 1 MP), and whether it changes any read in the repo's modules.
 - [ ] **Mac, first run:** a `read` from a headless probe — the capture from the `screen-capture`
@@ -4885,9 +4888,10 @@ an NVDA menu or dialog (NVDA+N, NVDA+F7, NVDA+Ctrl+G …) or an elevated window 
       the first real answer to whether a sleep loses the hook; captured Tab works in an overlay
       straight away; NVDA+T, NVDA+Space and browse-mode arrows behave as before;
   - a **lock/unlock** (Windows+L, then the PIN): one `unlocked:` line, and typing the PIN adds
-      no `the hook stopped seeing keys` line. The unlock line is also the only proof that
-      `WM_WTSSESSION_CHANGE` reaches a message-only window; if it never comes, the session
-      registration moves to a hidden top-level window;
+      no `the hook stopped seeing keys` line. The unlock line — and the `[system] the session
+      was unlocked` line beside it (see "Uptime" below) — is also the only proof that
+      `WM_WTSSESSION_CHANGE` reaches a message-only window; if neither comes, the session
+      registration moves to the watch's hidden top-level window;
   - a **forced hook timeout, on a test machine only — never on the maintainer's**: suspend the
       whole process (Process Explorer, Suspend), type about fifteen keys in Notepad — each
       waits a second for the hook — and resume it, then type a few more keys. Expected: one
@@ -4930,6 +4934,674 @@ an NVDA menu or dialog (NVDA+N, NVDA+F7, NVDA+Ctrl+G …) or an elevated window 
       again … The new tap is off as well` line and silence), or invalidate its port (`the event
       tap had to be created again … and could not be` once, then `the event tap was created
       again` after the grant is back). Either way no line every two seconds.
+
+## Uptime: sleep, lock, display changes, the log and what grows (2026-09-27)
+
+Two read-only audits listed what breaks or grows while the application runs for days (system
+events and time; resources over hours and days). The keyboard hook is the section above; the
+macOS items of the audits (VoiceOver re-arming, ScreenCaptureKit's back-off, App Nap, pid reuse,
+the macOS system events) are not in this list. Done for Windows and the shared code:
+
+- [x] **System events** (`system_events.rs`, `backend/hook_watch_thread.rs`). The keyboard
+      watch's thread now starts with the event loop (`Backend::watch_system`), whether or not a
+      hook is ever installed, and its session and suspend/resume registrations — not made twice
+      — also push `Sleep`/`Wake`/`Lock`/`Unlock`/`Connected`/`Disconnected` for the event loop;
+      raw input, the foreground events and the witness are armed only when the hook is. A second,
+      hidden top-level window on that thread (never shown, `WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`)
+      hears the broadcasts a message-only window does not: `WM_DISPLAYCHANGE`, `WM_DPICHANGED`,
+      `WM_SETTINGCHANGE` with `SPI_SETWORKAREA` or `SPI_SETLOGICALDPIOVERRIDE`, and `TaskbarCreated`
+      (log only: wxWidgets' `wxTaskBarIcon` answers it and adds the icon again, checked in
+      `src/msw/taskbar.cpp`). The pump delivers each batch through `HostEvents::on_system`: one
+      `[system]` line per event (how long the machine slept, the session was locked), both epochs
+      turned over, the window in front reported again as an activation and a focus round after a
+      resume, unlock or connect, a focus round after a display/scale/work-area change, the
+      `[env]` display lines again (now with a `monitors` line: each monitor's effective DPI —
+      `system dpi` is fixed for a session), desktop duplication reset, and the audio output let
+      go after a resume or connect. No host.* call; docs: `window.md` (onTrigger/onFocus,
+      Windows), `timer.md` (epoch, inputEpoch). **A storm is bounded** (after the review): an
+      event equal to the one queued just before it is folded into it, a full queue drops its
+      oldest rather than its newest, the display-family lines (display, scale, work area,
+      taskbar) are written once and then counted per kind through `logging::Repeats` (a line a
+      minute at most, flushed by the tick), and the `[env]` display lines are written again only
+      when they changed. Since the merge with the macOS group (below) the same queue, event
+      type, batch and plan serve both platforms.
+- [x] **The log rotates within the session** (`logging.rs`, `Sink`): a byte count kept beside the
+      file, past 8 MB the file goes to `.log.1` and the new one begins with a `[host] log
+      continued` line, the build and the settings; a refused rename keeps writing and is tried
+      again after another 512 KB, with a `could not be moved` line at each try (a reader that
+      holds the file without sharing its deletion, such as `Get-Content -Wait`, keeps it growing
+      until it lets go; copy-and-truncate was rejected, it can lose a line another copy
+      appends). After the review, an opening that fails is tried again after another 512 KB
+      rather than at every line, and a rename that went through is remembered, so the file that
+      opens begins with the continuation lines. `file-rotate` 0.8 checked and not used (loses every line while a
+      rename fails, `assert!`s inside the logger, no continuation hook, brings chrono). Docs:
+      `log.md`. Tests in `logging.rs`.
+- [x] **A second copy writing the same log** (found in the review of the merge with the macOS
+      changes). A headless run beside the application — exempt from the instance guard on
+      purpose — opens the same file and counts only its own lines, so it can move the file
+      first; the application's handle then follows it to `.log.1`. At the application's own 8 MB
+      its rename would have put the headless run's new file over `.log.1`, where its own lines
+      had gone. Now a rotation first checks that the path still names its open file
+      (`Fs::still_names`, through `same-file` 1.0.6, already in the lock file under walkdir);
+      when it does not, nothing is moved, and the copy goes on in the new file after a `the log
+      had been moved away before this session moved it` line and the continuation lines. Left:
+      the headless run moving its own new file over `.log.1` while the application still writes
+      there — that needs 8 MB written by the headless run. Test in `logging.rs`
+      (`a_log_another_copy_moved_is_not_moved_again`, on the real filesystem).
+- [x] **A continued file names the app folder** (same review). The continuation lines repeat
+      the header's `app folder` line (kept from the header, so no second write probe), after the
+      `translocated` line on macOS, whose text refers to it. Five lines at most. Docs: `log.md`,
+      whose macOS section now carries the `translocated` line; `building-on-macos.md` and
+      `macos-permissions.md` ask for `.log.1` as well, since the first block is there after a
+      rotation.
+- [x] **A module error repeated is written once, then counted** (`report_callback_error`,
+      `logging::Repeats`): per module, context and message; one summary a minute at most, flushed
+      by the tick when the error stops; forgotten on disable/enable, and (after the review) on a
+      reload and a rolled-back hot-load. A full table (512 lines) forgets the line seen longest
+      ago instead of refusing new ones, so a steady error is still counted while a changing one
+      floods. Docs: `module-runtime-and-lifecycle.md`, `log.md`.
+- [x] **A hotkey another program holds is logged once** (`refresh_hotkeys`, `os_refused`): the
+      retries at every register and release are counted, and the `is now held` line says how
+      often it was refused. Docs: `hotkey.md`.
+- [x] **The `captured set` line** (trace or calibrate) is written once per tick and only when it
+      changed, instead of once per captured key.
+- [x] **Desktop duplication** (`backend/dxgi.rs`): hangs count within ten minutes, not for the
+      session; stopped, it is tried again on a fresh thread after 10 minutes, doubling to an hour
+      (never while its old thread is still inside the driver); a resume, unlock or connect
+      clears the back-off, the hang count and the doubling and tries a stopped one at once. A
+      display or scale change alone (after the merge review) does so at most once in ten
+      minutes, only when there are hangs to forget or duplication has stopped, and keeps the
+      doubling and the back-off (`dxgi::after_system_event`): at every flap of a display whose
+      link keeps dropping it had wiped the hang count, so a driver hanging at each change was
+      never stopped. The `Disabled` reason changed wording (`screen.md`, Failure reasons).
+      Tests beside the existing ones. Cross-reference: M5. After the review, the doubling is
+      forgiven when a fresh engine answers 100 reads in time without a hang, and when the
+      switch is turned off and on.
+- [x] **`host.sound` follows the device** (`sound.rs`): the stream is built with rodio's mixer
+      and cpal (rodio's re-export) with an error callback; the output is opened again after a
+      stream error, when the default device changed, and after a resume or connect. Docs:
+      `sound.md`.
+- [x] **Menu shots: the first two openings of each control** per overlay and VM; the third says
+      so once (`overlay-runtime`, `_menuShots`; test in `overlay_menu_tests.rs`). Docs:
+      `calibrating.md`. Counted per overlay and control object (weak keys), not per label, so
+      overlays that share a label keep their own counts.
+- [x] **`host.ocr.read` keys are forgotten** once no read with them waits (`ocr/lua.rs`,
+      `forget_settled`), as `snapshotAsync`'s are. Docs: `ocr.md`.
+- [x] **`imageSearchAsync`, `imageSearchEach`, `matchCellsAsync`: at most 64 waiting per module**;
+      the 65th ends the module's oldest with `too many image searches waiting for this module
+      (64); the oldest was ended`, which the worker then skips (`image_search.rs`). Docs:
+      `screen.md`. First 16; raised after the review, because a sample-library VM's landmark
+      gates all ask in one poll (about 14 waiting counted for Soundiron, the header's reads on
+      top) and the cap would have ended the same gates' searches every poll. The overlay
+      runtime's landmark gate, value reads and `gbutton` activation, and Kontakt's resize-grip
+      check, now read `cb(nil, reason)` as "could not look" — the last verdict stands — instead
+      of "not there".
+- [x] **One neural recogniser thread** (`backend/paddle_ocr.rs`, `ask`) instead of a thread per
+      small region: still handed every small region before `Windows.Media.Ocr` starts, still used
+      only when that reads nothing; a region no longer wanted is cancelled (skipped, or stopped
+      before the session). Docs: `ocr.md` (Windows). After the review: the thread's loop is kept
+      going by an outer `catch_unwind`, and if the thread ever ends its queue is answered with
+      nothing and no region is queued for it again (`ALIVE`, `orphan_all`), so a synchronous
+      `host.ocr.recognize` cannot wait for ever on the event loop.
+- [x] **Screen-reader workers left in a call that never returns are bounded** (`speech/prism.rs`):
+      counted, the stall line says how many, and at four still waiting no new worker is started
+      until one comes back. Docs: `speech.md`.
+- [x] **The overlay runtime's memos are bounded** (`memoByOrigin`, the embedded binding's
+      identity cache: the 64 keys used last), and an `identify` that answers `nil` is asked
+      again instead of being stored as `false` for the life of the window — up to 8 times in a
+      row per control (after the review), then taken as no, so a plain-Lua `identify` that says
+      no by returning nothing does not run its UIA or OCR call at every recheck. Docs:
+      `overlay.md`.
+- [x] **Hotkey ids past 0xBFFF: no change.** Measured on Windows 11 26220 that `RegisterHotKey`
+      grants ids up to 0x7FFFFFFE; said at `next_id` in `lib.rs`.
+- [ ] **Audit items neither uptime group took** (listed after the merge review; the system
+      audit's and the resource audit's numbers):
+  - **System audit P2-11, both platforms: the single-instance listener gives up** after 20
+      accept errors in a row (`instance.rs`, `failures >= 20`); a later second start then waits
+      10 s and gives up, until a restart. Bind again with a back-off (1 s, doubling to a
+      minute), said once; test `serve` over an iterator of accept results.
+  - **System audit P3, `Instant` across a suspend:** on macOS `Instant` stops while the Mac
+      sleeps, so a `host.timer.after` deadline stretches by the sleep; on both platforms an
+      `every` timer fires once after a resume and does not catch up (`timers.rs`,
+      `t.next = now + t.interval`). Measure Windows' clock across one sleep, then state
+      `host.now()`'s and the timers' behaviour per platform in `timer.md`. Duplication's hang
+      clock runs on it too; the `[system]` storm counts are handled at a wake since the merge
+      review.
+  - **System audit P3, Windows power throttling for the hook thread and the pump:** neither
+      opts out (`SetThreadInformation(ThreadPowerThrottling)`, or the whole process with
+      `SetProcessInformation(ProcessPowerThrottling)`); the gamepad thread does
+      (`gamepad/win_thread.rs`). O18 asks the same for the OCR threads; one measurement.
+  - **System audit P3, `CoInitializeEx` on every UIA call** (`uia.rs`, `automation`), never
+      balanced: a per-thread counter that wraps after about 4 billion calls. Initialise once
+      per thread.
+  - **System audit P3, nothing brings the application back after a reboot** (Windows
+      Update): no `RegisterApplicationRestart`, no autostart. Optional; an Application
+      settings switch if done.
+  - **Resource audit 11: the template cache has no byte cap**, only 64 entries
+      (`TEMPLATE_CACHE_CAP`, `lib.rs`), so a module with many whole-window templates holds 64
+      of them; `template.rs`'s cache of scaled variants has a byte cap that could be copied.
+- [ ] **Live (Windows), with NVDA:**
+  - the start line: `[system] sleep, lock, connections and display changes are heard on the
+      keyboard watch's thread: session notifications yes; suspend/resume notifications yes;
+      display, scale, work-area and taskbar broadcasts yes`;
+  - **sleep and wake**: `[system] the machine is going to sleep — heard at …, written … later`
+      and `the machine woke from sleep (asleep for N min); …`, both written after the wake (the
+      first line without the "heard at" part if the loop turned before the machine went down);
+      compare the length with `powercfg /sleepstudy` or the System event log; the active overlay is looked at again
+      at once (Tab works, NVDA speaks), and a `desktop duplication is asked again` line only if a
+      module reads through duplication;
+  - **Windows+L and unlock**: `the screen was locked`, `the screen was unlocked (locked for N
+      s); …`;
+  - **display scale 100 % → 125 %** (Settings, Display): `the display scale changed` (perhaps
+      with `(N notifications)`) and the `[env] monitors: … 120 dpi (125%)` line; overlay clicks
+      still land on target. If no `[system]` line comes, a hidden window does not get
+      `WM_DPICHANGED` or `SPI_SETLOGICALDPIOVERRIDE` — say so here; a resolution change should
+      give `the display configuration changed` all the same;
+  - **the taskbar set to hide automatically**, then back within ten minutes: one `the work
+      area changed` line (perhaps with `(N notifications)`), and for the change back only a
+      count, `the same work-area change came 1 more time(s) in the last N s`, a minute after the
+      first line at the earliest (the display family is counted, not written again, within ten
+      minutes); a second full line would mean the counting does not hold;
+  - **Explorer restarted** (Task Manager, Restart): `the taskbar was created again` and the tray
+      icon back, reachable with the keyboard;
+  - **a Remote Desktop connection** to the session: `connected to a remote client (away for
+      …)`;
+  - **switch user** to another account and back: `the session was switched away from the
+      console`, then `the session is back at the console (away for …)` and the overlay looked at
+      again;
+  - **the log past 8 MB** (trace on for a working day, or a copy of a large log placed as
+      `automation-platform.log` before starting): `.log.1` appears, the new file begins with
+      `log continued`, and opening the log in a viewer that locks it gives a `could not be
+      moved` line every 512 KB while it is open, no lost lines, and the move at the first try
+      after the viewer is closed;
+  - **a display link that keeps dropping** (a TV or AV receiver in standby on HDMI, if one is at
+      hand): one `the display configuration changed` line, then `the same display change came N more
+      time(s)` at most once a minute, and `[env]` lines only when the displays really changed.
+      With a module reading through desktop duplication meanwhile: at most one `desktop
+      duplication is asked again after the system event: … (after a display or scale change,
+      at most once in 10 minutes; …)` line in ten minutes, and if duplication hangs at the
+      changes, `has taken more than 2 s (1 of 3 …)` up to `(3 of 3 …)` and one `stopped
+      answering` line, then no `[capture]` line per flap until its wait is over;
+  - **`examples/sound`**: make another device the default and play: one `[sound] … opened again`
+      line and the sound on the new device; unplug a USB audio device while a sound plays: `the
+      audio output reported an error`, and the next sound plays on the new default;
+  - **a module whose poll raises every 500 ms**: one full line, then `the same timer error came
+      N more time(s) in the last 60 s` once a minute, and nothing after it is fixed; reloaded
+      with the error still there, the next one is written in full again;
+  - **Melodyne's selection watcher with trace on**: Process Explorer shows one `paddle-ocr`
+      thread whatever the rate, the CPU of the process stays near the WinRT cost alone, and the
+      `waited … for paddle` lines appear only for regions WinRT read nothing in;
+  - **a 24-hour headless soak** with a timer-only module (the resource audit's plan): private
+      bytes, handles, threads and GDI/USER objects flat, and the log's size;
+  - **hotkey ids past 0xBFFF on Windows 10** (not measured there): a headless probe that
+      registers id 0xC001 on Ctrl+Alt+Shift+Win with the unassigned virtual key 0xE8 and
+      unregisters it at once.
+- [ ] **Next Mac session:** `examples/sound` with headphones unplugged while it plays, and with
+      the output switched in Control Center: `[sound] the audio output reported an error` or
+      `… opened again`, and the next sound audible (cpal's `DeviceIsAlive` listener, from its
+      source; never seen live — which is why `sound.md` does not describe it).
+- [ ] **`host.sound` on rodio 0.21** (checked from its source 2026-09-27, not taken in the uptime
+      change): `OutputStreamBuilder::with_error_callback` and `open_default_stream` do what
+      `sound.rs`'s `build`/`stream` do by hand. Moving means cpal 0.15.3 → 0.16 on both
+      platforms (the macOS half only verifiable on a Mac), `Sink::connect_new` instead of
+      `try_new`, `log_on_drop(false)`, and keeping the default-device check (its
+      `OutputStream` does not name its device). Also removes cpal 0.15.3's leaked event handle
+      per failed output, if 0.16 fixed that (not checked).
+
+## macOS over days of uptime (2026-09-27)
+
+From the two uptime audits of 2026-09-27 (system events and time; resource growth): the macOS
+half. Everything below is type-checked only (`cargo check --target aarch64-apple-darwin -p
+macos-check`, with and without `--tests`); the pure parts run under `cargo test` on Windows
+(`backend/macos/backoff.rs`, `backend/macos/handle_table.rs`, `speech/vo_park.rs`,
+`speech/pace.rs`, `system_events.rs` with its `what_each_event_sets_off` table), and where they are called
+from is checked on the source (`lib.rs`, `macos_uptime_wiring_tests`).
+
+- [x] **System events reach the host** (audit P1-2, macOS). `backend/macos/system.rs` hears the
+      workspace's will-sleep, did-wake, screens-did-sleep/-wake and session resign/become-active
+      notifications, the distributed `com.apple.screenIsLocked`/`…Unlocked` (CoreFoundation
+      centre, delivered immediately in the background), and display reconfiguration
+      (`CGDisplayRegisterReconfigurationCallback`: `NSApplicationDidChangeScreenParameters…`
+      needs a running `NSApplication`, which a headless run has not). Each is queued with the
+      wall-clock time it was heard (the host's queue, `system_events::push`) and delivered first
+      in the pump's drain as one batch through `HostEvents::on_system` — since the merge, the
+      Windows shape (see the merge item below). The host writes one `[system]` line per event
+      (`system_events.rs`: how long the sleep, the lock or the absence lasted, by the wall clock,
+      since `Instant` stops while a Mac sleeps; "heard at …, written N later" when the line is
+      only written after the wake; "how long it slept is not known" when the sleep notice was
+      itself heard only as the Mac woke; a display change once, then counted, with at most one
+      line a minute, the count flushed from the tick), turns both epochs over, hands it to
+      speech and does the rest of the host's plan. Before handing the batch over (since the
+      merge review; it came after at first) the backend checks the event tap at once after a
+      wake, an unlock or the session coming back (`tap::recheck_soon` — the tap's own
+      subscription from 25713e5 moved into `system.rs`, so each notification is registered
+      once), brings a ScreenCaptureKit back-off's next probe forward after a wake, an unlock,
+      the session coming back, the displays waking or a display change
+      (`SystemEvent::rechecks_capture`), and once per batch with an event that may have changed
+      what is in front reads the frontmost application again (an unannounced one is taken over,
+      and announced as an activation only when the host does not report the window in front
+      itself after the batch — so after the displays wake or a display change, not after a
+      wake, an unlock or the session coming back). The `[env] display N` lines after a display
+      change are the host's, written when they differ from the last ones
+      (`MacBackend::display_environment`). No host.* call, no setting.
+- [x] **One system-event design for both platforms** (merge of the Windows and macOS uptime
+      groups, 2026-09-27). The two groups had built the event type twice (`system_events.rs`
+      with a batch, and `backend::SystemEvent` delivered one at a time with its time) and the
+      `[system]` line twice. Now: one `SystemEvent` in `system_events.rs` (`Sleep`, `Wake`,
+      `Lock`, `Unlock`, `Connected`/`Disconnected { remote }` — macOS fast user switching is the
+      console kind —, `DisplaysAsleep`/`DisplaysAwake` from macOS only, `DisplaysChanged`, and
+      `Scale`/`WorkArea`/`TaskbarCreated` from Windows only); one queue (`push`/`take`: repeats
+      folded, the oldest dropped when full, and now one line when it did — the macOS queue's
+      line); one shape, `HostEvents::on_system(Vec<Stamped>)`; one `Since::plan` with the Windows
+      group's storm counting (`logging::Repeats`, flushed by `log_housekeeping` — macOS's own
+      minute counter and `flush` are gone) and the macOS group's wall-clock rules (the late note,
+      "not known" for a sleep heard at the wake, nothing on a clock set back, days in a length;
+      the Windows `(at …)` stamp is folded into the late note); one set of rules on the event
+      (`front_may_have_changed`, `reports_front`, `reopens_audio`, `rewrites_display_lines`,
+      `rechecks_capture` — Windows' `resets_capture` and macOS' `brings_capture_probe_forward`
+      were the same question —, `retries_screen_reader`), from which each line's tail is
+      written, so a line cannot claim what the host does not do. New on macOS by the merge: the
+      window in front is reported again as an activation after a wake, an unlock or the session
+      coming back, and the audio output is let go after a wake or the session coming back (as
+      on Windows); the focus round after an event is the host's (the backend's
+      `mark_focus_dirty` after it is gone); the `[env]` display lines go through
+      `Backend::display_environment` (the backend's own last-written copy is gone). Docs:
+      `window.md`, `timer.md`, `sound.md`.
+- [x] **The merge's review, fixed** (2026-09-27). On macOS the backend's part of a batch —
+      the tap check, the ScreenCaptureKit probe brought forward, the front application read
+      again — runs before the host hears it, as Windows resets duplication first: after it,
+      the host's reactivation captured while ScreenCaptureKit still skipped, and an application
+      that came to the front while the screen was locked was activated twice in one drain
+      (`watch::recheck_front(announce)`; `queue::taken_over` still arms the focus ladder for an
+      untitled window; wiring test `system_events_are_delivered_first_and_acted_on`). On
+      Windows a display or scale change alone no longer resets desktop duplication at every
+      flap (the Desktop duplication item under Uptime). A wake writes the display-family counts
+      still owed and forgets them (`Repeats::take_all`): on macOS the process clock they run on
+      stops while the Mac sleeps. A start event folded in the queue is stamped by its last
+      notice. Docs: `window.md` (onTrigger, and onFocus's untitled-window rounds on macOS,
+      written down now), `timer.md` (how often the epoch turns), `screen.md`.
+- [x] **VoiceOver comes back after a refusal** (audit P1-3). `speech/vo_park.rs`: only
+      `errAEEventNotPermitted` (-1743, by the Apple Event's code or `(-1743)` in `osascript`'s
+      output) parks the path until the setting is ticked again; anything else is tried again on
+      prism's schedule (`speech/pace.rs`, moved out of `prism.rs` and shared: 3 s for five
+      minutes then 10 s while VoiceOver runs, 3 s for a minute then 30 s while it does not,
+      counted from the first refusal), and at once when VoiceOver's pid changes (asked before
+      every line anyway) or on a wake, an unlock or the session coming back. A look lets one line
+      through and closes the gate behind it until VoiceOver has answered; lines said meanwhile go
+      to the system voice at once. A refusal whose `osascript` child had to be stopped at its 5 s
+      limit puts its run of refusals on the slow pace (10 s / 30 s) at once. The log: one line
+      per run of refusals, one when the pace changes, one when a refusal of another kind comes
+      (by its codes, or its words when it has none), one when VoiceOver takes a line again.
+- [x] **The VoiceOver transport, bounded** (review of the above, finding 1 and 7). Lines handed
+      over in the same opening of the gate as a refused one are not offered (`voiceover.rs`:
+      each line carries the opening it was handed over in; the worker says them through the
+      system voice at once instead of paying the refusal again, one after another). After the
+      Apple Event is refused, `osascript` follows only where it can help (`vo_park::after_event`):
+      not after -1743 (refused the same way), not after -600 (it would start VoiceOver), and after
+      -1744 once per arming — start-up, each tick of the setting — since it waits on the
+      Automation question for up to 5 s; after that each line asks
+      `AEDeterminePermissionToAutomateTarget(…, askUserIfNeeded: false)` first, on the speech
+      thread, and goes to the system voice at once while the question is open. The Apple Event
+      is given up for `osascript` for the session only when `osascript` then took the same line
+      after a refusal that was not about permission (`vo_park::event_broken`) — a child that took
+      a line after -1744 means the question was answered meanwhile. A refusal of a line handed
+      over before the setting was ticked is not held against the path the tick re-armed.
+- [x] **ScreenCaptureKit backs off instead of switching off** (audit P1-4).
+      `backend/macos/backoff.rs`: after a capture not answered within 1.5 s it is not asked for
+      30 s, then one probe while the reads go to Core Graphics; each probe not answered within
+      the deadline doubles the wait, to 10 minutes; captures that time out together count once;
+      only an answer within the deadline (a picture or an error) ends it. Review fixes (findings
+      2, 3, 3b–3d): the probe is **not waited for** where an older capture function exists
+      (`capture::sck_probe` — its handler reports to `Backoff::probe_answered`, and a probe with
+      no word after twice the deadline is written off at the next `attempt`, which also frees a
+      probe whose caller unwound); only a macOS without the older functions waits for it, having
+      nothing else to answer the read. A wake, an unlock, the session coming back, the displays
+      waking or a display change no longer END the back-off — they bring its next probe forward,
+      once per step and not sooner than 30 s after the timeout that began the step, and the
+      level stays (`Backoff::clear`). The back-off's lock is never held while a line is written.
+      Only `capture.rs`'s ScreenCaptureKit switch changed.
+- [x] **App Nap** (audit P2-7). `backend/macos/activity.rs`: one
+      `UserInitiatedAllowingIdleSystemSleep | LatencyCritical` activity for the application,
+      held while keys are captured (`tap::set_captured_keys`, non-empty — the host's notion of
+      an active overlay) or a controller's buttons or axes are listened to (the gamepad's own
+      activity folded in; its `activity` status says which). Info.plist (`package-macos.sh`)
+      checked: `LSUIElement`, no `NSAppSleepDisabled`, and deliberately none (a comment there
+      now says why).
+- [x] **pid-keyed caches forget an application that quits** (audit P2-10, resource audit 4).
+      `NSWorkspaceDidTerminateApplicationNotification` (in `system.rs`) → at the next drain
+      `watch::forget_process` (the observer and its run-loop source, a busy retry, a
+      written-off verdict), `ax::forget_process` (`EXE_BY_PID`, `BUNDLE_BY_PID`, `BUSY_UNTIL`,
+      the remembered front window) and `handles::forget_pid` → `ax::forget_handles`
+      (`INSET_BY_HANDLE`, `RING_REPORTED`, which moved to module level). Up to 1024 quits per
+      turn of the loop are queued; past that the log says so (review finding 8).
+- [x] **The handle table drops windows that are gone** (resource audit 3). Each entry knows the
+      window it lies in (`handle_table.rs`, pure and generic: `Kind::Window` is its own owner,
+      `Kind::In(window)` a control; `window_controls` passes its window, the focus chain adopts
+      its links to the window at its end). A sweep (at 4096 entries, then at twice what it
+      kept) still drops dead processes and asks each window's application once for its role —
+      `kAXErrorInvalidUIElement` is gone, with every control inside it; no answer keeps it — at
+      most 256 windows and 150 ms a sweep, busy applications skipped. Handles stay monotonic, so
+      the contract is unchanged. Review fixes (findings 4, 9, 11): the sweep runs from the pump
+      after the drain (`handles::sweep_if_due` in `pump_pending`), no longer inside the intern
+      that crossed the size — that was an activation, a control walk's 300 ms budget or the
+      focus chain; a window paired with a `CGWindowID` that `CGWindowListCopyWindowInfo(All)`
+      still lists is kept without asking its application (`handle_table::needs_asking`);
+      `ax::window_id` fills in only the id (`handles::set_window_id`) instead of re-interning,
+      which turned a control into a window; a process is "exited" only on `ESRCH`, not on
+      `EPERM` (another user's process).
+- [x] **The headless loop drains an autorelease pool per turn** (resource audit 10).
+- [ ] **Left open by the review** (2026-09-27), each waiting for what a Mac shows:
+  - **Which VoiceOver refusals reach the host at all.** The Apple Event is sent `NoReply`, so
+      only macOS's refusal to send it comes back (-1743, -1744, -600, -609 …); VoiceOver's own
+      refusal — "Allow VoiceOver to be controlled with AppleScript" unticked — and a VoiceOver too
+      busy to answer are not seen, and such a line is lost silently, neither VoiceOver nor the
+      system voice saying it (as before this change). Through `osascript` (after the transport
+      switched) they do come back. Measure first (live check below); if lines are lost, ask for a
+      reply with a short timeout on a thread that can receive it, or probe with `osascript` once
+      per look.
+  - **An application quitting without the workspace's notice** (review finding 8). Not
+      documented to be posted for background-only applications and menu-bar agents; if the live
+      check below shows one missing, key `EXE_BY_PID`/`BUNDLE_BY_PID` by (pid, start time)
+      (`proc_pidinfo(PROC_PIDTBSDINFO)`'s `pbi_start_tvsec`) or compare it on a cache hit.
+  - **One "invalid element" drops a window** (review finding 10, not changed): an element
+      reference an application has invalidated does not become valid again — a window it rebuilt
+      is a new element and gets a new handle anyway — so a second sweep's agreement would only
+      delay the reclaim by a doubling. Paired windows the window server still lists are no longer
+      asked at all. Revisit if the handle-table live check shows an open plug-in's overlay
+      starting over after a sweep.
+  - **How long a Mac slept, from the kernel** (review finding 12, not changed): `kern.sleeptime`
+      / `kern.waketime` would measure a sleep whose notice came late, but after Power Nap's dark
+      wakes they give the last stretch only, not the night. The line now says "not known"
+      instead of "asleep for 0 s"; compare the figures with `pmset -g log` before using them.
+- [ ] **Next Mac session** (all of it written blind):
+  - the start: `system events: … — yes; the screen lock — yes; display changes — yes`;
+  - **sleep and wake** with an overlay active: `[system] the machine is going to sleep` (possibly
+      written only after the wake, then with "— heard at …, written … later"), `[system] the
+      machine woke from sleep (asleep for …)` — compare with `pmset -g log` — then `the Mac woke
+      from sleep: the event tap was checked and is valid and enabled`, and captured Tab working
+      at once. A `how long it slept is not known` line means the sleep notice was heard only at
+      the wake: note how often. New by the merge: the window in front is reported again as an
+      activation after the wake (the overlay resumes rather than starting over), and
+      `examples/sound` after the wake opens the output afresh (`[sound] … opened again` is not
+      expected; the sound simply plays);
+  - **lock and unlock** (Control+Command+Q, then the password): `[system] the screen was locked`,
+      `[system] the screen was unlocked (locked for …)`, the tap line after it — and whether the
+      lock notices arrive at all while this accessory application is in the background. No
+      spurious `loginwindow … no activation said so — …` line after the unlock, and an active
+      overlay resumes where it was rather than starting over — since the merge the host reports
+      the window in front again as an activation after the unlock, as on Windows;
+  - **an application brought to the front while the screen is locked** (in Terminal
+      `sleep 20; open -a TextEdit`, lock at once, unlock after half a minute): one `TextEdit
+      (pid …) is in front, and no activation said so — taken over now; the system event reports
+      its window` line, and ONE activation of TextEdit's window: a module's `onTrigger` callback
+      for it that writes a line (`host.log.info`) writes it once. Twice would mean the
+      workspace announced it as well, as Windows can — say so here;
+  - **fast user switching** to another account and back: `session was switched away from the
+      console` and `session is back at the console (away for …)`;
+  - **displays**: let them sleep (`displays went to sleep` / `displays woke`); change the
+      resolution or scale in System Settings, or plug in or unplug an external display:
+      one `[system] the display configuration changed` line, and further changes within ten
+      minutes counted: `the same display change came N more time(s) in the last … s`, at most
+      once a minute — several full lines within a minute would mean the counting does not hold —
+      followed by the `[env] display N` lines when the arrangement differs, and an overlay's
+      clicks still landing on target. A display change before a sleep and another at the wake
+      (an external display): the one at the wake written in full, after a `the same display
+      change came N more time(s) within … s of its last line, before the machine slept` line
+      if some were still counted; whether the callback fires in a headless run too;
+  - **VoiceOver off and on with Command+F5** in the middle of a session with "Speak through
+      VoiceOver" ticked: lines while it is off go to the system voice; after it is on again the
+      next line reaches VoiceOver (and the braille display) without touching the setting — a
+      `VoiceOver started (pid …)` or `runs as a new process` line if a refusal had parked the
+      path;
+  - **VoiceOver with "Allow VoiceOver to be controlled with AppleScript" unticked**: either one
+      `VoiceOver would not take a line (…)` line with the error code, the system voice speaking,
+      a `still would not take a line … every 10 s` line after five minutes, and after ticking it
+      again a `VoiceOver took a line again` line within 10 s — or **no refusal at all**: VoiceOver
+      silent AND no system voice, lines lost (see "Left open" above). Which one it is, and which
+      code comes back if any;
+  - **the Automation question left unanswered** (this application's Automation entry reset with
+      `tccutil reset AppleEvents com.automationplatform.app`, the setting ticked, the dialog not
+      answered): how long the
+      first line waits (expected: up to 5 s, one `osascript did not come back within 5 s` in the
+      refusal line), that later lines are not delayed (each look asks macOS without a dialog:
+      `the system says this application may not send VoiceOver Apple Events yet — the Automation
+      question has not been answered [-1744]`), whether the dialog comes back on its own, and
+      that allowing it brings VoiceOver back within 10 s;
+  - **ScreenCaptureKit after a wake** with an OCR overlay in use: whether any capture times out
+      (a `did not answer … within 1500 ms … not asked for 30 s` line), then the wake's `… is
+      asked again at the next capture rather than at the end of its … back-off` line, and a
+      `ScreenCaptureKit answered a probe within its deadline` line bringing it back — or a `did
+      not answer the capture that asked it again after its back-off` line doubling it. No read
+      should wait 1.5 s for a probe on a macOS that still has the older functions. When a
+      back-off was already running from 30 s or more before the sleep, the `… is asked again at
+      the next capture` line comes BEFORE the wake's `[system]` line, and the reactivation's
+      first capture is the probe (its answer line right after the wake), not a Core Graphics
+      read with the probe only at the next poll;
+  - **App Nap**: an overlay active (keys captured), the application in the background for ten
+      minutes: Activity Monitor's Energy tab reads App Nap: No and Preventing Sleep: No for it,
+      `pmset -g assertions` lists nothing of it, and the Mac still sleeps when idle. Then with no
+      overlay active for ten minutes: App Nap: Yes is expected; press a captured key after an
+      overlay activates again and look for a `reached the event tap late` line — that line is
+      also the answer to whether the tap with nothing captured suffers from a nap;
+  - **an application quitting**: open and quit sforzando (or any observed application) twice:
+      `stopped observing … : it quit` each time, and the second launch observed afresh (`observing
+      focus in …`), not skipped as known. Also a **menu-bar agent** (one with no Dock icon)
+      quitting, with detailed (trace) logging ticked: whether a `pid … quit: forgotten` trace line appears for it at
+      all — if not, the workspace does not report it (see "Left open");
+  - **the handle table**: a long session opening and closing plugin windows until a `handle table
+      swept: … window(s) gone of N asked, M kept by the window list` line appears — how many
+      were dropped, how long it took, whether the window list could be read (without Screen
+      Recording too), and that an open plugin's overlay did not start over after it;
+  - Terminal's "Secure Keyboard Entry" on while an overlay is active (audit P3, not built): what
+      the log says — nothing is written for Secure Event Input yet.
+
+## A download opened with its quarantine flag still set (2026-09-27)
+
+A tester unzipped the whole macOS download and the application ran, but the Installed modules
+tab was empty. The likeliest cause is App Translocation: a quarantined application opened from
+the Finder (Open on the context menu, or Open Anyway) is run from a read-only copy of the `.app`
+alone at a random path under `/private/var/folders/…/AppTranslocation/`, so the folder the
+application thought it was in held no `modules`, no settings and no room for a log.
+
+- [x] **The folder around the original `.app`.** `portable::base_dir` asks the Security
+      framework's `SecTranslocateIsTranslocatedURL` and `SecTranslocateCreateOriginalPathForURL`
+      about the running `.app` and, for a translocated copy, uses the folder around the original
+      for `modules/`, `settings.toml`, the log and `build-info.txt`. Both functions are declared
+      only in `SecTranslocate.h` in Apple's open-source Security project and bound by no crate in
+      the lock file, so they are found with `dlopen`/`dlsym` (as Dolphin and DuckStation do) and
+      never linked: a macOS without them still starts. Decided by the first call, which is the
+      launcher's module list, so nothing reads the folder before it; nothing in it logs or
+      panics, because the log's path and the panic hook both depend on it. Any answer short of
+      another `.app` leaves the folder what it was before. The rule is pure and unit-tested on
+      Windows (`portable::place`); the question is type-checked by `macos-check`, and two
+      macOS-only tests ask the real framework in the macOS CI job's `cargo test`.
+- [x] **Said in the log.** A `translocated:` line in the header (after `executable`) and in the
+      `[env]` block: `no`, `YES — …` naming the copy and the original and repeating the `xattr`
+      fix, or `not known (why)`; a `no` for an `.app` under `AppTranslocation` is not believed
+      and reads `YES` with that reason. A new header line `modules folder <path>: N folders`
+      (`empty`, `does not exist` or `could not be read (…)`: only the state, because a start with
+      module folders on the command line does not read it), and the `no modules to load` line
+      names the folder it read, what was there, and for a missing one that an application moved
+      away from its folder finds none.
+- [x] Both macOS smoke runs in CI warn unless the log says `translocated: no` (they start the
+      executable directly, so they are never translocated): the first real call of the two
+      functions, on macOS 15, 14 and 26.
+
+Checked here: `cargo test -p host -p module-manifest` (the new `portable` tests: the translocated
+case, a trailing slash, an answer that is not another `.app`, a failed or impossible question
+with and without the translocated path shape, a `no` under `AppTranslocation`, a loose binary,
+the modules folder's states);
+`cargo check --target aarch64-apple-darwin -p macos-check`, with and without `--tests`; the
+workflow parses and its two changed `run:` blocks pass `bash -n`; `package-macos.sh` passes
+`bash -n`. Only a Mac can show:
+
+- [ ] **Next Mac session: open a fresh download WITHOUT removing the quarantine flag.**
+      1. Download the zip with a browser and unzip it with Archive Utility
+         (`xattr -l AutomationPlatform.app` lists `com.apple.quarantine`). Rename the unzipped
+         folder to `Test Ü`: a space and a non-ASCII letter, the one part of the path handling
+         nobody has seen on a Mac (Core Foundation may hand the original's path back
+         decomposed). Move the folder into the home folder as README step 1 says: left in
+         Downloads, reading `modules` beside the original would raise the Downloads permission
+         dialog, which a translocated run never did before.
+      2. Skip the README's `xattr` line and open the `.app` with Open on the Finder's context
+         menu (on macOS 15 and later: the Open Anyway button in Privacy & Security).
+      3. **First check the log's `executable` line** names
+         `/private/var/folders/…/AppTranslocation/…`. By published accounts only a Finder move of
+         the `.app` itself ends translocation, not a move of the folder around it; if the line
+         names `~/Test Ü/…` instead, moving the folder ended it, this pass tested nothing, and
+         a tester who followed README step 1 was never translocated either. Then start over
+         with a new download whose zip is moved into a new folder in the home folder and
+         unzipped there, so that nothing unzipped is moved.
+      4. Expected: the Installed modules tab lists the shipped modules, and
+         `automation-platform.log` is in `~/Test Ü` beside the original `.app`, not in
+         `~/Library/Application Support/AutomationPlatform/`. The header has `translocated: YES
+         — … The original is /Users/…/Test Ü/AutomationPlatform.app …`, `app folder
+         /Users/…/Test Ü (writable)` and `modules folder /Users/…/Test Ü/modules: N folders`,
+         and the `[env]` block repeats the `translocated` line. If it says `YES` with a reason
+         instead, the reason is the finding: which function failed, with its POSIX error. If the
+         original is found but no module loads, or its path looks garbled, repeat once in a
+         folder with a plain name, to tell the encoding apart from the rest.
+      5. Change a setting in Application settings: it lands in `~/Test Ü/settings.toml`. Quit and
+         open it the same way again: a second `translocated: YES` with a different copy path and
+         the same original.
+      6. Quit, run the `xattr` line and open it: the setting is still there and the line says
+         `translocated: no`.
+- [ ] **After that, not before** (by published accounts, moving the `.app` with the Finder ends
+      translocation for it for good): make a new, empty folder `Moved` in the home folder — not
+      the Desktop, which macOS guards with a permission dialog (README step 1), so that its
+      `modules` would read `could not be read (Operation not permitted)` — drag the `.app` alone
+      into it and open it. Expected: `modules folder /Users/…/Moved/modules: does not exist` in
+      the header, and `no modules to load — /Users/…/Moved/modules does not exist. Installed
+      modules are read only from beside the application, so one moved away from the folder it
+      came in finds none. …`. Put it back.
+- [x] **A log that starts a new file within the session** (the uptime change's rotation, merged
+      with this one): the new file's continuation lines repeat the header's `translocated`
+      line after the build, and then the `app folder` line it refers to, so a file sent on its
+      own still says why it is in the folder it is in. Rotation renames within the folder the
+      log was opened in, which is the resolved one; nothing in it asks the Security framework
+      again.
+
+## The application asks its own way into the Screen Recording list (2026-09-27)
+
+At a first setup the application appeared in the Accessibility list by itself and not in the
+Screen Recording one, which a blind tester then had to add by hand (padlock, +, the .app). Built
+blind, compile-checked for macOS, not yet run on a Mac (docs/macos-permissions.md, "How the
+application gets into the Screen Recording list"). Screen Recording is asked for once per run by
+itself, on the first tick at which Accessibility is granted — after the window and its
+announcement, never on top of the Accessibility dialog (`perm::pump`) — with
+`CGRequestScreenCaptureAccess` alone; on macOS 12 followed by ScreenCaptureKit's shareable
+content (5 s bound, own thread) and one point through the looked-up older functions, a second
+apart. The Permissions page's button climbs the same ladder one request per press
+(`enrol::screen_step`, tested on Windows) and never opens the pane on a press that has just
+asked — it says so instead; the press after the last request opens the pane. The log ends every
+request with what is left to do, including `tccutil reset ScreenCapture <bundle id>` for an
+entry left by an earlier build.
+
+Input Monitoring now reads its own state: `IOHIDCheckAccess` for listening, through
+`objc2-io-kit`. Every build before called it with request type 0, which is the posting side, so
+"Input Monitoring follows Accessibility" — and the first session's "Input Monitoring reported
+granted" — were Accessibility read a second way. The old reading stays in the log as `hid post
+events`. Input Monitoring's button asks with `CGRequestListenEventAccess`, then
+`IOHIDRequestAccess`, one per press; nothing asks for it at start. The startup block gained
+`launched by`; the minimum macOS is 12.3 (ScreenCaptureKit is a required load, and it arrived
+in 12.3); Info.plist carries `NSInputMonitoringUsageDescription`. What only a Mac can answer:
+
+- [ ] **Does the application land in the Screen Recording list by itself — on the oldest and the
+      newest macOS available?** Each run from a clean state for this one permission: a fresh
+      user account, or `tccutil reset ScreenCapture com.automationplatform.app`. Always with the
+      bundle id — a bare `tccutil reset ScreenCapture` takes the permission from every
+      application on that Mac. The .app opened from the Finder or with `open` (`launched by:
+      launchd`), never from its binary in a terminal.
+  1. Accessibility missing too (also `tccutil reset Accessibility com.automationplatform.app`):
+     one dialog at start, and the log says `screen recording: NOT granted, and not asked for
+     yet`. Grant Accessibility; within about a second the log says `asked with
+     CGRequestScreenCaptureAccess (now that Accessibility is granted)` — and on macOS 12 the
+     ScreenCaptureKit line and the one-point line, a second apart each. Then: is
+     AutomationPlatform in the Screen Recording list (the tester opens the pane and reads it
+     out), and how many dialogs came up.
+  2. Reset Screen Recording only, launch with Accessibility granted: the startup announcement
+     says a dialog may come, then the same lines with `(at start, once the application was
+     up)`, and the same two questions.
+  3. On 13 or later, with the entry still missing after 1 or 2: press "Open the Screen
+     Recording settings". Expected: no pane; the page says macOS has been asked; the log has
+     `asking a second way` and the ScreenCaptureKit line. Did a dialog come, and is the entry
+     there now? Press again: the pane opens (`settings pane: opened`).
+  If the entry is missing on a version, the lines say which requests were made there and what
+  each answered; if it is there, the log cannot say which of them put it there, and that is
+  enough.
+- [ ] **What ScreenCaptureKit answers while the permission is missing**, per version: the line
+      names domain and code (expected `-3801`, "declined"), or `did not answer within 5000 ms`.
+      A timeout on a version means the older functions carried the request there.
+- [ ] **Two or three dialogs on macOS 12?** There the automatic request makes all three
+      requests, a second apart. If the tester hears more than one dialog, the capture requests
+      move to the button there too (`enrol::screen_step`). And if the documented request turns
+      out to enrol on 12 now that it waits for Accessibility and for the GUI — the 12.7.6
+      finding was made with a request at the same instant as the Accessibility prompt, before
+      AppKit — the extra requests can go.
+- [ ] **Every start while Screen Recording is switched off.** The automatic request runs again
+      on each start while it is missing; with the entry present and off, does each start put a
+      dialog up? (ScreenCaptureKit has been reported to prompt on every call on macOS 14.6 and
+      15; the automatic request is the documented one alone there, so this is about that one.)
+      If it does, remember in the settings that the request was made for this build and make it
+      once — decided after measuring, not before.
+- [ ] **A new build over an old, granted entry.** Every CI download is ad-hoc signed and so a new
+      identity; the previous build's entry stays in the list, switched on. On the oldest and the
+      newest macOS: does the new build's request prompt, change the entry, or do nothing, and
+      what does the list read? The log's last Screen Recording line tells the tester to run
+      `tccutil reset ScreenCapture com.automationplatform.app`: does the next start's request
+      then add the entry again, or does it — as reported after "−" (forums thread 818415) —
+      need the Mac restarted first?
+- [ ] **Does the key tap need Input Monitoring at all?** It is created active, the kind
+      Accessibility governs, and it suppressed keys in the first session (12.7.6) — whether
+      Input Monitoring was granted then is unknown, because the line that said so read the
+      posting side. Read the new `input monitoring` line on each Mac next to `the event tap
+      suppressed its first key`: if the tap suppresses while the line reads `unknown` or
+      `denied`, it is not needed, and Input Monitoring should stop being `blocking` — a
+      `denied` reading puts the startup window in front of the user today. Until measured it
+      stays blocking, as it was.
+- [ ] **Input Monitoring's button.** With the `input monitoring` line `unknown` (or after
+      `tccutil reset ListenEvent com.automationplatform.app`): press "Open the Input Monitoring
+      settings". The log's `input monitoring: asked with CGRequestListenEventAccess` line gives
+      the answer and the state before and after; unknown to denied means the entry exists. Did
+      a dialog come, and is the entry in the list? If not, press again (`IOHIDRequestAccess
+      (listen)`), same questions; a third press opens the pane. On macOS 26.6 another project
+      saw the first request raise nothing and the second work.
+- [ ] **`NSInputMonitoringUsageDescription`.** Added to Info.plist on the strength of one forum
+      report (thread 809431) that `IOHIDCheckAccess` and `IOHIDRequestAccess` for listening
+      answer `denied` without it, whatever the switch says. Unverified: if the `input
+      monitoring` line reads `denied` on a Mac where the switch is on, the key did not help.
+- [x] **App Nap while the request waits for Accessibility** (found when this was merged with
+      the uptime change, whose App Nap activity was held only while keys are captured or a
+      controller is listened to): `perm::pump` looks at Accessibility once a second, and the
+      grant is made in System Settings with the application's window covered, the case App
+      Nap stretches timers for. The activity now has a third reason, `activity::SETUP`, held
+      from the first look that finds Accessibility missing until the request is made (by the
+      pump or the button); the first hold is written per reason, so the first overlay's `…
+      while keys are captured …` line is still written in full. After the merge's review:
+      - that reason alone begins the activity **without `LatencyCritical`**
+        (`UserInitiatedAllowingIdleSystemSleep` only): it is held for as long as Accessibility
+        is missing — the whole session when it is never granted, as after an ad-hoc rebuild —
+        and a look once a second needs App Nap kept away, not the most accurate timers.
+        Captured keys or a controller make it latency-critical, and releasing them makes it
+        plain again; the new activity is begun before the old one is ended;
+      - a reason that joins an activity already held gets its line too (`… (already held while
+        …)`), so a module that captures keys at load no longer hides the setup wait's line, and
+        a controller or the setup wait holding it first no longer hides the first capture's;
+      - the controller's `activity` status names what still holds the activity instead of
+        always saying keys.
+      The rules are in `activity_reasons.rs`, pure and tested on Windows; `activity.rs` begins
+      and ends what they decide.
+- [ ] **Does the request follow the grant within about a second, napped or not?** With
+      Accessibility missing, leave the application's window covered by System Settings for a
+      minute or more before switching Accessibility on. Expected: `App Nap: holding an
+      activity (not latency-critical) while Screen Recording's own request waits for
+      Accessibility to be granted` near the start (`a latency-critical activity … (already held
+      while keys are captured)` when a module captured keys at load), Activity Monitor's Energy
+      tab reading App Nap: No while it waits, the `asked with CGRequestScreenCaptureAccess (now
+      that Accessibility is granted)` line within about a second of the switch, and App Nap:
+      Yes again some minutes later with no overlay active. If the request comes late while the
+      activity is plain, `SETUP` belongs among the latency-critical reasons
+      (`activity_reasons.rs`, `LATENCY_CRITICAL`).
 
 ## Dev tools
 

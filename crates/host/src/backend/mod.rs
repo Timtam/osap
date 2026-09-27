@@ -91,6 +91,34 @@ mod macos_budget;
 #[path = "macos/key_age.rs"]
 mod macos_key_age;
 
+/// And ScreenCaptureKit's back-off: a clock handed in and a doubling, which decide whether every
+/// OCR and pixel read of a days-long session still reaches ScreenCaptureKit after one slow
+/// capture after a wake.
+#[cfg(all(test, not(target_os = "macos")))]
+#[path = "macos/backoff.rs"]
+mod macos_backoff;
+
+/// And the App Nap activity's bookkeeping: which activity captured keys, a controller and a
+/// first setup's wait call for, and that every reason gets its line the first time it holds it —
+/// the lines a Mac session looks for.
+#[cfg(all(test, not(target_os = "macos")))]
+#[path = "macos/activity_reasons.rs"]
+mod macos_activity_reasons;
+
+/// And the handle table's bookkeeping, generic over the element: which window a handle lies in
+/// and what a sweep drops — a window gone takes its controls with it, and a handle is never
+/// reused.
+#[cfg(all(test, not(target_os = "macos")))]
+#[path = "macos/handle_table.rs"]
+mod macos_handle_table;
+
+/// And which requests Screen Recording and Input Monitoring get, in which order, and what the
+/// log says for each answer: decided without a Mac, for the permission a blind tester otherwise
+/// has to add to its list by hand.
+#[cfg(all(test, not(target_os = "macos")))]
+#[path = "macos/enrol.rs"]
+mod macos_enrol;
+
 /// Where a permission stands, for something that has to SHOW it rather than log it.
 ///
 /// `Missing` and `Unknown` are constructed on macOS only, which is the whole point of the
@@ -136,8 +164,8 @@ pub struct Permission {
     pub without: &'static str,
     /// The settings-pane URL, for the button beside it.
     pub anchor: &'static str,
-    /// Whether the application can raise the system's own consent dialog for this one, or
-    /// whether the pane is the only route.
+    /// Whether the button beside it goes through `ask_for`, which may ask the system instead of
+    /// opening the pane, or only opens the pane.
     pub can_ask: bool,
     /// Whether nothing works without it — and therefore whether its absence is worth putting
     /// a window in front of somebody who did not ask for one.
@@ -160,10 +188,30 @@ pub(crate) fn open_pane(_anchor: &str) -> bool {
     false
 }
 
-/// Raises the system's own consent dialog, where there is one. False otherwise.
+/// What pressing a permission's button did, and so what the page does next.
+///
+/// The pane is not opened by a press that has just asked: the request may have put a system
+/// dialog on screen, and a settings window opened on top of it takes the focus — and a screen
+/// reader — away from the dialog, which is then left somewhere its user cannot find it. That
+/// press says so instead, and the next press, asking nothing, opens the pane.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Asked {
+    /// Open the settings pane now.
+    pub open_pane: bool,
+    /// Said after the press, where there is something to say.
+    pub say: Option<&'static str>,
+}
+
+impl Asked {
+    /// Nothing was asked: the pane opens, and the pane speaks for itself.
+    pub const PANE: Asked = Asked { open_pane: true, say: None };
+}
+
+/// Asks the system for a permission, where there is something to ask — see [`Asked`]. Where
+/// there is nothing, the answer is to open the pane.
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn ask_for(_name: &str) -> bool {
-    false
+pub(crate) fn ask_for(_name: &str) -> Asked {
+    Asked::PANE
 }
 
 /// One running application, as `host.window.apps()` lists them and as `find` narrows its
@@ -960,6 +1008,21 @@ pub trait Backend {
     /// Installs the low-level keyboard hook (idempotent).
     fn watch_keys(&self) -> Result<(), String>;
 
+    /// Starts listening for what the operating system does to the whole session — sleep and
+    /// wake, lock and unlock, the session going and coming back, display changes — which then
+    /// arrive through `pump_pending` as [`HostEvents::on_system`]. Called once, on the event
+    /// loop's thread, before the loop runs; idempotent. Installs no hook and takes no key. The
+    /// default hears nothing; the macOS backend starts its listeners in `MacBackend::new`
+    /// instead, for the whole run.
+    fn watch_system(&self) {}
+
+    /// The display part of [`environment`](Self::environment): the lines written again after a
+    /// display or scale change, when they differ from the last ones written. The default has
+    /// none.
+    fn display_environment(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
     /// Runs the platform event loop, dispatching OS events into `events`.
     /// Blocks until the process is terminated.
     fn run_event_loop(&self, events: &mut dyn HostEvents) -> Result<(), String>;
@@ -983,6 +1046,13 @@ pub trait HostEvents {
     /// [`gamepad::drain_into`]. A default body, so a sink that does not care about pads
     /// (a test's) need not say so.
     fn on_gamepad(&mut self, _events: Vec<gamepad::PadEvent>) {}
+    /// What the operating system did to the whole session since the last drain — a sleep, a
+    /// lock, the session switched away from, a display change — in order, each stamped with the
+    /// wall-clock time the backend heard it; see [`crate::system_events`]. That can be well
+    /// before this call: the notice that the machine is about to sleep may only be delivered
+    /// once it has woken again. Delivered before the hotkeys, keys and window changes of the
+    /// same drain, so they see the epochs it turned over. A default body, as for pads.
+    fn on_system(&mut self, _events: Vec<crate::system_events::Stamped>) {}
     /// One turn of the event loop has finished delivering events.
     ///
     /// The GUI path has a timer tick for the work that has to happen whether or not anything

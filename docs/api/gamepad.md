@@ -188,7 +188,7 @@ Windows opens Xbox Game Bar on the Guide button by default (Settings, Gaming), w
 
 The first call does not wait for a controller (see [`list`](#host-gamepad-list)). The `on` that brings the first `down`, `up`, `axis` or `chord` listener of an enabled module also asks macOS, on the event loop, for the activity described below.
 
-GameController delivers every change as it happens, on a queue of its own; `time` is when that delivery came. The event loop picks it up on its next turn — the manager window's 15 ms wxWidgets tick, or in a headless run a 15 ms turn of the CoreFoundation run loop — so at most about 15 ms later when the loop is not busy with something else. Input reaches an application that is not in front only after it asks, with `shouldMonitorBackgroundEvents`; the application asks when the first controller connects and logs what macOS answered. While a `down`, `up`, `axis` or `chord` listener exists it also holds a latency-critical `NSProcessInfo` activity, which is the request macOS offers against App Nap. `guide` is listed when the controller reports a Home button, but macOS may keep that button for itself.
+GameController delivers every change as it happens, on a queue of its own; `time` is when that delivery came. The event loop picks it up on its next turn — the manager window's 15 ms wxWidgets tick, or in a headless run a 15 ms turn of the CoreFoundation run loop — so at most about 15 ms later when the loop is not busy with something else. Input reaches an application that is not in front only after it asks, with `shouldMonitorBackgroundEvents`; the application asks when the first controller connects and logs what macOS answered. While a `down`, `up`, `axis` or `chord` listener exists it also holds a latency-critical `NSProcessInfo` activity, which is the request macOS offers against App Nap — one activity for the application, which captured keys hold as well (see [`host.keys.capture`](./keys.md#host-keys-capture)). `guide` is listed when the controller reports a Home button, but macOS may keep that button for itself.
 
 ## Button combinations {#button-combinations}
 
@@ -272,7 +272,7 @@ When the last listener goes, the pad thread stops reading and waits without a ti
 
 ### macOS
 
-When the last `down`, `up`, `axis` or `chord` listener goes, the App Nap activity is ended.
+When the last `down`, `up`, `axis` or `chord` listener goes, the App Nap activity is ended, unless keys are captured, which hold it as well — or, at a first setup, the application's own Screen Recording request is still waiting for Accessibility, which keeps an activity without `LatencyCritical` (see [macOS permissions](../macos-permissions.md#how-the-application-gets-into-the-screen-recording-list)).
 
 ## host.gamepad.status() {#host-gamepad-status}
 
@@ -291,7 +291,7 @@ Also `xinput` (which DLL, and whether the Guide button can be read — or `unava
 
 ### macOS
 
-Also `bundle` (the application's bundle identifier), `gamecontroller` (how many controllers were known at start), `background` (what macOS reported after the background request) and, once a `down`, `up`, `axis` or `chord` listener has existed, `activity` (whether the latency-critical activity is held).
+Also `bundle` (the application's bundle identifier), `gamecontroller` (how many controllers were known at start), `background` (what macOS reported after the background request) and, once a `down`, `up`, `axis` or `chord` listener has existed, `activity` (whether the App Nap activity is held, and for what, as it was when a listener last came or went: `held (latency-critical, while a button or axis listener exists)`; `held while …; no button or axis listener`, naming what still held it then — `keys are captured`, `Screen Recording's own request waits for Accessibility to be granted`, or both joined by `and`; or `not held`).
 
 ## Button and axis names {#button-and-axis-names}
 

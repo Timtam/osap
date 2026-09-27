@@ -8,11 +8,11 @@
 //! tested, in one place.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use mlua::{
@@ -25,6 +25,7 @@ use crate::backend::frame::Frame;
 use crate::backend::{CaptureFn, CaptureSource, CapturedImage};
 use crate::capture_source;
 use crate::cells;
+use crate::ocr::policy::IMAGE_PER_OWNER;
 use crate::ocr::types as geo;
 use crate::region::{self, ScreenRect};
 use crate::snapshot::{self, Picture};
@@ -189,6 +190,30 @@ fn pending(
         held: false,
         prio: crate::ocr::types::current_priority(),
     })
+}
+
+/// What a search or cells read is answered when a newer one of its module pushed it past
+/// [`IMAGE_PER_OWNER`]: `(nil, reason)`, on the next tick.
+pub(crate) fn too_many_waiting() -> String {
+    format!("too many image searches waiting for this module ({IMAGE_PER_OWNER}); the oldest was ended")
+}
+
+/// The request of `owner`'s VM that a newer one pushes past `cap`: its oldest, when it has more
+/// than `cap` waiting (held ones included — they are sent again on re-enable). The newest always
+/// proceeds: it is what the module asked for last. Pure, for the tests.
+fn oldest_over_cap(map: &HashMap<u64, PendingImage>, owner: usize, cap: usize) -> Option<u64> {
+    let mine: Vec<u64> = map.iter().filter(|(_, p)| p.owner == owner).map(|(id, _)| *id).collect();
+    (mine.len() > cap).then(|| mine.into_iter().min()).flatten()
+}
+
+/// The ids of tasks ended before the worker reached them ([`oldest_over_cap`]): the worker skips
+/// them rather than capture and match for an answer nobody reads. Each id leaves again — taken by
+/// the worker when it skips it, or by the event loop when the worker had answered it already —
+/// so the set holds only what is on its way.
+static ENDED: Mutex<Option<HashSet<u64>>> = Mutex::new(None);
+
+fn ended() -> std::sync::MutexGuard<'static, Option<HashSet<u64>>> {
+    ENDED.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 /// Takes every entry owned by module `owner`'s VM out of the map. Matched on the OWNER, never
@@ -467,6 +492,16 @@ fn worker_loop(
                 Err(_) => break, // window elapsed (batch complete) or sender dropped
             }
         }
+        // Ended while they waited here: already answered on the event loop's side.
+        {
+            let mut ended = ended();
+            if let Some(set) = ended.as_mut().filter(|s| !s.is_empty()) {
+                batch.retain(|t| !set.remove(&t.id));
+            }
+        }
+        if batch.is_empty() {
+            continue;
+        }
         let out = match logging::contain(|| run_batch(&batch, capture)) {
             Ok(out) => out,
             Err(report) => {
@@ -695,7 +730,34 @@ impl Shared {
         // just worked out. Bumped once, before the first callback runs, so they all see the
         // same new world. Fewer invalidations AND a truer statement about what changed.
         let mut bumped = false;
+        // Ended by a newer request past the module's cap (`submit`): answered `(nil, reason)`.
+        let ended_now = std::mem::take(&mut *self.ended_images.borrow_mut());
+        for (p, why) in ended_now {
+            if !bumped {
+                self.bump_epoch();
+                bumped = true;
+            }
+            let verdict = fate(p.owner, p.gen, &self.enabled.borrow(), &self.vm_gens.borrow());
+            if verdict == Fate::Deliver {
+                let _prio = crate::ocr::types::enter_priority(p.prio);
+                if let Ok(f) = p.lua.registry_value::<Function>(&p.cb) {
+                    let outcome = match &p.task.job {
+                        Job::Search { .. } => Outcome::Search(Err(why)),
+                        Job::Cells(_) => Outcome::Cells(Err(why)),
+                    };
+                    let args = result_args(&p.lua, &p.task, &p.names, outcome);
+                    if let Err(e) = call_guarded(&f, args) {
+                        self.report_callback_error(p.scope, p.task.binding(), &e);
+                    }
+                }
+            }
+            release([p]);
+        }
         while let Ok(res) = self.image_results.try_recv() {
+            // The worker answered one that was ended meanwhile: its id leaves the set here.
+            if let Some(set) = ended().as_mut() {
+                set.remove(&res.id);
+            }
             // A search nobody can see taking long is a bug nobody can diagnose. The
             // landmark poll is entirely invisible from Luau — it runs on a worker and only
             // its verdict is observable — so a slow one gets a line naming both halves,
@@ -767,6 +829,14 @@ impl Shared {
     pub(crate) fn purge_pending_images(&self, owner: usize) {
         let gone = purge_owner(&mut self.pending_image.borrow_mut(), owner);
         release(gone);
+        // And the ones ended past the cap, not answered yet: they hold the same VM.
+        let ended: Vec<PendingImage> = {
+            let mut list = self.ended_images.borrow_mut();
+            let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut *list).into_iter().partition(|(p, _)| p.owner == owner);
+            *list = rest;
+            mine.into_iter().map(|(p, _)| p).collect()
+        };
+        release(ended);
     }
 
     /// Sends again every search that was answered while module `owner` was disabled (see
@@ -1507,6 +1577,7 @@ fn submit(
     sh.next_image_id.set(id);
     let task = ImageTask { id, hay, job };
     let entry = pending(lua, &sh.vm_gens.borrow(), scope, cb, names, task.clone())?;
+    let owner = entry.owner;
     sh.pending_image.borrow_mut().insert(id, entry);
     if sh.image_tasks.send(task).is_err() {
         // Worker thread gone (it contains its own panics, so this means teardown): drop the
@@ -1514,6 +1585,38 @@ fn submit(
         // it), instead of a callback that never fires.
         let gone = sh.pending_image.borrow_mut().remove(&id);
         release(gone);
+        return Ok(());
+    }
+    // Past the module's cap, its oldest request is ended — the rule OCR reads and snapshots
+    // have. A module searching on a timer faster than the worker answers grew this map and the
+    // worker's queue without a bound. The cap is for that runaway, not for a busy module: a
+    // library module's VM holds one overlay per library and per Kontakt cell, each landmark gate
+    // with one search waiting and a near-miss probe beside it, and every gate asks in the same
+    // poll, so a sample-library module can have a dozen or two waiting at once by design.
+    let over = oldest_over_cap(&sh.pending_image.borrow(), owner, IMAGE_PER_OWNER);
+    if let Some(old) = over {
+        let gone = sh.pending_image.borrow_mut().remove(&old);
+        if let Some(p) = gone {
+            if !p.held {
+                ended().get_or_insert_with(HashSet::new).insert(old);
+            }
+            let why = too_many_waiting();
+            let who = sh.ids.borrow().get(owner).cloned().unwrap_or_else(|| "?".into());
+            let key = format!("{who}\u{1}image\u{1}{why}");
+            // Written the first time, then counted like a module error; the tick writes the count
+            // of a spell that stopped (`log_housekeeping`), and the summary due at an occurrence
+            // is written here.
+            match sh.error_repeats.borrow_mut().note(&key, Instant::now()) {
+                logging::Said::Line => {
+                    logging::line("image", &format!("[{who}] {why} (then counted, a line a minute at most)"))
+                }
+                logging::Said::Counted => {}
+                logging::Said::Summary { count, over } => {
+                    logging::line("image", &crate::repeat_summary(&who, "image", &why, count, over))
+                }
+            }
+            sh.ended_images.borrow_mut().push((p, why));
+        }
     }
     Ok(())
 }
@@ -2007,6 +2110,31 @@ mod tests {
         left.sort_unstable();
         assert_eq!(left, vec![1, 4], "the scope (9) is not what a purge matches on");
         assert!(purge_owner(&mut map, 9).is_empty());
+    }
+
+    /// Past the cap, the module's oldest request is the one ended — held ones counted, other
+    /// modules' never touched — and within it nothing is.
+    #[test]
+    fn past_the_cap_the_modules_oldest_request_is_ended() {
+        let lua = Lua::new();
+        let mut map: HashMap<u64, PendingImage> = HashMap::new();
+        for id in 1..=3u64 {
+            let mut p = entry(&lua, &HashMap::new(), id, 9);
+            p.owner = 4;
+            map.insert(id, p);
+        }
+        let mut other = entry(&lua, &HashMap::new(), 7, 9);
+        other.owner = 5;
+        map.insert(7, other);
+        assert_eq!(oldest_over_cap(&map, 4, 3), None, "at the cap, nothing is ended");
+        let mut newer = entry(&lua, &HashMap::new(), 8, 9);
+        newer.owner = 4;
+        map.insert(8, newer);
+        map.get_mut(&1).unwrap().held = true;
+        assert_eq!(oldest_over_cap(&map, 4, 3), Some(1), "its oldest, held or not");
+        assert_eq!(oldest_over_cap(&map, 5, 0), Some(7), "another module is counted on its own");
+        release(map.into_values());
+        assert!(too_many_waiting().contains(&IMAGE_PER_OWNER.to_string()));
     }
 
     /// Disable while a search is in flight, then enable: the search is sent again under the

@@ -40,7 +40,13 @@ mod settings;
 /// `host.screen.snapshot` and `pixels`: the Snapshot handle, its budget, and the rules every
 /// read of a snapshot applies — see the file.
 mod snapshot;
+/// `host.sound`'s audio output, opened again when its device went away — see the file.
+mod sound;
 mod speech;
+/// What the operating system does to the whole session (sleep, lock, the session going and
+/// coming back, display changes), the `[system]` line that says how long each lasted, and what
+/// the host does about it — see the file.
+mod system_events;
 mod template;
 /// `host.timer`: pending timers, their tokens, and the firing rules — see the file.
 mod timers;
@@ -131,8 +137,19 @@ struct Shared {
     reload_all: Cell<bool>,
     /// Audio output, opened lazily on first `host.sound.play` so we don't hold
     /// the audio device at startup — this tool overlays audio software, and
-    /// grabbing the device can interrupt it. Kept alive as (stream, handle).
-    audio: RefCell<Option<(rodio::OutputStream, rodio::OutputStreamHandle)>>,
+    /// grabbing the device can interrupt it. Opened again when it failed, when the default
+    /// device changed, and after a resume (sound.rs).
+    audio: RefCell<Option<sound::Output>>,
+    /// Hotkey ids, handed out in order and never reused.
+    ///
+    /// **Past 0xBFFF on Windows.** `RegisterHotKey`'s documentation gives applications ids
+    /// 0x0000–0xBFFF, and these are handed to it as they are. The overlay runtime registers
+    /// and unregisters its control hotkeys at every activation, 300 to 1200 a busy hour, so a
+    /// session of weeks passes 0xBFFF. Measured on Windows 11 (build 26220, 2026-09-27):
+    /// Windows grants ids 1, 0xBFFF, 0xC000, 0xFFFF, 0x10000 and 0x7FFFFFFE alike (the uptime
+    /// audit's `hotkey-id-range.ps1`), so nothing is mapped into the documented range — an
+    /// `i32` lasts centuries at that rate. TODO.md keeps the check for other Windows builds;
+    /// a build that did refuse would say so in the log, as `hotkey '…' rejected by OS`.
     next_id: Cell<i32>,
     /// module_idx → root directory.
     roots: RefCell<Vec<PathBuf>>,
@@ -209,15 +226,48 @@ struct Shared {
     /// show in an accessible dialog, as (title, message). Drained each tick.
     errors: RefCell<Vec<(String, String)>>,
     /// Dedup keys (id+context) so a module's fault in a given context dialogs once
-    /// per enabled session (cleared on toggle); the full message still goes to the
-    /// log every time. Keyed coarsely so a per-tick-varying message can't flood.
+    /// per enabled session (cleared on toggle). Keyed coarsely so a per-tick-varying message
+    /// can't flood.
     error_seen: RefCell<HashSet<String>>,
+    /// The log's side of the same faults: an error of one module, in one context, with one
+    /// message, is written the first time and then counted, with at most one summary a minute
+    /// (`logging::Repeats`; flushed on the tick by `log_housekeeping`). A poll that fails every
+    /// 500 ms wrote 170 000 identical lines a day. Forgotten per module on toggle, as the
+    /// dialogs are, and on a reload or a rolled-back hot-load too (`forget_error_repeats`), so
+    /// the same error after a fix is written in full.
+    error_repeats: RefCell<logging::Repeats>,
+    /// When `log_housekeeping` last asked `error_repeats` for its summaries: once a second is
+    /// enough for a count written at most once a minute.
+    repeats_asked: Cell<Option<Instant>>,
+    /// Hotkeys another application holds, per (module, spec), with how often the OS refused
+    /// them since the refusal was logged. `refresh_hotkeys` tries such a claim again at every
+    /// register and unregister — the overlay runtime makes several per focus move — and each
+    /// try logged "rejected by OS" again for as long as the other application held the key.
+    /// Now the first refusal is logged, the rest counted, and the count said when the key is
+    /// granted. Forgotten per module on toggle and when its registrations go.
+    os_refused: RefCell<HashMap<(usize, String), u32>>,
+    /// The captured-set line (under trace or calibrate) waiting for the end of the tick, and
+    /// the last one written. `refresh_captured` runs once per key an overlay captures, so an
+    /// activation of eight keys wrote eight growing lines of up to 500 bytes; the tick writes
+    /// the set once, and only when it differs from the last one written.
+    captured_line: RefCell<(Option<String>, String)>,
+    /// When the machine went to sleep and the session was locked, for the `[system]` lines, and
+    /// the counts of the system events that came again and again.
+    system_since: RefCell<system_events::Since>,
+    /// The `[env]` display lines last written: at start, and after a display or scale change
+    /// that changed them. A display that flaps — a TV or receiver in standby toggling its link —
+    /// sends a display change every few seconds, and the same three lines at each were most of
+    /// the log.
+    display_env_said: RefCell<Vec<(String, String)>>,
     /// Async image search: queued template matches go to a worker thread; results
     /// come back on the loop tick. Pending callbacks are keyed by request id and
     /// touched only on the main thread.
     image_tasks: std::sync::mpsc::Sender<ImageTask>,
     image_results: std::sync::mpsc::Receiver<ImageResult>,
     pending_image: RefCell<HashMap<u64, PendingImage>>,
+    /// Requests ended by a newer one of their module past `IMAGE_PER_OWNER`, with the reason
+    /// they are answered on the next tick (image_search.rs, `submit`).
+    ended_images: RefCell<Vec<(PendingImage, String)>>,
     next_image_id: Cell<u64>,
     /// What every module's snapshots hold between them, against the application's budget
     /// (snapshot.rs). Each VM keeps its own total in its app data beside this one.
@@ -595,9 +645,21 @@ impl Shared {
 
     /// Logs a module callback failure (a Lua error or a caught Rust panic) and
     /// queues it — deduped — for the GUI to surface in an accessible error dialog.
+    ///
+    /// The log line is written the first time an error of this module, in this context, with
+    /// this message comes, and then counted — at most one summary a minute, written by the next
+    /// occurrence or by the tick (`log_housekeeping`) — see `error_repeats`.
     fn report_callback_error(&self, module_idx: usize, context: &str, message: &str) {
         let id = self.ids.borrow().get(module_idx).cloned().unwrap_or_else(|| "?".into());
-        logging::line(context, &format!("[{id}] {message}"));
+        let key = format!("{id}\u{1}{context}\u{1}{message}");
+        let said = self.error_repeats.borrow_mut().note(&key, Instant::now());
+        match said {
+            logging::Said::Line => logging::line(context, &format!("[{id}] {message}")),
+            logging::Said::Counted => {}
+            logging::Said::Summary { count, over } => {
+                logging::line(context, &repeat_summary(&id, context, message, count, over))
+            }
+        }
         self.queue_dialog(
             format!("{id}\u{1}{context}"),
             format!("Module error: {id}"),
@@ -649,9 +711,19 @@ impl Shared {
 
     /// Surfaces a hotkey the OS itself rejected — held by another application, not
     /// one of our modules (or an unparseable spec). The module stays loaded.
+    ///
+    /// For a hotkey, called for the first refusal only: `refresh_hotkeys` tries the claim again
+    /// at every register and unregister, and counts a refusal that repeats (`os_refused`).
     fn report_os_conflict(&self, idx: usize, kind: &str, spec: &str, err: &str) {
         let me = self.ids.borrow().get(idx).cloned().unwrap_or_default();
-        logging::line("conflict", &format!("[{me}] {kind} '{spec}' rejected by OS: {err}"));
+        logging::line(
+            "conflict",
+            &format!(
+                "[{me}] {kind} '{spec}' rejected by OS: {err} (tried again whenever a hotkey is \
+                 registered or released; a refusal after this one is counted, and the count \
+                 said when it is granted)"
+            ),
+        );
         let key = backend::dialog_key_words_for(backend::KeyOs::CURRENT, spec);
         self.queue_dialog(
             format!("{me}\u{1}osconflict\u{1}{kind}\u{1}{spec}"),
@@ -666,6 +738,60 @@ impl Shared {
     fn drain_errors(&self) -> Vec<(String, String)> {
         std::mem::take(&mut *self.errors.borrow_mut())
     }
+
+    /// Forgets the log's counts of module `idx`'s errors (and of its image searches ended past
+    /// their limit), so their next occurrence is written in full: on disable/enable, on a reload,
+    /// and when a failed hot-load is rolled back. Keyed by the module's id, as `error_repeats`
+    /// is, so it is asked while `ids` still holds it.
+    fn forget_error_repeats(&self, idx: usize) {
+        if let Some(id) = self.ids.borrow().get(idx) {
+            self.error_repeats.borrow_mut().forget_prefix(&format!("{id}\u{1}"));
+        }
+    }
+
+    /// The log's end-of-tick work, on both event loops: the captured-set line `refresh_captured`
+    /// left, once per tick and only when it changed; and, once a second, the counts of module
+    /// errors that stopped repeating before their minute was up, and of system events that came
+    /// again and again (`system_events::Since::due`).
+    fn log_housekeeping(&self) {
+        let pending = self.captured_line.borrow_mut().0.take();
+        if let Some(line) = pending {
+            let mut c = self.captured_line.borrow_mut();
+            if line != c.1 {
+                logging::line("keys", &line);
+                c.1 = line;
+            }
+        }
+        let now = Instant::now();
+        if self.repeats_asked.get().is_some_and(|t| now.saturating_duration_since(t) < Duration::from_secs(1)) {
+            return;
+        }
+        self.repeats_asked.set(Some(now));
+        let due = self.error_repeats.borrow_mut().due(now);
+        for (key, count, over) in due {
+            let mut parts = key.splitn(3, '\u{1}');
+            let (id, context, message) =
+                (parts.next().unwrap_or("?"), parts.next().unwrap_or("?"), parts.next().unwrap_or(""));
+            logging::line(context, &repeat_summary(id, context, message, count, over));
+        }
+        let system = self.system_since.borrow_mut().due(now);
+        for line in system {
+            logging::line("system", &line);
+        }
+    }
+}
+
+/// The line that sums up a module error that came again `count` times over `over`.
+fn repeat_summary(id: &str, context: &str, message: &str, count: u64, over: Duration) -> String {
+    // The message once more, cut: the full text is in the line that was written first.
+    let short: String = message.chars().take(200).collect();
+    let cut = if short.len() < message.len() { "…" } else { "" };
+    format!(
+        "[{id}] the same {context} error came {count} more time(s) in the last {} s (written in \
+         full the first time; counted after that, with a line like this at most once a minute): \
+         {short}{cut}",
+        over.as_secs()
+    )
 }
 
 /// Which registration holds each combination: **whoever holds it already keeps it**, and
@@ -867,11 +993,27 @@ impl Shared {
                         reg.live = true;
                     }
                     let me = self.ids.borrow().get(idx).cloned().unwrap_or_default();
-                    logging::line("keys", &format!("hotkey '{spec}' is now held by [{me}]"));
+                    let refused = self.os_refused.borrow_mut().remove(&(idx, spec.clone()));
+                    let before = match refused {
+                        Some(n) => format!(" (the OS had refused it {n} time(s) before)"),
+                        None => String::new(),
+                    };
+                    logging::line("keys", &format!("hotkey '{spec}' is now held by [{me}]{before}"));
                 }
                 // Held by another application rather than by us. Left not-live, so a later
-                // refresh tries again — which is the one thing a restart used to be for.
-                Err(e) => self.report_os_conflict(idx, "hotkey", &spec, &e),
+                // refresh tries again — which is the one thing a restart used to be for. Said
+                // the first time; a retry that is refused again is only counted (`os_refused`).
+                Err(e) => {
+                    let first = {
+                        let mut refused = self.os_refused.borrow_mut();
+                        let n = refused.entry((idx, spec.clone())).or_insert(0);
+                        *n += 1;
+                        *n == 1
+                    };
+                    if first {
+                        self.report_os_conflict(idx, "hotkey", &spec, &e);
+                    }
+                }
             }
         }
         for (idx, owner, spec) in losers {
@@ -901,12 +1043,15 @@ impl Shared {
         //
         // WHO holds each key, not just which: a key is suppressed for the whole process while
         // any enabled module captures it, so the module names are the actionable half.
+        //
+        // Written at the end of the tick (`log_housekeeping`), and only when it changed: this
+        // runs once per key an overlay captures, so an activation of eight keys wrote eight
+        // growing lines, and over days of calibrating that was most of the log.
         if appcfg::trace() || appcfg::calibrate() {
             let ids = self.ids.borrow();
             let keys = self.keys.borrow();
-            logging::line(
-                "keys",
-                &format!(
+            self.captured_line.borrow_mut().0 = Some(
+                format!(
                     "captured set: {}",
                     set.iter()
                         .map(|(vk, m)| {
@@ -954,6 +1099,10 @@ impl Shared {
             }
         }
         self.keys.borrow_mut().retain(|(_, _, i, ..)| *i != idx);
+        self.os_refused.borrow_mut().retain(|(i, _), _| *i != idx);
+        // Its errors are news again in the log: a reload is how the maintainer tries a fix, and
+        // the same error after it has to be written in full, not counted into a summary.
+        self.forget_error_repeats(idx);
         // By the VM the callback was registered from, not by whose setting it watches — see
         // `drop_on_change_from`.
         purge_on_change(&mut self.on_change.borrow_mut(), idx);
@@ -1039,6 +1188,9 @@ impl Shared {
             let prefix = format!("{id}\u{1}");
             self.error_seen.borrow_mut().retain(|k| !k.starts_with(&prefix));
         }
+        // And the log's: its errors are news again, written in full.
+        self.forget_error_repeats(idx);
+        self.os_refused.borrow_mut().retain(|(i, _), _| *i != idx);
         // Derived, not toggled. This loop used to register or unregister only THIS module's
         // hotkeys, discarding the result (`let _ =`) — so enabling a module whose combination
         // another one held failed silently, and disabling the holder left the waiting module
@@ -1102,6 +1254,12 @@ impl Shared {
             }
         }
         self.keys.borrow_mut().retain(|(_, _, idx, ..)| *idx < n);
+        self.os_refused.borrow_mut().retain(|(idx, _), _| *idx < n);
+        // Before `ids` is cut below: the log's counts are keyed by the module's id.
+        let rolled_back = self.ids.borrow().len();
+        for idx in n..rolled_back {
+            self.forget_error_repeats(idx);
+        }
         rollback_on_change(&mut self.on_change.borrow_mut(), n);
         self.timers.retain(|idx| idx < n);
         self.initial_pending.borrow_mut().retain(|(idx, _)| *idx < n);
@@ -3725,6 +3883,8 @@ impl Manager {
         // After the speech engine, not before: part of the report is which screen reader
         // answered, and none has been asked until the engine is up.
         logging::report("env", &backend.environment());
+        // The display part of it, to write again after a display change only when it changed.
+        let display_env = backend.display_environment();
         let store = settings::Store::load();
         let disabled_ids = store.disabled_ids();
         let (image_tasks, image_task_rx) = std::sync::mpsc::channel::<ImageTask>();
@@ -3762,9 +3922,16 @@ impl Manager {
             next_key_token: Cell::new(0),
             errors: RefCell::new(Vec::new()),
             error_seen: RefCell::new(HashSet::new()),
+            error_repeats: RefCell::new(logging::Repeats::default()),
+            repeats_asked: Cell::new(None),
+            os_refused: RefCell::new(HashMap::new()),
+            captured_line: RefCell::new((None, String::new())),
+            system_since: RefCell::new(system_events::Since::default()),
+            display_env_said: RefCell::new(display_env),
             image_tasks,
             image_results,
             pending_image: RefCell::new(HashMap::new()),
+            ended_images: RefCell::new(Vec::new()),
             next_image_id: Cell::new(0),
             snap_bytes: Rc::new(Cell::new(0)),
             snap_state: snapshot::SnapState::default(),
@@ -3874,6 +4041,9 @@ impl Manager {
         // with nothing loaded yet, so modules can be browsed/installed/managed.
         // Headless has no window, so it only runs when something is actually pending.
         if has_hotkeys || has_keys || has_triggers || has_own_work || !headless {
+            // Sleep, lock, display changes: heard on a thread of the backend's and delivered
+            // through the pump as `on_system`. Installs no hook and takes no key.
+            self.shared.backend.watch_system();
             if has_triggers {
                 self.shared
                     .backend
@@ -4119,6 +4289,7 @@ impl Manager {
                         if shared.recheck_requested.replace(false) {
                             dispatcher.on_focus_change();
                         }
+                        shared.log_housekeeping();
                         shared.flush_if_dirty();
                         // Anything the screen reader turned down, said by the fallback —
                         // here rather than at the call site, because the answer arrives from
@@ -4175,7 +4346,8 @@ impl Manager {
     }
 }
 
-/// The folder the application lives in — where its log, settings and modules are.
+/// The folder the application lives in — where its log, settings and modules are. On macOS,
+/// the folder around the original `.app` when macOS runs a translocated copy of it.
 ///
 /// Exposed because the launcher needs the same answer the host uses; two rules that agreed
 /// on Windows and disagreed inside a macOS application bundle is exactly the bug this
@@ -4244,16 +4416,40 @@ pub fn run(dirs: &[String]) -> Result<()> {
         let mut manager = Manager::new()?;
         ocr_stop = Some(manager.ocr_shutdown());
         // Nothing to load is a legitimate state — it is how somebody installs their first
-        // module — and it is also what a translocated bundle, a moved folder or an empty
-        // `modules` directory look like. Those are indistinguishable from the outside and
-        // one of them wastes a remote tester's session, so the log says which state this is
-        // rather than leaving the reader to infer it from an absence of loading lines.
+        // module — and it is also what a translocated bundle whose original was not found, an
+        // application moved away from its folder or an empty `modules` directory look like.
+        // Those are indistinguishable from the outside and one of them wastes a remote
+        // tester's session, so the log names the folder it read and what was there, rather
+        // than leaving the reader to infer it from an absence of loading lines. What an absent
+        // folder means is said here and not in the header's `modules folder` line, because only
+        // here is it known that no folders were given on the command line instead.
         if dirs.is_empty() {
+            let modules = registry::modules_dir();
+            let state = match portable::look_into(&modules) {
+                portable::Folder::Missing => "does not exist. Installed modules are read only \
+                                              from beside the application, so one moved away \
+                                              from the folder it came in finds none"
+                    .to_string(),
+                portable::Folder::Unreadable(why) => format!("could not be read ({why})"),
+                portable::Folder::Holds(0) => "is empty".to_string(),
+                portable::Folder::Holds(n) => format!(
+                    "holds {n} folder{} and none of them loads (the lines above say why)",
+                    if n == 1 { "" } else { "s" }
+                ),
+            };
             logging::line(
                 "manager",
-                "no modules to load — the `modules` folder beside the application is empty \
-                 or could not be read. Every overlay will be absent and nothing will say so \
-                 again; see the `translocated` line above if this is a fresh download.",
+                &format!(
+                    "no modules to load — {} {state}. Every overlay will be absent and nothing \
+                     will say so again{}.",
+                    modules.display(),
+                    if cfg!(target_os = "macos") {
+                        "; the `translocated` line at the start of this session says whether \
+                         macOS ran a copy of the application"
+                    } else {
+                        ""
+                    }
+                ),
             );
         }
         for dir in dirs {
@@ -4595,6 +4791,56 @@ impl HostEvents for Dispatcher<'_> {
         self.shared.fire_snapshot_results();
         self.dispatch_initial();
         if self.shared.recheck_requested.replace(false) {
+            self.on_focus_change();
+        }
+        self.shared.log_housekeeping();
+    }
+
+    /// A sleep, a lock, the session going and coming back, a display change: a `[system]` line
+    /// each — the log was blind to all of them, and a report after a night could only be placed
+    /// by arithmetic on the observation counts — with how long what it ends lasted (a display
+    /// change that keeps coming is counted, see `system_events::Since::plan`); both epochs
+    /// turned over, because an answer cached before a display change or a wake may describe a
+    /// screen that is gone; speech's turn (on macOS a VoiceOver path parked after a refusal is
+    /// tried again at once after a wake rather than at its next look); and what the plan asks
+    /// for — the window in front reported again as an activation, the focus re-checked, the
+    /// display lines written again when they changed, the audio output opened afresh at the
+    /// next sound. The backend resets its own subsystems for them (see `system_events`).
+    fn on_system(&mut self, events: Vec<system_events::Stamped>) {
+        let plan = self.shared.system_since.borrow_mut().plan(&events, Instant::now(), SystemTime::now());
+        for line in &plan.lines {
+            logging::line("system", line);
+        }
+        // Everything cached before is asked again: pixels cached against the input epoch
+        // included, which a resolution or scale change makes wrong.
+        self.shared.bump_input_epoch();
+        for s in &events {
+            self.shared.speech.on_system(s.event);
+        }
+        if plan.env {
+            // Written again only when they changed: a display that keeps dropping its link sends
+            // a change every few seconds with nothing changed.
+            let now = self.shared.backend.display_environment();
+            let mut said = self.shared.display_env_said.borrow_mut();
+            if *said != now {
+                logging::report("env", &now);
+                *said = now;
+            }
+        }
+        if plan.reopen_audio {
+            // Dropped here and opened on the next `host.sound.play`: nothing is held open for
+            // a sound that may never come.
+            self.shared.audio.borrow_mut().take();
+        }
+        if plan.report_front {
+            let t = Instant::now();
+            let win = self.shared.backend.active_window();
+            slow_observation("window.active", "after a system event", t);
+            if let Some(win) = win.filter(|w| !w.title.is_empty()) {
+                self.on_window_activate(win);
+            }
+        }
+        if plan.recheck {
             self.on_focus_change();
         }
     }
@@ -6670,23 +6916,35 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         lua.create_function(move |_, rel: String| {
             let path = sh.root(idx).join(&rel);
             let mut audio = sh.audio.borrow_mut();
+            // Opened again when its stream failed or the default device is another one now
+            // (sound.rs); the manager drops it after a resume, so it is opened then too.
+            if audio.as_ref().is_some_and(sound::Output::stale) {
+                if let Some(old) = audio.take() {
+                    logging::line(
+                        "sound",
+                        &format!(
+                            "the audio output on {} is opened again: it failed, or the default \
+                             output device changed",
+                            old.device()
+                        ),
+                    );
+                }
+            }
             if audio.is_none() {
                 // Open the audio device on first use only (see the field doc).
-                match rodio::OutputStream::try_default() {
-                    Ok(pair) => *audio = Some(pair),
+                match sound::Output::open() {
+                    Ok(out) => *audio = Some(out),
                     Err(e) => {
                         logging::line("sound", &format!("no audio output device: {e}"));
                         return Ok(());
                     }
                 }
             }
-            if let Some((_, handle)) = audio.as_ref() {
+            if let Some(out) = audio.as_ref() {
                 let play = || -> anyhow::Result<()> {
                     let file = std::io::BufReader::new(std::fs::File::open(&path)?);
                     let source = rodio::Decoder::new(file)?;
-                    let sink = rodio::Sink::try_new(handle)?;
-                    sink.append(source);
-                    sink.detach();
+                    out.play(source);
                     Ok(())
                 };
                 if let Err(e) = play() {
@@ -8965,5 +9223,248 @@ mod option_and_speech_wiring_tests {
         // Ticking the setting is seen on every pass of the loop, not only when a line is said.
         let pump = body(SPEECH, "pub fn pump(&self)");
         assert!(pump.contains("self.prism.borrow_mut().rearm();"), "pump no longer re-arms on a tick of the setting");
+    }
+}
+
+/// Where the uptime work meets the event loop: the system events and the log's end-of-tick work.
+/// They are methods of `Shared`, which a test cannot build (its speech engines must not be
+/// opened), so they are checked where they are written, as `ocr_wiring_tests` checks its rules.
+#[cfg(test)]
+mod uptime_wiring_tests {
+    use super::ocr_wiring_tests::body;
+
+    const LIB: &str = include_str!("lib.rs");
+    const WINDOWS: &str = include_str!("backend/windows.rs");
+
+    #[test]
+    fn system_events_and_the_logs_tick_are_wired_into_both_loops() {
+        // Both loops write the captured-set line and the error summaries at the end of a tick.
+        assert!(body(LIB, "fn on_tick(&mut self)").contains("self.shared.log_housekeeping();"));
+        let run = body(LIB, "pub fn run(&mut self)");
+        assert!(run.contains("shared.log_housekeeping();"), "the GUI tick");
+        // The system watch starts before either loop runs.
+        assert!(run.contains("self.shared.backend.watch_system();"));
+        // A batch: the epochs, then the front reported again and a focus round.
+        let sys = body(LIB, "fn on_system(&mut self");
+        assert!(sys.contains("self.shared.bump_input_epoch();"));
+        assert!(sys.contains("self.on_window_activate(win)"));
+        assert!(sys.contains("self.on_focus_change();"));
+        assert!(sys.contains("self.shared.audio.borrow_mut().take();"));
+        // Windows: delivered before the window events, with desktop duplication reset first.
+        let pump = body(WINDOWS, "fn pump_pending(&self");
+        let take = pump.find("system_events::take()").expect("system events drained");
+        let reset = pump.find("dxgi::system_changed(").expect("duplication reset");
+        let hotkeys = pump.find("HOTKEY_QUEUE").expect("the hotkeys");
+        assert!(take < reset && reset < hotkeys);
+    }
+
+    const LOGGING: &str = include_str!("logging.rs");
+    const IMAGES: &str = include_str!("image_search.rs");
+    const OCR_LUA: &str = include_str!("ocr/lua.rs");
+    const HOOK_WATCH: &str = include_str!("backend/hook_watch_thread.rs");
+    const DXGI: &str = include_str!("backend/dxgi.rs");
+    const PRISM: &str = include_str!("speech/prism.rs");
+
+    /// The call sites of the uptime fixes, each of which the unit tests of its helper would not
+    /// notice being reverted: the helpers are tested where they are written, and these say that
+    /// the code that should call them still does.
+    #[test]
+    fn the_uptime_fixes_are_called_where_they_apply() {
+        // A module error: written once, then counted, the summary written when due.
+        let err = body(LIB, "fn report_callback_error(");
+        assert!(err.contains("self.error_repeats.borrow_mut().note(&key, Instant::now())"), "{err}");
+        assert!(err.contains("logging::Said::Counted => {}"));
+        assert!(err.contains("logging::Said::Summary { count, over }"));
+        // Forgotten on toggle, on a reload, and for a rolled-back hot-load.
+        assert!(body(LIB, "fn apply_enabled(").contains("self.forget_error_repeats(idx);"));
+        assert!(body(LIB, "fn purge_module(").contains("self.forget_error_repeats(idx);"));
+        let rollback = body(LIB, "fn rollback_to(");
+        let forget = rollback.find("self.forget_error_repeats(idx);").expect("rollback forgets");
+        let cut = rollback.find("self.ids.borrow_mut().truncate(n);").expect("ids cut");
+        assert!(forget < cut, "forgotten while the ids are still there");
+        // The tick writes the summaries of errors and of system events that stopped.
+        let tick = body(LIB, "fn log_housekeeping(&self)");
+        assert!(tick.contains("self.error_repeats.borrow_mut().due(now)"));
+        assert!(tick.contains("self.system_since.borrow_mut().due(now)"));
+        // A hotkey another program holds: said on the first refusal, counted after.
+        let hk = body(LIB, "fn refresh_hotkeys(&self)");
+        assert!(hk.contains("let n = refused.entry((idx, spec.clone())).or_insert(0);"));
+        assert!(hk.contains("if first {\n                        self.report_os_conflict(idx, \"hotkey\", &spec, &e);"));
+        assert!(hk.contains("self.os_refused.borrow_mut().remove(&(idx, spec.clone()))"));
+        // The display lines only when they changed.
+        let sys = body(LIB, "fn on_system(&mut self");
+        assert!(sys.contains("if *said != now {\n                logging::report(\"env\", &now);"), "{sys}");
+        // A sound: the output checked before it is used.
+        let api = body(LIB, "fn install_host_api(");
+        assert!(api.contains("if audio.as_ref().is_some_and(sound::Output::stale) {"));
+        // The log rotates from the line that crosses the limit.
+        let line = body(LOGGING, "pub fn line(scope: &str, msg: &str)");
+        assert!(line.contains("guard.as_mut().is_some_and(|sink| sink.write(text.as_bytes()))"));
+        assert!(line.contains("sink.rotate(&continued);"));
+        // Image searches: the cap at submit, and the worker skipping what was ended.
+        let submit = body(IMAGES, "fn submit(");
+        assert!(submit.contains("oldest_over_cap(&sh.pending_image.borrow(), owner, IMAGE_PER_OWNER)"));
+        assert!(submit.contains("sh.ended_images.borrow_mut().push((p, why));"));
+        assert!(submit.contains("logging::Said::Summary { count, over } =>"), "the summary is written");
+        assert!(body(IMAGES, "fn worker_loop(").contains("batch.retain(|t| !set.remove(&t.id));"));
+        assert!(body(IMAGES, "pub(crate) fn purge_pending_images(").contains("self.ended_images.borrow_mut()"));
+        // OCR keys: forgotten when their last read is answered or dropped.
+        assert!(body(OCR_LUA, "pub(crate) fn fire_ocr_results(&self)").contains("st.settled(p.owner, p.key.as_deref());"));
+        assert!(body(OCR_LUA, "pub(crate) fn ocr_drop_owner(").contains("st.settled(p.owner, p.key.as_deref());"));
+        // The keyboard watch's windows push the system events.
+        let watch = body(HOOK_WATCH, "unsafe extern \"system\" fn watch_wndproc(");
+        assert!(watch.contains("system(system_events::from_wts(wparam as u32));"));
+        assert!(watch.contains("system(system_events::from_pbt(wparam as u32));"));
+        let broadcast = body(HOOK_WATCH, "unsafe extern \"system\" fn broadcast_wndproc(");
+        for ev in [
+            "WM_DISPLAYCHANGE => system(Some(SystemEvent::DisplaysChanged))",
+            "WM_DPICHANGED => system(Some(SystemEvent::Scale))",
+            "WM_SETTINGCHANGE => system(system_events::from_setting(wparam as u32))",
+            "system(Some(SystemEvent::TaskbarCreated))",
+        ] {
+            assert!(broadcast.contains(ev), "{ev}");
+        }
+        let push = body(HOOK_WATCH, "fn system(event: Option<SystemEvent>)");
+        assert!(push.contains("system_events::push(event);") && push.contains("wake_pump();"));
+        // Desktop duplication: a stopped engine is tried again when its time has come.
+        let engine = body(DXGI, "fn engine() ->");
+        assert!(engine.contains("stopped_engine(now_ms(), RETRY_AT_MS.load(Ordering::SeqCst), stuck)"));
+        assert!(engine.contains("retire(old, \"had stopped, and its time is up\");"));
+        // Screen-reader workers: none started past the parked ones.
+        assert!(body(PRISM, "pub fn retry_if_due(&mut self)").contains("if self.worker_allowed() {"));
+        assert!(body(PRISM, "pub fn rearm(&mut self)").contains("if !self.worker_allowed() {"));
+        let stalled = body(PRISM, "fn stalled(&self)");
+        assert!(stalled.contains("PARKED.fetch_add(1, Ordering::AcqRel) + 1"));
+    }
+}
+
+/// Where the macOS rules for days of uptime are wired in. Their rules have unit tests
+/// (`speech::vo_park`, `backend/macos/backoff.rs`, `backend/macos/handle_table.rs`,
+/// `system_events`, whose `what_each_event_sets_off` is the table), but the places that call them are macOS code
+/// that only a Mac runs — reverting `capture.rs` to a switch, dropping the VoiceOver tick or the
+/// system drain, or putting the sweep back inside an intern left every other test and the macOS
+/// type check green. So they are checked where they are written, as `ocr_wiring_tests` does.
+#[cfg(test)]
+mod macos_uptime_wiring_tests {
+    use super::ocr_wiring_tests::body;
+
+    const LIB: &str = include_str!("lib.rs");
+    const SPEECH: &str = include_str!("speech/mod.rs");
+    const VO: &str = include_str!("speech/voiceover.rs");
+    const QUEUE: &str = include_str!("backend/macos/queue.rs");
+    const SYSTEM: &str = include_str!("backend/macos/system.rs");
+    const WATCH: &str = include_str!("backend/macos/watch.rs");
+    const MAC: &str = include_str!("backend/macos/mod.rs");
+    const CAPTURE: &str = include_str!("backend/macos/capture.rs");
+    const HANDLES: &str = include_str!("backend/macos/handles.rs");
+    const AX: &str = include_str!("backend/macos/ax.rs");
+
+    #[test]
+    fn system_events_are_delivered_first_and_acted_on() {
+        let drain = body(QUEUE, "pub fn drain(events: &mut dyn HostEvents)");
+        let system = drain.find("super::system::drain(events);").expect("queue::drain no longer delivers system events");
+        let hotkeys = drain.find("HOTKEYS").expect("queue::drain has no hotkeys");
+        assert!(system < hotkeys, "system events are delivered after the hotkeys of the same drain");
+        // One batch from the host's queue; the backend's own part of it done BEFORE it is handed
+        // over, as Windows resets duplication first: the host's reaction captures and reads the
+        // front at once, and must find the probe brought forward and the front application known.
+        let sys_drain = body(SYSTEM, "pub fn drain(events: &mut dyn HostEvents)");
+        let take = sys_drain.find("crate::system_events::take()").expect("system::drain no longer takes the host's queue");
+        let hand = sys_drain.find("events.on_system(batch);").expect("system::drain no longer hands the batch over");
+        let own = sys_drain.find("own_part(s.event);").expect("system::drain no longer does the backend's part");
+        let front = sys_drain.find("super::watch::recheck_front(!host_reports_front);").expect("the front is no longer read again");
+        assert!(take < own && own < hand && front < hand, "the backend's part runs after the host heard the event");
+        assert!(sys_drain.contains("s.event.front_may_have_changed()"));
+        assert!(sys_drain.contains("let host_reports_front = batch.iter().any(|s| s.event.reports_front());"));
+        let own_part = body(SYSTEM, "fn own_part(kind: SystemEvent)");
+        for call in [
+            "recheck_soon(super::tap::RECHECK_WAKE)",
+            "recheck_soon(super::tap::RECHECK_UNLOCK)",
+            "recheck_soon(super::tap::RECHECK_SESSION)",
+            "kind.rechecks_capture()",
+            "super::capture::clear_sck_backoff(",
+        ] {
+            assert!(own_part.contains(call), "system::own_part no longer does `{call}`");
+        }
+        // A front application taken over for an event the host reports the front after is not
+        // queued as an activation as well: that reported the same window twice in one drain.
+        let activated = body(WATCH, "fn activated(app: &NSRunningApplication, announce: bool)");
+        assert!(activated.contains("if announce {\n        super::queue::push_activated(window);\n    } else {\n        super::queue::taken_over(window);"));
+        assert!(body(QUEUE, "pub fn taken_over(window: isize)").contains("arm_recheck_ladder();"));
+        // The display lines after a change are the host's, read through the backend.
+        assert!(body(MAC, "fn display_environment(&self)").contains("system::display_lines()"));
+        let on_system = body(LIB, "fn on_system(&mut self, events: Vec<system_events::Stamped>)");
+        for call in [
+            "self.shared.system_since.borrow_mut().plan(",
+            "self.shared.bump_input_epoch();",
+            "self.shared.speech.on_system(s.event);",
+            "self.on_focus_change();",
+        ] {
+            assert!(on_system.contains(call), "the host's on_system no longer does `{call}`");
+        }
+        assert!(body(LIB, "fn on_tick(&mut self)").contains("self.shared.log_housekeeping();"), "counted display changes are never written");
+        assert!(body(LIB, "fn log_housekeeping(&self)").contains("self.system_since.borrow_mut().due(now)"));
+        assert!(body(SPEECH, "pub fn on_system(").contains("kind.retries_screen_reader()"));
+    }
+
+    #[test]
+    fn the_voiceover_path_is_looked_at_and_bounded() {
+        assert!(body(SPEECH, "pub fn pump(&self)").contains("self.vo.tick();"), "nothing reopens a parked VoiceOver path");
+        let say = body(VO, "pub fn say(&self, text: &str, interrupt: bool) -> bool");
+        assert!(say.contains(".handed()"), "a look no longer lets only one line through");
+        let run = body(VO, "fn run(");
+        let skip = run.find("refused_in.is_some_and(").expect("the worker offers lines from a refused opening again");
+        let output = run.find("output(&u.text").expect("the worker no longer says lines");
+        assert!(skip < output, "the refused-opening check comes after the line was already offered");
+        let out = body(VO, "fn output(");
+        for call in ["automation_status()", "vo_park::after_event(", "vo_park::event_broken("] {
+            assert!(out.contains(call), "output no longer uses `{call}`");
+        }
+    }
+
+    #[test]
+    fn capture_backs_off_and_the_sweep_runs_from_the_pump() {
+        let grab = body(CAPTURE, "fn grab(x: i32, y: i32, w: i32, h: i32, best: bool)");
+        assert!(grab.contains("sck_backoff().attempt(Instant::now())"), "ScreenCaptureKit is no longer asked through its back-off");
+        assert!(grab.contains("sck_probe(rect, since)"), "a probe is waited for again where an older function could answer");
+        assert!(!CAPTURE.contains("SCK_DISABLED"), "the session-long switch is back");
+        let pump = body(MAC, "fn pump_pending(&self, events: &mut dyn HostEvents)");
+        let drain = pump.find("queue::drain(events);").expect("pump_pending no longer drains");
+        let sweep = pump.find("handles::sweep_if_due();").expect("nothing sweeps the handle table");
+        assert!(drain < sweep, "the sweep runs before the drain it should follow");
+        assert!(!body(HANDLES, "fn intern_as(").contains("sweep"), "an intern sweeps again, inside a hot path");
+        assert!(body(AX, "pub(super) fn window_id(handle: isize) -> u32").contains("handles::set_window_id(handle, found)"));
+    }
+
+    /// Where the uptime change and the Screen Recording request meet. The request's look at
+    /// Accessibility runs in the same pump, before the drain that delivers a wake or a lock; it
+    /// keeps App Nap away while it waits — the uptime change's activity was held only for
+    /// captured keys and controllers, and a napped pump would look late — and the request, from
+    /// the pump or the button, lets it go before anything can return early. The first hold is
+    /// written per reason, so that one for this does not make the first overlay's a trace line —
+    /// a rule `activity_reasons.rs` decides and tests; here only that `want` follows it.
+    #[test]
+    fn the_screen_recording_request_waits_in_the_pump_and_unnapped() {
+        const PERM: &str = include_str!("backend/macos/perm.rs");
+        const ACTIVITY: &str = include_str!("backend/macos/activity.rs");
+        let pump = body(MAC, "fn pump_pending(&self, events: &mut dyn HostEvents)");
+        let asks = pump.find("perm::pump();").expect("nothing makes the automatic Screen Recording request");
+        let drain = pump.find("queue::drain(events);").expect("pump_pending no longer drains");
+        assert!(asks < drain);
+        let waits = body(PERM, "pub fn pump()");
+        let look = waits.find("AXIsProcessTrusted()").expect("the pump no longer looks at Accessibility");
+        let hold = waits.find("super::activity::want(super::activity::SETUP, true);").expect("the wait is napped again");
+        assert!(look < hold, "App Nap is held before Accessibility was found missing");
+        let request = body(PERM, "fn ask_for_screen_recording(trigger: Trigger) -> Asked");
+        let release = request
+            .find("super::activity::want(super::activity::SETUP, false);")
+            .expect("a request no longer ends the wait's App Nap activity");
+        assert!(release < request.find("return").unwrap(), "a request that returns early keeps App Nap away");
+        let want = body(ACTIVITY, "pub(crate) fn want(reason: u8, on: bool) -> bool");
+        assert!(
+            want.contains("change(WANTED.with(Cell::get), SAID.with(Cell::get), reason, on)"),
+            "the activity no longer follows activity_reasons.rs, where the first hold is said per reason"
+        );
+        assert!(want.contains("SAID.with(|s| s.set(c.said));"), "what has been said is not kept");
     }
 }

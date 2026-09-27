@@ -419,7 +419,10 @@ pub(crate) struct OcrState {
     /// Answers decided without the threads — stale, evicted, refused — delivered on the next
     /// tick, never from inside the binding.
     ready: RefCell<Vec<(TicketId, Status, Option<String>)>>,
-    /// (module index, VM generation, key) → the newest ticket asked with that key.
+    /// (module index, VM generation, key) → the newest ticket asked with that key, while a read
+    /// with that key is waiting: forgotten once none is (`forget_settled`), as `snapshotAsync`
+    /// forgets its keys, so a key made from a row number or from text is not kept for the
+    /// module's whole life.
     key_seq: RefCell<HashMap<(usize, u64, String), TicketId>>,
     next_ticket: Cell<TicketId>,
     /// Per module: when a slow job was last logged.
@@ -436,6 +439,34 @@ impl OcrState {
 
     fn once(&self, key: String) -> bool {
         self.said.borrow_mut().insert(key)
+    }
+
+    /// Whether a read of `owner` with `key` is still waiting for its answer.
+    fn waiting_with(&self, owner: Owner, key: &str) -> bool {
+        self.pending.borrow().values().any(|p| p.owner == owner && p.key.as_deref() == Some(key))
+    }
+
+    /// A read of `owner` with `key` was delivered or dropped: its key's record goes when no read
+    /// with it is waiting any more.
+    fn settled(&self, owner: Owner, key: Option<&str>) {
+        let waiting = key.is_some_and(|k| self.waiting_with(owner, k));
+        forget_settled(&mut self.key_seq.borrow_mut(), owner, key, waiting);
+    }
+}
+
+/// Forgets the newest-ticket record of `owner`'s `key` once no read of that VM with that key is
+/// waiting (`still_waiting` false). The record exists to answer `newer` for a delivery, and with
+/// nothing left to deliver it answers nothing; kept, every distinct key a module ever used stayed
+/// in the table for the module's life. Whatever order the answers of one key come back in, the
+/// record stays while any of them is still to be delivered.
+fn forget_settled(
+    seqs: &mut HashMap<(usize, u64, String), TicketId>,
+    owner: Owner,
+    key: Option<&str>,
+    still_waiting: bool,
+) {
+    if let (Some(k), false) = (key, still_waiting) {
+        seqs.remove(&(owner.idx, owner.gen, k.to_string()));
     }
 }
 
@@ -690,6 +721,8 @@ impl Shared {
                     self.report_callback_error(p.scope, "ocr.read", &e);
                 }
             }
+            // After the callback, which may have read again with the same key.
+            st.settled(p.owner, p.key.as_deref());
             let _ = p.lua.remove_registry_value(p.cb);
         }
     }
@@ -746,7 +779,9 @@ impl Shared {
     }
 
     /// Drops every read of module `idx`: disabled (`forget_keys` false), or reloaded and unloaded
-    /// (true, which also forgets which key it last asked with). Nothing of it is called back.
+    /// (true, which also forgets which key it last asked with, all at once). Nothing of it is
+    /// called back. With `false` too, each key's record goes with the last read waiting with it
+    /// (`forget_settled`), so a module switched off keeps none of its reads' keys either.
     pub(crate) fn ocr_drop_owner(&self, idx: usize, forget_keys: bool) {
         self.ocr.cancel_owner(idx);
         let st = &self.ocr_state;
@@ -761,6 +796,7 @@ impl Shared {
             st.ready.borrow_mut().retain(|(t, ..)| pending.contains_key(t));
         }
         for p in gone {
+            st.settled(p.owner, p.key.as_deref());
             let _ = p.lua.remove_registry_value(p.cb);
         }
         if forget_keys {
@@ -1081,6 +1117,28 @@ mod tests {
         assert!(!delivered_newer(&seqs, owner, Some("menu"), 5, &text));
         note_newest(&mut seqs, owner, Some("menu"), 6, true);
         assert!(delivered_newer(&seqs, owner, Some("menu"), 5, &text));
+    }
+
+    /// A key's record stays while any read with it waits, and goes with the last one, in any
+    /// order the answers come back — so the table holds only the keys in use.
+    #[test]
+    fn a_keys_record_goes_with_the_last_read_waiting_with_it() {
+        let owner = Owner { idx: 1, gen: 7 };
+        let mut seqs = HashMap::new();
+        note_newest(&mut seqs, owner, Some("row 12"), 5, true);
+        note_newest(&mut seqs, owner, Some("row 12"), 6, true);
+        // The newest answered first while the older one still waits: kept, so the older one is
+        // still delivered `newer`.
+        forget_settled(&mut seqs, owner, Some("row 12"), true);
+        assert!(newer_than(&seqs, owner, Some("row 12"), 5));
+        // The older one answered, nothing waits with the key: forgotten.
+        forget_settled(&mut seqs, owner, Some("row 12"), false);
+        assert!(seqs.is_empty());
+        // A read without a key has no record to forget; another VM's record is its own.
+        note_newest(&mut seqs, Owner { idx: 1, gen: 8 }, Some("row 12"), 9, true);
+        forget_settled(&mut seqs, owner, None, false);
+        forget_settled(&mut seqs, owner, Some("row 12"), false);
+        assert_eq!(seqs.len(), 1);
     }
 
     /// A read the queue refused never answers: it must not make the one still running `newer`,

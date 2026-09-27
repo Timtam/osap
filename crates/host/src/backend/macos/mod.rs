@@ -33,12 +33,23 @@ use super::{
 /// the rest are not. A Mac has never sent one, so the first is worth a line on its own.
 static SCROLL_SEEN: AtomicBool = AtomicBool::new(false);
 
+/// App Nap kept away while keys are captured, a controller is listened to or Screen Recording's
+/// request waits for Accessibility — see the file.
+/// `pub(super)` for the game-controller source, which holds the same activity.
+pub(super) mod activity;
+/// Which activity those reasons call for, and what the log says about it. Pure; see the file.
+mod activity_reasons;
 pub(super) mod app;
 mod ax;
+/// ScreenCaptureKit's back-off after a capture that did not answer. Pure; see the file.
+mod backoff;
 mod budget;
 mod capture;
+mod enrol;
 mod ffi;
 mod front_memory;
+/// The handle table's bookkeeping, pure; `handles` is its instance. See the file.
+mod handle_table;
 mod handles;
 mod hotkey;
 mod input;
@@ -50,6 +61,9 @@ mod layout;
 pub(crate) mod ocr;
 pub(crate) mod perm;
 mod queue;
+/// Sleep and wake, the lock, the session, the displays, applications quitting — heard, queued
+/// and handed to the host as `SystemEvent`s. See the file.
+mod system;
 mod tap;
 mod watch;
 
@@ -66,7 +80,9 @@ impl MacBackend {
         perm::request_accessibility_once();
         // And screen recording, which has to be ASKED for rather than checked: an
         // application that never asks is never listed in that settings pane, so the user
-        // cannot grant it even when they want to.
+        // cannot grant it even when they want to. Only arranged here: `perm::pump` asks, on the
+        // first tick at which Accessibility is granted — after the GUI is up, and never while
+        // the Accessibility dialog may be on screen (see `perm::request_screen_recording_once`).
         perm::request_screen_recording_once();
         // Vision loads its model on the first request — half a second to two seconds — and
         // `ocr` runs on the thread that carries the keyboard. Warming it on a background
@@ -76,6 +92,10 @@ impl MacBackend {
         // Which key types which letter under the user's keyboard layout, before the first hotkey
         // is registered on one: a letter in a spec is the key that types it, as on Windows.
         layout::start();
+        // Sleep, wake, the lock, the session, the displays and applications quitting, for the
+        // whole run — not only once a module watches windows: an application that quits has to
+        // be forgotten whoever asked about it, and the host's `[system]` line is for every run.
+        system::start();
         MacBackend
     }
 }
@@ -83,6 +103,13 @@ impl MacBackend {
 impl Backend for MacBackend {
     fn environment(&self) -> Vec<(String, String)> {
         perm::environment_report()
+    }
+
+    /// The displays, for the host to write again after a display change when they changed
+    /// (`system.rs`), and once at start-up to compare against. A few CoreGraphics calls per
+    /// display; the event loop's thread.
+    fn display_environment(&self) -> Vec<(String, String)> {
+        system::display_lines()
     }
 
     fn enumerate_windows(&self) -> Vec<WinInfo> {
@@ -398,9 +425,15 @@ impl Backend for MacBackend {
         // stays a fair test of the rest — see `queue::run_once`.
         crate::logging::line("macos", "headless: running the CoreFoundation run loop");
         loop {
-            queue::run_once();
-            self.pump_pending(events);
-            events.on_tick();
+            // One pool per turn. The GUI run is drained by AppKit's own run loop; this one
+            // runs CoreFoundation's directly, and nothing drained what the pump's AppKit and
+            // Foundation calls autorelease — `NSRunningApplication` lookups, workspace queries,
+            // string conversions — so a headless run grew for as long as it ran.
+            objc2::rc::autoreleasepool(|_| {
+                queue::run_once();
+                self.pump_pending(events);
+                events.on_tick();
+            });
         }
     }
 
@@ -437,7 +470,16 @@ impl Backend for MacBackend {
         if layout::pump() {
             hotkey::reregister_letters();
         }
+        // Screen Recording's automatic request, if it is still to be made: one atomic load
+        // otherwise, and one look at Accessibility a second while it waits for that grant.
+        perm::pump();
+        // A sleep, a lock, a display change (`system.rs`) are the first thing `queue::drain`
+        // delivers: before the window events, as on Windows.
         queue::drain(events);
+        // After everything queued has been delivered, not inside the intern that crossed the
+        // size: a sweep asks other applications about their windows, and there it would have
+        // spent a control walk's budget or delayed an activation. See handles.rs.
+        handles::sweep_if_due();
     }
 }
 

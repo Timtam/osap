@@ -2579,3 +2579,165 @@ fn menu_shots_do_not_overwrite_earlier_ones() {
           S.shots[3].path)
     "#);
 }
+
+/// The menu shots are taken of the first two openings of each control in a session, and the
+/// third says once that the rest are not: days of calibrating wrote three PNGs at every opening.
+#[test]
+fn menu_shots_are_taken_of_the_first_two_openings_of_a_control() {
+    run(r#"
+        local S = T.S
+        S.calibrating = true
+        local o = T.overlay({ T.O.menuTests.nativePopup })
+        for _ = 1, 4 do
+          T.press(o)
+          T.run(2000)
+        end
+        assert(#S.shots == 6, #S.shots .. " pictures")
+        assert(T.count("later ones are not photographed until the module is reloaded") == 1, T.dump())
+        assert(S.acted == 4, "every press still acts")
+    "#);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Memos over days.
+// ---------------------------------------------------------------------------------------------
+
+/// `memoByOrigin` keeps the 64 windows used most recently and works a forgotten one out again;
+/// `nil` is never kept.
+#[test]
+fn a_memo_by_origin_keeps_the_windows_used_last() {
+    run(r#"
+        local calls = 0
+        local memo = T.O.memoByOrigin(function(o) calls += 1; return o.id * 2 end)
+        for id = 1, 64 do assert(memo({ id = id }) == id * 2) end
+        assert(calls == 64, calls)
+        assert(memo({ id = 1 }) == 2 and calls == 64, "cached")
+        assert(memo({ id = 65 }) == 130 and calls == 65, "a new window")
+        -- The least recently used, 2, made room; 1 was asked just before and is kept.
+        assert(memo({ id = 1 }) == 2 and calls == 65, "1 kept")
+        assert(memo({ id = 2 }) == 4 and calls == 66, "2 forgotten, worked out again")
+        local n = 0
+        local undecided = T.O.memoByOrigin(function() n += 1; return nil end)
+        undecided({ id = 5 })
+        undecided({ id = 5 })
+        assert(n == 2, "could not tell yet is asked again")
+    "#);
+}
+
+/// An `identify` that cannot tell yet (UIA not ready the instant a plug-in appears) is asked
+/// again at the next recheck, and the overlay attaches once it can; a verdict is then kept.
+#[test]
+fn an_identity_that_could_not_be_told_yet_is_asked_again() {
+    run(r#"
+        local S = T.S
+        S.front, S.controls, S.chain = T.FX, { T.LIST, T.WRAP, T.KK }, { T.KK, T.WRAP, T.FX }
+        T.turn()
+        local answer, asked = nil, 0
+        local o = T.O.new("Komplete Kontrol")
+        o:addCustomButton({ label = "Search library browser", hotkey = "Alt+S", onActivate = function() end })
+        o:attachEmbedded({ hosts = { T.HOST }, control = "Qt%d+.-QWindowIcon",
+          identify = function() asked += 1; return answer end }, { slot = "com.platform.kontakt" })
+        assert(asked >= 1 and not o.active, "not recognised yet: " .. asked)
+        answer = true
+        T.event()
+        assert(o.active, "recognised once it could tell: " .. T.dump())
+        local after = asked
+        T.event()
+        assert(asked == after, "the verdict is kept: " .. asked .. " vs " .. after)
+        assert(T.count("identify could not tell yet") == 1, T.dump())
+    "#);
+}
+
+/// Two overlays that share a label — Kontakt builds one per version and library from the same
+/// names — each have their own count of menu shots, as do two controls that share a label.
+#[test]
+fn menu_shots_are_counted_per_overlay_and_control_not_per_label() {
+    run(r#"
+        local S = T.S
+        S.calibrating = true
+        local a = T.overlay(nil, "Kontakt 8 - Library")
+        local b = T.overlay(nil, "Kontakt 8 - Library")
+        local ca, cb = { label = "Snapshot menu" }, { label = "Snapshot menu" }
+        for _ = 1, 3 do
+          a:_menuShots(ca)
+          T.run(2000)
+          b:_menuShots(cb)
+          T.run(2000)
+        end
+        assert(#S.shots == 12, #S.shots .. " pictures: two openings each, three pictures each")
+        assert(T.count("later ones are not photographed until the module is reloaded") == 2, T.dump())
+    "#);
+}
+
+// ---------------------------------------------------------------------------------------------
+// A search that could not look.
+// ---------------------------------------------------------------------------------------------
+
+/// A landmark search answered with a reason — the capture failed, or the module had too many
+/// searches waiting — is no answer: the overlay stays as it was, one line says so, and only a
+/// search that was made and missed widens, then loses it.
+#[test]
+fn a_landmark_search_that_could_not_look_keeps_the_last_verdict() {
+    run(r#"
+        local S = T.S
+        local searches = {}
+        rawset(T.host.screen, "imageSearchAsync", function(_, opts, cb)
+          searches[#searches + 1] = { cb = cb, region = opts.region }
+        end)
+        -- Answers the search waiting now (the gate has at most one).
+        local function answer(hit, why)
+          local s = searches[#searches]
+          assert(s and not s.done, "no search waits: " .. #searches)
+          s.done = true
+          s.cb(hit, why)
+        end
+        local o = T.embedded(nil, "Library", function(o) o:landmark("C:/library.png") end)
+        assert(#searches == 1 and not o.active, "the first search is out: " .. T.dump())
+        answer({ x = 300, y = 60, w = 40, h = 12 })
+        assert(o.active, "found: " .. T.dump())
+        assert(T.count("found at 300,60") == 1, T.dump())
+        local why = "too many image searches waiting for this module (64); the oldest was ended"
+        answer(nil, why)
+        assert(o.active, "ended is not lost")
+        T.event()
+        answer(nil, why)
+        assert(o.active)
+        assert(T.count("could not look (" .. why .. ")") == 1, "said once per spell: " .. T.dump())
+        assert(T.count("widening") == 0 and T.count("lost") == 0, T.dump())
+        -- A search that was made: found again, and the next spell would be said again.
+        T.event()
+        answer({ x = 300, y = 60, w = 40, h = 12 })
+        T.event()
+        answer(nil, "the screen capture failed")
+        assert(T.count("could not look") == 2, T.dump())
+        -- Made, and missed in the sticky box: widened; missed in the whole plug-in: lost.
+        T.event()
+        answer(nil)
+        assert(o.active and T.count("widening") == 1, T.dump())
+        T.event()
+        answer(nil)
+        assert(not o.active, "lost: " .. T.dump())
+        assert(T.count("Library: lost") == 1, T.dump())
+    "#);
+}
+
+/// An `identify` that says "no" the plain Lua way — by returning nothing — is asked at most eight
+/// times in a row for a control, then taken as no, as false would be.
+#[test]
+fn an_identify_that_keeps_answering_nil_is_taken_as_no_after_eight() {
+    run(r#"
+        local S = T.S
+        S.front, S.controls, S.chain = T.FX, { T.LIST, T.WRAP, T.KK }, { T.KK, T.WRAP, T.FX }
+        T.turn()
+        local asked = 0
+        local o = T.O.new("Plain Lua")
+        o:addCustomButton({ label = "Search", hotkey = "Alt+S", onActivate = function() end })
+        o:attachEmbedded({ hosts = { T.HOST }, control = "Qt%d+.-QWindowIcon",
+          identify = function() asked += 1 end }, { slot = "com.platform.kontakt" })
+        for _ = 1, 20 do T.event() end
+        assert(asked == 8, "asked " .. asked .. " times")
+        assert(not o.active)
+        assert(T.count("identify could not tell yet") == 1, T.dump())
+        assert(T.count("identify could not tell 8 times in a row") == 1, T.dump())
+    "#);
+}

@@ -83,6 +83,22 @@ pub const SNAP_WAITS: usize = 16;
 /// Snapshot requests in the whole application; the 65th is not taken.
 pub const SNAP_TOTAL: usize = 64;
 
+// ── The image worker's searches (image_search.rs) ─────────────────────────────────────────────
+
+/// `imageSearchAsync`, `imageSearchEach` and `matchCellsAsync` requests of one module VM
+/// waiting for the image worker at once. The 65th ends that module's oldest: the newest always
+/// proceeds, as with snapshots.
+///
+/// 64, not the snapshots' 16: the cap is for a timer that searches faster than the worker
+/// answers, and must never be met by a module working as designed. A sample-library module's
+/// VM holds an overlay per library and Kontakt cell, and every one of their landmark gates asks
+/// in the same poll — one search each, a near-miss probe beside a full-region miss, a value read
+/// or a resize-grip search on top — so one VM has reached about 14 waiting at once (the uptime
+/// review of 2026-09-27, counted for the shipped Soundiron module), and the header's reads come
+/// on top. At 16, a poll that asked for more ended its first gates' searches, every poll and
+/// always the same ones, and those libraries could never have been detected.
+pub const IMAGE_PER_OWNER: usize = 64;
+
 /// The region of a change wait may cover at most this many pixels: one 4K screen. A wait holds
 /// three pictures of it at a time and compares one every round.
 pub const MAX_WAIT_PIXELS: i64 = 8_294_400;

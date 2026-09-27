@@ -275,7 +275,67 @@ fn on_app_activated(notification: &NSNotification) {
     // application; there is no typed accessor to do it for us.
     let app: &NSRunningApplication =
         unsafe { &*(&*object as *const objc2::runtime::AnyObject as *const NSRunningApplication) };
+    activated(app, true);
+}
 
+/// After a wake, an unlock, this session coming back or the displays changing (`system.rs`,
+/// before the host hears the event): the application in front is read again, and one that came
+/// to the front without the workspace saying so — while the screen was locked, say — is taken
+/// over as an activation would be: the menu state, the tap's window, its observer. With
+/// `announce` its window is also queued as an activation; without — the host reports the window
+/// in front itself after this event (`system_events::Plan::report_front`) — it is not, or it
+/// would be reported twice. Nothing when it is the one already known; the host's focus round
+/// after the event (`system_events::Plan::recheck`) covers a window changed inside it. Nothing
+/// either before `start`: without window triggers nobody is told about activations.
+pub(super) fn recheck_front(announce: bool) {
+    if !STARTED.load(Ordering::SeqCst) {
+        return;
+    }
+    let Some(app) = NSWorkspace::sharedWorkspace().frontmostApplication() else {
+        return;
+    };
+    let pid = app.processIdentifier();
+    if pid == FRONT_PID.load(Ordering::Relaxed) {
+        return;
+    }
+    crate::logging::line(
+        "macos",
+        &format!(
+            "{} (pid {pid}) is in front, and no activation said so — {}",
+            app_name(&app),
+            if announce {
+                "handled as one now"
+            } else {
+                "taken over now; the system event reports its window"
+            }
+        ),
+    );
+    activated(&app, announce);
+}
+
+/// An application quit (`system.rs`, on the workspace's notice): its observer goes — the
+/// run-loop source taken out, as `reap_dead` does — and so do a retry owed to it and a verdict
+/// that wrote it off, before macOS can hand its pid to another application.
+///
+/// A recycled pid used to be a hit here: `ensure_observer` returned early for a pid it knew,
+/// and `reap_dead` ran only on a miss, so an application that got a remembered pid inherited a
+/// dead observer, or a "written off", and its focus changes went unobserved until a restart.
+/// macOS pids wrap at 99,999, and over days a Mac starts enough processes to come round.
+pub(super) fn forget_process(pid: i32) {
+    RETRY.with(|r| r.borrow_mut().remove(&pid));
+    let removed = OBSERVERS.with(|o| o.borrow_mut().remove(&pid));
+    if let Some(Watched::Live(live)) = removed {
+        if let Some(run_loop) = CFRunLoop::current() {
+            run_loop.remove_source(Some(&live.source), unsafe { kCFRunLoopCommonModes });
+        }
+        crate::logging::line("macos", &format!("stopped observing {} (pid {pid}): it quit", live.app));
+    }
+}
+
+/// A different application came to the front — told by the workspace, or found by
+/// [`recheck_front`]. `announce`: queue its window as an activation for the host; false only
+/// when the host reports the window in front itself right after (see [`recheck_front`]).
+fn activated(app: &NSRunningApplication, announce: bool) {
     let pid = app.processIdentifier();
     let name = app_name(app);
     FRONT_PID.store(pid, Ordering::Relaxed);
@@ -330,8 +390,14 @@ fn on_app_activated(notification: &NSNotification) {
         format!("activated: {name} (pid {pid}), frontmost window handle {window}")
     });
     // Pushed even when it is 0: the drain resolves it, fails to match, and arms the delayed
-    // re-check ladder — which is exactly what a window that is not titled yet needs.
-    super::queue::push_activated(window);
+    // re-check ladder — which is exactly what a window that is not titled yet needs. Not pushed
+    // when the host reports the window in front itself; the ladder is still armed for one
+    // without a title, which the host does not report (`queue::taken_over`).
+    if announce {
+        super::queue::push_activated(window);
+    } else {
+        super::queue::taken_over(window);
+    }
 
     // Subscribing LAST, and the order is the whole point. It is six synchronous calls into
     // an application that has this instant been brought to the front and is therefore at its

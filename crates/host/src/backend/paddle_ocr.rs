@@ -6,9 +6,26 @@
 //!
 //! The recognition model and its dictionary are embedded in the binary (via
 //! `include_bytes!`), so the app stays fully self-contained and portable.
+//!
+//! **One recogniser thread, asked in parallel with the system engine.** `recognize_image`
+//! (`windows.rs`) hands every small region to this recogniser the moment it has the pixels —
+//! before `Windows.Media.Ocr` starts on it — and waits for the answer only when
+//! `Windows.Media.Ocr` read nothing. That rule is unchanged, and deliberate: the two run side by
+//! side on every small region, so a miss costs the slower of the two rather than their sum. What
+//! changed is who runs the recognition: it used to be a new thread per region, left running when
+//! `Windows.Media.Ocr` had answered or the region was blank. At Melodyne's ten regions a second
+//! that was half a core of answers nobody read, and at seventy blank regions a second two and a
+//! half cores, with as many threads as regions arrived faster than the one session drained them.
+//! Now one long-lived thread ([`ask`]) takes the regions in order, and a region whose answer is
+//! no longer wanted is cancelled when its [`Asked`] is dropped — skipped if it has not started,
+//! stopped before its preprocessing or before the session if it has. The session was already
+//! one, behind a lock, with one intra-op thread, so recognitions were one at a time before too;
+//! only the preprocessing of regions nobody waits for no longer runs.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use ort::session::builder::GraphOptimizationLevel;
@@ -46,13 +63,15 @@ fn lock_even_if_poisoned<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// Recognitions that are, or are about to be, inside ONNX Runtime.
 ///
-/// `recognize_image` (`windows.rs`) runs one of these on a thread of its own for every small
+/// `recognize_image` (`windows.rs`) asks the recogniser thread for one of these for every small
 /// region, beside `Windows.Media.Ocr`, and when `Windows.Media.Ocr` answers it does not wait
 /// for it: that is the point of running them side by side, so that a miss costs the slower of
-/// the two rather than their sum. Such a thread can therefore still be inside ONNX Runtime when
+/// the two rather than their sum. The recogniser can therefore still be inside ONNX Runtime when
 /// the application exits, and a thread in there while `ort`'s static cleanup runs is the fault
-/// the warm-up join in `run` exists for: an access violation at exit. This counts them, so
-/// that the exit can wait for them the way it waits for the warm-up — see `settle`.
+/// the warm-up join in `run` exists for: an access violation at exit. This counts them — from
+/// the moment one is asked for until it is done, skipped or cancelled — so that the exit can
+/// wait for them the way it waits for the warm-up — see `settle`. The recogniser thread itself,
+/// waiting for work, is in no call of ONNX Runtime's and is not counted.
 ///
 /// And once that wait has begun it is CLOSED: `start` refuses, so nothing enters ONNX Runtime
 /// after the exit stopped waiting. The recognise thread of `host.ocr.read` can still be working
@@ -87,9 +106,9 @@ impl InFlight {
     /// Counts one recognition, from now until the returned guard is dropped; `None`, counting
     /// nothing, once [`close`](Self::close) was called — the caller then does not start it.
     ///
-    /// Taken by the caller BEFORE it spawns the thread and moved into it: counted only once
-    /// the thread had started, a recognition spawned a moment before the exit would not be
-    /// counted yet, and the exit would not wait for it.
+    /// Taken by the caller BEFORE it hands the region over and moved into the job: counted only
+    /// once the recogniser had started it, a recognition asked for a moment before the exit
+    /// would not be counted yet, and the exit would not wait for it.
     ///
     /// Counted first and checked second, both sequentially consistent, against `close`, which
     /// sets the flag first and reads the count second: whichever order the two threads meet
@@ -190,9 +209,228 @@ fn init() -> anyhow::Result<Engine> {
     })
 }
 
-/// Recognizes text in a captured region via the neural recognizer, or `None`
-/// when the engine is unavailable or finds nothing.
-pub fn recognize(cap: &CapturedImage) -> Option<String> {
+/// A recognition asked of the recogniser thread ([`ask`]). Dropping it cancels the recognition:
+/// skipped if the thread has not reached it, stopped at the next point it looks if it has.
+pub(super) struct Asked {
+    cancel: Arc<AtomicBool>,
+    answer: Receiver<Option<String>>,
+}
+
+impl Asked {
+    /// Waits for the answer: the text, or `None` when the recogniser found nothing, is not
+    /// available, or its thread has gone. As long as the recognition takes — tens of
+    /// milliseconds warm — and no longer: the thread answers every job it takes.
+    pub(super) fn wait(self) -> Option<String> {
+        self.answer.recv().ok().flatten()
+    }
+}
+
+impl Drop for Asked {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Release);
+    }
+}
+
+/// A region for the recogniser thread, counted in [`IN_FLIGHT`] until it is dropped.
+struct Job {
+    cap: CapturedImage,
+    cancel: Arc<AtomicBool>,
+    reply: SyncSender<Option<String>>,
+    _running: Running<'static>,
+}
+
+/// Regions waiting for the recogniser: a caller waits for its own region or cancels it before
+/// it hands over the next, so a handful at most — the cap only guards against a recogniser
+/// that has stopped answering.
+const QUEUE_MAX: usize = 32;
+
+static JOBS: Mutex<VecDeque<Job>> = Mutex::new(VecDeque::new());
+static JOB_READY: Condvar = Condvar::new();
+/// Whether the recogniser thread was started; decided once, on the first region.
+static RECOGNISER: OnceLock<bool> = OnceLock::new();
+/// Whether the recogniser thread is still there to answer. Set before it starts, cleared — under
+/// the [`JOBS`] lock, with the queue emptied — if it ever ends; [`ask`] reads it under the same
+/// lock, so no region is queued for a thread that has gone. A queued region holds its caller's
+/// only way to be answered: left in the queue of a thread that has gone, its caller's `wait`
+/// would never return, and a synchronous `host.ocr.recognize` waits on the event loop, which
+/// carries every captured key.
+static ALIVE: AtomicBool = AtomicBool::new(false);
+
+/// Hands a small region to the recogniser thread, which starts on it as soon as it is free —
+/// before the caller runs `Windows.Media.Ocr` on the same region. `None`, and nothing started,
+/// once the exit's wait has begun (see [`InFlight::start`]), when the thread could not be
+/// started or has gone ([`ALIVE`]), or when [`QUEUE_MAX`] regions already wait (a recogniser
+/// that stopped answering; said once).
+pub(super) fn ask(cap: &CapturedImage) -> Option<Asked> {
+    let running = IN_FLIGHT.start()?;
+    if !*RECOGNISER.get_or_init(start_recogniser) {
+        return None;
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (reply, answer) = sync_channel(1);
+    let job = Job { cap: CapturedImage { w: cap.w, h: cap.h, rgba: cap.rgba.clone() }, cancel: cancel.clone(), reply, _running: running };
+    let admitted = admit(&mut lock_even_if_poisoned(&JOBS), &ALIVE, job);
+    match admitted {
+        Ok(()) => {}
+        // The thread has gone (said when it went): WinRT reads alone.
+        Err(Refused::Gone) => return None,
+        Err(Refused::Full) => {
+            static SAID: AtomicBool = AtomicBool::new(false);
+            if !SAID.swap(true, Ordering::Relaxed) {
+                crate::logging::line(
+                    "ocr",
+                    &format!(
+                        "{QUEUE_MAX} small regions wait for the neural recogniser, which has stopped \
+                         keeping up or answering; regions are read by Windows.Media.Ocr alone until \
+                         it catches up (said once)"
+                    ),
+                );
+            }
+            return None;
+        }
+    }
+    JOB_READY.notify_one();
+    Some(Asked { cancel, answer })
+}
+
+/// Why [`admit`] did not queue a region.
+#[derive(Debug, PartialEq, Eq)]
+enum Refused {
+    /// The recogniser thread has gone.
+    Gone,
+    /// [`QUEUE_MAX`] regions already wait.
+    Full,
+}
+
+/// Queues `job` — asked with the queue's lock held — unless the recogniser thread has gone
+/// (`alive` false) or the queue is full; the cancelled ones leave first. A refused job is
+/// dropped, and its caller is not handed a wait.
+fn admit(jobs: &mut VecDeque<Job>, alive: &AtomicBool, job: Job) -> Result<(), Refused> {
+    if !alive.load(Ordering::SeqCst) {
+        return Err(Refused::Gone);
+    }
+    prune_cancelled(jobs);
+    if jobs.len() >= QUEUE_MAX {
+        return Err(Refused::Full);
+    }
+    jobs.push_back(job);
+    Ok(())
+}
+
+/// The recogniser thread has gone: `alive` cleared and the queue emptied, both under the queue's
+/// lock, so [`admit`] queues nothing after. Returns the jobs that waited, for the caller to drop
+/// outside the lock — each one dropped answers its caller's `wait` with `None`.
+fn orphan_all(jobs: &Mutex<VecDeque<Job>>, alive: &AtomicBool) -> Vec<Job> {
+    let mut jobs = lock_even_if_poisoned(jobs);
+    alive.store(false, Ordering::SeqCst);
+    jobs.drain(..).collect()
+}
+
+/// What was cancelled while it waited goes now, uncounted with it.
+fn prune_cancelled(jobs: &mut VecDeque<Job>) {
+    jobs.retain(|j| !j.cancel.load(Ordering::Acquire));
+}
+
+fn start_recogniser() -> bool {
+    ALIVE.store(true, Ordering::SeqCst);
+    let spawned = std::thread::Builder::new().name("paddle-ocr".to_string()).spawn(serve);
+    if let Err(e) = &spawned {
+        ALIVE.store(false, Ordering::SeqCst);
+        crate::logging::line(
+            "ocr",
+            &format!("could not start the neural recogniser's thread ({e}); small regions are read by Windows.Media.Ocr alone"),
+        );
+    }
+    spawned.is_ok()
+}
+
+/// Marks the recogniser gone when its thread ends, however it ends, and answers everything still
+/// queued with nothing: each job dropped drops its reply channel, and its caller's `wait` returns
+/// `None`. See [`ALIVE`].
+struct Gone;
+
+impl Drop for Gone {
+    fn drop(&mut self) {
+        let orphans = orphan_all(&JOBS, &ALIVE);
+        let n = orphans.len();
+        drop(orphans);
+        crate::logging::line(
+            "ocr",
+            &format!(
+                "the neural recogniser's thread ended; {n} waiting region(s) were answered with \
+                 nothing, and small regions are read by Windows.Media.Ocr alone from now on"
+            ),
+        );
+    }
+}
+
+/// The recogniser thread: one region at a time, in the order asked, for as long as the process
+/// runs. A panic in one recognition answers that region `None` and the thread carries on; a
+/// panic anywhere else in its loop (the wait, the log) drops only the job in hand, whose caller
+/// is answered `None`, and the loop starts again. Should the thread end all the same, [`Gone`]
+/// answers what is left.
+fn serve() {
+    let _gone = Gone;
+    loop {
+        if std::panic::catch_unwind(serve_jobs).is_ok() {
+            return; // `serve_jobs` never returns; kept for the type
+        }
+        static OUTER: AtomicUsize = AtomicUsize::new(0);
+        let n = OUTER.fetch_add(1, Ordering::Relaxed) + 1;
+        if n.is_power_of_two() {
+            crate::logging::line(
+                "ocr",
+                &format!("the neural recogniser's loop panicked outside a recognition ({n} so far); it carries on"),
+            );
+        }
+    }
+}
+
+/// The loop of [`serve`], one job at a time.
+fn serve_jobs() {
+    loop {
+        let job = {
+            let mut jobs = lock_even_if_poisoned(&JOBS);
+            loop {
+                if let Some(job) = jobs.pop_front() {
+                    break job;
+                }
+                jobs = JOB_READY.wait(jobs).unwrap_or_else(|p| p.into_inner());
+            }
+        };
+        if job.cancel.load(Ordering::Acquire) {
+            continue; // dropped here, uncounted
+        }
+        let answer = match crate::logging::contain(|| recognize_unless(&job.cap, &job.cancel)) {
+            Ok(answer) => answer,
+            Err(report) => {
+                // The 1st, 2nd, 4th … — one region that trips something would trip it again.
+                static PANICS: AtomicUsize = AtomicUsize::new(0);
+                let n = PANICS.fetch_add(1, Ordering::Relaxed) + 1;
+                if n.is_power_of_two() {
+                    crate::logging::line(
+                        "ocr",
+                        &format!(
+                            "the neural recogniser panicked on a region ({n} so far this session); \
+                             it was answered with nothing and the recogniser carries on: {report}"
+                        ),
+                    );
+                }
+                None
+            }
+        };
+        let _ = job.reply.send(answer);
+    }
+}
+
+/// Recognizes text in a captured region via the neural recognizer, or `None` when the engine
+/// is unavailable, finds nothing, or `cancel` was set — looked at before the preprocessing,
+/// before waiting for the session, and once the session is in hand.
+fn recognize_unless(cap: &CapturedImage, cancel: &AtomicBool) -> Option<String> {
+    let cancelled = || cancel.load(Ordering::Acquire);
+    if cancelled() {
+        return None;
+    }
     let eng = engine()?;
 
     let rgba = image::RgbaImage::from_raw(cap.w, cap.h, cap.rgba.clone())?;
@@ -205,7 +443,13 @@ pub fn recognize(cap: &CapturedImage) -> Option<String> {
     let input = preprocess(&tight);
     let tensor = Tensor::from_array(input).ok()?;
 
+    if cancelled() {
+        return None;
+    }
     let mut session = lock_even_if_poisoned(&eng.session);
+    if cancelled() {
+        return None;
+    }
     let outputs = session.run(ort::inputs![tensor]).ok()?;
     let logits = outputs[0].try_extract_array::<f32>().ok()?;
     let text = decode(&logits, &eng.dict);
@@ -374,6 +618,104 @@ mod exit_safety_tests {
         });
         assert!(joined.is_err());
         assert_eq!(c.count(), 0);
+    }
+
+    /// A region whose answer is no longer wanted — WinRT read it, or it was blank — is cancelled
+    /// by dropping its handle, and leaves the queue uncounted; a cancelled one never reaches the
+    /// engine at all.
+    #[test]
+    fn a_cancelled_region_leaves_the_queue_uncounted_and_is_never_recognised() {
+        static C: InFlight = InFlight::new();
+        let mut jobs = VecDeque::new();
+        let mut asked = Vec::new();
+        for _ in 0..3 {
+            let cancel = Arc::new(AtomicBool::new(false));
+            let (reply, answer) = sync_channel(1);
+            let cap = CapturedImage { w: 1, h: 1, rgba: vec![0; 4] };
+            jobs.push_back(Job { cap, cancel: cancel.clone(), reply, _running: C.start().expect("open") });
+            asked.push(Asked { cancel, answer });
+        }
+        assert_eq!(C.count(), 3);
+        drop(asked.remove(0)); // the first: WinRT answered
+        prune_cancelled(&mut jobs);
+        assert_eq!((jobs.len(), C.count()), (2, 2));
+        // A job answered: its caller hears it, and it is uncounted once dropped.
+        let job = jobs.pop_front().unwrap();
+        job.reply.send(Some("7".into())).unwrap();
+        drop(job);
+        assert_eq!(asked.remove(0).wait(), Some("7".to_string()));
+        assert_eq!(C.count(), 1);
+        // A recogniser gone without answering: the wait ends with nothing rather than hanging.
+        drop(jobs.pop_front());
+        assert_eq!(asked.remove(0).wait(), None);
+        assert_eq!(C.count(), 0);
+        // Cancelled before it starts: no engine is even opened for it.
+        let cap = CapturedImage { w: 4, h: 4, rgba: vec![0; 64] };
+        assert_eq!(recognize_unless(&cap, &AtomicBool::new(true)), None);
+    }
+
+    /// The recogniser thread gone: everything it left in the queue is answered with nothing, and
+    /// nothing is queued for it after — a synchronous recognition waiting on the event loop
+    /// would otherwise wait for ever, and every captured key with it.
+    #[test]
+    fn a_recogniser_that_has_gone_answers_its_queue_and_takes_no_more() {
+        static C: InFlight = InFlight::new();
+        let jobs: Mutex<VecDeque<Job>> = Mutex::new(VecDeque::new());
+        let alive = AtomicBool::new(true);
+        let job = || {
+            let cancel = Arc::new(AtomicBool::new(false));
+            let (reply, answer) = sync_channel(1);
+            let cap = CapturedImage { w: 1, h: 1, rgba: vec![0; 4] };
+            (Job { cap, cancel: cancel.clone(), reply, _running: C.start().expect("open") }, Asked { cancel, answer })
+        };
+        let mut waiting = Vec::new();
+        for _ in 0..3 {
+            let (j, a) = job();
+            assert_eq!(admit(&mut jobs.lock().unwrap(), &alive, j), Ok(()));
+            waiting.push(a);
+        }
+        // Waiters on other threads, as the event loop and the OCR thread would be.
+        let waits: Vec<_> = waiting.into_iter().map(|a| std::thread::spawn(move || a.wait())).collect();
+        let orphans = orphan_all(&jobs, &alive);
+        assert_eq!(orphans.len(), 3);
+        drop(orphans);
+        for w in waits {
+            assert_eq!(w.join().unwrap(), None, "answered with nothing, not left waiting");
+        }
+        assert_eq!(C.count(), 0);
+        let (j, a) = job();
+        assert_eq!(admit(&mut jobs.lock().unwrap(), &alive, j), Err(Refused::Gone));
+        assert_eq!(a.wait(), None, "the refused job was dropped, so even a wait returns");
+        assert!(jobs.lock().unwrap().is_empty());
+        // A full queue refuses too.
+        let alive = AtomicBool::new(true);
+        let mut q = VecDeque::new();
+        let mut held = Vec::new();
+        for _ in 0..QUEUE_MAX {
+            let (j, a) = job();
+            assert_eq!(admit(&mut q, &alive, j), Ok(()));
+            held.push(a);
+        }
+        let (j, _a) = job();
+        assert_eq!(admit(&mut q, &alive, j), Err(Refused::Full));
+        // Cancelling one makes room.
+        drop(held.remove(0));
+        let (j, _b) = job();
+        assert_eq!(admit(&mut q, &alive, j), Ok(()));
+    }
+
+    /// The thread's loop is kept going by an outer catch, and its end is what answers the queue:
+    /// checked where it is written, since the real thread holds the real model.
+    #[test]
+    fn the_recogniser_thread_answers_its_queue_however_it_ends() {
+        const SRC: &str = include_str!("paddle_ocr.rs");
+        let serve = &SRC[SRC.find("fn serve() {").unwrap()..SRC.find("fn serve_jobs() {").unwrap()];
+        assert!(serve.contains("let _gone = Gone;"), "the guard that answers the queue");
+        assert!(serve.contains("std::panic::catch_unwind(serve_jobs)"), "the loop starts again after a panic");
+        let ask = &SRC[SRC.find("pub(super) fn ask(").unwrap()..SRC.find("enum Refused").unwrap()];
+        assert!(ask.contains("admit(&mut lock_even_if_poisoned(&JOBS), &ALIVE, job)"));
+        let gone = &SRC[SRC.find("impl Drop for Gone").unwrap()..SRC.find("fn serve() {").unwrap()];
+        assert!(gone.contains("orphan_all(&JOBS, &ALIVE)"));
     }
 
     /// One panic under the session lock no longer switches the recogniser off for good.

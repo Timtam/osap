@@ -38,6 +38,17 @@ pub fn push_activated(window: isize) {
     mark_focus_dirty();
 }
 
+/// An application found in front without an announced activation, whose window the host is
+/// about to report itself — a wake, an unlock or the session back (`watch::recheck_front`, from
+/// `system::drain`) — so it is not queued: it would be reported twice in this drain. The host
+/// reports only a window with a title, as the activation's drain does; for one without, the
+/// re-check ladder is armed here as that drain would have armed it.
+pub fn taken_over(window: isize) {
+    if super::ax::window_info(window, true).is_none() {
+        arm_recheck_ladder();
+    }
+}
+
 pub fn push_key(vk: u32, mods: u8) {
     KEYS.with(|q| q.borrow_mut().push((vk, mods)));
 }
@@ -86,10 +97,19 @@ fn arm_recheck_ladder() {
     });
 }
 
-/// Hands everything queued since the last call to the host, in the order the host needs.
+/// Hands everything queued since the last call to the host, in the order the host needs:
+/// system events — a wake, a lock, a display change (`system.rs`) — first (step 0), then
+/// hotkeys (1), window activations (2), captured keys (3), game-controller events (4), **one**
+/// focus change if anything dirtied it (5), and any re-check that has come due (6).
 ///
-/// 1. hotkeys, 2. window activations, 3. captured keys, 4. game-controller events, 5. **one**
-/// focus change if anything dirtied it, 6. any re-check that has come due.
+/// System events first: a wake or a display change turns the host's epochs over, and what
+/// follows in the same drain must not be answered from a cache taken before it. For a system
+/// event that may have changed what is in front the host runs its own focus round as it hears
+/// it (`system_events::Plan::recheck`). Before that the backend reads the application in front
+/// again: one it finds there without an announced activation is queued as one after a display
+/// change or the displays waking, and its focus change is the one in step 5; after a wake, an
+/// unlock or the session coming back the host reports the window in front itself, so it is only
+/// taken over ([`taken_over`]).
 ///
 /// Activations must precede the keys that arrived in that window: an activation invalidates
 /// every cached coordinate in the host, a key does not, and a key handled against stale
@@ -100,6 +120,8 @@ fn arm_recheck_ladder() {
 /// per drain because it fans out to every module VM and every overlay each of them owns —
 /// it is the most expensive thing the host does, and delivering it twice does nothing twice.
 pub fn drain(events: &mut dyn HostEvents) {
+    super::system::drain(events);
+
     for id in HOTKEYS.with(|q| std::mem::take(&mut *q.borrow_mut())) {
         events.on_hotkey(id);
     }

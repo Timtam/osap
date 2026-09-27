@@ -234,8 +234,12 @@ local function afterResize(ov, before)
     region = { o.client.x, o.client.y, o.client.x + w, o.client.y + h },
     tolerance = 20,
     scales = { 1.0 },
-  }, function(hit)
-    if not hit then
+  }, function(hit, why)
+    if not hit and why ~= nil then
+      -- No search was made (the capture failed, or too many searches were waiting): whether the
+      -- grip is there is not known, and the warning below would be a guess. The height is said.
+      host.log.info(string.format("[resize] could not look for the grip (%s)", tostring(why)))
+    elseif not hit then
       host.log.info(string.format(
         "[resize] the grip is gone at %dx%d — Kontakt is at its maximum and cannot be made "
         .. "smaller again without reloading the instrument", w, h))

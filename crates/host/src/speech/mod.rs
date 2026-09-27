@@ -22,8 +22,16 @@ mod avspeech;
 mod voiceover;
 #[cfg(windows)]
 mod fallback;
+/// How soon a screen reader that turned us down is tried again: prism's schedule, which the
+/// VoiceOver path keeps as well. Pure; see the file.
+#[cfg(any(windows, target_os = "macos", test))]
+mod pace;
 #[cfg(windows)]
 mod prism;
+/// When the VoiceOver path is tried again after a refusal, and which refusals park it for the
+/// session. Pure, so its tests run where `cargo test` runs; see the file.
+#[cfg(any(target_os = "macos", test))]
+mod vo_park;
 
 #[cfg(any(windows, target_os = "macos"))]
 use std::cell::Cell;
@@ -170,7 +178,9 @@ impl Speech {
             #[cfg(target_os = "macos")]
             {
                 if id == VOICEOVER_ID {
-                    if voiceover::is_running() && self.vo.say(text, interrupt) {
+                    let pid = voiceover::running_pid();
+                    self.vo.note_pid(pid);
+                    if pid.is_some() && self.vo.say(text, interrupt) {
                         return;
                     }
                 } else if self.av.say(text, interrupt, Some(&id)) {
@@ -252,7 +262,13 @@ impl Speech {
             // default — so without this the first thing the overlay ever said would switch a
             // screen reader on for somebody who had not asked for one. Not a failure either:
             // VoiceOver can be started later in the session and this simply starts working.
-            let running = voiceover::is_running();
+            // Its process id also opens a path parked after a refusal, for a VoiceOver that has
+            // started or restarted since (`vo_park.rs`), before this line is handed over.
+            let pid = voiceover::running_pid();
+            if on {
+                self.vo.note_pid(pid);
+            }
+            let running = pid.is_some();
             if on && running && self.vo.say(text, interrupt) {
                 self.note_route(1, "VoiceOver");
                 return;
@@ -265,7 +281,7 @@ impl Speech {
                     "the system voice — the setting is on but VoiceOver is not running"
                 } else {
                     "the system voice — the setting is on and VoiceOver is running, but the \
-                     transport would not take the line"
+                     transport is parked after VoiceOver would not take a line"
                 },
             );
         }
@@ -477,6 +493,11 @@ impl Speech {
             );
             self.av.say(&format!("{why} The box has been unticked."), false, None);
         }
+        // What the VoiceOver worker said about refusals since the last pass, and whether a
+        // parked path's next look has come due — before the refused lines are said, so the
+        // log's line about the refusal comes first.
+        #[cfg(target_os = "macos")]
+        self.vo.tick();
         #[cfg(target_os = "macos")]
         for text in self.vo.refused() {
             // Not `interrupt`: these are lines VoiceOver turned down, said late and out of
@@ -514,6 +535,22 @@ impl Speech {
                 self.prism.borrow_mut().retry_if_due();
             }
         }
+    }
+}
+
+impl Speech {
+    /// The machine or the session did something (`system_events::SystemEvent`). On macOS a
+    /// VoiceOver path parked after a refusal is tried again at once when the Mac wakes, the
+    /// screen is unlocked or this session comes back — the moments VoiceOver itself is likeliest
+    /// to have restarted — rather than at its next look. On Windows nothing here: prism's
+    /// searcher looks on its own schedule, and a wake changes nothing it looks at.
+    pub fn on_system(&self, kind: crate::system_events::SystemEvent) {
+        #[cfg(target_os = "macos")]
+        if kind.retries_screen_reader() {
+            self.vo.retry_now(kind.words());
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = kind;
     }
 }
 

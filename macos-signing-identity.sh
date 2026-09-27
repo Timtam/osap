@@ -7,9 +7,10 @@
 # Monitoring against an application's *code identity*. For an ad-hoc signature — which is
 # what `codesign -s -` produces, and what this project uses by default — that identity is
 # derived from the contents of the binary, so **every rebuild is a different application**
-# and every permission has to be granted again. On Monterey that includes adding the app to
-# Screen Recording by hand with the + button, because the prompt does not appear there. Doing
-# that after every change is not a test cycle, it is a punishment.
+# and every permission has to be granted again — and wherever the application's own requests
+# do not put it into the Screen Recording list (on Monterey the documented one was measured
+# not to), that includes adding it there by hand with the + button. Doing that after every
+# change is not a test cycle, it is a punishment.
 #
 # A self-signed certificate fixes it. The identity then becomes "the bundle id, signed by
 # this certificate", and neither of those changes when the code does. Grant the three

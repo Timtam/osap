@@ -128,14 +128,28 @@ const DEVICE_IDLE_RELEASE: Duration = Duration::from_secs(300);
 /// How often the thread wakes while it holds something, to notice the switch going off and
 /// a duplication going idle. It sleeps without a timeout when it holds nothing.
 const WAKE: Duration = Duration::from_secs(1);
-/// A read still outstanding after this long counts as a hang; three of them stop duplication
-/// until the switch is turned off and on again.
+/// A read still outstanding after this long counts as a hang; three of them within
+/// [`HANG_WINDOW`] stop duplication — for [`retry_after`], or until a resume, an unlock or (at
+/// most once in ten minutes) a display change, or until the switch is turned off and on again.
 const HANG: Duration = Duration::from_secs(2);
 /// The same for an opening. Slow there is expected — the first device of a process loads the
 /// graphics driver, measured at up to 4.3 s — so only an opening this long counts, and one
 /// that never ends still does: a driver stuck in device creation.
 const OPEN_HANG: Duration = Duration::from_secs(10);
 const HANGS_TO_DISABLE: u32 = 3;
+/// The window the hangs are counted in. They used to be counted for the whole session, and a
+/// session of days collects three slow reads — a driver reset, a resume, a GPU busy loading a
+/// game — that have nothing to do with each other; after the third, a module with
+/// `fallback = "none"` got no picture until the switch was toggled. Three within ten minutes is
+/// a driver that is really stuck.
+const HANG_WINDOW: Duration = Duration::from_secs(600);
+/// How long duplication stays stopped after the first time three reads hung, before it is tried
+/// again on a fresh thread; doubled each time it stops again, up to [`RETRY_MAX`]. Reset by a
+/// resume, an unlock or a connection (`system_changed`), which try it again at once, by the
+/// switch turned off and on, and by [`CLEAN_TO_FORGIVE`] reads answered in time; a display or
+/// scale change tries it again at once too, at most once in ten minutes, and keeps the doubling.
+const RETRY_FIRST: Duration = Duration::from_secs(600);
+const RETRY_MAX: Duration = Duration::from_secs(3600);
 /// How long the application's exit waits for this thread before leaving it to the process.
 const SHUTDOWN_WAIT: Duration = Duration::from_millis(500);
 
@@ -328,7 +342,7 @@ pub(crate) fn fits(w: i32, h: i32) -> bool {
 pub(crate) enum Fallback {
     /// The Application settings switch is off.
     SwitchedOff,
-    /// Three reads hung; stopped until the switch is turned off and on again.
+    /// Three reads hung within ten minutes; stopped for a while (see [`retry_after`]).
     Disabled,
     /// The capture thread stopped on an internal error (a panic); the same way out.
     Crashed,
@@ -375,8 +389,10 @@ impl Fallback {
     pub(crate) fn describe(self) -> String {
         match self {
             Fallback::SwitchedOff => "it is switched off in Application settings".into(),
-            Fallback::Disabled => "it stopped after three reads hung; switching it off and on \
-                                   again in Application settings tries again"
+            Fallback::Disabled => "it stopped after three reads hung within ten minutes; it is \
+                                   tried again after a while, after a resume, an unlock or a \
+                                   display change, or when it is switched off and on again in \
+                                   Application settings"
                 .into(),
             Fallback::Crashed => "its thread stopped on an internal error; switching it off and \
                                   on again in Application settings starts it afresh"
@@ -483,8 +499,9 @@ const IDLE: u8 = 0;
 const OPENING: u8 = 1;
 const READY: u8 = 2;
 const BACKOFF: u8 = 3;
-/// Three reads hung. Nothing moves the state out of here: turning the switch off and on again
-/// replaces the engine, and its gate with it.
+/// Three reads hung within [`HANG_WINDOW`]. Nothing moves the state out of here: the way out is
+/// a new engine with a gate of its own — `engine()` starts one once [`retry_after`] has passed or
+/// a system event asked for it (`system_changed`), and turning the switch off and on again does.
 const DISABLED: u8 = 4;
 /// The engine thread panicked, or its inbox closed. Left the same way as DISABLED.
 const CRASHED: u8 = 5;
@@ -516,12 +533,19 @@ pub(crate) struct Gate {
     /// failed, or skipped because its caller had stopped waiting — so it cannot outlive the
     /// request that took it.
     open_waiter: AtomicU64,
+    /// Hangs counted by this gate, in all.
     hangs: AtomicU32,
+    /// When the hangs of the last [`HANG_WINDOW`] were counted (the process clock, ms): what
+    /// decides whether three of them stop the engine.
+    hang_times: Mutex<VecDeque<u64>>,
     /// The request the engine is working on (0 = none), and since when. The hang clock
     /// starts again after an opening.
     busy_seq: AtomicU64,
     busy_since_ms: AtomicU64,
     hang_counted: AtomicU64,
+    /// Reads this gate's engine has answered in time, while it has had no hang: at
+    /// [`CLEAN_TO_FORGIVE`] the stops of engines before it are forgiven ([`clean_read`]).
+    clean_reads: AtomicU32,
 }
 
 impl Gate {
@@ -535,9 +559,11 @@ impl Gate {
             opening_since_ms: AtomicU64::new(0),
             open_waiter: AtomicU64::new(0),
             hangs: AtomicU32::new(0),
+            hang_times: Mutex::new(VecDeque::new()),
             busy_seq: AtomicU64::new(0),
             busy_since_ms: AtomicU64::new(0),
             hang_counted: AtomicU64::new(0),
+            clean_reads: AtomicU32::new(0),
         }
     }
 
@@ -684,10 +710,17 @@ impl Gate {
     /// Request `seq` is done: counted as a hang if it was one, its opening wait given back,
     /// and a caller that gave up on it told that the engine is back.
     fn end(&self, seq: u64, took: Duration, opening_spent: Duration) {
+        self.end_at(seq, took, opening_spent, now_ms());
+    }
+
+    /// [`end`](Self::end) at `now`, for the tests.
+    fn end_at(&self, seq: u64, took: Duration, opening_spent: Duration, now: u64) {
         if opening_spent >= OPEN_HANG {
-            self.count_hang(seq, "opening", OPEN_HANG);
+            self.count_hang(seq, "opening", OPEN_HANG, now);
         } else if took.saturating_sub(opening_spent) >= HANG {
-            self.count_hang(seq, "read", HANG);
+            self.count_hang(seq, "read", HANG, now);
+        } else if self.clean_read() {
+            forgive_streak();
         }
         // Before busy_seq goes back to zero: a caller that sees an idle engine with the flag
         // still set clears it itself, and would swallow this line.
@@ -714,37 +747,63 @@ impl Gate {
     fn check_hang(&self, busy: u64, now: u64) {
         if self.opening.load(Ordering::SeqCst) {
             if now.saturating_sub(self.opening_since_ms.load(Ordering::SeqCst)) >= OPEN_HANG.as_millis() as u64 {
-                self.count_hang(busy, "opening", OPEN_HANG);
+                self.count_hang(busy, "opening", OPEN_HANG, now);
             }
         } else if now.saturating_sub(self.busy_since_ms.load(Ordering::SeqCst)) >= HANG.as_millis() as u64 {
-            self.count_hang(busy, "read", HANG);
+            self.count_hang(busy, "read", HANG, now);
         }
     }
 
-    /// Counts a hang, once per request; the third stops duplication.
-    fn count_hang(&self, seq: u64, what: &str, limit: Duration) {
+    /// Counts a read answered in time, and says — once — when this gate has answered
+    /// [`CLEAN_TO_FORGIVE`] of them without a single hang: the engine that replaced a stopped one
+    /// has proved itself, and the stops before it no longer lengthen the next wait.
+    fn clean_read(&self) -> bool {
+        self.hangs.load(Ordering::SeqCst) == 0
+            && self.clean_reads.fetch_add(1, Ordering::SeqCst).saturating_add(1) == CLEAN_TO_FORGIVE
+    }
+
+    /// Counts a hang at `now`, once per request; the third within [`HANG_WINDOW`] stops
+    /// duplication, for [`retry_after`] of the times it has stopped since that was last forgiven.
+    fn count_hang(&self, seq: u64, what: &str, limit: Duration, now: u64) {
         if seq == 0 || self.hang_counted.swap(seq, Ordering::SeqCst) == seq {
             return;
         }
-        let n = self.hangs.fetch_add(1, Ordering::SeqCst) + 1;
+        self.hangs.fetch_add(1, Ordering::SeqCst);
+        let n = {
+            let mut times = self.hang_times.lock().unwrap_or_else(|p| p.into_inner());
+            hangs_within(&mut times, now)
+        };
         logging::line(
             "capture",
             &format!(
-                "a desktop duplication {what} has taken more than {} s ({n} of {HANGS_TO_DISABLE})",
-                limit.as_secs()
+                "a desktop duplication {what} has taken more than {} s ({n} of {HANGS_TO_DISABLE} \
+                 within {} minutes)",
+                limit.as_secs(),
+                HANG_WINDOW.as_secs() / 60
             ),
         );
         if n >= HANGS_TO_DISABLE {
-            let _ = self.state.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
-                (cur != CRASHED).then_some(DISABLED)
+            let was = self.state.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
+                (cur != CRASHED && cur != DISABLED).then_some(DISABLED)
             });
-            logging::line(
-                "capture",
-                "desktop duplication stopped answering, so it is not used again this session: modules \
-                 that allow it read the screen the standard way, and modules that declared fallback = \
-                 \"none\" get no picture. Turning \"read the screen through the graphics card\" off and \
-                 on again in Application settings tries it afresh.",
-            );
+            if was.is_ok() {
+                let streak = DISABLED_STREAK.fetch_add(1, Ordering::SeqCst) + 1;
+                let wait = retry_after(streak);
+                RETRY_AT_MS.store(now + wait.as_millis() as u64, Ordering::SeqCst);
+                logging::line(
+                    "capture",
+                    &format!(
+                        "desktop duplication stopped answering, so it is not used for {} minutes: \
+                         modules that allow it read the screen the standard way, and modules that \
+                         declared fallback = \"none\" get no picture. It is tried again on a fresh \
+                         thread after that (each time it stops again, twice as long, up to an \
+                         hour), at once after a resume, an unlock or — at most once in ten \
+                         minutes — a display change, and when \"read the screen through the \
+                         graphics card\" is turned off and on again in Application settings.",
+                        wait.as_secs() / 60
+                    ),
+                );
+            }
         }
     }
 
@@ -772,6 +831,158 @@ impl Gate {
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 static SHUT_DOWN: AtomicBool = AtomicBool::new(false);
+/// How often duplication has stopped since the streak was last forgiven — by a resume, an
+/// unlock or a connection, the switch turned off and on, or an engine's [`CLEAN_TO_FORGIVE`]
+/// clean reads: what [`retry_after`] doubles by. Process-wide, not per gate, because every stop
+/// ends its gate.
+static DISABLED_STREAK: AtomicU32 = AtomicU32::new(0);
+/// When a stopped engine is replaced by a fresh one (the process clock, ms); 0 is "at once".
+static RETRY_AT_MS: AtomicU64 = AtomicU64::new(0);
+/// Said that a stopped engine is still inside the graphics driver at its retry, once per stop.
+static SAID_STILL_STUCK: AtomicBool = AtomicBool::new(false);
+/// Reads an engine answers in time, with no hang, before the stops of the engines before it are
+/// forgiven — the streak [`retry_after`] doubles by goes back to zero. Without it the streak only
+/// went on a system event, and a machine that never sleeps kept an hour's wait for every later
+/// stop, weeks after the four stops that earned it.
+const CLEAN_TO_FORGIVE: u32 = 100;
+
+/// The stops of the engines before are forgiven: by [`CLEAN_TO_FORGIVE`] clean reads, or by the
+/// switch being turned off and on again. Said when there was something to forgive.
+fn forgive_streak() {
+    let was = DISABLED_STREAK.swap(0, Ordering::SeqCst);
+    if was > 0 {
+        logging::line(
+            "capture",
+            &format!(
+                "desktop duplication has answered {CLEAN_TO_FORGIVE} reads in time since it was \
+                 last tried again, so its {was} earlier stop(s) are forgiven: a stop from now on \
+                 waits {} minutes again",
+                RETRY_FIRST.as_secs() / 60
+            ),
+        );
+    }
+}
+
+/// The hangs within [`HANG_WINDOW`] of `now`, with `now`'s own already pushed: drops what has
+/// aged out and counts the rest. Pure over the ring, so it can be tested.
+fn hangs_within(times: &mut VecDeque<u64>, now: u64) -> u32 {
+    times.push_back(now);
+    let window = HANG_WINDOW.as_millis() as u64;
+    while times.front().is_some_and(|t| now.saturating_sub(*t) >= window) {
+        times.pop_front();
+    }
+    times.len() as u32
+}
+
+/// How long duplication stays stopped the `streak`th time since the streak was last forgiven:
+/// [`RETRY_FIRST`], doubled each time, at most [`RETRY_MAX`].
+fn retry_after(streak: u32) -> Duration {
+    let doubled = RETRY_FIRST.saturating_mul(1u32 << streak.saturating_sub(1).min(8));
+    doubled.min(RETRY_MAX)
+}
+
+/// What `engine()` does with a stopped engine at `now`: keep it (not due), replace it (due, and
+/// its thread is free), or keep it and look again later (due, but its thread is still inside the
+/// graphics driver — replacing it would leave one more thread there each time).
+#[derive(Debug, PartialEq, Eq)]
+enum Stopped {
+    Keep,
+    Replace,
+    StillStuck,
+}
+
+fn stopped_engine(now: u64, retry_at: u64, stuck: bool) -> Stopped {
+    if now < retry_at {
+        Stopped::Keep
+    } else if stuck {
+        Stopped::StillStuck
+    } else {
+        Stopped::Replace
+    }
+}
+
+/// When a display or scale change last let go of hangs or of a stopped engine (the process
+/// clock, ms); `u64::MAX` for never. What bounds [`system_changed`] for those two.
+static DISPLAY_RESET_MS: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// A system event (`system_events`): whatever made duplication back off, count hangs or stop may
+/// be over — or may have been the event itself, a read in flight across a suspend. Nothing when
+/// duplication was never used.
+///
+/// `full` — a resume, an unlock or a connection: the back-off, the hang count and the doubling
+/// go, and a stopped engine is replaced at the next read.
+///
+/// Otherwise a display or scale change alone, which a display whose link keeps dropping — a TV
+/// or receiver in standby — sends every few seconds for hours, and a driver that hangs around
+/// mode changes hangs at each: letting go of everything at each would keep the hangs from ever
+/// adding up to a stop, and cost a hung read and two `[capture]` lines per flap. So it forgets
+/// the hangs and has a stopped engine replaced at most once in [`HANG_WINDOW`], and only when
+/// there is something to forget; it keeps the doubling, and leaves a back-off — a few seconds
+/// at most — to end on its own.
+pub(crate) fn system_changed(full: bool) {
+    if full {
+        DISABLED_STREAK.store(0, Ordering::SeqCst);
+        RETRY_AT_MS.store(0, Ordering::SeqCst);
+    }
+    let gate = ENGINE.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map(|r| r.gate.clone());
+    let Some(gate) = gate else { return };
+    let Some(f) = after_system_event(&gate, full, now_ms(), &DISPLAY_RESET_MS) else { return };
+    if f.stopped {
+        RETRY_AT_MS.store(0, Ordering::SeqCst);
+    }
+    let text = format!(
+        "desktop duplication is asked again after the system event:{}{}{}",
+        if f.stopped { " it had stopped, and the next read starts it afresh;" } else { "" },
+        if f.backoff { " its back-off is over;" } else { "" },
+        if f.hangs > 0 { format!(" {} hang(s) forgotten", f.hangs) } else { String::new() }
+    );
+    let text = text.trim_end_matches(';');
+    if full {
+        logging::line("capture", text);
+    } else {
+        logging::line(
+            "capture",
+            &format!(
+                "{text} (after a display or scale change, at most once in {} minutes; the stops \
+                 before still lengthen the next wait)",
+                HANG_WINDOW.as_secs() / 60
+            ),
+        );
+    }
+}
+
+/// What [`after_system_event`] let go of, for the line.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Forgotten {
+    hangs: usize,
+    backoff: bool,
+    stopped: bool,
+}
+
+/// [`system_changed`]'s part on one gate at `now`, apart from the process-wide doubling: the
+/// hangs forgotten and, for a `full` event, the back-off ended; `stopped` says the caller has the
+/// engine replaced. For a display or scale change only when there are hangs within
+/// [`HANG_WINDOW`] or the engine has stopped, and not within [`HANG_WINDOW`] of the last time one
+/// did (`last_display`, stored here). `None` when nothing was let go of.
+fn after_system_event(gate: &Gate, full: bool, now: u64, last_display: &AtomicU64) -> Option<Forgotten> {
+    let window = HANG_WINDOW.as_millis() as u64;
+    let stopped = gate.state() == DISABLED;
+    let mut times = gate.hang_times.lock().unwrap_or_else(|p| p.into_inner());
+    if !full {
+        let recent_hangs = times.iter().any(|t| now.saturating_sub(*t) < window);
+        let last = last_display.load(Ordering::SeqCst);
+        let lately = last != u64::MAX && now.saturating_sub(last) < window;
+        if lately || !(recent_hangs || stopped) {
+            return None;
+        }
+        last_display.store(now, Ordering::SeqCst);
+    }
+    // Those that had not aged out yet: the older ones counted for nothing any more.
+    let hangs = std::mem::take(&mut *times).into_iter().filter(|t| now.saturating_sub(*t) < window).count();
+    drop(times);
+    let backoff = full && gate.backoff_until_ms.swap(0, Ordering::SeqCst) > now;
+    (hangs > 0 || backoff || stopped).then_some(Forgotten { hangs, backoff, stopped })
+}
 /// Counters for the observation log line, read and reset by `take_counters`. Atomics rather
 /// than fields of lib.rs's `Observations`, which is main-thread-only: the worker reads too.
 static DUP_CAPTURES: AtomicU64 = AtomicU64::new(0);
@@ -846,7 +1057,38 @@ fn engine() -> Result<(Sender<Req>, Arc<Gate>), Fallback> {
     }
     if g.as_ref().is_some_and(|r| r.generation != generation) {
         if let Some(old) = g.take() {
-            retire(old);
+            retire(old, "was switched off and on again");
+        }
+        // Turned off and on again is a fresh start: no back-off from the stops before it.
+        DISABLED_STREAK.store(0, Ordering::SeqCst);
+        RETRY_AT_MS.store(0, Ordering::SeqCst);
+        SAID_STILL_STUCK.store(false, Ordering::SeqCst);
+    }
+    // A stopped engine, after its time, or at once after a system event: a fresh one.
+    if let Some(r) = g.as_ref().filter(|r| r.gate.state() == DISABLED) {
+        let stuck = r.gate.busy_seq.load(Ordering::SeqCst) != 0;
+        match stopped_engine(now_ms(), RETRY_AT_MS.load(Ordering::SeqCst), stuck) {
+            Stopped::Keep => {}
+            Stopped::Replace => {
+                SAID_STILL_STUCK.store(false, Ordering::SeqCst);
+                if let Some(old) = g.take() {
+                    retire(old, "had stopped, and its time is up");
+                }
+            }
+            Stopped::StillStuck => {
+                let wait = retry_after(DISABLED_STREAK.load(Ordering::SeqCst).max(1));
+                RETRY_AT_MS.store(now_ms() + wait.as_millis() as u64, Ordering::SeqCst);
+                if !SAID_STILL_STUCK.swap(true, Ordering::SeqCst) {
+                    logging::line(
+                        "capture",
+                        &format!(
+                            "desktop duplication's time to be tried again has come, but its thread \
+                             is still inside the graphics driver; asked again in {} minutes",
+                            wait.as_secs() / 60
+                        ),
+                    );
+                }
+            }
         }
     }
     if g.is_none() {
@@ -863,15 +1105,16 @@ fn engine() -> Result<(Sender<Req>, Arc<Gate>), Fallback> {
     Ok((r.tx.clone(), r.gate.clone()))
 }
 
-/// Lets go of an engine the switch has been turned off and on since. Says so when the person
-/// turning it had a reason to: it had stopped, or was still stuck.
-fn retire(old: Running) {
+/// Lets go of an engine the switch has been turned off and on since, or one that had stopped and
+/// is tried again (`why`, for the line). Says so when there was a reason to: it had stopped, had
+/// hung, or was still stuck.
+fn retire(old: Running, why: &str) {
     let stuck = old.gate.busy_seq.load(Ordering::SeqCst) != 0;
     if old.gate.stopped().is_some() || old.gate.hangs.load(Ordering::SeqCst) > 0 || stuck {
         logging::line(
             "capture",
             &format!(
-                "desktop duplication was switched off and on again, so it is tried afresh on a new thread{}",
+                "desktop duplication {why}, so it is tried afresh on a new thread{}",
                 if stuck {
                     "; the old one is still inside the graphics driver and is left to finish on its own"
                 } else {
@@ -1214,8 +1457,9 @@ fn run(rx: Receiver<Req>, gate: Arc<Gate>) {
             if !crate::appcfg::desktop_duplication() {
                 eng.release_all("it was switched off in Application settings");
             } else if gate.stopped().is_some() {
-                // Stopped after three hangs: nothing will read through it this session, so
-                // the device, its driver memory and the duplication slots go now.
+                // Stopped after three hangs: nothing reads through this engine again — a retry
+                // starts a fresh one — so the device, its driver memory and the duplication
+                // slots go now.
                 eng.release_all("it stopped answering");
             }
         }
@@ -2216,6 +2460,159 @@ pub(super) mod tests {
         g.crashed("a test");
         assert_eq!(g.admit(Caller::Pump, 0, PUMP_BUDGET, 1), Err(Fallback::Crashed));
         assert_ne!(Fallback::Crashed.describe(), Fallback::Disabled.describe());
+    }
+
+    /// Three hangs stop duplication only within ten minutes of each other: slow reads days apart
+    /// — a driver reset, a resume, a game loading — are not a stuck driver.
+    #[test]
+    fn hangs_are_counted_within_ten_minutes_not_for_the_session() {
+        let min = 60_000u64;
+        let g = Gate::new();
+        g.begin(1, 0);
+        g.end_at(1, HANG, Duration::ZERO, 0);
+        g.begin(2, 0);
+        g.end_at(2, HANG, Duration::ZERO, 9 * min);
+        // The first has aged out by the third: two within the window, not three.
+        g.begin(3, 0);
+        g.end_at(3, HANG, Duration::ZERO, 11 * min);
+        assert_eq!(g.hangs.load(Ordering::SeqCst), 3, "all counted");
+        assert!(g.admit(Caller::Worker, 11 * min, Duration::MAX, 9).is_ok(), "not stopped");
+        // A third within ten minutes of the second does stop it.
+        g.begin(4, 0);
+        g.end_at(4, HANG, Duration::ZERO, 12 * min);
+        assert_eq!(g.admit(Caller::Worker, 12 * min, Duration::MAX, 10), Err(Fallback::Disabled));
+        let mut ring = VecDeque::new();
+        assert_eq!(hangs_within(&mut ring, 0), 1);
+        assert_eq!(hangs_within(&mut ring, 10 * min - 1), 2);
+        assert_eq!(hangs_within(&mut ring, 10 * min), 2, "the first is exactly ten minutes old: gone");
+    }
+
+    /// Stopped, it is tried again on a fresh thread after ten minutes, then twenty, forty, and at
+    /// most an hour; and never while its thread is still inside the driver.
+    #[test]
+    fn a_stopped_engine_is_tried_again_after_a_doubling_wait() {
+        let min = |m: u64| Duration::from_secs(m * 60);
+        assert_eq!(retry_after(1), min(10));
+        assert_eq!(retry_after(2), min(20));
+        assert_eq!(retry_after(3), min(40));
+        assert_eq!(retry_after(4), min(60));
+        assert_eq!(retry_after(40), min(60));
+        assert_eq!(retry_after(0), min(10), "a streak of 0 reads as the first");
+        assert_eq!(stopped_engine(100, 200, false), Stopped::Keep);
+        assert_eq!(stopped_engine(200, 200, false), Stopped::Replace);
+        assert_eq!(stopped_engine(200, 200, true), Stopped::StillStuck);
+        // A system event sets the time to 0: at once.
+        assert_eq!(stopped_engine(5, 0, false), Stopped::Replace);
+    }
+
+    /// A display whose link keeps dropping, and a driver that hangs a read at each change: 20
+    /// changes 3 s apart, a hung read after each. The hangs still add up to a stop, and the
+    /// changes after it leave the stopped engine alone — letting go of everything at every change,
+    /// as a resume does, would keep it running and hanging for as long as the display flaps.
+    #[test]
+    fn a_display_that_keeps_changing_cannot_keep_a_hanging_driver_in_use() {
+        let flap = |full: bool| {
+            let last = AtomicU64::new(u64::MAX);
+            let mut gate = Gate::new();
+            let mut replaced = 0;
+            let mut seq = 0;
+            for n in 0..20u64 {
+                let t = n * 3000;
+                // `system_changed` has a stopped engine replaced at the next read (RETRY_AT_MS 0,
+                // then `engine()`'s `Stopped::Replace`, tested above).
+                if after_system_event(&gate, full, t, &last).is_some_and(|f| f.stopped) {
+                    gate = Gate::new();
+                    replaced += 1;
+                }
+                if gate.stopped().is_none() {
+                    seq += 1;
+                    gate.begin(seq, t);
+                    gate.end_at(seq, HANG, Duration::ZERO, t + 2000);
+                }
+            }
+            (gate.stopped(), replaced, seq)
+        };
+        let (stopped, replaced, reads) = flap(false);
+        assert_eq!(stopped, Some(Fallback::Disabled), "the hangs added up");
+        assert_eq!((replaced, reads), (0, 4), "one forgetting, then three hangs, then left alone");
+        // As a resume at every change: never stopped, a hung read at every flap.
+        let (stopped, _, reads) = flap(true);
+        assert_eq!((stopped, reads), (None, 20));
+    }
+
+    /// A display change lets go of hangs and of a stopped engine at most once in ten minutes, and
+    /// only when there is something to let go of; a resume, an unlock or a connection always
+    /// does, and ends a back-off too, which a display change leaves to end on its own.
+    #[test]
+    fn a_display_change_lets_go_at_most_once_in_ten_minutes() {
+        let min = 60_000u64;
+        let last = AtomicU64::new(u64::MAX);
+        let g = Gate::new();
+        // Nothing to let go of: nothing done, and nothing used up.
+        assert_eq!(after_system_event(&g, false, 0, &last), None);
+        assert_eq!(last.load(Ordering::SeqCst), u64::MAX);
+        // A hang: forgotten, once.
+        g.begin(1, 0);
+        g.end_at(1, HANG, Duration::ZERO, min);
+        assert_eq!(after_system_event(&g, false, min, &last), Some(Forgotten { hangs: 1, ..Default::default() }));
+        g.begin(2, 0);
+        g.end_at(2, HANG, Duration::ZERO, 2 * min);
+        assert_eq!(after_system_event(&g, false, 2 * min, &last), None, "within ten minutes");
+        // Stopped, ten minutes after the last: the engine is replaced, the hangs forgotten.
+        for (seq, t) in [(3, 3 * min), (4, 4 * min)] {
+            g.begin(seq, 0);
+            g.end_at(seq, HANG, Duration::ZERO, t);
+        }
+        assert_eq!(g.stopped(), Some(Fallback::Disabled));
+        assert_eq!(after_system_event(&g, false, 10 * min, &last), None, "nine minutes after");
+        assert_eq!(
+            after_system_event(&g, false, 11 * min, &last),
+            Some(Forgotten { hangs: 3, backoff: false, stopped: true })
+        );
+        // Hangs older than ten minutes are nothing to forget.
+        let old = Gate::new();
+        old.begin(1, 0);
+        old.end_at(1, HANG, Duration::ZERO, 0);
+        assert_eq!(after_system_event(&old, false, 30 * min, &AtomicU64::new(u64::MAX)), None);
+        // A back-off: a display change leaves it; a resume ends it, however recent the last.
+        let b = Gate::new();
+        b.back_off(Fallback::AccessLost, Duration::from_secs(2), 0);
+        assert_eq!(after_system_event(&b, false, 500, &last), None);
+        assert_eq!(after_system_event(&b, true, 500, &last), Some(Forgotten { backoff: true, ..Default::default() }));
+        assert!(b.admit(Caller::Worker, 501, Duration::MAX, 9).is_ok());
+        // Where it is wired: the Windows pump passes whether any event was more than a display
+        // or scale change, and only a full event forgives the doubling.
+        const SRC: &str = include_str!("dxgi.rs");
+        let changed = &SRC[SRC.find("pub(crate) fn system_changed(full: bool)").unwrap()..SRC.find("/// What [`after_system_event`] let go of").unwrap()];
+        let full = &changed[changed.find("if full {").unwrap()..changed.find("let gate = ").unwrap()];
+        assert!(full.contains("DISABLED_STREAK.store(0, Ordering::SeqCst);"));
+        assert!(changed.contains("after_system_event(&gate, full, now_ms(), &DISPLAY_RESET_MS)"));
+        const WINDOWS: &str = include_str!("windows.rs");
+        assert!(WINDOWS.contains("dxgi::system_changed(system.iter().any(|s| s.event.rechecks_capture() && !s.event.may_storm()));"));
+    }
+
+    /// An engine that answers 100 reads in time, with no hang, forgives the stops before it —
+    /// once — so a machine that never sleeps is not left at an hour's wait for weeks; one that
+    /// has hung never does. And turning the switch off and on again forgives them as well.
+    #[test]
+    fn a_hundred_clean_reads_forgive_the_stops_before() {
+        let g = Gate::new();
+        for n in 1..CLEAN_TO_FORGIVE {
+            assert!(!g.clean_read(), "{n}");
+        }
+        assert!(g.clean_read(), "the hundredth");
+        assert!(!g.clean_read() && !g.clean_read(), "said once");
+        let hung = Gate::new();
+        hung.hangs.store(1, Ordering::SeqCst);
+        assert!((0..300).all(|_| !hung.clean_read()));
+        // Where they are wired: a read in time counts, and the toggle resets the streak.
+        const SRC: &str = include_str!("dxgi.rs");
+        let end = &SRC[SRC.find("fn end_at(").unwrap()..SRC.find("/// Request `seq` was dropped unread").unwrap()];
+        assert!(end.contains("} else if self.clean_read() {\n            forgive_streak();"), "{end}");
+        let engine = &SRC[SRC.find("fn engine() ->").unwrap()..SRC.find("fn retire(").unwrap()];
+        let toggled = &engine[engine.find("retire(old, \"was switched off and on again\")").unwrap()..];
+        assert!(toggled.contains("DISABLED_STREAK.store(0, Ordering::SeqCst);"));
+        assert!(toggled.contains("RETRY_AT_MS.store(0, Ordering::SeqCst);"));
     }
 
     #[test]

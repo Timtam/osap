@@ -67,10 +67,10 @@ jobs:
     # runs arm64, which no machine has ever executed.
     runs-on: macos-15
     env:
-      # The plist promises 12.0 and nothing has ever enforced it. rustc's default floor
-      # differs per architecture, so without this the two slices would disagree with each
-      # other and with the plist they ship inside.
-      MACOSX_DEPLOYMENT_TARGET: '12.0'
+      # The plist's floor (MIN_MACOS in package-macos.sh), which nothing else enforces. rustc's
+      # default floor differs per architecture, so without this the two slices would disagree
+      # with each other and with the plist they ship inside.
+      MACOSX_DEPLOYMENT_TARGET: '12.3'
       TARGETS: aarch64-apple-darwin x86_64-apple-darwin
     steps:
       # Full history, because the reuse check below asks git what has changed since the commit
@@ -451,6 +451,15 @@ jobs:
                 git -C "$GITHUB_WORKSPACE" status --short || true
               fi ;;
           esac
+          # App Translocation, asked of the real Security framework by name (portable.rs). Started
+          # directly rather than through LaunchServices, this run is never translocated, so the
+          # answer has to be a plain "no"; anything else means the lookup or the call did not work
+          # on this macOS. A warning: the application runs either way, as it did before it asked.
+          # `-m1`: the header and the [env] block both carry the line, and an annotation ends at
+          # the first newline (not `| head`, which would keep the `||` from ever firing).
+          if ! grep -q '\[host\] translocated: no$' automation-platform.log; then
+            echo "::warning::the log does not say 'translocated: no': $(grep -m1 'translocated:' automation-platform.log || echo 'no translocated line at all')"
+          fi
 
       # Speech, which is the one new subsystem a runner can actually exercise.
       #
@@ -751,6 +760,12 @@ jobs:
             *", build $COMMIT"*) ;;
             *) echo "::warning::the downloaded package does not name this run's commit ($COMMIT) as its build: $header" ;;
           esac
+          # The App Translocation question on this macOS, as in the build job's module run: the
+          # two Security framework functions are looked up by name, and this is where a macOS
+          # that no longer has them would first say so.
+          if ! grep -q '\[host\] translocated: no$' automation-platform.log; then
+            echo "::warning::the log does not say 'translocated: no' on macOS $(sw_vers -productVersion): $(grep -m1 'translocated:' automation-platform.log || echo 'no translocated line at all')"
+          fi
 
           WAIT_FOR="CAPTURE PROBE: still alive"
           launch "$GITHUB_WORKSPACE/tools/capture-probe"

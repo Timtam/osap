@@ -115,9 +115,10 @@ fn topic_query(query: &str) -> String {
     }
 }
 
-/// The portable modules directory, in the application's own folder.
+/// The portable modules directory, in the application's own folder (see
+/// `portable::modules_dir`, which the log's header reads as well).
 pub fn modules_dir() -> PathBuf {
-    crate::portable::base_dir().join("modules")
+    crate::portable::modules_dir()
 }
 
 /// The folder a repository installs into: `modules/<repository name>/`.

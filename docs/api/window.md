@@ -77,7 +77,7 @@ Note: a control table has no `title` / `app` fields — only `id`, `class`, `bou
 
 `app.exe` is the binary *inside* the bundle, named by the vendor's build system — Ableton is `Ableton Live 11 Suite.exe` on Windows and `Live` here. With no extension to strip, `app.name` equals `app.exe`, and if the executable URL cannot be read it falls back to the **localised** application name, which changes with the user's system language. `app.bundleId` carries the stable identity (`"com.native-instruments.Kontakt8"`) and is the field to match on.
 
-`id` is a small interned counter, meaningful only to this platform and **never reused** — nothing outside it accepts one, and a handle whose process has exited stays permanently unmatched rather than silently matching something else. `client` is derived rather than read: a titled window's content rect is worked out from its own geometry, so on a borderless plug-in window it equals the frame.
+`id` is a small interned counter, meaningful only to this platform and **never reused** — nothing outside it accepts one, and a handle whose process has exited stays permanently unmatched rather than silently matching something else. The host forgets the handles of an application when the workspace reports that it quit. It also sweeps its table of handles: first when the table reaches 4,096 entries, after that each time it reaches twice what the last sweep kept (and never below 4,096). A sweep runs on the event loop after that turn's events have been delivered, never inside a call, and drops the handles of processes that have exited and of windows that no longer exist, with every control inside them: a window paired with a window-server window number that the window server still lists is kept without asking anybody, and any other window is asked of its application — at most 256 windows and 150 ms a sweep, though one application that stops answering can hold one question for its one-second accessibility timeout. A forgotten handle is unmatched too — [`controls`](#host-window-controls), for one, answers it with nothing. The window table's executable name and bundle id of an application are forgotten when the workspace reports it quit, so a later process given the same process id is then described as itself. `client` is derived rather than read: a titled window's content rect is worked out from its own geometry, so on a borderless plug-in window it equals the frame.
 
 ## Matchers {#matchers}
 
@@ -538,6 +538,8 @@ The `initial` report asks the same question as [`host.window.active()`](#host-wi
 
 No focus round is run when watching starts. The window already in front is seen by `onFocus` only when the foreground or the focus next changes, or when a module calls [`host.window.recheck()`](#host-window-recheck).
 
+**After a sleep, an unlock or a new connection** — the machine resumed, the session was unlocked, or it was connected to the console or a remote client again — the window in front is reported again as an activation, when it has a title, whether or not Windows raised a foreground change of its own, and a focus round follows; so an overlay that was active before the lock looks again at once. When Windows does raise one as well, the window is reported twice, as it is when the same window comes forward twice. After a display, scale or work-area change a focus round runs, and no activation. Each of these writes a `[system]` line to the log.
+
 ### macOS
 
 Only *application* activation is system-wide. Focus-within-an-application, window-created and title-changed exist solely as per-process accessibility observers, created lazily the first time that application comes to the front and abandoned after three permanent refusals.
@@ -547,6 +549,8 @@ Only *application* activation is system-wide. Focus-within-an-application, windo
 The consequence lands exactly on the embedded-plug-in case: a plug-in window opening inside a DAW that is **already** frontmost raises no application activation, so the event depends entirely on that per-process observer. In a host that refuses accessibility, the overlay never activates even though the same module works on Windows.
 
 When watching first starts, one focus round is run for the application already in front, so `onFocus` callbacks registered by then see it; `onTrigger` sees it only through `initial = true`.
+
+**After the Mac wakes, the screen is unlocked or this user's session is back at the console**, the window in front is reported again as an activation, when it has a title — the question [`host.window.active()`](#host-window-active) asks — and a focus round follows, as on Windows. Before that, and after the displays wake or the display configuration changes, the host asks macOS again which application is in front. One that came to the front meanwhile without an activation being announced — while the screen was locked, say — is taken as the application in front from then on, and the log says so (`… is in front, and no activation said so — …`). After a wake, an unlock or the session coming back its window is the one reported to `onTrigger` then, once (`— taken over now; the system event reports its window`); one without a title is not reported, and the focus rounds that follow an untitled activation run instead (see [`onFocus`](#host-window-onfocus), macOS). After the displays wake or the configuration changes it is reported to `onTrigger` as an activation is (`— handled as one now`); when the application in front has not changed, a focus round runs and the window already known is not reported again. Each of these writes a `[system]` line to the log.
 
 ## host.window.onFocus(cb) {#host-window-onfocus}
 
@@ -567,11 +571,15 @@ end)
 
 ### Windows
 
-Fired by the system-wide focus and name-change hooks, and by a foreground change to a window without a title. No focus round is run when watching starts — see [`onTrigger`](#host-window-ontrigger).
+Fired by the system-wide focus and name-change hooks, by a foreground change to a window without a title, and after a sleep, an unlock, a new connection and a display, scale or work-area change (see [`onTrigger`](#host-window-ontrigger)). No focus round is run when watching starts.
 
 ### macOS
 
 Same caveat as `onTrigger` above: focus changes *within* an application are delivered by a per-process accessibility observer rather than by a system-wide hook, so an application that will not answer accessibility produces no focus events at all.
+
+One focus round is also run after the Mac wakes, the screen is unlocked, this user's session is back at the console, the displays wake or the display configuration changes, whether or not anything in front changed: a window may have moved, or come back at another scale, underneath the module.
+
+When an application comes to the front and its window has no title yet — so no activation is reported — a focus round runs then and again 0.2, 0.5, 1, 2, 5.3, 6.5 and 10.5 seconds later, so a window that takes its title a moment later is still seen; the last rungs lie past the five seconds an application that did not answer accessibility is left alone. A new application activation while these are pending does not start them again. The same rounds follow a wake, an unlock or the session coming back when the application the host then finds in front is one no activation was announced for and its window has no title.
 
 ## host.window.recheck() {#host-window-recheck}
 

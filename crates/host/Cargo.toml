@@ -53,6 +53,11 @@ interprocess = "2.4.4"
 # header's OS line. Both are borrowed by crates/macos-check through logging.rs.
 log = "0.4"
 os_info = { version = "3.15", default-features = false }
+# Whether the log's path still names the file this copy writes into, before a rotation moves it
+# (logging.rs, `Fs::still_names`): a headless copy beside the running one may have moved it
+# already. Already in the lock file, at this version, under walkdir; borrowed by crates/macos-check
+# through logging.rs, so it is declared there too.
+same-file = "1.0.6"
 # Which recognition language a read gets (ocr/lang.rs): BCP 47 negotiation against the list the
 # platform's engine offers, with CLDR's likely subtags so "de" finds "de-DE" and "zh-TW" finds
 # "zh-Hant". Borrowed by crates/macos-check through that file, so it is declared there too.
@@ -150,7 +155,20 @@ features = ["CGBase", "CGEvent", "CGEventTypes", "CGEventSource", "CGDirectDispl
 [target.'cfg(target_os = "macos")'.dependencies.objc2-screen-capture-kit]
 version = "0.3"
 default-features = false
-features = ["std", "block2", "objc2-core-foundation", "objc2-core-graphics", "SCScreenshotManager"]
+features = ["std", "block2", "objc2-core-foundation", "objc2-core-graphics", "SCScreenshotManager",
+    # The Screen Recording request's own capture request: asking for the shareable content is what
+    # TCC counts as a request to capture, and what puts the application into that list (perm.rs).
+    "SCShareableContent"]
+
+# IOKit's two Input Monitoring calls, `IOHIDCheckAccess` and `IOHIDRequestAccess` (backend/macos/
+# perm.rs), with their request and access types as named constants. They were looked up by name
+# with a hand-written request number, and that number was the posting side's — the Accessibility
+# half of the same check — so the application never read Input Monitoring at all. Both calls
+# exist from macOS 10.15, below the oldest macOS this application starts on.
+[target.'cfg(target_os = "macos")'.dependencies.objc2-io-kit]
+version = "0.3"
+default-features = false
+features = ["std", "hidsystem"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-vision]
 version = "0.3"

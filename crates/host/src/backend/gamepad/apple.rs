@@ -24,7 +24,7 @@
 //! controller allocated there, and a late value change for the old one would update the new.
 
 use core::ptr::NonNull;
-use std::cell::RefCell;
+use std::cell::Cell;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -33,10 +33,9 @@ use std::time::Instant;
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
 use objc2::{sel, ClassType};
 use objc2_app_kit::NSRunningApplication;
-use objc2_foundation::{NSActivityOptions, NSNotification, NSNotificationCenter, NSObjectProtocol, NSProcessInfo, NSString};
+use objc2_foundation::{NSNotification, NSNotificationCenter};
 use objc2_game_controller::{
     GCController, GCControllerButtonInput, GCControllerDidConnectNotification, GCControllerDidDisconnectNotification,
     GCControllerElement, GCDevice, GCDualSenseGamepad, GCDualShockGamepad, GCExtendedGamepad, GCXboxGamepad,
@@ -64,9 +63,10 @@ static BACKGROUND_DONE: AtomicBool = AtomicBool::new(false);
 static QUEUE: OnceLock<DispatchRetained<DispatchQueue>> = OnceLock::new();
 
 thread_local! {
-    /// The activity that keeps App Nap away while somebody listens. Main thread only: the
-    /// demand that decides it is set from the pump.
-    static ACTIVITY: RefCell<Option<Retained<ProtocolObject<dyn NSObjectProtocol>>>> = const { RefCell::new(None) };
+    /// Whether a button or axis listener has ever existed, so the `activity` status appears
+    /// from then on and not before, as the page says. Main thread only: the demand that
+    /// decides it is set from the pump.
+    static LISTENED: Cell<bool> = const { Cell::new(false) };
 }
 
 fn table() -> MutexGuard<'static, Vec<Held>> {
@@ -174,34 +174,32 @@ pub fn start(hub: &'static Hub) -> Result<(), String> {
 }
 
 /// Holds an activity against App Nap while anybody listens for buttons or axes, and lets it
-/// go when nobody does.
+/// go when nobody does — unless something else still holds it: captured keys, for the event
+/// tap's sake, or a first setup's Screen Recording request waiting for Accessibility. One
+/// activity for the application, kept in `backend/macos/activity.rs`.
 ///
 /// `UserInitiatedAllowingIdleSystemSleep | LatencyCritical`, not plain `UserInitiated`, which
 /// also keeps the Mac from sleeping — a module listening to a pad is no reason to stop the
 /// machine sleeping when its owner walks away.
+///
+/// The `activity` status is written here, so it is as it was when a listener last came or
+/// went; the reasons that still hold the activity are named as they were then.
 fn hold_activity(want: bool) {
-    ACTIVITY.with(|a| {
-        let mut a = a.borrow_mut();
-        match (want, a.is_some()) {
-            (true, false) => {
-                let reason = NSString::from_str("Watching game controllers for an accessibility module");
-                let token = NSProcessInfo::processInfo().beginActivityWithOptions_reason(
-                    NSActivityOptions::UserInitiatedAllowingIdleSystemSleep | NSActivityOptions::LatencyCritical,
-                    &reason,
-                );
-                *a = Some(token);
-                super::hub().set_status("activity", "held (latency-critical, while a button or axis listener exists)");
-            }
-            (false, true) => {
-                if let Some(token) = a.take() {
-                    // SAFETY: the token beginActivity returned, ended once.
-                    unsafe { NSProcessInfo::processInfo().endActivity(&token) };
-                }
-                super::hub().set_status("activity", "not held");
-            }
-            _ => {}
-        }
-    });
+    use crate::backend::macos::activity;
+    let held = activity::want(activity::GAMEPAD, want);
+    if want {
+        LISTENED.with(|l| l.set(true));
+    } else if !LISTENED.with(|l| l.get()) {
+        return;
+    }
+    super::hub().set_status(
+        "activity",
+        match (want, held) {
+            (true, _) => "held (latency-critical, while a button or axis listener exists)".to_string(),
+            (false, true) => format!("held while {}; no button or axis listener", activity::held_for()),
+            (false, false) => "not held".to_string(),
+        },
+    );
 }
 
 fn add(hub: &Hub, controller: Retained<GCController>) {

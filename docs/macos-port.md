@@ -263,10 +263,18 @@ Three, all granted by the user in System Settings, none grantable programmatical
    capture without permission does not error, it returns a picture of the desktop
    wallpaper. The backend preflights it and, if it cannot, checks a captured frame for the
    telltale (a capture of a region known to be over another application coming back
-   uniform), so the log says *permission* instead of *no match found* forty times.
-3. **Input Monitoring** — required for the event tap on some versions. Registered hotkeys
+   uniform), so the log says *permission* instead of *no match found* forty times. An
+   application appears in that settings list only once it has asked, so it is asked for
+   once per run — after Accessibility, never on top of its dialog — with the documented
+   request; the Permissions page's button adds a real capture request, one request per
+   press; see
+   [macos-permissions.md](macos-permissions.md#how-the-application-gets-into-the-screen-recording-list).
+3. **Input Monitoring** — whether the event tap needs it next to Accessibility is not
+   measured: the tap is the active kind, which Accessibility governs. Registered hotkeys
    deliberately do **not** need it: Carbon is used precisely so the core interaction works
-   before the fussiest permission is granted.
+   before the fussiest permission is granted. It is read with `IOHIDCheckAccess` for
+   listening and not asked for at start; the Permissions page's button asks, with
+   `CGRequestListenEventAccess` and then `IOHIDRequestAccess`.
 
 All three are reported in the startup environment block, by name, with their state. A
 tester who cannot see a dialog needs the log to say which switch is off.

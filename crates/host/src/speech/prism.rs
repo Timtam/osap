@@ -38,6 +38,42 @@ use prism_sys::{feature, Context, SCREEN_READERS};
 /// all, and in this application the second is much worse than the first.
 const STALL_MS: u64 = 300;
 
+/// Workers left inside a call into the screen reader that the event loop gave up on — each a
+/// parked thread holding its own prism library instance — and how many there were this session.
+///
+/// A call that comes back ends its worker ("its thread can stop now"); one into a screen reader
+/// that never answers again parks it for the rest of the session, one thread per wedge. Wedges
+/// are events, not time — a crashed or hung screen reader, a few a week at most — but over days
+/// they could add up, and nothing counted them. So they are counted, the stall line says how
+/// many there are, and while [`MAX_PARKED`] are parked no new worker is started: lines go to the
+/// plain voice until one of the parked calls returns, and then the search starts again at the
+/// next tick.
+static PARKED: AtomicUsize = AtomicUsize::new(0);
+static ABANDONED: AtomicUsize = AtomicUsize::new(0);
+
+/// The most workers left parked inside calls into the screen reader at once — see [`PARKED`].
+/// Four: a screen reader that wedges, is restarted, and wedges again several times in one
+/// session is already far past what has been seen; the fifth would say that restarting the
+/// screen reader is not fixing it.
+const MAX_PARKED: usize = 4;
+
+/// Uncounts a worker from [`PARKED`] when its thread ends while still marked parked.
+struct Unpark(Arc<AtomicBool>);
+
+impl Drop for Unpark {
+    fn drop(&mut self) {
+        if self.0.swap(false, Ordering::AcqRel) {
+            PARKED.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+/// Whether another worker may be started while `parked` of them are left inside calls that did
+/// not come back.
+fn may_start_worker(parked: usize) -> bool {
+    parked < MAX_PARKED
+}
+
 /// A line handed over longer ago than this is not worth saying any more.
 ///
 /// It matters when a wedged screen reader finally unblocks: everything queued behind it is
@@ -46,6 +82,8 @@ const STALL_MS: u64 = 300;
 /// cannot be trusted about the present.
 const STALE_MS: u64 = 1_000;
 
+// The numbers and `next_look` live in `pace.rs`, shared with the VoiceOver path on macOS, so a
+// restarted screen reader comes back on the same terms on either platform.
 /// How often to look for a screen reader that has gone, and for how long at that pace.
 ///
 /// Quitting and restarting a screen reader is an ordinary thing to do — it is how people fix
@@ -83,11 +121,7 @@ const STALE_MS: u64 = 1_000;
 /// services, so theirs says the reader is installed rather than in use: they get the pace of
 /// a search that found none running. Without both, an installed ZDSR whose service runs, or a
 /// JAWS that passes its check and will never open, kept the fast pace for the whole session.
-const RETRY_SOON: Duration = Duration::from_secs(3);
-const RETRY_CAPPED: Duration = Duration::from_secs(10);
-const RETRY_LATER: Duration = Duration::from_secs(30);
-const RETRY_SOON_FOR: Duration = Duration::from_secs(60);
-const RUNNING_FAST_FOR: Duration = Duration::from_secs(300);
+use super::pace::{next_look, RETRY_CAPPED, RETRY_LATER, RETRY_SOON};
 
 /// The readers whose "running" is a look at the reader itself: NVDA's control endpoint, JAWS's
 /// window and class factory, ZoomText's window, PC-Talker's status call, Sense Reader's window
@@ -99,20 +133,6 @@ const SCHEDULE: &str = "It is looked for again at once, then every 3 s for five 
                         every 10 s after that while a screen reader is running, and every 3 s \
                         for a minute and every 30 s after that while none is (ZDSR and Boy PC \
                         Reader count as none here: their check sees their background services).";
-
-/// When to look again after a look that opened nothing. For a reader that is `running` by its
-/// own check, `since` is how long it has been seen running and refusing: [`RETRY_SOON`] for
-/// the first [`RUNNING_FAST_FOR`], [`RETRY_CAPPED`] after that. Otherwise `since` is how long
-/// the search has been going: [`RETRY_SOON`] for the first [`RETRY_SOON_FOR`], [`RETRY_LATER`]
-/// after that.
-fn next_look(since: Duration, running: bool) -> Duration {
-    match (running, since) {
-        (true, s) if s < RUNNING_FAST_FOR => RETRY_SOON,
-        (true, _) => RETRY_CAPPED,
-        (false, s) if s < RETRY_SOON_FOR => RETRY_SOON,
-        (false, _) => RETRY_LATER,
-    }
-}
 
 /// Whether a sighting keeps the running pace: a reader that runs by its own check and refuses.
 fn runs_by_its_own_check(seen: &Sighting) -> bool {
@@ -150,7 +170,7 @@ struct Search {
     /// The wait chosen after the last look.
     nap: Duration,
     /// When, since the search began, the last look's news was first seen — where a reader
-    /// that runs and refuses starts its [`RUNNING_FAST_FOR`].
+    /// that runs and refuses starts its `pace::RUNNING_FAST_FOR`.
     news_since: Duration,
 }
 
@@ -348,6 +368,11 @@ pub struct Prism {
     /// the refusal and the replacement. Kept until the worker has gone (its end is dropped), and
     /// drained with this one's; a worker that stays wedged keeps its channel, one per wedge.
     leftovers: Vec<Receiver<String>>,
+    /// Set when the event loop gave up on this worker inside a call (`stalled`), counted in
+    /// [`PARKED`]; the worker clears it, and uncounts itself, when the call comes back.
+    parked: Arc<AtomicBool>,
+    /// Said that no new worker is started while [`MAX_PARKED`] are parked, for this episode.
+    said_parked_cap: bool,
 }
 
 impl Prism {
@@ -367,11 +392,12 @@ impl Prism {
         let outstanding: Outstanding = Arc::new(Mutex::new(None));
         let reader = Arc::new(AtomicBool::new(false));
         let stopped = Arc::new(AtomicBool::new(false));
-        let (h, p, o, r, s) =
-            (healthy.clone(), pending.clone(), outstanding.clone(), reader.clone(), stopped.clone());
+        let parked = Arc::new(AtomicBool::new(false));
+        let (h, p, o, r, s, k) =
+            (healthy.clone(), pending.clone(), outstanding.clone(), reader.clone(), stopped.clone(), parked.clone());
         std::thread::Builder::new()
             .name("prism-speech".into())
-            .spawn(move || run(start, rx, refused_tx, h, p, o, r, s))
+            .spawn(move || run(start, rx, refused_tx, h, p, o, r, s, k))
             .ok();
         Self {
             to_worker,
@@ -383,7 +409,31 @@ impl Prism {
             retrying: false,
             stopped,
             leftovers,
+            parked,
+            said_parked_cap: false,
         }
+    }
+
+    /// Whether another worker may be started now, saying once per episode when it may not — see
+    /// [`PARKED`].
+    fn worker_allowed(&mut self) -> bool {
+        let parked = PARKED.load(Ordering::Acquire);
+        if may_start_worker(parked) {
+            self.said_parked_cap = false;
+            return true;
+        }
+        if !self.said_parked_cap {
+            self.said_parked_cap = true;
+            crate::logging::line(
+                "speech",
+                &format!(
+                    "{parked} calls into the screen reader have not come back, each on a worker \
+                     left where it was; no new worker is started until one of them returns, and \
+                     lines go to the plain voice (OneCore or SAPI) meanwhile"
+                ),
+            );
+        }
+        false
     }
 
     /// Replaces this worker with a searcher, keeping the old one's refusal channel.
@@ -441,7 +491,9 @@ impl Prism {
         }
         let due = searcher_due(self.retrying, self.stopped.load(Ordering::Relaxed), had_reader);
         if let Some(why) = due {
-            self.replace_with_searcher(why);
+            if self.worker_allowed() {
+                self.replace_with_searcher(why);
+            }
         }
     }
 
@@ -517,12 +569,20 @@ impl Prism {
         }
         let (_, text) = slot.take()?;
         self.healthy.store(false, Ordering::Relaxed);
+        let parked = if self.parked.swap(true, Ordering::AcqRel) {
+            PARKED.load(Ordering::Acquire)
+        } else {
+            PARKED.fetch_add(1, Ordering::AcqRel) + 1
+        };
+        let abandoned = ABANDONED.fetch_add(1, Ordering::Relaxed) + 1;
         crate::logging::line(
             "speech",
             &format!(
                 "the screen reader has not answered a line in {STALL_MS} ms, so that line and \
                  the ones after it go to the plain voice (OneCore or SAPI). The waiting call \
-                 cannot be cancelled, so its thread is left where it is. {SCHEDULE}"
+                 cannot be cancelled, so its thread is left where it is ({abandoned} left this \
+                 session, {parked} of them still waiting; at {MAX_PARKED} no new worker is \
+                 started until one returns). {SCHEDULE}"
             ),
         );
         Some(text)
@@ -544,6 +604,9 @@ impl Prism {
         if self.healthy.load(Ordering::Relaxed) {
             return;
         }
+        if !self.worker_allowed() {
+            return;
+        }
         crate::logging::line("speech", "trying the screen reader again, because its setting was ticked");
         self.replace_with_searcher(Why::Ticked);
     }
@@ -559,7 +622,11 @@ fn run(
     outstanding: Outstanding,
     reader: Arc<AtomicBool>,
     stopped: Arc<AtomicBool>,
+    parked: Arc<AtomicBool>,
 ) {
+    // However this thread ends — a stall given up on while it opened the backend rather than
+    // inside a line, a panic — it is no longer parked once it has ended.
+    let _unpark = Unpark(parked.clone());
     // Everything prism owns lives on this thread and dies with it. `Context` is `!Send`,
     // which is what makes that a compiler guarantee rather than a comment.
     let ctx = match Context::open() {
@@ -670,6 +737,10 @@ fn run(
             let braille_too = brailling && crate::appcfg::braille();
             let outcome = say(b, &u.text, u.interrupt, braille_too);
             let took = started.elapsed().as_millis() as u64;
+            // Back from a call the event loop had given up on: no longer parked.
+            if parked.swap(false, Ordering::AcqRel) {
+                PARKED.fetch_sub(1, Ordering::AcqRel);
+            }
             pending.fetch_sub(1, Ordering::Relaxed);
             // Cleared after EVERY line, not only when the queue empties. Left in place, a
             // line that was merely slow — say 400 ms — would still be the thing the deadline
@@ -1171,6 +1242,16 @@ mod tests {
             "the screen reader was there the whole time and was not picked up within five \
              seconds"
         );
+    }
+
+    /// At most MAX_PARKED workers are left inside calls that never came back: the next one is
+    /// not started until one of them returns.
+    #[test]
+    fn no_worker_is_started_past_the_parked_ones() {
+        assert!(may_start_worker(0));
+        assert!(may_start_worker(MAX_PARKED - 1));
+        assert!(!may_start_worker(MAX_PARKED));
+        assert!(!may_start_worker(MAX_PARKED + 3));
     }
 
     /// Asking twice does not send a second searcher.

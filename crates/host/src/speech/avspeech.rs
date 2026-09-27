@@ -273,7 +273,7 @@ fn run(
 /// Every installed voice, with the Personal ones marked.
 ///
 /// **`voiceTraits` is asked for rather than assumed**, and that is not caution for its own
-/// sake. This bundle promises macOS 12.0, the tester's machine is 12.7.6, and the objc2
+/// sake. This bundle promises macOS 12.3, the tester's machine is 12.7.6, and the objc2
 /// bindings carry no availability information at all — every selector in them compiles to a
 /// bare `objc_msgSend`, so a method that does not exist on the running system is not a
 /// compile error and not a `None`: it is an unrecognised selector, an Objective-C exception

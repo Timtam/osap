@@ -30,6 +30,14 @@ pub mod instance;
 #[path = "../../host/src/backend/mod.rs"]
 pub mod backend;
 
+/// What the operating system does to the whole session — sleep, lock, display changes — the
+/// `[system]` line for each and the host's plan: the event type and the queue the macOS
+/// backend's `system.rs` pushes to and delivers from, and named by `HostEvents::on_system`, so
+/// it has to exist at `crate::system_events` here as it does in `host`. Pure apart from the
+/// queue; `--tests` builds its tests too.
+#[path = "../../host/src/system_events.rs"]
+pub mod system_events;
+
 /// `host.screen.cells` and the window-relative Region form: pure code, with no macOS half of
 /// its own, borrowed so that nothing in them can compile on Windows alone — the winnow parser,
 /// the hex exchange and the capture type they read are checked for this target too, and
@@ -43,6 +51,21 @@ pub mod cells;
 /// capture type and a snapshot's `Area`, both of which the macOS backend defines the other half of.
 #[path = "../../host/src/profile.rs"]
 pub mod profile;
+
+/// Names what `lib.rs` calls in `system_events.rs`, and the speech path's own hook, for the
+/// reason `cells_calls` exists. (The macOS backend's `system.rs` calls `push` and `take`, and
+/// is compiled here with the backend.)
+#[allow(clippy::type_complexity)]
+pub fn system_calls() {
+    let _: fn(
+        &mut system_events::Since,
+        &[system_events::Stamped],
+        std::time::Instant,
+        std::time::SystemTime,
+    ) -> system_events::Plan = system_events::Since::plan;
+    let _: fn(&mut system_events::Since, std::time::Instant) -> Vec<String> = system_events::Since::due;
+    let _: fn(&speech::Speech, system_events::SystemEvent) = speech::Speech::on_system;
+}
 
 /// Names what `lib.rs`, `region_lua.rs` and `ocr/lua.rs` call in the cells and region files, for
 /// the reason `checked` names the backend: an unreferenced item only warns, and a signature the
@@ -187,7 +210,7 @@ pub fn checked() -> std::rc::Rc<dyn backend::Backend> {
 pub fn permission_calls() -> (
     fn() -> Vec<backend::Permission>,
     fn(&str) -> bool,
-    fn(&str) -> bool,
+    fn(&str) -> backend::Asked,
 ) {
     (backend::permissions, backend::open_pane, backend::ask_for)
 }
