@@ -24,6 +24,11 @@ impl Backend for StubBackend {
         None
     }
 
+    // The one platform with no windows has no foreground either.
+    fn foreground_window(&self) -> Option<super::Foreground> {
+        None
+    }
+
     fn screen_size(&self) -> (i32, i32) {
         (0, 0)
     }

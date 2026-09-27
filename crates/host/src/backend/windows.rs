@@ -924,6 +924,16 @@ impl Backend for WindowsBackend {
         window_info(hwnd as isize, false)
     }
 
+    /// The foreground window as Windows has it, hidden or not — `active_window` drops a
+    /// window that is not visible, through `window_info`, and that is exactly the one this is
+    /// for (see [`super::Foreground`]). Five local calls, no message to the window: a hung
+    /// application cannot hold it up.
+    fn foreground_window(&self) -> Option<super::Foreground> {
+        // SAFETY: no arguments, and the handle it returns is only ever passed to calls that
+        // validate it.
+        foreground_of(unsafe { GetForegroundWindow() })
+    }
+
     fn focus_window(&self, id: isize) -> bool {
         let hwnd = id as HWND;
         if hwnd.is_null() {
@@ -1540,11 +1550,10 @@ impl Backend for WindowsBackend {
                 let cn = GetClassNameW(hwnd, cbuf.as_mut_ptr(), cbuf.len() as i32);
                 let class = String::from_utf16_lossy(&cbuf[..cn.max(0) as usize]);
                 // A tooltip is a top-level window of the process too, and the consumer
-                // treats any newcomer during a hold as the menu: the click that opened the
-                // menu leaves the pointer on the control, and a toolkit that shows its tip
-                // anyway would confirm a menu that is not there and end the hold when the
-                // tip goes. Win32's class and WinForms' wrapper of it both carry the name;
-                // Qt's tooltip window class carries "ToolTip".
+                // treats any newcomer after a menu-opening click as the menu: the click leaves
+                // the pointer on the control, and a toolkit that shows its tip anyway would
+                // count as a menu that is not there. Win32's class and WinForms' wrapper of it
+                // both carry the name; Qt's tooltip window class carries "ToolTip".
                 if class.contains("tooltips_class32") || class.contains("ToolTip") {
                     continue;
                 }
@@ -2065,12 +2074,18 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
             // The two keys that END a menu, remembered whenever the runtime says a plugin
             // menu is open — captured or not. Escape is captured by no overlay and Return
             // only while the focused control wants it, so a record kept inside the
-            // captured-key branch below never held the Escape that cancelled a menu, and the
-            // runtime's hold ran its full course after it. Noted only; never suppressed.
+            // captured-key branch below never held the Escape that cancelled a menu. Noted
+            // only; never suppressed.
+            //
+            // Remembered as noted, so that the captured-key branch below does not note the same
+            // press again: a captured Return passes both, and one press read as "Return,
+            // Return" in the runtime's log.
+            let mut menu_key_noted = false;
             if is_down && mask == 0 && (vk == 0x0D || vk == 0x1B) && MENU_OPEN.load(Ordering::Relaxed) {
                 let scope = KEY_SCOPE.load(Ordering::Relaxed);
                 if scope == 0 || GetForegroundWindow() as isize == scope {
                     note_menu_pass(vk, mask);
+                    menu_key_noted = true;
                 }
             }
             // The hotkeys' record of which keys are held (`hotkey_hook::Table`) is kept for every
@@ -2145,11 +2160,10 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                         }
                     }
                     return 1; // suppress the matched combo (down + up)
-                } else if in_scope && is_down {
+                } else if in_scope && is_down && !menu_key_noted {
                     // Let through because a menu is open. Remembered, not discarded: the
-                    // overlay runtime asks for these to learn that Return or Escape reached
-                    // the menu, which where nothing can see the menu itself is the best
-                    // available word that it is closing. See `take_menu_pass_through`.
+                    // overlay runtime asks for these to log which keys reached the menu, and
+                    // whether it was still there after an Escape. See `take_menu_pass_through`.
                     note_menu_pass(vk, mask);
                 }
             }
@@ -2411,6 +2425,54 @@ fn window_info(hwnd_val: isize, require_title: bool) -> Option<WinInfo> {
             client_h: crect.bottom - crect.top,
         })
     }
+}
+
+/// `host.window.foreground()`'s answer for `hwnd`, the foreground window: its process, and
+/// whether it is shown. Every call validates the handle and none sends the window a message,
+/// so it is safe on any value and a hung application cannot hold it up. `None` for a null
+/// handle and for one that is not a window (any more): it was destroyed between
+/// `GetForegroundWindow` and here, and a window that does not exist has nothing to report.
+fn foreground_of(hwnd: HWND) -> Option<super::Foreground> {
+    if hwnd.is_null() {
+        return None;
+    }
+    let mut pid: u32 = 0;
+    // SAFETY: `pid` is a live u32; the handle is validated by the call, which returns 0 for
+    // one that is not a window.
+    if unsafe { GetWindowThreadProcessId(hwnd, &mut pid) } == 0 {
+        return None;
+    }
+    // SAFETY: both validate the handle and answer false for one that is not a window.
+    let visible = unsafe { IsWindowVisible(hwnd) } != 0;
+    let minimised = unsafe { IsIconic(hwnd) } != 0;
+    let shown = shown(visible, minimised, cloaked(hwnd));
+    Some(super::Foreground { id: hwnd as isize, pid, shown })
+}
+
+/// Whether a foreground window counts as shown: visible (`WS_VISIBLE`), not minimised, and
+/// not cloaked. A cloaked window is visible to everything but the compositor, which does not
+/// draw it: a window on another virtual desktop, a suspended Store app's, the Start menu's and
+/// search's hosts while they are closed. `IsWindowVisible` alone would call every one of those
+/// shown.
+fn shown(visible: bool, minimised: bool, cloaked: bool) -> bool {
+    visible && !minimised && !cloaked
+}
+
+/// Whether DWM cloaks the window. A call that fails — no such window any more, or no
+/// compositor to ask — counts as not cloaked, which leaves the answer to the other two tests.
+fn cloaked(hwnd: HWND) -> bool {
+    use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+    let mut value: u32 = 0;
+    // SAFETY: `value` is a live u32 and the size passed is its size, as DWMWA_CLOAKED needs.
+    let hr = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED as u32,
+            &mut value as *mut u32 as *mut core::ffi::c_void,
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+    hr >= 0 && value != 0
 }
 
 fn process_exe(pid: u32) -> Option<String> {
@@ -2913,6 +2975,86 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
             .then(|| tight.as_ref().map(|t| (t.off_x as i32, t.off_y as i32, t.cw as i32, t.ch as i32)))
             .flatten();
         Ok(OcrText { text, words, lines, fallback, skipped: false })
+}
+
+/// `host.window.foreground()` on Windows: what counts as on screen, and the reading itself on
+/// windows of this session, looked at and never touched.
+#[cfg(test)]
+mod foreground_tests {
+    use super::*;
+
+    /// Shown only when all three say so. Komplete Kontrol's hidden menu window (2026-09-27) is
+    /// the first row; a minimised window that keeps the foreground and a cloaked one are the
+    /// other two ways a window gets the keyboard with nothing of it on screen.
+    #[test]
+    fn a_window_is_shown_only_when_visible_not_minimised_and_not_cloaked() {
+        assert!(!shown(false, false, false), "hidden");
+        assert!(!shown(true, true, false), "minimised");
+        assert!(!shown(true, false, true), "cloaked");
+        assert!(!shown(false, true, true));
+        assert!(shown(true, false, false));
+    }
+
+    /// A handle that is no window at all: DWM refuses the question, and a refusal counts as
+    /// not cloaked, leaving the answer to the visibility tests. Local, and reads nothing.
+    #[test]
+    fn a_cloaked_question_that_fails_counts_as_not_cloaked() {
+        assert!(!cloaked(std::ptr::null_mut()));
+    }
+
+    /// The backend's own body, on a window that is really there and hidden: it is named — the
+    /// one thing `active_window` would not do — with its process, and not shown. Read-only: an
+    /// existing hidden top-level window of this session (an input method's, say) is looked
+    /// at, and nothing is created, shown or focused. One that changes while it is looked at is
+    /// passed over for the next.
+    #[test]
+    fn a_hidden_window_is_named_with_its_process_and_not_shown() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::IsWindow;
+        let mut hwnds: Vec<isize> = Vec::new();
+        // SAFETY: `enum_proc` pushes into the Vec whose address is passed, which outlives the call.
+        unsafe { EnumWindows(Some(enum_proc), &mut hwnds as *mut Vec<isize> as LPARAM) };
+        let hidden = |h: HWND| unsafe { IsWindow(h) != 0 && IsWindowVisible(h) == 0 };
+        let mut checked = 0;
+        for h in hwnds.into_iter().map(|h| h as HWND) {
+            if !hidden(h) {
+                continue;
+            }
+            let mut pid: u32 = 0;
+            // SAFETY: `pid` is a live u32; the handle is validated by the call.
+            let tid = unsafe { GetWindowThreadProcessId(h, &mut pid) };
+            let answer = foreground_of(h);
+            if tid == 0 || !hidden(h) {
+                continue; // gone or shown meanwhile: says nothing either way
+            }
+            let f = answer.expect("a hidden window that exists is named");
+            assert_eq!(f.id, h as isize);
+            assert_eq!(f.pid, pid, "its own process");
+            assert!(!f.shown, "a hidden window is not shown");
+            checked += 1;
+            if checked == 3 {
+                break;
+            }
+        }
+        if checked == 0 {
+            // A session with no hidden top-level window at all (a bare service desktop) has
+            // nothing to look at; the next test's handles are checked either way.
+            eprintln!("no hidden top-level window in this session to look at");
+        }
+    }
+
+    /// Nothing is named for a null handle, or for one that is not a window: the window was
+    /// destroyed between `GetForegroundWindow` and the reading.
+    #[test]
+    fn a_handle_that_is_no_window_is_not_named() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::IsWindow;
+        assert_eq!(foreground_of(std::ptr::null_mut()), None);
+        let gone = [0x7fff_fff1usize, 0x7ffe_1235, 0x7ffd_2469, 0x5a5a_a5a5, 0x3c3c_c3c3]
+            .into_iter()
+            .map(|v| v as HWND)
+            .find(|&h| unsafe { IsWindow(h) } == 0)
+            .expect("one of these is no window");
+        assert_eq!(foreground_of(gone), None);
+    }
 }
 
 /// The shared parser's mask, converted to what `RegisterHotKey` and `SendInput` are given. The

@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 152 entries.
+Every call the platform offers a module, in one place. 154 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -71,6 +71,7 @@ Controls a module defines over a plug-in window, walked with Tab and spoken alou
 | [`O.doubleClick(x, y)`](overlay#o-doubleclick) | Two clicks at the same point, far enough apart in time to **be** a double-click. |
 | [`O.layer`](overlay#o-layer) | The specificity ladder within a slot, named |
 | [`O.memoByOrigin(fn, opts?)`](overlay#o-memobyorigin) | Memoizes a per-window property that does not change while that window exists |
+| [`O.menuTests — seeing a plug-in's menus`](overlay#o-menutests) | The tests that tell an overlay its plug-in has a menu open, listed in its `menus` option |
 | [`O.new(label)`](overlay#o-new) | Creates a new overlay object. |
 | [`O.state`](overlay#o-state) | A free-form table on every overlay for the owning module's own state, so it does not have to squat in the runtime's reserved `_`-prefixed fields. |
 | [`O:activate(index)`](overlay#o-activate) | Activates the control at `index` (defaults to the focused control). |
@@ -99,13 +100,14 @@ Finding windows and the surfaces inside them, and reacting when the focus moves.
 
 | | |
 |---|---|
-| [`host.window.active()`](window#host-window-active) | Returns the window table for the foreground window, or `nil` if there is none. |
+| [`host.window.active()`](window#host-window-active) | Returns the window table for the foreground window, or `nil` if there is none or it is hidden |
 | [`host.window.apps()`](window#host-window-apps) | The running applications, described the way a window table's `app` field describes them |
 | [`host.window.controls(win?)`](window#host-window-controls) | Returns the child control tables of `win` (its `id` is used), or of the active window when omitted. |
 | [`host.window.find(matcher)`](window#host-window-find) | Returns the first window that satisfies `matcher`, or `nil`. |
 | [`host.window.findAll(matcher)`](window#host-window-findall) | Returns all windows that satisfy `matcher`, listed the same narrowed way as `find`. |
 | [`host.window.focus(id)`](window#host-window-focus) | Brings the window with that handle to the front and gives it the keyboard. |
 | [`host.window.focusChain()`](window#host-window-focuschain) | Returns control tables from the currently focused element up to its top-level window. |
+| [`host.window.foreground()`](window#host-window-foreground) | The foreground window right now, whether or not anybody can see it: its `id`, its process's `pid`, and whether it is `shown`. |
 | [`host.window.list(filter?)`](window#host-window-list) | Returns an array of window tables for all enumerable top-level windows |
 | [`host.window.onFocus(cb)`](window#host-window-onfocus) | Registers `cb` to fire whenever the keyboard focus moves — including within the same top-level window. |
 | [`host.window.onTrigger(matcher, opts, cb)`](window#host-window-ontrigger) | Registers `cb` to fire on every foreground change for which the new active window satisfies `matcher`. |

@@ -552,9 +552,10 @@ local function addRackControls(ov, cell)
       ov:addCustomButton({
         label = h.label,
         hotkey = h.hotkey,
-        -- The snapshot menu LEAVES a menu open for the user to walk. Declaring it hands the
-        -- overlay's own hotkeys to that menu from the press onwards, instead of letting
-        -- Alt+M re-press the camera behind it.
+        -- The snapshot menu LEAVES a menu open for the user to walk. Declaring it makes the
+        -- menu tests look at once — in a DAW it is also what arms the one that sees it
+        -- (accessibilityAfterPress, see cells.luau) — so the overlay's own hotkeys go to that
+        -- menu as soon as a test sees it, instead of letting Alt+M re-press the camera behind it.
         opensMenu = h.opensMenu,
         onActivate = function(o)
           -- Acknowledge at PRESS time, as a hotspot control does. These act through a
@@ -607,8 +608,8 @@ local function addPluginHeader(ov, cell)
 end
 
 -- The standalone header: ReaHotkey's Kontakt StandaloneHeader. A standalone Kontakt IS
--- accessible, so the file menu is genuinely usable here — the menu watch hands Tab and the
--- arrows straight to the opened Qt menu — and the Kontakt 7 extras resolve by UIA name.
+-- accessible, so the file menu is genuinely usable here — the accessibility menu test sees the
+-- opened Qt menu and the keys go straight to it — and the Kontakt 7 extras resolve by UIA name.
 local function addStandaloneHeader(ov, cell, isLibrary)
   ov:addCustomButton({
     label = "Kontakt file menu",

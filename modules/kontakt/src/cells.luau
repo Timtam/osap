@@ -38,6 +38,37 @@ local STANDALONE_SLOT = "com.platform.kontakt-standalone"
 -- identity; if KK isn't installed, O.hosts omits it.
 local HOSTS = O.hosts(daw.all, kk and kk.standaloneWindow)
 
+-- How a Kontakt's menus are seen, for the keys to go to them while one is open (see the
+-- overlay runtime's Menus section).
+--
+--   accessibility  Kontakt's Qt menus — the File and View menus, the snapshot dropdown — are
+--                  Menu elements in its accessibility tree while they are up. That is what saw
+--                  every Kontakt menu on Windows since Phase A (2026-06-22), and a standalone
+--                  Kontakt 8's File menu on a Mac. It does NOT see a Kontakt 7's File and View
+--                  menus on a Mac (the 2026-09-18 session: no test saw them, and the window list
+--                  did not change), nor anything of a Kontakt nested in Komplete Kontrol, which
+--                  is a leaf to accessibility; those wait for a picture test of their own.
+--   nativePopup    any menu the operating system draws over Kontakt; one flag read.
+--
+-- IN A DAW, accessibilityAfterPress instead: the same question, asked only from a press of a
+-- control that opens a menu (the snapshot dropdown, Kontakt 7's VIEW) until that menu has
+-- closed, the user is back on one of the overlay's own keys, or the overlay leaves the front.
+-- On 2026-09-26 a Menu element appeared in an embedded Kontakt 8's tree when the snapshot
+-- dropdown was pressed on Cinematic Studio Strings and stayed for over a minute, through a
+-- switch to another application. Counted by the plain test, such an element would keep every
+-- overlay over that Kontakt out — no hotkeys, Tab and Return going to Kontakt — for as long as
+-- it exists; counted by this one, only until the user leaves the plug-in and comes back. What
+-- it gives up is a menu no control of the overlay opened, and no log shows keys ever going into
+-- a menu of an embedded Kontakt that way. The STANDALONE Kontakt keeps the plain test: its File
+-- menu is opened by the screen reader as well (VoiceOver on the Mac, 2026-09-18).
+--
+-- The cell inside Komplete Kontrol asks KK's tree, not Kontakt's (the nested Kontakt is a leaf),
+-- and carries KK's own menu (its chrome's "Komplete Kontrol menu"). No log has yet said which
+-- test sees that one, so it also keeps the window-list test the old watch ran after every press.
+local MENUS_IN_DAW = { O.menuTests.nativePopup, O.menuTests.accessibilityAfterPress }
+local MENUS_STANDALONE = { O.menuTests.nativePopup, O.menuTests.accessibility }
+local MENUS_IN_KK = { O.menuTests.nativePopup, O.menuTests.accessibility, O.menuTests.newWindow }
+
 -- A bare Kontakt of this version, with no Komplete Kontrol wrapping it. The `not isKK`
 -- matters: a KK container reports the nested "Kontakt N" name in its own subtree, so an
 -- identity check alone would match KK too. And `not inOwnDialog`: one of Kontakt's own
@@ -164,7 +195,7 @@ for vIdx, v in ipairs(D.VARIANTS) do
       -- Relational (it asks whether a KK is also present), so it must NOT be cached per
       -- HWND: a Kontakt's handle is stable while a KK is loaded around it.
       cacheIdentity = false,
-    }, { slot = SLOT, menus = true }),
+    }, { slot = SLOT, menus = MENUS_IN_DAW }),
     frame = D.constantFrame(ox, oy),
   }, { __index = common })
 
@@ -180,7 +211,7 @@ for vIdx, v in ipairs(D.VARIANTS) do
         control = D.QT_PLUGIN,
         identify = kkHostingVersion(vIdx),
         cacheIdentity = false,
-      }, { slot = SLOT, menus = true }),
+      }, { slot = SLOT, menus = MENUS_IN_KK }),
       frame = D.kkContentFrame(ox, oy),
     }, { __index = common })
   end
@@ -188,7 +219,8 @@ for vIdx, v in ipairs(D.VARIANTS) do
   local standalone = {
     key = v.name .. " standalone",
     where = "standalone",
-    binding = O.window(standaloneWindow(v.name), { slot = STANDALONE_SLOT, menus = true }),
+    binding = O.window(standaloneWindow(v.name),
+      { slot = STANDALONE_SLOT, menus = MENUS_STANDALONE }),
     frame = D.constantFrame(ox, oy),
   }
   -- On macOS the rack question has no honest answer, so the controls that depend on it are

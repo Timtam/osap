@@ -14,6 +14,9 @@ mod cells;
 /// The golden test of `cells` against an outside reader's own vectors (local data only).
 #[cfg(test)]
 mod cells_golden_tests;
+/// The overlay runtime's menu tests (modules/overlay-runtime), run against a scripted host.
+#[cfg(test)]
+mod overlay_menu_tests;
 mod gui;
 mod image_search;
 /// One running copy per user: the lock, and the request a second start sends — see the file.
@@ -5240,8 +5243,8 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     )?;
     // host.keys.passedThrough() -> { {vk, mask, key} } — the captured keys the hook let
     // through to the application because a menu was open, since the last call. Drained on
-    // read. The menu watch asks on its tick: a Return or Escape in here means the menu is
-    // closing, which on a platform where nothing can see the menu is the only word it gets.
+    // read. The overlay runtime asks on its menu tick and logs what reached an open menu, and
+    // whether the menu was still there after an Escape.
     let sh = shared.clone();
     keys.set(
         "passedThrough",
@@ -5497,6 +5500,11 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             }
         })?,
     )?;
+    // host.window.foreground() -> { id, pid, shown }? — the window the keyboard goes to now,
+    // shown or not, asked afresh on every call. Deliberately NOT through the observation
+    // cache `active` uses: see `foreground_fn`.
+    let sh = shared.clone();
+    win.set("foreground", foreground_fn(lua, move || sh.backend.foreground_window())?)?;
     // host.window.controls(win?) — child controls (class + geometry) of a window
     // (the active one if omitted), for detecting embedded plugins.
     let sh = shared.clone();
@@ -8334,6 +8342,105 @@ fn win_to_table(lua: &Lua, w: &WinInfo) -> mlua::Result<Table> {
     t.set("client", cl)?;
 
     Ok(t)
+}
+
+/// `host.window.foreground()`, over whatever `read` asks — the backend in the host, a script
+/// in the tests below.
+///
+/// **Asked on every call, never kept.** Everything else that says which window is in front
+/// (`active`, `focusChain`) is kept for the epoch, and an epoch is not turned over by a
+/// `host.timer.every` tick or by a window that hides without an event. That is how a
+/// diagnostic run of 2026-09-27 came to report Komplete Kontrol's menu window as in front
+/// after it had hidden: the answer was from before. A question whose whole point is
+/// such a change cannot be answered from a store that only an event refreshes, so this one
+/// has none, and what it asks is cheap enough not to need one: local on Windows, two
+/// accessibility reads on macOS (see `Backend::foreground_window`).
+///
+/// No OCR barrier either: it reads, it does not act.
+fn foreground_fn(lua: &Lua, read: impl Fn() -> Option<backend::Foreground> + 'static) -> mlua::Result<Function> {
+    lua.create_function(move |lua, ()| {
+        let t = Instant::now();
+        let f = read();
+        slow_observation("window.foreground", "", t);
+        let Some(f) = f else { return Ok(None) };
+        let out = lua.create_table()?;
+        out.set("id", f.id)?;
+        out.set("pid", f.pid)?;
+        out.set("shown", f.shown)?;
+        Ok(Some(out))
+    })
+}
+
+#[cfg(test)]
+mod foreground_binding_tests {
+    use super::ocr_wiring_tests::{bindings, body};
+    use super::*;
+
+    /// The shape a module sees, and that every call asks: three answers in one epoch are three
+    /// readings, a hidden window included, and nothing in front is `nil`.
+    #[test]
+    fn every_call_asks_and_the_answer_is_id_pid_and_shown_or_nil() {
+        let lua = Lua::new();
+        let script = Rc::new(RefCell::new(vec![
+            Some(backend::Foreground { id: 8327976, pid: 4242, shown: true }),
+            Some(backend::Foreground { id: 8327976, pid: 4242, shown: false }),
+            None,
+        ]));
+        let asked = Rc::new(Cell::new(0));
+        let (s, a) = (script.clone(), asked.clone());
+        let f = foreground_fn(&lua, move || {
+            a.set(a.get() + 1);
+            s.borrow_mut().remove(0)
+        })
+        .unwrap();
+        lua.globals().set("foreground", f).unwrap();
+        let seen: String = lua
+            .load(
+                r#"
+                local out = {}
+                for i = 1, 3 do
+                  -- Arguments are ignored, as window.md says.
+                  local f = if i == 2 then foreground("ignored", 42) else foreground()
+                  if f == nil then
+                    out[#out + 1] = "nil"
+                  else
+                    local keys = {}
+                    for k in pairs(f) do keys[#keys + 1] = k end
+                    table.sort(keys)
+                    out[#out + 1] = table.concat(keys, ",") .. "=" .. tostring(f.id) .. "/"
+                      .. tostring(f.pid) .. "/" .. tostring(f.shown) .. "/" .. type(f.shown)
+                  end
+                end
+                return table.concat(out, " ")
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(
+            seen,
+            "id,pid,shown=8327976/4242/true/boolean id,pid,shown=8327976/4242/false/boolean nil"
+        );
+        assert_eq!(asked.get(), 3, "asked on every call");
+    }
+
+    /// The binding in `install_host_api` asks the backend's `foreground_window` and nothing
+    /// else: no observation cache, which would hand a tick the answer from before a window hid,
+    /// and no epoch turnover, which is for calls that act.
+    #[test]
+    fn the_binding_reads_the_backend_fresh_and_turns_nothing_over() {
+        const LIB: &str = include_str!("lib.rs");
+        let api = body(LIB, "fn install_host_api(");
+        let (_, text) = bindings(api, "win").into_iter().find(|b| b.0 == "foreground").expect("host.window.foreground");
+        let text = text.split("// host.window.controls").next().unwrap();
+        assert!(text.contains("foreground_fn(lua, move || sh.backend.foreground_window())"), "{text}");
+        for not in ["observations", "bump_epoch", "bump_input_epoch", "ocr_barrier"] {
+            assert!(!text.contains(not), "host.window.foreground reaches `{not}`: {text}");
+        }
+        let f = body(LIB, "fn foreground_fn(");
+        for not in ["observations", "bump_epoch", "ocr_barrier"] {
+            assert!(!f.contains(not), "foreground_fn reaches `{not}`");
+        }
+    }
 }
 
 /// Where `host.ocr.read`'s rules meet the event loop: the input barrier, the interactive lane,

@@ -44,9 +44,9 @@ local O = host.require("com.platform.overlay")
 local ov = O.new("sforzando")   -- the name announced when the overlay comes up
 ov:addOCRButton({ label = "Instrument", region = { 90, 22, 200, 36 }, opensMenu = true })
 ov:addOCRButton({ label = "Polyphony", region = { 486, 40, 516, 70 }, opensMenu = true })
--- `menus = true`: while sforzando's own pop-up list is open, the keys belong to it.
+-- `menus`: how sforzando's own pop-up list is seen, so the keys belong to it while it is open.
 ov:attach({ title = { contains = "sforzando" }, windows = { class = "PLGWindowClass" } },
-  { menus = true })
+  { menus = { O.menuTests.nativePopup, O.menuTests.newWindow } })
 ```
 
 ## O\:addStaticText(label) {#o-addstatictext}
@@ -70,7 +70,7 @@ ov:addStaticText({
 
 ## O\:addHotspotButton(opts) {#o-addhotspotbutton}
 
-Appends a button that, when activated, clicks a fixed origin-relative point. `opts: { label: string, at: {number, number}, hotkey: string?, rawOrigin: boolean?, fromRight: boolean? }` — `at` is `{x, y}` relative to the origin; `hotkey` is an optional global activation hotkey spec (e.g. `"Alt+P"`).
+Appends a button that, when activated, clicks a fixed origin-relative point. `opts: { label: string, at: {number, number}, hotkey: string?, rawOrigin: boolean?, fromRight: boolean?, opensMenu: boolean? }` — `at` is `{x, y}` relative to the origin; `hotkey` is an optional global activation hotkey spec (e.g. `"Alt+P"`); `opensMenu` says the click puts a menu on screen (see [`O.menuTests`](#o-menutests)).
 
 Returns `{ kind = "hotspot", label, at, text, hotkey, rawOrigin, fromRight, opensMenu, when }`. On activate it clicks `(origin.x + at[1], origin.y + at[2])` and speaks `"label, activated"`.
 
@@ -128,7 +128,7 @@ local HOSTED = O.embedded({
     control = "Qt%d+.-QWindowIcon",
     identify = identifyHost,
     cacheIdentity = false,
-}, { slot = SLOT, menus = true })
+}, { slot = SLOT, menus = { O.menuTests.nativePopup, O.menuTests.accessibility } })
 
 base:bind(HOSTED, { specificity = O.layer.base })
 dialog:bind(HOSTED:with({ control = "^NIChildWindow%x+$", identify = present,
@@ -371,14 +371,14 @@ self:watch({
 
 ## O\:addOCRButton(opts) {#o-addocrbutton}
 
-Appends a button whose label/value is read live by OCR over a region; activating re-reads it then clicks the region centre. `opts: { label: string, region: {number, number, number, number}, hotkey: string? }` — `region` is `{x1, y1, x2, y2}` origin-relative.
+Appends a button whose label/value is read live by OCR over a region; activating re-reads it then clicks the region centre. `opts: { label: string, region: {number, number, number, number}, hotkey: string?, readOnly: boolean?, opensMenu: boolean? }` — `region` is `{x1, y1, x2, y2}` origin-relative; `readOnly` re-reads on activation and never clicks; `opensMenu` says the click puts a menu on screen (see [`O.menuTests`](#o-menutests)).
 
-Returns `{ kind = "ocr", label, region, hotkey }`. When focused/spoken it appends the OCR text (or `"no text"`) as the value.
+Returns `{ kind = "ocr", label, region, hotkey, readOnly, opensMenu, when }`. When focused/spoken it appends the OCR text (or `"no text"`) as the value.
 
 ```luau
 -- u-he draws its whole interface itself: the preset name exists nowhere but on screen.
--- Focusing reads it; pressing opens u-he's own preset menu, which `opensMenu` hands the
--- keys to.
+-- Focusing reads it; pressing opens u-he's own preset menu, and `opensMenu` makes the
+-- overlay's menu tests look for it at once (see O.menuTests).
 ov:addOCRButton({ label = "Preset menu", region = { 480, 20, 720, 48 },
   hotkey = "Alt+M", opensMenu = true })
 
@@ -472,7 +472,7 @@ end)
 
 ## O\:attach(matcher, opts) {#o-attach}
 
-Binds the overlay as a **standalone** context: active while a window matching `matcher` is the foreground/active window, with coordinates relative to that window's client area. `matcher` is a window matcher passed to `host.window.test`; `opts: { hoverToRead: boolean? }?`.
+Binds the overlay as a **standalone** context: active while a window matching `matcher` is the foreground/active window — or while the overlay holds its place over its own menu, a window of the same application in front after one of its controls opened it, in which one of its tests sees a menu (see [`O.menuTests`](#o-menutests)) — with coordinates relative to that window's client area. `matcher` is a window matcher passed to `host.window.test`; `opts: { hoverToRead: boolean?, menus: {MenuTest}?, slot: string?, specificity: number?, pollMatch: number? }?` — `menus` is described under [`O.menuTests`](#o-menutests), and `slot`, `specificity` and `pollMatch` as for [`attachEmbedded`](#o-attachembedded).
 
 While active, the overlay captures and suppresses the navigation keys, scoped to its own window (so `Alt+Tab` and menus pass through natively): `Tab` / `Shift+Tab` move between controls, `Return` and `Space` activate the focused control, and — when the overlay has a tab control — `Left`/`Right`, `Ctrl+Tab`/`Ctrl+Shift+Tab` and `Ctrl+<n>` drive it (the first two are Control+Tab on a Mac, see [below](#o-attach-macos)). `Space` is released while an editable field (an `ocredit` control) is focused, so a literal space can be typed into it. On activation the overlay starts at its first control (and any tab control at its first tab) when a **genuinely new** window opened, but resumes the last-focused control when the *same* still-open window merely regained the foreground (`Alt+Tab` out and back); the two are told apart by the window's identity (its HWND). `hoverToRead` (default `false`) moves the mouse onto an OCR control on focus (some UIs only reveal values on hover). Registers the foreground/focus trigger once. Returns nothing.
 
@@ -482,15 +482,15 @@ ov:attach({
   app = { exe = { contains = "Melodyne" } },
   windows = { class = "GNWindowDoc" },
 }, {
-  -- Melodyne has a native menu bar: while a menu is open the captured navigation keys
-  -- have to reach it rather than steer the overlay.
-  menus = true,
+  -- Melodyne has a native menu bar: while one of its menus is open the keys have to reach
+  -- it rather than steer the overlay, and a menu the system draws is what nativePopup sees.
+  menus = { O.menuTests.nativePopup },
 })
 
 -- Sharing an arbiter slot with other overlays over the same window, and re-checking the
 -- gate on a timer because a panel can open and close with no window event at all:
--- settings:attach(on_ear, { menus = true, slot = ON_EAR_SLOT,
---                           specificity = O.layer.dialog, pollMatch = 500 })
+-- settings:attach(on_ear, { menus = { O.menuTests.nativePopup, O.menuTests.newWindow },
+--                           slot = ON_EAR_SLOT, specificity = O.layer.dialog, pollMatch = 500 })
 ```
 
 ### Windows {#o-attach-windows}
@@ -507,7 +507,9 @@ Binds the overlay as an **embedded** context: active while keyboard focus is ins
 
 `spec: { hosts: {Matcher}?, host: Matcher?, control: string, identify: ((control) -> boolean)? }` — `hosts` is the list of acceptable DAW host-window matchers (falls back to `{ spec.host }`); `control` is a Luau pattern matched against candidate child/focus-chain control class names; `identify(control)` is an optional confirmation callback (UIA / OCR / image search), cached per control HWND, used because a host's plugin control class often matches any plugin (e.g. REAPER's `Plugin<ptr>`). Candidates come from `host.window.controls()` plus the `host.window.focusChain()`.
 
-`opts: { hoverToRead?, slot: string?, specificity: number?, pollMatch: number? }` — `hoverToRead` and the navigation / focus-reset behaviour are as in `attach`. With `slot` the overlay joins the host **arbiter** for that slot at `specificity` (a base and the overlays inheriting it pass the same slot; the most-specific *matching* one is active — see `host.arbiter`); `pollMatch` (ms) additionally re-checks the match on a recurring timer, for matches that change with no window event (a library landmark appearing inside an already-focused plugin). Returns nothing.
+`opts: { hoverToRead?, menus?, slot: string?, specificity: number?, pollMatch: number? }` — `hoverToRead`, `menus` and the navigation / focus-reset behaviour are as in `attach`. With `slot` the overlay joins the host **arbiter** for that slot at `specificity` (a base and the overlays inheriting it pass the same slot; the most-specific *matching* one is active — see `host.arbiter`); `pollMatch` (ms) additionally re-checks the match on a recurring timer, for matches that change with no window event (a library landmark appearing inside an already-focused plugin). Returns nothing.
+
+As with `attach`, the overlay also stays active while it holds its place over its own menu — a window of the same application in front after one of its controls opened it, in which one of its tests sees a menu (see [`O.menuTests`](#o-menutests)). When that ends, the match above decides again, exactly as for any other window change; if the keyboard is still in the menu's own window and that window is not shown, the window of the press is brought back first, once.
 
 ```luau
 -- REAPER names every plug-in window "Plugin<pointer>", so the class alone matches ANY
@@ -519,7 +521,7 @@ ov:attachEmbedded({
   identify = function(ctrl)
     return host.element.find(ctrl.id, "PlogueXMLGUI", host.element.type.Pane) ~= nil
   end,
-}, { slot = SLOT, specificity = O.layer.base, menus = true })
+}, { slot = SLOT, specificity = O.layer.base, menus = { O.menuTests.nativePopup } })
 ```
 
 ### Windows
@@ -548,6 +550,107 @@ control = {
   end,
 }
 ```
+
+## O.menuTests — seeing a plug-in's menus {#o-menutests}
+
+**Signature:** `menus = { test, … }` in the options of `O:attach`, `O:attachEmbedded`, `O.window` and `O.embedded`, where each `test` is `(o: Overlay, answer: (seen: any) -> ()) -> ()` or `{ name: string?, cheap: boolean?, test: (o, answer) -> (), pressed: ((o) -> ())?, forget: ((o) -> ())? }` · the building blocks `O.menuTests.nativePopup`, `O.menuTests.newWindow`, `O.menuTests.accessibility`, `O.menuTests.accessibilityAfterPress`
+
+The tests that tell an overlay its plug-in has a menu open, listed in its `menus` option; while a menu is open, the keys belong to it. The overlay gives up its per-control hotkeys — a registered hotkey outranks the application, so `Alt+M` would otherwise re-fire the control under the menu — and tells the key hook through [`host.keys.menuOpen`](keys.md#host-keys-menuopen) to let the navigation keys it captures (`Tab`, `Return`, `Space` and whatever the focused control holds) through to the application. **How a menu is seen is the module's decision**: the module names the tests, and the runtime runs them. ReaHotkey does the same with one fixed check, `WinExist("ahk_class #32768")`; a plug-in that paints its own menu needs a check of its own, and only its module knows which.
+
+A test answers one question — *is a menu open over this overlay's plug-in right now?* — by calling `answer(seen)` exactly once per call, at once or later. Any value other than `nil` and `false` counts as seen, so a search's hit can be handed straight on. `o` is the overlay, so `o:origin()` is the plug-in's window or control. A synchronous check answers before it returns; a test that starts [`host.screen.imageSearchAsync`](screen.md#host-screen-imagesearchasync), `matchCellsAsync` or `snapshotAsync` answers from the callback, which the runtime receives on the main thread like every callback. A bare function is a test named `test <n>` after its place in the list and is not cheap. The table form adds:
+
+- `name` — what the log calls it. Default `test <n>`.
+- `cheap = true` — may run on every tick even when nothing was pressed (see below). Default `false`.
+- `pressed(o)` — called when a control with `opensMenu` is activated, before it acts: for a test that compares against that moment.
+- `forget(o)` — called when the user presses one of the overlay's own keys (a navigation key or a hotkey) while no menu counts as open — so the last press opened nothing that took the keys — when the overlay leaves the front, and when the plug-in has the keyboard again after the overlay held its place over a menu that was a window in front (see below): a comparison against that press ends there.
+
+`opensMenu = true` on a control ([`addHotspotButton`](#o-addhotspotbutton), [`addCustomButton`](#o-addcustombutton), [`addOCRButton`](#o-addocrbutton), `addGraphicalButton`) says that activating it puts a menu on screen. It makes the tests run on every tick for a while, calls their `pressed`, and in a calibrating run takes the [menu shots](calibrating.md#host-calibrating). It never counts a menu as open by itself.
+
+**The runtime has no timer that decides whether a menu is open.** Each test has a *word*: from the answer that saw a menu, it says one is open, and it stops saying so once it has answered no **twice in a row** — one missed read is not a close, because an answer can be a moment old (the accessibility walk can hand a tick the previous tick's answer) or catch a menu mid-redraw. A menu counts as open while any test's word is that it is, and closes when none says so any more. When it opens the overlay hands its keys over once, and when it closes it takes them back once, however long the menu stays up. **A menu no test sees gets no pass-through**: the overlay keeps its keys while it is up, exactly as if there were no menu. Nothing below the runtime decides it by time either: the host's `nativeMenuOpen` counts a menu open until it closes (see [macOS](#o-menutests-macos)).
+
+**When the tests run** sets only how often they are asked, never what they decide. The runtime ticks every 150 ms, on the main thread. On each tick, for each overlay in front:
+
+- every test runs for 8 seconds after a control with `opensMenu` was activated, and for as long as a menu counts as open;
+- otherwise a test declared `cheap` runs on every tick, and each of the others once 8 ticks (about 1.2 s) have passed since it was last asked, so a menu opened some other way — the user's screen reader, a key that went to the plug-in — is still noticed;
+- while the word of a `cheap` test is that a menu is open, the others are not asked at all: they could only agree.
+
+**A test that has not answered yet** is not asked again until it does. It holds up none of the other tests, and its word stands meanwhile, so a slow test does not make a menu it sees flicker. There is no timeout: a test that never answers again after seeing a menu keeps that menu open until the overlay leaves the front, and the log names a test whose answer has been outstanding for 20 ticks. A test that raises has answered no, and a second answer to one question is ignored; each is logged once per test. When the overlay leaves the front every word is dropped and the state starts again from nothing; an answer that arrives later for a question asked before that is ignored.
+
+**One timer per module.** The overlays of a module share it, and while a menu counts as open over any of them, every one of them that is in front gives up its hotkeys: the pass-through is one flag for the whole application.
+
+**A menu that is a window in front.** Some menus are windows of their own that come to the front — Komplete Kontrol's own menu in REAPER is a popup titled "Komplete Kontrol", a window of `reaper.exe`. The overlay's binding no longer matches then (its window is not in front), but it does not leave the front: it **holds its place** over its own menu. Activating a control with `opensMenu` records the window in front and its process — the *press*.
+
+- **On the menu.** A window in front that is not the one of the press, but belongs to the same process, is held when one of the overlay's tests sees a menu **there and then**: the tests are asked at that moment, so `newWindow` sees the popup at once, and only an answer that sees a menu counts. The *word* does not: it says "open" for one more miss after a menu has closed, and a dialog an item of a native menu opened — Komplete Kontrol standalone's Preferences, which has an overlay of its own — is no menu of this overlay's; the overlay leaves the front for it as it always did. A test that answers only later (from a callback) cannot hold a window, so a module whose menu is a window lists a synchronous test that sees it: `newWindow`. Held, the overlay stays in front but holds **no keys at all** while that window is: no navigation key, no hotkey, and no say in the pass-through flag ([`host.keys.menuOpen`](keys.md#host-keys-menuopen)), so the window's keys are its own — whatever it leads to: a dialog opened from the menu may have an overlay of its own. Its tests run on, and each window event asks them again. Its origin stays the plug-in as it was at the press, and a [gate](#o-gate) is not asked meanwhile. It keeps its claim on its arbiter slot, so an overlay of the same or a lower specificity on that slot does not win a window the menu opened until the hold ends.
+- **When the hold ends** — the window in front is another application's (`Alt+Tab`), the window of the press, a window of the same application in which no test sees a menu now, or nothing once the tests no longer see the menu — the binding's own match decides, **exactly as for any other window change**. That is ReaHotkey's rule as well: its plug-in context is REAPER's FX window in front with the plug-in's control found in it. With the keyboard in the plug-in the overlay is still in front and has its keys again: its navigation keys at once, scoped to its window, and its hotkeys when its tests stop seeing the menu, as for any menu; the tests forget the press there, so a window the menu opened that is still up is no longer a menu, and for `newWindow` the hotkeys are back by the next tick — until then the navigation keys pass through. With the keyboard anywhere else — on REAPER's FX window itself, which its [chrome gate](#o-attachembedded) counts as REAPER's own — the overlay leaves the front, and comes back through an ordinary activation, which speaks its control, once the keyboard is in the plug-in. A gate is asked again. A window that comes up with no press behind it, or once the press is forgotten — the overlay's own next key with no menu open, leaving the front, the plug-in having the keyboard again after a hold, or the next press — is never held.
+- **The keyboard left in the menu's own window.** A plug-in can hide its menu's window instead of closing it, and the keyboard can stay in that window while nobody can see it. Komplete Kontrol in REAPER is the case this was built for: after `Escape` the first key was lost, and the overlay came back only about four seconds later, when REAPER's FX window was in front again — most likely because KK only hid its menu's window and the key went into it; that has not been measured. [`host.window.active()`](window.md#host-window-active) cannot show that state: it reports a hidden window as none, and answers from what was read in the current epoch. [`host.window.foreground()`](window.md#host-window-foreground) can: the foreground window, shown or not, read afresh. So when a hold ends because no test sees the menu any more, the runtime asks it, and when the foreground window is the **menu's own window** — the first one the hold was over after the press, of the press's process — and it is **not shown**, the runtime brings back the window that was in front at the press with [`host.window.focus`](window.md#host-window-focus) — **once per press**, whatever the answer — and asks the binding's own match again at once; from there it is as above. First it checks that the window of the press is still listed by [`host.window.list`](window.md#host-window-list) for its process with its class, because a menu item can close it and Windows reuses a gone window's id; `list` lists titled windows only, so an untitled window of the press is never brought back. If it is not listed, or the listing fails, nothing is brought back, and the log says so. Nothing is announced: the log line gives the platform's answer, `accepted` or `declined`, and whether the overlay is back is the match's to say. On Windows an accepted request is completed when REAPER's thread gets to it, so the match asked at once most likely still finds the hidden window in front — nothing, to `active()` — and the overlay leaves the front, unless the word still says the menu is open; REAPER's foreground event, when the change is made, brings it back with the keyboard in the plug-in, through an activation that speaks its control. Nothing is brought back when the foreground window is shown, or is any other window — a dialog the menu led to, a submenu that is a window of its own, another of the same application, the window of the press, another application's — or when there is none, or it cannot be read (the call raises, or on a Mac the application does not answer); the reading is then logged instead, once per press. The menu's own window getting the keyboard back after a dialog it led to has closed does count: it is still the menu's window, not shown. The step runs when the hold ends: with `newWindow` that is the tick that closes the menu, at its second miss; an overlay with `pollMatch` can reach it on its poll's first miss, while the word still says open, because the poll asks the tests itself and a hold needs a test seeing the menu there and then — `shown = false` is what keeps one missed reading of a menu that is still up from bringing anything back.
+
+No timer decides any of it: the window in front, the press, the tests' answers and the window that gets the keyboard do. With nothing in front — the moment between a popup closing and its owner coming back — a hold over a menu the tests still see stands until a window is. Only an overlay with menu tests holds its place.
+
+`menus = true` **raises** when the overlay is bound, with a message naming the building blocks. So does anything that is not a list of tests, a list with a gap in it (a `nil` before another entry, which is what a misspelt name leaves), and a `pressed` or `forget` that is not a function; reading a name that `O.menuTests` does not have raises as well. `menus = false`, `{}` or no `menus` means no tests: nothing runs, and a control declared with `opensMenu` on such an overlay is reported when the overlay binds.
+
+The log lines start with `[menu]`: which test saw a menu first, which control's press it followed (or that none did), and the keyboard focus at that moment ([`host.window.focusChain`](window.md#host-window-focuschain)`()[1]`); the keys that went through to an open menu; whether the menu was still seen two ticks after an `Escape` went through; a test that has not answered for 20 ticks; and, when the menu closed, how long it counted as open. For a menu that is a window in front: `… came to the front after '<control>' was pressed and a test sees a menu — the overlay holds its place while it is up, holding no keys`; `the plug-in has the keyboard again` when a hold ends with the binding matching; `no longer holding its place — in front now: …` when it ends any other way, naming what [`host.window.active()`](window.md#host-window-active) answers — which can be a window read earlier in the epoch that has hidden since, so it does not say where the keyboard was; `no test sees the menu any more; the keyboard goes to id=<id> of pid <pid>, shown` (or `not shown`, or `no window the platform names`, or `a window that could not be read (<reason>)`) `, and the menu's window '<title>' (<exe>) is id=<id> of pid <pid> — nothing is brought back`, which does, when a hold ends with no test seeing the menu and nothing is brought back; and `no test sees the menu any more, but its window '<title>' (<exe>) still gets the keyboard and is not shown — bringing back '<title>' (<exe>), where '<control>' was pressed: accepted` — or `declined`, followed by the reason when the call raised — or, when the window of the press is not found, `… is not shown — the window of the press, '<title>' (<exe>), is not listed for its process with its class (gone, untitled, or its id now another window's), so nothing is brought back`, or `… could not be looked for (<reason>), so nothing is brought back`. The overlay's `[keys] … gave up its per-control hotkeys (menu open)` and `… took back …` lines mark the hand-over itself.
+
+The building blocks are tests like any other, to be listed where they see a plug-in's menus:
+
+| Block | Sees | Cost | Cheap |
+| --- | --- | --- | --- |
+| `O.menuTests.nativePopup` | A menu the operating system drew, open in the application in front. | One flag read, [`host.keys.nativeMenuOpen`](keys.md#host-keys-nativemenuopen). | yes |
+| `O.menuTests.newWindow` | A window of the plug-in's process that was not there when a control with `opensMenu` was activated: a popup menu drawn as a window of its own. The process is settled at that press and kept. It compares only after such a press, and stops when the windows that appeared have all gone, at `forget`, and at the next press, which starts a new comparison. While it compares, **any** new window of that process counts — a dialog as well as a menu, whether it takes the front or not; one that takes the front keeps the overlay holding its place, with no keys, until it is gone (above). A menu no control of the overlay opened is not seen. | One [`host.window.windowsOf`](window.md#host-window-windowsof) of one process per tick while it compares, nothing otherwise. | yes |
+| `O.menuTests.accessibility` | An element of the Menu type anywhere in the plug-in's accessibility tree, [`host.element.find(origin, "", host.element.type.Menu)`](element.md#host-element-find). An element that stays in the tree while nothing is drawn counts as a menu for as long as it is there. | A walk of the plug-in's whole tree: measured at 50–194 ms on Windows. Answered once per [epoch](timer.md#host-epoch), which a tick does not turn over, so a tick can get the previous tick's answer. | no |
+| `O.menuTests.accessibilityAfterPress` | What `accessibility` sees, asked only from the activation of a control with `opensMenu` until that press is done with: the menu it opened was seen and has closed (answered no twice in a row), one of the overlay's own keys arrived with no menu open, the overlay left the front, or the plug-in has the keyboard again after the overlay held its place over a menu that was a window in front. For a plug-in whose tree can hold a Menu element while nothing is open: such an element keeps the overlay out only until the user leaves the plug-in and comes back. A menu no control of the overlay opened is not seen. | The same walk from a press until it is done with, nothing otherwise. | no |
+
+A menu the plug-in paints inside its own window, with no element for it, is seen by none of them — the window list does not change and nothing is announced. That is what a module's own test is for: take the menu shots in a calibrating run, then test a pixel or an image that only an open menu has.
+
+```luau
+-- sforzando: a native popup on Windows, a window of its own on a Mac.
+ov:attach(sforzando, { menus = { O.menuTests.nativePopup, O.menuTests.newWindow } })
+
+-- Kontakt in a DAW: its Qt menus are Menu elements, but its tree can keep one while nothing
+-- is open, so the walk is asked only after a press of the snapshot dropdown or VIEW.
+kontakt:attachEmbedded(spec, { menus = { O.menuTests.nativePopup, O.menuTests.accessibilityAfterPress } })
+
+-- Komplete Kontrol in a DAW: its own menu is a popup window of the DAW's process that comes to
+-- the front. newWindow sees it, so the overlay holds its place while it is up, holding no keys;
+-- once it has closed, the binding's own match decides.
+kk:attachEmbedded(spec, { slot = SLOT,
+  menus = { O.menuTests.nativePopup, O.menuTests.accessibility, O.menuTests.newWindow } })
+
+-- A module's own test, one pixel: a plug-in whose list, while it is open, has a white border
+-- at content point (412, 140) — the kind of point read off the menu shots. A pixel read costs
+-- one compositor frame (~16.7 ms on Windows), so it is not declared cheap: every tick after a
+-- press and while the list is open, once in eight ticks otherwise.
+local list = {
+  name = "preset list",
+  test = function(o, answer)
+    local c = o:origin().client
+    local p = host.screen.pixel(c.x + 412, c.y + 140)
+    answer(p ~= nil and p.r > 200 and p.g > 200 and p.b > 200)
+  end,
+}
+
+-- And an image, answered from the search's callback: a hit counts as seen, nil as not.
+local fileMenu = {
+  name = "file menu",
+  test = function(o, answer)
+    local b = o:origin().bounds
+    host.screen.imageSearchAsync(host.path("images/FileMenu.png"),
+      { region = { b.x, b.y, b.x + b.w, b.y + b.h }, tolerance = 8 },
+      function(hit) answer(hit) end)
+  end,
+}
+
+ov:attachEmbedded(spec, { menus = { O.menuTests.nativePopup, list, fileMenu } })
+```
+
+### Windows {#o-menutests-windows}
+
+`nativePopup` is true while the foreground thread is in menu mode — a `#32768` popup menu, a menu bar, a window's system menu. A menu open in another application does not count. `newWindow` compares visible top-level windows of the process, tooltips left out, so a popup the toolkit draws as a tool window of its own counts. `accessibility` and `accessibilityAfterPress` are a UI Automation search of the plug-in control's subtree for any element of the Menu type, with no visibility test: a Qt menu is seen while it is up, and so is any menu a plug-in keeps in its tree while hidden.
+
+Holding its place: a window is "in front" when it is the foreground window. A `#32768` menu and a menu bar's menus do not become it, so an overlay never needs to hold its place for them; a toolkit's popup that takes the foreground does — Komplete Kontrol's in REAPER (2026-09-26). That window is a full-screen one of `reaper.exe`, and after `Escape` Komplete Kontrol most likely only hides it: no foreground event came for about four seconds, which a destroyed window would most likely have caused — not measured. While a hidden window is the foreground window, [`host.window.foreground()`](window.md#host-window-foreground) answers it with `shown = false` — hidden, minimised and cloaked all count as not shown — and `host.window.active()` answers `nil` once the epoch has turned over; until then it can still answer the window it read while that was shown. The window of the press is brought back with `SetForegroundWindow`, whose `true` means Windows accepted the request: the change is made when REAPER's thread gets to it, with a foreground event, and it does not put the keyboard on any particular control. Where the keyboard is afterwards is REAPER's to decide: in the plug-in, the overlay is in front with its keys; on the FX window itself or its FX list, which the [chrome gate](#o-attachembedded) counts as REAPER's own, it is out until the keyboard reaches the plug-in. The process is the window's `app.pid`: a bridged plug-in's popup is a window of the bridge process, so it is held when the window in front at the press belongs to the bridge as well (REAPER's own bridge window), and not when the bridged plug-in is drawn inside the host's FX window — the overlay then leaves the front for it as it always did.
+
+### macOS {#o-menutests-macos}
+
+`nativePopup` counts the frontmost application's `AXMenuOpened` / `AXMenuClosed` notifications: a menu counts as open from its opening notification until its closing one, however long it stays up, and the count is cleared when another application comes to the front (see [`host.keys.nativeMenuOpen`](keys.md#host-keys-nativemenuopen)). Holding its place asks [`host.window.active()`](window.md#host-window-active) for the window in front, so it applies when a plug-in's popup becomes the application's focused window. A popup that does not become it leaves the overlay's window in front, and holding its place has no part in what happens then: the binding's own match decides — with the function form of [`attachEmbedded`](#o-attachembedded), the accessibility focus on a menu item outside the plug-in's panel takes the overlay out, as any element outside it does. `host.window.active()` answers nil while the frontmost application has no window (the Finder after a click on the desktop): a hold over a menu the tests still see stands through that, and ends once they stop seeing it. The window that gets the keyboard is the frontmost application's focused window, and [`host.window.foreground()`](window.md#host-window-foreground) reports it as shown unless it is minimised, so a focused menu window brings nothing back here. While the application does not answer, `foreground()` is `nil`, and nothing is brought back either: the runtime does not act on a state it could not read, and does not call `host.window.focus` on an application that is not answering. The reading itself is still taken once at each hold that ends with no test seeing the menu: two accessibility reads of the frontmost application, which against one that has just stopped answering can take up to the one-second timeout once, on the main thread. If the window of the press is brought back, `host.window.focus` raises it and activates its application, and `true` means raised and in front, not that the keyboard is in it (see [`host.window.focus`](window.md#host-window-focus)). The function form of `attachEmbedded` reads an empty focus chain as "not in the plug-in", so the overlay is back once the chain names something inside the panel. `newWindow` compares on-screen windows by owning process with no filter at all, so a tooltip or a window at any level counts as well; an `NSMenu` sits at window level 101. `accessibility` and `accessibilityAfterPress` are special-cased by the host to "is a menu open in this application", without descending the menu bar. An application the host has found not answering is left alone for 5 seconds, and in that time the answer is no: a menu only these tests see then counts as closed after two ticks, and as open again once the application answers. The one-miss rule does not cover that.
 
 ## O\:gate(fn) / O\:landmark(image) {#o-gate}
 

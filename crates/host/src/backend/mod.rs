@@ -188,6 +188,29 @@ pub struct WindowSpot {
     pub h: i32,
 }
 
+/// The window the system gives the keyboard to, as `host.window.foreground()` reports it —
+/// shown or not.
+///
+/// Not a [`WinInfo`], on purpose. `active_window` answers "which window is in front", and a
+/// window nobody can see is not that: it reads a hidden one as none, and the host keeps its
+/// answer for the epoch. This answers the narrower question the other cannot: which window
+/// the keys go to right now, unless a hotkey or a hook takes them first. A window can hold the
+/// keyboard while it is not on screen — after Escape in Komplete Kontrol's menu the user's
+/// next key was lost (2026-09-27), and the likeliest reading of that log, not measured, is
+/// that KK only hid its menu's window and the key went into it — and the only way to see that
+/// is a reading that does not drop hidden windows and is not kept. So: identity and visibility
+/// only, as little asked as the platform allows (nothing of the application on Windows), and
+/// read afresh on every call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Foreground {
+    /// In the id space of [`WinInfo::hwnd`]: the HWND on Windows, the interned handle on
+    /// macOS, so it compares with `host.window.active().id` and is what `focus` takes.
+    pub id: isize,
+    pub pid: u32,
+    /// Whether the window is on screen, as far as the platform says: see `foreground_window`.
+    pub shown: bool,
+}
+
 /// A snapshot of a window's matchable properties (normalized across platforms).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WinInfo {
@@ -578,7 +601,7 @@ pub trait Backend {
 
     /// Every on-screen window this process owns, from the window manager rather than from
     /// accessibility — see [`WindowSpot`]. Cheap (one system-wide list, no cross-process
-    /// call) and asked by the overlay runtime's menu watch only while a menu is plausible.
+    /// call) and asked by the overlay runtime's `newWindow` menu test after a menu-opening click.
     fn windows_of(&self, _pid: u32) -> Vec<WindowSpot> {
         Vec::new()
     }
@@ -592,6 +615,25 @@ pub trait Backend {
     }
 
     fn active_window(&self) -> Option<WinInfo>;
+
+    /// The window that gets the keyboard now, shown or not — see [`Foreground`].
+    ///
+    /// Asked afresh on every call and never kept for the epoch: the one thing it exists to
+    /// tell is a change that has no event of its own (a window hidden while it keeps the
+    /// foreground). So it has to be cheap enough to ask whenever a caller wonders, and it asks
+    /// as little as the platform allows:
+    ///
+    /// - **Windows:** `GetForegroundWindow`, `GetWindowThreadProcessId`, `IsWindowVisible`,
+    ///   `IsIconic` and DWM's cloaked attribute — all local.
+    /// - **macOS:** the frontmost application's `AXFocusedWindow` and that window's
+    ///   `AXMinimized`, two reads of the application that answers them; `None` without asking
+    ///   while it is in the not-answering quarantine, and `None` when a read times out.
+    ///
+    /// `None`: no window has the keyboard, or it cannot be said which.
+    ///
+    /// No default body, like `active_window`: a backend that forgot it would answer `None`
+    /// forever, which reads exactly like "no window has the keyboard" and fails no test.
+    fn foreground_window(&self) -> Option<Foreground>;
 
     /// Brings a window to the front and gives it the keyboard.
     ///

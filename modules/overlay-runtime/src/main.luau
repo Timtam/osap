@@ -67,41 +67,6 @@ function O.doubleClick(x, y)
   end
 end
 
--- How long after a control that OPENS a menu fires the menu watch keeps looking for a
--- self-drawn one at full rate. Declared here rather than beside the watch because
--- _menuOpening (far above it) is what sets the deadline.
-local MENU_PLAUSIBLE_MS = 8000
--- How long a control's own claim that it opened a menu is believed without confirmation.
---
--- **Ended early wherever detection works**, so this number only ever governs a plugin whose
--- menu nothing can see. On Windows the detector confirms within a tick or two and its word
--- that the menu has gone is what closes the hold; there this is a floor for the moment a menu
--- takes to appear, and nothing more.
---
--- It was 2500 ms, and that was a safety-net number being asked to do a mechanism's job. The
--- macOS tester's log settles it: every single menu he opened logged "a control opened a menu
--- and no detector ever saw one" — sforzando's popup is not an `AXMenu`, so nothing on that
--- platform can see it, and the stopwatch IS the mechanism there. He reported the consequence
--- without recognising it as one: the pitchbend menu "doesn't track when I use arrows and
--- Enter anymore", while polyphony's still did. Not two menus behaving differently — two
--- durations. Under 2.5 seconds his Enter reached the menu; over it, the overlay had taken
--- Enter back and only VoiceOver's own VO+Space still committed. A longer list read out by ear
--- takes longer, which is why the longer menu was the one that broke.
---
--- 8000 ms is a guess, and deliberately the same guess as `MENU_PLAUSIBLE_MS` above: both are
--- answering "how long is a control's claim worth believing", and two different numbers for
--- one question would be two things to maintain. What it costs when wrong is bounded and
--- recoverable — a menu cancelled at once leaves the overlay's per-control keys quiet for up
--- to eight seconds. What the old number cost was not: a choice that silently never committed,
--- with nothing to tell the user why.
-local MENU_HOLD_MS = 8000
-local menuPlausibleUntil = 0
--- How long after Return or Escape went through to a menu that nothing can see the hold
--- keeps the keys given up. The menu closes on that key; the grace is for the plugin to take
--- it down before Tab and Return are claimed again. Only applies where no detector has
--- confirmed the menu — see watchMenus — so where one can see it, its word governs instead.
-local MENU_CLOSE_GRACE_MS = 300
-
 -- The width and height of an origin's CONTENT, which is what coordinates are measured
 -- against — `client` for a window that has a frame, falling back to the window rect for
 -- anything that does not report one. An embedded plugin's control is borderless, so the
@@ -353,10 +318,10 @@ function Overlay:addHotspotButton(opts)
   -- sub-tab, then click it. Making that one control keeps every action self-contained, so
   -- the user never has to navigate a tab structure they cannot see.
   -- `opensMenu`: activating this control puts a MENU on screen. Declared, because the
-  -- overlay cannot tell — and the moment a menu is up the overlay must stop owning keys, so
-  -- that Alt+P and the rest reach the menu instead of re-firing the control (see
-  -- Overlay:_menuOpening). The menu watch would notice within 150 ms anyway; this closes
-  -- that window at the only moment it is open.
+  -- overlay cannot tell. It makes the overlay's menu tests run on every tick for a while
+  -- after the press, and gives a test that compares against the moment before the click
+  -- (newWindow) its starting point — see the Menus section. It never counts a menu as open
+  -- by itself: only a test does that.
   return add(self, {
     kind = "hotspot",
     label = opts.label,
@@ -1885,9 +1850,9 @@ function Overlay:activate(index)
       return
     end
   end
-  -- Before the click, not after: the menu can be up by the time the click returns, and from
-  -- that instant the keys belong to it.
-  if c.opensMenu then self:_menuOpening() end
+  -- Before the click, not after: a test that compares with the moment before the click
+  -- (newWindow) needs its starting point from before the menu can exist.
+  if c.opensMenu then self:_menuOpening(c) end
   if c.kind == "hotspot" and c.points then
     -- Acknowledge at PRESS time, like every other control. Speaking after the last click
     -- instead would land hundreds of milliseconds late — indistinguishable from a key that
@@ -2141,6 +2106,17 @@ local function afterModifiersReleased(fn, tries)
   host.timer.after(15, function() afterModifiersReleased(fn, tries) end)
 end
 
+-- A key of the overlay's own, wrapped: before it does its work, the menu tests hear that the
+-- user is back in the overlay (Overlay:_menuOwnKey, in the Menus section). While a menu counts
+-- as open these keys are not delivered at all — they belong to the menu — so reaching this
+-- means no menu took the keys since the last press.
+local function ownKey(self, fn)
+  return function(...)
+    self:_menuOwnKey()
+    return fn(...)
+  end
+end
+
 -- (Re-)registers the per-control global hotkeys. Kept separate from the key CAPTURES,
 -- which must NOT be dropped and retaken on a re-sync: their release is token-scoped and
 -- shared with sibling overlays in the same module.
@@ -2195,7 +2171,7 @@ function Overlay:_syncControlHotkeys()
     if refused then
       skipped[#skipped + 1] = spec .. " (" .. refused .. ")"
     elseif self:_visibleClaimant(candidates) then
-      local ok, id = pcall(host.hotkey.register, spec, function()
+      local ok, id = pcall(host.hotkey.register, spec, ownKey(self, function()
         -- The claimant is resolved AFTER the wait, not before: the point of resolving at press
         -- time is that the visible set can have changed, and waiting is time in which it can.
         afterModifiersReleased(function()
@@ -2203,7 +2179,7 @@ function Overlay:_syncControlHotkeys()
           if i then self:_focusForHotkey(i) end -- visible already, so its `when` is not asked again
           self:activate(i or candidates[1])
         end)
-      end)
+      end))
       if ok then
         took[#took + 1] = spec
         self.controlHotkeys[#self.controlHotkeys + 1] = id
@@ -2248,7 +2224,8 @@ end
 -- indistinguishable from a broken tool. Unregistered, the key reaches the menu, which is
 -- where the user was aiming and what ReaHotkey does.
 --
--- Idempotent: the watch polls at 150 ms and calls this on every tick.
+-- Idempotent: the menu timer calls this on every tick, for every overlay of the module in
+-- front (see applyMenuState in the Menus section).
 function Overlay:_suspendControlHotkeys(suspend)
   if suspend == (self._hotkeysSuspended == true) then return end
   self._hotkeysSuspended = suspend
@@ -2271,71 +2248,17 @@ function Overlay:_suspendControlHotkeys(suspend)
   end
 end
 
--- The on-screen windows of the overlay's own process, keyed by the platform's window id,
--- or nil when the origin is not known. What the menu watch compares before and after a
--- control opens a menu — see watchMenus for why the window list, of all things.
-local function windowIdsOf(o)
-  local origin = o:origin()
-  local pid = origin and origin.app and origin.app.pid
-  -- An embedded origin is a CONTROL, and a control table carries no application. The
-  -- plugin's popup is a window of the host's process all the same — the plugin draws inside
-  -- that process — so the active window's process is the one to list.
-  if not pid then
-    local a = host.window.active()
-    pid = a and a.app and a.app.pid
-  end
-  if not pid then return nil end
-  local ids = {}
-  for _, w in ipairs(host.window.windowsOf(pid)) do ids[w.id] = w end
-  return ids
-end
-
--- Called the moment a control that OPENS a menu is activated, because the watch's 150 ms
--- poll is too slow to be the only answer: ReaHotkey does the same eagerly (Kontakt8.ahk:97
--- checks for the menu immediately after clicking the snapshot dropdown) rather than waiting
--- for its own timer.
-function Overlay:_menuOpening()
-  if not self.active then return end
-  host.keys.menuOpen(true)
-  self:_suspendControlHotkeys(true)
-  -- The window list as it stands BEFORE the click (this runs before it — see the call
-  -- site), so a window that is there afterwards and was not now can be told from the ones
-  -- that were always there. The watch does the comparing.
-  self._menuBaseline = windowIdsOf(self)
-  self._menuPopup = nil
-  self._menuHoldCut = nil
-  -- Tells the menu watch that a self-drawn menu is now plausible, so its expensive
-  -- accessibility walk is worth running at full rate for a while. Outside that window the
-  -- walk drops to a backstop cadence — see watchMenus for what it costs.
-  menuPlausibleUntil = host.now() + MENU_PLAUSIBLE_MS
-  -- And a FLOOR, not only a hint. The watch lowers the flag on the first tick that sees no
-  -- menu, so on a platform where nothing can see this plugin's menu the eager suspension
-  -- lasts 150 ms and the menu is unusable — which is exactly what the macOS tester met:
-  -- arrows moved through the menu, Enter re-fired the control underneath and reopened it,
-  -- and no choice ever stuck. A control that says it opens a menu is a better witness than
-  -- a detector that cannot see one, so its word holds for a few seconds unless a detector
-  -- positively says otherwise.
-  self._menuHoldUntil = host.now() + MENU_HOLD_MS
-  self._menuHoldConfirmed = false
-  -- The watch is what LOWERS the flag again, by seeing that no menu is there. An overlay
-  -- that isn't watched has nothing to lower it — and a stranded suspension is an overlay
-  -- whose every hotkey has silently stopped working, with nothing to tell the user why. So
-  -- an unwatched overlay gets a one-shot restore: the eager suspension is worth having for
-  -- the moment a menu takes to appear, not for the rest of the session.
-  if not self._menuWatch then
-    host.timer.after(600, function()
-      host.keys.menuOpen(false)
-      self:_suspendControlHotkeys(false)
-    end)
-  end
-end
-
-function Overlay:_registerHotkeys()
+-- `suspended`: the per-control hotkeys start given up, and applyMenuState takes them back — an
+-- overlay whose hold over its own menu's window ended with the plug-in having the keyboard again
+-- (see the Menus section, "holding its place"), so that the hand-back is the one transition that
+-- says so in the log, whenever the menu closed. They also start given up while a menu still counts
+-- as open; at an ordinary activation none does.
+function Overlay:_registerHotkeys(suspended)
   self.registered = self.registered or {}
   self.capturedKeys = self.capturedKeys or {}
   self.capturedSpecs = {}
   self._typing = false
-  self._hotkeysSuspended = false
+  self._hotkeysSuspended = suspended == true or (self._menu ~= nil and self._menu.open == true)
   self:_syncControlHotkeys()
   for _, c in ipairs(self.controls) do
     -- A tab control's individual TABS may each carry a hotkey (ReaHotkey's Tab.SetHotkey):
@@ -2352,9 +2275,9 @@ function Overlay:_registerHotkeys()
             tostring(self.label), tostring(tab.label), tostring(tab.hotkey), refused))
         elseif tab.hotkey then
           local n = tn
-          local ok, id = pcall(host.hotkey.register, tab.hotkey, function()
+          local ok, id = pcall(host.hotkey.register, tab.hotkey, ownKey(self, function()
             afterModifiersReleased(function() self:gotoTab(n) end)
-          end)
+          end))
           if ok then
             self.registered[#self.registered + 1] = id
           else
@@ -2401,8 +2324,8 @@ function Overlay:_registerHotkeys()
   -- Tab moves *between* elements; arrow keys are left for value changes within a
   -- control (standard interaction scheme), so we don't capture them here.
   do
-    cap("Tab", function() self:focusNext() end)
-    cap("Shift+Tab", function() self:focusPrev() end)
+    cap("Tab", ownKey(self, function() self:focusNext() end))
+    cap("Shift+Tab", ownKey(self, function() self:focusPrev() end))
     -- Return is captured per FOCUS, not statically: while the pass-through control has
     -- the focus, the plugin's own control is what should receive it (open a combo, toggle
     -- a check box). Same reasoning as Space below. See _syncNativeKeys.
@@ -2431,16 +2354,16 @@ function Overlay:_registerHotkeys()
         windows = "Ctrl+Tab",
         macos = "Meta+Tab",
         linux = "Ctrl+Tab",
-      }, function() self:cycleTab(1) end)
+      }, ownKey(self, function() self:cycleTab(1) end))
       cap(host.os.pick {
         windows = "Ctrl+Shift+Tab",
         macos = "Meta+Shift+Tab",
         linux = "Ctrl+Shift+Tab",
-      }, function() self:cycleTab(-1) end)
+      }, ownKey(self, function() self:cycleTab(-1) end))
       local _, tcCtrl = findTabControl(self)
       local ntabs = tcCtrl and #tcCtrl.tabs or 0
       for n = 1, math.min(ntabs, 9) do
-        cap("Ctrl+" .. n, function() self:gotoTab(n) end)
+        cap("Ctrl+" .. n, ownKey(self, function() self:gotoTab(n) end))
       end
     end
     -- Space and Return activate the focused control (standard Windows button
@@ -2547,9 +2470,11 @@ end
 --                 it — Space toggles its check box, Return opens its combo. Capturing
 --                 either here would swallow the interaction the pass-through exists for.
 --
--- Idempotent; called on every focus move and at registration. No-op unless active.
+-- Idempotent; called on every focus move and at registration. No-op unless active, and while
+-- the overlay holds its place over its own menu's window, when it holds no keys at all (see the
+-- Menus section, "holding its place").
 function Overlay:_syncNativeKeys()
-  if not self.active then return end
+  if not self.active or self:_heldOnMenu() then return end
   -- Everything, or nothing at all: while the field has the keyboard this overlay is not
   -- entitled to any key, and the question is asked before any of the per-control ones below.
   if self._typingWhen then
@@ -2598,13 +2523,13 @@ function Overlay:_syncNativeKeys()
   local wantSpace = not inert and c.kind ~= "ocredit" and not c.editable
   local wantReturn = not inert
   if wantSpace and not self._spaceToken then
-    self._spaceToken = host.keys.capture("Space", function() self:activate() end)
+    self._spaceToken = host.keys.capture("Space", ownKey(self, function() self:activate() end))
   elseif not wantSpace and self._spaceToken then
     host.keys.release(self._spaceToken)
     self._spaceToken = false
   end
   if wantReturn and not self._returnToken then
-    self._returnToken = host.keys.capture("Return", function() self:activate() end)
+    self._returnToken = host.keys.capture("Return", ownKey(self, function() self:activate() end))
   elseif not wantReturn and self._returnToken then
     host.keys.release(self._returnToken)
     self._returnToken = false
@@ -2621,12 +2546,12 @@ function Overlay:_syncNativeKeys()
     -- one is focused decides what they do.
     local isTab = c.kind == "tabcontrol"
     self._arrowTokens = {
-      host.keys.capture("Left", function()
+      host.keys.capture("Left", ownKey(self, function()
         if isTab then self:switchTab(-1) else self:adjust(-1) end
-      end),
-      host.keys.capture("Right", function()
+      end)),
+      host.keys.capture("Right", ownKey(self, function()
         if isTab then self:switchTab(1) else self:adjust(1) end
-      end),
+      end)),
     }
   elseif not wantArrows and self._arrowTokens then
     for _, t in ipairs(self._arrowTokens) do host.keys.release(t) end
@@ -2638,8 +2563,8 @@ function Overlay:_syncNativeKeys()
   local wantVertical = c ~= nil and c.kind == "tabcontrol" and c.verticalStep ~= nil
   if wantVertical and not self._verticalTokens then
     self._verticalTokens = {
-      host.keys.capture("Up", function() self:stepTabVertical(-1) end),
-      host.keys.capture("Down", function() self:stepTabVertical(1) end),
+      host.keys.capture("Up", ownKey(self, function() self:stepTabVertical(-1) end)),
+      host.keys.capture("Down", ownKey(self, function() self:stepTabVertical(1) end)),
     }
   elseif not wantVertical and self._verticalTokens then
     for _, t in ipairs(self._verticalTokens) do host.keys.release(t) end
@@ -3017,9 +2942,10 @@ function Overlay:_deactivate()
   host.keys.scope(false)
   host.keys.menuOpen(false)
   self:_unregisterHotkeys()
-  -- A hold belongs to the moment a control opened a menu, not to the overlay's whole life.
-  self._menuHoldUntil = nil
-  self._menuHoldConfirmed = false
+  -- The menu state belongs to this stay in front: every test's word and any answer still
+  -- outstanding are dropped, and the tests forget the press they were comparing against (see
+  -- the Menus section).
+  self:_menuLeave()
   if self._onDeactivate then self._onDeactivate(self) end
 end
 
@@ -3065,6 +2991,22 @@ function Overlay:_recheck()
   end
   local tCtx = t0 and host.now() or nil
   if not matched then self.activeCtx = false end
+  -- An overlay whose own menu is a window in front holds its place although its context does not
+  -- match (see the Menus section, "holding its place"). A context that matches ends the hold.
+  local held = false
+  if self._menu then
+    if matched then
+      self:_menuHoldEnds()
+    elseif self.active then
+      local h = self:_menuHold()
+      -- The hold ended with the keyboard still in the menu's own window, not shown, and the
+      -- window of the press was brought back (see _menuRefocus): the ordinary path decides, on
+      -- the world after that change.
+      if h == "refocused" then return self:_recheck() end
+      held = h == "menu"
+      matched = held
+    end
+  end
   -- Stamped BEFORE the gate, because the two answer different questions: a context match
   -- means "this window is mine", the gate means "and what is loaded in it is mine too". The
   -- gap between them is the landmark search plus however many polling ticks it took, and
@@ -3079,8 +3021,9 @@ function Overlay:_recheck()
     self._ctxSince = nil
   end
   -- An extra gate (e.g. a library landmark) further narrows the match, evaluated
-  -- against the matched context's coordinate origin.
-  if matched and self._gate then
+  -- against the matched context's coordinate origin. Not while the overlay's own menu is in
+  -- front: what the plug-in has loaded is not what that window shows.
+  if matched and self._gate and not held then
     matched = self._gate(self:origin()) == true
     if not matched then self.activeCtx = false end
   end
@@ -3260,6 +3203,13 @@ local function report(self, opts)
     if c.hotkey ~= nil and type(c.hotkey) ~= "string" then
       bad("%s: `hotkey` must be a string like \"Alt+P\", got %s", who, type(c.hotkey))
     end
+    -- A control that says it opens a menu, on an overlay with nothing to see a menu with. The
+    -- declaration alone gives no key to the menu — only a test does — so while that menu is up
+    -- the overlay keeps Tab, Return and its hotkeys, and nothing else would ever say why.
+    if c.opensMenu and not self._menu then
+      bad("%s opens a menu, but the overlay lists no menu tests (`menus`) — nothing can see "
+        .. "that menu, so the overlay keeps its keys while it is up", who)
+    end
   end
 
   -- A hotkey spec claimed by TWO controls, where at least one of them is always visible.
@@ -3357,7 +3307,7 @@ end
 -- Twelve captures where the whole design says one.
 --
 -- Sharing the timer makes the ticks coincide, which is what makes the batching real. It
--- also matches how the menu watch is already done here: one watch per VM, not one per
+-- also matches how the menu tests are run here: one timer per VM, not one per
 -- overlay that has to remember to ask for it.
 local pollGroups = {}
 local function joinPoll(self, ms)
@@ -3365,7 +3315,7 @@ local function joinPoll(self, ms)
   if not group then
     group = {}
     pollGroups[ms] = group
-    -- Disable-safe recurring poll, like the menu watch: it survives a disable/enable cycle
+    -- Disable-safe recurring poll, like the menu tests' tick: it survives a disable/enable cycle
     -- where a self-rescheduling host.timer.after would not.
     host.timer.every(ms, function()
       -- Timed, because this tick runs on the MAIN thread and everything else waits behind
@@ -3480,9 +3430,10 @@ end
 local function ensureTrigger(self, opts)
   if opts then
     self.hoverToRead = opts.hoverToRead == true
-    -- `menus = true`: hand the captured navigation keys to a plugin menu while one is
-    -- open (see watchMenus). Any overlay whose controls can open a plugin menu needs it.
-    if opts.menus then self:watchMenus() end
+    -- `menus = { test, … }`: how this overlay's plug-in menus are seen, so the keys go to a
+    -- menu while one is open (see the Menus section). `false` or absent: no tests. `true` is
+    -- refused there, naming the building blocks.
+    if opts.menus ~= nil and opts.menus ~= false then self:_watchMenus(opts.menus) end
     self:_join(opts.slot, opts.specificity, opts.pollMatch)
   else
     self:_join(nil, nil, nil)
@@ -3819,7 +3770,7 @@ function Overlay:attachEmbedded(spec, opts)
   -- which cannot cache its identity per HWND — a UIA query per candidate control, which
   -- itself enumerates again. And it is asked for constantly: once per control coordinate,
   -- again for a right-anchored hotspot, on every hotkey re-sync, on activation, and every
-  -- 150 ms from the menu watch. All of those want the SAME answer.
+  -- 150 ms from the menu tests. All of those want the SAME answer.
   --
   -- So memoize it against host.epoch(), which changes whenever an OS event reaches a
   -- module, a timer fires, or the module drives input — every point at which the answer
@@ -3866,281 +3817,900 @@ function Overlay:attachEmbedded(spec, opts)
   ensureTrigger(self, opts)
 end
 
--- Watch for a MENU opening inside the plugin and tell the key hook to let the captured
--- navigation keys pass through to it — a plugin's own (Qt) menu is not a Win32 #32768
--- menu, so the hook cannot see it by itself. Without this, opening a plugin menu from an
--- overlay control leaves the user unable to move in it: the overlay keeps swallowing Tab,
--- Return and the arrows.
+-- ── Menus ────────────────────────────────────────────────────────────────────
+-- While a plug-in has a menu open, the keys belong to the menu. The overlay gives up its
+-- per-control hotkeys — they are RegisterHotKey claims, which outrank the application, so with
+-- a menu up Alt+M would re-fire the control under it instead of reaching it — and tells the key
+-- hook through host.keys.menuOpen to let its captured navigation keys through. ReaHotkey does
+-- the same: a regular check, and the overlay switched off while `WinExist("ahk_class #32768")`.
 --
--- ONE watch per VM, not one per overlay. Every overlay needed this and it was a private
--- method each module had to remember to call — sforzando and overlay-attach do not, and
--- silently swallow keys as a result. Opt in with `menus = true` on attach.
+-- HOW a menu is seen is the module's business, not this runtime's. A plug-in that paints its
+-- menu inside its own window has nothing in common with one whose menu is a native popup, and
+-- the one that knows which it is, is the module written against it. So an overlay names its
+-- MENU TESTS — `menus = { … }` on its binding — and this runtime runs them:
 --
--- `host.keys.menuOpen` is a process-wide flag, so it is only written while an opted-in
--- overlay is actually active; otherwise this would clobber the state of whichever overlay
--- is live elsewhere.
+--   test(o, answer)   "is a menu open over this overlay's plug-in right now?" — calls
+--                     answer(seen) exactly once per call, at once or later (from an
+--                     imageSearchAsync or snapshotAsync callback). Any value but nil and false
+--                     counts as seen, so a search's hit can be handed straight on. `o` is the
+--                     overlay.
+--
+-- The building blocks in O.menuTests are tests like any other; a module lists the ones that
+-- see its plug-in's menus, and writes its own (a pixel colour, an image) where none does.
+--
+-- NO TIMER IN THIS RUNTIME DECIDES THE STATE. Each test has a WORD: from the answer that saw a
+-- menu, it says one is open, and it stops saying so once it has answered no twice in a row —
+-- one missed read is not a close (an accessibility answer can be the previous tick's, a picture
+-- can catch the menu mid-redraw). A menu counts as open while any test's word is that it is.
+-- A test that has not answered yet is not asked again until it does, and its word stands
+-- meanwhile: a slow test does not make a menu it sees flicker, and one that is outstanding holds
+-- up none of the others. So a test that never answers again after seeing a menu keeps that menu
+-- open until the overlay leaves the front; the log names it after MENU_STALL_TICKS ticks.
+-- Time only sets how OFTEN the tests are asked:
+--   • every test on every tick for MENU_LOOK_MS after a control with `opensMenu` fired, and for
+--     as long as a menu counts as open;
+--   • otherwise a test that declares itself `cheap` on every tick, and each of the others once
+--     MENU_BACKSTOP_TICKS ticks have passed since it was last asked, so a menu opened some other
+--     way — the user's screen reader, a key that went to the plug-in — is still noticed;
+--   • while a cheap test sees the menu, the others are not asked at all — they could only
+--     agree, and a walk of the accessibility tree is what makes a test expensive.
+-- A menu no test sees gets no pass-through: the overlay keeps its keys. That replaced an
+-- eight-second stopwatch that assumed a menu after every press, and a thirty-second cap that
+-- stopped believing in a menu the user was still reading (2026-09-26). The host's own
+-- sixty-second rule for native menus on macOS went the same way the same day.
+--
+-- A menu that is a WINDOW coming to the front does not take the overlay out of the front: the
+-- overlay holds its place while it is up, and when that ends the ordinary match decides again
+-- (see "holding its place", below).
+--
+-- A test that raises has answered no, and says so once in the log. When the overlay leaves the
+-- front every word is dropped, and an answer that arrives later for a question asked before
+-- that is ignored.
+--
+-- ONE timer per VM, not one per overlay: the overlays of a module share it. While a menu counts
+-- as open over any of them, every one of them that is in front gives up its hotkeys, because
+-- the pass-through is one flag for the whole application.
+--
+-- `host.keys.menuOpen` is a process-wide flag, so it is only written while an overlay of this
+-- VM that has tests is actually active; otherwise this would clobber the state of whichever
+-- overlay is live elsewhere.
+local MENU_TICK_MS = 150
+-- How long a test that is not cheap waits between two questions while no menu is open and none
+-- was just opened: 8 ticks x 150 ms, a worst case of ~1.2 s to notice a menu opened by some
+-- other route. The accessibility walk is the reason — on Windows it walks the plug-in's whole
+-- tree across a process boundary, measured at 50-194 ms, which on every tick was more than the
+-- tick. Counted from the test's own last question, so a sibling that takes a while to answer
+-- cannot push it off the beat.
+local MENU_BACKSTOP_TICKS = 8
+-- How long after a control with `opensMenu` fired every test runs on every tick. Cadence only.
+local MENU_LOOK_MS = 8000
+-- Only for a log line: how many ticks a test's answer is outstanding before the log says so.
+local MENU_STALL_TICKS = 20
 local menuWatched = {}
 local menuTimer = false
--- How often the expensive Qt-menu check runs when no menu is plausible. 8 ticks x 150 ms is
--- a worst case of ~1.2 s to notice a menu opened by some other route, against the permanent
--- 100 %+ duty cycle it cost before.
-local MENU_BACKSTOP_TICKS = 8
 local menuTick = 0
--- A menu the expensive check SAW, with no control of ours having opened it: when it was first
--- seen, and whether the check has been sent back to the backstop cadence (see below).
+
+-- The building blocks, by name. Indexing a name that is not one raises, because a mistyped
+-- block in `menus = { … }` would otherwise be a nil that `ipairs` stops at — a test silently
+-- missing from the list, and a menu the module believes it covers.
+O.menuTests = setmetatable({}, {
+  __index = function(_, k)
+    error(("O.menuTests has no '%s' — the building blocks are nativePopup, newWindow, "
+      .. "accessibility and accessibilityAfterPress"):format(tostring(k)), 2)
+  end,
+})
+
+-- A menu the OPERATING SYSTEM drew is open in the application in front. ReaHotkey's
+-- `WinExist("ahk_class #32768")`, scoped to the foreground application. One flag read, no
+-- traversal: cheap enough for every tick. See host.keys.nativeMenuOpen for what each platform
+-- counts. u-he's preset menu, Komplete Kontrol's and Melodyne's menu bars are this kind.
+O.menuTests.nativePopup = {
+  name = "nativePopup",
+  cheap = true,
+  test = function(_, answer)
+    answer(host.keys.nativeMenuOpen() == true)
+  end,
+}
+
+-- A WINDOW of the plug-in's process that was not there when a control with `opensMenu` was
+-- pressed: a popup menu drawn as a window of its own is in the window manager's list from the
+-- moment it opens to the moment it closes, whatever the accessibility tree says of it. The
+-- macOS sessions measured sforzando's menus this way (a window at level 101 per menu); nothing
+-- else there could see them.
 --
--- Without this, such a menu was honoured for one tick in eight. The backstop asks every eighth
--- tick; the tick that sees the menu gives the keys to it, and the next one — which does not
--- ask — takes them back. The Mac mini session logged exactly that on Kontakt 8 standalone:
--- Kontakt's own File menu, opened with VoiceOver from the pass-through, and "gave up" / "took
--- back" four times in five seconds while it stayed open. Now each sighting keeps the check
--- running every tick for a little longer, so the keys stay with the menu while it is seen and
--- come back once two ticks in a row no longer see it (one miss is tolerated; see below).
-local menuSeen = nil
--- How long each sighting keeps the check running every tick: three ticks, so that after one
--- read that misses (tolerated below, the keys staying with the menu) the check still asks on
--- the next tick rather than waiting for the backstop.
-local MENU_SEEN_KEEP_MS = 3 * 150
--- And for how long in all. On Windows the check is a walk of the plug-in's whole tree (50-194
--- ms, on a 150 ms timer), so a plug-in whose tree ALWAYS contains a menu element would turn the
--- backstop into a permanent walk. After this long of continuous sighting it goes back to the
--- backstop's cadence, which is what such a plug-in had before.
-local MENU_SEEN_CAP_MS = 30000
-function Overlay:watchMenus()
-  for _, o in ipairs(menuWatched) do
-    if o == self then return self end
-  end
-  menuWatched[#menuWatched + 1] = self
-  self._menuWatch = true
-  if menuTimer then return self end
-  menuTimer = true
-  -- Disable-safe recurring poll (survives a disable/enable cycle, unlike a Lua
-  -- self-rescheduling host.timer.after).
-  host.timer.every(150, function()
-    local anyActive, open = false, false
-    for _, o in ipairs(menuWatched) do
-      if o.active then anyActive = true break end
+-- The PROCESS is settled at the press and kept: an embedded origin is a control, which carries
+-- no application, so the process is then the active window's — and asked again on a later tick
+-- that could be whichever program has just come to the front, every window of which would be
+-- "new" (a browser's window was once logged as the plug-in's menu that way).
+--
+-- It compares against the list taken at the press, so it says nothing about a menu no control
+-- of the overlay opened, and it stops comparing — answering false until the next press — once
+-- the windows that appeared have all gone (the menu closed), when the user presses one of the
+-- overlay's own keys with no menu open (the press opened nothing that took the keys), when the
+-- overlay leaves the front, and when its hold over a menu that was a window in front ends with
+-- the plug-in having the keyboard again (see "holding its place"). Without an end, any window
+-- the process opened later — a dialog that does not take the front, a tip under the parked
+-- pointer — would be the menu.
+-- While it compares, ANY new window of the process counts; on Windows the host leaves
+-- tooltips out of the list, on macOS it filters neither tooltips nor window levels.
+--
+-- Cost: one window list of one process per question while it is comparing (local and cheap on
+-- both platforms — see host.window.windowsOf), nothing at all otherwise. A menu painted inside
+-- the plug-in's own window is invisible to it: the window list does not change.
+do
+  -- The process of the overlay's plug-in right now, or nil when it cannot be told.
+  local function processOf(o)
+    local origin = o:origin()
+    local pid = origin and origin.app and origin.app.pid
+    if not pid then
+      local a = host.window.active()
+      pid = a and a.app and a.app.pid
     end
-    if not anyActive then
-      -- Nothing here is in front any more, so whatever the check saw is not ours to report.
-      menuSeen = nil
+    return pid
+  end
+
+  -- The on-screen windows of process `pid`, keyed by id.
+  local function windowsOf(pid)
+    local ids = {}
+    for _, w in ipairs(host.window.windowsOf(pid)) do ids[w.id] = w end
+    return ids
+  end
+
+  local watching = setmetatable({}, { __mode = "k" })
+
+  O.menuTests.newWindow = {
+    name = "newWindow",
+    cheap = true,
+    pressed = function(o)
+      local pid = processOf(o)
+      watching[o] = pid and { pid = pid, before = windowsOf(pid), said = {}, seen = false } or nil
+      if not pid then
+        host.log.info(("[menu] '%s': newWindow could not tell the plug-in's process at the "
+          .. "press, so it cannot see this menu"):format(tostring(o.label)))
+      end
+    end,
+    forget = function(o)
+      watching[o] = nil
+    end,
+    test = function(o, answer)
+      local w = watching[o]
+      if not w then return answer(false) end
+      local any = false
+      for id, win in pairs(windowsOf(w.pid)) do
+        if not w.before[id] then
+          any = true
+          if not w.said[id] then
+            w.said[id] = true
+            host.log.info(("[menu] '%s': newWindow: a window appeared for the plug-in since the "
+              .. "press — id %s%s, layer %d, %dx%d at %d,%d"):format(tostring(o.label), tostring(id),
+              (win.class ~= nil and win.class ~= "") and (" class '" .. win.class .. "'") or "",
+              win.layer or 0, win.w or 0, win.h or 0, win.x or 0, win.y or 0))
+          end
+        end
+      end
+      if any then
+        w.seen = true
+        return answer(true)
+      end
+      if w.seen then
+        -- Every window that appeared has gone: the menu this press opened has closed, and this
+        -- test has nothing more to say until the next press.
+        host.log.info(("[menu] '%s': newWindow: the window that appeared has gone"):format(tostring(o.label)))
+        watching[o] = nil
+      end
+      answer(false)
+    end,
+  }
+end
+
+-- A MENU ELEMENT anywhere in the plug-in's accessibility tree:
+-- `host.element.find(origin, "", host.element.type.Menu)`. Not cheap — see
+-- MENU_BACKSTOP_TICKS — so it runs on every tick only after a press and while a menu is open.
+-- Windows: any element of the Menu type in the plug-in control's UI Automation subtree, with
+-- no visibility test, which is how Kontakt's Qt menus are seen. macOS: the call is
+-- special-cased to "is a menu open in this application", and an application the host has
+-- found busy is left alone for 5 s, during which the answer is no. Answered once per epoch,
+-- and a timer tick does not turn the epoch over, so a tick can be handed the previous tick's
+-- answer; the one-miss rule absorbs that. Kept for the transition to modules' own tests: an
+-- element that is in the tree whether or not anything is drawn counts as a menu for as long
+-- as it is there.
+local function menuElementIn(o)
+  local ctrl = o:origin()
+  return ctrl ~= nil and ctrl.id ~= nil
+    and host.element.find(ctrl.id, "", host.element.type.Menu) == true
+end
+
+O.menuTests.accessibility = {
+  name = "accessibility",
+  cheap = false,
+  test = function(o, answer)
+    answer(menuElementIn(o))
+  end,
+}
+
+-- The same question, asked only from a press of a control with `opensMenu` until that press is
+-- done with: the menu it opened was seen and has closed (missed twice in a row, the one-miss
+-- rule), the user pressed one of the overlay's own keys with no menu open, the overlay left the
+-- front, or its hold over a menu that was a window in front ended with the plug-in having the
+-- keyboard again. Until the next press it answers no without walking anything.
+--
+-- For a plug-in whose tree can hold a Menu element while nothing is open. Kontakt 8 in a DAW
+-- did on 2026-09-26: an element appeared under the snapshot bar on Cinematic Studio Strings and
+-- stayed for over a minute, through a switch to another application. Counted by `accessibility`
+-- such an element keeps the overlay out for as long as it exists; counted by this one, only
+-- until the user leaves the plug-in and comes back. What it gives up is a menu no control of
+-- the overlay opened.
+do
+  local armed = setmetatable({}, { __mode = "k" })
+
+  O.menuTests.accessibilityAfterPress = {
+    name = "accessibilityAfterPress",
+    cheap = false,
+    pressed = function(o)
+      armed[o] = { seen = false, misses = 0 }
+    end,
+    forget = function(o)
+      armed[o] = nil
+    end,
+    test = function(o, answer)
+      local a = armed[o]
+      if not a then return answer(false) end
+      local seen = menuElementIn(o)
+      if seen then
+        a.seen, a.misses = true, 0
+      elseif a.seen then
+        a.misses += 1
+        if a.misses >= 2 then
+          -- The menu this press opened has closed: nothing more to say until the next press.
+          armed[o] = nil
+        end
+      end
+      answer(seen)
+    end,
+  }
+end
+
+local MENU_TESTS_HELP = "name the menu tests instead: O.menuTests.nativePopup (a menu the "
+  .. "operating system drew), O.menuTests.newWindow (a window that appeared since the click), "
+  .. "O.menuTests.accessibility (a Menu element in the plug-in's accessibility tree), "
+  .. "O.menuTests.accessibilityAfterPress (the same, asked only after a click), or a "
+  .. "function(o, answer) of the module's own — see docs/api/overlay.md, 'Menus'"
+
+-- `menus` as the runtime keeps it: one record per test, `{ name, cheap, test, pressed?,
+-- forget? }` plus its word and its outstanding question (see resetMenuTest), fresh per overlay.
+-- Raises for anything that is not a list of tests, naming the overlay — at bind time, where the
+-- mistake is, rather than as a menu that silently keeps the keys.
+local function menuTestsOf(self, list)
+  local who = tostring(self.label)
+  if list == true then
+    error(("overlay '%s': `menus = true` no longer says how a menu is seen — %s")
+      :format(who, MENU_TESTS_HELP), 0)
+  end
+  if type(list) ~= "table" then
+    error(("overlay '%s': `menus` must be a list of menu tests, got %s — %s")
+      :format(who, type(list), MENU_TESTS_HELP), 0)
+  end
+  local out = {}
+  for i, t in ipairs(list) do
+    if type(t) == "function" then
+      out[i] = { name = "test " .. i, cheap = false, test = t }
+    elseif type(t) == "table" and type(t.test) == "function" then
+      for _, hook in ipairs({ "pressed", "forget" }) do
+        if t[hook] ~= nil and type(t[hook]) ~= "function" then
+          error(("overlay '%s': menu test %d's `%s` must be a function(o), got %s")
+            :format(who, i, hook, type(t[hook])), 0)
+        end
+      end
+      out[i] = {
+        name = t.name ~= nil and tostring(t.name) or ("test " .. i),
+        cheap = t.cheap == true,
+        test = t.test,
+        pressed = t.pressed,
+        forget = t.forget,
+      }
+    else
+      error(("overlay '%s': menu test %d is a %s, not a function(o, answer) or a table with "
+        .. "`test` — %s"):format(who, i, type(t), MENU_TESTS_HELP), 0)
+    end
+  end
+  -- A gap in the list: `ipairs` stopped before a later entry, which would drop it in silence.
+  for k in pairs(list) do
+    if type(k) ~= "number" or k < 1 or k > #out or k % 1 ~= 0 then
+      error(("overlay '%s': `menus` has an entry at %s that is not in the list — a nil before "
+        .. "it (a mistyped name?) or a named key"):format(who, tostring(k)), 0)
+    end
+  end
+  return out
+end
+
+-- A test's state for one stay in front: its word (`saw`, and the misses since it last saw),
+-- the question it has not answered yet (`asking`, a token; a later answer to an earlier
+-- question does not match it), how many ticks that has been outstanding, and the tick it was
+-- last asked on.
+local function resetMenuTest(t)
+  t.saw, t.misses, t.asking, t.waited, t.lastAsked = false, 0, nil, 0, nil
+end
+
+-- Is overlay `o` holding its place over its own menu's window (see "holding its place")? It
+-- then holds no keys at all, and has no say in the pass-through flag: its window is not in front.
+local function heldOnMenu(o)
+  return o._menu ~= nil and o._menu.hold ~= nil
+end
+
+function Overlay:_heldOnMenu()
+  return heldOnMenu(self)
+end
+
+-- Is a menu open over any overlay of this VM that is in front? What host.keys.menuOpen is set to.
+local function anyMenuOpen()
+  for _, o in ipairs(menuWatched) do
+    if o.active and not heldOnMenu(o) and o._menu.open then return true end
+  end
+  return false
+end
+
+-- The menu state, applied: the hook's pass-through flag, and the hotkeys of every overlay of
+-- this VM in front — given up by all of them while a menu is open over any, because the
+-- pass-through lets every captured key of the application through, not one overlay's.
+-- Idempotent (see _suspendControlHotkeys), so the tick re-applies it: an overlay that came to
+-- the front between two transitions falls into step, and a transition that failed half-way is
+-- completed on the next tick. An overlay holding its place over its menu's window is left out:
+-- it holds no keys, and the flag is not written for it — another overlay may be in front of
+-- that window, and the flag is one for the whole application.
+local function applyMenuState()
+  local open, inFront = anyMenuOpen(), false
+  for _, o in ipairs(menuWatched) do
+    if o.active and not heldOnMenu(o) then inFront = true end
+  end
+  if inFront then host.keys.menuOpen(open) end
+  for _, o in ipairs(menuWatched) do
+    if o.active and not heldOnMenu(o) then o:_suspendControlHotkeys(open) end
+  end
+end
+
+-- Calls one hook of every test that has it, guarded: a module's hook must not take the
+-- overlay's key handling or its deactivation with it.
+local function menuHook(self, hook)
+  for _, t in ipairs(self._menu.tests) do
+    if t[hook] then
+      local ok, err = pcall(t[hook], self)
+      if not ok then
+        host.log.info(("[menu] '%s': menu test '%s' failed in `%s`: %s")
+          :format(tostring(self.label), t.name, hook, tostring(err)))
+      end
+    end
+  end
+end
+
+-- The menu opened or closed: the overlay goes out (hotkeys given up, keys to the menu) or
+-- comes back in. Called on the transition only, so each is said and done exactly once. The
+-- state is written first, so nothing after it can leave it half-changed.
+function Overlay:_menuChange(open, by)
+  local st = self._menu
+  local now = host.now()
+  st.open = open
+  if open then
+    st.since, st.escape = now, nil
+    -- Where the keyboard is when the menu is first seen: whether keys that pass through can
+    -- reach the menu at all is the question the log could not answer (2026-09-26). Guarded: a
+    -- log line must not cost the hand-over.
+    local ok, f = pcall(function()
+      return (host.window.focusChain() or {})[1]
+    end)
+    host.log.info(("[menu] '%s': a menu is open — test '%s' sees it, %s; keyboard focus on %s")
+      :format(tostring(self.label), tostring(by),
+        st.pressed and ("after '" .. st.pressed .. "' was pressed")
+          or "and no control of this overlay opened it",
+        not ok and ("an unknown element (" .. tostring(f) .. ")")
+          or f and ("[" .. tostring(f.class) .. "] id=" .. tostring(f.id))
+          or "nothing the platform reports"))
+  else
+    host.log.info(("[menu] '%s': the menu has closed — no test sees it any more (it counted as "
+      .. "open for %d ms%s)"):format(tostring(self.label), now - (st.since or now),
+      st.escape and (", and was seen on " .. st.escape .. " tick(s) after Escape went through")
+        or ""))
+    st.since, st.escape, st.pressed = nil, nil, nil
+  end
+  applyMenuState()
+end
+
+-- A transition, guarded: the state is settled whatever happens, and a hand-over that fails is
+-- said once per failure and completed by the next tick's applyMenuState.
+function Overlay:_menuSet(open, by)
+  local ok, err = pcall(self._menuChange, self, open, by)
+  if not ok then
+    self._menu.open = open
+    host.log.info(("[menu] '%s': handing the keys %s failed: %s — the next tick tries again")
+      :format(tostring(self.label), open and "to the menu" or "back", tostring(err)))
+  end
+end
+
+-- One answer of test `t`: its word, and the transition when it is the first to see the menu or
+-- the last to stop seeing it.
+function Overlay:_menuAnswer(t, seen)
+  local st = self._menu
+  if seen then
+    t.saw, t.misses = true, 0
+    st.seenThisTick = true
+    -- Counted, so that holding its place can ask whether a test sees a menu NOW rather than read
+    -- the word, which stays "open" for a miss after the menu has gone (see _menuHold).
+    st.sightings = (st.sightings or 0) + 1
+    if not st.open then self:_menuSet(true, t.name) end
+    return
+  end
+  if not t.saw then return end
+  -- One missed read is not a close: the test's next answer decides.
+  t.misses += 1
+  if t.misses < 2 then return end
+  t.saw, t.misses = false, 0
+  if not st.open then return end
+  for _, u in ipairs(st.tests) do
+    if u.saw then return end
+  end
+  self:_menuSet(false)
+end
+
+-- Asks test `t` once. The answer is taken whenever it comes, as long as it answers this
+-- question: a question asked before the overlay left the front is not.
+function Overlay:_menuAsk(t)
+  local q = {}
+  t.asking, t.waited, t.lastAsked = q, 0, menuTick
+  local answered = false
+  local function answer(v)
+    if answered then
+      if not t.saidTwice then
+        t.saidTwice = true
+        host.log.info(("[menu] '%s': menu test '%s' answered twice to one question — the "
+          .. "second answer is ignored"):format(tostring(self.label), t.name))
+      end
       return
     end
-    -- THE CHEAP QUESTION FIRST: is a native popup menu on screen? One window-class lookup.
-    -- Every menu these overlays open themselves turns out to be a native one — u-he's preset
-    -- menu (verified live), Komplete Kontrol's menu bar, and the plug-in menus generally —
-    -- so this answers the common case outright.
-    open = host.keys.nativeMenuOpen() == true
-    -- THE EXPENSIVE ONE only when it can still pay. `host.element.find(hwnd, "", Menu)` means
-    -- "any menu element anywhere in this tree" and therefore walks the plug-in's ENTIRE
-    -- accessibility tree, across a process boundary: measured at 50-194 ms per call, on a
-    -- 150 ms timer — more than its own interval, permanently, on the thread that owns the
-    -- keyboard hook. That was the single largest load in the whole runtime, and it was
-    -- being spent almost entirely on answering "no".
-    --
-    -- It is still asked, because a self-drawn Qt menu is invisible to the cheap check. But
-    -- only when a menu is PLAUSIBLE — just after a control that opens one fired, which the
-    -- runtime now knows from `opensMenu` — with a slow backstop the rest of the time so a
-    -- menu opened some other way is still noticed within about a second rather than never.
-    if not open then
-      menuTick = menuTick + 1
-      local plausible = host.now() < menuPlausibleUntil
-      if plausible or menuTick % MENU_BACKSTOP_TICKS == 0 then
-        local seenBy
-        for _, o in ipairs(menuWatched) do
-          if o.active then
-            local ctrl = o:origin()
-            if ctrl ~= nil and ctrl.id ~= nil
-              and host.element.find(ctrl.id, "", host.element.type.Menu) == true
-            then
-              open = true
-              seenBy = o
-              break
-            end
-          end
-        end
-        local now = host.now()
-        if seenBy then
-          if menuSeen then menuSeen.missed = false end
-          if not menuSeen then
-            menuSeen = { since = now, capped = false, missed = false }
-            if not plausible then
-              host.log.info(("[overlay] '%s': the accessibility check sees a menu the overlay "
-                .. "did not open — the keys go to it until it closes"):format(tostring(seenBy.label)))
-            end
-          end
-          if now - menuSeen.since < MENU_SEEN_CAP_MS then
-            menuPlausibleUntil = math.max(menuPlausibleUntil, now + MENU_SEEN_KEEP_MS)
-          elseif not menuSeen.capped then
-            menuSeen.capped = true
-            host.log.info(("[overlay] '%s': the accessibility check has seen a menu for %d s "
-              .. "without a break — asking only every %d ticks again, as if it were not there")
-              :format(tostring(seenBy.label), math.floor(MENU_SEEN_CAP_MS / 1000), MENU_BACKSTOP_TICKS))
-          end
-        elseif menuSeen and not menuSeen.capped and not menuSeen.missed then
-          -- One read that misses is not a close. On a Mac the check comes back empty while the
-          -- application is in the busy quarantine (Kontakt, slow to answer VoiceOver, is the
-          -- case), and a single miss used to hand the keys back, log a close and restart the
-          -- 30 s count. The keep window above guarantees the next tick asks again; a menu that
-          -- really closed gives the keys back then, one tick later than it would have.
-          menuSeen.missed = true
-          open = true
-        elseif menuSeen then
-          host.log.info(("[overlay] the menu the accessibility check saw has closed after %d ms")
-            :format(now - menuSeen.since))
-          menuSeen = nil
-        end
+    answered = true
+    if t.asking ~= q then return end -- asked before the overlay left the front
+    t.asking = nil
+    self:_menuAnswer(t, v ~= nil and v ~= false)
+  end
+  local ok, err = pcall(t.test, self, answer)
+  if not ok then
+    if not t.saidFailed then
+      t.saidFailed = true
+      host.log.info(("[menu] '%s': menu test '%s' failed: %s — counted as not seeing a menu")
+        :format(tostring(self.label), t.name, tostring(err)))
+    end
+    if not answered then answer(false) end
+  end
+end
+
+-- The tick that has just ended, looked back on before this one's keys and questions: an Escape
+-- went through to the menu, and the menu was seen again on that tick. Said once, at two: a
+-- menu that closes on Escape is gone by then.
+function Overlay:_menuFollowEscape()
+  local st = self._menu
+  if st.open and st.escape and st.seenThisTick then
+    st.escape += 1
+    if st.escape == 2 then
+      host.log.info(("[menu] '%s': the menu is still seen two ticks after Escape went "
+        .. "through — the key did not reach it, or it ignores Escape"):format(tostring(self.label)))
+    end
+  end
+  st.seenThisTick = false
+end
+
+-- Asks the tests that are due on this tick: the cheap ones first, and the others only when no
+-- cheap one sees the menu. A test whose answer is outstanding is not asked again. `tick`: this is
+-- the timer's round, which counts how long an answer has been outstanding; a round asked by a
+-- window event (see _menuHold) does not.
+function Overlay:_menuRound(now, tick)
+  local st = self._menu
+  for _, t in ipairs(st.tests) do
+    if t.asking and tick then
+      t.waited += 1
+      if t.waited == MENU_STALL_TICKS then
+        host.log.info(("[menu] '%s': menu test '%s' has not answered for %d ticks — it is not "
+          .. "asked again until it does, and its word stands meanwhile (%s)")
+          :format(tostring(self.label), t.name, t.waited,
+            t.saw and "that a menu is open" or "no menu"))
       end
     end
-    -- THE THIRD DETECTOR: a menu drawn as a window of its own. Neither of the two above can
-    -- see a popup that posts no accessibility notification and is not an AXMenu — which is
-    -- what every menu the macOS tester opened looked like, though that session could not
-    -- say so for certain (its observer was never armed on the process). A popup that is
-    -- its own window is in the window manager's list, though, whatever the accessibility
-    -- tree says of it: compared against the list _menuOpening took before the click, a
-    -- window that is there now and was not then is the menu, and its going is the menu
-    -- closing. Asked only while a hold is running, so it costs nothing the rest of the
-    -- time, and logged the first time it answers either way — "does this plugin's menu
-    -- appear in the window list" is the question that decides whether this detector is the
-    -- mechanism for that plugin or the stopwatch still is.
+  end
+  for _, t in ipairs(st.tests) do
+    if not self.active then return end
+    if t.cheap and not t.asking then self:_menuAsk(t) end
+  end
+  for _, t in ipairs(st.tests) do
+    if t.cheap and t.saw then return end
+  end
+  local all = st.open or now < st.lookUntil
+  for _, t in ipairs(st.tests) do
+    if not self.active then return end
+    if not t.cheap and not t.asking
+      and (all or t.lastAsked == nil or menuTick - t.lastAsked >= MENU_BACKSTOP_TICKS) then
+      self:_menuAsk(t)
+    end
+  end
+end
+
+local function menuTickFn()
+  menuTick += 1
+  local anyActive = false
+  for _, o in ipairs(menuWatched) do
+    if o.active then
+      anyActive = true
+      break
+    end
+  end
+  if not anyActive then return end
+  for _, o in ipairs(menuWatched) do
+    if o.active then o:_menuFollowEscape() end
+  end
+  -- The keys the hook let through to a menu since the last tick, logged against the overlay
+  -- whose menu is open — they are user-paced, so a line each is affordable, and an Escape is
+  -- followed to see whether the menu then closes (see _menuFollowEscape). Drained here every
+  -- tick an overlay is active, so a key noted for an earlier menu is not reported against a
+  -- later one.
+  local passed = host.keys.passedThrough()
+  if #passed > 0 then
     for _, o in ipairs(menuWatched) do
-      if o.active and o._menuHoldUntil and o._menuBaseline then
-        local now = windowIdsOf(o)
-        if now then
-          if o._menuPopup then
-            local still = false
-            for id in pairs(o._menuPopup) do
-              if now[id] then still = true break end
-            end
-            if still then
-              open = true
-            else
-              host.log.info(("[overlay] '%s': the menu window is gone — the menu closed")
-                :format(tostring(o.label)))
-              o._menuPopup = nil
-              -- Detection has spoken: the hold below was confirmed by this window and ends
-              -- now that it has gone.
-            end
-          else
-            local appeared, n = {}, 0
-            for id, w in pairs(now) do
-              if not o._menuBaseline[id] then
-                appeared[id] = w
-                n += 1
-              end
-            end
-            if n > 0 then
-              o._menuPopup = appeared
-              open = true
-              for id, w in pairs(appeared) do
-                host.log.info(("[overlay] '%s': a window appeared for the plugin while a menu "
-                  .. "was plausible — id %s%s, layer %d, %dx%d at %d,%d — treated as the menu")
-                  :format(tostring(o.label), tostring(id),
-                    w.class ~= "" and (" class '" .. w.class .. "'") or "",
-                    w.layer, w.w, w.h, w.x, w.y))
-              end
-            end
-          end
+      local st = o._menu
+      if o.active and st.open then
+        local names = {}
+        for _, k in ipairs(passed) do
+          names[#names + 1] = tostring(k.key)
+          if k.key == "Escape" then st.escape = 0 end
         end
+        host.log.info(("[menu] '%s': went through to the menu: %s")
+          :format(tostring(o.label), table.concat(names, ", ")))
       end
     end
-    -- THE KEY THAT CLOSED IT. Return and Escape end a menu — Return commits the item under
-    -- the cursor, Escape cancels — so while a hold is running and no detector has confirmed
-    -- a menu, a Return or Escape that the hook let through to the plugin is the best
-    -- evidence there is that the menu is now closing, and the hold is cut to a short grace
-    -- instead of running its full course. That course is what left Tab dead for the rest
-    -- of eight seconds after every choice the macOS tester made. Unconfirmed holds only:
-    -- where a detector can see the menu, its word beats a guess about what a key did
-    -- (Return can open a submenu, and a detector sees that; this cannot).
-    local passed = host.keys.passedThrough()
-    if #passed > 0 then
-      for _, o in ipairs(menuWatched) do
-        if o.active and o._menuHoldUntil and not o._menuHoldConfirmed then
-          for _, k in ipairs(passed) do
-            if k.key == "Return" or k.key == "Escape" then
-              local grace = host.now() + MENU_CLOSE_GRACE_MS
-              if grace < o._menuHoldUntil then
-                o._menuHoldUntil = grace
-                o._menuHoldCut = k.key
-                host.log.info(("[overlay] '%s': %s went through to the menu; the hold ends "
-                  .. "in %d ms unless something sees the menu still open")
-                  :format(tostring(o.label), k.key, MENU_CLOSE_GRACE_MS))
-              end
-            end
-          end
-        end
-      end
+  end
+  local now = host.now()
+  for _, o in ipairs(menuWatched) do
+    if o.active then o:_menuRound(now, true) end
+  end
+  -- An overlay holding its place over its own menu's window whose tests no longer see a menu:
+  -- whatever is in front now decides again, as a window event would have (see _menuHold). Its
+  -- tests have just been asked, and none saw a menu (the word would still say open), so they are
+  -- not asked a second time on this tick.
+  for _, o in ipairs(menuWatched) do
+    local st = o._menu
+    if o.active and st.hold and not st.open then
+      st.askedThisTick = true
+      local ok, err = pcall(o._recheck, o)
+      st.askedThisTick = nil
+      if not ok then error(err, 0) end
     end
-    -- A control's own word that it opened a menu, honoured until it expires. Detection wins
-    -- when it finds something — it is the more specific answer — but never overrules the
-    -- hold by finding nothing, because "found nothing" is the failure mode being covered.
-    if open then
-      for _, o in ipairs(menuWatched) do
-        if o._menuHoldUntil and not o._menuHoldConfirmed then
-          o._menuHoldConfirmed = true
-        end
-      end
-    else
-      for _, o in ipairs(menuWatched) do
-        if o.active and o._menuHoldUntil then
-          if o._menuHoldConfirmed then
-            -- Detection has already PROVED it can see this plugin's menu, so its word that
-            -- the menu has gone beats a stopwatch that was only ever standing in for it.
-            -- Without this the hold went on forcing "menu open" until its deadline even where
-            -- the answer was known — which is what made lengthening the deadline unsafe, and
-            -- is why it stayed too short for the platform that has no detector at all.
-            o._menuHoldUntil = nil
-          elseif host.now() < o._menuHoldUntil then
-            open = true
-          else
-            -- Logged, not spoken, and once: this line is the answer to "is this plugin's
-            -- menu something the accessibility layer can see at all", which nobody here can
-            -- ask any other way. It now also says the hold RAN OUT rather than merely that
-            -- nothing was seen — because a key arriving just after this line is the evidence
-            -- that the duration above is still too short, and the two used to be
-            -- indistinguishable in a log. And it says whether the window list moved: a hold
-            -- that ran its course with the plugin's windows unchanged is a menu drawn inside
-            -- the plugin's own window, which no detector this runtime has can see.
-            local windows = o._menuBaseline
-              and " — and the plugin's window list did not change, so its menu is drawn inside its own window"
-              or ""
-            if o._menuHoldCut then
-              host.log.info(
-                ("[overlay] '%s': the hold ended %d ms after %s went through to a menu no "
-                  .. "detector ever saw%s"):format(tostring(o.label), MENU_CLOSE_GRACE_MS,
-                  o._menuHoldCut, windows)
-              )
-            else
-              host.log.info(
-                ("[overlay] '%s': a control opened a menu, no detector ever saw one, and the "
-                  .. "%d ms hold has run out — a key claimed by the overlay from here on was "
-                  .. "meant for that menu%s"):format(tostring(o.label), MENU_HOLD_MS, windows)
-              )
-            end
-            o._menuHoldUntil = nil
-            o._menuHoldCut = nil
-          end
-        end
-      end
+  end
+  applyMenuState()
+end
+
+-- Runs `tests` for this overlay — what `menus = { … }` on a binding does. Returns the overlay.
+-- An empty list runs nothing. Raises for `true`, for anything that is not a list of tests, and
+-- for a gap in the list (see menuTestsOf).
+function Overlay:_watchMenus(tests)
+  local list = menuTestsOf(self, tests)
+  if #list == 0 then return self end
+  for _, t in ipairs(list) do resetMenuTest(t) end
+  self._menu = self._menu or { open = false, lookUntil = 0, seenThisTick = false }
+  self._menu.tests = list
+  local known = false
+  for _, o in ipairs(menuWatched) do
+    if o == self then
+      known = true
+      break
     end
-    if anyActive then
-      host.keys.menuOpen(open)
-      -- And the other half of what "a menu is open" has to mean: an active overlay owns no
-      -- per-control hotkeys while one is up, so they reach the menu instead of re-firing
-      -- the control. This loop is also what LOWERS an eager suspension (_menuOpening) when
-      -- the menu never appeared.
-      for _, o in ipairs(menuWatched) do
-        if o.active then o:_suspendControlHotkeys(open) end
-      end
-    end
-  end)
+  end
+  if not known then menuWatched[#menuWatched + 1] = self end
+  if not menuTimer then
+    menuTimer = true
+    -- Disable-safe recurring poll (survives a disable/enable cycle, unlike a Lua
+    -- self-rescheduling host.timer.after).
+    host.timer.every(MENU_TICK_MS, menuTickFn)
+  end
   return self
 end
 
--- Deprecated name kept so existing modules keep loading; `menus = true` on attach is the
--- supported way in.
-function Overlay:_startMenuWatch()
-  return self:watchMenus()
+-- A control with `opensMenu` is being activated, before it acts: the tests run on every tick
+-- for a while, and a test that compares against this moment (newWindow) takes its starting
+-- point. Counts no menu as open — only a test does that. In a calibrating run it also takes the
+-- menu shots (see the Calibration section).
+function Overlay:_menuOpening(c)
+  if not self.active then return end
+  local st = self._menu
+  if st then
+    st.lookUntil = host.now() + MENU_LOOK_MS
+    st.pressed = c and c.label or "a control"
+    -- The PRESS, for holding its place if the menu comes up as a window in front (see "holding
+    -- its place", below): the window in front and its process, the binding's own context the
+    -- overlay is active through — not a stand-in it uses while it holds its place — the origin
+    -- that resolves to now, and the control. The next press starts it again.
+    local a = host.window.active()
+    local pid = a and a.app and a.app.pid
+    local base = self.activeCtx and (self.activeCtx.base or self.activeCtx) or nil
+    st.press = nil
+    if a and pid and base then
+      st.press = { window = a.id, front = a, pid = pid, base = base, origin = self:origin(),
+        control = st.pressed }
+    end
+    menuHook(self, "pressed")
+  end
+  if host.calibrating then self:_menuShots(c) end
+end
+
+-- One of the overlay's own keys arrived with no menu counted open: the user is back in the
+-- overlay, so whatever the last press was expected to open did not take the keys. The tests
+-- forget that press (newWindow stops comparing against it), and so does holding its place: a
+-- window that comes to the front after this is not that press's menu. See ownKey.
+function Overlay:_menuOwnKey()
+  local st = self._menu
+  if not st or st.open then return end
+  st.pressed, st.press = nil, nil
+  menuHook(self, "forget")
+end
+
+-- The overlay left the front: the state starts again from nothing when it is back — the press
+-- and a hold over its menu's window with it.
+function Overlay:_menuLeave()
+  local st = self._menu
+  if not st then return end
+  if st.open then
+    host.log.info(("[menu] '%s': left the front with a menu counted open — the tests start "
+      .. "again from nothing when it is back"):format(tostring(self.label)))
+  end
+  st.open = false
+  for _, t in ipairs(st.tests) do resetMenuTest(t) end
+  st.escape, st.pressed, st.since, st.seenThisTick = nil, nil, nil, false
+  st.press, st.hold = nil, nil
+  st.lookUntil = 0
+  menuHook(self, "forget")
+end
+
+-- ── Holding its place ────────────────────────────────────────────────────────
+-- A menu can be a WINDOW that comes to the front. Komplete Kontrol's own menu in REAPER is one
+-- (2026-09-26): its hamburger opens a popup titled "Komplete Kontrol", a window of reaper.exe,
+-- and it takes the front. The overlay's context — the plug-in's window in front, the keyboard in
+-- the plug-in — then no longer matched, so the overlay left the front, and its tests, which run
+-- only for an overlay in front, never saw the menu.
+--
+-- So a press of a control with `opensMenu` is recorded (see _menuOpening), and:
+--   • ON ITS MENU. The window in front is not the press's, but belongs to the same process, and a
+--     test sees a menu NOW — asked there and then, and its answer counts, not the word, which
+--     still says "open" for a miss after a menu has closed: a dialog that an item of a native
+--     menu opened is no menu of the overlay's, and holding it would hold another overlay's
+--     window. The overlay stays in front, but holds NO KEYS AT ALL while that window is: no
+--     navigation key, no hotkey, no say in the pass-through flag. The window's keys are its own,
+--     whatever it leads to — a dialog opened from the menu may be another overlay's. Its tests
+--     run on, and it keeps its claim on the arbiter's slot.
+--   • Anything else ends the hold, and the ordinary match decides, exactly as for any other
+--     window change: the plug-in with the keyboard again (its keys come back, see
+--     _menuHoldEnds); another application (Alt+Tab); a window of the same one that no test sees
+--     a menu in; the host's window with the keyboard on the host's own chrome, which the
+--     embedded focus gate counts as the host's. ReaHotkey has no more than that: its plug-in
+--     context is REAPER's FX window active with the plug-in's control found in it.
+-- The press is forgotten on the overlay's next own key with no menu open, when it leaves the
+-- front, when the plug-in has the keyboard again after a hold, and at the next press — so a
+-- window that appears with no press behind it, or belongs to another process, is never held.
+--
+-- ONE STEP BEYOND ReaHotkey, so that the first key after Escape is not lost (the NVDA test and a
+-- diagnostic run of 2026-09-27). Komplete Kontrol's menu is an invisible full-screen window of
+-- reaper.exe; after Escape the user's first key was lost, and the overlay came back about four
+-- seconds later. The likeliest reading of the log, not measured: KK only HIDES that window, and it
+-- stayed the foreground window, with the keyboard in it — no foreground event came in those four
+-- seconds, which a destroyed window would most likely have caused. host.window.active() cannot
+-- say so: it reports a hidden window as none, and it answers from what was read in the current
+-- epoch, which a tick does not turn over. host.window.foreground() can: the window that gets the
+-- keyboard, shown or not, read afresh. So when a hold ends because no test sees the menu any more,
+-- and the window that gets the keyboard is still the menu's own — the first window the overlay
+-- held its place over after the press, of the press's process — and is not shown, the window that
+-- was in front at the press is brought back, if it is still listed: once per press, with
+-- host.window.focus, its answer logged and nothing announced. Then the ordinary match decides (see
+-- _menuRefocus). When nothing is brought back, the reading is logged instead, once per press.
+--
+-- No timer decides any of it: the window in front, the press, the tests' answers and the window
+-- that gets the keyboard do. Nothing in front — the moment between a popup closing and its owner
+-- coming back, or on a Mac an application with no window — keeps a hold over a menu the tests
+-- still see and ends any other.
+--
+-- A process test rather than an owner test: the window table carries no owner, and a plug-in's
+-- popups are windows of the process that runs it, on both platforms. A plug-in bridged into
+-- another process whose own window is not the one in front at the press — its window reparented
+-- into the host's — is the case this does not hold: its popup belongs to the bridge, and the
+-- overlay leaves the front for it as it did before.
+
+-- The window in front, for a log line.
+local function frontName(a)
+  if not a then return "nothing" end
+  return ("'%s' (%s)"):format(tostring(a.title), tostring(a.app and a.app.exe or "?"))
+end
+
+-- Not held: a hold there was ends here, and says so. Returns nil.
+function Overlay:_menuNotHeld(a)
+  local st = self._menu
+  if st.hold and self.active then
+    host.log.info(("[menu] '%s': no longer holding its place — in front now: %s")
+      :format(tostring(self.label), frontName(a)))
+  end
+  st.hold = nil
+  return nil
+end
+
+-- Called by _recheck when the context of an overlay in front does not match. Returns "menu" — it
+-- holds its place, and self.activeCtx is set to what its origin resolves through meanwhile —
+-- "refocused" — the hold ended and the window of the press was brought back (see _menuRefocus),
+-- so the ordinary match is to be asked again — or nil: it is not held.
+--
+-- `a` can be the answer read earlier in this epoch (see host.window.active), so a window that
+-- hid since then without an event can still be `a`; the step after the hold does not go by it.
+function Overlay:_menuHold()
+  local st = self._menu
+  local h = st.hold
+  local a = host.window.active()
+  if not a then
+    -- Nothing in front. The moment between a popup closing and its owner coming back: a hold
+    -- over a menu the tests still see stands until a window is in front. On a Mac it is also an
+    -- application with no window (Command+Tab to the Finder), so nothing else is held through
+    -- it; and once the tests stop seeing the menu, the tick decides again (menuTickFn). On
+    -- Windows it is also a hidden foreground window — most likely the menu's own, after Escape.
+    if h and st.open then
+      self.activeCtx = h.ctx
+      return "menu"
+    end
+    -- No test sees the menu any more (the word has closed).
+    if h and self:_menuRefocus() then return "refocused" end
+    return self:_menuNotHeld(a)
+  end
+  local pid = a.app and a.app.pid
+  local p = st.press
+  if p and a.id ~= p.window and pid ~= nil and pid == p.pid then
+    -- The origin as it was at the press: the plug-in is still there, behind its menu, and a
+    -- test that reads it (o:origin()) is asked about the plug-in, not about the menu's window.
+    local was = p.origin
+    local ctx = {
+      base = p.base,
+      match = function() return true end,
+      origin = function() return was end,
+    }
+    self.activeCtx = ctx
+    -- A test must see a menu NOW. The tests are asked there and then — so the overlay lets its
+    -- keys go in the same breath as it keeps its place, not a tick later — unless this is the
+    -- tick deciding again, which has just asked them, and none saw one.
+    local before = st.sightings or 0
+    if not st.askedThisTick then self:_menuRound(host.now()) end
+    if (st.sightings or 0) > before and st.open and self.active then
+      if not h then
+        host.log.info(("[menu] '%s': %s came to the front after '%s' was pressed and a test "
+          .. "sees a menu — the overlay holds its place while it is up, holding no keys"):format(
+          tostring(self.label), frontName(a), tostring(st.pressed or "a control")))
+        -- NO KEYS AT ALL while that window is in front: not the navigation keys, not a hotkey,
+        -- and no say in the pass-through flag. They are the menu's — and a window the menu
+        -- leads to can be another overlay's (Komplete Kontrol's Preferences, opened from its
+        -- menu, has one): an overlay still holding Tab and Return behind it would take them,
+        -- because the host hands a captured key to the first module that holds it.
+        self:_unregisterHotkeys()
+        self._hotkeysSuspended = true
+        host.keys.menuOpen(false)
+        -- The menu's own window: the one the hold starts over, the first for this press (a hold
+        -- that ends takes the press with it). Only it can have the step after the hold (see
+        -- _menuRefocus) — not a dialog the menu leads to, which the hold moves on to below.
+        p.menuWindow, p.menuFront = a.id, a
+      end
+      st.hold = { ctx = ctx }
+      return "menu"
+    end
+    self.activeCtx = false
+    -- No test sees the menu any more. On a recheck that asked the tests itself this can be their
+    -- first miss, the word still saying open (see _menuRefocus).
+    if h and self:_menuRefocus() then return "refocused" end
+  end
+  return self:_menuNotHeld(a)
+end
+
+-- Where host.window.foreground() says the keyboard goes, for a log line: `read` and `f` are what
+-- pcall returned.
+local function keyboardName(read, f)
+  if not read then return ("a window that could not be read (%s)"):format(tostring(f)) end
+  if type(f) ~= "table" then return "no window the platform names" end
+  return ("id=%s of pid %s, %s"):format(tostring(f.id), tostring(f.pid),
+    f.shown == false and "not shown" or "shown")
+end
+
+-- A hold ends because no test sees the menu any more. When the window that gets the keyboard
+-- (host.window.foreground, read afresh — never host.window.active, which drops a hidden window
+-- and may answer from before it hid) is still the menu's own window — the first one held over
+-- after this press, of the press's process — and it is not shown, the keyboard is in a window
+-- nobody can see, and the window that was in front at the press is brought back with
+-- host.window.focus: once per press, whatever the answer, and only if that window is still
+-- listed. Nothing is said: accepted is not the keyboard in the plug-in, and whether the overlay
+-- is back is the ordinary match's to decide, which _recheck asks again at once. Returns whether
+-- the platform accepted.
+--
+-- Not when foreground() names another window, one that is shown, nothing, or cannot be read (it
+-- raises, or on a Mac the application is not answering: nil). Only past those is anything else
+-- asked, so wherever the window that gets the keyboard is shown — on a Mac, any focused window that
+-- is not minimised — the step costs one reading and no more. That reading is logged, once per
+-- press, when nothing is brought back: the `in front now:` line after it names what
+-- host.window.active() answers, which can be kept from earlier in the epoch, so this line is the
+-- one that says where the keyboard was.
+--
+-- Reached from _menuHold whenever a hold ends with no test seeing the menu: on the tick that
+-- closes the menu, or — a recheck that asks the tests itself, such as a pollMatch poll reading a
+-- window active() kept from before the menu hid — at the first miss, while the word still says
+-- open. foreground()'s `shown = false` is what keeps a single missed reading of a menu that is
+-- still up from bringing anything back.
+function Overlay:_menuRefocus()
+  local st = self._menu
+  local p = st.press
+  if not p or p.refocused or p.menuWindow == nil then return false end
+  local read, f = pcall(host.window.foreground)
+  -- Once per press, brought back or not: the hold ends here either way, and the press with it.
+  p.refocused = true
+  if not (read and type(f) == "table" and f.id == p.menuWindow and f.pid == p.pid
+    and f.shown == false) then
+    host.log.info(("[menu] '%s': no test sees the menu any more; the keyboard goes to %s, and the "
+      .. "menu's window %s is id=%s of pid %s — nothing is brought back"):format(
+      tostring(self.label), keyboardName(read, f), frontName(p.menuFront), tostring(p.menuWindow),
+      tostring(p.pid)))
+    return false
+  end
+  local why = ("[menu] '%s': no test sees the menu any more, but its window %s still gets the "
+    .. "keyboard and is not shown"):format(tostring(self.label), frontName(p.menuFront))
+  -- Windows reuses a window's handle once the window is gone: the window of the press must still
+  -- be listed for its process, with its class, before it is brought forward. A menu item can close
+  -- it or unload the plug-in. host.window.list lists titled windows only, so an untitled window of
+  -- the press is never brought back.
+  local listed, list = pcall(host.window.list, { pids = { p.pid } })
+  local there = false
+  if listed and type(list) == "table" then
+    for _, w in ipairs(list) do
+      if w.id == p.window and w.class == p.front.class then
+        there = true
+        break
+      end
+    end
+  end
+  if not listed then
+    host.log.info(("%s — the window of the press, %s, could not be looked for (%s), so nothing "
+      .. "is brought back"):format(why, frontName(p.front), tostring(list)))
+    return false
+  end
+  if not there then
+    host.log.info(("%s — the window of the press, %s, is not listed for its process with its "
+      .. "class (gone, untitled, or its id now another window's), so nothing is brought back")
+      :format(why, frontName(p.front)))
+    return false
+  end
+  local ok, answer = pcall(host.window.focus, p.window)
+  local accepted = ok and answer == true
+  host.log.info(("%s — bringing back %s, where '%s' was pressed: %s"):format(why,
+    frontName(p.front), tostring(p.control),
+    accepted and "accepted" or (ok and "declined" or ("declined (" .. tostring(answer) .. ")"))))
+  return accepted
+end
+
+-- The hold over its menu's window ended with the plug-in having the keyboard again: its keys
+-- again, scoped to its window, which another overlay may have scoped them away from meanwhile.
+-- The tests forget the press — the menu it opened is over — and are asked at once, so they start
+-- counting it closed. The per-control hotkeys come back given up, and applyMenuState takes them
+-- back when the menu counts as closed — now, or on a later tick — with the log line that says so.
+function Overlay:_menuKeysBack()
+  local st = self._menu
+  st.press = nil
+  menuHook(self, "forget")
+  self:_registerHotkeys(true)
+  host.keys.scope(true)
+  applyMenuState()
+  self:_menuRound(host.now())
+end
+
+-- The overlay's context matches again — the plug-in has the keyboard: the hold is over, and the
+-- overlay's keys come back. A plug-in that takes the keyboard back itself, or the window of the
+-- press brought back with the keyboard in the plug-in.
+function Overlay:_menuHoldEnds()
+  local st = self._menu
+  if not st.hold then return end
+  st.hold = nil
+  if not self.active then return end
+  host.log.info(("[menu] '%s': the plug-in has the keyboard again"):format(tostring(self.label)))
+  self:_menuKeysBack()
 end
 
 -- ── Calibration ──────────────────────────────────────────────────────────────
@@ -4158,6 +4728,9 @@ end
 --
 -- Command+Option+Shift on a Mac, where the spec's Ctrl is Command — off Control+Option, which
 -- is VoiceOver's.
+--
+-- And with no key at all: activating a control with `opensMenu` takes the three menu shots,
+-- which delay the control by one screen capture and nothing more (see _menuShots below).
 --
 -- Written into `calibration/` under the module's own directory.
 
@@ -4207,9 +4780,14 @@ local function shotName(base, k)
 end
 
 local shotsTaken = {}
-local function shotPath(label)
+-- `suffix` is what follows the number in the file the existence check looks for: nothing for
+-- the calibration shot (`<overlay>.png`, `<overlay>-2.png`), "-menu-before" for the menu shots
+-- (`<overlay>-<control>-menu-before.png`, `<overlay>-<control>-2-menu-before.png`).
+local function shotPath(label, suffix)
+  suffix = suffix or ""
   local base = safeName(label)
-  local n = shotsTaken[base]
+  local key = base .. suffix
+  local n = shotsTaken[key]
   -- Seeded from what is already on disk, not merely counted per run. A counter that lives
   -- only in memory resets on restart, and restarting between two shots of the same overlay
   -- is not the exception while a module is being written — it is the loop. That is exactly
@@ -4217,12 +4795,12 @@ local function shotPath(label)
   -- was added to prevent, defeated by the workflow it was meant to serve.
   if n == nil then
     n = 0
-    while host.resource.exists("calibration/" .. shotName(base, n + 1) .. ".png") do
+    while host.resource.exists("calibration/" .. shotName(base, n + 1) .. suffix .. ".png") do
       n = n + 1
     end
   end
   n = n + 1
-  shotsTaken[base] = n
+  shotsTaken[key] = n
   return shotName(base, n)
 end
 
@@ -4312,40 +4890,32 @@ local function calibrationUia(origin)
   return lines
 end
 
-function Overlay:calibrationShot()
-  local o = self:origin()
-  if not (o and o.client and o.bounds) then
-    host.log.info("[calibrate] no active origin")
-    return false
-  end
-  local marks, lines = {}, {}
-  for _, c in ipairs(self.controls) do
+-- Where every VISIBLE control will act, as crosshair marks, and each control's own entry:
+-- `points[i]` is `{ x, y, n }` (n = its mark's number) for a visible control with a position,
+-- `false` for a visible one without, nil for a hidden one. No pixel is read here, but a
+-- control's `when` and its point can cost a lookup each (an image search for a slider's thumb),
+-- which is why the menu shots, taken before a click, do not size their picture with it.
+local function calibrationMarks(self)
+  local marks, points = {}, {}
+  for i, c in ipairs(self.controls) do
     -- A control that is currently HIDDEN gets no crosshair: drawing one would say the user
     -- can reach something they cannot, which is the opposite of what this picture is for.
-    -- It is still listed, marked, so its absence is visible rather than mysterious.
-    if not isVisible(self, c) then
-      lines[#lines + 1] = string.format("  -- %-24s hidden (its `when` is false)", tostring(c.label))
-      continue
-    end
-    local x, y = calibrationPoint(self, c)
-    if x then
-      marks[#marks + 1] = { x = x, y = y }
-      local px = host.screen.pixel(x, y)
-      lines[#lines + 1] = string.format(
-        "  %2d %-24s screen (%d,%d)  pixel %s%s",
-        #marks, tostring(c.label), x, y,
-        px and string.format("%d,%d,%d", px.r, px.g, px.b) or "?",
-        c.rawOrigin and "  [rawOrigin]" or ""
-      )
-    else
-      lines[#lines + 1] = string.format("  -- %-24s no position", tostring(c.label))
+    if isVisible(self, c) then
+      local x, y = calibrationPoint(self, c)
+      if x then
+        marks[#marks + 1] = { x = x, y = y }
+        points[i] = { x = x, y = y, n = #marks }
+      else
+        points[i] = false
+      end
     end
   end
-  -- Written under the OVERLAY RUNTIME's own directory, not the module whose overlay this
-  -- is: host.path resolves against the module that DEFINES the running code, which here is
-  -- the runtime. That rule is what makes an inherited overlay find its own images, so it
-  -- stays -- calibration output just gets one known home instead of a per-module one. The
-  -- log line prints the absolute path, and the file is named after the overlay.
+  return marks, points
+end
+
+-- The region a calibration picture of origin `o` covers: its CONTENT rectangle, grown to take
+-- in every mark, clamped to the window.
+local function calibrationRegion(o, marks)
   -- The CONTENT rectangle, which is the one the controls are measured against — using the
   -- window rect instead made a standalone shot overshoot by its border and include a strip
   -- of whatever was behind it, so a picture meant to settle where a coordinate lands
@@ -4366,6 +4936,41 @@ function Overlay:calibrationShot()
     region[3] = math.min(o.bounds.x + o.bounds.w, math.max(region[3], m.x + pad))
     region[4] = math.min(o.bounds.y + o.bounds.h, math.max(region[4], m.y + pad))
   end
+  return region
+end
+
+function Overlay:calibrationShot()
+  local o = self:origin()
+  if not (o and o.client and o.bounds) then
+    host.log.info("[calibrate] no active origin")
+    return false
+  end
+  local marks, points = calibrationMarks(self)
+  local lines = {}
+  for i, c in ipairs(self.controls) do
+    local p = points[i]
+    -- A hidden control is still listed, marked, so its absence is visible rather than
+    -- mysterious.
+    if p == nil then
+      lines[#lines + 1] = string.format("  -- %-24s hidden (its `when` is false)", tostring(c.label))
+    elseif p then
+      local px = host.screen.pixel(p.x, p.y)
+      lines[#lines + 1] = string.format(
+        "  %2d %-24s screen (%d,%d)  pixel %s%s",
+        p.n, tostring(c.label), p.x, p.y,
+        px and string.format("%d,%d,%d", px.r, px.g, px.b) or "?",
+        c.rawOrigin and "  [rawOrigin]" or ""
+      )
+    else
+      lines[#lines + 1] = string.format("  -- %-24s no position", tostring(c.label))
+    end
+  end
+  -- Written under the OVERLAY RUNTIME's own directory, not the module whose overlay this
+  -- is: host.path resolves against the module that DEFINES the running code, which here is
+  -- the runtime. That rule is what makes an inherited overlay find its own images, so it
+  -- stays -- calibration output just gets one known home instead of a per-module one. The
+  -- log line prints the absolute path, and the file is named after the overlay.
+  local region = calibrationRegion(o, marks)
   local stem = shotPath(self.label)
   local path = host.path("calibration/" .. stem .. ".png")
   local ok = host.screen.saveMarked(path, { region = region, marks = marks })
@@ -4394,6 +4999,82 @@ function Overlay:calibrationShot()
   for _, l in ipairs(calibrationUia(o)) do host.log.info("[calibrate]" .. l) end
   for _, l in ipairs(lines) do host.log.info("[calibrate]" .. l) end
   return ok == true
+end
+
+-- The MENU SHOTS, in a calibrating run: a control with `opensMenu` was activated, so its menu
+-- is about to appear over the plug-in. Three pictures of the origin's whole rectangle — the
+-- plug-in's control, or the window with its frame — just before the control acts and about
+-- 600 ms and 1500 ms after:
+--
+--   calibration/<overlay>-<control>-menu-before.png
+--   calibration/<overlay>-<control>-menu-after-600.png
+--   calibration/<overlay>-<control>-menu-after-1500.png
+--
+-- numbered like the other shots (`<overlay>-<control>-2-menu-before.png` for the next press),
+-- so nothing is overwritten. They are what a module's own menu test is written from: a menu
+-- the plug-in paints inside its own window has no window, no element and no notification, and
+-- the pixels are the only thing that changes. The rectangle is taken once, before the click,
+-- so the three pictures line up pixel for pixel; the part of a popup that reaches past it is
+-- not in them.
+--
+-- NOTHING BUT ONE CAPTURE STANDS BEFORE THE CLICK. The first version wrote the "before" PNG on
+-- the press and worked out every visible control's point to size the picture, and in a debug
+-- build that put about 700 ms between the key and the click — Diva's preset menu felt slow
+-- (2026-09-26). Now the press takes a snapshot of a rectangle the origin already carries and
+-- nothing else. The later two are taken off the event loop at their time (snapshotAsync with
+-- `at`) and written when they arrive; the "before" one is written last, once both are in, and
+-- its snapshot kept until then. Not on the next pass after the click: that is when the menu's
+-- first answer, its window coming to the front and the user's first key arrive, and a PNG takes
+-- the event loop for hundreds of milliseconds in a debug build. So a key pressed while the menu
+-- opens waits for no capture and no PNG; one pressed at 600 or 1500 ms waits for one or two
+-- PNGs. The timing is a measuring instrument, not menu state: nothing reads these pictures but
+-- the person calibrating.
+function Overlay:_menuShots(c)
+  local who, what = tostring(self.label), tostring(c and c.label or "control")
+  local o = self:origin()
+  if not (o and o.client and o.bounds) then
+    host.log.info(("[calibrate] '%s' '%s': no active origin, so no menu shots"):format(who, what))
+    return
+  end
+  local b = o.bounds
+  local region = { b.x, b.y, b.x + b.w, b.y + b.h }
+  local stem = shotPath(who .. "-" .. what, "-menu-before")
+  -- Writes one picture, and lets its pixels go. A shot that fails says why and stops nothing.
+  local function write(suffix, when, snap, why)
+    local path = host.path("calibration/" .. stem .. suffix .. ".png")
+    local ok = false
+    if snap then
+      local fine, saved, reason = pcall(host.screen.save, path, { snapshot = snap })
+      ok, why = fine and saved == true, fine and reason or saved
+      pcall(snap.release, snap)
+    end
+    host.log.info(("[calibrate] '%s' '%s': menu shot %s, (%d,%d)-(%d,%d), content at (%d,%d) "
+      .. "-> %s (%s)"):format(who, what, when, region[1], region[2], region[3], region[4],
+      o.client.x, o.client.y, path,
+      ok and "true" or ("false: " .. tostring(why or "no reason given"))))
+  end
+  local pressed = host.now()
+  local fine, snap, why = pcall(host.screen.snapshot, { region = region })
+  if not fine then snap, why = nil, snap end
+  -- The "before" picture once the later two are in (see above).
+  local waiting = 2
+  local function oneIn()
+    waiting -= 1
+    if waiting == 0 then write("-menu-before", "just before the control acts", snap, why) end
+  end
+  for _, ms in ipairs({ 600, 1500 }) do
+    local suffix, when = "-menu-after-" .. ms, ms .. " ms after"
+    local asked, err = pcall(host.screen.snapshotAsync, { region = region, at = pressed + ms },
+      function(later, reason)
+        write(suffix, when, later, reason)
+        oneIn()
+      end)
+    if not asked then
+      write(suffix, when, nil, err)
+      -- Counted on a later pass, not now: now would write the "before" picture ahead of the click.
+      host.timer.after(0, oneIn)
+    end
+  end
 end
 
 -- Crops `size` pixels around the FOCUSED control and writes it as a template. The size a

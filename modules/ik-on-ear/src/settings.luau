@@ -165,7 +165,7 @@ for _, b in ipairs({
 end
 
 settings:attach(on_ear, {
-  menus = true,
+  menus = app.MENUS,
   slot = ON_EAR_SLOT,
   specificity = O.layer.dialog,
   pollMatch = 500,

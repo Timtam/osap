@@ -22,8 +22,7 @@ use core::ffi::c_void;
 use core::ptr::NonNull;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
@@ -51,20 +50,8 @@ static FRONT_PID: AtomicI32 = AtomicI32::new(0);
 
 /// How many menus the frontmost application currently has open. See [`native_menu_open`].
 static MENU_DEPTH: AtomicI32 = AtomicI32::new(0);
-/// When [`MENU_DEPTH`] last moved, in milliseconds since the first call to `now_ms`.
-static MENU_SINCE_MS: AtomicU64 = AtomicU64::new(0);
 /// Whether any accessibility notification has ever arrived, so the log can say so once.
 static HEARD_ANYTHING: AtomicBool = AtomicBool::new(false);
-
-/// A menu that has been "open" longer than this is assumed to be a notification we never
-/// got rather than a user still reading.
-///
-/// The number is a guess and wants measuring. What it guards is the one failure this
-/// module could cause that a user cannot see: a stuck flag hands every captured key to the
-/// application underneath, so the overlay simply stops answering, permanently and
-/// silently. Erring long is safe for the other direction — while it is wrongly still
-/// "open" the overlay is merely disarmed, which is exactly what a real open menu wants.
-const STUCK_MENU_MS: u64 = 60_000;
 
 /// One application we are listening to.
 struct Live {
@@ -228,23 +215,17 @@ pub fn start() -> Result<(), String> {
 /// What a real Mac has to settle is whether the two notifications arrive in balanced pairs
 /// in the applications we care about; the log records every transition, so one session with
 /// a DAW's File menu opened and closed a few times answers it.
+///
+/// NO CLOCK DECIDES IT. A menu counts as open from its `AXMenuOpened` until its
+/// `AXMenuClosed`, however long the user stays in it, and the count is cleared when another
+/// application comes to the front (`on_app_activated`). A sixty-second valve used to sit here,
+/// taking a count that had not moved for a minute as a lost close notification — a guess that
+/// took the keys away from a user still reading the menu. Timed decisions about UI state were
+/// ruled out on 2026-09-26, so a lost close notification now leaves the count up until the user
+/// switches to another application; the log's "a menu opened in pid …" line with no "closed"
+/// line after it names the application that lost one.
 pub fn native_menu_open() -> bool {
-    if MENU_DEPTH.load(Ordering::Relaxed) <= 0 {
-        return false;
-    }
-    let age = now_ms().saturating_sub(MENU_SINCE_MS.load(Ordering::Relaxed));
-    if age > STUCK_MENU_MS {
-        MENU_DEPTH.store(0, Ordering::Relaxed);
-        crate::logging::line(
-            "macos",
-            &format!(
-                "a menu has been open for {age} ms with no close notification — assuming it is \
-                 gone and re-arming; if the overlay felt dead until now, this is why"
-            ),
-        );
-        return false;
-    }
-    true
+    MENU_DEPTH.load(Ordering::Relaxed) > 0
 }
 
 /// Subscribes to the frontmost-application change.
@@ -855,9 +836,7 @@ fn on_notification(pid: i32, name: &CFString) {
     }
 
     // Read-modify-write without a compare-exchange: only the run loop this observer is on
-    // ever writes these, and `native_menu_open`'s unstick is a store of the same value it
-    // would converge to anyway.
-    MENU_SINCE_MS.store(now_ms(), Ordering::Relaxed);
+    // writes the count, and `on_app_activated`, which clears it, runs on that same thread.
     let before = MENU_DEPTH.load(Ordering::Relaxed);
     let after = if opened { before + 1 } else { (before - 1).max(0) };
     MENU_DEPTH.store(after, Ordering::Relaxed);
@@ -883,15 +862,6 @@ fn app_name(app: &NSRunningApplication) -> String {
         .filter(|s| !s.is_empty())
         .or_else(|| app.bundleIdentifier().map(|s| s.to_string()))
         .unwrap_or_else(|| "an unnamed application".to_string())
-}
-
-/// Milliseconds since the first call, monotonic.
-///
-/// `Instant` rather than the wall clock so that a clock adjustment cannot make an open menu
-/// look an hour old and re-arm the overlay underneath a user who is still reading it.
-fn now_ms() -> u64 {
-    static EPOCH: OnceLock<Instant> = OnceLock::new();
-    EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
 /// AppKit publishes every accessibility name this module needs; HIServices publishes none

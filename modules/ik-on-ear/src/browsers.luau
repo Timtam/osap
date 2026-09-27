@@ -920,7 +920,7 @@ local function chooser(spec)
   -- event" — and the failure it prevents is worse than a missed activation: an overlay that
   -- will not let go is one a person who cannot see the screen has no way to escape.
   b:attach(on_ear, {
-    menus = true,
+    menus = app.MENUS,
     slot = ON_EAR_SLOT,
     specificity = O.layer.dialog,
     -- 500, not less: the log times each of these gate evaluations at 26 to 53 ms, because a

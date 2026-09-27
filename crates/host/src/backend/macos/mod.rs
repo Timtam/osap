@@ -93,6 +93,10 @@ impl Backend for MacBackend {
         ax::active_window()
     }
 
+    fn foreground_window(&self) -> Option<super::Foreground> {
+        ax::foreground_window()
+    }
+
     fn focus_window(&self, id: isize) -> bool {
         ax::focus_window(id)
     }

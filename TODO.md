@@ -4356,6 +4356,324 @@ can settle:
       its key without asking again (now only a newer request with the key, which is itself
       taken, or disabling the module ends one).
 
+## Menus: each module names its tests, and no timer decides (2026-09-26)
+
+The maintainer's decisions of 2026-09-26: the host's core API holds only general primitives, and
+no timed option decides UI state. A menu counts as open while a test says so and closed when none
+does; time may only set how often the tests run. How a plug-in's menus are seen is its module's
+decision, hooked into one interface the overlay runtime provides.
+
+- [x] **Removed, and why.** The central detection every `menus = true` overlay got, and every
+      elapsed-time decision about whether a menu is open:
+  - `MENU_HOLD_MS` (8 s) and the hold: a control with `opensMenu` counted as a menu for 8 s
+      unless a detector confirmed it, with a 300 ms grace after a Return or Escape
+      (`MENU_CLOSE_GRACE_MS`) and its confirm logic. It gave the keys to a menu that was not
+      there for up to 8 s, and took them back from one still being read.
+  - `MENU_SEEN_CAP_MS` (30 s): a menu the accessibility check had seen for 30 s stopped
+      counting — half-applied, so from then on the keys flipped every 1.2 s (Kontakt's snapshot
+      menu on Cinematic Studio Strings: 23 flips, 17 hotkeys registered again each time).
+  - The hand-over at the press itself (`host.keys.menuOpen(true)` and the hotkeys given up
+      before any check had looked), and the 600 ms restore for an overlay with no watch.
+  - `menus = true`: it raises at bind now, naming the building blocks.
+- [x] **What replaced it** — `modules/overlay-runtime`, the Menus section;
+      `docs/api/overlay.md#o-menutests`. `menus = { test, … }` on a binding; a test is
+      `function(o, answer)` that answers once per question, at once or from an async callback
+      (any value but nil and false is "seen"), or `{ name, cheap, test, pressed, forget }`.
+      Each test has a word: "open" from the answer that saw a menu until it has answered no
+      twice in a row (one missed read is not a close); the menu is open while any test's word
+      says so. A test whose answer is outstanding is not asked again, holds up none of the
+      others, and its word stands meanwhile — no timeout. Cadence only: every tick for 8 s after
+      an `opensMenu` press and while a menu is open, otherwise cheap tests every tick and each
+      other test once 8 ticks have passed since it was last asked; while a cheap test sees the
+      menu the others are not asked. While a menu is open over any overlay of a module, every
+      one of its overlays in front gives up its hotkeys. Building blocks
+      `O.menuTests.nativePopup`, `O.menuTests.newWindow` (the process and the window list taken
+      at the press; ends when its windows have gone, at the overlay's own next key with no menu
+      open, and when the overlay leaves the front), `O.menuTests.accessibility` and
+      `O.menuTests.accessibilityAfterPress` (the same walk, only from a press until that press
+      is done with), both for the transition. `[menu]` log lines: which test saw it, the
+      keyboard focus then, the keys that went through, whether it was still seen two ticks
+      after an Escape, a test that has not answered for 20 ticks. In a calibrating run an
+      `opensMenu` press saves `<overlay>-<control>-menu-before.png`, `-menu-after-600.png`,
+      `-menu-after-1500.png` (docs/api/calibrating.md). Scenarios against a scripted host in
+      `crates/host/src/overlay_menu_tests.rs`: 46 since the "holding its place" and menu-shot
+      items further down. Host bug fixed on the way: a captured Return or Escape was recorded
+      twice (the Windows hook and the macOS tap noted it in two branches).
+- [x] **Which module lists which tests** (from the logs and the modules' own records):
+  - Kontakt in a DAW: nativePopup + accessibilityAfterPress (see the snapshot-bar item below).
+      Standalone: nativePopup + accessibility (the accessibility check saw every Kontakt menu on
+      Windows since Phase A, and Kontakt 8 standalone's File menu, opened with VoiceOver, on a
+      Mac). Kontakt in Komplete Kontrol: nativePopup + accessibility + newWindow — the walk asks
+      KK's tree there (the nested Kontakt is a leaf), for KK's own menu.
+  - Komplete Kontrol in a DAW: nativePopup + accessibility + newWindow (no log says which sees
+      KK's own menu). Standalone: nativePopup (its menu bar is the window's Win32 menu bar).
+  - sforzando, all three bindings: nativePopup (Windows; ReaHotkey needs nothing but `#32768`)
+      + newWindow (macOS, 2026-09-18: a level-101 window for each of the six lists opened).
+  - u-he: nativePopup (the preset menu is a native menu, verified live). Melodyne: nativePopup.
+  - ARC ON:EAR (main window, settings, choosers): nativePopup + newWindow. Not accessibility:
+      on 2026-08-31 it ran every tick after each press and saw none of the menus.
+- [ ] **Menus only the removed hold ever covered — they keep the overlay's keys now, until a
+      test sees them:**
+  - Kontakt 7 standalone on macOS, File and View menus (2026-09-18: "the hold ended 300 ms
+      after Escape went through to a menu no detector ever saw — and the plugin's window list
+      did not change"). Drawn inside the window: phase 2.
+  - ARC ON:EAR's Device list on Windows (2026-08-31, three presses, each "no detector ever saw
+      one" — before the window-list detector existed). A JUCE list is a window of its own, so
+      newWindow should see it: a live check. (The Settings gear, declared `opensMenu`, opens a
+      panel, not a menu; the hold gave the keys away for its length there, and no longer does.)
+  - Kontakt nested in Komplete Kontrol: its own snapshot dropdown (a leaf to accessibility; no
+      log of it exists). Probably hold-only; phase 2 covers it with the bare Kontakt's picture.
+- [ ] **Phase 2 — picture tests for self-drawn menus.** Kontakt's snapshot menu, File and View
+      menus; sforzando's lists where newWindow does not see them. From the menu shots taken with
+      calibration on: one test per menu, a pixel colour or an image only the open menu has.
+      Then drop the accessibility tests from Kontakt's lists where a picture test covers the
+      menu.
+  - How to take the shots: tick "Calibration keys in overlays" in the module manager's
+      Application settings tab and reload the modules. Then press the control, wait two
+      seconds without a key, and close the menu with Escape; the log's
+      `[calibrate] … menu shot` lines name the three files in
+      `modules/overlay-runtime/calibration/`. Kontakt 8 in REAPER, classic view: Tab to
+      "Snapshot menu" and Return (not Alt+M: see the next item), on an instrument with
+      snapshots. File menu: Alt+F (Kontakt file menu) in a standalone Kontakt — in a DAW no
+      control leaves that menu open (Load, Save and Reset drive it themselves). View menu: Alt+V
+      in a standalone Kontakt 7 (Kontakt 8 has no View menu). sforzando: Return on Instrument,
+      Polyphony and Pitchbend range. LAST, Cinematic Studio Strings, which has no snapshots:
+      "Snapshot menu" and Return once. If the overlay is silent afterwards (no hotkeys, Tab
+      going to Kontakt), switch to another application and back (Alt+Tab, then Alt+Tab again).
+- [ ] **Kontakt's classic-view hotkeys came late** (2026-09-26 log): after switching Kontakt 8 to
+      classic view, the rack controls' hotkeys (Alt+M/P/N, Ctrl+P/N, Ctrl+Shift+P/N, Alt+E/8/9)
+      were not registered for about a minute — no "is now held" line between the switch and the
+      next re-sync. Cause not yet traced; the log shows only that nothing re-synced them.
+- [ ] **Kontakt's snapshot bar and the accessibility walk.** On 2026-09-26 a Menu element
+      appeared in an embedded Kontakt 8's tree when the snapshot dropdown was pressed on
+      Cinematic Studio Strings and was still there 66 s later, across a switch to another
+      application. With no cap, the plain accessibility test would count it as an open menu for
+      as long as it exists, and the backstop would see it again after every return. So Kontakt
+      in a DAW lists accessibilityAfterPress: the element is counted only from a press of the
+      snapshot dropdown (or VIEW) until that press is done with. If it stays after the press,
+      the overlay is out — its hotkeys given up, Tab and Return going to Kontakt — until the
+      user switches to another application and back, which ends the press. Escape (never
+      captured) closes a real menu and brings the keys back sooner. Disabling a module is not
+      needed; done anyway, it has to be the module that owns the overlay in front — for
+      Cinematic Studio Strings that is Cinematic Studio Series, not Kontakt, because the arbiter
+      drops only the overlays of the disabled module itself. The live check decides what the
+      element is — the `[menu]` line names the keyboard focus, and one after an Escape says
+      whether it was still seen — and phase 2's picture test replaces the walk either way.
+- [ ] **Live checks, Windows with NVDA:** u-he Alt+M preset menu (`[menu] … test 'nativePopup'
+      sees it`, one gave up / took back pair); Komplete Kontrol standalone Alt+F/E/V/C/H, and
+      Edit → Preferences: no `holds its place` line, and Tab moves in the Preferences overlay; KK
+      in a DAW, Space or Alt+M on "Komplete Kontrol menu" — the log says `… came to the front
+      after 'Komplete Kontrol menu' was pressed and a test sees a menu — the overlay holds its
+      place` and `test 'newWindow' sees it`, no `[deactivate]`; arrows and Return walk KK's menu;
+      after Escape, when the menu has closed, one `… its window 'Komplete Kontrol' (reaper.exe)
+      still gets the keyboard and is not shown — bringing back 'FX: …' (reaper.exe), where
+      'Komplete Kontrol menu' was pressed: accepted` (or `declined`, the likely answer: next
+      item), then most likely `no longer holding its place — in front now: nothing` and a
+      `[deactivate]` at once — Windows makes the change when REAPER's thread gets to it — and an
+      `[activate]` that speaks the overlay's control once REAPER has made it with the keyboard in
+      KK (made inside the call instead: `the plug-in has the keyboard again` and one `took
+      back`); the first key after that (Tab) speaks the overlay's next control, with no second
+      `bringing back` line (the same for Kontakt inside KK). No `bringing back` line: the
+      `no test sees the menu any more; the keyboard goes to …, and the menu's window … is id=…
+      of pid … — nothing is brought back` line says where the keyboard was when the menu closed,
+      and that is the finding; the `in front now:` line names host.window.active()'s answer,
+      which can be kept from earlier in the epoch, and says nothing about it. A submenu, or
+      Escape twice: the same; if KK's submenus are windows of their own, the reading line names
+      the submenu's window, which is not the menu's own and brings nothing back (widening that is
+      the maintainer's call). An item of KK's menu that opens a dialog: the overlay holds its
+      place while the dialog is up; after it closes, a `bringing back` line only if KK's hidden
+      menu window gets the keyboard back, otherwise the reading line and the ordinary match (back
+      once the keyboard is in KK);
+      then keep only the tests the `[menu]` lines named for KK; Melodyne's
+      menu bar, no flicker; Kontakt 8 in REAPER: Ctrl+L still loads, the snapshot menu on an
+      instrument with snapshots takes arrows and Return (`test 'accessibilityAfterPress' sees
+      it`), and on Cinematic Studio Strings the focus and Escape lines say whether keys reach
+      Kontakt at all, and Alt+Tab away and back gives the overlay its keys again; sforzando's
+      three lists (nativePopup expected); ON:EAR's Device list and the four settings lists
+      (newWindow expected: `newWindow: a window appeared`).
+- [ ] **The foreground lock will most likely decline the step's SetForegroundWindow** (the
+      review of 2026-09-27; not measured). The step runs on a tick 150–300 ms after an Escape
+      that went to REAPER, and Windows lets a process change the foreground only if it is the
+      foreground process, was started by it, received the last input event, or no window is in
+      the foreground — none of which is likely to hold for this host then (the Escape went to
+      REAPER, and the hidden menu window is the foreground window). If the NVDA test logs
+      `declined`, the maintainer decides between (a) `host.window.focus` doing what AutoHotkey's
+      WinActivate does (AttachThreadInput with the foreground window's thread around
+      SetForegroundWindow) — a host change; and (b) no refocus: while foreground() names the
+      press's hidden menu window, the runtime treats that as the plug-in's context, its keys held
+      and scoped to that window — a new runtime decision that needs no foreground rights.
+- [ ] **Live checks, macOS:** sforzando's lists still seen by newWindow, standalone and in REAPER,
+      and whether a list's window becomes the focused window (a `holds its place` line; no
+      `bringing back` line is expected after it closes: foreground() reports a focused window as
+      shown unless it is minimised, and the `the keyboard goes to …` line says what it answered)
+      or leaves REAPER's in front — then the binding's own match decides, and in REAPER the
+      function form's geometric gate takes the overlay out when VoiceOver's focus is on a list
+      item outside sforzando's panel (a `[deactivate]` line; whether the keys still reach the
+      list then is the question); Command+Tab to the Finder with
+      a list up: the overlay holds no keys while newWindow still sees the list, and leaves (`no
+      longer holding its place — in front now: nothing`) once it does not — does the list close
+      when REAPER goes to the background?; Kontakt 8 standalone's File menu by accessibility;
+      Kontakt 7 standalone's File and View menus now keep the overlay's keys until phase 2
+      (expected) — so with one of them open, Return re-presses "Kontakt file menu" (or "View
+      menu") under it instead of choosing an item, and only VoiceOver's own VO+Space chooses one.
+- [ ] **host.window.foreground() on a Mac, never run.** Whether AXFocusedWindow can name a
+      window that is ordered out (not on screen) — `shown` would still say true, since only
+      AXMinimized is read and the window server is not asked; whether its `id` equals
+      `active().id` for the same window (both intern the element, so it should); and what the two
+      reads cost. The probe (Cmd+Shift+F9) logs a `foreground:` line beside the window it
+      probes, saying whether it is that window; and every hold over a menu's window that ends
+      with no test seeing the menu logs the runtime's `the keyboard goes to …` line.
+- [ ] **A busy Mac application reads as "no menu" to the accessibility tests.** The host leaves
+      an application that did not answer alone for 5 s (`BUSY_PENALTY`, `backend/macos/ax.rs`)
+      and `find` answers false meanwhile, so a menu only the accessibility tests see (a
+      standalone Kontakt 8's File menu) closes after two ticks and opens again afterwards.
+      Documented under overlay.md's macOS notes; telling "could not ask" from "no menu" needs a
+      host change — the maintainer's decision.
+- [x] **Decided 2026-09-26: the host's 60 s rule is gone.** On macOS `native_menu_open` treated a
+      menu depth that had not moved for 60 s as closed (`STUCK_MENU_MS`, `backend/macos/watch.rs`),
+      and the event tap's own pass-through followed it — a timed decision about UI state. Removed:
+      a menu counts as open from its `AXMenuOpened` until its `AXMenuClosed`, and the count is
+      cleared when another application comes to the front. docs/api/keys.md
+      (`host.keys.nativeMenuOpen`, macOS) and overlay.md's macOS block say so.
+  - [ ] **Only a Mac can confirm:** that `AXMenuOpened` / `AXMenuClosed` arrive in balanced
+      pairs in REAPER, Kontakt 8 and sforzando — open and close a menu bar menu, a submenu, and
+      one closed with Escape, and look for a "the menu in pid … closed" line after each "a menu
+      opened in pid …"; and what a lost close would cost: the tap lets captured keys through and
+      the overlay's hotkeys stay given up until the user switches to another application and
+      back, which clears the count (say so in the protocol, as the way out).
+- [x] **Decided 2026-09-26: a test that saw a menu and then never answers keeps it open** until
+      the overlay leaves the front: its word stands while its answer is outstanding, which is
+      what keeps a slow picture test from flickering, and only a timeout could tell "slow" from
+      "never" — the kind of timer the decisions rule out. The log names such a test after 20
+      ticks. The building blocks always answer; a module's own async test must answer from every
+      path of its callback.
+- [x] **Decided 2026-09-26: `menus = true` raises at bind**, with a message naming the building
+      blocks: a module still written with it fails to load rather than running with no menu
+      tests.
+- [x] **A menu that is a window in front: the overlay holds its place** (2026-09-26, from the
+      maintainer's NVDA test of phase 1). Komplete Kontrol in REAPER: Space on "Komplete Kontrol
+      menu" opened KK's menu as a popup window of reaper.exe titled "Komplete Kontrol"; it came
+      to the front, so the overlay left the front (`[deactivate] … in front now: 'Komplete
+      Kontrol' (reaper.exe)`) and its tests — which run only for an overlay in front — never saw
+      the menu. When the menu closed, REAPER left the keyboard on its FX window, which the
+      embedded chrome gate counts as REAPER's, so the overlay stayed out, hotkeys and all, until
+      the user left and came back two minutes later. ReaHotkey follows "REAPER's FX window is
+      active" there. Now (`modules/overlay-runtime`, the Menus section, "holding its place";
+      docs/api/overlay.md#o-menutests): after a press of an `opensMenu` control, a window in
+      front that belongs to the process that was in front at the press (not that window itself)
+      is held while the overlay's tests see a menu — asked there and then, so newWindow sees the
+      popup at once — and the overlay stays in front holding no keys at all (no navigation key,
+      no hotkey, no say in the pass-through flag: a dialog the menu leads to may be another
+      overlay's, and the host hands a captured key to the first module holding it), its tests
+      running. When the hold ends, the binding's own match decides, as for any other window
+      change (ReaHotkey's rule: REAPER's FX window active with the plug-in's control in it); with
+      the keyboard in the plug-in its navigation keys come back at once and its hotkeys when the
+      tests stop seeing the menu. Another application, or a window of the same one no test takes
+      for a menu, ends it as before. No timer: the window in front, the press, the tests and the
+      keyboard decide. Process, not
+      owner: the window table has no owner, and a plug-in's popups are windows of its process on
+      both platforms. 8 scenarios in `overlay_menu_tests.rs` bind the overlay for real
+      (`attachEmbedded` against a scripted FX window, through the arbiter); 34 targeted mutants
+      of the runtime, the phase-1 ones included, each fail at least one scenario.
+  - [x] **Review fixes, the same day.** The hold needs a test to see a menu AT THAT MOMENT, not
+      the word: the word says "open" for a miss after a menu has closed, so a dialog that an item
+      of a native menu opened (KK standalone, Edit → Preferences) was held, and when the word
+      closed two ticks later the leaving overlay unpinned the Preferences overlay's key scope.
+      When the plug-in has the keyboard again after a hold, the tests forget the press, so a
+      window the menu opened that stays up no longer keeps the keys passing through. Nothing in
+      front holds only a menu the tests still see (a Command+Tab to an application with no window
+      kept the overlay in front). The hotkeys come back with their `took back` line. The "before"
+      menu shot is written after the other two, not straight after the click. (A claim on the
+      window of the press, with a "back on its window" state and an empty-chain rule built on it,
+      came with these fixes; removed on 2026-09-27, next item.)
+  - [x] **Simplified, and one step beyond ReaHotkey** (2026-09-27, the maintainer's decisions
+      after his NVDA test and a diagnostic run). KK's menu is an invisible full-screen Qt window
+      of reaper.exe that KK most likely only HIDES after Escape (the likeliest reading of the
+      log, not measured: no foreground event came for ~4 s): newWindow saw it gone and the menu
+      closed, the claim's logic saw another window in front and let the overlay go, the user's
+      first key (Tab) was lost, and the overlay came back ~4 s later with REAPER's FX window.
+      (The log's `in front is id=…` on that tick was host.window.active()'s answer kept from an
+      earlier epoch, not a reading: a tick does not turn the epoch over, and active() reports a
+      hidden window as none. The focus chain, read fresh, was empty, which on Windows means the
+      foreground window was hidden or absent.) ReaHotkey has no return handling: its plug-in
+      context is REAPER's `#32770` FX window active with the plug-in control found after
+      `reaperPluginHostWrapProc1` (`Lib/ReaHotkey.ahk`, GetPluginControl / ManageState).
+      Removed: the claim ("home"), "back on its window", `attachEmbedded`'s
+      `origin({ anyFocus = true })`, `keyboardAround`, `_menuHomeLeft`, `_menuBackOn`, the
+      empty-chain rule, and their docs, log lines and scenarios. Kept: the hold (no keys at all,
+      a test seeing the menu there and then); when it ends, the ordinary match decides. Added,
+      first version: bring back the window of the press when the window held over was still in
+      front with an empty focus chain. The review found it could only fire on a stale reading
+      (see above), and that the scripted host was green only because it reported hidden windows
+      as in front and kept nothing for the epoch; replaced the same day, next item.
+  - [x] **host.window.foreground(), and the step after the hold on it** (2026-09-27, the
+      maintainer's approval of the review's proposal). A general host primitive: the window that
+      gets the keyboard now, `{ id, pid, shown }`, hidden or not, read afresh on every call and
+      never from the epoch's store; `nil` when there is none or it cannot be read. Windows:
+      GetForegroundWindow, its process, and shown = visible, not minimised, not cloaked (DWM), all
+      local. macOS: the frontmost application's AXFocusedWindow (no fall-backs) and its
+      AXMinimized, `nil` without asking while the application is in the not-answering quarantine
+      or when a read times out. Stub: nil. Capability `window`.
+      docs/api/window.md#host-window-foreground, with `active()`'s Windows block corrected (it was
+      "always current"; it is the epoch's answer, and a hidden foreground window is nil) and
+      `focus()`'s (`true` is Windows accepting the request, not the keyboard in it). The runtime's
+      step now fires only when, as a hold ends because no test sees the menu, foreground() names
+      the menu's own window — the one the hold started over after the press, of the press's
+      process — with `shown = false`; the focus chain is not read. The window of the press must
+      still be listed for its process with its class (Windows reuses handles), or nothing is
+      brought back and the log says so. A dialog the menu led to never triggers it; the menu's own
+      window getting the keyboard back after such a dialog does. The scripted host in
+      overlay_menu_tests.rs now answers as the real one: a hidden window is never active();
+      active() and focusChain() are kept per epoch, turned over by events, keys, timer.after,
+      snapshot answers and focus() but not by the tick; an empty chain on Windows only for a
+      hidden or absent foreground window; foreground() fresh; and a Mac mode. 50 scenarios, among
+      them the KK case from the diagnostic run, every excluded case, the handle-reuse check and
+      the Mac's unreadable state; 37 targeted mutants each fail at least one, and the first
+      version's runtime fails 10 of the 50 scenarios.
+  - [x] **Review fixes of that step, the same day.** When the step reaches its reading and
+      brings nothing back, the reading is logged, once per press (`… the keyboard goes to id=…
+      of pid …, shown` / `not shown` / `no window the platform names` / `a window that could not
+      be read (…)`, `and the menu's window … is id=… of pid … — nothing is brought back`): the
+      `in front now:` line names active()'s possibly kept answer, and three different states
+      had given the same log. The scripted host completes an accepted host.window.focus later,
+      with its foreground event (`T.land`), as Windows does for another thread's window, and at
+      once only where a scenario says so; the KK case now asserts `[deactivate] … 'nothing'` and
+      then the `[activate]` that speaks. A window of the press that is not listed is "not listed
+      for its process with its class (gone, untitled, or its id now another window's)" — list()
+      lists titled windows only — and a listing that raises is said with its reason. A
+      pollMatch poll can bring the window back at its first miss, before the tick closes the
+      menu (a scenario, and overlay.md). The trait's default `foreground_window` is gone, so a
+      backend without one does not compile, and the Windows reading is `foreground_of(hwnd)`,
+      tested read-only on this session's hidden top-level windows and on handles that are no
+      window. window.md: what foreground() names and where keys do not go to it (hotkeys and
+      hooks, a UWP app's frame, macOS panels that do not activate their application), the
+      macOS run-loop freshness and the quarantine a timed-out read sets; active()'s "hidden"
+      per platform, a minimised Mac window read as nil; focus()'s `true` is the request
+      accepted, the change made later on the window's own thread. "KK only hides its menu's
+      window" is hedged everywhere as the likeliest reading.
+- [x] **The menu shots no longer delay the click** (2026-09-26: ~700 ms per shot in a debug
+      build; Diva's preset menu felt slow). The press takes one snapshot of the origin's own
+      rectangle (`bounds`) and nothing else — no PNG, no control's point or `when` — and the
+      control acts; its PNG is written once the later two are in, not straight after the click,
+      when the menu's first answer and the user's first key arrive. The later two are
+      `snapshotAsync` with `at`, captured off the event loop and written when they arrive. The pictures now cover the
+      origin whole (for a window, its frame too) rather than the content rectangle grown by the
+      controls' points, and the log line says where the content begins. docs/api/calibrating.md.
+- [ ] **Accessibility context checks block the event loop while Kontakt loads** (2026-09-26,
+      NVDA test of phase 1). After Kontakt's Load dialog the overlay came back only after ~4 s:
+      `uia.findAny(Komplete Kontrol) blocked the pump for 2075 ms`, `uia.findAny(Kontakt 8/Kontakt
+      7) blocked the pump for 1006 ms`, `[recheck] 'Kontakt 8' 3083 ms (context 3083, gate 0)`,
+      `[pump] one iteration took 4372 ms (… window-activate 3097 + focus-change 1231 …)`.
+      Kontakt's identity checks (`isKK`, `variantIndex`, relational, not cached) ask UI
+      Automation on the event loop while Kontakt is busy loading. Moving those checks off the
+      event loop is its own task; not done here.
+- [ ] **Kontakt still writes the flag itself:** `openFileMenu` calls `host.keys.menuOpen(true)`
+      after opening the File menu by name, and the runtime overwrites it on its next tick
+      (≤150 ms) with its tests' answer. Unchanged behaviour, but a claim with no test behind it.
+      Likewise `verifyMenuOpened` says "Snapshot menu did not open" from one accessibility check
+      350 ms after the click: an announcement, not menu state, but a fixed delay deciding what
+      is said; phase 2's picture test is the better witness for it too.
+
 ## Dev tools
 
 - [x] **OCR window inspector (first version):** `tools/inspect` — **Ctrl+Alt+I** OCRs the focused window's client area and logs every recognized word with its **client-relative coordinates** (+ saves the capture with `AUTOMATION_PLATFORM_OCR_DEBUG=1`). Calibrates overlay regions and reveals where hardcoded (e.g. ReaHotkey) coordinates land vs the real controls. Resolved the sforzando polyphony case (the region was correct; the failures were the hover scrub-value — fixed by `hoverToRead`-off — and UWP OCR being blind to *single* digits). ✓ (2026-06-21)

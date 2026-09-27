@@ -808,4 +808,4 @@ end
 host.include("src/browsers.luau")
 host.include("src/settings.luau")
 
-ov:attach(on_ear, { menus = true, slot = ON_EAR_SLOT, specificity = O.layer.content })
+ov:attach(on_ear, { menus = app.MENUS, slot = ON_EAR_SLOT, specificity = O.layer.content })

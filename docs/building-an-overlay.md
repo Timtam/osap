@@ -104,6 +104,7 @@ Tick **Calibration keys in overlays** in the module manager's Application settin
 | `Ctrl+Alt+Shift+S` | Screenshot of the coordinate window with a **crosshair** where each control will actually click, plus a log line per control: resolved screen point, the pixel read there, and whether it is `rawOrigin`. |
 | `Ctrl+Alt+Shift+T` | Crops a template around the **focused** control and writes it into `calibration/`. |
 | `Ctrl+Alt+Shift+V` | Counts **every** match of the focused control's template in the region. |
+| (no key) | Activating a control declared with `opensMenu` saves three pictures of the overlay's origin whole — a snapshot just before it acts, written once the other two are in, and ~600 ms and ~1500 ms after — as `<overlay>-<control>-menu-before.png`, `-menu-after-600.png` and `-menu-after-1500.png`. What a menu test for a menu drawn inside the plug-in is written from; see [calibrating](api/calibrating.md#host-calibrating). |
 
 The screenshot is the one that matters: "is my control on its button?" becomes a glance instead of arithmetic. The crosshairs are magenta, a colour these dark plugin interfaces do not use, and are numbered by ticks so they match the log lines.
 
@@ -385,5 +386,5 @@ No line at all means the gate is never even evaluated — the *context* does not
 - Fixed for the window's life → its own overlay. Changes while active → `when`.
 - Same situation → same slot, different layers. Can be live together → different slots.
 - Image paths through `host.path`.
-- Anything that can open a menu → `menus = true`, or the menu will be unusable.
+- Anything that can open a menu → `opensMenu = true` on the control, and `menus = { … }` naming the tests that see the plug-in's menus ([`O.menuTests`](api/overlay.md#o-menutests)); a menu no test sees keeps the overlay's keys and is unusable. A menu that is a window of its own coming to the front needs `O.menuTests.newWindow`, which is also what lets the overlay hold its place over it.
 - Shared controls → a part, and if another module owns them, ask that module for them.

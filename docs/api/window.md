@@ -12,11 +12,11 @@ Nothing here touches the screen, so one call is cheap — but every overlay make
 
 The same call answers with different things per platform, so read the platform sections: `controls()` yields every visible child window on Windows and container elements only on macOS, and a focus chain's links are windows there and accessibility elements here — test what a chain contains rather than how deep it is. Believe what you are told rather than what you assume: `focus` can be declined by either platform, and `ownsPoint` answers `nil` on macOS, which a caller must read as permission rather than refusal.
 
-**Some answers are kept for the rest of the epoch.** `active()`, `controls()` and `focusChain()` — like `host.element.find`, `findAny` and `pluginLocate` — ask the operating system once per [epoch](./timer.md#host-epoch) and hand every later call in the same epoch the same answer, a `nil` included. The epoch turns over on OS events (a hotkey, a captured key, a foreground or focus change, a controller event), on a [`host.timer.after`](./timer.md#host-timer-after) callback coming due, on an image result arriving, on input the platform drives, and on `host.window.focus`, so a callback normally sees the world as it was when the callback started. It does **not** turn over on a [`host.timer.every`](./timer.md#host-timer-every) tick: a poll is handed whatever was asked in the current epoch, which may be from before the last tick, unless something else turned it over. Nor does [`host.input.post`](./input.md#host-input-post) turn it over: a `focusChain()` read after a post in the same callback is the answer from before the key. `list`, `find`, `findAll`, `apps` and `windowsOf` are asked afresh on every call.
+**Some answers are kept for the rest of the epoch.** `active()`, `controls()` and `focusChain()` — like `host.element.find`, `findAny` and `pluginLocate` — ask the operating system once per [epoch](./timer.md#host-epoch) and hand every later call in the same epoch the same answer, a `nil` included. The epoch turns over on OS events (a hotkey, a captured key, a foreground or focus change, a controller event), on a [`host.timer.after`](./timer.md#host-timer-after) callback coming due, on an image result arriving, on input the platform drives, and on `host.window.focus`, so a callback normally sees the world as it was when the callback started. It does **not** turn over on a [`host.timer.every`](./timer.md#host-timer-every) tick: a poll is handed whatever was asked in the current epoch, which may be from before the last tick, unless something else turned it over. Nor does [`host.input.post`](./input.md#host-input-post) turn it over: a `focusChain()` read after a post in the same callback is the answer from before the key. Nor does a window that hides or closes without an event. `list`, `find`, `findAll`, `apps`, `windowsOf` and [`foreground`](#host-window-foreground) are asked afresh on every call.
 
 All coordinates are physical device pixels on Windows and **points** on macOS (i32 → Luau `number`) unless noted; the two agree only at 100 % scaling — see [`host.screen.size()`](screen#host-screen-size) for why that distinction costs a day when it is missed. `id` fields are native window handles on Windows (a Win32 `HWND` as a Luau integer) and interned counters on macOS; see the platform sections under [Table shapes](#table-shapes).
 
-`list`, `active`, `controls`, `focusChain` and `ownsPoint` are native bindings; `find`, `findAll`, `test`, `onTrigger` and `onFocus` are added on top of them by the Luau prelude.
+`list`, `active`, `foreground`, `controls`, `focusChain` and `ownsPoint` are native bindings; `find`, `findAll`, `test`, `onTrigger` and `onFocus` are added on top of them by the Luau prelude.
 
 ## What to declare {#declare}
 
@@ -133,7 +133,7 @@ local reaper = host.window.list({ pids = { reaperPid } })
 
 `EnumWindows` — local, microseconds, and the filter merely drops entries. There is no cost to leaving it out.
 
-Only **visible windows with a title** are listed, so `find` and `findAll` never return an untitled window — Komplete Kontrol's untitled `#32770` save dialog, for one. `active()` is the one call that also returns an untitled window.
+Only **visible windows with a title** are listed, so `find` and `findAll` never return an untitled window — Komplete Kontrol's untitled `#32770` save dialog, for one. `active()` is the one call that also returns an untitled window as a window table; [`foreground()`](#host-window-foreground) names the foreground window by id whether it has a title or not, and whether it is visible or not.
 
 ### macOS
 
@@ -164,7 +164,7 @@ The workspace's own list of running applications, minus those whose activation p
 
 **Signature:** `host.window.windowsOf(pid: number) -> { { id: number, layer: number, class: string, x: number, y: number, w: number, h: number } }`
 
-Every on-screen window a process owns, as the **window manager** lists them rather than as accessibility does. The difference is the point: a popup menu drawn as a window of its own is in this list from the moment it opens to the moment it closes, whether or not the application posts a notification about it or exposes it as a menu element. The overlay runtime's menu watch takes this list before clicking a control that opens a menu and compares on every tick while the menu is plausible — a window that is there now and was not then is the menu, and its going is the menu closing. That is the third detector, after the native-menu notification and the accessibility walk, and the one that works for a plugin whose menu neither of those can see, provided the menu is a window at all. A module needs it directly only for the same kind of question.
+Every on-screen window a process owns, as the **window manager** lists them rather than as accessibility does. The difference is the point: a popup menu drawn as a window of its own is in this list from the moment it opens to the moment it closes, whether or not the application posts a notification about it or exposes it as a menu element. The overlay runtime's menu test `O.menuTests.newWindow` takes this list when a control that opens a menu is activated and compares on every tick after — a window that is there now and was not then is the menu, and its going is the menu closing (see [`O.menuTests`](overlay.md#o-menutests)). It works for a plugin whose menu neither the native-menu notification nor the accessibility tree can see, provided the menu is a window at all. A module needs it directly only for the same kind of question.
 
 Cheap: one system-wide list, no message to the application, so it may be asked on the tick that carries the keyboard. Nothing here needs a window's title, and none is read.
 
@@ -185,13 +185,15 @@ end
 
 ### macOS
 
-`CGWindowListCopyWindowInfo` for on-screen windows, filtered by owning pid. `id` is the `CGWindowID`, `layer` the window server's level — an `NSMenu` sits at 101, an ordinary window at 0. `class` is empty. Whether a given plugin's self-drawn menu is a window of its own or painted inside the plugin's window is exactly what this exists to find out; the runtime logs the answer the first time a hold runs with this detector armed.
+`CGWindowListCopyWindowInfo` for on-screen windows, filtered by owning pid. `id` is the `CGWindowID`, `layer` the window server's level — an `NSMenu` sits at 101, an ordinary window at 0. `class` is empty. Whether a given plugin's self-drawn menu is a window of its own or painted inside the plugin's window is exactly what this exists to find out; the runtime's `newWindow` test logs each window that appeared after a menu-opening press, with its level and size.
 
 ## host.window.active() {#host-window-active}
 
 **Signature:** `host.window.active() -> Window?`
 
-Returns the [window table](#window-table) for the foreground window, or `nil` if there is none.
+Returns the [window table](#window-table) for the foreground window, or `nil` if there is none or it is hidden: on Windows not visible (`IsWindowVisible`), on macOS minimised. A window table is something to match and place things against, and a window nobody can see is neither. Keys still go to such a window; [`foreground()`](#host-window-foreground) is the call that says so. Its `shown` is a different, stricter test on Windows: a minimised or cloaked foreground window is a window table here and `shown = false` there.
+
+**The answer is the epoch's.** The first call in an [epoch](./timer.md#host-epoch) asks the operating system, and every later call in the same epoch — from any module — gets that answer back, `nil` included (the note at the top of this page lists what turns it over). So it is current as of whatever last turned the epoch over, not as of the call: in a [`host.timer.every`](./timer.md#host-timer-every) poll it can name a window that has since hidden, closed or lost the foreground without an event.
 
 ```luau
 local w = host.window.active()
@@ -215,10 +217,106 @@ an application that is not answering is also not moving its window, but a module
 a coordinate far from where the user last saw it has no way to tell. Every served answer is
 in the log, so a session can be explained afterwards.
 
+A minimised window reads as `nil` — minimised is this platform's hidden — and the call does not
+go on to another window of the application instead.
+
 ### Windows
 
-Always current: the foreground window is a local question there, answered without asking the
-application anything.
+`GetForegroundWindow`, a local question answered without asking the application anything — but
+asked once per epoch and kept, as above, so "local" is not "current": the answer is refreshed
+only when the epoch turns over (an OS event dispatched into a module, a one-shot timer coming due,
+an image, text or snapshot result arriving, input the host drives, `host.window.focus`,
+`host.window.recheck` — the full list is under [`host.epoch`](./timer.md#host-epoch)).
+
+A foreground window that is not visible (`IsWindowVisible` false: hidden) reads as `nil`, and so
+does a window with nothing in the foreground. A minimised or cloaked foreground window is still
+reported: it is visible to that test. An untitled window is reported too, unlike in `list()`.
+
+## host.window.foreground() {#host-window-foreground}
+
+**Signature:** `host.window.foreground() -> { id: number, pid: number, shown: boolean }?`
+
+The foreground window right now, whether or not anybody can see it: its `id`, its process's `pid`, and whether it is `shown`. It is the window the keys the user presses go to, unless a hotkey or a keyboard hook takes them first — this host's captured keys among them — and apart from two platform cases: a Windows Store app, and on macOS a panel that takes the keys without its application coming to the front (see the platform sections). `nil` when there is no foreground window, or when the platform cannot say which it is.
+
+It answers the two things [`active()`](#host-window-active) cannot. `active()` drops a window that
+is not shown, although keys still go to it — a program that hides a popup instead of closing it can
+leave the keyboard there, and every key then vanishes into a window nobody sees. And `active()` is
+kept for the epoch, while this is **read afresh on every call**, so it also sees a change that
+came with no event: a window hidden since the epoch began.
+
+Only identity and visibility — no title, class or geometry. `id` is in the id space of a
+[window table](#window-table)'s `id`, so it compares with `active().id` and is what
+[`focus`](#host-window-focus) takes; for the rest, look the window up with
+`list({ pids = { f.pid } })`, which lists shown, titled windows only.
+
+- **Cost.** Windows: five local calls, no message to any application — 7 to 8 µs a call,
+  measured in a debug build with the table it returns. macOS: two accessibility reads of the
+  frontmost application, the kind `active()` makes (see below). On the main thread,
+  like every host call, and it returns when those have.
+- **Never raises**, and takes no arguments; arguments passed are ignored. `nil` is the only
+  "no answer".
+- **Turns nothing over.** It is a reading: the epoch and every answer kept in it stay as they are.
+  On macOS a read that times out does leave one mark behind: the application is put in the
+  not-answering quarantine, which other calls consult (see the macOS section).
+
+```luau
+-- Warn when keys go into a window that is not on screen.
+local f = host.window.foreground()
+if f and not f.shown then
+  host.speech.output("The keyboard is in a window that is not on screen")
+end
+
+-- The window keys go to is not the one active() reported earlier in this epoch.
+local a = host.window.active()
+if f and a and f.id ~= a.id then
+  host.log.info(("keys go to window %d of process %d, not to '%s'"):format(f.id, f.pid, a.title))
+end
+```
+
+### Windows
+
+`GetForegroundWindow` — the window whose thread gets keyboard input — then its process
+(`GetWindowThreadProcessId`) and three local tests. `shown` is `true` only when the window is
+visible (`IsWindowVisible`), not minimised (`IsIconic`) and not cloaked (DWM's `DWMWA_CLOAKED`:
+a window on another virtual desktop, a suspended Store app's, the Start menu's and search's hosts
+while they are closed — visible to the first test, drawn by nobody). A cloaked question that DWM
+refuses counts as not cloaked. `nil` when Windows reports no foreground window, which it does for
+a moment while one window loses activation to another, and when the window was destroyed between
+the calls.
+
+Nothing is sent to the window, so a hung application cannot hold the call up, and a window of an
+elevated application is read like any other: none of the five calls is refused across integrity
+levels. Where `active()` answers `nil` for a hidden foreground window, this answers it with
+`shown = false`; a minimised or cloaked one is a window to both, and `shown = false` here.
+
+A Windows Store (UWP) app's foreground window is its frame, an `ApplicationFrameWindow` of
+`ApplicationFrameHost.exe`, so `pid` is that process's — as `active()`'s `app.pid` is — while the
+keys go to the app's own window inside the frame, in the app's process.
+
+### macOS
+
+The frontmost application — the workspace's own answer, local — and its `AXFocusedWindow`. Only
+that attribute: `active()` falls back to the application's main window and then its first window
+when none is focused, and this does not, so an application that answers with no focused window
+gives `nil` here where `active()` may still name one. For the same window the `id` is the handle
+`active()` reports. `shown` is `false` only when the window reports itself minimised
+(`AXMinimized`); the window server is not asked whether the window is drawn.
+
+The two accessibility reads are made at the call; the frontmost application is the workspace's
+answer as of the main thread's last run-loop turn, so an application that came to the front since
+is named once that turn has been taken. A panel that takes the keys without activating its
+application — Spotlight, a launcher, a password manager's quick-access window — is not named: the
+frontmost application, and so this answer, stays the one before it.
+
+**Never from memory.** While the frontmost application is in the five-second not-answering
+quarantine described under [`active()`](#host-window-active), it is not asked, and the answer is
+`nil` — not the window `active()` serves from memory then. A read that times out puts the
+application in that quarantine and answers `nil` as well, and the quarantine then holds for every
+call that consults it, for five seconds: `active()` serves its remembered window, and other calls
+put no accessibility question to that application. Each read is a call into the application on the
+main thread, bounded by the accessibility timeout of one second, so a call against an application
+that has just stopped answering can take that long once; the quarantine makes the calls after it
+free until it ends.
 
 ## host.window.focus(id) {#host-window-focus}
 
@@ -254,8 +352,10 @@ else
 end
 ```
 
-A call also turns the observation cache over, so a `focusChain()` read straight after it
-reports the world after the change rather than before it.
+A call also turns the observation cache over, so a `focusChain()` read straight after it asks
+the operating system again rather than being handed the answer kept from before the call. That
+answer is the world as of the read, which on Windows can still be from before the change (see
+below).
 
 **Why it exists.** On Windows a screen-reader user gets back to a plugin's window with
 OSARA's F6. macOS has no equivalent: VoiceOver offers no command for it, so a plugin window
@@ -268,7 +368,7 @@ see it happen.
 
 ### Windows
 
-A minimised window is restored first, then brought to the foreground. `true` means it is foreground **and has the keyboard**.
+A minimised window is restored first, then brought to the foreground with `SetForegroundWindow`. `true` means Windows accepted the request — not that the change has been made. For a window of another application the activation can finish only once that window's own thread has processed it, so [`active()`](#host-window-active), [`foreground()`](#host-window-foreground) and `focusChain()` asked straight after the call can still name the window that was in front; the foreground event follows once the change is made, and a module that wants to know where the keyboard went waits for that event rather than reading again at once. Which control inside the window gets the keyboard is the application's to decide, and nothing here moves it — REAPER may leave it on its FX window itself or on its FX list rather than in the plug-in. `false` means Windows refused: it limits which processes may change the foreground (the conditions are listed under `SetForegroundWindow` in Microsoft's documentation), and it does not say which one applied. Read [`focusChain()`](#host-window-focuschain) afterwards for where the keyboard is inside the window.
 
 ### macOS
 

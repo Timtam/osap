@@ -60,10 +60,9 @@ local ov = O.new("sforzando")
 -- Built fresh each time rather than shared, because two overlays now want them and a
 -- control table is not something to alias between them.
 -- `opensMenu` on all three because all three do: Enter on any of them opens sforzando's own
--- pop-up list. It is not decoration — it is what tells the runtime to stop owning the
--- navigation keys the moment the menu appears, so arrows and Enter reach the menu instead of
--- re-firing the control underneath and reopening it. Without it the macOS tester could move
--- through a menu and never commit a choice.
+-- pop-up list. It is not decoration — it is what gives the newWindow menu test (below) the
+-- window list from before the click, so the list's window is recognised when it appears and
+-- the navigation keys go to it, instead of re-firing the control underneath and reopening it.
 local function addReadOuts(o)
   o:addOCRButton({ label = "Instrument", opensMenu = true, region = host.os.pick {
     windows = { 90, 22, 200, 36 },
@@ -90,10 +89,16 @@ local daw = host.require("com.platform.daw-hosts")
 -- Activate while the sforzando window is focused (standalone) or while it is
 -- embedded in a DAW host window; deactivate on leaving. Navigation is Tab /
 -- Shift+Tab / Enter (and Space) captured + suppressed, so it feels like ReaHotkey.
--- `menus = true`: while the plugin has a menu open, hand the captured navigation keys to
--- it instead of steering the overlay. Any overlay over a plugin that can open a menu needs
--- this; without it Tab and Enter are swallowed and the menu cannot be used at all.
-ov:attach(sforzando, { menus = true })
+-- `menus`: how sforzando's pop-up list is seen, so the captured navigation keys go to it while
+-- it is open instead of steering the overlay (see the overlay runtime's Menus section).
+--   nativePopup  on Windows the list is a native popup menu — ReaHotkey's sforzando overlay
+--                relies on nothing but its `#32768` check for it.
+--   newWindow    on a Mac it is a window of its own at the menu level (101): the 2026-09-18
+--                session saw one open and close for each of the six lists it opened, standalone
+--                and inside REAPER, where an earlier session's accessibility check saw none.
+-- The same two for all three bindings, so a list is one declaration.
+local MENUS = { O.menuTests.nativePopup, O.menuTests.newWindow }
+ov:attach(sforzando, { menus = MENUS })
 -- Embedded in a DAW, by CONTROL — which is the Windows way, and only the Windows way. A
 -- Mac has since been probed and the answer was that there is no control: REAPER lets its
 -- accessibility tree show its own chrome and nothing of the plugin at all. The macOS case is
@@ -118,7 +123,7 @@ ov:attachEmbedded({
     local r = host.ocr.recognize({ region = { ox + 605, oy + 33, ox + 762, oy + 70 } })
     return string.find(string.lower(r.text or ""), "sforzando", 1, true) ~= nil
   end,
-}, { menus = true })
+}, { menus = MENUS })
 
 -- ===== Embedded in a DAW, on macOS =====
 --
@@ -172,5 +177,5 @@ if host.os.is("macos") then
   inDaw:attach({
     title = { contains = "sforzando" },
     macos = { app = { bundleId = "com.cockos.reaper" }, axSubrole = "AXStandardWindow" },
-  }, { menus = true })
+  }, { menus = MENUS })
 end

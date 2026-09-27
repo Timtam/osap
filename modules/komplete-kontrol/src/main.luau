@@ -86,13 +86,21 @@ end
 
 -- Where KK can be: embedded in a DAW, or its own application window. Values, not
 -- factory calls — nothing mutates them, so one declaration serves every attachment.
+--
+-- `menus`: how KK's menus are seen (see the overlay runtime's Menus section). KK's own menu,
+-- opened by its hamburger, is a Qt menu in a UI that accessibility reaches, and no retained
+-- log says which test sees it — so it keeps all three the old watch ran: a Menu element in
+-- KK's tree, a menu the system draws, and a window that appeared since the press.
 local HOSTED = O.embedded({
   hosts = daw.all,
   -- KK's control is the NI-versioned Qt class (e.g. "Qt671NI_6_7_1_R3QWindowIcon
   -- {GUID}"); ".-" spans the NI_<version> segment that sits before QWindowIcon.
   control = "Qt%d+.-QWindowIcon",
   identify = isKK,
-}, { slot = SLOT, menus = true })
+}, {
+  slot = SLOT,
+  menus = { O.menuTests.nativePopup, O.menuTests.accessibility, O.menuTests.newWindow },
+})
 
 
 -- The toggle that closes KK's library browser — the previous-sibling of the browser
@@ -206,8 +214,8 @@ return {
     -- Auto-close on activate (opt-out): reveals an instrument the browser is hiding.
     ov:onActivate(onKKActive)
     -- Tab / Shift+Tab navigate the header (like the Kontakt overlay), Enter activates;
-    -- Alt+M / Alt+S / Alt+L are also global. The menu-watch hands the captured nav keys
-    -- to KK's own Qt menu (opened by Alt+M) while it is open.
+    -- Alt+M / Alt+S / Alt+L are also global. While a menu test sees KK's own Qt menu (opened
+    -- by Alt+M), the captured nav keys and the hotkeys go to it.
     ov:bind(HOSTED, { specificity = O.layer.chrome })
     host.log.info("Komplete Kontrol base overlay ready.")
 
@@ -268,7 +276,13 @@ return {
     -- the embedded KK chrome (0) does in a DAW. (The Kontakt module adds this KK window as
     -- a host, so its nested overlays can match here.) When the browser hides the nested
     -- Kontakt, this overlay is the active one and its onKKActive still auto-closes it.
-    sa:attach(STANDALONE, { slot = SLOT, specificity = O.layer.chrome, menus = true })
+    -- The menu bar is the window's own Win32 menu bar (it sits in the non-client band above
+    -- the client area), so its menus are the kind the system draws: nativePopup sees them.
+    sa:attach(STANDALONE, {
+      slot = SLOT,
+      specificity = O.layer.chrome,
+      menus = { O.menuTests.nativePopup },
+    })
     host.log.info("Komplete Kontrol standalone overlay ready.")
 
     -- STANDALONE Preferences dialog overlay (#32770 "Preferences"). Robust core: switch

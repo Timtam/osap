@@ -1749,9 +1749,11 @@ host.timer.every(WATCH_MS, function()
   end
 end)
 
--- `menus = true`: Melodyne has a native menu bar, and while a menu is open the captured
--- navigation keys have to reach it rather than steer the overlay.
-ov:attach(melodyne, { menus = true })
+-- `menus`: Melodyne has a native menu bar, and while one of its menus is open the keys have to
+-- reach it rather than steer the overlay. A menu the system draws is what nativePopup sees; in
+-- the logs Melodyne's menus took the keys at once and gave them back cleanly, which is that
+-- every-tick answer and not the slow accessibility backstop.
+ov:attach(melodyne, { menus = { O.menuTests.nativePopup } })
 
 host.log.info(
   "Melodyne: standalone overlay ready — tool bar, variants, menu bar, and both inspector "

@@ -583,9 +583,14 @@ unsafe extern "C-unwind" fn tap_callback(
     // The two keys that END a menu, remembered whenever the runtime says a plugin menu is
     // open — captured or not. Escape is captured by no overlay, and Return only while the
     // focused control wants it, so a record kept only for captured keys never held the one
-    // Escape that cancelled a menu, and the hold ran its full course after it.
+    // Escape that cancelled a menu.
+    //
+    // Remembered as noted, so that the gate below does not note the same press again: a
+    // captured Return passes both, and one press read as "Return, Return" in the runtime's log.
+    let mut menu_key_noted = false;
     if is_menu_key(vk) && mask == 0 && MENU_OPEN.load(Ordering::Relaxed) {
         note_menu_pass(vk, mask, "a plugin menu is open");
+        menu_key_noted = true;
         if !captured(vk, mask) {
             return pass;
         }
@@ -614,7 +619,9 @@ unsafe extern "C-unwind" fn tap_callback(
         // stays closed for as long as a menu is open or a window is not frontmost, and one
         // line per keystroke would bury the log it is meant to explain.
         report_gate_pass(vk, mask, why);
-        note_menu_pass(vk, mask, why);
+        if !menu_key_noted {
+            note_menu_pass(vk, mask, why);
+        }
         return pass;
     }
     queue::push_key(vk, mask);
@@ -749,9 +756,8 @@ thread_local! {
 const MENU_PASS_MAX: usize = 32;
 
 /// A captured key went to the application because a menu was open. Remembered so the
-/// overlay runtime can learn that Return or Escape reached the menu — where nothing can see
-/// the menu itself, that is the best available word that it is closing, and the alternative
-/// was a stopwatch running its full course while Tab stayed dead.
+/// overlay runtime can log which keys reached the menu, and whether the menu was still there
+/// after an Escape went through.
 fn note_menu_pass(vk: u32, mask: u8, why: &'static str) {
     if !why.contains("menu") {
         return;
@@ -764,8 +770,8 @@ fn note_menu_pass(vk: u32, mask: u8, why: &'static str) {
     });
 }
 
-/// Return or Escape — the keys that end a menu, and the two the runtime's menu watch
-/// wants to hear about whether or not an overlay had claimed them.
+/// Return or Escape — the keys that end a menu, and the two the overlay runtime wants to hear
+/// about whether or not an overlay had claimed them.
 fn is_menu_key(vk: u32) -> bool {
     vk == 0x0D || vk == 0x1B
 }

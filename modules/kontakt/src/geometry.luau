@@ -111,8 +111,10 @@ local HEADER = {
 -- into menus). `uia` is the button's UIA name, used where the plugin is accessible.
 --
 -- `opensMenu`: VIEW drops a menu, and a control that opens one has to say so — that is what
--- hands the navigation keys to the menu. The file menu has always declared it; VIEW did not,
--- and on a Mac nothing else would have noticed its menu at all.
+-- makes the menu tests look for it at once, what arms the test that sees it in a DAW
+-- (accessibilityAfterPress), and what takes the menu shots in a calibrating run. The keys go to
+-- the menu only while a test sees it: on a Mac, Kontakt 7's VIEW menu is seen by none yet (see
+-- cells.luau, MENUS_STANDALONE).
 -- `uiaOnly`: no coordinate is right for SHOP in both of Kontakt's layouts — it moves with the
 -- library browser, 440 from the left with the browser closed and 815 with it open, the second
 -- measured on a Mac — so when it cannot be found by name the press is refused out loud rather

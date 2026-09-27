@@ -310,6 +310,16 @@ host.hotkey.register(KEY, function()
     line("  [%d] class='%s' %d,%d %dx%d", i, c.class or "", c.bounds.x, c.bounds.y, c.bounds.w, c.bounds.h)
   end
 
+  -- The window the keyboard goes to, read afresh, and whether it is on screen — what TODO.md asks
+  -- of a Mac: whether it is the window above (it should be), and whether `shown` is ever false.
+  local fg = host.window.foreground()
+  if fg then
+    line("foreground: id=%d pid=%d shown=%s — %s", fg.id, fg.pid, tostring(fg.shown),
+      fg.id == win.id and "the window above" or "NOT the window above")
+  else
+    line("foreground: nil (no window has the keyboard, or it could not be read)")
+  end
+
   -- The subrole is the second field of the class the backend composes (`join_class`:
   -- `AXRole/AXSubrole/AXIdentifier`), and these three are the ones `content_rect` treats as
   -- titled — the same set, so the caveat fires exactly where the derivation was attempted.

@@ -191,13 +191,14 @@ return {
       -- ranking wrong is exactly the kind of change that must be verified against a real
       -- window rather than reasoned about.
       --
-      -- `menus = true`, and it is load-bearing rather than precautionary: the preset menu
-      -- these overlays open is a REAL Windows menu, not part of u-he's self-drawn UI, so
-      -- while it is up the captured navigation keys have to reach it instead of steering the
-      -- overlay. Without this, Return would never arrive at the one menu that chooses a
-      -- preset.
+      -- `menus`, and it is load-bearing rather than precautionary: the preset menu these
+      -- overlays open is a REAL Windows menu, not part of u-he's self-drawn UI, so while it is
+      -- up the keys have to reach it instead of steering the overlay — and Alt+M must not
+      -- re-open it underneath. A menu the system draws is what nativePopup sees (verified live
+      -- on Diva and Repro-1); u-he's own UI exposes nothing to accessibility, so that test
+      -- would only cost a walk of an empty tree.
       ov:attachEmbedded({ hosts = daw.all, control = s.class },
-        { slot = SLOT, specificity = O.layer.base, menus = true })
+        { slot = SLOT, specificity = O.layer.base, menus = { O.menuTests.nativePopup } })
     end
     host.log.info(string.format("u-he: %d synth overlays ready.", #SYNTHS))
   end,

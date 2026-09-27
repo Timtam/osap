@@ -284,7 +284,7 @@ The comparison is against a value **cached from notifications** — application 
 
 **Signature:** `host.keys.menuOpen(open: boolean)` → `nil`
 
-Tells the hook a plugin's own (Qt/UIA) menu is open (`true`) or closed (`false`). While open, captured navigation keys (e.g. `Tab`/`Enter`) **pass through** to that menu instead of being consumed by the overlay — covering plugin menus the Win32 menu-state check can't see. Like [`scope`](#host-keys-scope), this is one flag for the whole application: `menuOpen(true)` lets **every** module's captured keys through until somebody sets it back.
+Tells the hook a plugin's own (Qt/UIA) menu is open (`true`) or closed (`false`). While open, captured navigation keys (e.g. `Tab`/`Enter`) **pass through** to that menu instead of being consumed by the overlay — covering plugin menus the Win32 menu-state check can't see. Like [`scope`](#host-keys-scope), this is one flag for the whole application: `menuOpen(true)` lets **every** module's captured keys through until somebody sets it back. The overlay runtime writes it on every tick of its menu timer while one of a module's overlays with [menu tests](overlay.md#o-menutests) is in front — `true` while a menu counts as open for one of them — and `false` whenever one of its overlays leaves the front, and once when one starts [holding its place](overlay.md#o-menutests) over its own menu's window — right after the `true` of that menu's opening, when the tests saw the menu only at that moment — after which it writes nothing for that overlay until the hold ends; so while such an overlay is in front a value a module writes itself lasts until the runtime's next tick (150 ms) at most.
 
 ```luau
 host.keys.menuOpen(true)
@@ -323,22 +323,21 @@ end)
 
 True while the application in front has a menu open that the operating system itself drew. This is the **cheap half** of "is a menu open": no accessibility traversal, no screen touch, cheap enough to ask from inside the key path and from a 150 ms timer. The expensive half — `host.element.find(hwnd, "", host.element.type.Menu)`, which walks a plug-in's entire accessibility tree across a process boundary — was measured at 50–194 ms per call, more than its own 150 ms interval, and was being spent almost entirely on answering "no". Ask this first and the common case is settled outright, because the menus these overlays open (u-he's preset menu, Komplete Kontrol's menu bar) turn out to be native ones. It is also the guard a module wants around anything that reads the screen on a timer: a menu is drawn *over* the region, so a read-out watcher that keeps going reports the menu's own text as a changed value, over and over, as the user moves through it.
 
-A false answer means "no menu the OS drew", not "no menu". A plug-in that paints its own menu inside its window — a Qt menu, typically — is invisible here; that case is what [`host.keys.menuOpen`](#host-keys-menuopen) is for, and the runtime's `Overlay:watchMenus` already drives it for you if you attach with `menus = true`. Note also that you do not need this call to get key pass-through while a native menu is up: the key hook consults the same answer itself on both platforms and stops suppressing captured keys for the duration. Modules call it to quiet their *own* polling and reading.
+A false answer means "no menu the OS drew", not "no menu". A plug-in that paints its own menu inside its window — a Qt menu, typically — is invisible here; that case is what [`host.keys.menuOpen`](#host-keys-menuopen) is for, and the overlay runtime drives it from the menu tests an overlay names (see [`O.menuTests`](overlay.md#o-menutests)), whose building block `O.menuTests.nativePopup` is this call. Note also that you do not need this call to get key pass-through while a native menu is up: the key hook consults the same answer itself on both platforms and stops suppressing captured keys for the duration. What the call adds is everything else an open menu should change — the overlay runtime gives up its registered hotkeys while it is true — and modules call it to quiet their *own* polling and reading.
 
 ```luau
--- modules/overlay-runtime/src/main.luau, Overlay:watchMenus — the cheap question first.
-local tick = 0
-host.timer.every(150, function()
-  if not ov.active then return end
-  -- Every menu these overlays open turns out to be native (u-he's preset menu, KK's menu bar).
-  local open = host.keys.nativeMenuOpen() == true
-  -- The tree walk costs 50-194 ms, so it is paid on a slow backstop, not every tick.
-  tick += 1
-  if not open and tick % 8 == 0 then
-    local hwnd = ov:hwnd()
-    open = hwnd ~= nil and host.element.find(hwnd, "", host.element.type.Menu) == true
-  end
-  host.keys.menuOpen(open)
+-- The overlay runtime's building block, whole: a menu test that is cheap enough for every tick.
+local nativePopup = {
+  name = "nativePopup",
+  cheap = true,
+  test = function(_, answer) answer(host.keys.nativeMenuOpen() == true) end,
+}
+
+-- A module's own guard: a read-out watcher that stays quiet while a menu is drawn over it,
+-- rather than announcing the menu's text as a changed value.
+host.timer.every(500, function()
+  if host.keys.nativeMenuOpen() then return end
+  readTheStrip()
 end)
 ```
 
@@ -348,9 +347,9 @@ A live question, asked fresh on every call: `GetGUIThreadInfo` for the foregroun
 
 ### macOS
 
-Nothing is asked at call time. The answer is a counter kept by the accessibility observer from the frontmost application's `AXMenuOpened` / `AXMenuClosed` notifications, so the common case — nothing open — is one relaxed load. It **counts rather than latches**, so a submenu opening and closing again does not clear its parent, and notifications from any application that is not frontmost are discarded — an unrelated program with a menu up must never disarm the overlay. The count is also cleared outright when a different application comes to the front, because whatever menu was believed open belonged to the application just left; switching away from an app with a menu up therefore re-arms at once rather than waiting on the valve below.
+Nothing is asked at call time. The answer is a counter kept by the accessibility observer from the frontmost application's `AXMenuOpened` / `AXMenuClosed` notifications, so the common case — nothing open — is one relaxed load. It **counts rather than latches**, so a submenu opening and closing again does not clear its parent, and notifications from any application that is not frontmost are discarded — an unrelated program with a menu up must never disarm the overlay. The count is also cleared outright when a different application comes to the front, because whatever menu was believed open belonged to the application just left; switching away from an app with a menu up therefore re-arms at once.
 
-Because the answer depends on a close notification arriving, there is a safety valve: a depth that has not moved for 60 seconds is treated as closed and the overlay re-arms, writing a line to the log that says so. The failure it guards against is invisible from the outside — a stuck flag hands every captured key to the application underneath and the overlay simply stops answering. An application that draws a menu without posting either notification reads here as no menu, which is the same shape of gap as a self-drawn Qt menu on Windows and has the same answer: `host.keys.menuOpen`.
+**No clock decides the answer.** A menu counts as open from its `AXMenuOpened` until its `AXMenuClosed`, however long it stays up. So the answer depends on the close notification arriving: if an application ever loses one, the count stays up — and the event tap goes on letting captured keys through — until a different application comes to the front. The log names each transition (`a menu opened in pid …`, `the menu in pid … closed`), so an opened line with no closed line after it names the application that lost one. An application that draws a menu without posting either notification reads here as no menu, which is the same shape of gap as a self-drawn Qt menu on Windows and has the same answer: a test of the module's own ([`O.menuTests`](overlay.md#o-menutests)).
 
 ---
 
@@ -360,12 +359,12 @@ Because the answer depends on a close notification arriving, there is a safety v
 
 The keys the hook let through to the application because a menu was open, since the last call — drained on read, so each key is reported once, to whichever module asks first: the record is one for the whole application, and it holds at most 32 keys until it is read. Two kinds: any **captured** key let past because a menu was open, and **Return or Escape, captured or not**, whenever `host.keys.menuOpen(true)` is in force — those two end a menu, no overlay captures Escape, and Return is captured only while the focused control wants it, so a record kept for captured keys alone would never hold the Escape that cancelled a menu. `key` is the spelling `host.keys.capture` would accept (`"Return"`, `"Escape"`, `"Tab"`, `"A"`, `"F5"`), or `"vk 0x.."` for a key the spec grammar cannot name.
 
-What it is for: **Return and Escape end a menu.** Where nothing can see a plugin's menu — no notification, no menu element, no window of its own — the overlay runtime's hold is a stopwatch, and the only word it can get that the menu has closed is one of those two keys going through to it. The menu watch asks this on its tick and cuts the hold to a short grace when it finds one, instead of leaving Tab and Return with the plugin for the rest of the stopwatch. Only for a hold no detector has confirmed: where a detector can see the menu, its word is better than a guess about what a key did.
+What it is for: **knowing what reached a menu.** Whether a key that went through arrived where the user meant it is invisible from outside — the menu might have closed on it, or the keyboard might have been somewhere else all along. The overlay runtime asks on every tick of its menu timer while one of its overlays is in front, logs each key against the overlay whose menu is open, and follows an `Escape`: when a menu test still sees the menu two ticks later, the log says the key did not reach it or the menu ignores Escape. It decides nothing from these keys — whether a menu is open is only ever its [menu tests'](overlay.md#o-menutests) answer. Drained on read, so while such an overlay is in front the runtime is the one that gets them.
 
 ```luau
 for _, k in ipairs(host.keys.passedThrough()) do
-  if k.key == "Return" or k.key == "Escape" then
-    host.log.info(k.key .. " reached the menu, which is therefore closing")
+  if k.key == "Escape" then
+    host.log.info("Escape went through to the menu")
   end
 end
 ```

@@ -19,9 +19,20 @@ local on_ear = {
 -- and the most specific one that is actually on screen wins.
 local ON_EAR_SLOT = "com.platform.ik-on-ear/window"
 
+-- How this application's menus are seen, for every overlay here (see the overlay runtime's
+-- Menus section). A JUCE combo box opens its list as a popup WINDOW of its own, which is what
+-- newWindow sees; nativePopup costs one flag read and catches any menu the system draws.
+-- Not the accessibility test: in the only session that opened these menus (2026-08-31, four
+-- presses) it ran on every tick after each press and saw none of them — the popup is a window
+-- of its own, outside the tree it walks. Whether newWindow sees them is a live check still to
+-- be made: that session ran before it existed.
+local O = host.require("com.platform.overlay")
+local MENUS = { O.menuTests.nativePopup, O.menuTests.newWindow }
+
 return {
   window = on_ear,
   SLOT = ON_EAR_SLOT,
+  MENUS = MENUS,
   -- Something this window's tree carries whenever the tree works at all. Every panel here uses
   -- it to tell "the thing I am looking for is gone" apart from "the application has stopped
   -- answering", which it does whenever a caret is in one of its text fields.

@@ -1902,6 +1902,56 @@ pub fn foreground_window_id() -> Option<isize> {
     }
 }
 
+/// `host.window.foreground()`: the frontmost application's focused window, whether it is on
+/// screen, and nothing remembered.
+///
+/// Only `AXFocusedWindow`, without `active_window`'s fall-backs to the main window and the
+/// first window: those name a window to take geometry from when none is focused, and this
+/// is asked where a key goes. For the same window the handle is the one `active_window`
+/// reports — both intern the element.
+///
+/// **Never from memory.** An application in the not-answering quarantine is not asked, and
+/// the answer is `None`: "cannot say" is what that state is, and a remembered window would
+/// be a guess dressed as a reading — the one thing a caller of this must be able to rule
+/// out before acting on it (the overlay runtime brings a window back on this answer). A read
+/// that times out puts the application in quarantine (`attribute` does), and the answer is
+/// `None` the same way.
+///
+/// `shown` is the window's `AXMinimized` read as "not minimised" — minimised is this
+/// platform's "not visible", as in `win_info`. The window server is not asked whether the
+/// window is drawn; whether a focused window can be ordered out is not known (TODO.md).
+pub fn foreground_window() -> Option<crate::backend::Foreground> {
+    let t = Instant::now();
+    let pid = frontmost_pid()?;
+    if skip_busy(pid, "foreground_window") {
+        return None;
+    }
+    let app_el = app_element(pid);
+    let answer = match attribute_element(&app_el, a_focused_window()) {
+        // A timed-out read comes back as `None` too; either way there is no window to name.
+        None => None,
+        Some(el) => {
+            let minimised = attribute_bool(&el, a_minimized());
+            if is_busy(pid) {
+                // That read was the one that timed out: nothing is known about the window.
+                None
+            } else {
+                let id = handles::intern(el, pid, 0);
+                Some(crate::backend::Foreground { id, pid: pid as u32, shown: minimised != Some(true) })
+            }
+        }
+    };
+    let ms = t.elapsed().as_millis();
+    crate::logging::trace("macos", || match &answer {
+        Some(f) => format!("foreground_window: id {} (pid {}) shown {} in {ms} ms", f.id, f.pid, f.shown),
+        None => format!("foreground_window: none named by {} (pid {pid}) in {ms} ms", exe_for_pid(pid)),
+    });
+    if ms > SLOW_MS {
+        crate::logging::line("macos", &format!("foreground_window blocked the pump for {ms} ms"));
+    }
+    answer
+}
+
 /// The snapshot this application last gave, served because it has stopped answering.
 ///
 /// `named` is the window the application just told us is in front, where it got that far
