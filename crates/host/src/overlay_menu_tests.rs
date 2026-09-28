@@ -49,10 +49,11 @@
 
 use mlua::{Function, Lua, Table};
 
-const RUNTIME: &str = include_str!("../../../modules/overlay-runtime/src/main.luau");
+pub(crate) const RUNTIME: &str = include_str!("../../../modules/overlay-runtime/src/main.luau");
 
-/// The scripted host and the helpers the scenarios use, returned as the table `T`.
-const HARNESS: &str = r##"
+/// The scripted host and the helpers the scenarios use, returned as the table `T`. Shared with
+/// `overlay_host_panel_tests.rs`, which loads it with the window prelude's real matcher.
+pub(crate) const HARNESS: &str = r##"
 local T = {}
 
 -- REAPER as the NVDA test of 2026-09-26 met it: the FX window, Komplete Kontrol's control inside

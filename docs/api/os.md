@@ -45,21 +45,15 @@ host.log.info("running on " .. host.os.current)
 
 **Signature:** `host.os.is(name: string) -> boolean`
 
-Returns `true` when `name` equals the current OS string, exactly: `"macOS"` or `"mac"` is simply `false`. It raises only for an argument that is not a string or a number. For the genuine fork, where a whole binding differs — not for a key or a value, which `pick` and the key spec's modifier roles cover.
+Returns `true` when `name` equals the current OS string, exactly: `"macOS"` or `"mac"` is simply `false`. It raises only for an argument that is not a string or a number. For the genuine fork, where what a module offers differs by platform — a binding, or a set of controls that one platform cannot support — not for a key or a value, which `pick` and the key spec's modifier roles cover.
 
 ```luau
--- sforzando: REAPER on macOS publishes no plug-in control, so the Mac gets a binding of its
--- own, against the FX window, with the frame moved to where the plug-in sits inside it.
+-- Kontakt standalone (modules/kontakt/src/cells.luau): on a Mac the rack question has no honest
+-- answer — Kontakt 7 publishes its VIEW button there while the preset browser fills the window —
+-- so the controls that depend on it are not offered on that platform.
 if host.os.is("macos") then
-  local inDaw = O.new("sforzando in a DAW")
-  inDaw:frame(function(o)
-    local p = daw.reaperPluginOrigin(o)
-    return p[1], p[2]
-  end)
-  inDaw:attach({
-    title = { contains = "sforzando" },
-    macos = { app = { bundleId = "com.cockos.reaper" }, axSubrole = "AXStandardWindow" },
-  })
+  standalone.inRack = function() return false end
+  standalone.inClassic = function() return false end
 end
 ```
 

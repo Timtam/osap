@@ -35,7 +35,16 @@ local header = host.include("src/header.luau")
 -- Version-independent, so it is not part of the cell matrix. Both join their slot at the
 -- dialog layer, so the dialog takes over from whatever header or library overlay was
 -- active and hands back when it closes.
-local CONTENT_MISSING_CONTROL = "^NIChildWindow%x+$"
+--
+-- Not on a Mac (`macos = false`): nobody has seen this dialog on one, and without the entry the
+-- runtime would hand this overlay the DAW's plug-in panel as it does a plug-in's — where a
+-- Logic window titled "Content Missing" (a titled AXDialog, which Logic's entry takes) would get
+-- "Browse For Folder" at a point measured from Logic's header. Declared absent, not guessed.
+local CONTENT_MISSING_CONTROL = {
+  windows = "^NIChildWindow%x+$",
+  linux = "^NIChildWindow%x+$",
+  macos = false,
+}
 local CONTENT_MISSING_WINDOW = {
   title = { pattern = "^Content Missing" },
   app = { exe = { contains = "Kontakt" } },

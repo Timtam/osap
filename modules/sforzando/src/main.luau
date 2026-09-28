@@ -26,7 +26,8 @@ local sforzando = {
 local O = host.require("com.platform.overlay")
 local ov = O.new("sforzando")
 
--- OCR regions, relative to the window's CONTENT origin (x1, y1, x2, y2).
+-- OCR regions, relative to sforzando's own top-left (x1, y1, x2, y2): the window's CONTENT
+-- origin standalone, the plug-in's own top-left inside a DAW.
 --
 -- Two sets, and the reason is worth understanding before adding a third platform. The
 -- coordinates are not per-platform because the platforms differ; they are per-platform
@@ -57,34 +58,87 @@ local ov = O.new("sforzando")
 -- The earlier note here read the standalone probe as putting RANGE's box at 574, overlapping
 -- DEF at 571, which cannot both be true of non-overlapping text; the embedded measurement is
 -- the cleaner one and is what these numbers come from. Still unrun: whether a 1 now reads.
--- Built fresh each time rather than shared, because two overlays now want them and a
--- control table is not something to alias between them.
 -- `opensMenu` on all three because all three do: Enter on any of them opens sforzando's own
 -- pop-up list. It is not decoration — it is what gives the newWindow menu test (below) the
 -- window list from before the click, so the list's window is recognised when it appears and
 -- the navigation keys go to it, instead of re-firing the control underneath and reopening it.
-local function addReadOuts(o)
-  o:addOCRButton({ label = "Instrument", opensMenu = true, region = host.os.pick {
-    windows = { 90, 22, 200, 36 },
-    macos = { 82, 20, 205, 43 },
-  } })
-  o:addOCRButton({ label = "Polyphony", opensMenu = true, region = host.os.pick {
-    windows = { 486, 40, 516, 70 },
-    macos = { 490, 38, 530, 58 },
-  } })
-  o:addOCRButton({ label = "Pitchbend range", opensMenu = true, region = host.os.pick {
-    windows = { 576, 40, 602, 60 },
-    macos = { 569, 38, 607, 60 },
-  } })
-end
+--
+-- One overlay carries them for both of its places, standalone and inside a DAW, on both
+-- platforms: the regions are relative to sforzando's own top-left, which is the window's
+-- content origin standalone and the plug-in's control — or, on a Mac, the DAW's plug-in panel —
+-- inside a DAW. There was a second overlay for REAPER on a Mac, with the same three read-outs
+-- in a frame moved by REAPER's geometry; the runtime's panel is that frame now, for every DAW.
+ov:addOCRButton({ label = "Instrument", opensMenu = true, region = host.os.pick {
+  windows = { 90, 22, 200, 36 },
+  macos = { 82, 20, 205, 43 },
+} })
+ov:addOCRButton({ label = "Polyphony", opensMenu = true, region = host.os.pick {
+  windows = { 486, 40, 516, 70 },
+  macos = { 490, 38, 530, 58 },
+} })
+ov:addOCRButton({ label = "Pitchbend range", opensMenu = true, region = host.os.pick {
+  windows = { 576, 40, 602, 60 },
+  macos = { 569, 38, 607, 60 },
+} })
 
-addReadOuts(ov)
-
--- DAW host-window criteria come from the shared `daw-hosts` library module
--- (declared as a dependency in module.toml), so they aren't hardcoded here.
--- Sforzando's VST window class is "Plugin<instance pointer>" (host-independent),
--- so the same OCR regions apply relative to that control.
+-- DAW host-window criteria come from the shared `daw-hosts` code module (declared as a
+-- dependency in module.toml), so no DAW is named here: `daw.all` is every DAW it has an entry
+-- for, and a DAW added there is one sforzando is recognised in.
 local daw = host.require("com.platform.daw-hosts")
+
+-- The "sforzando" wordmark in the header, relative to the plug-in's top-left: the identity
+-- check for a plug-in that publishes nothing to ask (see identify below).
+--
+-- Windows: ReaHotkey's landmark region, which has done this since the first port. macOS: the
+-- same region grown by 8 points left and right and by 4 above and below, because sforzando's
+-- Mac build lays its header out a few points differently — the read-outs above sat within 7
+-- points horizontally and 4 vertically of where the Windows numbers put them once both were
+-- measured from the plug-in's own corner. That difference is sforzando's, not a DAW's, so it
+-- stays here. The wordmark itself has not been read on a Mac: TODO.md, "sforzando in a DAW on
+-- a Mac". A wider region costs nothing — the question is only whether the word is in it.
+local WORDMARK = host.os.pick {
+  windows = { 605, 33, 762, 70 },
+  macos = { 597, 29, 770, 74 },
+}
+
+-- The wordmark on the DAW's plug-in panel, read OFF the event loop.
+--
+-- On a child control (Windows) the read below is synchronous and asked once per control handle,
+-- which is what it always was. The panel is asked once per STAY instead — every time the keyboard
+-- comes back into a plug-in from the DAW's own controls or another window — and in EVERY plug-in
+-- of every DAW, not only sforzando's, because a panel says nothing about which plug-in it holds.
+-- On a Mac a synchronous read there is Vision with its retry ladder, up to 250 ms on the thread
+-- that carries the event tap when nothing is found — which is exactly the common case, another
+-- plug-in's graphics — so the first key after coming into any plug-in would wait for it. So it is
+-- asked of the OCR worker, and `identify` answers nil ("could not tell yet") until the answer
+-- lands, then asks every overlay to look again; `false` would be kept for the stay.
+--
+-- Only a read that READ something is a verdict: text without the wordmark is another plug-in.
+-- Nothing read — "blank", "none", a read that failed or was pushed out — is not a "no": a view
+-- that has not painted yet looks exactly like that. It stays nil, and the next evaluation reads
+-- again; the runtime takes IDENTIFY_UNDECIDED_MAX of them in one stay as no. Not asked again on a
+-- timer: an evaluation is a focus event, the runtime's own recheck, or Cmd+Shift+F6.
+--
+-- One answer at a time — one window is in front at a time — for one window, panel size and stay.
+local wordmark = { key = nil, value = nil, reading = false }
+local function wordmarkOnPanel(ctrl)
+  local key = string.format("%s|%dx%d|%s", tostring(ctrl.id), ctrl.client.w, ctrl.client.h, tostring(ctrl.stay))
+  if wordmark.key ~= key then wordmark.key, wordmark.value, wordmark.reading = key, nil, false end
+  if wordmark.value ~= nil then return wordmark.value end
+  if wordmark.reading then return nil end
+  wordmark.reading = true
+  local ox, oy = math.floor(ctrl.client.x), math.floor(ctrl.client.y)
+  host.ocr.read({ ox + WORDMARK[1], oy + WORDMARK[2], ox + WORDMARK[3], oy + WORDMARK[4] },
+    { lang = "en", key = "sforzando-wordmark" }, function(r)
+      -- Another window, size or stay by now: that one reads for itself.
+      if wordmark.key ~= key then return end
+      wordmark.reading = false
+      if r.status ~= "text" then return end
+      wordmark.value = string.find(string.lower(r.text or ""), "sforzando", 1, true) ~= nil
+      host.window.recheck()
+    end)
+  return nil
+end
 
 -- Activate while the sforzando window is focused (standalone) or while it is
 -- embedded in a DAW host window; deactivate on leaving. Navigation is Tab /
@@ -96,86 +150,42 @@ local daw = host.require("com.platform.daw-hosts")
 --   newWindow    on a Mac it is a window of its own at the menu level (101): the 2026-09-18
 --                session saw one open and close for each of the six lists it opened, standalone
 --                and inside REAPER, where an earlier session's accessibility check saw none.
--- The same two for all three bindings, so a list is one declaration.
+-- The same two for both bindings, so a list is one declaration.
 local MENUS = { O.menuTests.nativePopup, O.menuTests.newWindow }
 ov:attach(sforzando, { menus = MENUS })
--- Embedded in a DAW, by CONTROL — which is the Windows way, and only the Windows way. A
--- Mac has since been probed and the answer was that there is no control: REAPER lets its
--- accessibility tree show its own chrome and nothing of the plugin at all. The macOS case is
--- therefore a separate binding at the bottom of this file, against the FX window itself. An
--- OS-keyed table with no entry for the current platform makes this one inert rather than
--- wrong, which is what keeps the two from fighting over the same window.
+-- Embedded in a DAW. On Windows, by CONTROL: sforzando's VST window class is
+-- "Plugin<instance pointer>" — a class several vendors' plug-ins share (ReaHotkey matches
+-- sforzando, Engine 2 and Zampler by it, in REAPER and in Ableton; this platform has seen it in
+-- REAPER only) — and the regions above apply relative to it.
+-- On a Mac there is no such control — REAPER's FX window offers 22 accessibility elements and
+-- every one of them is REAPER's own chrome, nothing of sforzando's — and the binding has no
+-- macOS entry, so the overlay runtime gives it the DAW's plug-in panel instead: where the
+-- window's daw-hosts entry says a plug-in begins (REAPER's FX chain or floating window, Logic's
+-- plug-in window, …). The runtime also keeps the overlay out of the way while the keyboard is
+-- on the DAW's own controls, by asking whether the focused element lies inside the panel — the
+-- question this module used to ask itself, as "is the focus chain one link deep", for REAPER
+-- alone.
 ov:attachEmbedded({
   hosts = daw.all,
   control = { windows = "^Plugin%x+$" },
-  -- "^Plugin%x+$" matches any REAPER plugin, so confirm it's actually sforzando:
-  -- read the "sforzando" wordmark in the header (relative to the plugin control).
-  -- ReaHotkey uses UIA (a Pane named "PlogueXMLGUI"); this OCR landmark is the
-  -- UIA-free check (UIA-based identity to be added alongside).
+  -- Whose plug-in is it? "^Plugin%x+$" matches other vendors' plug-ins too, and the DAW's panel
+  -- on a Mac any plug-in at all, so this is asked of both, and kept: per control on Windows, per
+  -- stay inside the panel on a Mac (another plug-in selected in the same FX chain window is
+  -- asked about afresh — see the runtime's "stay").
   identify = function(ctrl)
-    -- UIA (as ReaHotkey): sforzando's GUI is a Pane
-    -- named "PlogueXMLGUI".
+    -- UIA (as ReaHotkey): sforzando's GUI is a Pane named "PlogueXMLGUI". On a Mac nothing
+    -- of sforzando's is published, and this asks the whole plug-in window for nothing.
     if host.element and host.element.find(ctrl.id, "PlogueXMLGUI", host.element.type.Pane) then
       return true
     end
-    -- Fallback: read the "sforzando" wordmark in the header.
+    -- Otherwise the "sforzando" wordmark in the header, read where it would be: off the loop on
+    -- the DAW's panel (above), and on a control of its own as it always was — a small region, on
+    -- the event loop, once per control handle.
+    if ctrl.stay ~= nil then return wordmarkOnPanel(ctrl) end
     local ox, oy = ctrl.client.x, ctrl.client.y
-    local r = host.ocr.recognize({ region = { ox + 605, oy + 33, ox + 762, oy + 70 } })
+    local r = host.ocr.recognize({
+      region = { ox + WORDMARK[1], oy + WORDMARK[2], ox + WORDMARK[3], oy + WORDMARK[4] },
+    })
     return string.find(string.lower(r.text or ""), "sforzando", 1, true) ~= nil
   end,
 }, { menus = MENUS })
-
--- ===== Embedded in a DAW, on macOS =====
---
--- The binding above cannot serve here, and the probe of a real REAPER session says why: its
--- FX window offers 22 accessibility elements and every one of them is REAPER's own chrome —
--- the FX list, the preset menu, Param, 2 out, UI, FX Active. Nothing whatsoever belongs to
--- sforzando. There is no control to attach to, which is exactly what the log has been saying
--- for weeks ("no control pattern for this platform").
---
--- So this attaches to the FX WINDOW and shifts its coordinate frame to where the plugin
--- actually sits inside it. Identity comes from the title, because REAPER writes the plugin's
--- name into it — `FX: Track 1 "sforzando"` — on both platforms, and because on this one it is
--- the only thing available.
-if host.os.is("macos") then
-  -- Where the plugin sits inside the FX window is REAPER's geometry, not sforzando's, so the
-  -- numbers live in `daw-hosts` (`reaperPluginOrigin`), next to the shortcut that has to
-  -- click there. They were measured from this module's own probe captures — the plugin's
-  -- dark panel at content (240,52), with an OCR landmark in the standalone and the embedded
-  -- shot agreeing to within a pixel — and moved, not re-derived; one copy now.
-  --
-  -- Memoised per window. Reading the surface list is an accessibility traversal, and paying
-  -- for one on every spoken read-out is not affordable on the machine this runs on. The cost
-  -- of memoising is that dragging the FX list divider needs a window switch before the
-  -- coordinates follow; that is the right trade for a divider nobody moves mid-session.
-  local pluginOrigin = O.memoByOrigin(function(o)
-    local p = daw.reaperPluginOrigin(o)
-    host.log.info(("[sforzando] plugin origin inside the FX window: %d,%d"):format(p[1], p[2]))
-    return p
-  end)
-
-  local inDaw = O.new("sforzando in a DAW")
-  addReadOuts(inDaw)
-  inDaw:frame(function(o)
-    local p = pluginOrigin(o)
-    return p[1], p[2]
-  end)
-  -- Only while the keyboard is actually in the plugin. When it is in REAPER's own chrome the
-  -- focus chain runs several elements deep — the probe recorded AXTable, then AXScrollArea,
-  -- then the window — whereas the plugin exposes nothing at all, so focus inside it reaches
-  -- the window and stops. Depth is therefore the discriminator this platform gives us, and
-  -- it is the same question the Windows path asks with its list of chrome classes.
-  inDaw:gate(function()
-    local chain = host.window.focusChain()
-    -- Exactly one link — the window — and not "one or none". An empty chain is the
-    -- backend saying it could not read where the keyboard is, and an overlay that took
-    -- that as "inside" would start capturing Tab and Return on a guess. It gated in on
-    -- `not chain or #chain <= 1` until the F6 work made the shortcut treat the same empty
-    -- reading as unknown, and one window with two readings of one fact is a contradiction.
-    return chain ~= nil and #chain == 1
-  end)
-  inDaw:attach({
-    title = { contains = "sforzando" },
-    macos = { app = { bundleId = "com.cockos.reaper" }, axSubrole = "AXStandardWindow" },
-  }, { menus = MENUS })
-end

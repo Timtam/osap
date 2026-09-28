@@ -12,7 +12,7 @@ One plug-in is usually several overlays rather than one. Kontakt declares one pe
 
 Running through every method here is one rule: **announce what the application did, not what the module intended.** `O:watch` waits for a value to change instead of guessing a delay, a pixel that resembles neither reference reports no state at all rather than the nearer guess, and a click is refused when another window is drawn over the point.
 
-All control coordinates are **origin-relative**: the origin is the client-area top-left of the active context's coordinate window — the plug-in window when standalone, or the embedded plug-in's child control when hosted in a DAW — re-resolved per call so it tracks the window as it moves, and `(0, 0)` when the overlay is not attached.
+All control coordinates are **origin-relative**: the origin is the client-area top-left of the active context's coordinate window — the plug-in window when standalone, or the embedded plug-in's child control when hosted in a DAW (on a Mac, the DAW's plug-in panel: see [`attachEmbedded`](#o-attachembedded-macos)) — re-resolved per call so it tracks the window as it moves, and `(0, 0)` when the overlay is not attached.
 
 A control is spoken as `"label, type[, value]"`, and **every kind is a focus stop**: static text is Tab-reachable and read aloud, it simply has no activation.
 
@@ -118,9 +118,9 @@ Two controls **share** a hotkey when their specs name the same key on this platf
 **Signatures:**
 `O.window(matcher, opts?) -> Binding` · `O.embedded(spec, opts?) -> Binding` · `Binding:with(over) -> Binding` · `O.hosts(...) -> {matcher}` · `O:bind(binding, opts?) -> Overlay`
 
-A **binding** is an inert value saying *where* an overlay lives: which window or embedded control, on which `slot`, at which `specificity`, with `pollMatch` / `menus`. Declare it once and reuse it, instead of writing a factory function that rebuilds an attach spec per attachment — the reason such factories appear is that a caller mutates the table and the next caller needs a clean copy.
+A **binding** is an inert value saying *where* an overlay lives: which window or embedded control, on which `slot`, at which `specificity`, with `pollMatch` / `menus`. Declare it once and reuse it, instead of writing a factory function that rebuilds an attach spec per attachment — the reason such factories appear is that a caller mutates the table and the next caller needs a clean copy. `O.window` takes what [`attach`](#o-attach) takes, and `O.embedded` what [`attachEmbedded`](#o-attachembedded) takes — so an embedded binding with no control of its own for a platform gets the DAW's plug-in panel there, as `attachEmbedded` describes, and every overlay bound to one `O.embedded` value shares the control it resolves, once per epoch, and on a panel its identity verdict.
 
-`:with(over)` returns a **copy** with `over` merged into the target (`control`, `identify`, `title`, …); `over.opts` merges into the options. `O.hosts(...)` concatenates host lists and skips `nil`, so an optional host (a plugin that may not be installed) can be listed inline. `O:bind(binding, opts)` attaches, with `opts` overriding the binding's own options.
+`:with(over)` returns a **copy** with `over` merged into the target (`control`, `identify`, `title`, …); `over.opts` merges into the options. `O.hosts(...)` concatenates host lists and skips `nil`, so an optional host (a plugin that may not be installed) can be listed inline: a table with an array part is a list of entries, any other non-empty table is one entry — an entry may carry nothing but a platform block, as Logic's does in [daw-hosts](../daw-hosts.md) — and an empty table adds nothing. `O:bind(binding, opts)` attaches, with `opts` overriding the binding's own options.
 
 ```luau
 local HOSTED = O.embedded({
@@ -131,8 +131,11 @@ local HOSTED = O.embedded({
 }, { slot = SLOT, menus = { O.menuTests.nativePopup, O.menuTests.accessibility } })
 
 base:bind(HOSTED, { specificity = O.layer.base })
-dialog:bind(HOSTED:with({ control = "^NIChildWindow%x+$", identify = present,
-                          opts = { menus = false } }), { specificity = O.layer.dialog })
+-- `macos = false`: the dialog is Kontakt's own, never a plug-in panel, so on a Mac — where a
+-- plain pattern that finds nothing would take the DAW's panel — the binding does not apply.
+dialog:bind(HOSTED:with({ control = { windows = "^NIChildWindow%x+$", macos = false },
+                          identify = present, opts = { menus = false } }),
+            { specificity = O.layer.dialog })
 ```
 
 One overlay object takes **one** binding: an object is pinned to a single slot and its match poll belongs to that join. Two places to live means two overlay objects sharing a build function.
@@ -163,7 +166,7 @@ One rule: a **non-nil** result is cached; **`nil` means "cannot tell yet" and is
 
 It keeps the answers for the **64 windows (keys) asked about most recently** and forgets the one asked about least recently when a 65th comes: a window that closed is never asked about again, and the application runs for days. A window forgotten and asked about again has `fn` called for it once more. A hit costs a table lookup; a new key at a full memo costs one pass over its 64 entries.
 
-The same holds for the verdicts of an embedded binding's `identify` (see [`attachEmbedded`](#o-attachembedded)): kept for the 64 controls asked about most recently, and a `nil` from `identify` is not a verdict — the control is asked again at the next recheck, up to 8 times in a row, with one `attachEmbedded: … identify could not tell yet` line per control; the eighth `nil` in a row is kept as "no", as `false` would be, with one line saying so.
+The same holds for the verdicts of an embedded binding's `identify` on Windows (see [`attachEmbedded`](#o-attachembedded); on a Mac's plug-in panel a verdict is kept for a stay instead): kept for the 64 controls asked about most recently, and a `nil` from `identify` is not a verdict — the control is asked again at the next recheck, up to 8 times in a row, with one `attachEmbedded: … identify could not tell yet` line per control; the eighth `nil` in a row is kept as "no", as `false` would be, with one line saying so.
 
 ```luau
 local variantOf = O.memoByOrigin(function(ctrl)
@@ -563,49 +566,117 @@ The tab keys are the ones written: `Ctrl+Tab` and `Ctrl+Shift+Tab` cycle the tab
 
 ## O\:attachEmbedded(spec, opts) {#o-attachembedded}
 
-Binds the overlay as an **embedded** context: active while keyboard focus is inside a plugin control hosted in a DAW. Coordinates are relative to that control's client area, so the same regions work standalone and embedded.
+Binds the overlay as an **embedded** context: active while keyboard focus is inside a plug-in hosted in a DAW. Coordinates are relative to the plug-in's control — its own child window on Windows, the DAW's plug-in panel on a Mac (below) — so the same regions work standalone and embedded, and in every DAW.
 
-`spec: { hosts: {Matcher}?, host: Matcher?, control: string, identify: ((control) -> boolean?)? }` — `hosts` is the list of acceptable DAW host-window matchers (falls back to `{ spec.host }`); `control` is a Luau pattern matched against candidate child/focus-chain control class names; `identify(control)` is an optional confirmation callback (UIA / OCR / image search), cached per control HWND, used because a host's plugin control class often matches any plugin (e.g. REAPER's `Plugin<ptr>`). `true` matches; any other value except `nil` — `false` included — does not, and is kept as the verdict. `nil` means "cannot tell yet" (UIA not ready the instant a plug-in appears) and is not kept: the control does not match now and `identify` is called again at the next recheck — every focus event, and every `pollMatch` tick — up to 8 times in a row for one control; the eighth `nil` in a row is kept as "no", as `false` would be. Each of those calls runs on the event loop and costs whatever `identify` does (a UIA search of an Electron window was measured at 0.65–0.88 s), so an `identify` that means "no" returns `false`, not nothing. The verdicts of the 64 controls asked about most recently are kept, as in [`O.memoByOrigin`](#o-memobyorigin). Candidates come from `host.window.controls()` plus the `host.window.focusChain()`.
+`spec: { hosts: {Entry}?, host: Entry?, control: string | { windows: Control?, macos: Control?, linux: Control? } | ((activeWindow, hostPanel) -> control?)?, identify: ((control) -> boolean?)?, cacheIdentity: boolean?, present: ((control) -> boolean)? }` where `Control` is `string | ((activeWindow, hostPanel) -> control?) | false`.
 
-`opts: { hoverToRead?, menus?, slot: string?, specificity: number?, pollMatch: number? }` — `hoverToRead`, `menus` and the navigation / focus-reset behaviour are as in `attach`. With `slot` the overlay joins the host **arbiter** for that slot at `specificity` (a base and the overlays inheriting it pass the same slot; the most-specific *matching* one is active — see `host.arbiter`); `pollMatch` (ms) additionally re-checks the match on a recurring timer, for matches that change with no window event (a library landmark appearing inside an already-focused plugin). Returns nothing.
+`hosts` is the list of DAW entries the plug-in can be embedded in (falls back to `{ spec.host }`): window matchers carrying what each DAW knows about its plug-in windows. A plug-in module passes `daw.all` from `com.platform.daw-hosts` and names no DAW itself — see [daw-hosts](../daw-hosts.md) for the entry format and for adding a DAW. The first entry whose matcher takes the window in front is the one used; its `chrome` classes and its `pluginOrigin` apply.
+
+`control` says where the plug-in is, per platform, resolved in three steps:
+
+1. **The module's own.** A string is a Luau pattern matched against the class names of the window's child controls (`host.window.controls()`) and of the focus chain (`host.window.focusChain()`); the first that matches and passes `identify` is the control. A function is called as `(activeWindow, hostPanel)` and returns a control table or `nil` (see [macOS](#o-attachembedded-macos)). A string that is not in an OS-keyed table applies on every platform.
+2. **The DAW's plug-in panel**, when the module gives nothing for this platform — no entry, or a pattern of which no control both matched and passed `identify` — **and** the window's entry has a `pluginOrigin` on this platform **and** the binding has an `identify`. The panel says where *a* plug-in is and nothing about *which*, so a binding without `identify` never takes it.
+3. **Nothing**: the binding is inert on this platform. It says so once at bind time, as `[<label>] embedded binding is inactive on <os>: <why>` — the module declared `false` for the platform; or neither the module (no pattern for the platform) nor any of its hosts (no `pluginOrigin` there) gives a control; or only the panel is on offer and the binding has no `identify`. It registers no trigger and asks nothing afterwards. The line is decided over all of a binding's hosts at once, so a binding with `daw.all` — where some entries have an origin — never says it for an entry that has none; the runtime says that instead, once per entry and VM, the first time such an entry's window is in front: `[overlay] '<title>' is a plug-in window of <daw>, whose daw-hosts entry gives no pluginOrigin on macos — no plug-in panel there, …`.
+
+`false` for a platform is the module's word that the binding does not apply there, not even through the panel: Kontakt's "Content Missing" dialog overlay is `{ windows = "^NIChildWindow%x+$", macos = false }`. A pattern that looks like a Win32 class — no `AX` and no `/` in it — is reported once per pattern on a Mac, saying what the binding does then: takes the panel, or stays inert because it has no `identify`, or because none of its hosts gives a `pluginOrigin` there; written as `{ windows = … }` it is not tried there at all.
+
+`identify(control)` is an optional confirmation callback (UIA / OCR / image search) — needed because a class pattern often matches any plug-in (the `Plugin<pointer>` class that several vendors' plug-ins share) and a panel matches every one. `true` matches; any other value except `nil` — `false` included — does not, and is kept as the verdict. `nil` means "cannot tell yet" (UIA not ready the instant a plug-in appears) and is not kept: the control does not match now and `identify` is called again at the next recheck — every focus event, and every `pollMatch` tick — up to 8 times in a row; the eighth `nil` in a row is kept as "no", as `false` would be. Each call runs on the event loop and costs whatever `identify` does (a UIA search of an Electron window was measured at 0.65–0.88 s), so an `identify` that means "no" returns `false`, not nothing.
+
+An `identify` that reads the screen **off the event loop** — [`host.ocr.read`](ocr.md#host-ocr-read), as sforzando's does on a panel (below) — answers `nil` until its answer lands and then calls [`host.window.recheck`](window.md#host-window-recheck); `false` would be kept. Its answer has to land within those 8 evaluations: every recheck in between counts one, so under a `pollMatch` of 500 ms that is about four seconds of rechecks and nothing else happening, and a read that lands later finds "no" kept already — per control on Windows, for the rest of the stay on a Mac. A read that saw nothing at all (`"blank"`, `"none"`, `"failed"`) is no answer: leave the verdict `nil` so the next evaluation reads again, and keep `false` for text that is not yours. An async read inside a `control` **function** instead — Kontakt's — is not counted by the runtime at all: the function returns `nil` until its read lands, and the function bounds its own retries.
+
+How long a verdict is kept is per platform — per control on Windows, per stay in the panel on a Mac — see the sections below. `cacheIdentity = false` keeps nothing: `identify` is called at every evaluation, for a verdict that depends on more than the control (Kontakt's: "is a Komplete Kontrol wrapped around it?"), so such an `identify` has to be cheap. `present(control)`, when given, is asked at every evaluation as well and never kept — for a condition that changes while the same control stays focused.
+
+`opts: { hoverToRead?, menus?, slot: string?, specificity: number?, pollMatch: number? }` — `hoverToRead`, `menus` and the navigation / focus-reset behaviour are as in `attach`. With `slot` the overlay joins the host **arbiter** for that slot at `specificity` (a base and the overlays inheriting it pass the same slot; the most-specific *matching* one is active — see `host.arbiter`); `pollMatch` (ms) additionally re-checks the match on a recurring timer, for matches that change with no window event (a library landmark appearing inside an already-focused plugin). Returns nothing. The overlay is evaluated as it is bound, like any binding — and an overlay that is already bound (to its standalone window, say) is evaluated again by this call, once, so a plug-in already in front is recognised without waiting for a window or focus event, which on a Mac may never come.
+
+The control is resolved once per [`host.epoch()`](timer.md#host-epoch) per `spec` table, shared by every overlay bound to that table, so the controls, the focus chain and `identify` are asked once per event however many overlays and coordinates want the answer; on a panel the verdict is kept per `spec` table as well, so an overlay that asks while another bound to the same table is outranked does not ask again.
 
 As with `attach`, the overlay also stays active while it holds its place over its own menu — a window of the same application in front after one of its controls opened it, in which one of its tests sees a menu (see [`O.menuTests`](#o-menutests)). When that ends, the match above decides again, exactly as for any other window change; if the keyboard is still in the menu's own window and that window is not shown, the window of the press is brought back first, once.
 
 ```luau
--- REAPER names every plug-in window "Plugin<pointer>", so the class alone matches ANY
--- plug-in: `identify` is what confirms this one is sforzando (its GUI is a UIA pane).
+-- sforzando (modules/sforzando, shortened): its own window class on Windows, the DAW's plug-in
+-- panel on a Mac, in every DAW daw-hosts has an entry for. "Plugin<pointer>" is shared by several
+-- vendors' plug-ins and a panel holds whatever plug-in is shown, so `identify` says which.
 local daw = host.require("com.platform.daw-hosts")
+-- The wordmark relative to the plug-in's top-left; the Mac build lays its header out a few points
+-- differently, which is sforzando's own difference and not a DAW's.
+local WORDMARK = host.os.pick { windows = { 605, 33, 762, 70 }, macos = { 597, 29, 770, 74 } }
+local pending, seen = nil, {}   -- the read out, and its answer: one window is in front at a time
+
 ov:attachEmbedded({
   hosts = daw.all,
-  control = { windows = "^Plugin%x+$" },   -- OS-keyed; see below
+  control = { windows = "^Plugin%x+$" },   -- no macos entry: the panel there
   identify = function(ctrl)
-    return host.element.find(ctrl.id, "PlogueXMLGUI", host.element.type.Pane) ~= nil
+    if host.element.find(ctrl.id, "PlogueXMLGUI", host.element.type.Pane) then return true end
+    local x, y = ctrl.client.x, ctrl.client.y
+    local region = { x + WORDMARK[1], y + WORDMARK[2], x + WORDMARK[3], y + WORDMARK[4] }
+    if ctrl.stay == nil then                       -- a control of its own: read here, once per control
+      local r = host.ocr.recognize({ region = region })
+      return string.find(string.lower(r.text), "sforzando", 1, true) ~= nil
+    end
+    local key = ctrl.id .. "|" .. ctrl.stay        -- the panel: once per stay, off the event loop
+    if seen[key] ~= nil then return seen[key] end
+    if pending ~= key then
+      pending = key
+      host.ocr.read(region, { lang = "en", key = "wordmark" }, function(r)
+        if pending == key then pending = nil end
+        if r.status ~= "text" then return end       -- nothing read: asked again next time
+        seen = { [key] = string.find(string.lower(r.text), "sforzando", 1, true) ~= nil }
+        host.window.recheck()
+      end)
+    end
+    return nil                                     -- not false: false is kept for the stay
   end,
-}, { slot = SLOT, specificity = O.layer.base, menus = { O.menuTests.nativePopup } })
+}, { menus = { O.menuTests.nativePopup, O.menuTests.newWindow } })
 ```
 
-### Windows
+### Windows {#o-attachembedded-windows}
 
-`control` matches a child window class, and the example above is the whole mechanism: a DAW hosts a plug-in in a child window, and that window has a class name to match on.
+`control` matches a child window class: a DAW hosts a plug-in in a child window, and that window has a class name to match on. Candidates come from `host.window.controls()` plus the focus chain, and the entry's `chrome` classes keep the overlay out while the focused control is one of the DAW's own (REAPER's FX list, its buttons). A verdict of `identify` is kept per control handle, for the 64 controls asked about most recently, as in [`O.memoByOrigin`](#o-memobyorigin); the eighth `nil` in a row is kept for as long as that control is.
 
-### macOS
+No daw-hosts entry has a `pluginOrigin` for Windows, so the panel of step 2 never applies there: every binding finds its own control or nothing, as it always has. An entry must not get one: every binding whose own class pattern found nothing would take the panel instead.
 
-There is no equivalent child control to match. A binding whose `control` table carries no entry for the running platform is **inert rather than broken** -- it logs and does nothing, and the module keeps working through whatever other bindings it has. That is why sforzando ships a separate standalone binding for the Mac rather than relying on this one.
+### macOS {#o-attachembedded-macos}
 
-The platform's entry may instead be a **function** `(activeWindow) -> control | nil`, for a plugin the host publishes no container for at all. Measured on a real Mac: Kontakt 7 inside REAPER puts its 34 accessibility elements straight into REAPER's FX window — nothing that *is* the plugin, no class, no group, no identifier — while its own FILE button sits at a fixed offset from the panel's corner and can be found by name. The function returns a control table shaped like one from `host.window.controls()` — `id` (the window's, so element queries keep working), `class`, `bounds` and `client` set to the plugin's **panel** — and everything downstream (`rawOrigin`, `fromRight`, `O.contentSize`, every authored coordinate) behaves as it does against a real control on Windows. `identify` still runs on what it returns. The Win32 chrome gate cannot apply, so the runtime asks the same question geometrically: a focused element outside the returned panel is the host's own chrome and the overlay stays out; the window itself as the focused element counts as inside.
+A plug-in inside a DAW publishes no control of its own, as far as anything has been measured: in REAPER, Kontakt 7's accessibility elements are direct children of the FX window, with nothing that *is* the plug-in; sforzando in REAPER publishes nothing at all, and VPS Avenger nothing in REAPER or in Logic. So the control is the **DAW's plug-in panel**, built by the runtime from the window's entry: `pluginOrigin(window)` gives `{ dx, dy }` from the window's content origin, and the panel reaches the window's right and bottom edges. It is a control table like one from `host.window.controls()`:
 
 ```luau
--- Kontakt 7 in a DAW: its panel found from its own FILE button (modules/kontakt).
+{ id = <the window's id>, app = <its application>, class = "host-panel",
+  bounds = <the panel>, client = <the panel>, stay = <a number, see below> }
+```
+
+The window's `id`, so element queries still ask the right window; `bounds` and `client` both the panel. Every authored coordinate, `rawOrigin`, `fromRight` and `O.contentSize` behave against it as against a child control on Windows. `pluginOrigin` is called once per window and client size per VM — it may walk the window's accessibility tree — and a divider dragged inside a window that keeps its size is followed only after the window is resized, or closed and opened again as a new window (whether a DAW reuses the window it closed is not measured). A `pluginOrigin` that raises or answers anything but two numbers — `nil` included, which is how an origin says it could not look this time — gives that window no panel, with one line per window and size (`[overlay] the DAW entry's pluginOrigin for '…' (id=…, <w>x<h>) … — no plug-in panel there`), and is asked again at the next evaluation. An origin that leaves the panel no width or height (past the window's right or bottom edge) gives no panel either, silently.
+
+**The gate is geometric.** The `chrome` classes are Win32 vocabulary and match nothing here, so the runtime asks where the focused element is. The focus chain has to **end in the window in front**: the window in front and the focused element are two separate questions to the system, and a chain that ends in another window — another application's, read in between — says nothing about this one. On such a chain, or an **empty** one (the backend saying it could not read where the keyboard is, as while the application is not answering), the keyboard is not inside, and the origin is not asked for either. Otherwise the window itself as the focused element — all a view that publishes nothing leaves on the chain — counts as inside, and so does an element whose centre lies inside the panel; an element whose centre lies outside the panel is the DAW's own chrome and the overlay stays out, and so is an element that has no rectangle (the host gives every element one; a control a module made may not). The accessibility focus on a menu item outside the panel takes the overlay out as any element outside it does.
+
+**A verdict is kept for a stay.** One REAPER FX chain window shows whichever FX is selected in its list, in the same window — possibly at the same rectangle, since REAPER sizes the window to the plug-in — so a panel's verdict cannot be kept per window. Whether Logic's plug-in window can be switched to another insert from its header is not measured yet. The rule assumes that what changes the plug-in shown is the DAW's own chrome, and that the keyboard has to be there to use it. So a verdict is kept for a **stay**: the keyboard inside one window's panel, from the evaluation that first finds it there until anything else is observed — the keyboard on the DAW's chrome, another window in front, an empty chain or one that is another window's, or the window's title or client size changed. The next time the keyboard is inside, `identify` is asked again, once. It is observed at every evaluation, and by a watcher of the runtime's own on every focus and activation event in each VM that has a binding that can take a panel, so an overlay outranked on its slot — which skips its own rechecks — does not bring back a verdict from before the visit. Moving the window keeps the stay. The verdict is kept for the stay **and** the control's place in the window, so a control a function moves within one stay is asked about again. The eighth `nil` in a row is kept as "no" for the rest of the stay.
+
+What the stay cannot see: a plug-in changed with the keyboard still inside it keeps the old verdict until the keyboard next leaves; and a visit to the DAW's chrome that no evaluation *samples* is not seen either. A focus change on a Mac only marks the focus as changed, and the round that follows reads the chain as it is by then, while moving into a view that publishes nothing raises no notification at all — so Shift+Tab to REAPER's FX list, Down, Tab back, all done before a busy event loop gets to its queue, reads as one round with the keyboard inside, and the old verdict goes on over the newly selected plug-in. `host.window.recheck`, and so the focus key's "already inside" press, is one more evaluation: it undoes an `identify` that could not tell yet, not a verdict the stay keeps.
+
+The verdict is logged when it differs from the one logged last for that window and place, naming the overlay that asked: `attachEmbedded: [host-panel] panel of '<title>' id=<id> at <dx>,<dy> <w>x<h> from its content origin, identify=<verdict> — '<label>'`. One line per VM, when the first binding with no control of its own for the platform is bound, says that it takes the panel: `[overlay] on macos an embedded binding with no control of its own takes the DAW's plug-in panel … '<label>' is the first here`.
+
+`stay` on the panel is a number per VM that changes when a stay ends; two VMs' numbers are unrelated. It is there for a module whose own evidence is costly and whose `identify` is asked at every evaluation (a `cacheIdentity = false` one, Kontakt's): it keys that evidence on the stay, the way the runtime keys a verdict.
+
+**A function for the platform** is called as `(activeWindow, hostPanel)`, where `hostPanel` is the panel above (with its `stay`) or `nil` when the window's entry has no `pluginOrigin`, and returns the control or `nil`. It is for a plug-in that knows its own corner better than the DAW's origin does, or that publishes a container of its own: Kontakt finds its FILE button and hands back the panel from its own corner. The control needs `bounds`: the keyboard has to be inside the DAW's panel **and** inside what the function returned. Not their union — the DAW's panel is the DAW's word for where its chrome ends — so a control that begins above or left of the DAW's panel has a strip in which the keyboard reads as the DAW's chrome; a DAW origin that far off is a wrong entry. What it returns gets the panel's `stay`, and its verdict is kept for the stay as the panel's is; where there is no panel, `identify` is asked at every evaluation. A `macos` pattern — `"^AXGroup/"` — matches the accessibility role, subrole and identifier a control's `class` is here (`AXRole/AXSubrole/AXIdentifier`), for a plug-in that does publish its own container.
+
+```luau
+-- Kontakt 7 in a DAW (modules/kontakt, detect.onHostPanel, much shortened): the DAW's panel, from
+-- Kontakt's own corner when its FILE button, with LIBRARY beside it, is near where Kontakt's
+-- geometry puts it. The module keeps what it found per stay, and reads the top row as text when
+-- no button is published.
 control = {
   windows = "Qt%d+.-QWindowIcon",
-  macos = function(active)
-    if not string.find(active.title or "", "Kontakt 7", 1, true) then return nil end
-    local p = host.element.locate(active.id, "FILE", host.element.type.Button)
-    if not p then return nil end
-    local x, y = p.x - 175, p.y - 19               -- the authored FILE offset
-    local w = active.client.x + active.client.w - x  -- REAPER sizes the window to the plugin
+  macos = function(active, panel)
+    if not panel then return nil end
+    local B = host.element.type.Button
+    local p = host.element.locate(active.id, "FILE", B)
+    local q = p and host.element.locate(active.id, "LIBRARY", B)
+    if not (q and q.x - p.x >= 35 and q.x - p.x <= 90) then return nil end
+    local dx, dy = p.x - (panel.client.x + 175), p.y - (panel.client.y + 19)
+    if math.abs(dx) > 24 or math.abs(dy) > 24 then return nil end   -- some other plug-in's FILE
+    local x, y = panel.client.x + dx, panel.client.y + dy
+    local w = active.client.x + active.client.w - x
     local h = active.client.y + active.client.h - y
-    return { id = active.id, app = active.app, class = "macos-anchor", variant = "Kontakt 7",
+    return { id = panel.id, app = panel.app, class = panel.class, variant = "Kontakt 7",
              bounds = { x = x, y = y, w = w, h = h }, client = { x = x, y = y, w = w, h = h } }
   end,
 }
@@ -710,7 +781,7 @@ Holding its place: a window is "in front" when it is the foreground window. A `#
 
 ### macOS {#o-menutests-macos}
 
-`nativePopup` counts the frontmost application's `AXMenuOpened` / `AXMenuClosed` notifications: a menu counts as open from its opening notification until its closing one, however long it stays up, and the count is cleared when another application comes to the front (see [`host.keys.nativeMenuOpen`](keys.md#host-keys-nativemenuopen)). Holding its place asks [`host.window.active()`](window.md#host-window-active) for the window in front, so it applies when a plug-in's popup becomes the application's focused window. A popup that does not become it leaves the overlay's window in front, and holding its place has no part in what happens then: the binding's own match decides — with the function form of [`attachEmbedded`](#o-attachembedded), the accessibility focus on a menu item outside the plug-in's panel takes the overlay out, as any element outside it does. `host.window.active()` answers nil while the frontmost application has no window (the Finder after a click on the desktop): a hold over a menu the tests still see stands through that, and ends once they stop seeing it. The window that gets the keyboard is the frontmost application's focused window, and [`host.window.foreground()`](window.md#host-window-foreground) reports it as shown unless it is minimised, so a focused menu window brings nothing back here. While the application does not answer, `foreground()` is `nil`, and nothing is brought back either: the runtime does not act on a state it could not read, and does not call `host.window.focus` on an application that is not answering. The reading itself is still taken once at each hold that ends with no test seeing the menu: two accessibility reads of the frontmost application, which against one that has just stopped answering can take up to the one-second timeout once, on the main thread. If the window of the press is brought back, `host.window.focus` raises it and activates its application, and `true` means raised and in front, not that the keyboard is in it (see [`host.window.focus`](window.md#host-window-focus)). The function form of `attachEmbedded` reads an empty focus chain as "not in the plug-in", so the overlay is back once the chain names something inside the panel. `newWindow` compares on-screen windows by owning process with no filter at all, so a tooltip or a window at any level counts as well; an `NSMenu` sits at window level 101. `accessibility` and `accessibilityAfterPress` are special-cased by the host to "is a menu open in this application", without descending the menu bar. An application the host has found not answering is left alone for 5 seconds, and in that time the answer is no: a menu only these tests see then counts as closed after two ticks, and as open again once the application answers. The one-miss rule does not cover that.
+`nativePopup` counts the frontmost application's `AXMenuOpened` / `AXMenuClosed` notifications: a menu counts as open from its opening notification until its closing one, however long it stays up, and the count is cleared when another application comes to the front (see [`host.keys.nativeMenuOpen`](keys.md#host-keys-nativemenuopen)). Holding its place asks [`host.window.active()`](window.md#host-window-active) for the window in front, so it applies when a plug-in's popup becomes the application's focused window. A popup that does not become it leaves the overlay's window in front, and holding its place has no part in what happens then: the binding's own match decides — on the DAW's plug-in panel of [`attachEmbedded`](#o-attachembedded-macos), or a function's control, the accessibility focus on a menu item outside the panel takes the overlay out, as any element outside it does. `host.window.active()` answers nil while the frontmost application has no window (the Finder after a click on the desktop): a hold over a menu the tests still see stands through that, and ends once they stop seeing it. The window that gets the keyboard is the frontmost application's focused window, and [`host.window.foreground()`](window.md#host-window-foreground) reports it as shown unless it is minimised, so a focused menu window brings nothing back here. While the application does not answer, `foreground()` is `nil`, and nothing is brought back either: the runtime does not act on a state it could not read, and does not call `host.window.focus` on an application that is not answering. The reading itself is still taken once at each hold that ends with no test seeing the menu: two accessibility reads of the frontmost application, which against one that has just stopped answering can take up to the one-second timeout once, on the main thread. If the window of the press is brought back, `host.window.focus` raises it and activates its application, and `true` means raised and in front, not that the keyboard is in it (see [`host.window.focus`](window.md#host-window-focus)). The panel and the function form of `attachEmbedded` read an empty focus chain as "not in the plug-in", so the overlay is back once the chain names something inside the panel. `newWindow` compares on-screen windows by owning process with no filter at all, so a tooltip or a window at any level counts as well; an `NSMenu` sits at window level 101. `accessibility` and `accessibilityAfterPress` are special-cased by the host to "is a menu open in this application", without descending the menu bar. An application the host has found not answering is left alone for 5 seconds, and in that time the answer is no: a menu only these tests see then counts as closed after two ticks, and as open again once the application answers. The one-miss rule does not cover that.
 
 ## O\:gate(fn) / O\:landmark(image) {#o-gate}
 

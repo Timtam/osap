@@ -52,7 +52,7 @@ A module can be loaded either as an unpacked directory (dev) or as a **`.zip` pa
 - `crates/host/src/gui.rs` — tray-resident wxDragon module manager: a system-tray icon + a window listing modules with **native** (`wxTreeCtrl` + `TVS_CHECKBOXES`) checkboxes to enable/disable them, plus a **per-module settings dialog** (native, screen-reader-labeled controls); hands wxWidgets the event loop and drains our OS events via a `Timer` tick (event-loop coexistence).
 - `modules/` — the **real** modules, the set you would actually run:
   - `overlay-runtime` (`com.platform.overlay`) — the overlay framework itself, a **code module**: its code is evaluated inside each dependent's VM, so dependents get its functions and not just its data.
-  - `daw-hosts` — a **library module**: shared DAW host-window matchers, imported via `host.require`. Modules declare `dependencies` in `module.toml` and those are auto-loaded first.
+  - `daw-hosts` — a **code module**: one entry per kind of DAW plug-in window (its matcher, its chrome, and on a Mac where a plug-in starts in it), imported via `host.require`. A plug-in module binds with `daw.all` and names no DAW, so adding a DAW is adding its entries there ([docs/daw-hosts.md](docs/daw-hosts.md)). Modules declare `dependencies` in `module.toml` and those are auto-loaded first.
   - `kontakt`, `komplete-kontrol` — the ReaHotkey plugin overlays: one overlay per cell of {Kontakt 7, Kontakt 8} × {bare in a DAW, nested in Komplete Kontrol, standalone}.
   - `cinematic-studio-series` — a sample-library overlay built on `kontakt` by inheritance.
   - `sforzando` — the first real ReaHotkey port: a self-voicing OCR overlay over the standalone sforzando window.

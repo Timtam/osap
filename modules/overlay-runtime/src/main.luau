@@ -3684,7 +3684,16 @@ function Overlay:_join(slot, specificity, pollMs)
       )
     end
   end
-  if self.triggerSet then return end
+  -- A second binding of an overlay that is already live (sforzando binds its standalone window,
+  -- then its embedded context) is evaluated now, as the first was: its triggers are the ones
+  -- already registered, and without this its context was first asked at the next window or
+  -- focus event. On a Mac there may be none — moving into a plug-in view that publishes nothing
+  -- raises no notification — so a module loaded with its plug-in already in front stayed silent
+  -- until Cmd+Shift+F6. One recheck per extra binding, at bind time.
+  if self.triggerSet then
+    self:_recheck()
+    return
+  end
   self.triggerSet = true
   -- Foreground changes AND focus changes (the latter catches focus moving into
   -- an embedded plugin without a foreground change).
@@ -3861,10 +3870,14 @@ function O.hosts(...)
   for i = 1, select("#", ...) do
     local list = select(i, ...)
     if type(list) == "table" then
-      if list.title or list.app or list.windows then
-        out[#out + 1] = list -- a single matcher, not a list of them
-      else
+      -- A list has an array part and a single entry does not. This asked for `title`, `app` or
+      -- `windows` until daw-hosts had an entry with none of them — Logic's, a `macos` block
+      -- and its plug-in origin — which it would have read as an empty list and dropped. An
+      -- empty table is neither, and adds nothing: taken as an entry, it would match every window.
+      if list[1] ~= nil then
         for _, h in ipairs(list) do out[#out + 1] = h end
+      elseif next(list) ~= nil then
+        out[#out + 1] = list -- a single entry, not a list of them
       end
     end
   end
@@ -3875,6 +3888,9 @@ end
 -- See the note in attachEmbedded for why this is not per overlay. Weak keys: an entry
 -- lives exactly as long as the spec it answers for.
 local originMemo = setmetatable({}, { __mode = "k" })
+-- A panel's identity verdict per spec, for the same reason and with the same weak keys: see
+-- panelIdentity in attachEmbedded.
+local panelVerdicts = setmetatable({}, { __mode = "k" })
 
 -- Attaches the overlay according to `b`, with `opts` overriding the binding's own.
 function Overlay:bind(b, opts)
@@ -3905,21 +3921,247 @@ function Overlay:attach(matcher, opts)
   ensureTrigger(self, opts)
 end
 
+-- ── The DAW's plug-in panel ──────────────────────────────────────────────────
+-- On a Mac a plug-in inside a DAW publishes no control of its own, nothing an embedded binding
+-- could match. Measured more than once: the third Mac session found Kontakt 7's 34 elements
+-- straight in REAPER's FX window, with nothing that IS the plug-in — no class, no group, no
+-- identifier; sforzando in REAPER publishes nothing at all; and a VPS Avenger, in REAPER and in
+-- Logic on 2026-09-27, the same. So the one answer there to "where is the plug-in?" is the
+-- DAW's: where it draws a plug-in inside its plug-in window. That is the `pluginOrigin` a
+-- daw-hosts entry carries —
+-- `(window) -> { dx, dy }` from the window's content origin, the panel reaching the window's
+-- right and bottom edges — and from it this runtime builds the plug-in's control, for every
+-- module alike:
+--
+--   { id = the window's id, app = its application, class = "host-panel",
+--     bounds = client = the panel, stay = see below }
+--
+-- The window's id, so an element query still asks the right window; the panel as both
+-- rectangles, since it has no frame of its own, as a child control on Windows has none. From
+-- there every authored coordinate, `rawOrigin`, `fromRight` and O.contentSize behave as they do
+-- against a real control, which is what lets a module write its control set once and have it
+-- work in every DAW that has an entry.
+--
+-- Which is the point: a DAW is added by adding its entry, and no plug-in module names a DAW
+-- (the maintainer's decision of 2026-09-27). Before this each module did the DAW's part itself
+-- on a Mac — sforzando attached to REAPER's bundle with a frame from REAPER's geometry, Kontakt
+-- asked for "Kontakt 7" in REAPER's window title — and neither could come up in Logic, whose
+-- plug-in window is titled by the channel strip ("Inst 1").
+--
+-- The panel says WHERE a plug-in is and nothing about WHICH, so a binding takes it only when it
+-- has an `identify` to ask. A module whose window class was its whole identity (u-he's) would
+-- otherwise come up over every plug-in in every DAW.
+--
+-- The origin is memoised per window and client size, because an origin function may walk the
+-- window's accessibility tree (REAPER's reads its FX list, Logic's its header) and would
+-- otherwise run at every evaluation, in every VM. The size is in the key because a DAW lays a
+-- window out again when it is resized; the trade is the focus key's own, which keys its memo
+-- the same way — a divider dragged inside a window that keeps its size is followed only once
+-- the window is resized, or closed and opened again as a new window (a new id; whether REAPER
+-- on a Mac reuses the window it closed is not measured).
+local HOST_PANEL = "host-panel"
+local hostOrigins = boundedCache(MEMO_CAP)
+-- Windows and sizes whose origin function failed, said once each.
+local hostOriginSaid = boundedCache(MEMO_CAP)
+
+-- Entry `entry`'s origin function on this platform, or nil. `pluginOrigin` is a function or an
+-- OS-keyed table of them: REAPER's was measured on a Mac, and on Windows every module finds a
+-- control of its own, so daw-hosts gives it for macOS alone.
+local function originFnOf(entry)
+  local fn = entry and host.os.pick(entry.pluginOrigin)
+  return type(fn) == "function" and fn or nil
+end
+
+-- The DAW's plug-in panel in window `win`, as a control, or nil when `entry` gives no origin on
+-- this platform or the origin leaves the panel no width or height.
+local function hostPanelOf(entry, win)
+  local originOf = originFnOf(entry)
+  if not (originOf and win and win.id and win.client) then return nil end
+  local cw, ch = win.client.w or 0, win.client.h or 0
+  local key = tostring(win.id) .. "|" .. cw .. "x" .. ch
+  local p = hostOrigins.get(key)
+  if p == nil then
+    local ok, v = pcall(originOf, win)
+    if not (ok and type(v) == "table" and type(v[1]) == "number" and type(v[2]) == "number") then
+      -- Not kept, so a failure that was momentary is asked again at the next evaluation; said
+      -- once per window and size, so one that is not does not fill the log.
+      if not hostOriginSaid.get(key) then
+        hostOriginSaid.set(key, true)
+        host.log.info(string.format(
+          "[overlay] the DAW entry's pluginOrigin for '%s' (id=%s, %dx%d) %s — no plug-in panel there",
+          tostring(win.title), tostring(win.id), cw, ch,
+          ok and ("answered a " .. type(v) .. ", not { dx, dy }") or ("raised: " .. tostring(v))
+        ))
+      end
+      return nil
+    end
+    p = { v[1], v[2] }
+    hostOrigins.set(key, p)
+  end
+  local x, y = win.client.x + p[1], win.client.y + p[2]
+  local w, h = win.client.x + cw - x, win.client.y + ch - y
+  if w <= 0 or h <= 0 then return nil end
+  return {
+    id = win.id,
+    app = win.app,
+    class = HOST_PANEL,
+    bounds = { x = x, y = y, w = w, h = h },
+    client = { x = x, y = y, w = w, h = h },
+  }
+end
+
+-- Where the keyboard is, against panel `b` of window `active`: "inside", "outside" or
+-- "unknown". This is the Win32 chrome gate's question asked geometrically, because the chrome
+-- classes are Win32 vocabulary and mean nothing on a Mac. The window itself as the focused
+-- element — all a view that publishes nothing leaves on the chain — is inside, which is the rule
+-- sforzando's own macOS binding settled on before this runtime asked it for everyone; a focused
+-- element whose centre lies outside the panel is the DAW's own chrome (REAPER's FX list, its
+-- preset popup, Logic's header); and an EMPTY chain is the backend saying it could not read
+-- where the keyboard is. Unknown, not inside: the reading daw-hosts' focus key makes too, and an
+-- overlay that took it as "inside" would start capturing Tab and Return on a guess while the
+-- keyboard may well be in the FX list.
+--
+-- A chain that does not END in `active` is unknown as well, which is daw-hosts' reading again.
+-- The two are separate questions to the system — the window in front is the frontmost
+-- application's, the focused element is the system-wide one — so a chain read in between
+-- describes some other window, and an element of it whose centre happened to lie over the
+-- panel's rectangle on screen would have started a stay and had `identify` asked on its
+-- strength. The backend ends every chain in a window, the frontmost one when the walk reaches
+-- none (a menu), so a chain about `active` always ends in it. And a focused element other than
+-- the window that carries no rectangle says nothing about where it is: unknown too. The host
+-- gives every element one; a control a module made by hand may not.
+local function chainKnown(active, chain)
+  local last = chain and chain[#chain]
+  return chain ~= nil and chain[1] ~= nil and last ~= nil and last.id == active.id
+end
+
+local function keyboardIn(active, chain, b)
+  if not chainKnown(active, chain) then return "unknown" end
+  local focused = chain[1]
+  if focused.id == active.id then return "inside" end
+  if not (focused.bounds and b) then return "unknown" end
+  local fx = focused.bounds.x + focused.bounds.w / 2
+  local fy = focused.bounds.y + focused.bounds.h / 2
+  if fx < b.x or fx > b.x + b.w or fy < b.y or fy > b.y + b.h then return "outside" end
+  return "inside"
+end
+
+-- ── Which plug-in the panel shows: the stay ──────────────────────────────────
+-- A child control on Windows IS one plug-in for as long as it exists, which is why its
+-- `identify` verdict is kept per control. A panel is not: one REAPER FX chain window shows
+-- whichever FX is selected in its list, in the same window — at the same rectangle whenever the
+-- two plug-ins are the same size, since REAPER sizes the window to the plug-in — and a Logic
+-- plug-in window can most likely be switched to another insert from its header (not measured
+-- yet: TODO.md, "The stay, live"). A verdict kept per window would go on calling the second
+-- plug-in by the first one's name.
+--
+-- The rule's premise is that what changes which plug-in a panel shows is the DAW's own chrome —
+-- the FX list, the header's plug-in menu — and that the keyboard has to be there to use it;
+-- whether a visit there is always observed on a Mac is a Mac session's question (below). So a
+-- panel's verdict is kept for a STAY: the keyboard inside one window's panel, from the
+-- evaluation that first finds it there to the first observation that it is anywhere else — on
+-- the DAW's chrome, in another window, nowhere anybody can read (an empty chain, or one that is
+-- another window's) — or that the window's title or size changed (a REAPER window retitled for
+-- another track). The next time the keyboard is inside, `identify` is asked again, once, and its
+-- answer kept for that stay. Changing plug-in costs one identify; staying in one costs none.
+--
+-- What the rule cannot see, said so nobody reads the stay as more than it is:
+--   * A switch made with the keyboard still inside the plug-in — no DAW measured so far has a
+--     key for that — keeps the old verdict until the keyboard next leaves.
+--   * A visit to the chrome that no evaluation SAMPLES. On a Mac, AXFocusedUIElementChanged only
+--     marks the focus dirty, and the round that follows reads the chain as it is by then
+--     (backend/macos/queue.rs), while moving into a view that publishes nothing raises no
+--     notification at all. So Shift+Tab to the FX list, Down, Tab back, all done before a busy
+--     event loop drains its queue, is one round that sees "inside" — and the old verdict goes on,
+--     over the newly selected plug-in. Telling that apart needs the host to count the
+--     notifications it merged into a round, a general primitive nobody has measured the need for
+--     yet: TODO.md, "The stay, live", asks a Mac session for a quick switch first.
+--   * A definite "no" is kept for the stay like a "yes": an `identify` that has not been able to
+--     LOOK yet (a view not painted, a read that failed) answers nil, which is asked again at the
+--     next evaluation up to IDENTIFY_UNDECIDED_MAX times, and not false. Cmd+Shift+F6 with the
+--     keyboard already inside is one more evaluation (daw-hosts asks every overlay to look
+--     again); it does not end the stay, so it undoes a nil, never a false.
+--
+-- Observed by every evaluation that asks where the keyboard is, AND by a watcher of its own on
+-- every focus and activation event, per VM. The watcher is what makes the rule hold across the
+-- arbiter: an overlay outranked on its slot skips its rechecks (_outranked), so the VM of a
+-- Kontakt header outranked by a library overlay in another module's VM would never see the visit
+-- to the FX list, and would bring its old verdict back the moment the library let go — over
+-- whatever plug-in is selected by then.
+--
+-- The stay's number is on the panel (`stay`), for a module whose own evidence is costly and
+-- whose `identify` is relational and so asked at every evaluation (Kontakt's cells): it can keep
+-- its evidence per stay the way this runtime keeps a verdict.
+local stay = { n = 0, win = nil }
+
+local function endStay()
+  if stay.win ~= nil then
+    stay.n += 1
+    stay.win = nil
+  end
+end
+
+local function inStayWindow(a)
+  return a ~= nil and stay.win ~= nil and a.id == stay.win and a.title == stay.title
+    and a.client ~= nil and a.client.w == stay.cw and a.client.h == stay.ch
+end
+
+-- The stay the keyboard is in, inside `panel` of `active`: the one in progress, or a new one.
+local function stayIn(active, panel)
+  if inStayWindow(active) then return stay.n end
+  stay.n += 1
+  stay.win, stay.title = active.id, active.title
+  stay.cw, stay.ch = active.client.w, active.client.h
+  stay.dx, stay.dy = panel.client.x - active.client.x, panel.client.y - active.client.y
+  return stay.n
+end
+
+local function watchStay()
+  if stay.win == nil then return end
+  local a = host.window.active()
+  if not inStayWindow(a) then return endStay() end
+  local x, y = a.client.x + stay.dx, a.client.y + stay.dy
+  local b = { x = x, y = y, w = a.client.x + a.client.w - x, h = a.client.y + a.client.h - y }
+  if keyboardIn(a, host.window.focusChain(), b) ~= "inside" then endStay() end
+end
+
+-- Registered once per VM, by the first binding that can take a panel or has a function for the
+-- platform. On Windows no binding can take a panel (no daw-hosts entry gives an origin there)
+-- and no module ships a function for it, so it is not registered; one that did would register
+-- it for nothing, since a stay only begins on a panel.
+local stayWatched = false
+local function watchStays()
+  if stayWatched then return end
+  stayWatched = true
+  host.window.onTrigger({}, { on = "activate" }, watchStay)
+  host.window.onFocus(watchStay)
+end
+
 -- Patterns already explained as Win32 classes on a Mac, so each is said once per VM however
--- many overlays share it (Kontakt's cells all carry the same one).
+-- many overlays share it.
 local win32PatternsSaid = {}
-local function warnWin32PatternOnMac(self, pattern)
+-- `then_` is what the binding does when the pattern finds nothing, as the line says it.
+local function warnWin32PatternOnMac(self, pattern, then_)
   if host.os.current ~= "macos" or type(pattern) ~= "string" then return end
   if string.find(pattern, "AX", 1, true) or string.find(pattern, "/", 1, true) then return end
   if win32PatternsSaid[pattern] then return end
   win32PatternsSaid[pattern] = true
   host.log.info(string.format(
     "[%s] embedded control pattern '%s' looks like a Win32 window class, and on macOS a control's "
-      .. "class is AXRole/AXSubrole/AXIdentifier — it probably never matches here, and then this "
-      .. "binding stays inert. Give `control` a macos entry: { windows = ..., macos = ... }",
-    tostring(self.label or "overlay"), pattern
+      .. "class is AXRole/AXSubrole/AXIdentifier — it probably never matches here, and then %s. "
+      .. "Written as `control = { windows = ... }` it is not tried here at all",
+    tostring(self.label or "overlay"), pattern, then_
   ))
 end
+
+-- DAW entries that matched a window with a binding wanting a panel and gave no origin on this
+-- platform, said once each per VM: a DAW entry added without one brings up no embedded overlay
+-- in that DAW, and the bind-time line cannot say so — it is decided over ALL of a binding's
+-- hosts, and `daw.all` has entries with origins.
+local noOriginSaid = setmetatable({}, { __mode = "k" })
+
+-- One line per VM saying that the panel is in use, naming the first binding that took it.
+local panelModeSaid = false
 
 -- Context-bound (embedded): active while the keyboard focus is *inside* a plugin
 -- control — a window whose class matches `spec.control` (a Luau pattern) on the
@@ -3927,6 +4169,9 @@ end
 -- on focus-in-plugin (not just host-foreground) means we don't capture the
 -- host's own navigation keys. Coordinates are relative to that control's client
 -- area, so the same regions work standalone and embedded.
+--
+-- Where the plug-in has no control of its own — a Mac — the control is the DAW's plug-in panel
+-- (above), and the same holds of it.
 function Overlay:attachEmbedded(spec, opts)
   local hosts = spec.hosts or { spec.host }
   -- The one thing in an embedded binding that cannot be written once. A host names its
@@ -3934,47 +4179,99 @@ function Overlay:attachEmbedded(spec, opts)
   -- macOS, and no amount of abstraction makes "Qt5152QWindowIcon" and "AXGroup" the same
   -- string. So this accepts an OS-keyed table — `control = { windows = …, macos = … }` —
   -- and everything else about the binding stays shared.
-  local pattern = host.os.pick(spec.control)
-  -- No pattern for this platform means this binding has nothing to say here. Returning
-  -- rather than matching against nil is the difference between a module that is honestly
-  -- inert on a platform nobody has measured yet and one that throws on the first focus
-  -- change; and an OS-keyed `control` with no entry for the current system is exactly how a
-  -- module declares "not here, not yet".
   --
-  -- A platform's entry may also be a FUNCTION: `(activeWindow) -> control | nil`. That is
-  -- the macOS answer for a plugin the host publishes no container for at all. The third Mac
-  -- session measured it for Kontakt 7 inside REAPER: the plugin's 34 accessibility
-  -- elements appear as direct children of REAPER's FX window, with nothing that IS the
-  -- plugin — no class, no group, no identifier — so there is nothing for a pattern to match,
-  -- while Kontakt's own FILE button sits at a fixed offset from its panel's corner and can
-  -- be found by name. The function returns a control table the way `host.window.controls`
-  -- would have — `id` (the window's, so element queries still work), `class`, `bounds` and
-  -- `client` set to the plugin's PANEL — and from there every authored coordinate,
-  -- `rawOrigin`, `fromRight` and `O.contentSize` behave exactly as they do against a real
-  -- control on Windows. `identify` still runs on what it returns.
-  if pattern == nil then
+  -- Resolved in three steps, per platform (the maintainer's decision of 2026-09-27):
+  --   (a) the module's own `control` for this platform, as it always was: a pattern over the
+  --       window's child controls, or a function;
+  --   (b) otherwise — no entry for this platform, or a pattern that finds nothing — the DAW's
+  --       plug-in panel, when the entry of the window in front has a `pluginOrigin` and the
+  --       binding has an `identify` to tell which plug-in the panel shows;
+  --   (c) otherwise nothing: the binding is inert here, and says so once.
+  -- So a module writes `control = { windows = "<its own class>" }` and works on a Mac without a
+  -- macOS entry, in every DAW daw-hosts has an entry for; a module whose plug-in does publish a
+  -- container of its own on a Mac can still name it. `false` for a platform is the module's
+  -- word that the binding does not apply there at all — neither a control nor the panel
+  -- (Kontakt's Content Missing, a dialog of its own and never a plug-in panel).
+  --
+  -- A pattern that finds nothing falls through to the panel, rather than only a missing entry,
+  -- so that a plain-string pattern — Win32 vocabulary, almost always, which on a Mac is compared
+  -- with the AXRole/AXSubrole/AXIdentifier triple and practically never matches — takes the
+  -- panel there instead of leaving the binding inert. Where it DOES match (a Mac pattern that
+  -- names the plug-in's container) it is used, exactly as before.
+  --
+  -- A platform's entry may be a FUNCTION: `(activeWindow, hostPanel) -> control | nil`, where
+  -- `hostPanel` is the DAW's panel as above, or nil when the window's entry gives none. That
+  -- was the macOS answer before the panel existed, and it stays for a plug-in that knows its
+  -- own corner better than the DAW's origin does: Kontakt finds its FILE button at a fixed
+  -- offset from its panel's corner and hands back the panel with that corner. What it returns
+  -- is a control table the way `host.window.controls` would have made one — `id` (the window's,
+  -- so element queries still work), `class`, `bounds` and `client` set to the plug-in's PANEL —
+  -- and from there every authored coordinate behaves exactly as it does against a real control
+  -- on Windows. `identify` still runs on what it returns, and the keyboard is tested against its
+  -- `bounds`, so a control without them never has the keyboard inside.
+  --
+  -- So `own`, the binding's `control` for the platform we are on, is one of:
+  --   a string     a pattern over the window's child controls and the focus chain — plain (the
+  --                same on every platform) or one entry of an OS-keyed table
+  --   a function   (activeWindow, hostPanel) -> control | nil
+  --   false        the module's word that the binding does not apply on this platform
+  --   nil          nothing of the module's own: the DAW's plug-in panel, where there is one
+  local own = host.os.pick(spec.control)
+  local identify = spec.identify
+  -- Whether a panel is to be had here at all: some host of this binding has an origin on this
+  -- platform. On Windows, where daw-hosts gives origins for macOS only, never.
+  local anyPanel = false
+  for _, h in ipairs(hosts) do
+    if originFnOf(h) then anyPanel = true break end
+  end
+  -- Whether this binding takes the panel as its control, when it has nothing of its own.
+  local panelFallback = anyPanel and identify ~= nil and own ~= false and type(own) ~= "function"
+  if own == false or (own == nil and not panelFallback) then
     -- `self.label`, not `self.name`: O.new sets `label` and nothing in this runtime ever
     -- sets `name`, so every one of these lines said "[overlay]" and a log full of them could
     -- not say WHICH cell had declared itself inert. Kontakt alone writes several.
+    local why
+    if own == false then
+      why = "the module declares no control for this platform"
+    elseif anyPanel then
+      why = "the module gives no control pattern for this platform, and the DAW's plug-in panel "
+        .. "does not say which plug-in it shows — the binding has no identify to ask"
+    else
+      why = "neither the module (no control pattern for this platform) nor any of its hosts "
+        .. "(no plug-in panel, `pluginOrigin`, on this platform) gives a control here"
+    end
     host.log.info(string.format(
-      "[%s] embedded binding is inactive on %s: no control pattern for this platform",
-      self.label or "overlay", host.os.current
+      "[%s] embedded binding is inactive on %s: %s",
+      self.label or "overlay", host.os.current, why
     ))
     return self
   end
   -- A plain-string pattern is a Win32 window class almost always ("^Plugin%x+$",
   -- "Qt%d+.-QWindowIcon"), and on a Mac it is matched against the AXRole/AXSubrole/AXIdentifier
-  -- triple a control's `class` is there — so it almost never matches, and the binding is as
-  -- inert as one with no pattern, except that nothing said so. Said once per pattern; the
-  -- behaviour is unchanged. A macOS pattern usually names an AX role or has the triple's `/`
-  -- in it; one that matches an AXIdentifier alone ("^com%.u%-he") is told too, which is why
-  -- the line says "probably".
-  warnWin32PatternOnMac(self, pattern)
+  -- triple a control's `class` is there — so it almost never matches. Said once per pattern,
+  -- with what the binding does then. A macOS pattern usually names an AX role or has the
+  -- triple's `/` in it; one that matches an AXIdentifier alone ("^com%.u%-he") is told too,
+  -- which is why the line says "probably".
+  warnWin32PatternOnMac(self, own,
+    panelFallback and "the binding takes the DAW's plug-in panel wherever the DAW's entry gives one"
+      or identify == nil and "the binding stays inert: it has no `identify` to ask of the DAW's plug-in panel"
+      or "the binding stays inert: none of its hosts gives a plug-in panel (`pluginOrigin`) on this platform")
+  local panels = panelFallback or type(own) == "function"
+  if panels then watchStays() end
+  if own == nil and not panelModeSaid then
+    panelModeSaid = true
+    host.log.info(string.format(
+      "[overlay] on %s an embedded binding with no control of its own takes the DAW's plug-in "
+        .. "panel (its daw-hosts entry's pluginOrigin) as the plug-in's control; '%s' is the first here",
+      host.os.current, tostring(self.label or "overlay")
+    ))
+  end
   -- Optional identity check: the control class often matches *any* plugin in a
-  -- host (e.g. REAPER's "Plugin<ptr>"), so `spec.identify(control)` confirms it
-  -- is really this plugin (via UIA / OCR landmark / image search — the module's
-  -- choice). Cached per control HWND, since such a check is costly.
-  local identify = spec.identify
+  -- host (e.g. "Plugin<hex>", which several vendors' plug-ins share — ReaHotkey matches
+  -- sforzando, Engine 2 and Zampler by it), and a DAW's panel matches every plug-in, so
+  -- `spec.identify(control)` confirms it is really this plugin (via UIA / OCR landmark /
+  -- image search — the module's choice). Cached per control HWND, since such a check is costly.
+  --
   -- identify may be RELATIONAL — its verdict depends on sibling controls, not just
   -- this one (e.g. "this Kontakt is wrapped by a Komplete Kontrol, so defer to KK").
   -- Such a spec sets cacheIdentity = false so the per-HWND cache below (which assumes
@@ -3996,63 +4293,10 @@ function Overlay:attachEmbedded(spec, opts)
   local idCache = boundedCache(MEMO_CAP)
   -- Per control id, how many "could not tell yet" in a row; the first is logged.
   local idUndecided = boundedCache(MEMO_CAP)
-  local function pluginControl()
-    local active = host.window.active()
-    if not active then return nil end
-    local chrome = nil
-    local hostOk = false
-    for _, h in ipairs(hosts) do
-      if host.window.test(h, active) then
-        hostOk = true
-        chrome = h.chrome
-        break
-      end
-    end
-    if not hostOk then return nil end
-    local focusChain = host.window.focusChain()
-    -- Focus gate (ReaHotkey-style): only treat the plugin as focused when the
-    -- keyboard focus is NOT on one of the DAW's own chrome controls (its FX list,
-    -- track list, transport, …), supplied per host as `chrome` patterns. Without
-    -- it the overlay activates whenever the plugin control is merely a *child* of
-    -- the focused host window — e.g. while browsing REAPER's FX list with Kontakt
-    -- selected, before the plugin GUI itself is focused. focusChain()[1] is the
-    -- focused control (GetGUIThreadInfo's hwndFocus).
-    if chrome then
-      local focused = focusChain[1]
-      if focused then
-        for _, pat in ipairs(chrome) do
-          if string.match(focused.class, pat) then return nil end
-        end
-      end
-    end
-    -- The function form: the platform has no control to enumerate, so the module says
-    -- where the plugin is. The chrome gate above cannot help here — it matches Win32
-    -- classes — so the same question is asked geometrically: a focused element that lies
-    -- OUTSIDE the panel the function returned is the host's own chrome (REAPER's FX list,
-    -- its preset popup), and the overlay stays out of the way exactly as the class gate
-    -- keeps it out on Windows. The window itself as the focused element — the only thing on
-    -- the chain when the keyboard is in a view that exposes nothing — counts as inside,
-    -- which is the rule sforzando's macOS binding settled on.
-    if type(pattern) == "function" then
-      local c = pattern(active)
-      if not c then return nil end
-      local focused = focusChain[1]
-      -- An empty chain is the backend saying it could not read where the keyboard is.
-      -- Unknown, not inside: the same reading sforzando's gate and daw-hosts' F6 make, and
-      -- an overlay that took it as "inside" would start capturing Tab and Return on a
-      -- guess — while the keyboard may well be in the host's FX list.
-      if not focused then return nil end
-      if focused.id ~= active.id and focused.bounds and c.bounds then
-        local fx = focused.bounds.x + focused.bounds.w / 2
-        local fy = focused.bounds.y + focused.bounds.h / 2
-        local b = c.bounds
-        if fx < b.x or fx > b.x + b.w or fy < b.y or fy > b.y + b.h then
-          return nil
-        end
-      end
-      if identify and identify(c) ~= true then return nil end
-      return c
-    end
+
+  -- The module's own control among the window's children, by pattern, or nil. Unchanged from
+  -- before the panel existed, and on Windows the whole story.
+  local function ownByPattern(focusChain)
     -- Enumerate the active (plugin host) window's child controls — like
     -- ReaHotkey's WinGetControls — with the keyboard-focus chain as a fallback.
     -- The plugin control is often NOT on the focus chain (e.g. Kontakt's Qt window
@@ -4063,7 +4307,7 @@ function Overlay:attachEmbedded(spec, opts)
       candidates[#candidates + 1] = c
     end
     for _, c in ipairs(candidates) do
-      if string.match(c.class, pattern) then
+      if string.match(c.class, own) then
         if not identify then return c end
         local ok
         if cacheId then
@@ -4109,6 +4353,169 @@ function Overlay:attachEmbedded(spec, opts)
       end
     end
     return nil
+  end
+
+  -- The panel's verdict for the stay in progress (see "the stay", above): one slot per SPEC —
+  -- one window is in front at a time — kept beside the spec's resolved control (panelVerdicts,
+  -- next to originMemo) rather than per overlay, because every overlay bound to one `O.embedded`
+  -- value asks the same `identify` the same question, and whichever resolves the control first
+  -- in an epoch asks it for all of them. Per overlay, an `identify` that reads the screen would
+  -- run once per overlay per stay. `rect` is the control's place in its window, so a control a
+  -- module moved (Kontakt's corner) is asked about again when it moves. The nil rule is a child
+  -- control's, counted per stay: IDENTIFY_UNDECIDED_MAX "could not tell yet" in a row, and the
+  -- rest of the stay takes it as no — the next stay asks again, which is what a Kontakt that
+  -- refuses every accessibility question for its first minute needs.
+  --
+  -- The lines name the overlay that asked (`self.label`): `c.class` is "host-panel" for every
+  -- module, and host.log adds no module name, so without it a log with two modules binding
+  -- panels could not say whose `identify` answered.
+  local pv = panelVerdicts[spec]
+  if not pv then
+    pv = { held = nil, undecided = { stay = -1, n = 0 }, said = nil }
+    panelVerdicts[spec] = pv
+  end
+  local function panelIdentity(c, active)
+    local rect = string.format("%d,%d %dx%d", c.client.x - active.client.x,
+      c.client.y - active.client.y, c.client.w, c.client.h)
+    local s = c.stay
+    local held = pv.held
+    if held and held.stay == s and held.rect == rect then return held.value end
+    local label = tostring(self.label or "overlay")
+    local verdict = identify(c)
+    if verdict == nil then
+      if pv.undecided.stay ~= s then pv.undecided = { stay = s, n = 0 } end
+      local n = pv.undecided.n + 1
+      pv.undecided.n = n
+      if n >= IDENTIFY_UNDECIDED_MAX then
+        pv.held = { stay = s, rect = rect, value = false }
+        host.log.info(string.format(
+          "attachEmbedded: [%s] panel of '%s' id=%s, identify could not tell %d times in a row, so "
+            .. "it is taken as no until the keyboard next leaves the panel — '%s'",
+          c.class, tostring(active.title), tostring(active.id), n, label
+        ))
+      elseif n == 1 then
+        host.log.info(string.format(
+          "attachEmbedded: [%s] panel of '%s' id=%s, identify could not tell yet — asked again at "
+            .. "the next recheck, up to %d times in a row — '%s'",
+          c.class, tostring(active.title), tostring(active.id), IDENTIFY_UNDECIDED_MAX, label
+        ))
+      end
+      return false
+    end
+    pv.held = { stay = s, rect = rect, value = verdict == true }
+    -- The line a Mac session reads to see where the panel came out and whether the plug-in was
+    -- recognised in it. Said when the verdict for this window and place differs from the one
+    -- said last, so going back and forth between the FX list and one plug-in says it once.
+    local said = tostring(active.id) .. "|" .. rect .. "|" .. tostring(pv.held.value)
+    if said ~= pv.said then
+      pv.said = said
+      host.log.info(string.format(
+        "attachEmbedded: [%s] panel of '%s' id=%s at %s from its content origin, identify=%s — '%s'",
+        c.class, tostring(active.title), tostring(active.id), rect, tostring(pv.held.value), label
+      ))
+    end
+    return pv.held.value
+  end
+
+  local function pluginControl()
+    local active = host.window.active()
+    if not active then
+      if panels then endStay() end
+      return nil
+    end
+    -- Another window in front than the one a stay is in: whatever this binding makes of it,
+    -- the keyboard is not in that panel any more.
+    if panels and stay.win ~= nil and not inStayWindow(active) then endStay() end
+    local entry = nil
+    for _, h in ipairs(hosts) do
+      if host.window.test(h, active) then
+        entry = h
+        break
+      end
+    end
+    if not entry then return nil end
+    local chrome = entry.chrome
+    local focusChain = host.window.focusChain()
+    -- Focus gate (ReaHotkey-style): only treat the plugin as focused when the
+    -- keyboard focus is NOT on one of the DAW's own chrome controls (its FX list,
+    -- track list, transport, …), supplied per host as `chrome` patterns. Without
+    -- it the overlay activates whenever the plugin control is merely a *child* of
+    -- the focused host window — e.g. while browsing REAPER's FX list with Kontakt
+    -- selected, before the plugin GUI itself is focused. focusChain()[1] is the
+    -- focused control (GetGUIThreadInfo's hwndFocus).
+    if chrome then
+      local focused = focusChain[1]
+      if focused then
+        for _, pat in ipairs(chrome) do
+          if string.match(focused.class, pat) then
+            if panels then endStay() end
+            return nil
+          end
+        end
+      end
+    end
+    if type(own) == "string" then
+      local c = ownByPattern(focusChain)
+      if c or not panelFallback then return c end
+    end
+    -- (b), or a function's answer: the panel. The chrome gate above cannot help here — it
+    -- matches Win32 classes — so the same question is asked geometrically (keyboardIn), first
+    -- of the DAW's panel, which is what the stay is about, and then of whatever a module's
+    -- function made of it.
+    --
+    -- With the keyboard nowhere anybody can say — an empty chain, or another window's — the
+    -- answer is no, and it is given BEFORE the origin is asked for. On a Mac an empty chain is
+    -- the host's busy quarantine, in which `host.window.controls` answers nothing too: an
+    -- origin function that reads the window's surfaces would answer its fallback then, and the
+    -- memo above would keep that for the window's life at that size.
+    if not chainKnown(active, focusChain) then
+      endStay()
+      return nil
+    end
+    local panel = hostPanelOf(entry, active)
+    if not panel and not originFnOf(entry) and not noOriginSaid[entry] then
+      noOriginSaid[entry] = true
+      host.log.info(string.format(
+        "[overlay] '%s' is a plug-in window of %s, whose daw-hosts entry gives no pluginOrigin on "
+          .. "%s — no plug-in panel there, so no binding without a control of its own comes up in it",
+        tostring(active.title), tostring(entry.daw or "a DAW"), host.os.current
+      ))
+    end
+    if panel then
+      if keyboardIn(active, focusChain, panel.bounds) ~= "inside" then
+        endStay()
+        return nil
+      end
+      panel.stay = stayIn(active, panel)
+    end
+    local c = panel
+    -- What a function returns is gated as well, so the keyboard has to be inside BOTH: the
+    -- DAW's panel, which is the DAW's word for where its chrome ends and what the stay is about,
+    -- and the function's control. Not their union, although a control that begins above or left
+    -- of the DAW's panel (Kontakt's corner, up to 24 points from the DAW's origin) then has a
+    -- strip the keyboard can be on and read as chrome: widened into the chrome, the stay would
+    -- no longer end on a visit to Logic's header or REAPER's list, which is the rule's whole
+    -- point. A DAW origin that far off is a wrong entry, and the line Kontakt logs for its
+    -- corner ("… puts Kontakt's corner dx,dy from the DAW's plug-in origin") is what shows it.
+    if type(own) == "function" then
+      c = own(active, panel)
+      if c and c ~= panel then
+        if keyboardIn(active, focusChain, c.bounds) ~= "inside" then return nil end
+        if panel then c.stay = panel.stay end
+      end
+    end
+    if not c then return nil end
+    if not identify then return c end
+    -- A function's control where the DAW gives no panel, and a relational identify: asked at
+    -- every evaluation, as a function's control always was. A relational verdict can change
+    -- inside one stay (a Kontakt loaded into a Komplete Kontrol through its own browser), so
+    -- the stay does not pin it either.
+    if not (cacheId and panel) then
+      if identify(c) ~= true then return nil end
+      return c
+    end
+    if not panelIdentity(c, active) then return nil end
+    return c
   end
   -- The match also requires spec.present(control) when given — a per-call check,
   -- NOT cached like identify, so a condition that changes while the same control

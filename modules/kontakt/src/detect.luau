@@ -39,10 +39,10 @@ for i, v in ipairs(VARIANTS) do VARIANT_NAMES[i] = v.name end
 -- "is this a Kontakt?" and "which one?" costs the same as the old "is this a Kontakt 8?"
 -- alone did — and this runs on every detection pass, per candidate control.
 local function variantIndex(c)
-  -- A control that already knows what it is. The macOS panel below is found by a title and
-  -- a button, not by an identity element — the FX window's title is `FX: Track 1 "Kontakt
-  -- 7"` and nothing inside it is NAMED Kontakt 7 — so the accessibility question has no
-  -- answer there, and the thing that found the panel says instead.
+  -- A control that already knows what it is. The macOS panel below is found by Kontakt's own
+  -- file-menu button or its header text, not by an identity element — nothing inside a DAW's
+  -- plug-in window on a Mac is NAMED Kontakt 7 — so the accessibility question has no answer
+  -- there, and the thing that found the panel says instead.
   if c and c.variant then
     for i, v in ipairs(VARIANTS) do
       if v.name == c.variant then return i end
@@ -241,31 +241,80 @@ local function constantFrame(vx, vy)
   return function() return vx, vy end
 end
 
--- ── Kontakt's panel inside a host window, on macOS ───────────────────────────
--- There is no control to find there. The third Mac session probed Kontakt 7 inside REAPER
--- on an M1 mini: the plugin's 34 accessibility elements are direct children of REAPER's FX
--- window, no container, no class, no identifier — the same 34 the standalone window
--- publishes, shifted. What survives is Kontakt's own header buttons, by name, and the one
--- measurement that makes them useful: FILE's centre sits at exactly the offset the Windows
--- geometry gives it — (176,19) from the panel's corner standalone, (158+…) inside REAPER —
--- against the authored {175,19}, in both windows, to 2 px. So the panel's corner is FILE
--- minus the authored offset, and its right and bottom edges are the window's, because REAPER
--- sizes the FX window to the plugin (measured: 1023 wide in both).
+-- ── Kontakt in a DAW's plug-in panel, on macOS ───────────────────────────────
+-- There is no control to find there. The third Mac session probed Kontakt 7 inside REAPER on an
+-- M1 mini: the plug-in's 34 accessibility elements are direct children of REAPER's FX window —
+-- no container, no class, no identifier — the same 34 the standalone window publishes, shifted.
+-- So the overlay runtime gives the in-DAW cells the DAW's plug-in panel instead (daw-hosts'
+-- `pluginOrigin`, the "host panel"), in REAPER, Logic and any DAW with an entry, and this module
+-- says nothing about any DAW: not its title, not its geometry. What it does say is Kontakt's.
 --
--- The function shape is the runtime's own: `attachEmbedded` accepts a platform entry that
--- is a function of the active window and treats what it returns as the plugin control.
--- What is remembered per window and size is the panel's OFFSET from the window's content
--- origin, never its screen rectangle: the panel moves with the window, and REAPER re-lays
--- it out only on a resize — the same rule `kkContentFrame` follows. A rectangle cached
--- here would have put every click one window-move off. A miss is logged once per window
--- rather than cached, because Kontakt refused every accessibility question for its first
--- minutes in that session and would have been written off for good.
+-- WHETHER the panel shows a Kontakt of this version, from Kontakt's own evidence inside it:
+--   * its file-menu button by accessibility — Kontakt 7's "FILE", Kontakt 8's "Kontakt File
+--     Menu" — NEAR where Kontakt's geometry puts it in the panel: FILE's centre sits at the
+--     authored {175,19} from Kontakt's corner, measured to 2 px in the standalone window and in
+--     REAPER alike (the third session: (176,19)). "Near" is ANCHOR_NEAR points either way, a
+--     margin for a DAW origin that is a few points off (Logic's is estimated from one probe).
+--     A button of that name anywhere else in the window is some other plug-in's, which is the
+--     case a Logic window titled "Inst 1" leaves nothing else to tell apart. "FILE" is a
+--     generic name, so for Kontakt 7 its neighbour is asked too: a button named LIBRARY 35 to
+--     90 points to its right on the same row, which the third session found published beside
+--     it (FILE, LIBRARY, VIEW and SHOP, in REAPER as standalone). The version's own name —
+--     "Kontakt File Menu" — is not generic, and gets a box of its own, wider across
+--     (geometry.fileMenuNear): its {86,19} was authored as a click point, not measured as a
+--     centre, and refusing the one name only a Kontakt 8 publishes for missing a guessed point
+--     by 25 would leave the next session with no Kontakt 8 overlay at all. Still ANCHOR_NEAR
+--     down and up, which is what refuses a Kontakt 8 nested in Komplete Kontrol (about 198,222
+--     from the DAW's origin);
+--   * for Kontakt 7, when it publishes nothing (a Mac log of 2026-09-27: no FILE button and "0
+--     focusable candidates" on three presses over 73 s, in REAPER's FX chain, while the
+--     standalone Kontakt 7 on the same Mac published its header half a minute after it
+--     started), its top row read as text: FILE with LIBRARY to its right, in a small region
+--     around where FILE belongs — off the event loop (`host.ocr.read`), in English, whose words
+--     these are. Measured on the Windows calibration shot of Kontakt 7, whose chrome Kontakt
+--     draws itself: FILE's letters span x 164–188, y 15–23, a centre of (176, 19) — the button's
+--     own — and LIBRARY's centre is 56 to its right (35 to 90 accepted). A word Vision boxes
+--     is within a point or two of its ink (the probe's text-against-elements lines: 0 to 2
+--     points on buttons). Until the read answers, the panel is not Kontakt's; an answer that
+--     anchors asks every overlay to look again (`host.window.recheck`), because the answer is
+--     not a focus change and nothing else would.
+-- Kontakt 8 has no text fallback: its file-menu button is a wordmark, not a word.
+--
+-- WHERE Kontakt's corner is: FILE's centre minus the authored offset — Kontakt's own geometry,
+-- the same in every DAW — so the panel handed back starts there, and every header coordinate
+-- lands as it does on Windows. The difference between that corner and the DAW's origin is
+-- logged, because it is the measurement a Mac session is after: how far each DAW's origin is
+-- from where a plug-in actually starts. The overlay runtime still gates the keyboard on the
+-- DAW's panel as well as on this one, so a DAW origin more than 19 points too LOW — Kontakt's
+-- top row then above the DAW's panel — has the keyboard on FILE read as the DAW's chrome: the
+-- anchor line shows that origin, and the entry in daw-hosts is what to correct.
+--
+-- Kept per STAY — the runtime's word for the keyboard inside one window's panel, which ends
+-- when it visits the DAW's chrome, where another plug-in could have been selected (see the
+-- overlay runtime, "the stay") — not per window: one REAPER FX chain window shows whichever FX
+-- is selected. Evidence found is kept for the stay; the cells' `identify` is relational (it
+-- asks after Komplete Kontrol too) and runs at every evaluation, and a walk of the window's
+-- accessibility tree at every one of those — every 500 ms per library module — is what this
+-- keeps it from costing. A MISS is not kept at once: a Kontakt that refuses every accessibility
+-- question while it starts (the third session: its first minutes) or whose header has not been
+-- drawn yet looks exactly like a window that is no Kontakt. So a miss is counted, and asked
+-- again at the next evaluation — a library module's 500 ms poll, a focus event, Cmd+Shift+F6 —
+-- until MISSES_MAX evaluations of one stay have found nothing; then "not this version" is kept
+-- for the rest of the stay, the way the runtime keeps an `identify` that could not tell eight
+-- times in a row. A count, not a clock. Text read at FILE's place that is not Kontakt's top row
+-- is a real answer — some other plug-in draws there — and kept at once; a read that failed
+-- (pushed out, the recogniser not answering) is no answer at all and is not even counted. What
+-- is kept is the corner's OFFSET from the DAW's origin, never a screen rectangle: the panel
+-- moves with the window, and a rectangle kept here would have put every click one window-move
+-- off.
 --
 -- `name` and `at` come from the cell: the button to look for and where the authored geometry
 -- puts its centre. A version without a measured anchor passes nil and stays inert here.
--- `header` is the pair of words the text fallback below looks for — first where `at` is, the
--- second to its right — or nil for a version whose top row has not been measured as text
--- (Kontakt 8, whose file-menu button is a wordmark).
+-- `header` is the pair of words the text fallback looks for — first where `at` is, the second
+-- to its right — or nil for a version whose top row has not been measured as text (Kontakt 8).
+-- `near` is how far from `at` the button may be, { across, down }; ANCHOR_NEAR both ways when
+-- the cell gives none.
+--
 -- Whether this VM writes the anchor lines. Kontakt's code runs in its own VM and again inside
 -- every library module that depends on it (four today), each with its own copy of this memo, so
 -- one window change wrote every anchor line five times. Only Kontakt's own VM logs — see
@@ -273,43 +322,16 @@ end
 --
 -- The cost, stated so nobody reads silence as "nothing changed": while a LIBRARY overlay holds
 -- the slot, Kontakt's own overlays are outranked and skip their rechecks, so a panel that is
--- re-anchored then (the FX window resized under a loaded library) is anchored by the library's
--- VM, which does not log. The line comes once Kontakt's VM evaluates that window again. Telling
--- the winner apart would need `host.arbiter`, which this module does not declare.
+-- anchored then is anchored by the library's VM, which does not log. The line comes once
+-- Kontakt's VM evaluates that window again. Telling the winner apart would need
+-- `host.arbiter`, which this module does not declare.
 local logAnchors = false
+local ANCHOR_NEAR = 24
+local MISSES_MAX = 8
+-- How far right of the first header word its neighbour's centre lies (FILE to LIBRARY: 55).
+local NEIGHBOUR_GAP_MIN, NEIGHBOUR_GAP_MAX = 35, 90
 
--- ── …and when it publishes nothing: its header, read as text ──────────────────
--- A Mac log of 2026-09-27 had Kontakt 7 in REAPER's FX chain publish NOTHING, on three
--- presses of the focus shortcut over 73 seconds: no FILE button, "0 focusable candidates" —
--- so no overlay, while the standalone Kontakt 7 on the same Mac published its header by name
--- half a minute after it started. Whether that is the silent first minutes the third session
--- saw, or a Kontakt that never publishes inside a host on that machine, the log cannot say;
--- either way the panel can be found without accessibility, because Kontakt 7 prints its menu
--- bar: FILE and LIBRARY, side by side, in its own top row.
---
--- So when the button is not there, the top of the window is read as text — off the event
--- loop (`host.ocr.read`), in English, whose words these are — and FILE's centre stands in for
--- the button's. Measured on the Windows calibration shot of Kontakt 7, whose chrome Kontakt
--- draws itself: FILE's letters span x 164–188, y 15–23, a centre of (176, 19) — the same point
--- the third session's accessibility read gave the button, (176, 19), against the authored
--- {175, 19}. A word Vision boxes is within a point or two of its ink (the probe's own
--- text-against-elements lines: 0 to 2 points on buttons), so the corner comes out as close as
--- the button's does. LIBRARY must stand to FILE's right on the same row, 35 to 90 points on
--- (56 in the shot), so a FILE anywhere else — a preset, a track name — anchors nothing.
---
--- The band: the window's top 160 points, its full width. Kontakt's top row sits at content
--- y 71 in REAPER's FX chain (panel at 52, row at 19) and at 41 in a floating window (22 and
--- 19), and the FX list's left edge moves when its divider is dragged — so the band takes both,
--- and nothing about REAPER's geometry is assumed.
---
--- Asked again at the next evaluation after a miss, never on a timer: an embedded overlay is
--- evaluated when the focus moves, which is when a Kontakt that was not on screen may have
--- come onto it (the FX list's selection moved to it). One read at a time per window, and
--- every VM that runs this code asks the same question of the same pixels, which the host
--- answers with one picture and one recognition. An answer that anchors asks the overlays to
--- look again (`host.window.recheck`), because nothing else would: the read's answer is not
--- a focus change.
-local HEADER_BAND = 160
+-- FILE and LIBRARY side by side on one row, among `words`: FILE's centre, or nil.
 local function findHeaderWord(words, first, second)
   for _, a in ipairs(words or {}) do
     if string.upper(a.text or "") == first then
@@ -318,7 +340,8 @@ local function findHeaderWord(words, first, second)
         if string.upper(b.text or "") == second then
           local gap = (b.x + b.w / 2) - (a.x + a.w / 2)
           local by = b.y + b.h / 2
-          if gap >= 35 and gap <= 90 and math.abs(by - ay) <= math.max(a.h, b.h) / 2 then
+          if gap >= NEIGHBOUR_GAP_MIN and gap <= NEIGHBOUR_GAP_MAX
+            and math.abs(by - ay) <= math.max(a.h, b.h) / 2 then
             return math.floor(a.x + a.w / 2 + 0.5), math.floor(ay + 0.5)
           end
         end
@@ -328,116 +351,164 @@ local function findHeaderWord(words, first, second)
   return nil
 end
 
-local function macosPanel(version, name, at, header)
-  if not (name and at) then return nil end
-  -- `missed` and `outside` are separate on purpose: a window that publishes nothing during
-  -- Kontakt's silent first minute and later publishes a button that will not anchor has two
-  -- different stories, and one flag would keep the second one out of the log.
-  local offsets, missed, outside = {}, {}, {}
-  -- The text fallback's own: a read waiting per window, and a miss said once per window.
-  local reading, unread = {}, {}
-  local function readHeader(active, key)
-    if not header or reading[key] then return end
-    local cx, cy = math.floor(active.client.x), math.floor(active.client.y)
-    local w = math.floor(active.client.w)
-    local h = math.min(math.floor(active.client.h), HEADER_BAND)
-    if w <= 0 or h <= 0 then return end
-    reading[key] = true
-    host.ocr.read({ cx, cy, cx + w, cy + h }, { lang = "en", key = "kontakt-header:" .. key }, function(r)
-      reading[key] = nil
-      local fx, fy = nil, nil
-      if r.status == "text" then fx, fy = findHeaderWord(r.words, header[1], header[2]) end
-      if not fx then
-        if logAnchors and not unread[key] then
-          unread[key] = true
-          host.log.info(string.format(
-            "[kontakt] no %s %s row in the top %d points of '%s' either (%s%s) — not anchoring; read again the next time it is evaluated",
-            header[1], header[2], h, tostring(active.title), tostring(r.status),
-            r.error and (": " .. r.error) or ""))
-        end
-        return
-      end
-      -- Against the origin the picture was taken at: the window may have moved since.
-      local dx, dy = fx - at[1] - cx, fy - at[2] - cy
-      if dx < 0 or dy < 0 or dx >= w or dy >= active.client.h then
-        if logAnchors and not outside[key] then
-          outside[key] = true
-          host.log.info(string.format(
-            "[kontakt] %s read at %d,%d in '%s' puts %s's panel corner at %d,%d, outside the window — not anchoring",
-            header[1], fx, fy, tostring(active.title), version, dx, dy))
-        end
-        return
-      end
-      offsets[key] = { dx, dy }
-      if logAnchors then
-        host.log.info(string.format(
-          "[kontakt] %s panel in '%s' anchored by its header text: %s read at %d,%d puts the corner %d,%d from the content origin",
-          version, tostring(active.title), header[1], fx, fy, dx, dy))
-      end
-      host.window.recheck()
-    end)
+local function onHostPanel(version, name, at, header, near)
+  near = near or { ANCHOR_NEAR, ANCHOR_NEAR }
+  -- The evidence for the stay in progress, one slot (one window is in front at a time):
+  -- { key, corner = { dx, dy } from the DAW's origin to Kontakt's corner, or false }.
+  local held = nil
+  -- Evaluations of the stay `misses.key` that found no evidence yet.
+  local misses = { key = nil, n = 0 }
+  -- The stay the last evaluation was about, and the one whose header read is out (nil: none).
+  -- One read at a time: while it is out nothing is searched, and an answer that comes back for a
+  -- stay that is over is dropped — the stay that is on reads for itself.
+  local current, reading = nil, nil
+  -- What was last said of each kind, so a line comes once per window and size and not once per
+  -- stay; `ANCHOR` is keyed on the corner too, so a corner that moves is said again.
+  local said = {}
+  local function sayOnce(kind, key, fmt, ...)
+    if not logAnchors or said[kind] == key then return end
+    said[kind] = key
+    host.log.info(string.format(fmt, ...))
   end
-  local function panel(active, dx, dy)
-    local x, y = active.client.x + dx, active.client.y + dy
-    local w, h = active.client.w - dx, active.client.h - dy
+
+  -- One more evaluation of stay `key` without evidence. True when that makes MISSES_MAX, and
+  -- "not this version" is then kept for the rest of the stay.
+  local function missed(key)
+    if misses.key ~= key then misses.key, misses.n = key, 0 end
+    misses.n += 1
+    if misses.n < MISSES_MAX then return false end
+    held = { key = key, corner = false }
+    return true
+  end
+
+  -- The panel from Kontakt's corner, `d` from the DAW's origin, to the window's edges.
+  local function refined(active, panel, d)
+    local x, y = panel.client.x + d[1], panel.client.y + d[2]
+    local w, h = active.client.x + active.client.w - x, active.client.y + active.client.h - y
     if w <= 0 or h <= 0 then return nil end
     return {
-      id = active.id,
-      app = active.app,
-      class = "macos-anchor:" .. version,
+      id = panel.id,
+      app = panel.app,
+      class = panel.class,
       variant = version,
       bounds = { x = x, y = y, w = w, h = h },
       client = { x = x, y = y, w = w, h = h },
     }
   end
-  return function(active)
-    if not (active and active.id and active.client and active.title) then return nil end
-    if not string.find(active.title, version, 1, true) then return nil end
-    local key = tostring(active.id) .. "|" .. tostring(active.client.w) .. "x" .. tostring(active.client.h)
-    local off = offsets[key]
-    if off then return panel(active, off[1], off[2]) end
+
+  -- The anchor line, the evidence a Mac session is after.
+  local function sayAnchor(active, panel, winKey, how, px, py, d)
+    sayOnce("anchor", winKey .. "|" .. d[1] .. "," .. d[2],
+      "[kontakt] %s in '%s' (%dx%d): %s at %d,%d puts Kontakt's corner %d,%d from the DAW's plug-in origin, "
+        .. "which is %d,%d from the content origin",
+      version, tostring(active.title), active.client.w, active.client.h, how, px, py, d[1], d[2],
+      panel.client.x - active.client.x, panel.client.y - active.client.y)
+  end
+
+  -- For a generic name, the header's second word published beside the button `p` too.
+  local function neighbourOf(active, p)
+    local q = host.element.locate(active.id, header[2], host.element.type.Button)
+    if not q then return false end
+    local gap = q.x - p.x
+    return gap >= NEIGHBOUR_GAP_MIN and gap <= NEIGHBOUR_GAP_MAX and math.abs(q.y - p.y) <= 12
+  end
+
+  -- Starts the read of Kontakt 7's top row for stay `key`; the answer is kept for that stay, or
+  -- counted as a miss when nothing was read.
+  local function readHeader(active, panel, key, winKey)
+    local ex, ey = panel.client.x + at[1], panel.client.y + at[2]
+    local cx1, cy1 = active.client.x, active.client.y
+    local cx2, cy2 = cx1 + active.client.w, cy1 + active.client.h
+    local x1 = math.floor(math.max(cx1, ex - 30 - ANCHOR_NEAR))
+    local y1 = math.floor(math.max(cy1, ey - 12 - ANCHOR_NEAR))
+    local x2 = math.floor(math.min(cx2, ex + 96 + ANCHOR_NEAR))
+    local y2 = math.floor(math.min(cy2, ey + 12 + ANCHOR_NEAR))
+    if x2 <= x1 or y2 <= y1 then
+      -- No room for Kontakt's top row in this window at all: a real answer.
+      held = { key = key, corner = false }
+      return
+    end
+    reading = key
+    sayOnce("read", winKey,
+      "[kontakt] no %s button of %s's found by accessibility in '%s' (%dx%d) — reading %s %s at "
+        .. "%d,%d %dx%d instead",
+      name, version, tostring(active.title), active.client.w, active.client.h, header[1], header[2],
+      x1, y1, x2 - x1, y2 - y1)
+    host.ocr.read({ x1, y1, x2, y2 }, { lang = "en", key = "kontakt-header:" .. winKey }, function(r)
+      if reading == key then reading = nil end
+      -- Superseded by a read of a later stay of the same window, or a stay that is over by now:
+      -- the stay that is on reads for itself.
+      if r.status == "stale" or current ~= key then return end
+      local fx, fy = nil, nil
+      if r.status == "text" then fx, fy = findHeaderWord(r.words, header[1], header[2]) end
+      if fx and math.abs(fx - ex) <= near[1] and math.abs(fy - ey) <= near[2] then
+        local d = { fx - ex, fy - ey }
+        held = { key = key, corner = d }
+        sayAnchor(active, panel, winKey, "its header text " .. header[1], fx, fy, d)
+        host.window.recheck()
+        return
+      end
+      if r.status == "failed" then return end
+      local kept = r.status == "text"
+      if kept then
+        held = { key = key, corner = false }
+      else
+        kept = missed(key)
+      end
+      if kept then
+        sayOnce("unread", winKey,
+          "[kontakt] no %s %s row where %s's would be in '%s' (%s%s) — not %s; asked again when the "
+            .. "keyboard next comes into the plug-in",
+          header[1], header[2], version, tostring(active.title), tostring(r.status),
+          r.error and (": " .. r.error) or "", version)
+      end
+    end)
+  end
+
+  return function(active, panel)
+    if not (name and at and panel and active and active.id and active.client) then return nil end
+    local winKey = tostring(active.id) .. "|" .. tostring(active.client.w) .. "x" .. tostring(active.client.h)
+    local key = winKey .. "|" .. tostring(active.title) .. "|"
+      .. (panel.client.x - active.client.x) .. "," .. (panel.client.y - active.client.y)
+      .. "|" .. tostring(panel.stay)
+    current = key
+    if held and held.key == key then
+      return held.corner and refined(active, panel, held.corner) or nil
+    end
+    if reading == key then return nil end
+    local ex, ey = panel.client.x + at[1], panel.client.y + at[2]
     local p = host.element.locate(active.id, name, host.element.type.Button)
+    if p then
+      local d = { p.x - ex, p.y - ey }
+      if math.abs(d[1]) <= near[1] and math.abs(d[2]) <= near[2] then
+        if not header or neighbourOf(active, p) then
+          held = { key = key, corner = d }
+          sayAnchor(active, panel, winKey, name, p.x, p.y, d)
+          return refined(active, panel, d)
+        end
+        sayOnce("alone", winKey,
+          "[kontakt] the button named %s in '%s' is where %s's would be, but no button named %s "
+            .. "beside it — not taken for %s's",
+          name, tostring(active.title), version, header[2], version)
+      else
+        sayOnce("elsewhere", winKey,
+          "[kontakt] the button named %s in '%s' is at %d,%d, %d,%d from where %s's would be in the "
+            .. "DAW's plug-in panel — not taken for %s's",
+          name, tostring(active.title), p.x, p.y, d[1], d[2], version, version)
+      end
+    end
+    if header then
+      readHeader(active, panel, key, winKey)
+      return nil
+    end
     if not p then
-      if not missed[key] then
-        missed[key] = true
-        -- With the size, because the memo is keyed on it: two miss lines for one window mean
-        -- it changed size in between, and the log could not say so.
-        if logAnchors then
-          host.log.info(string.format(
-            "[kontakt] '%s' (%dx%d) publishes no button named %s — %s",
-            tostring(active.title), active.client.w, active.client.h, name,
-            header and ("reading its top row for " .. header[1] .. " " .. header[2] .. " instead")
-              or (version .. "'s panel cannot be anchored in it yet")))
-        end
-      end
-      readHeader(active, key)
-      return nil
+      sayOnce("miss", winKey,
+        "[kontakt] '%s' (%dx%d) publishes no button named %s — no %s there yet; asked again at the "
+          .. "next evaluation, up to %d in a row",
+        tostring(active.title), active.client.w, active.client.h, name, version, MISSES_MAX)
     end
-    local dx, dy = p.x - at[1] - active.client.x, p.y - at[2] - active.client.y
-    local c = panel(active, dx, dy)
-    if not c then
-      -- Refused only when the corner would leave the panel no width or height. Since the authored
-      -- offset is positive, that needs the button's reported centre to lie right of or below the
-      -- window by more than the offset: the button's position and the window's frame disagree
-      -- (another coordinate space, or a button outside the window). A merely wrong authored offset
-      -- does not end here — it still anchors, and shows only as an odd corner in the line below.
-      if not outside[key] then
-        outside[key] = true
-        if logAnchors then
-          host.log.info(string.format(
-            "[kontakt] %s at %d,%d in '%s' puts %s's panel corner at %d,%d, outside the window — not anchoring",
-            name, p.x, p.y, tostring(active.title), version, dx, dy))
-        end
-      end
-      return nil
-    end
-    offsets[key] = { dx, dy }
-    if logAnchors then
-      host.log.info(string.format(
-        "[kontakt] %s panel in '%s': %s at %d,%d puts the corner %d,%d from the content origin — %dx%d to the window's edges",
-        version, tostring(active.title), name, p.x, p.y, dx, dy, c.bounds.w, c.bounds.h))
-    end
-    return c
+    missed(key)
+    return nil
   end
 end
 
@@ -644,7 +715,7 @@ return {
   isPluginHostContainer = isPluginHostContainer,
   kkContentFrame = kkContentFrame,
   constantFrame = constantFrame,
-  macosPanel = macosPanel,
+  onHostPanel = onHostPanel,
   kontaktPaneName = kontaktPaneName,
   isClassicView = isClassicView,
   isEditView = isEditView,

@@ -20,6 +20,10 @@ mod overlay_menu_tests;
 /// The Tab pass-through's unnamed stops, read by OCR, against the same scripted host.
 #[cfg(test)]
 mod overlay_passthrough_tests;
+/// The DAW's plug-in panel on a Mac, the stay, and daw-hosts / sforzando / Kontakt loaded against
+/// the same scripted host with the window prelude's real matcher.
+#[cfg(test)]
+mod overlay_host_panel_tests;
 mod gui;
 mod image_search;
 /// One running copy per user: the lock, and the request a second start sends — see the file.

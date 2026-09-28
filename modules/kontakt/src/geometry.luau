@@ -16,12 +16,18 @@ local GEOMETRY = {
     -- So this is only offered where UIA resolves the real button: the standalone header.
     shop = { 440, 19 },
     -- The top row as TEXT, for a Mac whose Kontakt publishes no accessibility element inside
-    -- a DAW (detect.macosPanel's fallback): FILE where `fileMenu` is, LIBRARY to its right.
+    -- a DAW (detect.onHostPanel's fallback): FILE where `fileMenu` is, LIBRARY to its right.
     -- The calibration shot puts the letters' centres at (176, 19) and (231, 19).
     headerWords = { "FILE", "LIBRARY" },
   },
   ["Kontakt 8"] = {
     fileMenu = { 86, 19 }, -- the KONTAKT wordmark
+    -- How far from `fileMenu` a button named "Kontakt File Menu" may be and still be taken for
+    -- this Kontakt's, in a DAW's plug-in panel on a Mac ({ across, down }; detect.onHostPanel).
+    -- Wide across because {86,19} was authored as a click point, not measured as a centre, and
+    -- the name is Kontakt 8's own, so no other plug-in publishes it; 24 down, as for Kontakt 7,
+    -- which still refuses a Kontakt 8 nested in Komplete Kontrol, some 222 points lower.
+    fileMenuNear = { 110, 24 },
   },
 }
 

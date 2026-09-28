@@ -4462,34 +4462,61 @@ decision, hooked into one interface the overlay runtime provides.
       Polyphony and Pitchbend range. LAST, Cinematic Studio Strings, which has no snapshots:
       "Snapshot menu" and Return once. If the overlay is silent afterwards (no hotkeys, Tab
       going to Kontakt), switch to another application and back (Alt+Tab, then Alt+Tab again).
-- [ ] **Kontakt 7 in REAPER on a Mac, anchored by its header text — unverified (2026-09-27).**
+- [ ] **Kontakt 7 in a DAW on a Mac, anchored by its header text — unverified (2026-09-27).**
       A tester's log of that day had Kontakt 7 in REAPER's FX chain publish no accessibility
       element at all (no FILE button, "0 focusable candidates" on three presses of Cmd+Shift+F6
       over 73 s), so the in-DAW overlay never came, while the same Mac's standalone Kontakt 7
-      published its header half a minute after starting. `detect.macosPanel` now reads the
-      window's top 160 points as text when the button is missing and anchors on FILE with
-      LIBRARY to its right (`geometry.headerWords`). At the next Mac session: Kontakt 7 in the
-      FX chain and in a floating window; the log should say "anchored by its header text" with
-      a corner of about 240,52 in the chain (where REAPER's own layout put the panel on that
-      Mac: 272,112 in a window whose content began at 32,60) and about 0,22 when floating; compare it with the button's corner when Kontakt does publish ("FILE at …
-      puts the corner"). The first word read is FILE's centre, measured at (176,19) on the
-      Windows shot against the authored {175,19}.
+      published its header half a minute after starting. `detect.onHostPanel` now reads a small
+      region around where FILE belongs in the DAW's plug-in panel (daw-hosts' origin, see "Plug-in
+      modules in every DAW entry" below) when no FILE button with LIBRARY beside it is published
+      (`no FILE button of Kontakt 7's found by accessibility in '…' — reading FILE LIBRARY at …`),
+      and anchors on FILE with LIBRARY to its right (`geometry.headerWords`) within 24 points of
+      where Kontakt's geometry puts it — no title, no band of the window. A read that sees
+      nothing is asked again, up to eight evaluations of a stay. At the next Mac session: Kontakt 7 in REAPER's
+      FX chain, in a floating window and in Logic; the log's `[kontakt] Kontakt 7 in '…' (…): its
+      header text FILE at x,y puts Kontakt's corner dx,dy from the DAW's plug-in origin, which is
+      ox,oy from the content origin` line should give a corner within a few points of 0,0, and an
+      origin of about 240,52 in the chain (where REAPER's own layout put the panel on that Mac:
+      272,112 in a window whose content began at 32,60), 0,22 floating and 2,88 in Logic.
+      Compare it with the button's corner when Kontakt does publish (`FILE at … puts Kontakt's
+      corner`). When Kontakt's corner is more than 24 points from the DAW's origin the read
+      finds nothing (`no FILE LIBRARY row where Kontakt 7's would be`), and then it is the
+      origin in daw-hosts that is wrong. The first word read is FILE's centre, measured at
+      (176,19) on the Windows shot against the authored {175,19}.
 - [ ] **REAPER's floating plug-in windows on a Mac — origin 0,22 unverified (2026-09-27).**
       Cmd+Shift+F6 and every macOS host matcher took REAPER's FX chain only (`FX: …`); the same
       log had it pressed five times over a floating VPS Avenger, answering "could not find a
       plugin window". `daw-hosts` now matches both (`^%u[%u%d]*i?: `, the format first:
       `VST3i: …`), and a floating window's plug-in origin is 0,22 — from the probe's toolbar
       elements (content y 1–22) and the same plug-in's text in Logic, not from a picture. Check
-      with sforzando floated out of its chain: its log line "plugin origin inside the FX
-      window: 0,22" and its read-outs landing; and Cmd+Shift+F6 over a floating window.
-- [ ] **Logic Pro as a host.** The same log has Cmd+Shift+F6 pressed three times over a Logic
-      plug-in window (`AXWindow/AXDialog/`, titled by the channel strip, "Inst 1"), and no
-      matcher knows Logic at all, so no embedded overlay can come there either. Needs a probe
-      of Kontakt 7 and sforzando in Logic: the window's identity (bundle `com.apple.logic10`,
-      subrole AXDialog — but which other Logic windows are dialogs?), the plug-in's origin
-      below Logic's header row (the probe's header elements end at screen y 114 in a window at
-      y 30, and Logic's content origin came out equal to the frame), and whether Logic hands
-      the keyboard to a plug-in view at all.
+      with sforzando floated out of its chain: the log line `attachEmbedded: [host-panel] panel
+      of 'VST3i: sforzando …' id=… at 0,22 …, identify=true` and its read-outs landing; and
+      Cmd+Shift+F6 over a floating window.
+- [ ] **Logic Pro as a host — built from the probe, unverified (2026-09-27).** The same log has
+      Cmd+Shift+F6 pressed three times over a Logic plug-in window, which no matcher knew.
+      `daw-hosts` now has a `logic` entry, in `all`, which the embedded bindings and the focus
+      key both search: bundle `com.apple.logic10`, subrole AXDialog, a non-blank title (Logic
+      titles the window by the channel strip, "Inst 1", not by the plug-in). Its
+      `logicPluginOrigin` puts the plug-in 2 in and 88 down from the window's FRAME — the bottom
+      edge of the header's elements plus 4 when the window publishes them, counting only
+      elements that begin above where the plug-in would (so a plug-in's own published elements
+      are not taken for Logic's header), 88 when not — and logs "[daw-hosts] Logic plug-in window
+      '…': the plug-in starts at …". Every plug-in module is recognised there without naming
+      Logic (see "Plug-in modules in every DAW entry" below). At the next Mac session, with VPS
+      Avenger, sforzando or Kontakt 7 in Logic:
+  - Cmd+Shift+F6 from the Logic main window: the plug-in window comes forward and its title
+      is said; the log's origin line should read 2,88 (header's bottom edge) while the host
+      still reports content == frame for that window — with Kontakt 7 too, whose FILE button
+      would have moved it about 30 points down had it been counted as header.
+  - Whether the keyboard reaches the plug-in's view at all after that (Logic's key commands
+      may keep it), and what the focus chain reads (one deep = the window, which the embedded
+      gate counts as inside).
+  - Which of Logic's other windows are titled AXDialogs too: the focus key takes the first it
+      finds, and every embedded binding takes the DAW's panel in them and asks its `identify`
+      once per stay there (sforzando: one wordmark read, off the event loop). With Logic's toolbar
+      hidden (the window's toolbar button), where the plug-in starts.
+  - Ableton Live and MainStage on a Mac: no entry yet — each is one entry in daw-hosts, with a
+      measured origin, and nothing else.
 - [ ] **Kontakt's classic-view hotkeys came late** (2026-09-26 log): after switching Kontakt 8 to
       classic view, the rack controls' hotkeys (Alt+M/P/N, Ctrl+P/N, Ctrl+Shift+P/N, Alt+E/8/9)
       were not registered for about a minute — no "is now held" line between the switch and the
@@ -4557,8 +4584,8 @@ decision, hooked into one interface the overlay runtime provides.
       `bringing back` line is expected after it closes: foreground() reports a focused window as
       shown unless it is minimised, and the `the keyboard goes to …` line says what it answered)
       or leaves REAPER's in front — then the binding's own match decides, and in REAPER the
-      function form's geometric gate takes the overlay out when VoiceOver's focus is on a list
-      item outside sforzando's panel (a `[deactivate]` line; whether the keys still reach the
+      DAW's plug-in panel's geometric gate takes the overlay out when VoiceOver's focus is on a
+      list item outside sforzando's panel (a `[deactivate]` line; whether the keys still reach the
       list then is the question); Command+Tab to the Finder with
       a list up: the overlay holds no keys while newWindow still sees the list, and leaves (`no
       longer holding its place — in front now: nothing`) once it does not — does the list close
@@ -5699,6 +5726,122 @@ of it. Named stops are unchanged. What only the real systems can answer:
       If it is, what would fix it is general, not the overlay's: a way to have a queued line
       dropped when a newer one of the same kind is said — a host speech question, to be
       decided then.
+
+## Plug-in modules in every DAW entry (2026-09-27)
+
+The maintainer's decision of that day: what a DAW is — which of its windows are plug-in windows,
+its own chrome, and on a Mac where a plug-in starts inside its window — lives in daw-hosts entries
+and nowhere else, so adding a DAW is adding its entries and every plug-in module is then
+recognised in it; no plug-in module names a DAW or needs the window's title to name the plug-in.
+Built, reviewed on 2026-09-28 and corrected after that review, and tested against the scripted
+host (`crates/host/src/overlay_host_panel_tests.rs`, 30 scenarios: the runtime's resolution, the
+gate and the stay, and daw-hosts, sforzando and Kontakt loaded for real in a REAPER window floated
+out of its chain, a REAPER FX chain and a Logic window titled "Inst 1"); not yet run on either
+system.
+
+- [x] **The entry** (`modules/daw-hosts`; docs/daw-hosts.md): a window matcher with `chrome`,
+      `pluginOrigin` (a function per platform — macOS for REAPER and Logic), `focusTarget` and
+      `daw`. The focus key searches the entries of `all` that can match on the platform it runs
+      on — the list the overlays bind with; its own list (`pluginWindows`) and the exports
+      `reaperPluginOrigin` / `logicPluginOrigin` are gone. On Windows it therefore also finds
+      REAPER's bridged plug-in windows and Ableton's VST2 and `#32770` plug-in windows, which its
+      own list did not know; REAPER's `#32770` entry keeps the key off REAPER's other dialogs by
+      the plug-in windows' titles (`focusTarget`). Its origin is asked only on a readable chain,
+      kept per window and size, and one that fails is said ("could not tell where the plugin is
+      in …"), not clicked on and not kept. REAPER's origin takes the FX list by where it is (the
+      leftmost surface left of 240 that does not span the window), and answers nothing — not the
+      authored 240 — when the host could not read the window's surfaces.
+- [x] **The DAW's plug-in panel** (`modules/overlay-runtime`, attachEmbedded;
+      docs/api/overlay.md): a binding with no control of its own for the platform — no entry, or
+      a pattern of which no control matched and passed `identify` — takes the panel built from
+      the window's entry's `pluginOrigin`, when it has an `identify`; otherwise it is inert and
+      one line says why, and an entry without an origin says so once when its window is in
+      front. `false` for a platform declines even the panel; a function entry is handed it.
+      Geometric gate, on a chain that has to end in the window in front (and the origin is not
+      asked for on one that does not, or is empty). A verdict on a panel is kept for a STAY (the
+      keyboard inside one window's panel, until it is seen anywhere else), per binding value and
+      with the overlay named in its line, and a watcher per VM so an overlay outranked on its
+      slot cannot bring back a verdict from before a visit to the FX list. A binding that joins
+      an overlay already bound is evaluated at once. Windows is unchanged for the overlays: no
+      entry has an origin there.
+- [x] **The modules.** sforzando: one embedded binding for both platforms; the macOS-only
+      "sforzando in a DAW" overlay, its REAPER bundle-and-title matcher, its frame from REAPER's
+      geometry and its focus-chain-depth gate are gone; on a panel its wordmark is read off the
+      event loop, and a read that saw nothing is no answer. Kontakt: the in-DAW cells' Mac control
+      is the panel, moved to Kontakt's own corner by its FILE button with LIBRARY beside it (or
+      Kontakt 7's header text) within 24 points of where its geometry puts it — Kontakt 8's own
+      "Kontakt File Menu" within 110 across — no title check, with the relational checks as
+      before; a miss is asked again up to eight evaluations of a stay. Content Missing and the
+      in-Komplete-Kontrol cells are declared absent on a Mac (`macos = false`). Komplete Kontrol,
+      u-he, Melodyne, ARC ON:EAR and the Kontakt library modules named no DAW and are unchanged.
+- [ ] **sforzando in a DAW on a Mac — the wordmark, never read there.** The binding used to be
+      recognised in REAPER by the window's title; now by a `PlogueXMLGUI` pane (nothing of
+      sforzando's is published on a Mac, so in practice not) or by the "sforzando" wordmark read
+      off the event loop at 597..770 x 29..74 of the panel — the Windows region (605..762 x
+      33..70) grown by 8 and 4 points for the Mac build, which moved the read-outs by up to 7 and
+      4. At the next session, sforzando in REAPER (chain and floating) and in Logic: the
+      `attachEmbedded: [host-panel] panel of '…' … identify=true — 'sforzando'` line, the overlay
+      coming up and its read-outs landing. `identify=false` with sforzando plainly on screen means
+      the region misses the wordmark: send the log and a screenshot of the window, and the region
+      is measured from it.
+- [ ] **Kontakt 8 in a DAW on a Mac** is recognised only when it publishes a button named "Kontakt
+      File Menu" within 110 points across and 24 up or down of the authored {86,19}, which was
+      written as a click point, not measured as a centre; otherwise `publishes no button named
+      Kontakt File Menu — no Kontakt 8 there yet`, once per window, and no overlay. Check with
+      Kontakt 8 in REAPER and in Logic, and note the anchor line's corner: its first number is
+      how far the authored point is from the wordmark's centre, which every header coordinate of
+      Kontakt 8 on a Mac is then off by.
+- [ ] **The stay, live.** In REAPER's FX chain with sforzando and another FX: select the other FX
+      in the list and Tab (or Cmd+Shift+F6) back into the plug-in — the overlay must not come up
+      over it (one `identify=false` line); select sforzando again — it comes up. In Logic, change
+      the plug-in shown from the window's header, if Logic's window can do that. Whether moving
+      between the list and the plug-in fires the focus notifications the stay is ended by. And
+      the same switch done quickly — Shift+Tab, Down, Tab in a second, with Kontakt and its
+      libraries enabled so the event loop is busy: a focus change on a Mac only marks the focus
+      dirty and the next round reads the chain as it is then, so a visit no round samples keeps
+      the old verdict over the new plug-in (the runtime's "the stay" says so). If that happens,
+      the fix is a general one in the host — counting the notifications merged into a round —
+      not a timer.
+- [ ] **A fresh plug-in window on a Mac: the first verdict.** Open sforzando and a Kontakt 7 in a
+      new window and go straight in: the first `identify=` line should say `true`. A "no" that
+      comes before the plug-in has painted is kept for the whole stay — only nothing-read is
+      asked again, and Cmd+Shift+F6 with the keyboard already inside is one more evaluation, not
+      a fresh stay. If a wrong first "no" shows up, what would undo it is a general "look again
+      afresh" round (a `host.window.recheck` that ends every stay), which nobody has needed yet.
+- [ ] **A DAW origin more than 19 points too low hides Kontakt's top row.** The runtime gates the
+      keyboard on the DAW's panel as well as on Kontakt's own corner, so with Logic's estimated 88
+      too far down, the keyboard on FILE or LIBRARY reads as Logic's header and the overlay drops.
+      Kontakt's anchor line gives the corner: a second number below -19 means the origin in
+      daw-hosts is what to correct.
+- [ ] **What the evidence costs in a window that is not the plug-in's.** With no title to go by,
+      every plug-in window in every DAW is asked once per stay, in Kontakt's VM and each library
+      module's (five today): an accessibility search for FILE (and LIBRARY beside it) and one for
+      "Kontakt File Menu", up to eight times while they find nothing, and header reads off the
+      loop; sforzando one wordmark read off the loop. Look at the `[recheck]` and `[poll]` lines
+      around a return into sforzando or VPS Avenger with Kontakt and its libraries enabled.
+- [ ] **The focus key on Windows, with NVDA.** It now searches every entry, so it also finds a
+      bridged REAPER plug-in window (`REAPERb32host`), Ableton's VST2 plug-in windows and any
+      `#32770` of Ableton's process. Ctrl+Shift+Win+Alt+F6 over an Ableton VST2 plug-in window,
+      over a bridged REAPER one, and in Ableton with a file dialog open and no plug-in window:
+      which window it takes and what it says (for the last, the dialog's title, which the entry
+      allows because a plug-in's own dialogs are such windows).
+- [ ] **sforzando in Ableton Live on Windows.** Every page now says the `Plugin<hex>` class is one
+      several vendors' plug-ins share (ReaHotkey matches sforzando, Engine 2 and Zampler by it, in
+      REAPER and in Ableton); this platform has only ever seen it in REAPER. Check that the
+      overlay comes up over sforzando in Ableton, which is what makes a Windows DAW entry need no
+      more than a matcher and its chrome.
+- [ ] **Modules that would bind a panel on a Mac only by override.** u-he's binding has no
+      `identify`, so on a Mac it would stay inert by design (its window class was its whole
+      identity); if u-he is ever ported it needs one that answers on the panel. Komplete Kontrol's
+      `HOSTED` binding, with "Load modules not meant for this system", takes the DAW's panel on a
+      Mac when its `identify` finds a "Komplete Kontrol" element in the window, with coordinates
+      measured on Windows — nobody has seen what Komplete Kontrol publishes inside a Mac DAW
+      beyond the third session's "nothing".
+- [ ] **Logic's origin line repeats.** `[daw-hosts] Logic plug-in window '…': the plug-in starts
+      at …` comes once per window and size in every module that binds with `daw.all` —
+      sforzando, Kontakt and each of its library modules — identical each time, and once more
+      from the focus key. Expected: daw-hosts' own VM evaluates no overlay, so a line limited to
+      it would come only when the key is pressed.
 
 ## Dev tools
 

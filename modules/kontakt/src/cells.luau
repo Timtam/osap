@@ -177,21 +177,25 @@ for vIdx, v in ipairs(D.VARIANTS) do
     binding = O.embedded({
       hosts = HOSTS,
       -- On Windows the plugin is a Qt control of the host window. On macOS it is nothing
-      -- the host publishes — see detect.macosPanel — so the panel is found from Kontakt's own
-      -- file-menu button, at the offset the geometry table already carries. Measured for
-      -- Kontakt 7 (FILE, to 2 px). Kontakt 8's is the KONTAKT wordmark, published on Windows
-      -- only by a STANDALONE Kontakt 8 as "Kontakt File Menu" — embedded there it is a leaf —
-      -- so whether a Mac's Kontakt 8 publishes it inside REAPER is exactly what the next
-      -- session finds out: if not, the log says "publishes no button named Kontakt File Menu"
-      -- once and the cell stays inert, as before. If it does, the corner is the wordmark's
-      -- centre minus {86,19}, which was authored as a click point rather than measured as a
-      -- centre, and the anchor line in the log prints the corner that came out.
+      -- the host publishes, so the overlay runtime hands this the DAW's plug-in panel — in any
+      -- DAW daw-hosts has an entry for, REAPER and Logic alike — and detect.onHostPanel says
+      -- whether a Kontakt of this version is in it, from Kontakt's own file-menu button near
+      -- the offset the geometry table carries, and hands the panel back from Kontakt's own
+      -- corner. Measured for Kontakt 7 (FILE, to 2 px). Kontakt 8's is the KONTAKT wordmark,
+      -- published on Windows only by a STANDALONE Kontakt 8 as "Kontakt File Menu" — embedded
+      -- there it is a leaf — so whether a Mac's Kontakt 8 publishes it inside a DAW is what the
+      -- next session finds out: if not, the log says "publishes no button named Kontakt File
+      -- Menu" once per window and the cell stays inert. If it does, the corner is the
+      -- wordmark's centre minus {86,19}, which was authored as a click point rather than
+      -- measured as a centre — so it is accepted in a wider box across (G.fileMenuNear) — and
+      -- the anchor line in the log prints the corner that came out.
       control = {
         windows = D.QT_PLUGIN,
         linux = D.QT_PLUGIN,
         -- A Kontakt 7 that publishes nothing there at all (a Mac log of 2026-09-27) is found
-        -- by its top row read as text instead; see detect.macosPanel.
-        macos = D.macosPanel(v.name, geo.UIA_FILE_MENU[v.name], G.fileMenu, G.headerWords),
+        -- by its top row read as text instead; see detect.onHostPanel.
+        macos = D.onHostPanel(v.name, geo.UIA_FILE_MENU[v.name], G.fileMenu, G.headerWords,
+          G.fileMenuNear),
       },
       identify = bareOfVersion(vIdx),
       -- Relational (it asks whether a KK is also present), so it must NOT be cached per
@@ -210,7 +214,13 @@ for vIdx, v in ipairs(D.VARIANTS) do
       where = "in-kk",
       binding = O.embedded({
         hosts = HOSTS,
-        control = D.QT_PLUGIN,
+        -- Not on a Mac (`macos = false`): the nested Kontakt is found by its plain Qt class
+        -- among Komplete Kontrol's controls (findNestedKontakt), which a Mac does not publish —
+        -- the third session found Komplete Kontrol inside REAPER publishing nothing at all. As a
+        -- plain string this took the DAW's plug-in panel there, where it can never match and
+        -- its relational `identify` searched the window at every evaluation. Komplete Kontrol
+        -- is a Windows-only module today; this is its nesting, not a DAW's.
+        control = { windows = D.QT_PLUGIN, linux = D.QT_PLUGIN, macos = false },
         identify = kkHostingVersion(vIdx),
         cacheIdentity = false,
       }, { slot = SLOT, menus = MENUS_IN_KK }),

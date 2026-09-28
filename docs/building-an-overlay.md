@@ -116,23 +116,39 @@ Output goes to `modules/overlay-runtime/calibration/`, named after the overlay �
 
 ## Step 3 — a plugin inside another application
 
-A plugin has no window of its own. It is a child control inside a host's window, so instead of matching a window you match a control within one:
+A plugin has no window of its own. It is drawn inside a DAW's window, so instead of matching a window you say where the plugin is within one:
 
 ```luau
 local daw = host.require("com.platform.daw-hosts")
 
+-- Where the plugin prints its name, from its own top-left. Its Mac build lays the header out a
+-- few points differently — the plugin's difference, not a DAW's — so the region is picked.
+local WORDMARK = host.os.pick { windows = { 605, 33, 762, 70 }, macos = { 597, 29, 770, 74 } }
+
 ov:attachEmbedded({
-  hosts = daw.all,                 -- the applications that can host it
-  control = "^Plugin%x+$",         -- the child control's window class
-  identify = function(ctrl)        -- ...but is it OUR plugin?
-    return host.element.find(ctrl.id, "PlogueXMLGUI", host.element.type.Pane)
+  hosts = daw.all,                          -- every DAW daw-hosts has an entry for
+  control = { windows = "^Plugin%x+$" },    -- the plugin's own child window, on Windows
+  identify = function(ctrl)                 -- ...but is it OUR plugin?
+    -- An accessibility element of its own: found on Windows, and on a Mac no plugin measured
+    -- so far publishes one inside a DAW — so this alone would never say yes there.
+    if host.element.find(ctrl.id, "PlogueXMLGUI", host.element.type.Pane) then return true end
+    -- Its name where it prints it, relative to the control: what answers on the panel too.
+    local x, y = ctrl.client.x, ctrl.client.y
+    local r = host.ocr.recognize({ region = { x + WORDMARK[1], y + WORDMARK[2], x + WORDMARK[3], y + WORDMARK[4] } })
+    return string.find(string.lower(r.text), "sforzando", 1, true) ~= nil
   end,
 })
 ```
 
-The class alone is rarely enough — one vendor's class covers all of their plugins. `identify` is the second question, and it should be a *positive* test: something that is true of your plugin and nothing else. Its result is cached per window handle unless you pass `cacheIdentity = false`, which you need when the answer depends on the plugin's *surroundings* rather than the control itself.
+That read runs on the event loop, which is fine once per control on Windows. On the DAW's panel it is asked once per stay in *every* plugin window of every DAW, and on a Mac a read that finds nothing can hold the event loop for a quarter of a second — so sforzando reads there with `host.ocr.read`, off the loop, answering `nil` until the answer lands; [`O:attachEmbedded`](api/overlay#o-attachembedded) shows how.
 
-Coordinates are now relative to that control, so the same numbers work in every host.
+**Never name a DAW.** `hosts = daw.all` is every DAW [daw-hosts](daw-hosts.md) knows, and a DAW added there is one your plugin is recognised in, with no change to your module. So nothing in a plugin module may depend on which DAW it is in: not the DAW's executable or bundle, not its window titles — Logic titles a plug-in window "Inst 1", by its channel strip — not its chrome, not where in its window it draws a plugin. If you find yourself needing one of those, it belongs in the DAW's entry, where every plugin gets it.
+
+On Windows the plugin is a child control of the DAW's window, with a window class of its own, and `control` matches that class. On a Mac there is no such control: the plugins measured so far publish nothing inside a DAW that *is* the plugin. So a binding with no `macos` entry is given **the DAW's plug-in panel** there — where the DAW's entry says a plugin begins, to the window's edges — and your coordinates, written against your plugin's own top-left, land in it as they do against the control on Windows. You do not write a macOS entry to work on a Mac.
+
+The class alone is rarely enough — `Plugin<hex>` is shared by several vendors' plugins (ReaHotkey matches sforzando, Engine 2 and Zampler by it) — and the panel says nothing at all about *which* plugin it shows. `identify` is the second question, and it should be a *positive* test: something that is true of your plugin and nothing else, asked inside the control — an accessibility element of your plugin's, a word it prints at a known place relative to its top-left, a pixel. It has to answer on the panel too, because a binding with no `identify` never takes one: a module whose class was its whole identity is simply inactive on a Mac, and says so in the log. And an `identify` that finds nothing there — an accessibility element no Mac plugin publishes — answers "no" in every DAW on a Mac, which is why the example above reads the plugin's name as well. Its result is kept per window handle on Windows, and on a Mac for as long as the keyboard stays in the plugin — a REAPER FX chain window shows whichever FX is selected in its list, so the question is asked again once the keyboard has been on the list. Pass `cacheIdentity = false` when the answer depends on the plugin's *surroundings* rather than the control itself; then it is asked every time and has to be cheap.
+
+Coordinates are now relative to the plugin, so the same numbers work in every host. Where your plugin's own layout differs between its Windows and Mac builds, that difference is the plugin's, not a DAW's: pick it with `host.os.pick`, as sforzando does for its read-outs.
 
 ---
 
@@ -295,17 +311,17 @@ Three more rules worth knowing:
   habit puts it — is ignored without an error, and the matcher then matches every window of
   the application. The full list of keys is under [Matchers](api/window.md#matchers).
 
-The embedded binding has one more of these, for the same reason — a host names its plugin
-surface with a window class on Windows and an accessibility role on macOS:
+The embedded binding has one more of these, for the same reason — a plugin's own control has a
+window class on Windows and, where it publishes one at all, an accessibility role on macOS:
 
 ```luau
 O.embedded {
-  hosts = daw.reaper,
+  hosts = daw.all,
   control = { windows = "^Plugin%x+$", macos = "^AXGroup/" },
 }
 ```
 
-Where the Mac publishes nothing that *is* the plugin — Kontakt inside REAPER puts its elements straight into the FX window — the macOS entry can be a function that finds the panel from one of the plugin's own named buttons and returns it as a control; see [`O:attachEmbedded`](api/overlay#o-attachembedded). A `control` written as a plain string is almost always a Win32 class pattern, which on a Mac is compared with the accessibility role, subrole and identifier and so practically never matches; the runtime says so in the log, once per pattern that names no `AX` role and has no `/`.
+Most plugins publish no control of their own on a Mac, and then you leave the `macos` entry out: the binding takes the DAW's plug-in panel there (see Step 3). A `macos` entry is for a plugin that does publish its own container — or a function, `(activeWindow, hostPanel) -> control`, for one that knows its own corner better than the DAW does: Kontakt finds its FILE button near where its geometry puts it and hands back the panel from its own corner; see [`O:attachEmbedded`](api/overlay#o-attachembedded). `macos = false` says the binding does not apply on a Mac at all, panel included. A `control` written as a plain string is almost always a Win32 class pattern, which on a Mac is compared with the accessibility role, subrole and identifier and so practically never matches; the binding then takes the panel as well when it has an `identify` (and stays inert when it has none), and the runtime says which in the log, once per pattern that names no `AX` role and has no `/`.
 
 **Keys are written once, and land on each platform's counterpart.** The key spec's modifiers
 are roles, the way Qt names them. On a Mac `Ctrl` is Command, `Alt` is Option and `Win` (written
