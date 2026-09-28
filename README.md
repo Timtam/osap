@@ -56,6 +56,7 @@ A module can be loaded either as an unpacked directory (dev) or as a **`.zip` pa
   - `kontakt`, `komplete-kontrol` — the ReaHotkey plugin overlays: one overlay per cell of {Kontakt 7, Kontakt 8} × {bare in a DAW, nested in Komplete Kontrol, standalone}.
   - `cinematic-studio-series` — a sample-library overlay built on `kontakt` by inheritance.
   - `sforzando` — the first real ReaHotkey port: a self-voicing OCR overlay over the standalone sforzando window.
+  - `vps-avenger` — VPS Avenger's header (preset, previous/next, its MENU, undo and the redo list, zoom) at every zoom from 50 to 200 %, recognised and scaled by reading Avenger's own header; built from the avenger_control project's coordinate tables and not yet run against a real Avenger (TODO.md, "VPS Avenger").
 - `examples/` — the API demos, one per capability: `hello` (speak once), `hotkey`, `window`, `window-trigger`, `screen`, `ocr`, `input`, `sound`, `keys`, `settings`, `overlay-attach` (a context-bound overlay over Notepad). Kept out of `modules/` so that running everything in `modules/` means running the real thing.
 - `tools/inspect` — OCR window-inspector dev tool: **Ctrl+Alt+I** logs every recognized word with client-relative coordinates. Largely superseded for overlay work by the built-in calibrator ("Calibration keys in overlays" in the Application settings tab).
 - `docs/` — design documents (see below).

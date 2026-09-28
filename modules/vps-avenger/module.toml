@@ -1,0 +1,22 @@
+id = "com.platform.vps-avenger"
+name = "VPS Avenger"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
+dependencies = ["com.platform.overlay", "com.platform.daw-hosts"]
+# No supported_os: the module is meant for both systems and names nothing only one of them has —
+# a JUCE window's class for Avenger's own child window on Windows, the DAW's plug-in panel on a
+# Mac (src/main.luau). Neither has met a real Avenger through this module yet: TODO.md,
+# "VPS Avenger".
+
+[capabilities]
+# What this module's own code calls; the overlay runtime's calls are covered by its own manifest.
+#   window  ownsPoint before a click of its own, recheck once a read has decided, the window's title
+#   ocr     Avenger's header (identity and zoom), the preset's name, the warning box
+#   input   the clicks on ◀ and ▶, the redo list's right click, and an opener clicked again to
+#           close a popup a choice left open
+#   speech  the new preset name, and the refusals of its own clicks
+#   log     what was read, and where
+#   screen  the screen's size, before a choice that opens Avenger's warning box; the calibration
+#           pictures of the header and the warning box, in a calibrating run only
+#   path    where those pictures are written
+require = ["window", "ocr", "input", "speech", "log", "screen", "path"]

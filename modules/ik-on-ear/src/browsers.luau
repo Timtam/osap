@@ -10,8 +10,7 @@ local geo = host.include("src/geometry.luau")
 local read = host.include("src/tree.luau")
 
 local on_ear, ON_EAR_SLOT, TREE_SENTINEL = app.window, app.SLOT, app.SENTINEL
-local scaleOf, scaled, screenRect, screenPointOf =
-  geo.scaleOf, geo.scaled, geo.screenRect, geo.screenPointOf
+local scaleOf = geo.scaleOf
 local dumpFor = read.dumpFor
 
 -- == The chooser panels ======================================================
@@ -31,7 +30,9 @@ local dumpFor = read.dumpFor
 -- name — but "almost certainly" is not a measurement, so only the one that has been probed
 -- is built here. The other is a handful of lines once there is a capture of it.
 local function chooser(spec)
-  local b = O.new(spec.name)
+  -- Scaled like the window it is drawn in (geometry.luau): its design coordinates are the
+  -- window's, and a point this panel works out from the tree is `rawOrigin`.
+  local b = geo.apply(O.new(spec.name))
 
   -- The pane's presence, and nothing more, decides whether this overlay is live. Asked with
   -- a targeted UIA find rather than the whole-tree read the rest of this module uses: a gate
@@ -298,7 +299,7 @@ local function chooser(spec)
     b:addCustomButton({
       label = label,
       onActivate = function()
-        local x, y = screenPointOf(b, atx, aty)
+        local x, y = b:toScreen(atx, aty)
         if not x then return end
         host.log.info(("[on-ear] %s: %s at (%d,%d)"):format(spec.name, label, x, y))
         local o = b:origin()
@@ -329,7 +330,7 @@ local function chooser(spec)
   b:addCustomButton({
     label = "Close",
     onActivate = function()
-      local x, y = screenPointOf(b, spec.close[1], spec.close[2])
+      local x, y = b:toScreen(spec.close[1], spec.close[2])
       if not x then return end
       local q = host.screen.pixel(x, y)
       host.log.info(("[on-ear] '%s' Close clicking (%d,%d), pixel there %s")
@@ -415,8 +416,7 @@ local function chooser(spec)
       -- worked while everything lived in one file and `ov` was in scope; here it is a nil to
       -- call a method on. The window overlay is stood down whenever this one is up anyway, so
       -- the fallback was never the one being used.
-      local o = b:origin()
-      local rect = screenRect(o, 330, 186, 565, 214)
+      local rect = b:toScreenRect({ 330, 186, 565, 214 })
       if not rect then return nil end
       local got = host.ocr.recognize({ region = rect })
       local v = (got and got.text or ""):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
@@ -427,7 +427,7 @@ local function chooser(spec)
     onActivate = function()
       -- The element when it is there (it is exact), the measured coordinate when it is not.
       if clickElement(searchField()) then return end
-      local x, y = screenPointOf(b, spec.search[1], spec.search[2])
+      local x, y = b:toScreen(spec.search[1], spec.search[2])
       if not x then return end
       host.log.info(("[on-ear] '%s' search clicking (%d,%d)"):format(spec.name, x, y))
       clickAt(x, y)
@@ -447,7 +447,7 @@ local function chooser(spec)
   for _, f in ipairs(spec.filters) do
   b:addHotspotButton({
     label = f.label,
-    at = scaled(f.at[1], f.at[2]),
+    at = { f.at[1], f.at[2] },
     text = function()
       local sawRow = false
       local o = b:origin()
@@ -531,6 +531,9 @@ local function chooser(spec)
     b:addHotspotToggle({
       label = spec.rowLabel,
       when = function() return row() ~= nil end,
+      -- In the window's own pixels, worked out from where the tree says the row is: neither the
+      -- panel's frame nor its scale applies to it.
+      rawOrigin = true,
       at = function() return rowPoint(row()) end,
       onColor = ROW_ON,
       offColor = ROW_OFF,
@@ -572,7 +575,7 @@ local function chooser(spec)
   local GROUND_NEAR, EDGE_FAR = 8, 30
 
   local function tileFilled(tx, ty)
-    local x, y = screenPointOf(b, tx + TILE_EDGE_DX, ty)
+    local x, y = b:toScreen(tx + TILE_EDGE_DX, ty)
     if not x then return true end
     local q = host.screen.pixel(x, y)
     if not q then return true end
@@ -583,7 +586,7 @@ local function chooser(spec)
   end
 
   local function tileSelected(tx, ty)
-    local x, y = screenPointOf(b, tx + TILE_PROBE_DX, ty)
+    local x, y = b:toScreen(tx + TILE_PROBE_DX, ty)
     if not x then return nil end
     local q = host.screen.pixel(x, y)
     if not q then return nil end
@@ -737,7 +740,7 @@ local function chooser(spec)
       return
     end
     local cols, rows = spec.tiles.cols, spec.tiles.rows
-    local rect = screenRect(o, cols[1] - 95, rows[1] - 100, cols[#cols] + 95, rows[#rows] + 100)
+    local rect = b:toScreenRect({ cols[1] - 95, rows[1] - 100, cols[#cols] + 95, rows[#rows] + 100 })
     if not rect then
       gridDirty = true
       return
@@ -749,7 +752,7 @@ local function chooser(spec)
     for _, wd in ipairs((got and got.words) or {}) do
       local wx, wy = wd.x + wd.w / 2, wd.y + wd.h / 2
       for c, cx in ipairs(cols) do
-        local sx = screenPointOf(b, cx, rows[1])
+        local sx = b:toScreen(cx, rows[1])
         if sx and math.abs(wx - sx) <= NAME_HALF * k then
           hits[#hits + 1] = { c = c, x = wx, y = wy, text = wd.text }
         end
@@ -852,7 +855,7 @@ local function chooser(spec)
         end,
         onActivate = function()
           local ry = rowY(r)
-          local x, y = screenPointOf(b, tx, ry)
+          local x, y = b:toScreen(tx, ry)
           if not x then return end
           -- Waits for THIS TILE to become the selected one, then reads the name.
           --

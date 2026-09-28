@@ -6,7 +6,6 @@ local geo = host.include("src/geometry.luau")
 local read = host.include("src/tree.luau")
 
 local on_ear, ON_EAR_SLOT, TREE_SENTINEL = app.window, app.SLOT, app.SENTINEL
-local scaled, screenPointOf = geo.scaled, geo.screenPointOf
 local dumpFor = read.dumpFor
 
 -- == The settings panel ======================================================
@@ -25,7 +24,8 @@ local dumpFor = read.dumpFor
 -- which is the duplication this module has now produced three times. It is on the list of
 -- things to lift into the runtime; doing it here, in the last section written, would mean
 -- rewriting the two that are tested and working.
-local settings = O.new("ARC ON:EAR Settings")
+-- Scaled like the window it is drawn in (geometry.luau).
+local settings = geo.apply(O.new("ARC ON:EAR Settings"))
 
 local sTree = O.memoByEpoch(function() return dumpFor(settings) end)
 
@@ -80,7 +80,7 @@ end)
 settings:typingWhen(function() return settingsDark end)
 
 -- Out first, as in the choosers, and for the same reason.
-settings:addHotspotButton({ label = "Close", at = scaled(967, 949) })
+settings:addHotspotButton({ label = "Close", at = { 967, 949 } })
 
 -- The device's own name, which is the one thing here that can be typed.
 settings:addCustomButton({
@@ -161,7 +161,7 @@ for _, b in ipairs({
   { label = "Restore factory settings", y = 334 },
   { label = "Firmware recovery", y = 410 },
 }) do
-  settings:addHotspotButton({ label = b.label, at = scaled(1478, b.y) })
+  settings:addHotspotButton({ label = b.label, at = { 1478, b.y } })
 end
 
 settings:attach(on_ear, {

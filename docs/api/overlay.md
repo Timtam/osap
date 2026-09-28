@@ -12,7 +12,7 @@ One plug-in is usually several overlays rather than one. Kontakt declares one pe
 
 Running through every method here is one rule: **announce what the application did, not what the module intended.** `O:watch` waits for a value to change instead of guessing a delay, a pixel that resembles neither reference reports no state at all rather than the nearer guess, and a click is refused when another window is drawn over the point.
 
-All control coordinates are **origin-relative**: the origin is the client-area top-left of the active context's coordinate window — the plug-in window when standalone, or the embedded plug-in's child control when hosted in a DAW (on a Mac, the DAW's plug-in panel: see [`attachEmbedded`](#o-attachembedded-macos)) — re-resolved per call so it tracks the window as it moves, and `(0, 0)` when the overlay is not attached.
+All control coordinates are **origin-relative**: the origin is the client-area top-left of the active context's coordinate window — the plug-in window when standalone, or the embedded plug-in's child control when hosted in a DAW (on a Mac, the DAW's plug-in panel: see [`attachEmbedded`](#o-attachembedded-macos)) — re-resolved per call so it tracks the window as it moves, and `(0, 0)` when the overlay is not attached. An overlay can shift that frame ([`O:frame`](#o-frame)) and, for a plug-in that zooms its whole interface, scale every authored coordinate ([`O:scale`](#o-scale)).
 
 A control is spoken as `"label, type[, value]"`, and **every kind is a focus stop**: static text is Tab-reachable and read aloud, it simply has no activation.
 
@@ -70,9 +70,13 @@ ov:addStaticText({
 
 ## O\:addHotspotButton(opts) {#o-addhotspotbutton}
 
-Appends a button that, when activated, clicks a fixed origin-relative point. `opts: { label: string, at: {number, number}, hotkey: string?, rawOrigin: boolean?, fromRight: boolean?, opensMenu: boolean? }` — `at` is `{x, y}` relative to the origin; `hotkey` is an optional global activation hotkey spec (e.g. `"Alt+P"`); `opensMenu` says the click puts a menu on screen (see [`O.menuTests`](#o-menutests)).
+Appends a button that, when activated, clicks a fixed origin-relative point. `opts: { label: string, at: {number, number} | ((overlay) -> {number, number}?), points: {{number, number}}?, settle: number?, text: ((overlay) -> string?)?, ocrLabel: {number, number, number, number} | ((overlay) -> {…}?)?, hotkey: string?, hotkeyKeepsFocus: boolean?, rawOrigin: boolean?, fromRight: boolean?, button: ("left" | "right" | "middle")?, opensMenu: boolean?, menuItem: {number, number} | ((overlay, menu, factor) -> {number, number} | false | nil)?, retries: number?, when: ((overlay) -> boolean)? }` — `at` is `{x, y}` relative to the origin; `hotkey` is an optional global activation hotkey spec (e.g. `"Alt+P"`); `opensMenu` says the click puts a menu on screen (see [`O.menuTests`](#o-menutests)).
 
-Returns `{ kind = "hotspot", label, at, text, hotkey, rawOrigin, fromRight, opensMenu, when }`. On activate it clicks `(origin.x + at[1], origin.y + at[2])` and speaks `"label, activated"`.
+Returns `{ kind = "hotspot", label, ocrLabel, text, at, points, settle, hotkey, hotkeyKeepsFocus, opensMenu, rawOrigin, fromRight, button, menuItem, retries, when }`. On activate it clicks `(origin.x + at[1], origin.y + at[2])` — through the frame and the scale, when the overlay has them — logs `<overlay>: '<label>' activated, clicking (x,y)`, and speaks `"label, activated"`.
+
+`button` is the mouse button of that click: `"right"` for a control a right click opens (VPS Avenger's redo list is a right click on UNDO), `"middle"`, or `"left"` — the default, and what [`host.input.click`](input.md#host-input-click) makes of any other value, which the overlay reports when it binds. It applies to `at` only, not to a `points` sequence.
+
+`menuItem` makes the click at `at` open a menu and **chooses an item in it**: the item's offset from the menu's top-left corner, clicked when one of the overlay's menu tests sees the menu and says where it is, and clicked again while the menu is seen not to have taken it, up to `retries` more times (default 3) — see [`O:chooseMenuItem`](#o-choosemenuitem), which this is the control form of, for all of it. It implies `opensMenu`, needs `at` (a `points` sequence cannot open one) and menu tests on the binding; without tests the overlay reports the control when it binds, and pressing it opens nothing and says `"<label> is not available now"`. Pressed again while its menu is still awaited, it clicks nothing (logged); the first press stands.
 
 Two checks come before the click. The point must fall inside the origin's own frame, and — where the platform can say — the window it belongs to must be the one actually **drawn** at that point; see [`host.window.ownsPoint`](window#host-window-ownspoint). A coordinate inside our rectangle can still be covered by a notification or another application, and a click that lands somewhere unknown while the overlay announces "activated" is a press with no way to tell where it went.
 
@@ -82,12 +86,24 @@ Two checks come before the click. The point must fall inside the origin's own fr
 
 `points` replaces `at` with a **click sequence** — `points = {{x1,y1},{x2,y2},…}`, with `settle` ms between each (default 400) — for UI where reaching a control means getting there first: switch to its tab, then its sub-tab, then click it. Each step re-resolves the origin and goes through the overlay's own coordinate resolution, so a frame offset, `rawOrigin` or landmark anchoring applies exactly as for a single point. Making that one control keeps every action self-contained, so a user who cannot see a tab structure never has to navigate it.
 
-`at` may also be a **function** `(overlay) -> {x, y} | nil`, for a control whose position depends on what is focused right now — one overlay serving several versions of a plugin whose chrome moved between them. Returning `nil` (the version isn't known yet) skips the click rather than guessing. Also accepted by `addHotspotToggle`.
+`at` may also be a **function** `(overlay) -> {x, y} | nil`, for a control whose position depends on what is focused right now — one overlay serving several versions of a plugin whose chrome moved between them. Returning `nil` (the version isn't known yet) skips the click rather than guessing, without a word. What it returns is authored like a table: framed and scaled in an overlay that has a frame or a scale, unless the control is `rawOrigin`. Also accepted by `addHotspotToggle`.
+
+In an overlay with [`O:scale`](#o-scale) whose factor cannot be told now, the click is not made and the control says `"<label> is not available now"`, with a `[place]` line in the log; the same holds for every step of a `points` sequence, which then ends where it is.
 
 ```luau
 ov:addHotspotButton({ label = "Play", at = { 120, 40 }, hotkey = "Alt+P" })
 -- 352 px in from the right edge, 87 px down — Kontakt's instrument arrows:
 ov:addHotspotButton({ label = "Previous instrument", at = { 352, 87 }, fromRight = true, rawOrigin = true })
+
+-- VPS Avenger's header: UNDO clicked, and its redo list opened with the right button. The list is
+-- a popup of its own, so the keys go to it while a menu test sees it.
+ov:addHotspotButton({ label = "Undo", at = { 305, 14 } })
+ov:addHotspotButton({ label = "Redo list", at = { 305, 14 }, button = "right", opensMenu = true })
+-- MENU, then its first item — chosen once a menu test sees the menu, 5 across and 14 down from its
+-- corner (both scaled with the overlay; the numbers here are illustrative, not measured).
+ov:addHotspotButton({ label = "Load preset", at = { 262, 14 }, menuItem = { 5, 14 } })
+-- A menu of tick boxes stays open after a choice: a second click would untick it again.
+ov:addHotspotButton({ label = "Sync to host", at = { 400, 14 }, menuItem = { 5, 30 }, retries = 0 })
 ```
 
 ## O\:group(pred, build) {#o-group}
@@ -175,6 +191,23 @@ local variantOf = O.memoByOrigin(function(ctrl)
 end)
 ```
 
+## O.memoByEpoch(fn) {#o-memobyepoch}
+
+**Signature:** `O.memoByEpoch(fn: (...) -> value) -> (...) -> value`
+
+Memoizes `fn` for the current [epoch](timer.md#host-epoch) only: until the epoch turns over the first call asks `fn` and every later call gets that answer back, whatever arguments it is given; the first call in a new epoch asks again. The epoch turns over on an OS event, a `host.timer.after` coming due, a read's or search's answer, `host.window.focus` and the module's own input — **not** on a [`host.timer.every`](timer.md#host-timer-every) tick, so a poll on `every`, the overlay's menu tick among them, gets the same answer on tick after tick until one of those happens. For a question whose answer holds only until the world moves — a reading of the screen, a walk of the accessibility tree — asked by several controls in one announcement, or by a [scale](#o-scale) factor at every coordinate one calibration shot places.
+
+The same rule as [`O.memoByOrigin`](#o-memobyorigin): a **non-nil** answer is kept; `nil` means "could not tell yet" and is asked again at the next call; `false` is kept. Only the current epoch's answer is held — one slot, not a table — so nothing accumulates, and a stale answer cannot be read after the epoch has turned over. The arguments are not part of the key: a function asked about two different things in one epoch is two memos. `fn` is not guarded: what it raises comes out of the memo's call, and nothing is kept. A hit costs one call of [`host.epoch`](timer.md#host-epoch) and a comparison.
+
+```luau
+-- ON:EAR's accessibility tree, read once per epoch however many read-outs ask about it.
+local tree = O.memoByEpoch(function() return host.element.rawDump(ov:hwnd()) end)
+
+-- A zoom read off the plug-in's zoom field, for the overlay's scale: once per epoch, not once per
+-- coordinate. nil (nothing read) is asked again, and places nothing meanwhile.
+local zoomOf = O.memoByEpoch(function(origin) return readZoom(origin) end)
+```
+
 ## O\:origin() / O\:hwnd() {#o-origin}
 
 **Signature:** `O:origin() -> Control | Window | nil` · `O:hwnd() -> number | nil`
@@ -189,21 +222,43 @@ onActivate = function(o)
 end,
 
 -- `:origin()` -- the context itself, whose `client` rect every authored coordinate is
--- measured against. ON:EAR scales all of its to the size the window is really drawn at:
-local function screenPointOf(overlay, dx, dy)
+-- measured against. ON:EAR works a point in its design back out of where a word was read:
+local function designY(overlay, screenY)
   local o = overlay:origin()
-  if not (o and o.client and o.client.h > 0) then return nil end  -- not active: no point
-  local k = o.client.h / DESIGN_H
-  return math.floor(o.client.x + o.client.w / 2 + k * (dx - DESIGN_W / 2) + 0.5),
-    math.floor(o.client.y + k * dy + 0.5)
+  if not (o and o.client and o.client.h > 0) then return nil end  -- not active: no answer
+  return (screenY - o.client.y) / (o.client.h / DESIGN_H)
 end
 ```
+
+## O.contentSize(origin) {#o-contentsize}
+
+**Signature:** `O.contentSize(origin: Control | Window | nil) -> (number, number)`
+
+The width and height of an origin's **content**, which is what coordinates are measured against — each on its own: the width is `client.w` when that is above 0 and `bounds.w` otherwise, the height `client.h` or else `bounds.h`, and `0` where neither is there; `0, 0` for `nil`. Anything measured from the right edge (`fromRight`) or sized from the window has to use this. A function of the runtime, not a method; it reads the table it is handed and asks the host nothing.
+
+```luau
+-- A factor for a plug-in whose design is 1010 wide, from the width it is drawn at now.
+ov:scale(function(o)
+  local w = O.contentSize(o)
+  return w > 0 and w / 1010 or nil
+end)
+```
+
+### Windows
+
+An embedded plug-in's control is borderless, so its `client` and `bounds` are the same size and either answers alike. A standalone window's are not: a Kontakt 8 window is 1026 wide around 1010 of plug-in, and the content is the 1010.
+
+### macOS
+
+A DAW's plug-in panel ([`attachEmbedded`](#o-attachembedded-macos)) has `client` equal to `bounds`, so the two agree there. A standalone window's `client` is derived from its own geometry rather than read ([window table shapes](window.md#table-shapes), macOS): a titled window's content below its title bar, and the frame itself for a borderless one — its content size is then the frame's.
 
 ## O\:frame(fn) {#o-frame}
 
 **Signature:** `O:frame(fn: (origin) -> (number, number)) -> Overlay`
 
-Shifts the overlay's whole coordinate frame: `fn` returns `dx, dy`, resolved per active control — a host version's content shift, or a nested plugin's inner origin. Controls marked `rawOrigin` opt out.
+Shifts the overlay's whole coordinate frame: `fn` returns `dx, dy`, resolved per active control — a host version's content shift, or a nested plugin's inner origin. Controls marked `rawOrigin` opt out, and so does a landmark-anchored overlay while its landmark is on screen ([`O:landmark`](#o-gate)): it places from the landmark's corner. Called before the overlay is bound; afterwards it raises. A second call replaces the first.
+
+The shift is **not scaled**: in an overlay with [`O:scale`](#o-scale) it is added to the origin first, and the scaled part of a coordinate after it — the frame is where the part of the geometry that does not zoom goes: an offset of the plug-in's own corner from the origin (VPS Avenger's -2, +2 on a DAW's panel), or a centring (ARC ON:EAR's half width). Never the DAW's own chrome: daw-hosts has put the origin below it already ([daw-hosts](../daw-hosts.md)), and DAW geometry in a plug-in's module would have to be written again for every DAW. `fn` is called at every resolution, with the origin, and is not guarded: an error in it raises out of whatever was placing the control — [`O:toScreen`](#o-toscreen) included.
 
 ```luau
 -- A Kontakt nested inside Komplete Kontrol: the origin is KK's container control, but every
@@ -218,6 +273,85 @@ ov:frame(function(kkCtrl)
   return k.client.x - kkCtrl.client.x, k.client.y - kkCtrl.client.y
 end)
 ```
+
+## O\:scale(fn, opts?) {#o-scale}
+
+**Signature:** `O:scale(fn: (origin) -> number?, opts: { about: {number, number}? }?) -> Overlay`
+
+Scales every authored coordinate of the overlay by the factor `fn` answers, for a plug-in that zooms its whole interface. VPS Avenger is the case it was built for: it zooms from 50 to 200 %, and by the avenger_control project's account a point measured at 50 % from its corner lands at *zoom / 50* times that distance. Every coordinate goes through one formula,
+
+```text
+screen = origin + frame + k × (authored − about)
+```
+
+rounded once, to the nearest whole unit — a pixel on Windows, a point on macOS — with a half rounded up: `origin` is the client-area top-left as above, `frame` what [`O:frame`](#o-frame) answers (unscaled), `k` what `fn(origin)` answers now, and `about` the authored point that stays where the frame puts it — `{0, 0}` unless `opts.about` says otherwise. `about` is for a plug-in that scales around something other than its corner: ARC ON:EAR scales by its window's height about its design's centre line, which is `about = {960, 0}` with a frame of half the window's width. Two cases do not fit the formula as written: `fromRight` is `origin + frame's dx + content width − k × at[1]` across (a distance from the right edge, which `about` has nothing to say about), with `y` as above; and a landmark-anchored overlay ([`O:landmark`](#o-gate) with `anchor = true`), while its landmark is on screen, is `landmark's corner + k × (authored − about)`, with no frame.
+
+It applies to `at` (a table or a function's answer), `points`, `region` (a table or a function's answer), `ocrLabel`, a tab's `at`, a `reveal` probe, a slider's `from` and `to` (and so the size of one arrow-key step, one percent of the track as drawn), a graphical button's `clickOffset` and a fixed `dragBy` (distances: scaled, not framed and not moved by `about`), a menu item's offset from its menu's corner when it is a table ([`O:chooseMenuItem`](#o-choosemenuitem): a distance too, at the factor its opener was placed with), the points of [`O:toScreen`](#o-toscreen) and `captureRegion`, and every crosshair of a calibration shot. It does **not** apply to a `rawOrigin` control, which is in the origin's own pixels — neither framed nor scaled — to a `dragBy` function's or a `menuItem` function's answer, or anything else worked out from a search's hit or a menu's rectangle, which are screen pixels already, or to template images, which are matched at their own `scales`.
+
+`fn` is called with the origin at **every** resolution — once per point or region a control places, so a calibration shot calls it at least once per control and once more for each region, name region and menu opener it lists — and its answer is not kept by the runtime. A factor that costs something to learn, such as a zoom read off the plug-in's own caption, is memoised by the module: [`O.memoByEpoch`](#o-memobyepoch) keeps it until the epoch turns over. It is called guarded. Anything but a number above 0 and below infinity — `nil`, which is how a factor says "cannot tell now", a raise, a string, 0, a negative number, NaN — is **no factor**: nothing the overlay places is clicked or read. A control that would have clicked says `"<label> is not available now"` and logs `[place] '<overlay>': '<label>' cannot be placed now — <why>; nothing clicked` — a slider's arrow keys and a graphical button's press included; an OCR control announces `"cannot be read now"` in place of its value; a toggle announces no state; a tab stays where it was and says `"<tab> tab is not available now"`. Never 1: a factor guessed at 1 is a click at the wrong place, said with the confidence of the right one.
+
+The factor is logged when it **changes** — `[scale] '<overlay>': factor 1.6000 about (0,0)`, or `[scale] '<overlay>': no factor now — <why>; nothing it places is clicked or read until it answers one` — never per resolution.
+
+An overlay that does not call it is placed exactly as before: no rounding, and nothing in this section applies. Called before the overlay is bound; afterwards it raises, and a `fn` that is not a function or an `about` that is not two numbers raises at the call. A second call replaces the first.
+
+A function rather than a design size to compare with the window's: neither overlay that scales today has a size to compare. Avenger's factor is its zoom **read** off its own zoom field — its width has an offset nobody has measured, and a zoom worked out from the width reads 80 % as 75 % — and ON:EAR's is its height alone, its width being free. A design size is one line inside `fn`; a read zoom is no design size at all.
+
+```luau
+-- A plug-in whose layout is written at 50 % of its zoom, the zoom read off its zoom field once
+-- per epoch. `readZoom` is the module's own (an OCR read); nil until it has one, and then nothing
+-- is clicked at a guessed size. On a Mac the zoom is the whole factor; on Windows the display's
+-- scaling multiplies it and has to be learned from the screen (see Windows below) — VPS Avenger's
+-- module learns it from where its header is drawn. `displayFactor` is the module's own too.
+local zoomOf = O.memoByEpoch(function(origin) return readZoom(origin) end)
+ov:scale(function(origin)
+  local zoom = zoomOf(origin)
+  return zoom and zoom / 50 * displayFactor(origin) or nil
+end)
+
+-- ARC ON:EAR (modules/ik-on-ear/src/geometry.luau): the window scales by its height and centres
+-- the design across, so the design's centre line is put at half the window's width.
+ov:frame(function(o) return o.client.w / 2, 0 end)
+ov:scale(function(o) return o.client.h > 0 and o.client.h / 1009 or nil end, { about = { 960, 0 } })
+```
+
+### Windows
+
+A coordinate is a physical pixel ([Coordinates](index.md#coordinates)), so a plug-in drawn at 150 % display scaling is 1.5 times the size it has at 100 %, at the same zoom. The factor has to carry that: one learned from what is on screen — a width, a height, the distance between two things read by OCR — already does; one computed from the plug-in's zoom alone does not, and nothing in the host says which scaling a window is drawn at.
+
+### macOS
+
+A coordinate is a point, and a Retina display draws two pixels per point, so the factor is the same on a Retina display as on one without: a zoom read off the plug-in, divided by the zoom the coordinates were measured at, is the whole factor there.
+
+## O\:toScreen(x, y, opts?) / O\:toScreenRect(r, opts?) {#o-toscreen}
+
+**Signature:** `O:toScreen(x: number, y: number, opts: { rawOrigin: boolean? }?) -> (number, number) | (nil, string)` · `O:toScreenRect(r: {number, number, number, number}, opts: { rawOrigin: boolean? }?) -> {number, number, number, number} | (nil, string)`
+
+Where an authored point, or an authored rectangle `{x1, y1, x2, y2}`, lands on screen now: what an `at` or a `region` of the overlay would click or read, through the same origin, frame and [scale](#o-scale), for a module's own code — a custom button's `onActivate`, a stepper's `onStep`, a `text` function that reads by OCR. `opts.rawOrigin = true` places it as a `rawOrigin` control would: in the origin's own pixels.
+
+Returns `nil` and a reason when the overlay is not active (no origin), and when its scale has no factor now; a caller tests the first value. It raises what the overlay's [frame](#o-frame) function raises: the factor is asked guarded, the frame is not. In an overlay without a scale it is the plain sum, `origin + frame + authored`, unrounded — whole numbers in, whole numbers out. It clicks and reads nothing itself, and costs one origin resolution (memoised per [epoch](timer.md#host-epoch) for an embedded overlay) plus the frame's and the factor's functions.
+
+```luau
+-- A stepper that turns a knob by dragging it a few authored units, at whatever zoom it is drawn.
+onStep = function(dir, o)
+  local x1, y1 = o:toScreen(262, 140)
+  local x2 = o:toScreen(262 + 6 * dir, 140)
+  if x1 and x2 then host.input.drag(x1, y1, x2, y1) end
+end,
+
+-- A read-out that reads its own region.
+text = function(o)
+  local r = o:toScreenRect({ 34, 7, 214, 22 })
+  return r and host.ocr.recognize({ region = r }).text or nil
+end,
+```
+
+### Windows
+
+The answer is in physical pixels, as every coordinate is.
+
+### macOS
+
+The answer is in points, as every coordinate is; a factor that is not a whole number can put a point between two pixels of a Retina display, and it is rounded to the nearest whole point like any other.
 
 ## O.state {#o-state}
 
@@ -246,6 +380,8 @@ Any hotspot or hotspot-toggle may carry `ocrLabel = {x1, y1, x2, y2}` (origin-re
 Use it where the plugin itself changes what a control means. A sample library can put one mixer strip in a fixed place whose five channels are microphone positions for one patch and orchestral sections for another — same buttons, same pixels, different names. A fixed label is then confidently wrong, which is worse than being slow: it tells a user who cannot see the screen that they toggled something they did not.
 
 Costs one OCR read per focus, so put it on controls whose name genuinely varies, not on every control.
+
+Like a `region`, it may be a function of the overlay answering the corners, and it is scaled in an overlay with [`O:scale`](#o-scale). A name region that cannot be placed now — the function answers `nil`, or the scale has no factor — is not read, and the static `label` is announced, as when OCR reads nothing.
 
 ```luau
 ov:addHotspotToggle({
@@ -287,26 +423,44 @@ ov:addCustomButton({
 
 ## O\:addStepper(opts) {#o-addstepper}
 
-Appends a **value changed with Left and Right**, where the module knows how to change it. `opts: { label: string, text: (overlay) -> string?, onStep: (dir: number, overlay) -> (), onActivate: ((overlay) -> ())?, settle: number?, typeLabel: string?, when: ((overlay) -> boolean)? }`.
+Appends a **value changed with Left and Right**, where the module knows how to change it. `opts: { label: string, text: (overlay) -> string?, onStep: (dir: number, overlay) -> false?, onActivate: ((overlay) -> ())?, settle: number?, typeLabel: string?, hotkey: string?, hotkeyKeepsFocus: boolean?, when: ((overlay) -> boolean)? }`.
 
 Announced as a slider, because that is what it is to the person using it; how it is driven underneath is the module's problem rather than theirs.
 
 Use it where `addSlider` cannot serve. That one finds its thumb by matching an image, which needs a template captured for one plug-in at one size — no use for a rotary drawn as an arc, a bar with two handles, or anything in a window the user can resize. What such a control does have is a value printed beside it and something that moves it, and that is all a stepper is.
 
-- `onStep(dir, overlay)` — `dir` is `-1` for Left and `+1` for Right. Called guarded.
+- `onStep(dir, overlay)` — `dir` is `-1` for Left and `+1` for Right. Called guarded; one that raises says `"<label> could not be moved"`. It returns nothing, or `false` for a press that moved nothing and has nothing of its own to say — one that came while an earlier step is still being carried out, whose own announcement is on its way: nothing is watched or announced for it.
 - `onActivate` — optional, and what a **press** means. Without it, Space and Return are still captured on a stepper (it is not an inert control) and then do nothing at all, which is a promise without an action. ON:EAR's two use it for "double-click to put this back to its default", which is one keystroke instead of twenty.
-- `settle` — how long to wait **at most** for the value to change before announcing it anyway. Not how long to wait: see [`O:watch`](#o-watch).
+- `settle` — how long to wait **at most** for the value to change before announcing it anyway, in milliseconds, default 600. Not how long to wait: see [`O:watch`](#o-watch). A step that goes through a menu — [`O:chooseMenuItem`](#o-choosemenuitem), whose item is clicked only once the menu is seen — needs a longer one. It is read after each `onStep` returns, from the returned control's `settle` field, so an `onStep` that knows nothing will change — a zoom already at its last step — sets it short on the control before it returns, and the value is said at once.
 
 What is announced afterwards always comes from reading `text` again, never from what the step intended. A control that reports its own intention rather than the application's state is the failure this project keeps returning to.
+
+`hotkey` and `hotkeyKeepsFocus` are taken as by every constructor (see [`O:group`](#o-group)); the hotkey activates the stepper as Return does.
 
 ```luau
 ov:addStepper({
   label = "Tone",
   when = function() return element("Tone") ~= nil end,
   text = function() return valueBelow("Tone") or "not shown" end,
-  onStep = function(dir)
-    local x, y = screenPoint(290, 780)
+  onStep = function(dir, o)
+    local x, y = o:toScreen(290, 780)   -- a design point, through the overlay's scale
     if x then host.input.scroll(x, y, dir * 0.5) end
+  end,
+})
+
+-- A step that is carried out through the plug-in's own list: a press while the last one is still
+-- under way sends nothing and says nothing of its own; at either end nothing is opened, and the
+-- value is said at once. `busy`, `atEnd` and `openAndChoose` are the module's own.
+local zoom
+zoom = ov:addStepper({
+  label = "Zoom",
+  settle = 3000,
+  text = function(o) return readZoomText(o) end,
+  onStep = function(dir, o)
+    if busy() then return false end
+    if atEnd(dir) then zoom.settle = 1; return end
+    zoom.settle = 3000
+    if not openAndChoose(o, dir) then return false end
   end,
 })
 ```
@@ -378,9 +532,13 @@ self:watch({
 
 ## O\:addOCRButton(opts) {#o-addocrbutton}
 
-Appends a button whose label/value is read live by OCR over a region; activating re-reads it then clicks the region centre. `opts: { label: string, region: {number, number, number, number}, hotkey: string?, readOnly: boolean?, opensMenu: boolean? }` — `region` is `{x1, y1, x2, y2}` origin-relative; `readOnly` re-reads on activation and never clicks; `opensMenu` says the click puts a menu on screen (see [`O.menuTests`](#o-menutests)).
+Appends a button whose label/value is read live by OCR over a region; activating re-reads it then clicks the region centre. `opts: { label: string, region: {number, number, number, number} | ((overlay) -> {number, number, number, number}?), text: ((overlay) -> string?)?, fallback: string?, hotkey: string?, hotkeyKeepsFocus: boolean?, readOnly: boolean?, opensMenu: boolean?, when: ((overlay) -> boolean)? }` — `region` is `{x1, y1, x2, y2}` origin-relative; `readOnly` re-reads on activation and never clicks; `opensMenu` says the click puts a menu on screen (see [`O.menuTests`](#o-menutests)).
 
-Returns `{ kind = "ocr", label, region, hotkey, readOnly, opensMenu, when }`. When focused/spoken it appends the OCR text (or `"no text"`) as the value.
+Returns `{ kind = "ocr", label, region, hotkey, hotkeyKeepsFocus, readOnly, opensMenu, when, text, fallback }`. It is announced as `"<label>[, <text>], button[, <key>], <value>"` — the key its `hotkey`, said in the platform's words when focus arrives on the control (not when it is activated), and the value what the region reads, `fallback` when it reads nothing, and `"no text"` when there is no `fallback` — and a `readOnly` one without the word "button": a control that cannot be pressed does not describe itself as one. The region is read with [`host.ocr.recognize`](ocr.md#host-ocr-recognize), on the event loop, at every announcement (arriving on the control, and activating it), and each read writes one line: `[read] '<label>' = "<text>" (region x1,y1 wxh, <ms> ms, <n> words)`, the region as authored.
+
+- `text(overlay)` is announced between the label and the type word: what a read-out's value *is*, where that changes (Melodyne's inspector box holds whichever parameter the tool owns).
+- `fallback` says what an empty region means in the plug-in's terms (`"no value"`), instead of "no text", which describes the recogniser.
+- `region` may be a **function** of the overlay answering the corners, for a region that moves with something the module knows. It is asked at every read. `nil` from it — or no factor from the overlay's [scale](#o-scale) — reads nothing: the control announces `"cannot be read now"` in place of a value, logs `[read] '<label>' not read: <why>`, and a click it would have made is not made. A region in a scaled overlay is scaled corner by corner, and its `[read]` line adds where it was read: `… at x,y wxh on screen`.
 
 ```luau
 -- u-he draws its whole interface itself: the preset name exists nowhere but on screen.
@@ -393,6 +551,18 @@ ov:addOCRButton({ label = "Preset menu", region = { 480, 20, 720, 48 },
 -- list no screen reader can follow -- so this one announces and never clicks.
 ov:addOCRButton({ label = "Articulation", region = { -115, 114, 165, 152 },
   readOnly = true, hotkey = "Alt+B" })
+
+-- A preset name, the first control, so it is what the overlay says on arrival. In a scaled
+-- overlay the region follows the zoom; `fallback` says an empty field in the plug-in's terms.
+ov:addOCRButton({ label = "Preset", region = { 34, 7, 214, 22 }, readOnly = true,
+  fallback = "no preset name" })
+
+-- A region that depends on what the module knows: the value box of whichever slot is shown.
+ov:addOCRButton({ label = "Slot value", readOnly = true,
+  region = function(o)
+    local slot = o.state.slot
+    return slot and { 40 + 60 * slot, 300, 90 + 60 * slot, 316 } or nil   -- nil: "cannot be read now"
+  end })
 ```
 
 ## O\:addGraphicalToggle(opts) {#o-addgraphicaltoggle}
@@ -519,7 +689,7 @@ The line goes to the platform's own voice unless **Speak through VoiceOver** is 
 
 ## O\:activate(index) {#o-activate}
 
-Activates the control at `index` (defaults to the focused control). `index: number?`. Behaviour by kind: `hotspot` clicks `at` and speaks `"label, activated"`; `custom` calls `onActivate(self)`; `ocr` re-reads then clicks the region centre; `gtoggle` clicks the region centre and re-reads state after ~150 ms. No-op for `static` or a missing control. Returns nothing.
+Activates the control at `index` (defaults to the focused control). `index: number?`. Behaviour by kind: `hotspot` clicks `at` and speaks `"label, activated"` — and, with `menuItem`, chooses that item once a menu test sees the menu (see [`O:chooseMenuItem`](#o-choosemenuitem)); `custom` calls `onActivate(self)`; `ocr` re-reads then clicks the region centre; `gtoggle` clicks the region centre and re-reads state after ~150 ms. A control that cannot be placed now (a [scale](#o-scale) with no factor, a region function with no answer) clicks nothing and says so: `"<label> is not available now"`, or for an OCR control the `"cannot be read now"` of its announcement. No-op for `static` or a missing control. Returns nothing.
 
 ```luau
 -- Space and Return are bound to this by the runtime, so a module needs it only to press a
@@ -535,7 +705,7 @@ end)
 
 ## O\:attach(matcher, opts) {#o-attach}
 
-Binds the overlay as a **standalone** context: active while a window matching `matcher` is the foreground/active window — or while the overlay holds its place over its own menu, a window of the same application in front after one of its controls opened it, in which one of its tests sees a menu (see [`O.menuTests`](#o-menutests)) — with coordinates relative to that window's client area. `matcher` is a window matcher passed to `host.window.test`; `opts: { hoverToRead: boolean?, menus: {MenuTest}?, slot: string?, specificity: number?, pollMatch: number? }?` — `menus` is described under [`O.menuTests`](#o-menutests), and `slot`, `specificity` and `pollMatch` as for [`attachEmbedded`](#o-attachembedded).
+Binds the overlay as a **standalone** context: active while a window matching `matcher` is the foreground/active window — or while the overlay holds its place over its own menu, a window of the same application in front after one of its controls opened it, in which one of its tests sees a menu (see [`O.menuTests`](#o-menutests)) — with coordinates relative to that window's client area. `matcher` is a window matcher passed to `host.window.test`; `opts: { hoverToRead: boolean?, menus: {MenuTest}?, slot: string?, specificity: number?, pollMatch: number?, pollWhen: ((overlay) -> boolean)? }?` — `menus` is described under [`O.menuTests`](#o-menutests), and `slot`, `specificity`, `pollMatch` and `pollWhen` as for [`attachEmbedded`](#o-attachembedded).
 
 While active, the overlay captures and suppresses the navigation keys, scoped to its own window (so `Alt+Tab` and menus pass through natively): `Tab` / `Shift+Tab` move between controls, `Return` and `Space` activate the focused control, and — when the overlay has a tab control — `Left`/`Right`, `Ctrl+Tab`/`Ctrl+Shift+Tab` and `Ctrl+<n>` drive it (the first two are Control+Tab on a Mac, see [below](#o-attach-macos)). `Space` is released while an editable field (an `ocredit` control) is focused, so a literal space can be typed into it. On activation the overlay starts at its first control (and any tab control at its first tab) when a **genuinely new** window opened, but resumes the last-focused control when the *same* still-open window merely regained the foreground (`Alt+Tab` out and back); the two are told apart by the window's identity (its HWND). `hoverToRead` (default `false`) moves the mouse onto an OCR control on focus (some UIs only reveal values on hover). Registers the foreground/focus trigger once. Returns nothing.
 
@@ -586,7 +756,7 @@ An `identify` that reads the screen **off the event loop** — [`host.ocr.read`]
 
 How long a verdict is kept is per platform — per control on Windows, per stay in the panel on a Mac — see the sections below. `cacheIdentity = false` keeps nothing: `identify` is called at every evaluation, for a verdict that depends on more than the control (Kontakt's: "is a Komplete Kontrol wrapped around it?"), so such an `identify` has to be cheap. `present(control)`, when given, is asked at every evaluation as well and never kept — for a condition that changes while the same control stays focused.
 
-`opts: { hoverToRead?, menus?, slot: string?, specificity: number?, pollMatch: number? }` — `hoverToRead`, `menus` and the navigation / focus-reset behaviour are as in `attach`. With `slot` the overlay joins the host **arbiter** for that slot at `specificity` (a base and the overlays inheriting it pass the same slot; the most-specific *matching* one is active — see `host.arbiter`); `pollMatch` (ms) additionally re-checks the match on a recurring timer, for matches that change with no window event (a library landmark appearing inside an already-focused plugin). Returns nothing. The overlay is evaluated as it is bound, like any binding — and an overlay that is already bound (to its standalone window, say) is evaluated again by this call, once, so a plug-in already in front is recognised without waiting for a window or focus event, which on a Mac may never come.
+`opts: { hoverToRead?, menus?, slot: string?, specificity: number?, pollMatch: number?, pollWhen: ((overlay) -> boolean)? }` — `hoverToRead`, `menus` and the navigation / focus-reset behaviour are as in `attach`. With `slot` the overlay joins the host **arbiter** for that slot at `specificity` (a base and the overlays inheriting it pass the same slot; the most-specific *matching* one is active — see `host.arbiter`); `pollMatch` (ms) additionally re-checks the match on a recurring timer, for matches that change with no window event (a library landmark appearing inside an already-focused plugin). `pollWhen`, with `pollMatch`, is asked on each of its ticks, with the overlay, and the match is re-checked only when it answers `true`: for a match that can change without a window event only while the module expects it to — VPS Avenger's warning box, looked for only after a Save or Initialize of its own. Every other tick then costs one call of it rather than a context match (the focus chain is read, and on a Mac in Logic that is the slow accessibility). One that raises is logged once, `[poll] '<overlay>': pollWhen failed: …`, and the match is re-checked as if it were not there; anything but a function raises when the overlay is bound. The poll's interval and its one timer per interval are unchanged by it. Returns nothing. The overlay is evaluated as it is bound, like any binding — and an overlay that is already bound (to its standalone window, say) is evaluated again by this call, once, so a plug-in already in front is recognised without waiting for a window or focus event, which on a Mac may never come.
 
 The control is resolved once per [`host.epoch()`](timer.md#host-epoch) per `spec` table, shared by every overlay bound to that table, so the controls, the focus chain and `identify` are asked once per event however many overlays and coordinates want the answer; on a panel the verdict is kept per `spec` table as well, so an overlay that asks while another bound to the same table is outranked does not ask again.
 
@@ -688,12 +858,12 @@ control = {
 
 The tests that tell an overlay its plug-in has a menu open, listed in its `menus` option; while a menu is open, the keys belong to it. The overlay gives up its per-control hotkeys — a registered hotkey outranks the application, so `Alt+M` would otherwise re-fire the control under the menu — and tells the key hook through [`host.keys.menuOpen`](keys.md#host-keys-menuopen) to let the navigation keys it captures (`Tab`, `Return`, `Space` and whatever the focused control holds) through to the application. **How a menu is seen is the module's decision**: the module names the tests, and the runtime runs them. ReaHotkey does the same with one fixed check, `WinExist("ahk_class #32768")`; a plug-in that paints its own menu needs a check of its own, and only its module knows which.
 
-A test answers one question — *is a menu open over this overlay's plug-in right now?* — by calling `answer(seen)` exactly once per call, at once or later. Any value other than `nil` and `false` counts as seen, so a search's hit can be handed straight on. `o` is the overlay, so `o:origin()` is the plug-in's window or control. A synchronous check answers before it returns; a test that starts [`host.screen.imageSearchAsync`](screen.md#host-screen-imagesearchasync), `matchCellsAsync` or `snapshotAsync` answers from the callback, which the runtime receives on the main thread like every callback. A bare function is a test named `test <n>` after its place in the list and is not cheap. The table form adds:
+A test answers one question — *is a menu open over this overlay's plug-in right now?* — by calling `answer(seen)` exactly once per call, at once or later. Any value other than `nil` and `false` counts as seen, so a search's hit can be handed straight on. An answer that is a table with numbers `x`, `y`, `w` and `h` (`w` and `h` above 0) also says **where** the menu is, on screen, which is what an item is chosen in ([`O:chooseMenuItem`](#o-choosemenuitem)): it has to be the whole menu, since an item outside it is not clicked. `newWindow` answers with one; a search's hit is such a table too, but only of what its template shows — hand one on as the menu's rectangle only when the template is the whole menu, and otherwise answer the menu's own rectangle worked out from it. `o` is the overlay, so `o:origin()` is the plug-in's window or control. A synchronous check answers before it returns; a test that starts [`host.screen.imageSearchAsync`](screen.md#host-screen-imagesearchasync), `matchCellsAsync` or `snapshotAsync` answers from the callback, which the runtime receives on the main thread like every callback. A bare function is a test named `test <n>` after its place in the list and is not cheap. The table form adds:
 
 - `name` — what the log calls it. Default `test <n>`.
 - `cheap = true` — may run on every tick even when nothing was pressed (see below). Default `false`.
 - `pressed(o)` — called when a control with `opensMenu` is activated, before it acts: for a test that compares against that moment.
-- `forget(o)` — called when the user presses one of the overlay's own keys (a navigation key or a hotkey) while no menu counts as open — so the last press opened nothing that took the keys — when the overlay leaves the front, and when the plug-in has the keyboard again after the overlay held its place over a menu that was a window in front (see below): a comparison against that press ends there.
+- `forget(o)` — called when the user presses one of the overlay's own keys (a navigation key or a hotkey) while no menu counts as open — so the last press opened nothing that took the keys; while an item waits for its menu ([`O:chooseMenuItem`](#o-choosemenuitem)), once the key has run, and not for a second press of the same control — when the overlay leaves the front, and when the plug-in has the keyboard again after the overlay held its place over a menu that was a window in front (see below): a comparison against that press ends there.
 
 `opensMenu = true` on a control ([`addHotspotButton`](#o-addhotspotbutton), [`addCustomButton`](#o-addcustombutton), [`addOCRButton`](#o-addocrbutton), `addGraphicalButton`) says that activating it puts a menu on screen. It makes the tests run on every tick for a while, calls their `pressed`, and in a calibrating run takes the [menu shots](calibrating.md#host-calibrating). It never counts a menu as open by itself.
 
@@ -703,7 +873,7 @@ A test answers one question — *is a menu open over this overlay's plug-in righ
 
 - every test runs for 8 seconds after a control with `opensMenu` was activated, and for as long as a menu counts as open;
 - otherwise a test declared `cheap` runs on every tick, and each of the others once 8 ticks (about 1.2 s) have passed since it was last asked, so a menu opened some other way — the user's screen reader, a key that went to the plug-in — is still noticed;
-- while the word of a `cheap` test is that a menu is open, the others are not asked at all: they could only agree.
+- while the word of a `cheap` test is that a menu is open, the others are not asked at all: they could only agree — except while an item waits to be chosen, or to be seen taken ([`O:chooseMenuItem`](#o-choosemenuitem)): then every test is asked, since the one that says where the menu is need not be the cheap one that sees it.
 
 **A test that has not answered yet** is not asked again until it does. It holds up none of the other tests, and its word stands meanwhile, so a slow test does not make a menu it sees flicker. There is no timeout: a test that never answers again after seeing a menu keeps that menu open until the overlay leaves the front, and the log names a test whose answer has been outstanding for 20 ticks. A test that raises has answered no, and a second answer to one question is ignored; each is logged once per test. When the overlay leaves the front every word is dropped and the state starts again from nothing; an answer that arrives later for a question asked before that is ignored.
 
@@ -726,7 +896,7 @@ The building blocks are tests like any other, to be listed where they see a plug
 | Block | Sees | Cost | Cheap |
 | --- | --- | --- | --- |
 | `O.menuTests.nativePopup` | A menu the operating system drew, open in the application in front. | One flag read, [`host.keys.nativeMenuOpen`](keys.md#host-keys-nativemenuopen). | yes |
-| `O.menuTests.newWindow` | A window of the plug-in's process that was not there when a control with `opensMenu` was activated: a popup menu drawn as a window of its own. The process is settled at that press and kept. It compares only after such a press, and stops when the windows that appeared have all gone, at `forget`, and at the next press, which starts a new comparison. While it compares, **any** new window of that process counts — a dialog as well as a menu, whether it takes the front or not; one that takes the front keeps the overlay holding its place, with no keys, until it is gone (above). A menu no control of the overlay opened is not seen. | One [`host.window.windowsOf`](window.md#host-window-windowsof) of one process per tick while it compares, nothing otherwise. | yes |
+| `O.menuTests.newWindow` | A window of the plug-in's process that was not there when a control with `opensMenu` was activated: a popup menu drawn as a window of its own. The process is settled at that press and kept. It compares only after such a press, and stops when the windows that appeared have all gone, at `forget`, and at the next press, which starts a new comparison. While it compares, **any** new window of that process counts — a dialog as well as a menu, whether it takes the front or not; one that takes the front keeps the overlay holding its place, with no keys, until it is gone (above). A menu no control of the overlay opened is not seen. It answers with the menu: `{ kind = "window", id, window, layer, class, x, y, w, h }` of the **largest** window that appeared (a toolkit can draw a popup's shadow as windows of their own, thin strips round it), the first the window list names of two the same size; `id` as [`windowsOf`](window.md#host-window-windowsof) lists it — which [`host.window.ownsPoint`](window.md#host-window-ownspoint) takes with `listed = true` — and `window` the same window as a `host.window` id where there is one (see the platform sections). | One [`host.window.windowsOf`](window.md#host-window-windowsof) of one process per tick while it compares, nothing otherwise. | yes |
 | `O.menuTests.accessibility` | An element of the Menu type anywhere in the plug-in's accessibility tree, [`host.element.find(origin, "", host.element.type.Menu)`](element.md#host-element-find). An element that stays in the tree while nothing is drawn counts as a menu for as long as it is there. | A walk of the plug-in's whole tree: measured at 50–194 ms on Windows. Answered once per [epoch](timer.md#host-epoch), which a tick does not turn over, so a tick can get the previous tick's answer. | no |
 | `O.menuTests.accessibilityAfterPress` | What `accessibility` sees, asked only from the activation of a control with `opensMenu` until that press is done with: the menu it opened was seen and has closed (answered no twice in a row), one of the overlay's own keys arrived with no menu open, the overlay left the front, or the plug-in has the keyboard again after the overlay held its place over a menu that was a window in front. For a plug-in whose tree can hold a Menu element while nothing is open: such an element keeps the overlay out only until the user leaves the plug-in and comes back. A menu no control of the overlay opened is not seen. | The same walk from a press until it is done with, nothing otherwise. | no |
 
@@ -775,13 +945,124 @@ ov:attachEmbedded(spec, { menus = { O.menuTests.nativePopup, list, fileMenu } })
 
 ### Windows {#o-menutests-windows}
 
-`nativePopup` is true while the foreground thread is in menu mode — a `#32768` popup menu, a menu bar, a window's system menu. A menu open in another application does not count. `newWindow` compares visible top-level windows of the process, tooltips left out, so a popup the toolkit draws as a tool window of its own counts. `accessibility` and `accessibilityAfterPress` are a UI Automation search of the plug-in control's subtree for any element of the Menu type, with no visibility test: a Qt menu is seen while it is up, and so is any menu a plug-in keeps in its tree while hidden.
+`nativePopup` is true while the foreground thread is in menu mode — a `#32768` popup menu, a menu bar, a window's system menu. A menu open in another application does not count. `newWindow` compares visible top-level windows of the process, tooltips left out, so a popup the toolkit draws as a tool window of its own counts; its answer's `window` is the popup's HWND, which is what every `host.window` call names, and its `id` the same number, so [`host.window.ownsPoint`](window.md#host-window-ownspoint) can be asked about it either way. `accessibility` and `accessibilityAfterPress` are a UI Automation search of the plug-in control's subtree for any element of the Menu type, with no visibility test: a Qt menu is seen while it is up, and so is any menu a plug-in keeps in its tree while hidden.
 
 Holding its place: a window is "in front" when it is the foreground window. A `#32768` menu and a menu bar's menus do not become it, so an overlay never needs to hold its place for them; a toolkit's popup that takes the foreground does — Komplete Kontrol's in REAPER (2026-09-26). That window is a full-screen one of `reaper.exe`, and after `Escape` Komplete Kontrol most likely only hides it: no foreground event came for about four seconds, which a destroyed window would most likely have caused — not measured. While a hidden window is the foreground window, [`host.window.foreground()`](window.md#host-window-foreground) answers it with `shown = false` — hidden, minimised and cloaked all count as not shown — and `host.window.active()` answers `nil` once the epoch has turned over; until then it can still answer the window it read while that was shown. The window of the press is brought back with `SetForegroundWindow`, whose `true` means Windows accepted the request: the change is made when REAPER's thread gets to it, with a foreground event, and it does not put the keyboard on any particular control. Where the keyboard is afterwards is REAPER's to decide: in the plug-in, the overlay is in front with its keys; on the FX window itself or its FX list, which the [chrome gate](#o-attachembedded) counts as REAPER's own, it is out until the keyboard reaches the plug-in. The process is the window's `app.pid`: a bridged plug-in's popup is a window of the bridge process, so it is held when the window in front at the press belongs to the bridge as well (REAPER's own bridge window), and not when the bridged plug-in is drawn inside the host's FX window — the overlay then leaves the front for it as it always did.
 
 ### macOS {#o-menutests-macos}
 
-`nativePopup` counts the frontmost application's `AXMenuOpened` / `AXMenuClosed` notifications: a menu counts as open from its opening notification until its closing one, however long it stays up, and the count is cleared when another application comes to the front (see [`host.keys.nativeMenuOpen`](keys.md#host-keys-nativemenuopen)). Holding its place asks [`host.window.active()`](window.md#host-window-active) for the window in front, so it applies when a plug-in's popup becomes the application's focused window. A popup that does not become it leaves the overlay's window in front, and holding its place has no part in what happens then: the binding's own match decides — on the DAW's plug-in panel of [`attachEmbedded`](#o-attachembedded-macos), or a function's control, the accessibility focus on a menu item outside the panel takes the overlay out, as any element outside it does. `host.window.active()` answers nil while the frontmost application has no window (the Finder after a click on the desktop): a hold over a menu the tests still see stands through that, and ends once they stop seeing it. The window that gets the keyboard is the frontmost application's focused window, and [`host.window.foreground()`](window.md#host-window-foreground) reports it as shown unless it is minimised, so a focused menu window brings nothing back here. While the application does not answer, `foreground()` is `nil`, and nothing is brought back either: the runtime does not act on a state it could not read, and does not call `host.window.focus` on an application that is not answering. The reading itself is still taken once at each hold that ends with no test seeing the menu: two accessibility reads of the frontmost application, which against one that has just stopped answering can take up to the one-second timeout once, on the main thread. If the window of the press is brought back, `host.window.focus` raises it and activates its application, and `true` means raised and in front, not that the keyboard is in it (see [`host.window.focus`](window.md#host-window-focus)). The panel and the function form of `attachEmbedded` read an empty focus chain as "not in the plug-in", so the overlay is back once the chain names something inside the panel. `newWindow` compares on-screen windows by owning process with no filter at all, so a tooltip or a window at any level counts as well; an `NSMenu` sits at window level 101. `accessibility` and `accessibilityAfterPress` are special-cased by the host to "is a menu open in this application", without descending the menu bar. An application the host has found not answering is left alone for 5 seconds, and in that time the answer is no: a menu only these tests see then counts as closed after two ticks, and as open again once the application answers. The one-miss rule does not cover that.
+`nativePopup` counts the frontmost application's `AXMenuOpened` / `AXMenuClosed` notifications: a menu counts as open from its opening notification until its closing one, however long it stays up, and the count is cleared when another application comes to the front (see [`host.keys.nativeMenuOpen`](keys.md#host-keys-nativemenuopen)). Holding its place asks [`host.window.active()`](window.md#host-window-active) for the window in front, so it applies when a plug-in's popup becomes the application's focused window. A popup that does not become it leaves the overlay's window in front, and holding its place has no part in what happens then: the binding's own match decides — on the DAW's plug-in panel of [`attachEmbedded`](#o-attachembedded-macos), or a function's control, the accessibility focus on a menu item outside the panel takes the overlay out, as any element outside it does. `host.window.active()` answers nil while the frontmost application has no window (the Finder after a click on the desktop): a hold over a menu the tests still see stands through that, and ends once they stop seeing it. The window that gets the keyboard is the frontmost application's focused window, and [`host.window.foreground()`](window.md#host-window-foreground) reports it as shown unless it is minimised, so a focused menu window brings nothing back here. While the application does not answer, `foreground()` is `nil`, and nothing is brought back either: the runtime does not act on a state it could not read, and does not call `host.window.focus` on an application that is not answering. The reading itself is still taken once at each hold that ends with no test seeing the menu: two accessibility reads of the frontmost application, which against one that has just stopped answering can take up to the one-second timeout once, on the main thread. If the window of the press is brought back, `host.window.focus` raises it and activates its application, and `true` means raised and in front, not that the keyboard is in it (see [`host.window.focus`](window.md#host-window-focus)). The panel and the function form of `attachEmbedded` read an empty focus chain as "not in the plug-in", so the overlay is back once the chain names something inside the panel. `newWindow` compares on-screen windows by owning process with no filter at all, so a tooltip or a window at any level counts as well; an `NSMenu` sits at window level 101. Its answer's `id` is the window server's `CGWindowID`, a numbering `host.window` ids are not in, so its `window` is `nil`; what is drawn over the menu is asked by that `id`, with [`host.window.ownsPoint`](window.md#host-window-ownspoint)'s `listed = true`. `accessibility` and `accessibilityAfterPress` are special-cased by the host to "is a menu open in this application", without descending the menu bar. An application the host has found not answering is left alone for 5 seconds, and in that time the answer is no: a menu only these tests see then counts as closed after two ticks, and as open again once the application answers. The one-miss rule does not cover that.
+
+## O\:chooseMenuItem(spec) — choosing an item in a plug-in's menu {#o-choosemenuitem}
+
+**Signature:** `O:chooseMenuItem(spec: { label: string?, at: {number, number} | ((overlay) -> {number, number}?), fromRight: boolean?, rawOrigin: boolean?, button: ("left" | "right" | "middle")?, menuItem: {number, number} | ((overlay, menu, factor) -> {number, number} | false | nil), retries: number?, onDone: ((overlay, chosen: boolean, why: string?) -> ())? }) -> boolean` · the control form: `menuItem` on [`addHotspotButton`](#o-addhotspotbutton)
+
+Opens a plug-in's own popup menu and chooses an item in it: clicks the opener at `at`, clicks the item once one of the overlay's [menu tests](#o-menutests) **sees** the menu and says where it is, and counts it as chosen once the menu is seen to have taken it. A JUCE plug-in's menus are popups it draws itself — windows of their own, with no item anybody can press through the accessibility layer; VPS Avenger's MENU, zoom list and redo list are such popups by the avenger_control project's account. The obvious alternative, a hotspot with `points = { opener, item }`, does not work: every click of a sequence asks [`host.window.ownsPoint`](window.md#host-window-ownspoint) of the plug-in's window first, a popup is a window of its own over it, so the item's click is refused as covered; and the `settle` between the two would be a timer deciding that the menu is up by then.
+
+The method is for a module's own code — a stepper whose step is a choice from a list, as Avenger's zoom is. A hotspot with `menuItem` does the same as a control: its `at` (with its `button`) is the opener, its `menuItem` the item, its `retries` the retries, and it has no `onDone`.
+
+`label` names the choice in what is said and logged; `"Menu item"` when it is not given.
+
+What happens, in order:
+
+1. **The opener** is placed like a hotspot's `at` — origin, frame, [scale](#o-scale), `fromRight`, `rawOrigin` — and checked like any hotspot's click (inside the origin, nothing else drawn there). One that cannot be placed — an `at` function that answers `nil`, or no factor — is **said**, `"<label> is not available now"`, unlike a hotspot's silent `nil`; one that is refused is said as the check says it. Either way nothing more happens: `onDone(overlay, false, "unplaced" | "refused")`, and the method returns `false`.
+2. **The press.** Only then does it count as the press of a control with `opensMenu`: the tests run on every tick from here, `newWindow` takes the window list it compares against, and in a calibrating run the [menu shots](calibrating.md#host-calibrating) are taken. An item the overlay was still waiting to choose for **another** control is dropped (logged). The opener is clicked with `button` (left unless given), and the method returns `true`; the item is chosen later.
+3. **The menu.** Each answer of a test that sees a menu is looked at, as it arrives, on the tick it arrives or in a test's callback. One that says where the menu is — a table with numbers `x`, `y`, `w`, `h`, as `newWindow` answers — places the item. A table `menuItem` is the item's offset from the menu's top-left corner, a **distance**: scaled at the factor the opener was placed with (the popup is drawn at the zoom it opened at, and a factor read off the plug-in's screen may not be readable while the popup covers it), never framed. A `menuItem` function is called with the overlay, that table and that factor (`nil` in an overlay without a scale), and answers the offset in **screen pixels** — it works from the menu's rectangle, which is in screen pixels, so its answer is not scaled again, as a `dragBy` function's is not; `false` says "this window is not my menu" (a tooltip that appeared first), and the next answer is looked at; `nil` is an item that cannot be placed. An answer that sees a menu without saying where — `nativePopup`, the accessibility tests — places nothing, and is logged once; another test on the list may still say where, and while an item waits every test on the list is asked, a cheap one that sees the menu holding back none.
+4. **The checks.** The item must lie inside the menu's rectangle; if it does not, it is not clicked, the log says where it fell, and the next answer is looked at — a later answer can be the menu itself where this one was something else that appeared. Then what is drawn there: a menu that is a window is asked [`host.window.ownsPoint`](window.md#host-window-ownspoint) about *itself* — by its `host.window` id (`window`, which `newWindow` gives on Windows), or by its `id` in the window list's numbering with `listed = true` (macOS) — and a `false` refuses the click; a menu with no `kind` — a rectangle a module's own test answered, for a menu painted inside the plug-in — gets the check every click of the overlay gets.
+5. **The click**, at once, in that same pass: no wait of any kind stands between the menu being seen and the item being clicked.
+6. **Taken, or clicked again.** A menu does not always take a click that comes right after it opened: JUCE's popup ignores a mouse-up in its first moments (a quarter of a second in its source as it was read for this, not measured against any JUCE a plug-in here ships), and the first tick that lists a new window can come sooner. So the item keeps waiting after its click. An answer to a question asked on a **later** tick that still shows the same menu — the same window, at the same place and size — is a click the menu did not take: the item is checked again and clicked again, at most `retries` more times (default 3; a count of answers, not a time). The menu closing — for the menu tests, two answers in a row that do not see it — an answer that shows another window in its place, or the overlay leaving the front or moving on after the click, is the choice **taken**: `onDone(overlay, true)`. `retries = 0` is for a menu whose item keeps it open (a tick box in a menu), where a second click would be a second choice: chosen at the click, and not followed. The menu then closes the way any menu does for the menu tests, and the keys come back to the overlay with it.
+
+A second call for the **same** `label` while its item is still waiting for its menu — a double Return, a held arrow on a stepper — clicks nothing: `"… pressed again while its menu is still being waited for — the opener is not clicked again; the first press stands"` in the log, `onDone(overlay, false, "busy")` for the second call, and `false` from it. The first press is not disturbed: one of the overlay's own keys that is such a repeat does not count as the user moving on either.
+
+Nothing more is clicked, the item is dropped, `onDone(overlay, false, why)` is called, and:
+
+| When | `why` | Said | Logged (`[menu item] '<overlay>': '<label>' not chosen — …`) |
+| --- | --- | --- | --- |
+| no test saw a menu within 8 seconds of the press — the time the tests run on every tick after a press, a bound on how long a press waits for its menu, not a guess that it is up | `due` | `"<label>: no menu was seen, nothing was chosen"` | `no menu test saw a menu within 8000 ms of the press` |
+| the menu was seen only by tests that do not say where, by then or when it closes | `due`, `closed` | `"<label>: the menu does not say where it is, nothing was chosen"` | `test '<name>' sees a menu but does not say where it is, …` |
+| the `menuItem` function took no window seen for its menu, by then or when it closes | `due`, `closed` | `"<label>: no menu it can be chosen in was seen, nothing was chosen"` | `its menuItem function took no window seen for its menu (the last at …)` |
+| the item fell outside every menu seen, by then or when it closes | `due`, `closed` | `"<label> is not where it should be"` | `the item, at (x,y) of x,y wxh, is outside the menu that was seen` |
+| the menu closed before any of that | `closed` | `"<label>: the menu closed before anything was chosen"` | `the menu closed before a test placed the item` |
+| the item cannot be placed: `menuItem` raised or answered `nil` or no `{dx, dy}` | `unplaced` | `"<label> is not available now"` | `the item cannot be placed now: <why>` |
+| another window is drawn over the item, at its click or a retry | `covered` | `"something else is covering <label>"` | `(x,y) is inside the menu's window …, but another window is drawn there` |
+| a menu drawn inside the plug-in, and the overlay's own check refused the item | `refused` | what that check says | `refused, and said` |
+| the menu was still there after the last retry | `untaken` | `"<label>: the menu did not take the choice"` | `the menu was still there after <n> click(s) on the item at (x,y)` |
+| one of the overlay's own keys arrived with no menu open, the overlay left the front, another control's press came, or the overlay is on another window by the time the menu is seen or the 8 seconds are over | `key`, `left`, `press`, `moved` | nothing: the user moved on, and the key says what it does | `one of the overlay's own keys came first, …`, `the overlay left the front first`, `another press came first`, `the overlay is on another window now` |
+
+At the call itself `why` is `inactive` (the overlay is not in front: nothing said), `no tests` (no menu tests: `"<label> is not available now"`), `unplaced` or `refused` (step 1), or `busy` (a repeat, above). The method **raises** at the call for a `spec` that is not a table or has no `at` of `{x, y}` or a function, a `menuItem` that is neither `{dx, dy}` nor a function, a `button` other than `"left"`, `"right"` or `"middle"`, and a `retries` that is not a whole number from 0: a mistake that would otherwise show only after the menu had opened.
+
+A menu that stays open after its item was refused keeps the keys, as any open menu does: `Escape` goes to it, and a module that knows how its plug-in's popup closes can close it in `onDone` — [`O:menuOpen`](#o-menuopen) says whether a menu still counts as open. A menu that appears after the item was dropped is an ordinary menu: nothing is chosen in it.
+
+The log says every step: `[menu item] '<overlay>': '<label>' opening its menu, clicking (x,y)`; `… clicked its opener — the item is chosen when a menu test sees the menu, for up to 8000 ms`; `… — test 'newWindow' sees the menu at 362,80 120x200 (window id 300) (its window id 300 is asked what is drawn there); choosing item (10,20) at (372,100)`; `… — test 'newWindow' still sees the menu at … a tick after the item's click, which it did not take: clicking (372,100) again, 2 of 4`; `… chosen — clicked 1 time(s) at (372,100); the menu has closed`; or a `not chosen` line from the table. In a calibrating run, a press that was photographed also writes the **menu item shot** — the menu with a crosshair on the item, taken just before its first click (see [calibrating](calibrating.md#host-calibrating)) — and the calibration shot marks the opener of every label this method has been called with, at the `at` it was last given, as `[menu opener]`, after the overlay's controls.
+
+**Cost.** The opener's placement and click, one origin resolution at the press; per answer that sees a menu, the item's placement and one `ownsPoint`; per retry, the same again and one click; a calibrating run adds one capture before the item's first click. Nothing is asked of the screen that the menu tests were not asking anyway.
+
+```luau
+-- A stepper over a plug-in's zoom list: each step opens the list and chooses the entry beside the
+-- current one; the stepper then reads the zoom field again and says what it became. `zoomIndex`
+-- and `readZoomText` are the module's own; the numbers are illustrative.
+local ENTRIES, PITCH = 21, 11.5   -- rows in the list, 11.5 apart at 50 %
+ov:addStepper({
+  label = "Zoom",
+  settle = 3000,                                  -- at most this long for the new zoom to show
+  text = function(o) return readZoomText(o) end,
+  onStep = function(dir, o)
+    local i = zoomIndex(o)                        -- which of the 21 entries is the current zoom
+    if not i or not (i + dir >= 1 and i + dir <= ENTRIES) then return end  -- nothing beside it
+    local opened = o:chooseMenuItem({
+      label = "Zoom",
+      at = { 21, 14 },
+      -- The list is drawn at the zoom it opened at, so its rows are PITCH times the factor the
+      -- zoom field was clicked with; the answer is in screen pixels from the list's corner.
+      menuItem = function(_, menu, k)
+        if not k then return nil end
+        return { 12 * k, (6 + PITCH * (i - 1 + dir)) * k }
+      end,
+    })
+    if not opened then return false end             -- a repeat, or refused and said: nothing to watch
+  end,
+})
+```
+
+### Windows
+
+A popup drawn as a top-level window of the plug-in's process (for a plug-in in a DAW, the DAW's process, unless the DAW bridges it) is what `newWindow` sees; its answer's `window` is that window's HWND, and the item is checked with `ownsPoint` against it — the window manager's hit test, taken up to the top-level window on both sides, which sees through a window that lets clicks pass. A toolkit can draw a popup's drop shadow as separate windows beside it, which is why the largest new window is taken as the menu.
+
+### macOS
+
+`newWindow` lists windows as the window server numbers them (`CGWindowID`), which is not the numbering of `host.window` ids, so its answer has no `window`, and the item is checked by the menu's `id` with `ownsPoint`'s `listed = true`: the window server's own hit test, with `nil` — no answer, which lets the click go — where it names no window, a window of VoiceOver's own, or one of this application's. The menu's rectangle and the click are both in points. A tooltip under the pointer is a window of the process as well, and nothing filters it: the largest new window is the menu, and an item that falls outside a smaller one that came first waits for the next answer (step 4).
+
+## O\:menuOpen() {#o-menuopen}
+
+**Signature:** `O:menuOpen() -> boolean`
+
+Whether a menu counts as open over the overlay now: one of its [menu tests](#o-menutests)' word is that one is. `false` for an overlay with no menu tests, and while it is not in front. For a module's own code that tidies up after a menu of its own — closing a popup a choice left open by clicking its opener again — which must not open one that has gone. A table lookup.
+
+```luau
+-- VPS Avenger (modules/vps-avenger, shortened): a choice that could not be made leaves the popup
+-- open; the zoom field closes the zoom list, as a second click on it does in the plug-in.
+onDone = function(o, chosen, why)
+  if not chosen and why == "unplaced" and o:menuOpen() then
+    local x, y = o:toScreen(21, 14)
+    if x then host.input.click(x, y) end
+  end
+end,
+```
+
+## O\:resume(on) {#o-resume}
+
+**Signature:** `O:resume(on: boolean) -> Overlay`
+
+Whether the overlay, coming to the front again on the window it was last in front on, resumes on the control the user was on (`true`, the default: `Alt+Tab` out and back should not throw them back to the start), or starts on its first control as it does on a new window (`false`). For a box drawn **inside** a plug-in's window, whose origin is that window every time it appears: VPS Avenger's warning box comes up for Initialize and again for Save, and resuming would put the second on the button the first was answered with — a user who counts stops from the box's text would land on the other button. Called before the overlay is bound; afterwards it raises. A second call replaces the first.
+
+```luau
+local box = O.new("Warning box")
+box:addStaticText({ label = "Avenger asks", text = boxText })
+box:addHotspotButton({ label = "Yes", rawOrigin = true, at = yesPoint })
+box:addHotspotButton({ label = "No", rawOrigin = true, at = noPoint })
+box:resume(false)   -- every box starts on its own text
+box:bind(BINDING, { specificity = O.layer.dialog })
+```
 
 ## O\:gate(fn) / O\:landmark(image) {#o-gate}
 
@@ -846,6 +1127,26 @@ settings:gate(function(origin)
   return true           -- absence of an answer is not an answer, so the last one stands
 end)
 settings:typingWhen(function() return settingsDark end)
+```
+
+## O\:onActivate(fn) / O\:onDeactivate(fn) {#o-onactivate}
+
+**Signature:** `O:onActivate(fn: (overlay) -> ()) -> Overlay` · `O:onDeactivate(fn: (overlay) -> ()) -> Overlay`
+
+Hooks the module runs each time the overlay comes to the front and each time it leaves it. `onActivate` runs after the overlay has taken its keys and before its first control is announced (350 ms later), so the origin is known and a hook can prepare what that announcement reads; it is called guarded — a hook that raises is logged, `[overlay] <label>: onActivate failed: …`, and the overlay comes up all the same. `onDeactivate` runs after the keys have been handed back and the menu state dropped, and is not guarded: what it raises leaves the overlay's deactivation into the window event that caused it — the overlay is inactive and its keys are released by then — and the host logs it there. Both are set before the overlay is bound; afterwards they raise. One of each per overlay: a second call replaces the first.
+
+"Comes to the front" is the overlay's activation, not a window event: an overlay that holds its place over its own menu stays active, and comes to the front again only after it has left it — so a hook that forgets a per-window reading here forgets it at every return to the plug-in, Alt+Tab included.
+
+```luau
+-- A scanning dialog says when a scan it committed to has gone (modules/komplete-kontrol does
+-- this, keeping the flag in a field of its own; a module's state belongs in `o.state`).
+scan:onDeactivate(function(o)
+  if o.state.scanCommitted then host.speech.output("Scanning stopped", { interrupt = true }) end
+  o.state.scanCommitted = false
+end)
+
+-- A module that reads the plug-in's zoom once per stay in front forgets it on every return.
+ov:onActivate(function(o) o.state.zoom = nil end)
 ```
 
 ## Plugin base + library overlays (the cell model) {#plugin-base-library-overlays}

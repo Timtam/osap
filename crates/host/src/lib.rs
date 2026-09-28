@@ -24,6 +24,16 @@ mod overlay_passthrough_tests;
 /// the same scripted host with the window prelude's real matcher.
 #[cfg(test)]
 mod overlay_host_panel_tests;
+/// The runtime's coordinate scaling (O:scale), and ARC ON:EAR held to its old geometry on it.
+#[cfg(test)]
+mod overlay_scale_tests;
+/// Choosing an item from a plug-in's own popup menu, once a menu test sees it.
+#[cfg(test)]
+mod overlay_menu_item_tests;
+/// VPS Avenger's module loaded against the same scripted host: its header read, its zoom and
+/// scale, its clicks, its menus and its warning box.
+#[cfg(test)]
+mod overlay_avenger_tests;
 mod gui;
 mod image_search;
 /// One running copy per user: the lock, and the request a second start sends — see the file.
@@ -5802,16 +5812,31 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     )?;
     // host.window.focusChain() — controls from the focused element up to its
     // top-level window, for detecting focus inside an embedded plugin.
-    // host.window.ownsPoint(id, x, y) -> true | false | nil.
+    // host.window.ownsPoint(id, x, y, opts?) -> true | false | nil.
     //
     // nil means "this platform cannot say", and a caller must read that as permission rather
     // than refusal: a check with no answer must not block what it cannot judge.
+    //
+    // `opts.listed = true`: `id` is a window as host.window.windowsOf lists it, which on a Mac is
+    // the window server's number rather than a host.window id — how the overlay runtime asks
+    // about a popup menu it knows only from that list. Anything but a table for `opts`, or a
+    // `listed` that is not true or false, raises.
     let sh = shared.clone();
     win.set(
         "ownsPoint",
-        lua.create_function(move |_, (id, x, y): (isize, i32, i32)| {
-            Ok(sh.backend.window_owns_point(id, x, y))
-        })?,
+        lua.create_function(
+            move |_, (id, x, y, opts): (isize, i32, i32, Option<Table>)| {
+                let listed = opt_bool(opts.as_ref(), "listed", false, "host.window.ownsPoint")?;
+                if listed {
+                    // A negative number is no window in any list: nothing can be said of it.
+                    let Ok(id) = u64::try_from(id) else {
+                        return Ok(None);
+                    };
+                    return Ok(sh.backend.listed_window_owns_point(id, x, y));
+                }
+                Ok(sh.backend.window_owns_point(id, x, y))
+            },
+        )?,
     )?;
 
     let sh = shared.clone();

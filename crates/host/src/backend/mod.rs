@@ -775,6 +775,15 @@ pub trait Backend {
         None
     }
 
+    /// The same question about a window as [`windows_of`](Self::windows_of) lists it — its
+    /// [`WindowSpot::id`], which is not a window handle on every platform. A popup a plug-in
+    /// draws as a window of its own is known to the overlay runtime only from that list, and
+    /// clicking an item in it wants to know that nothing is drawn over the item. The same three
+    /// answers, and `None` from a backend that cannot say.
+    fn listed_window_owns_point(&self, _id: u64, _x: i32, _y: i32) -> Option<bool> {
+        None
+    }
+
     /// Child controls (descendant windows) of a top-level window, for detecting
     /// embedded plugins by control class + locating their coordinate origin.
     fn window_controls(&self, hwnd: isize) -> Vec<ControlInfo>;

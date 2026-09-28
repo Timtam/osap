@@ -1389,11 +1389,26 @@ fn win_info(el: CFRetained<AXUIElement>, require_title: bool) -> Option<WinInfo>
 /// Main thread only, which the pump is; anywhere else it answers `None` rather than
 /// touching AppKit from the wrong thread.
 pub(super) fn window_owns_point(hwnd: isize, x: i32, y: i32) -> Option<bool> {
-    let mtm = objc2::MainThreadMarker::new()?;
+    objc2::MainThreadMarker::new()?;
     let ours = window_id(hwnd);
     if ours == 0 {
         return None;
     }
+    number_owns_point(ours, x, y, &format!("window {hwnd}"))
+}
+
+/// `window_owns_point` for a window as `windows_of` lists it: its id there IS the window
+/// server's `CGWindowID`, which is what the hit-test answers in, so no pairing is needed. The
+/// same three answers. An id beyond the 32 bits a `CGWindowID` has is no window: `None`.
+pub(super) fn listed_window_owns_point(id: u64, x: i32, y: i32) -> Option<bool> {
+    objc2::MainThreadMarker::new()?;
+    let ours = u32::try_from(id).ok().filter(|n| *n != 0)?;
+    number_owns_point(ours, x, y, &format!("window {ours} of the window list"))
+}
+
+/// The hit-test itself, against the window server's number `ours`; `what` names it in the log.
+fn number_owns_point(ours: u32, x: i32, y: i32, what: &str) -> Option<bool> {
+    let mtm = objc2::MainThreadMarker::new()?;
     let (_, height) = super::capture::screen_size();
     if height <= 0 {
         return None;
@@ -1424,7 +1439,7 @@ pub(super) fn window_owns_point(hwnd: isize, x: i32, y: i32) -> Option<bool> {
             "macos",
             &format!(
                 "the point {x},{y} is under window {hit} of {} (pid {pid}, layer {layer}), not \
-                 under window {hwnd} — a click there would land in that application",
+                 under {what} — a click there would land in that application",
                 exe_for_pid(pid)
             ),
         );

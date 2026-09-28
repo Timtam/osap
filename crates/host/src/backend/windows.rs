@@ -1058,6 +1058,12 @@ impl Backend for WindowsBackend {
         }
     }
 
+    /// `windows_of` lists top-level windows by their HWND, so a listed window's id is a handle
+    /// already, and the question is `window_owns_point`'s.
+    fn listed_window_owns_point(&self, id: u64, x: i32, y: i32) -> Option<bool> {
+        self.window_owns_point(id as isize, x, y)
+    }
+
     fn window_controls(&self, hwnd_val: isize) -> Vec<ControlInfo> {
         let mut hwnds: Vec<isize> = Vec::new();
         unsafe {

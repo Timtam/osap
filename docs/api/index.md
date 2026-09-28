@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 155 entries.
+Every call the platform offers a module, in one place. 163 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -44,7 +44,7 @@ The overlay is the exception in shape rather than degree: it is a **module**, so
 
 ## Coordinates {#coordinates}
 
-Every coordinate the platform takes or returns — window bounds, regions, clicks, hits — is a screen coordinate with its origin at the top left of the primary display. On **Windows** it is a physical device pixel, because the application is per-monitor DPI aware; on **macOS** it is a point. The two agree only at 100 % scaling, and a Retina Mac is exactly half of the same panel on Windows at 200 %. Coordinates measured by a tool that is not DPI-aware, on a Windows display scaled above 100 %, have to be multiplied by the scale factor. A fractional coordinate is cut toward zero without an error, except by the calls that read regions strictly — the cells calls and `host.ocr.read` — which raise for a corner that is not a whole number. Regions are `{ x1, y1, x2, y2 }` with `x2` and `y2` exclusive, and every `host.screen` and `host.ocr` call that takes a region also takes one as fractions of a window's client area, `{ window = w, fraction = { x1, y1, x2, y2 } }` — and `host.screen.pixel` a point, `{ window = w, fraction = { x, y } }` — which follows the window across sizes, scalings and platforms. A region table that is neither form raises; only a region left out is the whole primary screen — see [Region form](screen.md#region-form). An [overlay](overlay.md) control's `region` and `ocrLabel` options take only corners, relative to the overlay's origin.
+Every coordinate the platform takes or returns — window bounds, regions, clicks, hits — is a screen coordinate with its origin at the top left of the primary display. On **Windows** it is a physical device pixel, because the application is per-monitor DPI aware; on **macOS** it is a point. The two agree only at 100 % scaling, and a Retina Mac is exactly half of the same panel on Windows at 200 %. Coordinates measured by a tool that is not DPI-aware, on a Windows display scaled above 100 %, have to be multiplied by the scale factor. A fractional coordinate is cut toward zero without an error, except by the calls that read regions strictly — the cells calls and `host.ocr.read` — which raise for a corner that is not a whole number. Regions are `{ x1, y1, x2, y2 }` with `x2` and `y2` exclusive, and every `host.screen` and `host.ocr` call that takes a region also takes one as fractions of a window's client area, `{ window = w, fraction = { x1, y1, x2, y2 } }` — and `host.screen.pixel` a point, `{ window = w, fraction = { x, y } }` — which follows the window across sizes, scalings and platforms. A region table that is neither form raises; only a region left out is the whole primary screen — see [Region form](screen.md#region-form). An [overlay](overlay.md) control's `region` and `ocrLabel` options take only corners, relative to the overlay's origin, or a function answering them; an overlay with [`O:scale`](overlay.md#o-scale) scales them, and every other authored coordinate but a `rawOrigin` control's, by a factor it asks for at each use, and rounds the result to whole pixels on Windows and whole points on macOS.
 
 ## Coming from another tool {#coming-from}
 
@@ -68,8 +68,10 @@ Controls a module defines over a plug-in window, walked with Tab and spoken alou
 | | |
 |---|---|
 | [`Bindings — O.window / O.embedded / :with / O.hosts / O:bind`](overlay#bindings) | `O.window(matcher, opts?) -> Binding` · `O.embedded(spec, opts?) -> Binding` · `Binding:with(over) -> Binding` · `O.hosts(...)… |
+| [`O.contentSize(origin)`](overlay#o-contentsize) | The width and height of an origin's **content**, which is what coordinates are measured against |
 | [`O.doubleClick(x, y)`](overlay#o-doubleclick) | Two clicks at the same point, far enough apart in time to **be** a double-click. |
 | [`O.layer`](overlay#o-layer) | The specificity ladder within a slot, named |
+| [`O.memoByEpoch(fn)`](overlay#o-memobyepoch) | Memoizes `fn` for the current epoch only |
 | [`O.memoByOrigin(fn, opts?)`](overlay#o-memobyorigin) | Memoizes a per-window property that does not change while that window exists |
 | [`O.menuTests — seeing a plug-in's menus`](overlay#o-menutests) | The tests that tell an overlay its plug-in has a menu open, listed in its `menus` option |
 | [`O.new(label)`](overlay#o-new) | Creates a new overlay object. |
@@ -86,12 +88,18 @@ Controls a module defines over a plug-in window, walked with Tab and spoken alou
 | [`O:afterIdle(key, ms, fn)`](overlay#o-afteridle) | Runs `fn` **once**, `ms` after the last call carrying the same `key`. |
 | [`O:attach(matcher, opts)`](overlay#o-attach) | Binds the overlay as a **standalone** context |
 | [`O:attachEmbedded(spec, opts)`](overlay#o-attachembedded) | Binds the overlay as an **embedded** context: active while keyboard focus is inside a plug-in hosted in a DAW. |
+| [`O:chooseMenuItem(spec) — choosing an item in a plug-in's menu`](overlay#o-choosemenuitem) | Opens a plug-in's own popup menu and chooses an item in it |
 | [`O:focusNext()`](overlay#o-focusnext) | Moves focus to the next control (wrapping) and speaks it, moving the mouse onto OCR controls if `hoverToRead` is set. |
 | [`O:focusPrev()`](overlay#o-focusprev) | Moves focus to the previous control (wrapping) and speaks it. |
 | [`O:frame(fn)`](overlay#o-frame) | Shifts the overlay's whole coordinate frame |
 | [`O:gate(fn) / O:landmark(image)`](overlay#o-gate) | `gate(fn)` sets an extra activation condition ANDed onto the context match |
 | [`O:group(pred, build)`](overlay#o-group) | Adds everything `build` adds under a shared condition: `pred` is ANDed onto each control's own `when`, and groups nest. |
+| [`O:menuOpen()`](overlay#o-menuopen) | Whether a menu counts as open over the overlay now: one of its menu tests' word is that one is. |
+| [`O:onActivate(fn) / O:onDeactivate(fn)`](overlay#o-onactivate) | Hooks the module runs each time the overlay comes to the front and each time it leaves it. |
 | [`O:origin() / O:hwnd()`](overlay#o-origin) | The active context's coordinate window — the plugin control when embedded, the window when standalone — and its handle. |
+| [`O:resume(on)`](overlay#o-resume) | Whether the overlay, coming to the front again on the window it was last in front on, resumes on the control the user was on (`true`, the default |
+| [`O:scale(fn, opts?)`](overlay#o-scale) | Scales every authored coordinate of the overlay by the factor `fn` answers, for a plug-in that zooms its whole interface. |
+| [`O:toScreen(x, y, opts?) / O:toScreenRect(r, opts?)`](overlay#o-toscreen) | Where an authored point, or an authored rectangle `{x1, y1, x2, y2}`, lands on screen now |
 | [`O:typingWhen(fn)`](overlay#o-typingwhen) | `fn() -> boolean`. |
 | [`O:watch(spec)`](overlay#o-watch) | Waits for something to **change**, rather than for a length of time. |
 
@@ -112,7 +120,7 @@ Finding windows and the surfaces inside them, and reacting when the focus moves.
 | [`host.window.list(filter?)`](window#host-window-list) | Returns an array of window tables for all enumerable top-level windows |
 | [`host.window.onFocus(cb)`](window#host-window-onfocus) | Registers `cb` to fire whenever the keyboard focus moves — including within the same top-level window. |
 | [`host.window.onTrigger(matcher, opts, cb)`](window#host-window-ontrigger) | Registers `cb` to fire on every foreground change for which the new active window satisfies `matcher`. |
-| [`host.window.ownsPoint(id, x, y)`](window#host-window-ownspoint) | Whether the window `id` belongs to is the one drawn at that screen point. |
+| [`host.window.ownsPoint(id, x, y, opts?)`](window#host-window-ownspoint) | Whether the window `id` belongs to is the one drawn at that screen point. |
 | [`host.window.recheck()`](window#host-window-recheck) | Asks the host to run a focus-change round at the end of the current tick |
 | [`host.window.test(matcher, win)`](window#host-window-test) | Returns whether the given window table satisfies `matcher` (the same logic `find`/`findAll` apply). |
 | [`host.window.windowsOf(pid)`](window#host-window-windowsof) | Every on-screen window a process owns, as the **window manager** lists them rather than as accessibility does. |

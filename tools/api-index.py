@@ -328,7 +328,10 @@ CAPABILITIES = [
     'window across sizes, scalings and platforms. A region table that is neither form raises; '
     'only a region left out is the whole primary screen — see [Region form](screen.md#region-form). '
     'An [overlay](overlay.md) control\'s `region` and `ocrLabel` options take only corners, '
-    'relative to the overlay\'s origin.',
+    'relative to the overlay\'s origin, or a function answering them; an overlay with '
+    '[`O:scale`](overlay.md#o-scale) scales them, and every other authored coordinate but a '
+    '`rawOrigin` control\'s, by a factor it asks for at each use, and rounds the result to whole '
+    'pixels on Windows and whole points on macOS.',
     '',
     '## Coming from another tool {#coming-from}',
     '',

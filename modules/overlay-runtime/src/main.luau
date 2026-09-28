@@ -124,6 +124,9 @@ function O.new(label)
       -- differs — i.e. a genuinely NEW window opened — but resumes where the user was
       -- when it's the SAME window regaining focus (Alt+Tab out and back). See _activate.
       _lastActiveId = false,
+      -- false (O:resume(false)): every activation starts at the first control, the same window
+      -- or not — for a box that comes and goes inside one window, whose origin id never changes.
+      _resume = true,
       -- How many times the overlay has come to the front: one more on every _activate, so a
       -- reply asked for in one stay in front can tell it is not in that stay any more.
       _stay = 0,
@@ -224,11 +227,43 @@ function Overlay:hwnd()
   return o and o.id or nil
 end
 
+-- Whether an activation on the window the overlay was last active on resumes on the control the
+-- user was on (the default: Alt+Tab out and back should not throw them to the start), or starts
+-- at the first control as a new window does (`false`). A dialog drawn INSIDE a plug-in's window
+-- — VPS Avenger's warning box — is the case for `false`: its origin is the plug-in's window every
+-- time it appears, so the second box would come up on the button the first was answered with,
+-- and a user who counts stops from the box's text would land on the other one.
+function Overlay:resume(on)
+  assertUnbound(self, "resume")
+  self._resume = on ~= false
+  return self
+end
+
 -- Shifts this overlay's whole coordinate frame: `fn(origin) -> dx, dy`, resolved per
--- active control (a host version's content shift, a nested plugin's inner origin).
+-- active control (a host version's content shift, a nested plugin's inner origin). A second call
+-- replaces the first.
 function Overlay:frame(fn)
   assertUnbound(self, "frame")
   self._originOffset = fn
+  return self
+end
+
+-- SCALES this overlay's authored coordinates: `fn(origin) -> factor | nil`, asked at every
+-- resolution, and `opts.about = {x, y}` the authored point that stays where the frame puts it.
+-- See the Scaling section below `originOf` for what it applies to, in which order, and why it is
+-- a function rather than a design size.
+function Overlay:scale(fn, opts)
+  assertUnbound(self, "scale")
+  if type(fn) ~= "function" then
+    error(("overlay '%s': scale takes a function(origin) -> factor, got %s")
+      :format(tostring(self.label), type(fn)), 2)
+  end
+  local about = opts and opts.about or { 0, 0 }
+  if type(about) ~= "table" or type(about[1]) ~= "number" or type(about[2]) ~= "number" then
+    error(("overlay '%s': scale's `about` must be {x, y}, got %s")
+      :format(tostring(self.label), type(about)), 2)
+  end
+  self._scale = { fn = fn, about = { about[1], about[2] } }
   return self
 end
 
@@ -325,6 +360,11 @@ function Overlay:addHotspotButton(opts)
   -- after the press, and gives a test that compares against the moment before the click
   -- (newWindow) its starting point — see the Menus section. It never counts a menu as open
   -- by itself: only a test does that.
+  -- `button`: which mouse button the click at `at` is ("right" for a menu a right click opens).
+  -- `menuItem`: the click at `at` opens a menu, and this is the item to CHOOSE in it, as an
+  -- offset from the menu's corner — clicked when a menu test sees the menu, checked against the
+  -- menu's own window, and clicked again while the menu is seen not to have taken it, up to
+  -- `retries` more times (see "Choosing an item" in the Menus section). It implies `opensMenu`.
   return add(self, {
     kind = "hotspot",
     label = opts.label,
@@ -334,9 +374,12 @@ function Overlay:addHotspotButton(opts)
     points = opts.points,
     settle = opts.settle,
     hotkey = opts.hotkey, hotkeyKeepsFocus = opts.hotkeyKeepsFocus == true,
-    opensMenu = opts.opensMenu,
+    opensMenu = (opts.menuItem ~= nil) or opts.opensMenu,
     rawOrigin = opts.rawOrigin,
     fromRight = opts.fromRight,
+    button = opts.button,
+    menuItem = opts.menuItem,
+    retries = opts.retries,
     when = opts.when,
   })
 end
@@ -793,6 +836,204 @@ local function originOf(self, control)
   return 0, 0
 end
 
+-- ── Scaling ──────────────────────────────────────────────────────────────────
+-- A plug-in that ZOOMS its whole interface moves every control with the zoom, and no fixed
+-- coordinate survives that. VPS Avenger zooms from 50 to 200 %, and its layout is one picture
+-- drawn at the zoom's size: every point measured at 50 % from Avenger's corner lands at
+-- (zoom / 50) times that distance (the avenger_control project's coordinate model, and the
+-- reason its tables are written at 50 %). ON:EAR is the other case already in this repository:
+-- it scales its whole window uniformly by the height and centres it across, which the module
+-- carried out by hand in every `at`, and again in every point its own code clicked.
+--
+-- So the runtime scales, for the overlay that asks: `O:scale(fn, { about = {x, y} })`, and every
+-- authored coordinate goes through one formula,
+--
+--     screen = origin + frame + k * (authored - about)
+--
+-- rounded once, to the nearest whole unit (half up: a pixel on Windows, a point on a Mac) — `k`
+-- what `fn(origin)` answers now, the frame what `O:frame` answers (unscaled: it is the part of
+-- the geometry that does NOT zoom — an offset of the plug-in's own corner from the origin, as
+-- Avenger's (-2, +2) on a DAW's panel, or the half-width ON:EAR centres on; never the DAW's
+-- chrome, which daw-hosts has already put the origin below), and `about` the authored point
+-- that stays where the frame puts it ({0, 0} unless given). Rounded once and as one sum, in that
+-- order, because that is the order ON:EAR's own arithmetic had — which is what makes its
+-- migration give the same points, not merely nearly the same. Two places do not fit the sum as
+-- written: `fromRight` is origin + frame's dx + the content's width − k × at[1] (a distance
+-- from an edge, which `about` has nothing to say about), and a landmark-ANCHORED overlay places
+-- from the landmark's corner with no frame at all (originOf).
+--
+-- A FUNCTION for the factor rather than a design size compared with the measured one, because
+-- neither user has a size to compare: Avenger's factor is its zoom READ off its own caption
+-- (the plug-in's width has an intercept nobody has measured, and a zoom guessed from it reads
+-- 80 % as 75 % — the tool's own formula does), and ON:EAR's is the height alone, the width
+-- being free. A design size is one line inside the function; a read zoom cannot be expressed as
+-- a design size at all.
+--
+-- `nil` from the function is "cannot tell now" (the caption could not be read yet): nothing is
+-- placed — no click, no read — and a control that would have acted says so. Not 1: a factor
+-- guessed at 1 is a click at the wrong place with the confidence of the right one.
+--
+-- What does NOT scale: a `rawOrigin` control, which is in the origin's own pixels (neither the
+-- frame nor the scale — it names DAW chrome, or a point the module worked out from the screen);
+-- a `dragBy` FUNCTION's answer, a `menuItem` FUNCTION's answer, and anything else a module
+-- computes from a hit or a menu's rectangle, which are screen pixels already; and template
+-- images, which are matched at their own `scales`.
+--
+-- An overlay that never calls O:scale takes none of this: every site below keeps the arithmetic
+-- it had, character for character, on its unscaled branch.
+
+-- The factor in effect now, or nil and why not. Asked of the module's function at every
+-- resolution and not kept here: the function knows what its answer depends on (a zoom read once
+-- per epoch, a window height) and memoises accordingly. Guarded, because a raising factor must
+-- cost the controls it would have placed and not the key that asked.
+local function factorNow(self)
+  local s = self._scale
+  local o = self:origin()
+  if not o then return nil, "the overlay has no origin now" end
+  local ok, k = pcall(s.fn, o)
+  local why = nil
+  if not ok then
+    why = "its scale function raised: " .. tostring(k)
+    k = nil
+  elseif k == nil then
+    why = "its scale function answered nil"
+  elseif type(k) ~= "number" or k ~= k or k <= 0 or k == math.huge then
+    why = "its scale function answered " .. tostring(k) .. ", not a factor above 0"
+    k = nil
+  end
+  -- Said when it CHANGES, never per resolution: a calibration shot resolves every control, and
+  -- a Tab resolves one. The change is the event a log reader wants — Avenger zoomed, ON:EAR's
+  -- window was resized, the caption stopped being readable.
+  local now = k and string.format("%.4f", k) or why
+  if now ~= self._scaleSaid then
+    self._scaleSaid = now
+    if k then
+      host.log.info(string.format("[scale] '%s': factor %s about (%s,%s)", tostring(self.label),
+        now, tostring(s.about[1]), tostring(s.about[2])))
+    else
+      host.log.info(string.format("[scale] '%s': no factor now — %s; nothing it places is "
+        .. "clicked or read until it answers one", tostring(self.label), tostring(why)))
+    end
+  end
+  return k, why
+end
+
+-- Whether control `c` goes through the scale: every control of a scaled overlay but a
+-- `rawOrigin` one. `c` nil is a point asked of the overlay itself (O:toScreen, captureRegion).
+local function scaledFor(self, c)
+  return self._scale ~= nil and not (c and c.rawOrigin)
+end
+
+-- Authored point (ax, ay) of control `c` on screen: x, y — or nil, nil and why. Every function
+-- here that answers a POINT answers three values on failure, so that `local x, y, why =` reads
+-- the reason where it expects it; a rectangle answers nil and why.
+local function placePoint(self, c, ax, ay)
+  if not scaledFor(self, c) then
+    local ox, oy = originOf(self, c)
+    return ox + ax, oy + ay
+  end
+  local k, why = factorNow(self)
+  if not k then return nil, nil, why end
+  local ox, oy = originOf(self, c)
+  local a = self._scale.about
+  return math.floor(ox + k * (ax - a[1]) + 0.5), math.floor(oy + k * (ay - a[2]) + 0.5)
+end
+
+-- Authored rectangle {x1, y1, x2, y2} of control `c` on screen, each corner as a point — or
+-- nil and why.
+local function placeRect(self, c, r)
+  if not scaledFor(self, c) then
+    local ox, oy = originOf(self, c)
+    return { ox + r[1], oy + r[2], ox + r[3], oy + r[4] }
+  end
+  local k, why = factorNow(self)
+  if not k then return nil, why end
+  local ox, oy = originOf(self, c)
+  local a = self._scale.about
+  return {
+    math.floor(ox + k * (r[1] - a[1]) + 0.5), math.floor(oy + k * (r[2] - a[2]) + 0.5),
+    math.floor(ox + k * (r[3] - a[1]) + 0.5), math.floor(oy + k * (r[4] - a[2]) + 0.5),
+  }
+end
+
+-- A control's authored rectangle in `field` ("region", "ocrLabel"): the table, or what its
+-- function answers now — nil and why when it answers none. A table is handed on as it is, exactly
+-- as before functions were allowed; only a function's answer is checked, because it is the one
+-- that can change between two reads.
+local function authoredRect(self, c, field)
+  local r = c[field]
+  if type(r) ~= "function" then return r end
+  local ok, v = pcall(r, self)
+  if not ok then return nil, "its `" .. field .. "` function raised: " .. tostring(v) end
+  if v == nil then return nil, "its `" .. field .. "` function answered nil" end
+  if type(v) ~= "table" or type(v[1]) ~= "number" or type(v[2]) ~= "number"
+    or type(v[3]) ~= "number" or type(v[4]) ~= "number" then
+    return nil, "its `" .. field .. "` function answered " .. tostring(v) .. ", not {x1, y1, x2, y2}"
+  end
+  return v
+end
+
+-- Control `c`'s rectangle in `field` on screen: the rectangle, and the authored one it came
+-- from — or nil and why.
+local function regionOf(self, c, field)
+  local ar, why = authoredRect(self, c, field or "region")
+  if not ar then return nil, why end
+  local r, rwhy = placeRect(self, c, ar)
+  if not r then return nil, rwhy end
+  return r, ar
+end
+
+-- The middle of authored rectangle `ar` of control `c`, on screen: the middle of the rectangle
+-- it resolves to, rounded down — or nil, nil and why. Unscaled, the arithmetic it always had.
+local function rectCentre(self, c, ar)
+  if not scaledFor(self, c) then
+    local ox, oy = originOf(self, c)
+    return ox + math.floor((ar[1] + ar[3]) / 2), oy + math.floor((ar[2] + ar[4]) / 2)
+  end
+  local r, why = placeRect(self, c, ar)
+  if not r then return nil, nil, why end
+  return math.floor((r[1] + r[3]) / 2), math.floor((r[2] + r[4]) / 2)
+end
+
+-- An authored DISTANCE from screen point (x0, y0) — a click offset from where a template was
+-- found, an item's offset from a menu's corner — on screen. Scaled, never moved by the frame or
+-- `about`: those place the plug-in, and this is measured from something already placed.
+local function placeFrom(self, c, x0, y0, dx, dy)
+  if not scaledFor(self, c) then return x0 + dx, y0 + dy end
+  local k, why = factorNow(self)
+  if not k then return nil, nil, why end
+  return math.floor(x0 + k * dx + 0.5), math.floor(y0 + k * dy + 0.5)
+end
+
+-- A control that cannot be placed right now is SAID, not clicked and not silently dropped: from
+-- the keyboard a key that does nothing is a broken tool. `quiet` when the control has already
+-- said something about it (an OCR control's "cannot be read now").
+local function unplaced(self, c, why, quiet)
+  host.log.info(string.format("[place] '%s': '%s' cannot be placed now — %s; nothing clicked",
+    tostring(self.label), tostring(c and c.label), tostring(why)))
+  if not quiet then
+    host.speech.output(((c and c.label) or "That control") .. " is not available now",
+      { interrupt = true })
+  end
+end
+
+-- Authored point (x, y) of this overlay on screen, for a module's own code: what an `at` would
+-- click, through the same frame and scale. `opts.rawOrigin` places it as a `rawOrigin` control.
+-- nil and why when the overlay has no origin or no factor now — the ordinary Lua pair, since a
+-- module reads `local x, y = o:toScreen(…)` and tests `x`.
+function Overlay:toScreen(x, y, opts)
+  if not self:origin() then return nil, "the overlay has no origin now" end
+  local sx, sy, why = placePoint(self, (opts and opts.rawOrigin) and { rawOrigin = true } or nil, x, y)
+  if sx == nil then return nil, why end
+  return sx, sy
+end
+
+-- Authored rectangle {x1, y1, x2, y2} on screen, likewise: what a `region` would read.
+function Overlay:toScreenRect(r, opts)
+  if not self:origin() then return nil, "the overlay has no origin now" end
+  return placeRect(self, (opts and opts.rawOrigin) and { rawOrigin = true } or nil, r)
+end
+
 -- The overlay's (first) tab control and its index in `controls`, or nil if none.
 -- Defined here, after `originOf`, since the selectors below use it (a Luau local is
 -- only visible after its declaration — so tab helpers all live below originOf).
@@ -868,12 +1109,22 @@ local function tabMessage(tab, extra)
 end
 
 -- Clicks tab control `c`'s CURRENT tab coordinate (so the underlying dialog follows) and
--- announces it. Shared by every tab selector.
-local function selectTab(self, c)
+-- announces it. Shared by every tab selector. `from` is the tab that was current before the
+-- caller moved it: a tab whose point cannot be placed now (a scaled overlay with no factor)
+-- goes back to it and says so, because announcing "selected" for a tab nobody clicked is a
+-- statement about the application that is not true.
+local function selectTab(self, c, from)
   local tab = c.tabs[c._current]
   if tab and tab.at then
-    local ox, oy = originOf(self, c)
-    host.input.click(ox + tab.at[1], oy + tab.at[2])
+    local x, y, why = placePoint(self, c, tab.at[1], tab.at[2])
+    if not x then
+      host.log.info(string.format("[place] '%s': tab '%s' cannot be placed now — %s; nothing clicked",
+        tostring(self.label), tostring(tab.label), tostring(why)))
+      if from then c._current = from end
+      host.speech.output(tostring(tab.label or "") .. " tab is not available now", { interrupt = true })
+      return
+    end
+    host.input.click(x, y)
   end
   -- Focus is now on the tab control (a non-editable stop): make sure Space is captured
   -- again if we arrived here from an editable field via Ctrl+Tab / Ctrl+<n>.
@@ -897,8 +1148,9 @@ end
 function Overlay:switchTab(dir)
   local c = self.controls[self.focus]
   if not c or c.kind ~= "tabcontrol" or #c.tabs == 0 then return end
+  local from = c._current
   c._current = ((c._current - 1 + dir) % #c.tabs) + 1
-  selectTab(self, c)
+  selectTab(self, c, from)
 end
 
 -- Ctrl+Tab / Ctrl+Shift+Tab: switch the overlay's tab control from ANYWHERE (focus need
@@ -907,8 +1159,9 @@ function Overlay:cycleTab(dir)
   local i, c = findTabControl(self)
   if not c or #c.tabs == 0 then return end
   self.focus = i
+  local from = c._current
   c._current = ((c._current - 1 + dir) % #c.tabs) + 1
-  selectTab(self, c)
+  selectTab(self, c, from)
 end
 
 -- Ctrl+<n>: jump straight to tab n and move focus onto the tab control.
@@ -929,14 +1182,17 @@ function Overlay:gotoTab(n, keepFocus)
   -- The selection still happens and is still announced either way; what `keepFocus` decides is
   -- only whether the user is taken along with it.
   if not (keepFocus or c.hotkeyKeepsFocus) then self.focus = i end
+  local from = c._current
   c._current = n
-  selectTab(self, c)
+  selectTab(self, c, from)
 end
 
+-- The middle of control `c`'s region on screen — or nil, nil and why (a region function with
+-- no answer, a scaled overlay with no factor).
 local function ocrCenter(self, c)
-  local ox, oy = originOf(self, c)
-  return ox + math.floor((c.region[1] + c.region[3]) / 2),
-    oy + math.floor((c.region[2] + c.region[4]) / 2)
+  local ar, why = authoredRect(self, c, "region")
+  if not ar then return nil, nil, why end
+  return rectCentre(self, c, ar)
 end
 
 -- A hotspot's point has to land inside the origin it was measured against. Outside it,
@@ -1006,8 +1262,13 @@ local function refuseOutside(self, c, x, y)
   --
   -- Asked of the platform rather than guessed, and a platform with no answer is taken as
   -- permission. Only a definite "that pixel belongs to another window" refuses — a check that
-  -- cannot judge must not block what it cannot judge, which is also why macOS, where this is
-  -- not implemented yet, behaves exactly as it did before.
+  -- cannot judge must not block what it cannot judge. On macOS the window server's own hit test
+  -- answers (host.window.ownsPoint, unverified on hardware), and there its `nil` — no pairing
+  -- yet, a window of VoiceOver's own — is permission too.
+  --
+  -- A popup the plug-in opens is a window of its own, so a point in it is "another window" to
+  -- this check: an item in such a menu is chosen through "Choosing an item" (Menus), which asks
+  -- about the menu's window instead.
   if o and o.id and host.window and host.window.ownsPoint then
     local ok, mine = pcall(host.window.ownsPoint, o.id, x, y)
     if ok and mine == false then
@@ -1044,8 +1305,8 @@ end
 -- on/off templates. Returns "on" / "off" / nil (unknown).
 local function gtoggleState(self, c)
   if not c.region then return nil end
-  local ox, oy = originOf(self, c)
-  local region = { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] }
+  local region = regionOf(self, c)
+  if not region then return nil end
   local opts = {
     region = region,
     tolerance = c.tolerance or MATCH_TOLERANCE,
@@ -1077,9 +1338,10 @@ end
 -- found (the panel is not showing, or the plugin draws it differently than the template).
 local function sliderThumb(self, c)
   if not (c.region and c.thumbImage) then return nil end
-  local ox, oy = originOf(self, c)
+  local region = regionOf(self, c)
+  if not region then return nil end
   local _, hit = host.screen.imageSearchMulti(asList(c.thumbImage), {
-    region = { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] },
+    region = region,
     tolerance = c.tolerance or MATCH_TOLERANCE,
     scales = c.scales or MATCH_SCALES,
   })
@@ -1098,11 +1360,13 @@ end
 -- Kontakt's resize grip escaped its region on the second press, because dragging it made the
 -- window taller and moved the grip past the lower bound that had looked generous. The origin
 -- grows with the window, so it cannot go stale that way.
+--
+-- nil and why when there is a `region` and it cannot be placed now (a function with no answer, a
+-- scaled overlay with no factor): not the whole origin, which would search where the module
+-- said not to.
 local function searchRect(self, c)
+  if c.region then return regionOf(self, c) end
   local ox, oy = originOf(self, c)
-  if c.region then
-    return { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] }
-  end
   local o = self:origin()
   if not o then return { ox, oy, ox, oy } end
   local w, h = O.contentSize(o)
@@ -1112,8 +1376,10 @@ end
 -- Where a graphical button's template currently is, as a click point, or nil.
 local function graphicalButtonPoint(self, c)
   if not c.image then return nil end
+  local rect = searchRect(self, c)
+  if not rect then return nil end
   local _, hit = host.screen.imageSearchMulti(asList(c.image), {
-    region = searchRect(self, c),
+    region = rect,
     tolerance = c.tolerance or MATCH_TOLERANCE,
     scales = c.scales or MATCH_SCALES,
   })
@@ -1125,8 +1391,16 @@ end
 -- degenerate (from == to) — better to say nothing than to announce a number from a
 -- division that means nothing.
 local function sliderPercent(self, c, thumb)
-  local ox = originOf(self, c)
-  local from, to = ox + c.from, ox + c.to
+  local from, to
+  if scaledFor(self, c) then
+    -- `from` and `to` are x coordinates like any other, so they scale as points do.
+    from = placePoint(self, c, c.from, 0)
+    to = placePoint(self, c, c.to, 0)
+    if not (from and to) then return nil end
+  else
+    local ox = originOf(self, c)
+    from, to = ox + c.from, ox + c.to
+  end
   if to <= from then return nil end
   local p = math.floor(((thumb.cx - from) / (to - from)) * 100 + 0.5)
   return math.max(0, math.min(100, p))
@@ -1139,13 +1413,29 @@ end
 -- on the same window — a drag into whatever window arrived meanwhile is not recoverable.
 local SLIDER_SETTLE, SLIDER_MAX_NUDGES = 25, 24
 local function sliderStep(self, c, dir)
+  -- A track that cannot be placed now (a scaled overlay with no factor, a region function with
+  -- no answer) is said as every control that cannot be placed is: "not found" would describe a
+  -- thumb search that was never made.
+  if c.region then
+    local r, why = regionOf(self, c)
+    if not r then return unplaced(self, c, why) end
+  end
+  if scaledFor(self, c) then
+    local _, _, why = placePoint(self, c, c.from, 0)
+    if why then return unplaced(self, c, why) end
+  end
   local thumb = sliderThumb(self, c)
   if not thumb then
     host.speech.output((c.label or "") .. ", not found", { interrupt = true })
     return
   end
-  local ox = originOf(self, c)
+  -- One percent of the track, on screen: of the track as it is drawn now in a scaled overlay.
   local step = math.max(1, math.ceil((c.to - c.from) / 100))
+  if scaledFor(self, c) then
+    local from = placePoint(self, c, c.from, 0)
+    local to = placePoint(self, c, c.to, 0)
+    if from and to then step = math.max(1, math.ceil((to - from) / 100)) end
+  end
   local startPct = sliderPercent(self, c, thumb)
   local pinned = self:hwnd()
   local target = thumb.cx + dir * step
@@ -1191,6 +1481,24 @@ local function hotspotPoint(self, c)
   local at = c.at
   if type(at) == "function" then at = at(self) end
   if type(at) ~= "table" then return nil end
+  if scaledFor(self, c) then
+    -- The same point, through the scale. A third value (why) says a point exists but cannot be
+    -- placed now, which the caller says out loud; a plain nil stays the silent "no point" an
+    -- `at` function has always been allowed to answer.
+    local k, why = factorNow(self)
+    if not k then return nil, nil, why end
+    local ox, oy = originOf(self, c)
+    local a = self._scale.about
+    local x
+    if c.fromRight then
+      -- A distance leftwards from the content's right edge, scaled like any distance; `about`
+      -- is a point and has nothing to say about an edge.
+      x = math.floor(ox + O.contentSize(self:origin()) - k * at[1] + 0.5)
+    else
+      x = math.floor(ox + k * (at[1] - a[1]) + 0.5)
+    end
+    return x, math.floor(oy + k * (at[2] - a[2]) + 0.5)
+  end
   local ox, oy = originOf(self, c)
   local x = at[1]
   if c.fromRight then
@@ -1303,8 +1611,9 @@ local REVEAL_TOLERANCE = 30
 local function ensureRevealed(self, c, done)
   local r = c.reveal
   if not r or not r.at or not r.closedColor then return done() end
-  local ox, oy = originOf(self, c)
-  local px, py = ox + r.at[1], oy + r.at[2]
+  local px, py = placePoint(self, c, r.at[1], r.at[2])
+  -- A probe that cannot be placed now cannot be read either: fail open, as for a failed read.
+  if not px then return done() end
   local p = host.screen.pixel(px, py)
   if not p or colorDist(p, r.closedColor) > REVEAL_TOLERANCE then return done() end
   if refuseOutside(self, c, px, py) then return end
@@ -1329,11 +1638,16 @@ local function couldNotLook(c, why)
 end
 
 local function valueOfNow(self, c, done)
-  local ox, oy = originOf(self, c)
+  -- The region, placed; or the whole origin for a graphical button without one (searchRect).
+  -- One that cannot be placed now is no answer, like a search that could not be made.
+  local region, why = searchRect(self, c)
+  if not region then
+    host.log.info(("[%s] '%s': no region now (%s), so no value is said"):format(
+      tostring(c.kind), tostring(c.label), tostring(why)))
+    return done(nil)
+  end
   local opts = {
-    region = c.region
-      and { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] }
-      or searchRect(self, c),
+    region = region,
     tolerance = c.tolerance or MATCH_TOLERANCE,
     scales = c.scales or MATCH_SCALES,
   }
@@ -1362,7 +1676,7 @@ local function valueOfNow(self, c, done)
       local why = c.unavailable(self)
       if why then return done(why) end
     end
-    opts.region = searchRect(self, c)
+    -- `opts.region` is searchRect's already (above), so there is nothing to work out again.
     host.screen.imageSearchAsync(asList(c.image), opts, function(hit, why)
       if not hit and why ~= nil then
         couldNotLook(c, why)
@@ -1519,14 +1833,12 @@ local function speakControl(self, index, moveMouse, withHint, queued)
   -- OCR reads nothing, so a failed read never leaves a control nameless.
   local label = c.label or ""
   if c.ocrLabel then
-    local ox, oy = originOf(self, c)
-    local r = host.ocr.recognize({
-      region = {
-        ox + c.ocrLabel[1], oy + c.ocrLabel[2],
-        ox + c.ocrLabel[3], oy + c.ocrLabel[4],
-      },
-    })
-    if r and r.text and r.text ~= "" then label = r.text end
+    -- A name region that cannot be placed now leaves the static label, as a read of nothing does.
+    local region = regionOf(self, c, "ocrLabel")
+    if region then
+      local r = host.ocr.recognize({ region = region })
+      if r and r.text and r.text ~= "" then label = r.text end
+    end
   end
   local parts = { label }
   if c.text then
@@ -1555,15 +1867,24 @@ local function speakControl(self, index, moveMouse, withHint, queued)
   -- the key is noise, and they plainly know it. A key the host refuses is not said: it is never
   -- registered, and the bind-time report has named it in the log.
   if moveMouse and c.hotkey and not hotkeyRefusal(c.hotkey) then parts[#parts + 1] = spokenKey(c.hotkey) end
+  -- The region is placed first: a region function with no answer, or a scaled overlay with no
+  -- factor, has nothing to read, and says "cannot be read now" — not "no text", which would
+  -- describe a read that was never made.
+  local region, ar = nil, nil
   if (c.kind == "ocr" or c.kind == "ocredit") and c.region then
-    local ox, oy = originOf(self, c)
-    local region = { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] }
+    region, ar = regionOf(self, c)
+    if not region then
+      parts[#parts + 1] = "cannot be read now"
+      host.log.info(string.format("[read] '%s' not read: %s", tostring(label), tostring(ar)))
+    end
+  end
+  if region then
     if moveMouse and self.hoverToRead then
       -- Move the mouse onto the control on focus — only for overlays that opt in.
       -- Some plugin UIs reveal the value on hover; others (like sforzando) show a
       -- *different* value while hovered, so this is off by default.
-      host.input.move(ox + math.floor((c.region[1] + c.region[3]) / 2),
-        oy + math.floor((c.region[2] + c.region[4]) / 2))
+      local hx, hy = rectCentre(self, c, ar)
+      if hx then host.input.move(hx, hy) end
     end
     local t0 = host.now and host.now() or 0
     local r = host.ocr.recognize({ region = region })
@@ -1580,18 +1901,22 @@ local function speakControl(self, index, moveMouse, withHint, queued)
     -- would have to gate this on the text changing, or write two lines a second for nothing.
     local shown = forLog(r.text)
     local words = r.words and #r.words or 0
+    -- In a scaled overlay the authored numbers are not where the read was made, so the screen
+    -- rectangle is added: the one a calibration picture can be held against.
     host.log.info(string.format(
-      "[read] '%s' = \"%s\" (region %s,%s %sx%s, %d ms, %d %s)",
-      tostring(label), shown, tostring(c.region[1]), tostring(c.region[2]),
-      tostring(c.region[3] - c.region[1]), tostring(c.region[4] - c.region[2]),
-      ms, words, words == 1 and "word" or "words"
+      "[read] '%s' = \"%s\" (region %s,%s %sx%s, %d ms, %d %s)%s",
+      tostring(label), shown, tostring(ar[1]), tostring(ar[2]),
+      tostring(ar[3] - ar[1]), tostring(ar[4] - ar[2]),
+      ms, words, words == 1 and "word" or "words",
+      scaledFor(self, c) and string.format(" at %d,%d %dx%d on screen", region[1], region[2],
+        region[3] - region[1], region[4] - region[2]) or ""
     ))
     -- An OCREdit drops the caret into the real edit control on focus, so the user can type
     -- to change the value right away. Read first (clean), then click. `moveMouse` is true
     -- only on a focus read, so navigating away doesn't re-click.
     if c.kind == "ocredit" and moveMouse then
-      host.input.click(ox + math.floor((c.region[1] + c.region[3]) / 2),
-        oy + math.floor((c.region[2] + c.region[4]) / 2))
+      local cx, cy = rectCentre(self, c, ar)
+      if cx then host.input.click(cx, cy) end
     end
   end
   if c.kind == "hotspottoggle" then
@@ -2106,9 +2431,28 @@ function Overlay:activate(index)
       return
     end
   end
+  -- A control that chooses an item from its menu, on an overlay with nothing to see a menu
+  -- with, would open the menu and leave it there — with the overlay holding every key, because
+  -- no test says a menu is up. So it does not open it at all. The bind-time report has named
+  -- the control; this says it at the press.
+  if c.kind == "hotspot" and c.menuItem ~= nil and not self._menu then
+    host.log.info(string.format("[menu item] '%s': '%s' has a menuItem, but the overlay lists no "
+      .. "menu tests to see its menu with — not opening it", tostring(self.label), tostring(c.label)))
+    host.speech.output((c.label or "That control") .. " is not available now", { interrupt = true })
+    return
+  end
+  -- Pressed again while its item is still waiting for its menu (a double Return, a held key):
+  -- clicking the opener a second time would close the menu the first press is opening, and
+  -- newWindow's new list would already hold it. The first press stands; this one is logged.
+  if c.kind == "hotspot" and c.menuItem ~= nil and self:_pickRepeat(c) then return end
   -- Before the click, not after: a test that compares with the moment before the click
-  -- (newWindow) needs its starting point from before the menu can exist.
-  if c.opensMenu then self:_menuOpening(c) end
+  -- (newWindow) needs its starting point from before the menu can exist. A single point counts
+  -- as a press only once it has been placed and checked, just before its click: a press whose
+  -- opener is never clicked must not set the tests running, take newWindow's list again or use
+  -- up one of the control's menu shots. A sequence counts from its first step, and any other
+  -- control from its activation — its click is the module's own code.
+  local onePoint = c.kind == "hotspot" and c.at ~= nil and not c.points
+  if c.opensMenu and not onePoint then self:_menuOpening(c) end
   if c.kind == "hotspot" and c.points then
     -- Acknowledge at PRESS time, like every other control. Speaking after the last click
     -- instead would land hundreds of milliseconds late — indistinguishable from a key that
@@ -2132,17 +2476,25 @@ function Overlay:activate(index)
       local p = c.points[k]
       if not p then return end
       if not self.active or self:hwnd() ~= pinned then return end
-      local ox, oy = originOf(self, c)
-      if refuseOutside(self, c, ox + p[1], oy + p[2]) then return end
-      host.input.click(ox + p[1], oy + p[2])
+      local x, y, why = placePoint(self, c, p[1], p[2])
+      -- A step that cannot be placed now ends the sequence where it is, said once.
+      if not x then return unplaced(self, c, why) end
+      if refuseOutside(self, c, x, y) then return end
+      host.input.click(x, y)
       -- No trailing delay after the last click: there is nothing left to settle for.
       if c.points[k + 1] then host.timer.after(settle, function() step(k + 1) end) end
     end
     step(1)
   elseif c.kind == "hotspot" and c.at then
-    local px, py = hotspotPoint(self, c)
-    if not px then return end
+    local px, py, why = hotspotPoint(self, c)
+    if not px then
+      -- A point that exists but cannot be placed now is said; an `at` function answering nil is
+      -- the silent "no point" it has always been.
+      if why then unplaced(self, c, why) end
+      return
+    end
     if refuseOutside(self, c, px, py) then return end
+    if c.opensMenu then self:_menuOpening(c) end
     -- WHERE it clicked, in the log. A hotspot that presses nothing and a hotspot that presses
     -- the wrong thing are the same experience for someone who cannot see the screen — the
     -- control says "activated" either way — and telling them apart cost a whole test round
@@ -2151,8 +2503,18 @@ function Overlay:activate(index)
     -- likely to be aimed wrong, did not.
     host.log.info(string.format("%s: '%s' activated, clicking (%d,%d)",
       tostring(self.label), tostring(c.label), px, py))
-    host.input.click(px, py)
+    -- `button`: a hotspot that opens its menu with the right button (VPS Avenger's redo list
+    -- is a right click on UNDO). Passed only when given, so every other hotspot's click is the
+    -- call it always was.
+    if c.button ~= nil then
+      host.input.click(px, py, { button = c.button })
+    else
+      host.input.click(px, py)
+    end
     host.speech.output((c.label or "") .. ", activated", { interrupt = true })
+    -- The menu this click opened has an item to choose: chosen when a menu test sees it (see
+    -- "Choosing an item" in the Menus section).
+    if c.menuItem ~= nil then self:_armPick(c, nil, c.retries) end
   elseif (c.kind == "custom" or c.kind == "stepper") and c.onActivate then
     -- A stepper can be ACTIVATED as well as stepped, where the control it stands for has
     -- something a press means. ON:EAR's two are the case that asked for it: a double-click
@@ -2186,16 +2548,18 @@ function Overlay:activate(index)
     -- always clicks: activating it re-focuses the edit field for typing.
     speakControl(self, i, false)
     if c.kind == "ocredit" or not c.readOnly then
-      local cx, cy = ocrCenter(self, c)
+      local cx, cy, why = ocrCenter(self, c)
+      -- Quiet: the read just said "cannot be read now" about the same region.
+      if not cx then return unplaced(self, c, why, true) end
       host.input.click(cx, cy)
     end
   elseif c.kind == "gtoggle" and c.region then
     -- Reveal first, for the same reason the state read does: a click aimed at a control
     -- inside a collapsed panel lands on the panel, not the control.
     ensureRevealed(self, c, function()
-      local ox, oy = originOf(self, c)
-      host.input.click(ox + math.floor((c.region[1] + c.region[3]) / 2),
-        oy + math.floor((c.region[2] + c.region[4]) / 2))
+      local cx, cy, why = ocrCenter(self, c)
+      if not cx then return unplaced(self, c, why) end
+      host.input.click(cx, cy)
       -- Re-read the new state once the UI redraws. `withHint`: this is the transition, the
       -- one moment a state hint is worth hearing (see hintFor).
       if host.timer then host.timer.after(150, function() speakControl(self, i, false, true) end) end
@@ -2207,9 +2571,13 @@ function Overlay:activate(index)
     -- exactly as the hotspot `points` sequence and the panel reveal do, because a click
     -- arriving after the world moved is the one mistake pressing the key again cannot undo.
     local pinned = self:hwnd()
+    -- Where to look, placed before anything is said: a region that cannot be placed now is a
+    -- search that cannot be made, and "activated" would promise one.
+    local rect, rwhy = searchRect(self, c)
+    if not rect then return unplaced(self, c, rwhy) end
     host.speech.output((c.label or "") .. ", activated", { interrupt = true })
     host.screen.imageSearchAsync(asList(c.image), {
-      region = searchRect(self, c),
+      region = rect,
       tolerance = c.tolerance or MATCH_TOLERANCE,
       scales = c.scales or MATCH_SCALES,
     }, function(hit, why)
@@ -2237,7 +2605,10 @@ function Overlay:activate(index)
       end
       local cx, cy = hit.x + math.floor(hit.w / 2), hit.y + math.floor(hit.h / 2)
       if c.clickOffset then
-        cx, cy = hit.x + c.clickOffset[1], hit.y + c.clickOffset[2]
+        -- An authored distance from where the template was found: scaled in a scaled overlay.
+        local ox, oy, owhy = placeFrom(self, c, hit.x, hit.y, c.clickOffset[1], c.clickOffset[2])
+        if not ox then return unplaced(self, c, owhy) end
+        cx, cy = ox, oy
       end
       if refuseOutside(self, c, cx, cy) then return end
       if c.dragBy then
@@ -2247,11 +2618,19 @@ function Overlay:activate(index)
         -- bigger but never smaller again is worse than one that refuses to grow. A caller that
         -- knows its own limits can compute the step from the handle's actual position, and
         -- return nothing to decline — with a reason, so declining is not silence.
+        --
+        -- A function's answer is in screen pixels (it is worked out from `hit`, which is); a
+        -- fixed {dx, dy} is authored, and scaled like any authored distance.
         local dx, dy, why
         if type(c.dragBy) == "function" then
           dx, dy, why = c.dragBy(self, hit)
         else
           dx, dy = c.dragBy[1], c.dragBy[2]
+          if scaledFor(self, c) then
+            local ex, ey, ewhy = placeFrom(self, c, 0, 0, dx, dy)
+            if not ex then return unplaced(self, c, ewhy) end
+            dx, dy = ex, ey
+          end
         end
         if not dx or (dx == 0 and dy == 0) then
           host.speech.output(why or ((c.label or "Control") .. " cannot go further"),
@@ -2267,8 +2646,11 @@ function Overlay:activate(index)
       end
     end)
   elseif c.kind == "hotspottoggle" and c.at then
-    local px, py = hotspotPoint(self, c)
-    if not px then return end
+    local px, py, why = hotspotPoint(self, c)
+    if not px then
+      if why then unplaced(self, c, why) end
+      return
+    end
     -- The same check the plain hotspot has had. A toggle clicks a coordinate too, and there is
     -- no reason its click should be the one allowed to land on somebody else's window.
     if refuseOutside(self, c, px, py) then return end
@@ -2373,10 +2755,37 @@ end
 -- user is back in the overlay (Overlay:_menuOwnKey, in the Menus section). While a menu counts
 -- as open these keys are not delivered at all — they belong to the menu — so reaching this
 -- means no menu took the keys since the last press.
+--
+-- One exception to "before": while an item is still waiting for its menu (O:chooseMenuItem, a
+-- hotspot's `menuItem`), the key is looked at first. A second press of the same control — a
+-- double Return, a held arrow on a stepper over a zoom list — arrives before the first press's
+-- menu has been seen; taken as "the user moved on", it dropped the first press, and newWindow's
+-- list, taken again for the second, already held the first press's popup, while the second
+-- click on the opener closed it. So the key runs first: a repeat of the waiting control is
+-- dropped there (Overlay:_pickRepeat), and any other key — or a handler that raises — moves on
+-- from the waiting press as before, once the key has run, unless the key itself made a new
+-- press, which has taken over from it already.
 local function ownKey(self, fn)
   return function(...)
-    self:_menuOwnKey()
-    return fn(...)
+    local p = self._pick
+    if not p or p.clicked then
+      self:_menuOwnKey()
+      return fn(...)
+    end
+    p.keyPending = true
+    local function after(...)
+      if self._pick == p and p.keyPending then
+        p.keyPending = nil
+        self:_menuOwnKey()
+      end
+      return ...
+    end
+    local ok, a, b, c, d = pcall(fn, ...)
+    if not ok then
+      after()
+      error(a, 0)
+    end
+    return after(a, b, c, d)
   end
 end
 
@@ -2869,8 +3278,15 @@ function Overlay:adjust(dir)
         { interrupt = true })
       return
     end
+    -- `false` from onStep: this press moved nothing and has nothing of its own to say — a press
+    -- that came while an earlier step is still being carried out, whose own announcement is on
+    -- its way. Watching the value for it too would say that announcement twice, or the old value
+    -- first.
+    if err == false then return end
     -- What the value BECAME is the only honest thing to announce; what we asked it to become
-    -- is a guess that sounds exactly as confident.
+    -- is a guess that sounds exactly as confident. `c.settle` is read here, at each step, so an
+    -- onStep that knows nothing will change (the end of its range) sets it short before it
+    -- returns, and the value is said at once.
     announceWhenChanged(self, i, c, was)
   end
 end
@@ -3100,7 +3516,7 @@ function Overlay:_activate()
   -- focus here lets the `if self.focus == 0` block below re-pick the first focusable.
   local origin = self:origin()
   local id = (origin and origin.id) or false
-  if id ~= self._lastActiveId then
+  if id ~= self._lastActiveId or not self._resume then
     self.focus = 0
     for _, c in ipairs(self.controls) do
       if c.kind == "tabcontrol" then c._current = 1 end
@@ -3365,6 +3781,35 @@ local function report(self, opts)
     if NEEDS_REGION[c.kind] and c.region == nil then
       bad("%s has no `region` — there is nothing for it to read", who)
     end
+    -- A region or a name region is corners or a function answering them; anything else fails
+    -- the first time it is read, inside an announcement, naming nothing.
+    for _, field in ipairs({ "region", "ocrLabel" }) do
+      local r = c[field]
+      if r ~= nil and type(r) ~= "function"
+        and not (type(r) == "table" and type(r[1]) == "number" and type(r[2]) == "number"
+          and type(r[3]) == "number" and type(r[4]) == "number") then
+        bad("%s: `%s` must be {x1, y1, x2, y2} or a function(overlay) answering that", who, field)
+      end
+    end
+    if c.button ~= nil and c.button ~= "left" and c.button ~= "right" and c.button ~= "middle" then
+      bad("%s: `button` is \"%s\" — host.input.click reads anything but \"right\" and \"middle\" "
+        .. "as the left button", who, tostring(c.button))
+    end
+    if c.menuItem ~= nil then
+      local k = type(c.menuItem)
+      if k ~= "function" and not (k == "table" and type(c.menuItem[1]) == "number"
+        and type(c.menuItem[2]) == "number") then
+        bad("%s: `menuItem` must be {dx, dy} or a function(overlay, menu) answering that", who)
+      end
+      if c.at == nil then
+        bad("%s: `menuItem` needs `at`, the point that opens the menu — a `points` sequence "
+          .. "cannot open one", who)
+      end
+      if not self._menu then
+        bad("%s chooses a menu item, but the overlay lists no menu tests (`menus`) — nothing can "
+          .. "see the menu, so pressing it opens nothing and says it is not available", who)
+      end
+    end
     if c.kind == "hotspottoggle" then
       if c.at == nil then bad("%s has no `at`", who) end
       if c.onColor == nil or c.offColor == nil then
@@ -3473,7 +3918,7 @@ local function report(self, opts)
     -- A control that says it opens a menu, on an overlay with nothing to see a menu with. The
     -- declaration alone gives no key to the menu — only a test does — so while that menu is up
     -- the overlay keeps Tab, Return and its hotkeys, and nothing else would ever say why.
-    if c.opensMenu and not self._menu then
+    if c.opensMenu and not self._menu and c.menuItem == nil then
       bad("%s opens a menu, but the overlay lists no menu tests (`menus`) — nothing can see "
         .. "that menu, so the overlay keeps its keys while it is up", who)
     end
@@ -3577,6 +4022,26 @@ end
 -- also matches how the menu tests are run here: one timer per VM, not one per
 -- overlay that has to remember to ask for it.
 local pollGroups = {}
+
+-- Whether the poll rechecks overlay `o` on this tick: always, unless its binding gave `pollWhen`,
+-- which is then asked — for a match that can change without a window event only while the module
+-- expects it to (VPS Avenger's warning box, looked for only after a Save or Initialize of its
+-- own). Every other tick costs one call of it, not a context match: on a Mac in a DAW a match
+-- reads the focus chain, and Logic's accessibility is the slow one. Guarded: one that raises is
+-- said once and rechecked, as it would be without it.
+local function pollWanted(o)
+  local fn = o._pollWhen
+  if not fn then return true end
+  local ok, v = pcall(fn, o)
+  if ok then return v == true end
+  if not o._pollWhenSaid then
+    o._pollWhenSaid = true
+    host.log.info(string.format("[poll] '%s': pollWhen failed: %s — rechecked on every poll",
+      tostring(o.label), tostring(v)))
+  end
+  return true
+end
+
 local function joinPoll(self, ms)
   local group = pollGroups[ms]
   if not group then
@@ -3598,7 +4063,7 @@ local function joinPoll(self, ms)
       -- traceback.
       inPoll = true
       for _, o in ipairs(group) do
-        o:_recheck()
+        if pollWanted(o) then o:_recheck() end
       end
       inPoll = false
       local dt = (host.now and host.now() or 0) - t0
@@ -3710,6 +4175,15 @@ local function ensureTrigger(self, opts)
     -- menu while one is open (see the Menus section). `false` or absent: no tests. `true` is
     -- refused there, naming the building blocks.
     if opts.menus ~= nil and opts.menus ~= false then self:_watchMenus(opts.menus) end
+    -- `pollWhen = function(overlay) -> boolean`: the `pollMatch` poll rechecks this overlay only
+    -- while it answers true (see joinPoll). Raises here for anything but a function.
+    if opts.pollWhen ~= nil then
+      if type(opts.pollWhen) ~= "function" then
+        error(("overlay '%s': `pollWhen` must be a function(overlay) -> boolean, got %s")
+          :format(tostring(self.label), type(opts.pollWhen)), 0)
+      end
+      self._pollWhen = opts.pollWhen
+    end
     self:_join(opts.slot, opts.specificity, opts.pollMatch)
   else
     self:_join(nil, nil, nil)
@@ -4609,7 +5083,9 @@ end
 --     MENU_BACKSTOP_TICKS ticks have passed since it was last asked, so a menu opened some other
 --     way — the user's screen reader, a key that went to the plug-in — is still noticed;
 --   • while a cheap test sees the menu, the others are not asked at all — they could only
---     agree, and a walk of the accessibility tree is what makes a test expensive.
+--     agree, and a walk of the accessibility tree is what makes a test expensive — except while
+--     an item waits to be chosen (see "Choosing an item"), when the one that says where the menu
+--     is need not be the cheap one.
 -- A menu no test sees gets no pass-through: the overlay keeps its keys. That replaced an
 -- eight-second stopwatch that assumed a menu after every press, and a thirty-second cap that
 -- stopped believing in a menu the user was still reading (2026-09-26). The host's own
@@ -4638,8 +5114,14 @@ local MENU_TICK_MS = 150
 -- tick. Counted from the test's own last question, so a sibling that takes a while to answer
 -- cannot push it off the beat.
 local MENU_BACKSTOP_TICKS = 8
--- How long after a control with `opensMenu` fired every test runs on every tick. Cadence only.
+-- How long after a control with `opensMenu` fired every test runs on every tick — a cadence, and
+-- no more than that for whether a menu is open. It also bounds how long an item may wait for its
+-- menu to be seen (see "Choosing an item"): a bound on a wait, after which the item is not chosen
+-- and the user hears it, never a guess that the menu is up by then.
 local MENU_LOOK_MS = 8000
+-- How many more times an item is clicked when the menu it was clicked in is still there on a
+-- later tick (see "Choosing an item"): a count of answers, not a time.
+local MENU_ITEM_RETRIES = 3
 -- Only for a log line: how many ticks a test's answer is outstanding before the log says so.
 local MENU_STALL_TICKS = 20
 local menuWatched = {}
@@ -4731,10 +5213,15 @@ do
     test = function(o, answer)
       local w = watching[o]
       if not w then return answer(false) end
-      local any = false
-      for id, win in pairs(windowsOf(w.pid)) do
+      -- The answer is the MENU, not just "yes": where it is, for an item to be chosen in it (see
+      -- "Choosing an item" below). Of several windows that appeared, the largest — a toolkit
+      -- can draw a popup's shadow as windows of their own, strips a few pixels wide around it
+      -- (JUCE does on Windows) — and of two the same size, the one the list names first, which
+      -- on both platforms is the one in front.
+      local menu = nil
+      for _, win in ipairs(host.window.windowsOf(w.pid)) do
+        local id = win.id
         if not w.before[id] then
-          any = true
           if not w.said[id] then
             w.said[id] = true
             host.log.info(("[menu] '%s': newWindow: a window appeared for the plug-in since the "
@@ -4742,11 +5229,24 @@ do
               (win.class ~= nil and win.class ~= "") and (" class '" .. win.class .. "'") or "",
               win.layer or 0, win.w or 0, win.h or 0, win.x or 0, win.y or 0))
           end
+          if menu == nil or (win.w or 0) * (win.h or 0) > (menu.w or 0) * (menu.h or 0) then
+            menu = win
+          end
         end
       end
-      if any then
+      if menu then
         w.seen = true
-        return answer(true)
+        -- `window`: the same window as a host.window id, which host.window.ownsPoint takes. On
+        -- Windows the window manager's id IS the HWND every host.window call names; on macOS
+        -- windowsOf lists the window server's CGWindowID, a different numbering, so there is
+        -- none to give — `id` is asked about there, with ownsPoint's `listed` option.
+        return answer({
+          kind = "window",
+          id = menu.id,
+          window = (host.os.current == "windows") and menu.id or nil,
+          layer = menu.layer, class = menu.class,
+          x = menu.x, y = menu.y, w = menu.w, h = menu.h,
+        })
       end
       if w.seen then
         -- Every window that appeared has gone: the menu this press opened has closed, and this
@@ -4897,6 +5397,14 @@ function Overlay:_heldOnMenu()
   return heldOnMenu(self)
 end
 
+-- Whether a menu counts as open over this overlay now: some test's word is that one is (see
+-- above). For a module's own code that tidies up after a menu of its own — VPS Avenger clicks a
+-- popup's opener again to close one a choice left open, and must not open one that has gone.
+-- false for an overlay with no menu tests, and after it left the front.
+function Overlay:menuOpen()
+  return self._menu ~= nil and self._menu.open == true
+end
+
 -- Is a menu open over any overlay of this VM that is in front? What host.keys.menuOpen is set to.
 local function anyMenuOpen()
   for _, o in ipairs(menuWatched) do
@@ -4966,6 +5474,9 @@ function Overlay:_menuChange(open, by)
       st.escape and (", and was seen on " .. st.escape .. " tick(s) after Escape went through")
         or ""))
     st.since, st.escape, st.pressed = nil, nil, nil
+    -- An item still waiting when its menu closes was never chosen: the menu never said where it
+    -- was, or the item was not inside it. Said now — the menu that could have held it is gone.
+    if self._pick then self:_pickEnd("closed") end
   end
   applyMenuState()
 end
@@ -4982,8 +5493,9 @@ function Overlay:_menuSet(open, by)
 end
 
 -- One answer of test `t`: its word, and the transition when it is the first to see the menu or
--- the last to stop seeing it.
-function Overlay:_menuAnswer(t, seen)
+-- the last to stop seeing it. `value` is what the test answered, handed to an item waiting to be
+-- chosen (see "Choosing an item").
+function Overlay:_menuAnswer(t, seen, value)
   local st = self._menu
   if seen then
     t.saw, t.misses = true, 0
@@ -4992,6 +5504,7 @@ function Overlay:_menuAnswer(t, seen)
     -- the word, which stays "open" for a miss after the menu has gone (see _menuHold).
     st.sightings = (st.sightings or 0) + 1
     if not st.open then self:_menuSet(true, t.name) end
+    if self._pick then self:_pickSeen(t, value) end
     return
   end
   if not t.saw then return end
@@ -5024,7 +5537,7 @@ function Overlay:_menuAsk(t)
     answered = true
     if t.asking ~= q then return end -- asked before the overlay left the front
     t.asking = nil
-    self:_menuAnswer(t, v ~= nil and v ~= false)
+    self:_menuAnswer(t, v ~= nil and v ~= false, v)
   end
   local ok, err = pcall(t.test, self, answer)
   if not ok then
@@ -5073,8 +5586,13 @@ function Overlay:_menuRound(now, tick)
     if not self.active then return end
     if t.cheap and not t.asking then self:_menuAsk(t) end
   end
-  for _, t in ipairs(st.tests) do
-    if t.cheap and t.saw then return end
+  -- Not while an item waits to be chosen, or to be seen taken: a cheap test that sees the menu
+  -- without saying where (nativePopup) would otherwise keep the one test that can place the item
+  -- from ever being asked, and the item would end as "the menu does not say where it is".
+  if not self._pick then
+    for _, t in ipairs(st.tests) do
+      if t.cheap and t.saw then return end
+    end
   end
   local all = st.open or now < st.lookUntil
   for _, t in ipairs(st.tests) do
@@ -5122,6 +5640,16 @@ local function menuTickFn()
   local now = host.now()
   for _, o in ipairs(menuWatched) do
     if o.active then o:_menuRound(now, true) end
+  end
+  -- An item whose press no test has answered with a menu it could be chosen in, for as long as
+  -- the tests are asked on every tick after a press: dropped, and said (see "Choosing an item").
+  -- One the user has left for another window of the same overlay (a second Avenger) is dropped
+  -- quietly, as a pick seen on another window is: nothing is said about a window they left.
+  for _, o in ipairs(menuWatched) do
+    local p = o._pick
+    if p and o.active and now >= p.untilMs then
+      o:_pickEnd(o:hwnd() ~= p.pinned and "moved" or "due")
+    end
   end
   -- An overlay holding its place over its own menu's window whose tests no longer see a menu:
   -- whatever is in front now decides again, as a window event would have (see _menuHold). Its
@@ -5172,6 +5700,8 @@ end
 function Overlay:_menuOpening(c)
   if not self.active then return end
   local st = self._menu
+  -- A new press: an item the last one was waiting to choose is not this press's menu.
+  if self._pick then self:_pickEnd("press") end
   if st then
     st.lookUntil = host.now() + MENU_LOOK_MS
     st.pressed = c and c.label or "a control"
@@ -5189,7 +5719,10 @@ function Overlay:_menuOpening(c)
     end
     menuHook(self, "pressed")
   end
-  if host.calibrating then self:_menuShots(c) end
+  -- Whether this press was photographed, so the item it chooses is photographed with it (see
+  -- _pickShot): the same first two openings per control, not a count of its own.
+  self._pressShot = false
+  if host.calibrating then self._pressShot = self:_menuShots(c) == true end
 end
 
 -- One of the overlay's own keys arrived with no menu counted open: the user is back in the
@@ -5201,6 +5734,9 @@ function Overlay:_menuOwnKey()
   if not st or st.open then return end
   st.pressed, st.press = nil, nil
   menuHook(self, "forget")
+  -- The user moved on before any menu was seen: the item is not chosen, and nothing is said —
+  -- the key they pressed is about to say what it does.
+  if self._pick then self:_pickEnd("key") end
 end
 
 -- The overlay left the front: the state starts again from nothing when it is back — the press
@@ -5218,6 +5754,433 @@ function Overlay:_menuLeave()
   st.press, st.hold = nil, nil
   st.lookUntil = 0
   menuHook(self, "forget")
+  if self._pick then self:_pickEnd("left") end
+end
+
+-- ── Choosing an item ─────────────────────────────────────────────────────────
+-- A plug-in whose menu is a popup it draws itself — every JUCE plug-in's is, and VPS Avenger's
+-- MENU, zoom list and redo list are by the avenger_control project's account — publishes no item
+-- anybody can press. What a sighted user does is click the opener and then the item, and the
+-- obvious way to say that here, a hotspot with `points = { opener, item }`, fails twice over:
+--
+--   * the second click is refused. Every click of a sequence asks host.window.ownsPoint of the
+--     PLUG-IN's window first, and a popup is a window of its own drawn over it, so the item point
+--     answers "another window is drawn there" — "something else is covering …", every time;
+--   * and `settle` would be a timer deciding that the menu is up by now. It is exactly the guess
+--     this project has stopped making: too short and the click lands on the plug-in under a menu
+--     that has not appeared, too long and every choice is slow.
+--
+-- So an item is chosen when a MENU TEST SEES THE MENU, and at a place the test's answer says:
+--
+--   1. the opener (a hotspot's `at`, with its `button`) is placed and checked like any hotspot's
+--      click; then it counts as the press of a control with `opensMenu` — the tests run on every
+--      tick from here, newWindow takes its list — and it is clicked. Placed first, so that a press
+--      whose opener cannot be clicked starts nothing;
+--   2. the first answer that sees a menu AND says where it is — `{ x, y, w, h }` on screen, which
+--      newWindow answers with the window that appeared — places the item. A table `menuItem` is
+--      its offset from the menu's corner, authored and scaled like every other distance of the
+--      overlay, by the factor the OPENER was placed with (the popup is drawn at the zoom it opened
+--      at, and a factor read off the plug-in's screen is least likely to be readable while a popup
+--      covers it). A function is handed the overlay, the menu and that factor, and answers the
+--      offset in screen pixels — it works from the menu's rectangle, which is in screen pixels,
+--      so its answer is not scaled again, as a `dragBy` function's is not; `false` for "this
+--      window is not my menu, look at the next answer" (a tooltip), nil for "cannot be placed";
+--   3. the item must lie inside that rectangle, and must not be covered: a menu that is a window
+--      is asked host.window.ownsPoint about ITSELF — by its host.window id (`window`, Windows), or
+--      by its id in windowsOf's numbering with ownsPoint's `listed` option (macOS); one drawn
+--      inside the plug-in (no `kind`) gets the check every click of the overlay gets;
+--   4. then it is clicked — on that answer, in that pass, with no wait;
+--   5. and it counts as CHOSEN only once the menu is seen to have taken it. JUCE's popup ignores
+--      a mouse-up that comes too soon after the popup's window was created — a quarter of a second
+--      in `juce_PopupMenu.cpp` as it was read for this, from memory, and not measured against the
+--      JUCE any plug-in here ships — while the first tick that lists a new window comes 0–150 ms
+--      after it appeared. An ignored click leaves the menu open, the keys its, and nothing said.
+--      So the item keeps waiting after its click: an answer to a question asked on a LATER tick
+--      that still shows the same menu — the same window, at the same place and size — is a click
+--      the menu did not take, and the item is clicked again, at most MENU_ITEM_RETRIES more times
+--      (a count of answers, not a time: three more ticks cover a quarter of a second at any
+--      cadence of 150 ms or slower); the menu closing, an answer showing another window in its
+--      place, or the overlay leaving the front after the click is the item taken, and only then
+--      is `onDone` told it was chosen. Detection, never a wait before the click. A menu whose
+--      item keeps it open — a tick box in a menu — would take the second click as a second
+--      choice, so it opts out with `retries = 0`: chosen at its click, and not followed.
+--
+-- Relative to the MENU rather than to the opener, because a toolkit puts a popup where it fits:
+-- below its opener, flipped above it when the screen ends first, shifted left at the right edge
+-- (JUCE does all three). An offset from the opener is right only where the popup had room — and
+-- wrong exactly when the plug-in sits low on the screen, which a sighted user never notices and a
+-- blind one cannot. The menu's own corner moves with it. A `menuItem` function is handed the
+-- menu, and can place its item from anything else it knows.
+--
+-- What ends it without a choice, and what is said:
+--   * the time the tests are asked on every tick after a press (MENU_LOOK_MS) runs out — a bound
+--     on how long a press may wait for its menu, not a guess that the menu is up: a later menu is
+--     another press's. Said: no menu was seen; or none it could be chosen in; or the menu did not
+--     say where it is; or the item was not inside it;
+--   * the menu closes before the item's click — the same sentences;
+--   * one of the overlay's own keys, the overlay leaving the front, another press, or the overlay
+--     on another window, first — the user moved on; logged, not said;
+--   * the item cannot be placed (a function with no answer), or it is covered — said, like any
+--     control that cannot act;
+--   * the menu is still there after the last click on the item — said: it did not take it.
+-- A second press of the same control while its item is still waiting for its menu is not a new
+-- press: the opener is not clicked again (see ownKey), and the log says so.
+local PICK_LOG = "[menu item] '%s': '%s' "
+
+-- The rectangle a menu test's answer gives, or nil.
+local function menuRectOf(v)
+  if type(v) == "table" and type(v.x) == "number" and type(v.y) == "number"
+    and type(v.w) == "number" and type(v.h) == "number" and v.w > 0 and v.h > 0 then
+    return v
+  end
+  return nil
+end
+
+-- Whether answer `m` shows menu `was`, the one an item was clicked in: the same place and size,
+-- and the same window where both answers name one — two tests on the list can answer the same
+-- menu, one with a window's id and one with only its rectangle.
+local function sameMenu(m, was)
+  if m.id ~= nil and was.id ~= nil and m.id ~= was.id then return false end
+  return m.x == was.x and m.y == was.y and m.w == was.w and m.h == was.h
+end
+
+-- Control `c`'s opener has just been clicked: its item is chosen when a test sees the menu.
+-- `onDone(overlay, chosen, why)` is O:chooseMenuItem's, `retries` its count (default
+-- MENU_ITEM_RETRIES). The factor the opener was placed with is kept for the item (step 2).
+function Overlay:_armPick(c, onDone, retries)
+  local k = nil
+  if scaledFor(self, c) then k = factorNow(self) end
+  self._pick = {
+    c = c,
+    pinned = self:hwnd(),
+    untilMs = host.now() + MENU_LOOK_MS,
+    onDone = onDone,
+    k = k,
+    retries = retries or MENU_ITEM_RETRIES,
+    shoot = self._pressShot == true,
+    noWhere = nil, -- the test that saw the menu without saying where it is
+    outside = nil, -- where the item fell, outside the menu that was seen
+    other = nil,   -- a window the `menuItem` function said is not its menu
+    clicked = nil, -- once the item is clicked: { x, y, menu, tick, clicks }
+    keyPending = nil, -- one of the overlay's own keys is running (see ownKey)
+  }
+  host.log.info((PICK_LOG .. "clicked its opener — the item is chosen when a menu test sees the "
+    .. "menu, for up to %d ms"):format(tostring(self.label), tostring(c.label), MENU_LOOK_MS))
+end
+
+-- A press of control `c` while its item is still waiting for its menu, from the first press: the
+-- opener is not clicked again (see ownKey). Returns whether the press is dropped.
+function Overlay:_pickRepeat(c)
+  local p = self._pick
+  if not (p and p.c == c and not p.clicked) then return false end
+  p.keyPending = nil
+  host.log.info((PICK_LOG .. "pressed again while its menu is still being waited for — the opener "
+    .. "is not clicked again; the first press stands"):format(tostring(self.label), tostring(c.label)))
+  return true
+end
+
+-- Calls the pick's `onDone`, guarded: a module's hook must not take the menu tick with it.
+function Overlay:_pickDone(p, chosen, why)
+  if not p.onDone then return end
+  local ok, err = pcall(p.onDone, self, chosen, why)
+  if not ok then
+    host.log.info((PICK_LOG .. "onDone failed: %s"):format(tostring(self.label),
+      tostring(p.c.label), tostring(err)))
+  end
+end
+
+-- The pick is over. `why` is one of:
+--   press / key / left / moved — the user or the world moved on first: logged only;
+--   due / closed — no answer placed the item in time, or the menu closed: said, in the words of
+--                  what was seen;
+--   unplaced / covered — the item could not be placed, or something is drawn over it: said;
+--   refused — refuseOutside has said it already: logged only;
+--   untaken — the menu was still there after the last click on the item: said.
+-- Once the item has been clicked, every other ending — the menu closed, another window in its
+-- place ("taken"), the overlay left the front or moved on — is the item CHOSEN: onDone(true).
+function Overlay:_pickEnd(why, detail)
+  local p = self._pick
+  if not p then return end
+  self._pick = nil
+  local label = tostring(p.c.label or "That control")
+  local k = p.clicked
+  if k and why ~= "untaken" and why ~= "covered" and why ~= "refused" then
+    local how
+    if why == "closed" then
+      how = "the menu has closed"
+    elseif why == "taken" then
+      how = tostring(detail)
+    elseif why == "due" then
+      how = "the menu was not seen again after it"
+    else
+      how = ({ left = "the overlay left the front after it", moved = "the overlay is on another "
+        .. "window after it", key = "the overlay's own keys are back, no menu open",
+        press = "another press came after it" })[why] or tostring(why)
+    end
+    host.log.info((PICK_LOG .. "chosen — clicked %d time(s) at (%d,%d); %s"):format(
+      tostring(self.label), tostring(p.c.label), k.clicks, k.x, k.y, how))
+    self:_pickDone(p, true, nil)
+    return
+  end
+  local said, logged
+  if why == "press" then
+    logged = "not chosen — another press came first"
+  elseif why == "key" then
+    logged = "not chosen — one of the overlay's own keys came first, with no menu open"
+  elseif why == "left" then
+    logged = "not chosen — the overlay left the front first"
+  elseif why == "moved" then
+    logged = "not chosen — the overlay is on another window now"
+  elseif why == "due" or why == "closed" then
+    if p.outside then
+      said = label .. " is not where it should be"
+      logged = "not chosen — the item, at " .. p.outside .. ", is outside the menu that was seen"
+    elseif p.other then
+      said = label .. ": no menu it can be chosen in was seen, nothing was chosen"
+      logged = "not chosen — its menuItem function took no window seen for its menu (the last at "
+        .. p.other .. ")"
+    elseif p.noWhere then
+      said = label .. ": the menu does not say where it is, nothing was chosen"
+      logged = "not chosen — test '" .. p.noWhere .. "' sees a menu but does not say where it is, "
+        .. "and no test that does saw it"
+    elseif why == "closed" then
+      said = label .. ": the menu closed before anything was chosen"
+      logged = "not chosen — the menu closed before a test placed the item"
+    else
+      said = label .. ": no menu was seen, nothing was chosen"
+      logged = ("not chosen — no menu test saw a menu within %d ms of the press"):format(MENU_LOOK_MS)
+    end
+  elseif why == "unplaced" then
+    said = label .. " is not available now"
+    logged = "not chosen — the item cannot be placed now: " .. tostring(detail)
+  elseif why == "covered" then
+    said = "something else is covering " .. label
+    logged = "not chosen — " .. tostring(detail)
+  elseif why == "untaken" then
+    said = label .. ": the menu did not take the choice"
+    logged = ("not chosen — the menu was still there after %d click(s) on the item at (%d,%d)")
+      :format(k and k.clicks or 0, k and k.x or 0, k and k.y or 0)
+  else
+    logged = "not chosen — " .. tostring(detail or why)
+  end
+  host.log.info((PICK_LOG .. "%s"):format(tostring(self.label), tostring(p.c.label), logged))
+  if said then host.speech.output(said, { interrupt = true }) end
+  self:_pickDone(p, false, why)
+end
+
+-- What is drawn at (x, y) over menu `m`, for control `c`: nil and how it was asked when it is the
+-- menu (or nothing can say), the reason when another window is, or "refused" when the overlay's
+-- own check refused the point and said so (step 3).
+function Overlay:_pickCovered(c, m, x, y)
+  if m.window ~= nil then
+    local ok, mine = pcall(host.window.ownsPoint, m.window, x, y)
+    if ok and mine == false then
+      return ("(%d,%d) is inside the menu's window id %s, but another window is drawn there")
+        :format(x, y, tostring(m.window))
+    end
+    return nil, "its window id " .. tostring(m.window) .. " is asked what is drawn there"
+  end
+  if m.kind == "window" and m.id ~= nil then
+    local ok, mine = pcall(host.window.ownsPoint, m.id, x, y, { listed = true })
+    if ok and mine == false then
+      return ("(%d,%d) is inside the menu's window %s of the window list, but another window is "
+        .. "drawn there"):format(x, y, tostring(m.id))
+    end
+    return nil, "its window " .. tostring(m.id) .. " of the window list is asked what is drawn there"
+  end
+  -- Drawn inside the plug-in: the check any click of this overlay gets.
+  if refuseOutside(self, c, x, y) then return "refused" end
+  return nil, "drawn inside the plug-in, checked like any click of the overlay"
+end
+
+-- Test `t` sees a menu and answered `value`: the item is chosen in it, if the answer says where
+-- it is and the item lies inside; once the item is clicked, the answer says whether the menu took
+-- it (step 5).
+function Overlay:_pickSeen(t, value)
+  local p = self._pick
+  local c = p.c
+  local m = menuRectOf(value)
+  if p.clicked then return self:_pickFollow(t, m) end
+  if not m then
+    -- nativePopup and the accessibility tests say only "a menu is open": nowhere to place an
+    -- item. Another test on the list may say where; this one's word is noted once.
+    if p.noWhere == nil then
+      p.noWhere = t.name
+      host.log.info((PICK_LOG .. "— test '%s' sees a menu but does not say where it is; waiting for "
+        .. "one that does"):format(tostring(self.label), tostring(c.label), t.name))
+    end
+    return
+  end
+  if not self.active or self:hwnd() ~= p.pinned then return self:_pickEnd("moved") end
+  local where = ("%d,%d %dx%d"):format(m.x, m.y, m.w, m.h)
+  local item = c.menuItem
+  local x, y
+  if type(item) == "function" then
+    local ok, v, vwhy = pcall(item, self, m, p.k)
+    if not ok then return self:_pickEnd("unplaced", "its menuItem function raised: " .. tostring(v)) end
+    if v == false then
+      -- Not this window: something else that appeared (a tooltip). The next answer is looked at.
+      if p.other ~= where then
+        p.other = where
+        host.log.info((PICK_LOG .. "— test '%s' sees a window at %s, which its menuItem function "
+          .. "says is not its menu%s; waiting for the next answer"):format(tostring(self.label),
+          tostring(c.label), t.name, where, vwhy ~= nil and (" (" .. tostring(vwhy) .. ")") or ""))
+      end
+      return
+    end
+    if type(v) ~= "table" or type(v[1]) ~= "number" or type(v[2]) ~= "number" then
+      return self:_pickEnd("unplaced", "its menuItem answered " .. tostring(v) .. ", not {dx, dy}")
+    end
+    -- Screen pixels from the menu's corner: not scaled again. Rounded once in a scaled overlay,
+    -- the plain sum in one without, as every point there is.
+    item = v
+    if scaledFor(self, c) then
+      x, y = math.floor(m.x + v[1] + 0.5), math.floor(m.y + v[2] + 0.5)
+    else
+      x, y = m.x + v[1], m.y + v[2]
+    end
+  elseif scaledFor(self, c) then
+    -- An authored distance, at the factor the opener was placed with.
+    if not p.k then return self:_pickEnd("unplaced", "no factor was known at the press") end
+    x, y = math.floor(m.x + p.k * item[1] + 0.5), math.floor(m.y + p.k * item[2] + 0.5)
+  else
+    x, y = m.x + item[1], m.y + item[2]
+  end
+  if x < m.x or x >= m.x + m.w or y < m.y or y >= m.y + m.h then
+    -- Not clicked, and not given up either: a later answer may be the menu itself where this one
+    -- was something else that appeared (a tooltip under the pointer is a window too, on a Mac).
+    local at = ("(%d,%d)"):format(x, y)
+    if p.outside ~= at .. " of " .. where then
+      p.outside = at .. " of " .. where
+      host.log.info((PICK_LOG .. "— test '%s' sees a menu at %s, and item (%s,%s) lands at %s, "
+        .. "outside it; not clicking"):format(tostring(self.label), tostring(c.label), t.name, where,
+        tostring(item[1]), tostring(item[2]), at))
+    end
+    return
+  end
+  local covered, checked = self:_pickCovered(c, m, x, y)
+  if covered == "refused" then return self:_pickEnd("refused", "refused, and said") end
+  if covered then return self:_pickEnd("covered", covered) end
+  -- In a calibrating run, the menu with a crosshair on the item, before the click takes it away.
+  local writeShot = p.shoot and self:_pickShot(c, m, x, y) or nil
+  host.log.info((PICK_LOG .. "— test '%s' sees the menu at %s%s (%s); choosing item (%s,%s) at "
+    .. "(%d,%d)"):format(tostring(self.label), tostring(c.label), t.name, where,
+    m.kind == "window" and (" (window id " .. tostring(m.id) .. ")") or "", checked,
+    tostring(item[1]), tostring(item[2]), x, y))
+  host.input.click(x, y)
+  -- Written on a later pass: a PNG takes the event loop for hundreds of milliseconds in a debug
+  -- build, and the click is what the user is waiting for.
+  if writeShot then host.timer.after(0, writeShot) end
+  if p.retries <= 0 then
+    -- Not followed (`retries = 0`): chosen at its click.
+    self._pick = nil
+    self:_pickDone(p, true, nil)
+    return
+  end
+  p.clicked = { x = x, y = y, menu = m, tick = menuTick, clicks = 1 }
+end
+
+-- An answer after the item's click, `m` its rectangle or nil (step 5). The same menu, on a
+-- question asked on a tick after the last click, is a click the menu did not take: clicked again,
+-- after the same checks, while the pick has retries left, and "untaken" after that. Another window
+-- in its place is the item taken. An answer that does not say where says nothing either way.
+function Overlay:_pickFollow(t, m)
+  local p = self._pick
+  local k = p.clicked
+  if not m then return end
+  if not sameMenu(m, k.menu) then
+    return self:_pickEnd("taken", ("test '%s' sees another window in its place, at %d,%d %dx%d")
+      :format(t.name, m.x, m.y, m.w, m.h))
+  end
+  -- Asked on the click's own tick or before it: the menu cannot have had the click yet.
+  if (t.lastAsked or -1) <= k.tick then return end
+  if k.clicks > p.retries then return self:_pickEnd("untaken") end
+  if not self.active or self:hwnd() ~= p.pinned then return self:_pickEnd("moved") end
+  local covered = self:_pickCovered(p.c, m, k.x, k.y)
+  if covered == "refused" then return self:_pickEnd("refused", "refused, and said") end
+  if covered then return self:_pickEnd("covered", covered) end
+  k.clicks += 1
+  k.tick = menuTick
+  host.log.info((PICK_LOG .. "— test '%s' still sees the menu at %d,%d %dx%d a tick after the "
+    .. "item's click, which it did not take: clicking (%d,%d) again, %d of %d"):format(
+    tostring(self.label), tostring(p.c.label), t.name, m.x, m.y, m.w, m.h, k.x, k.y, k.clicks,
+    p.retries + 1))
+  host.input.click(k.x, k.y)
+end
+
+-- Opens a menu and chooses an item in it, for a module's own code — a stepper whose step is a
+-- choice from the plug-in's list (Avenger's zoom). `spec` is what a hotspot with `menuItem` takes:
+-- `label`, `at` (a table or a function of the overlay), `fromRight`, `rawOrigin`, `button`,
+-- `menuItem`, `retries`, and `onDone(overlay, chosen, why)`. Returns whether the opener was
+-- clicked. A spec that cannot work — no `at`, a `menuItem` that is neither {dx, dy} nor a
+-- function, a `button` the click does not know, a `retries` that is not a whole number from 0 —
+-- raises here, at the call, rather than after the menu has opened.
+function Overlay:chooseMenuItem(spec)
+  local who = tostring(self.label)
+  if type(spec) ~= "table" or (type(spec.at) ~= "table" and type(spec.at) ~= "function")
+    or spec.menuItem == nil then
+    error(("overlay '%s': chooseMenuItem takes { label, at, menuItem, … }, with `at` {x, y} or a "
+      .. "function(overlay)"):format(who), 2)
+  end
+  local mi = spec.menuItem
+  if type(mi) ~= "function" and not (type(mi) == "table" and type(mi[1]) == "number"
+    and type(mi[2]) == "number") then
+    error(("overlay '%s': chooseMenuItem's `menuItem` must be {dx, dy} or a function(overlay, menu, "
+      .. "factor), got %s"):format(who, type(mi)), 2)
+  end
+  local b = spec.button
+  if b ~= nil and b ~= "left" and b ~= "right" and b ~= "middle" then
+    error(("overlay '%s': chooseMenuItem's `button` must be \"left\", \"right\" or \"middle\", got %s")
+      :format(who, tostring(b)), 2)
+  end
+  local r = spec.retries
+  if r ~= nil and (type(r) ~= "number" or r < 0 or r % 1 ~= 0) then
+    error(("overlay '%s': chooseMenuItem's `retries` must be a whole number from 0, got %s")
+      :format(who, tostring(r)), 2)
+  end
+  local label = spec.label or "Menu item"
+  local function fail(why)
+    if spec.onDone then pcall(spec.onDone, self, false, why) end
+    return false
+  end
+  if not self.active then
+    host.log.info((PICK_LOG .. "not opened — the overlay is not in front"):format(who, label))
+    return fail("inactive")
+  end
+  if not self._menu then
+    host.log.info((PICK_LOG .. "not opened — the overlay lists no menu tests to see the menu with")
+      :format(who, label))
+    host.speech.output(label .. " is not available now", { interrupt = true })
+    return fail("no tests")
+  end
+  -- One control per label, kept: the menu shots count a control's openings by the control, and
+  -- a fresh table per call would be photographed at every one.
+  self._pickControls = self._pickControls or {}
+  local c = self._pickControls[label]
+  if not c then
+    c = { kind = "pick", label = label }
+    self._pickControls[label] = c
+  end
+  if self:_pickRepeat(c) then return fail("busy") end
+  c.at, c.fromRight, c.rawOrigin, c.button, c.menuItem =
+    spec.at, spec.fromRight, spec.rawOrigin, spec.button, spec.menuItem
+  local px, py, why = hotspotPoint(self, c)
+  if not px then
+    unplaced(self, c, why or "its `at` answered nil")
+    return fail("unplaced")
+  end
+  if refuseOutside(self, c, px, py) then return fail("refused") end
+  -- Placed and checked: now it is a press (step 1).
+  self:_menuOpening(c)
+  host.log.info((PICK_LOG .. "opening its menu, clicking (%d,%d)%s"):format(who,
+    label, px, py, c.button and (" with the " .. tostring(c.button) .. " button") or ""))
+  if c.button ~= nil then
+    host.input.click(px, py, { button = c.button })
+  else
+    host.input.click(px, py)
+  end
+  self:_armPick(c, spec.onDone, r)
+  return true
 end
 
 -- ── Holding its place ────────────────────────────────────────────────────────
@@ -5451,6 +6414,9 @@ function Overlay:_menuKeysBack()
   local st = self._menu
   st.press = nil
   menuHook(self, "forget")
+  -- The menu's window is over and the plug-in has the keyboard: an item still waiting was never
+  -- chosen in it.
+  if self._pick then self:_pickEnd("closed") end
   self:_registerHotkeys(true)
   host.keys.scope(true)
   applyMenuState()
@@ -5512,9 +6478,8 @@ local function calibrationPoint(self, c)
     if bx then return bx, by end
   end
   if c.region then
-    local ox, oy = originOf(self, c)
-    return ox + math.floor((c.region[1] + c.region[3]) / 2),
-      oy + math.floor((c.region[2] + c.region[4]) / 2)
+    -- nil when the region cannot be placed now: listed as "no position", with no crosshair.
+    return ocrCenter(self, c)
   end
   return nil
 end
@@ -5666,7 +6631,23 @@ local function calibrationMarks(self)
       end
     end
   end
-  return marks, points
+  -- The openers O:chooseMenuItem has clicked for a module's own code (a stepper over a zoom
+  -- list): points no control's `at` names, and the module clicks them all the same. Each is known
+  -- once it has been used, at the `at` it was last given; by label, so the numbering is stable.
+  local openers = {}
+  local labels = {}
+  for label in pairs(self._pickControls or {}) do labels[#labels + 1] = label end
+  table.sort(labels)
+  for _, label in ipairs(labels) do
+    local x, y = hotspotPoint(self, self._pickControls[label])
+    if x then
+      marks[#marks + 1] = { x = x, y = y }
+      openers[#openers + 1] = { label = label, x = x, y = y, n = #marks }
+    else
+      openers[#openers + 1] = { label = label }
+    end
+  end
+  return marks, points, openers
 end
 
 -- The region a calibration picture of origin `o` covers: its CONTENT rectangle, grown to take
@@ -5695,13 +6676,37 @@ local function calibrationRegion(o, marks)
   return region
 end
 
+-- What a control's line in a calibration shot adds. In a SCALED overlay, where the authored
+-- numbers are not where anything lands, every region it reads, as the screen rectangle; an
+-- unscaled overlay's regions are its source's numbers plus the origin printed above them, and its
+-- lines are what they always were. And for a control that chooses a menu item, the item — placed
+-- only once its menu is seen, so given as authored; its crosshair is in the menu item shot.
+function Overlay:_calibrationPlaces(c)
+  local out = {}
+  if self._scale then
+    for _, field in ipairs({ "region", "ocrLabel" }) do
+      if c[field] ~= nil then
+        local r, why = regionOf(self, c, field)
+        out[#out + 1] = r and string.format("  %s (%d,%d)-(%d,%d)", field, r[1], r[2], r[3], r[4])
+          or ("  " .. field .. " not placed (" .. tostring(why) .. ")")
+      end
+    end
+  end
+  if c.menuItem ~= nil then
+    out[#out + 1] = type(c.menuItem) == "table"
+      and string.format("  then item (%s,%s) of its menu", tostring(c.menuItem[1]), tostring(c.menuItem[2]))
+      or "  then an item of its menu"
+  end
+  return table.concat(out)
+end
+
 function Overlay:calibrationShot()
   local o = self:origin()
   if not (o and o.client and o.bounds) then
     host.log.info("[calibrate] no active origin")
     return false
   end
-  local marks, points = calibrationMarks(self)
+  local marks, points, openers = calibrationMarks(self)
   local lines = {}
   for i, c in ipairs(self.controls) do
     local p = points[i]
@@ -5712,13 +6717,24 @@ function Overlay:calibrationShot()
     elseif p then
       local px = host.screen.pixel(p.x, p.y)
       lines[#lines + 1] = string.format(
-        "  %2d %-24s screen (%d,%d)  pixel %s%s",
+        "  %2d %-24s screen (%d,%d)  pixel %s%s%s",
         p.n, tostring(c.label), p.x, p.y,
         px and string.format("%d,%d,%d", px.r, px.g, px.b) or "?",
-        c.rawOrigin and "  [rawOrigin]" or ""
+        c.rawOrigin and "  [rawOrigin]" or "",
+        self:_calibrationPlaces(c)
       )
     else
-      lines[#lines + 1] = string.format("  -- %-24s no position", tostring(c.label))
+      lines[#lines + 1] = string.format("  -- %-24s no position%s", tostring(c.label),
+        self:_calibrationPlaces(c))
+    end
+  end
+  for _, op in ipairs(openers) do
+    if op.n then
+      local px = host.screen.pixel(op.x, op.y)
+      lines[#lines + 1] = string.format("  %2d %-24s screen (%d,%d)  pixel %s  [menu opener]",
+        op.n, op.label, op.x, op.y, px and string.format("%d,%d,%d", px.r, px.g, px.b) or "?")
+    else
+      lines[#lines + 1] = string.format("  -- %-24s no position  [menu opener]", op.label)
     end
   end
   -- Written under the OVERLAY RUNTIME's own directory, not the module whose overlay this
@@ -5742,13 +6758,25 @@ function Overlay:calibrationShot()
   -- The captured region, not the window size: the two differ (content vs frame, and the
   -- growth above), and printing the one that is NOT in the picture is how half an hour goes
   -- into wondering why a coordinate inside "1044x633" was off the edge of the image.
+  -- A scaled overlay says the factor its crosshairs were placed with, and the frame: the two
+  -- numbers a tester's picture is checked against at another zoom.
+  local scaleNote = ""
+  if self._scale then
+    local k, why = factorNow(self)
+    local fx, fy = 0, 0
+    if self._originOffset then fx, fy = self._originOffset(o) end
+    scaleNote = k and string.format("  scale %.4f about (%s,%s), frame (%s,%s)", k,
+      tostring(self._scale.about[1]), tostring(self._scale.about[2]), tostring(fx), tostring(fy))
+      or ("  no scale now (" .. tostring(why) .. ")")
+  end
   host.log.info(string.format(
-    "[calibrate] %s — origin (%d,%d) captured (%d,%d)-(%d,%d) %dx%d%s -> %s (%s)",
+    "[calibrate] %s — origin (%d,%d) captured (%d,%d)-(%d,%d) %dx%d%s%s -> %s (%s)",
     tostring(self.label), o.client.x, o.client.y,
     region[1], region[2], region[3], region[4], region[3] - region[1], region[4] - region[2],
     self._landmarkHit
       and string.format("  landmark at (%d,%d)", self._landmarkHit.x, self._landmarkHit.y)
       or "",
+    scaleNote,
     path, tostring(ok)
   ))
   for _, l in ipairs(calibrationContext(o)) do host.log.info("[calibrate]" .. l) end
@@ -5797,12 +6825,15 @@ end
 -- share one count of two. Keys held weakly, so the count never keeps an overlay alive.
 local MENU_SHOTS_PER_CONTROL = 2
 local menuShotsTaken = setmetatable({}, { __mode = "k" })
+
+-- Takes the menu shots of one press, as above. Returns true when this press is photographed, so
+-- that the item a control chooses in its menu on this press is photographed too (_pickShot).
 function Overlay:_menuShots(c)
   local who, what = tostring(self.label), tostring(c and c.label or "control")
   local o = self:origin()
   if not (o and o.client and o.bounds) then
     host.log.info(("[calibrate] '%s' '%s': no active origin, so no menu shots"):format(who, what))
-    return
+    return false
   end
   local mine = menuShotsTaken[self]
   if not mine then
@@ -5858,6 +6889,42 @@ function Overlay:_menuShots(c)
       -- Counted on a later pass, not now: now would write the "before" picture ahead of the click.
       host.timer.after(0, oneIn)
     end
+  end
+  return true
+end
+
+-- The MENU ITEM SHOT, in a calibrating run: a control that chooses a menu item has just been
+-- handed the menu by a test, and is about to click. One picture of the menu — its rectangle as the
+-- test gave it, 12 pixels round — with a crosshair on the point about to be clicked:
+--
+--   calibration/<overlay>-<control>-menu-item.png
+--
+-- numbered like the menu shots, and taken on the presses those are taken on (the first two
+-- openings of each control). It is the only picture that can show where an item lands: the menu
+-- shots' later two come after the click has closed the menu, and the calibration shot is of the
+-- plug-in, with no menu open. What a tester sends back so an item offset can be measured.
+--
+-- The capture is made here, before the click — one snapshot — and the PNG is written by the
+-- function returned, which the caller runs on a later pass, after the click.
+function Overlay:_pickShot(c, m, x, y)
+  local who, what = tostring(self.label), tostring(c and c.label or "control")
+  local pad = 12
+  local region = { m.x - pad, m.y - pad, m.x + m.w + pad, m.y + m.h + pad }
+  local fine, snap, why = pcall(host.screen.snapshot, { region = region })
+  if not fine then snap, why = nil, snap end
+  local stem = shotPath(who .. "-" .. what, "-menu-item")
+  return function()
+    local path = host.path("calibration/" .. stem .. "-menu-item.png")
+    local ok = false
+    if snap then
+      local okc, saved, reason = pcall(host.screen.saveMarked, path,
+        { snapshot = snap, marks = { { x = x, y = y } } })
+      ok, why = okc and saved == true, okc and reason or saved
+      pcall(snap.release, snap)
+    end
+    host.log.info(("[calibrate] '%s' '%s': menu item shot, (%d,%d)-(%d,%d), the item marked at "
+      .. "(%d,%d) -> %s (%s)"):format(who, what, region[1], region[2], region[3], region[4], x, y,
+      path, ok and "true" or ("false: " .. tostring(why or "no reason given"))))
   end
 end
 
@@ -5919,8 +6986,11 @@ function Overlay:captureControl(label, path)
   end
   for _, c in ipairs(self.controls) do
     if c.region and c.label == label then
-      local ox, oy = originOf(self, c)
-      local region = { ox + c.region[1], oy + c.region[2], ox + c.region[3], oy + c.region[4] }
+      local region, why = regionOf(self, c)
+      if not region then
+        host.log.info("captureControl '" .. tostring(label) .. "': no region now (" .. tostring(why) .. ")")
+        return false
+      end
       local ok = host.screen.save ~= nil and host.screen.save(path, { region = region })
       host.log.info(string.format(
         "captureControl '%s' region=(%d,%d,%d,%d) -> %s ok=%s",
@@ -5940,8 +7010,11 @@ function Overlay:captureRegion(region, path)
     host.log.info("captureRegion: overlay not active")
     return false
   end
-  local ox, oy = originOf(self)
-  local r = { ox + region[1], oy + region[2], ox + region[3], oy + region[4] }
+  local r, why = placeRect(self, nil, region)
+  if not r then
+    host.log.info("captureRegion: cannot be placed now (" .. tostring(why) .. ")")
+    return false
+  end
   local ok = host.screen.save ~= nil and host.screen.save(path, { region = r })
   host.log.info(string.format(
     "captureRegion (%d,%d,%d,%d) -> %s ok=%s", r[1], r[2], r[3], r[4], path, tostring(ok)
@@ -5968,10 +7041,11 @@ function Overlay:captureFull(path)
 end
 
 -- Dev calibration: dump a content-frame-exact shot of the whole plugin content
--- (`content-full.png`, where pixel (x,y) == authored content coordinate (x,y)) plus
--- a small box around every positioned control, into `dir` (an absolute path), so
--- re-derived coordinates can be verified against the live plugin in one shot.
--- Skips rawOrigin (chrome-frame) controls. Active only.
+-- (`content-full.png`, where pixel (x,y) == authored content coordinate (x,y) — in an overlay
+-- without O:scale; a scaled one's picture is the authored rectangle placed through the scale, so
+-- its pixels are authored coordinates times the factor) plus a small box around every positioned
+-- control, into `dir` (an absolute path), so re-derived coordinates can be verified against the
+-- live plugin in one shot. Skips rawOrigin (chrome-frame) controls. Active only.
 function Overlay:captureAll(dir)
   if not self.active then
     host.log.info("captureAll: overlay not active")
@@ -5985,7 +7059,7 @@ function Overlay:captureAll(dir)
       local cx, cy
       if type(c.at) == "table" then
         cx, cy = c.at[1], c.at[2]
-      elseif c.region then
+      elseif type(c.region) == "table" then
         cx = math.floor((c.region[1] + c.region[3]) / 2)
         cy = math.floor((c.region[2] + c.region[4]) / 2)
       end

@@ -572,9 +572,12 @@ built for themselves.
       four (250/250/900), Komplete Kontrol a 250/600/1000 chain. Not migratable from here: each
       one needs the plug-in running to see what it actually waits for, and a wait shortened
       against a guess is a value announced from before the action.
-- [ ] **A coordinate-scaling helper is still deferred.** ON:EAR is the only module that scales
-      its authored coordinates to the window's drawn size, so there is one instance and nothing
-      to generalise from. It becomes worth doing when a second plug-in needs it.
+- [x] **Coordinate scaling is in the runtime (2026-09-28).** Deferred until a second plug-in
+      needed it, and VPS Avenger is that plug-in: it zooms from 50 to 200 %. `O:scale(fn, {
+      about })` puts every authored coordinate of an overlay through origin + frame + k *
+      (authored - about), rounded once; ON:EAR moved onto it with its points unchanged (held to
+      its old arithmetic to the pixel in `crates/host/src/overlay_scale_tests.rs`). See "VPS
+      Avenger, stage 1: the runtime's building blocks" below.
 
 ## The reference reads like one now (2026-08-31)
 
@@ -5842,6 +5845,285 @@ system.
       sforzando, Kontakt and each of its library modules — identical each time, and once more
       from the focus key. Expected: daw-hosts' own VM evaluates no overlay, so a line limited to
       it would come only when the key is pressed.
+
+## VPS Avenger, stage 1: the runtime's building blocks (2026-09-28)
+
+The maintainer's decisions of that day: our own module for VPS Avenger, every feature the
+avenger_control project's tool had, and stage 1 now — the header (preset name, previous/next,
+MENU with Load, Save, Save as and Initialize, Undo, the redo list, zoom) at every zoom, in every DAW
+daw-hosts knows. Its general parts live in the overlay runtime, built and tested against the
+scripted host (`crates/host/src/overlay_scale_tests.rs`, 16 scenarios;
+`crates/host/src/overlay_menu_item_tests.rs`, 24), and documented in docs/api/overlay.md; nothing
+of it has run on either system.
+
+- [x] **Coordinate scaling** — `O:scale(fn, { about })`, `O:toScreen` / `O:toScreenRect`. One
+      formula for every authored coordinate: `at` (table or function), `points`, `region` and
+      `ocrLabel` (both may now be functions of the overlay), `fromRight` (a distance from the right
+      edge), tab points, `reveal` probes, a slider's `from`/`to` and step, a graphical button's
+      `clickOffset` and fixed `dragBy`, a menu item's offset, calibration crosshairs.
+      `rawOrigin` is neither framed nor scaled. The frame is unscaled and composes first. A
+      factor the module cannot tell yet (`nil`, a raise, not a number above 0) places nothing and
+      says so ("… is not available now" — a slider's arrow keys too — "cannot be read now");
+      logged when it changes. An overlay without it is placed exactly as before — no rounding (a
+      scenario holds that). Every kind of coordinate above has a scenario of its own.
+- [x] **ARC ON:EAR on the runtime's scale.** `geometry.luau` is now the model put on each of its
+      four overlays (a frame of half the window's width, a factor of height / 1009 about (960, 0));
+      every `scaled(x, y)` is a plain `{x, y}`, its own clicks and reads go through `toScreen` /
+      `toScreenRect`, and the chooser rows — points worked out from the tree — are `rawOrigin`.
+      The runtime's arithmetic is its old arithmetic in the same order; the tests hold every design
+      point it clicks (29, in all four overlays, over 429 window sizes and places) and every point
+      and rectangle its own code placed (fractions of a pixel included) to the old formula.
+      `supported_os` stays windows.
+- [x] **Choosing an item in a plug-in's own menu** — `menuItem` on `addHotspotButton` (with `button
+      = "right"` for a menu a right click opens), and `O:chooseMenuItem(spec)` for a module's own
+      code (a stepper over Avenger's zoom list). The opener is placed and checked, then counts as a
+      press, then is clicked; the item is clicked on the answer of a menu test that sees the menu
+      and says where it is (`newWindow` answers with the largest window that appeared: `{ kind =
+      "window", id, window, x, y, w, h, … }`), at its offset from the menu's corner — a table scaled
+      at the factor the opener was placed with, a function's answer in screen pixels (`false`: not
+      this window, the next answer) — inside it, and with `host.window.ownsPoint` asked of the
+      menu's own window: by its HWND on Windows, by its window-list number on a Mac (`ownsPoint`'s
+      new `listed` option). Chosen only once the menu has taken it: the same menu still there on a
+      later tick is clicked again, up to `retries` more times (default 3, `retries = 0` for a menu
+      that stays open), then said ("… the menu did not take the choice"). A second press of the same
+      control while its menu is awaited clicks nothing. While an item waits every menu test is
+      asked, a cheap one that sees the menu holding back none. Nothing clicked, logged and said when
+      no test saw a menu within the 8 s the tests run after a press, when the menu does not say
+      where it is, when the function took no window for its menu, when the item falls outside it,
+      when it is covered, or when it cannot be placed; dropped quietly on an own key, leaving the
+      front, another press or another window. In a calibrating run the menu is photographed with a
+      crosshair on the item (`…-menu-item.png`), and the calibration shot marks an opener a
+      stepper's `chooseMenuItem` clicks (`[menu opener]`).
+- [x] **Small building blocks the module needed** — `O:menuOpen()` (whether a menu counts as open,
+      for closing a popup a choice left open); `O:resume(false)` (every activation starts at the
+      first control: a box drawn inside a plug-in comes back on the same window); `pollWhen` on a
+      binding with `pollMatch` (the poll rechecks only while the module expects a change); a
+      stepper's `onStep` returning `false` (a press that moved nothing says nothing of its own),
+      and its `settle` read at each step, documented.
+- [x] **Documentation** (docs/api/overlay.md): `O:scale`, `O:toScreen`, `O:chooseMenuItem`,
+      `menuItem`, `retries` and `button`, region functions, what a menu test's answer can say,
+      `O:menuOpen`, `O:resume`, `pollWhen`; and what stage 1 uses that had no entry:
+      `O.memoByEpoch`, `O.contentSize`, `O:onActivate` / `O:onDeactivate`, `addOCRButton`'s `text`,
+      `fallback` and `when`, `addHotspotButton`'s whole option list. docs/api/window.md:
+      `ownsPoint`'s `listed`. The stale runtime comment that `ownsPoint` was not implemented on
+      macOS is corrected.
+- [ ] **ON:EAR, live on Windows.** The tests hold the arithmetic; nothing has run. The main
+      window, one chooser and the settings panel at two window sizes (maximised and a small one):
+      the calibration shot (Ctrl+Alt+Shift+S) of each, crosshairs where they were before, and Tone,
+      Width and a tile press still landing. Its log gains `[scale] 'ARC ON:EAR': factor …` lines,
+      one per resize. One change that is not arithmetic: with no height at all (a window
+      minimised to nothing while in front) a press now says "… is not available now", where the
+      old `at` function answered nil and the press said nothing.
+- [ ] **Avenger's popups against the item choice — Windows.** Is the MENU popup a window of the
+      DAW's process that `newWindow` sees (the `newWindow: a window appeared …` line and the menu
+      shots)? Is the largest new window the menu, or does JUCE's drop shadow come out larger (it
+      should not: strips beside it)? How many clicks the item needs: the log's `clicking (x,y)
+      again, n of 4` lines. JUCE's quarter of a second after its popup opens is from its source as
+      read for this, not measured against the JUCE Avenger ships; if JUCE ignores more than three
+      clicks, the count is too small — detection all the same, never a wait. `ownsPoint` against
+      the popup's HWND: `true` expected.
+- [ ] **Avenger's popups — macOS, in Logic and in REAPER.** The same questions, plus: at which
+      window level; whether the popup becomes the application's focused window (then the overlay
+      holds its place over it, as tested); whether a tooltip appears under the parked pointer first
+      (an item outside it, or a window the module's function passes over, waits for the next
+      answer); what `ownsPoint` with `listed` answers for the popup's own number — `true` expected,
+      never run.
+- [ ] **Template images do not follow `O:scale`.** A graphical toggle's, graphical button's or
+      slider's templates and a landmark are matched at their own `scales`. Stage 1 matches no image;
+      a later stage that does, at a zoom other than the one the template was cut at, needs its
+      `scales` worked out from the factor.
+- [ ] **Stage 2 documentation, before Avenger's later stages rely on it.** Undocumented in
+      docs/api/overlay.md and not used by stage 1: `addTabControl` (a tab's `at`, `hotkey` and
+      `hotkeyLabel`; `typeLabel`, `current`, `verticalStep` / `verticalName`,
+      `hotkeyKeepsFocus`, `onSelect`) and `gotoTab` / `cycleTab` / `switchTab` /
+      `stepTabVertical`; `addSlider`; `addOCREdit`; `addGraphicalButton` (`dragBy`,
+      `clickOffset`, `state`, `unavailable`, `rawOrigin`); `O.stateGeneration`; `O:adjust`; the
+      calibration helpers `captureControl`, `captureRegion`, `captureFull`, `captureAll`. A tab
+      control whose tabs are read off the screen (the analysis's C1) is stage 2 work as well.
+
+## VPS Avenger, stage 1: the module (2026-09-28)
+
+The module itself, `com.platform.vps-avenger` (`modules/vps-avenger`), on the runtime's building
+blocks above: VPS Avenger's header at every zoom from 50 to 200 %, in every DAW daw-hosts knows,
+from the avenger_control project's coordinate tables, taken as starting values with permission and
+with that source named in `geometry.luau`. Built and tested against the scripted host
+(`crates/host/src/overlay_avenger_tests.rs`, 20 scenarios: a REAPER window floated out of its chain,
+a REAPER FX chain and Logic windows titled "Inst 1" on a Mac, Avenger's JUCE child in REAPER on
+Windows at 100, 110, 125 and 150 % display scaling); nothing of it has met a real Avenger. The Mac
+tester's stage-1 instructions are a text of their own, not in the repository.
+
+- [x] **The module.** Bound with `daw.all`: on a Mac the DAW's plug-in panel, on Windows Avenger's
+      own child window by the shape of a JUCE class (`^JUCE_%x+$`). Which plug-in and which zoom
+      are one read of Avenger's header off the event loop (`header.luau`): MENU and UNDO in
+      capitals, in boxes the recogniser located, in the table's proportion from Avenger's corner,
+      and a factor that fits them say it is Avenger (never the window title; half an answer is read
+      again, never a "no"); the zoom field's caption — left of where the preset's name begins — is
+      the zoom, and the factor is zoom / 50 times a display factor: 1 on a DAW's panel, and on
+      Windows what the header's own size gives (1.25, 1.5 …); an unread caption leaves the size's
+      step on a panel and, on Windows, a factor with no zoom, which the Zoom control will not step
+      from. A new size of the child window the module holds as Avenger's (a zoom step on Windows)
+      is Avenger's still. Avenger's corner is the panel's + `ORIGIN_DIFF` (-2, +2), on a DAW's
+      panel only. The ring: Preset (read; spoken on arrival), Previous and Next preset (the new name
+      once it is read on screen, "unchanged" when it is not, and never a name before the watch is
+      over when nothing was read before the click), Load, Save, Save as and Initialize (chosen in
+      Avenger's MENU once `newWindow` sees it and counted once the popup took it; Save and
+      Initialize refused, and said, where the warning box would open off the screen), Undo, Redo
+      list (a right click; the keys are the list's while it is seen), Zoom (a stepper over
+      Avenger's zoom list, which says the zoom the field then reads, and sends nothing while a step
+      is under way). A popup a choice left open is closed with a second click on its opener.
+      Avenger's warning box after Initialize or Save is an overlay of its own at the dialog layer
+      (`dialog.luau`), looked for only while expected (`pollWhen`), starting on its own text every
+      time (`resume(false)`): its text, YES and NO clicked where they are read, given up only on two
+      readings without them. A stay that the module's own popup or zoom step ended keeps the
+      overlay in front — once, and at the size it was read at unless the zoom list opened. In a
+      calibrating run: `modules/vps-avenger/calibration/header-<zoom>pct-<w>x<h>.png` (where the
+      overlay clicks the zoom field, ◀, ▶, MENU and UNDO, and where the words were read) and
+      `dialog-<choice>-<zoom>pct.png`, beside the runtime's calibration, menu and menu item shots.
+- [ ] **Stage 1 on the Mac tester's Avenger** — asynchronous: a CI build and written instructions,
+      and the tester sends back the log, both calibration folders and his notes. With
+      **Calibration keys in overlays** ticked and the modules reloaded (Command-Shift-F5):
+      1. **Logic**, Avenger at whatever zoom it is at: into its window, Command-Shift-F6. Heard:
+         "Preset, <name>". Log: `attachEmbedded: [host-panel] panel of 'Inst 1' … identify=true
+         — 'VPS Avenger'` and `[avenger] 'Inst 1' (<w>x<h>): VPS Avenger, the zoom field reads
+         <z> % — zoom <z> % (read), factor …, display factor 1.00. MENU read at (…), UNDO at (…):
+         (dx,dy) and (dx,dy) from where the table puts them …`. Picture:
+         `header-<z>pct-<w>x<h>.png`. Then Command-Option-Shift-S: `VPS-Avenger.png` and
+         `VPS-Avenger-clean.png` in the runtime's folder.
+      2. Tab once round the ring: Preset, Previous preset, Next preset, Load preset, Save preset,
+         Save preset as, Initialize preset, Undo, Redo list, Zoom.
+      3. **Next preset**, Return twice, then **Previous preset** once: the new name each time,
+         `[watch] VPS Avenger: changed after …`. An "unchanged" at the first press is the swallowed
+         first click (below).
+      4. **Zoom**, Left one step at a time to 50 %, then Right back: "Zoom, 75 percent, slider" and
+         so on, and `[avenger] 'Zoom': 80 % to 75 %, entry 6 … at y … by the list's height, … by
+         the table`; the header picture at each zoom; `VPS-Avenger-Zoom-menu-item.png` (the first
+         two steps). At 50 %: what "Preset" says, and whether the overlay comes up again after
+         Command-Tab away and back and Command-Shift-F6 — a new stay, so the header is read at
+         50 % (OCR at 50 %, below).
+      5. **Load preset**: the file dialog opens; Escape. `VPS-Avenger-Load-preset-menu-*.png`, and
+         `[avenger] 'Load preset': MENU's popup at (…) … from Avenger's corner in 50 % units`.
+      6. **Initialize preset**: "Avenger asks, Warning, …" (every box starts on its text); Tab
+         twice to **No**, Return; the header is back on "Initialize preset". `Avenger's warning box
+         is up … YES read at …` and `dialog-Initialize-preset-<z>pct.png`. The same with **Save
+         preset**, **No**.
+      7. **Undo**; **Redo list**, then Down and Up — does VoiceOver read the list? — and Escape.
+      8. **REAPER**, a floating window and an FX chain: 1, 3 and one zoom step there and back.
+- [ ] **The origin difference (-2, +2)** (`geometry.luau`, `ORIGIN_DIFF`): the (dx, dy) of the
+      header lines at two zooms in Logic and in REAPER settle it. The same at both zooms and in
+      both DAWs is an error in daw-hosts' origins, which Kontakt and sforzando on a Mac panel share:
+      it moves into daw-hosts' Logic and REAPER entries and out of this module. Growing with the
+      zoom is the project's tables: the difference goes into the tables at 50 %, scaled, and then
+      on Windows too — Avenger's own child window, which today gets none; the Windows log line
+      already gives the offsets with and without it. Near 0 is the constant right. It answers
+      Logic's 88 against the project's 90, and REAPER's 22. The other way, if the two do not
+      settle it: anchor Avenger's corner on where MENU and UNDO are READ, with the factor known,
+      as Kontakt anchors on its FILE button — and keep the constant only for the first read's band.
+- [ ] **OCR of Avenger's header and name at 50 %.** The project's recogniser read "Init Preset" as
+      "hit Presst" at 50 %; the tester's good reads were at 80 %. A MENU or UNDO the recogniser
+      does not read (one wrong character is accepted) leaves the overlay down at that zoom — the log
+      says `not VPS Avenger — no MENU was read` or `… — read again`; a zoom field it does not read
+      leaves the zoom `seen from the header's size, not read`. On Windows, captions only in the
+      neural fallback's shared-out boxes are no evidence (`read only in boxes the recogniser
+      guessed`) and are read again. If 50 % fails, the header band is read enlarged, or the zoom
+      told apart some other way — decided on the pictures.
+- [ ] **A misread zoom caption on Windows.** On a DAW's panel a caption misread as another step
+      never fits (the display factor is 1). On Windows the display factor is learned from the
+      header, and a misread can land on a quarter step that fits within 3 %: 60 % read as "50%" at
+      150 % display is 1.8 against 1.75. The factor is then 3 % off and the zoom wrong. A host
+      primitive for the display scaling a window is drawn at (a general one, `GetDpiForWindow` on
+      Windows, 1 on a Mac, where coordinates are points) would make the display factor known there
+      as it is on a panel. Build it once an Avenger on Windows shows the case.
+- [ ] **Avenger's popups as windows** (MENU, the zoom list, the redo list): the `newWindow: a window
+      appeared …` lines; whether one comes to the front (`came to the front after …`: the overlay
+      holds its place over it); how many clicks an item took (`clicking … again, n of 4`); whether
+      the zoom list's row by its own height agrees with the table's row (the two numbers of the
+      `'Zoom'` line, within 3 points); whether MENU's popup opens below MENU. Then the items are
+      placed from the popup's corner (the runtime's item above) and the placement from Avenger's
+      corner goes. Whether the redo list answers VoiceOver's and NVDA's arrow keys with the keys
+      handed to it. **Whether Logic runs Avenger in a process of its own**: `newWindow` lists the
+      windows of the process in front at the press, so if Logic hosts the plug-in apart, its
+      popups belong to that process and every MENU, zoom and redo press ends with "no menu was
+      seen" — the `newWindow: a window appeared` lines present in REAPER and missing in Logic answer
+      it; the tester text asks for that sentence.
+- [ ] **A popup a choice left open is closed with a second click on its opener.** The project
+      closes the zoom list that way; that MENU's popup closes the same way is JUCE's modal popup,
+      not measured. The `[avenger] '…': its popup was left open (…) — clicking its opener again`
+      line and the `[menu] … the menu has closed` after it show whether it did.
+- [ ] **The zoom list at high zooms on a small screen.** At 150–200 % on a MacBook the list may not
+      fit below the field. Moved, it is placed by its own height; cut short with scroll arrows it
+      is refused (`cut short, so it scrolls; nothing chosen`) and closed, which leaves no way down
+      from that zoom through the overlay — measure first, then read the list's visible rows.
+- [ ] **The warning boxes.** Inside Avenger, as the project says, or windows? Initialize's YES and
+      NO against the table (the offsets in the log line). Save's box: whether Save always opens
+      one (and not a file dialog for a factory preset), its words and its YES and NO. A box that is
+      a window leaves the header holding its place over it with no keys and would have its buttons
+      refused as covered; the box overlay then needs the box's window as its origin.
+- [ ] **A warning box off the screen.** Save and Initialize are refused when the box's band, placed
+      at the zoom, reaches past the primary display (`would lie at …, past the screen's …`): the
+      host names no other display's size, so a window on a second display is not checked at all,
+      and one reaching down onto a display below the primary would be refused wrongly. Whether the
+      box is drawn in Avenger's middle, and how far down, is the project's figure only.
+- [ ] **A DAW window narrower than Avenger.** The header band is sized by Avenger's width at the
+      panel's size, its width or its height in Avenger's proportions (871 by 561 at 50 %, the
+      height from the tester's log, not measured on its own). Whether any DAW keeps its plug-in
+      window narrower than a large Avenger, and what the band then misses, is not measured.
+- [ ] **Load's and Save as's file dialog on a Mac.** A window of its own, which the overlay leaves
+      the front for (or holds its place over with no keys, while `newWindow` still compares
+      against the MENU press) — or a sheet on Logic's plug-in window, whose fields the runtime's
+      geometric gate would read as inside the plug-in's panel, so the overlay would keep Tab and
+      Return over the dialog. Which of the two decides whether the gate has to tell a sheet apart —
+      the runtime's question, for every module on a panel, not this module's.
+- [ ] **Logic's keyboard with Avenger in front**: whether Tab, Return, Space, Left and Right reach
+      the overlay in Logic's plug-in window at all (the `[keys]` lines); whether Logic takes the
+      first click after it comes forward for itself (Next preset says "unchanged" the first time);
+      Link mode — a window switched to another insert in place should end the stay by the visit to
+      Logic's header or by its new title, and the header read then says `not VPS Avenger`. A stay
+      carried over after our own popup that shows another plug-in after all is overturned by two
+      reads (`not VPS Avenger after all`), but the runtime keeps a panel's verdict for the stay:
+      the overlay stays up, placing nothing, until the stay ends.
+- [ ] **Windows, if an Avenger is ever there**: REAPER's FX chain and floating window, Ableton.
+      Whether Avenger's editor is a `JUCE_<hex>` child and the only one (the calibration shot's
+      roster), the header line at 100 and 150 % display scaling (`display factor 1.50`) and its
+      offsets with and without the (-2, +2), and NVDA in the redo list.
+- [ ] **◀, ▶ and the redo list's right click are the module's own clicks**, with the runtime's
+      checks repeated (placed through the frame and scale, inside the plug-in, `ownsPoint`),
+      because a hotspot has no hook for what its click changed or that it opened a popup. A hotspot
+      that says what its click changed once it has (a read-back through `O:watch`) would be a
+      runtime building block for every plug-in; lift it when a second module needs the same.
+- [ ] **Hotkeys.** Stage 1 has none: which keys Logic and REAPER leave to a plug-in window is not
+      measured. Previous and next preset on keys first, once the Logic keyboard question is
+      answered.
+- [ ] **A zoom chosen directly.** The project's tool sets a zoom in one action (`set_zoom`); the
+      Zoom control steps one entry at a time, so 50 to 200 % is twenty steps. Home and End, or a
+      first step to 100 %, choose that entry of the list in one pick.
+- [ ] **Stage 2 — oscillators and macros.** Runtime, documented first: the tab control with tabs
+      read off the screen (the documentation item above), coarse steps on a stepper (Page Up and
+      Down), a right-button double-click, a public "focus this control", a toggle by the share of
+      matching pixels in a box (`host.screen.cells`). Module: the OSC tabs (their count from the
+      green dots, their names by OCR), mute and solo, the tab menu; the knobs as steppers — a short
+      drag per step, Avenger's double-click reset on Return — with their **values always in the
+      ring** (the maintainer's decision), so the pointer-angle reader is built (a runtime building
+      block over `snapshot` and `pixels`) whatever OSARA's and Logic's parameter lists offer; the
+      macros (tabs, three knobs and two buttons each, names by OCR, the reset-mode and button
+      menus). Renaming presets, oscillators and macros with `typingWhen` once Avenger's editor can
+      be detected, and only after measuring whether `host.input.text` or a letter at a time through
+      `host.input.send` reaches a JUCE editor at all (the project found neither synthetic keys nor
+      the clipboard arrive).
+- [ ] **Stage 3 — drums, the sample editor and Drum SQ**: twelve slots with their columns and menus,
+      the kit, the sample editor's tabs, knobs and menus, Drum SQ's length, speed, patterns and
+      menus, and the playing pattern said as it changes, on a poll cadence while the Drum SQ tab is
+      seen. The sample editor sits low (y 407 at 50 %), off a small screen above about 70 %.
+- [ ] **Stage 4 — the expansion browser**: a list control in the runtime (items from a function,
+      first-letter jumps, "n of N"); expansions, categories and presets read by OCR and clicked by
+      the word read, not by the project's tables for one library's size; the wheel, measured;
+      **free-text search in a native field from `host.gui`** (the maintainer's decision).
+- [ ] **A preset database of our own**, once the developer's arrives (the maintainer's decision):
+      to spell and snap what OCR reads and to name categories — never to say a name before the
+      screen shows it.
+- [ ] **Everything the project's tool does** is the goal: what is left of its actions after stages
+      1 to 4, then what it never reached (ARP, Step SQ, the effects, the mixer, the modulation
+      envelopes, zones). And a standalone Avenger, if there is one and it is wanted: an `O.window`
+      binding beside the embedded one, as sforzando has.
 
 ## Dev tools
 

@@ -21,19 +21,19 @@ local app = host.include("src/app.luau")
 local geo = host.include("src/geometry.luau")
 local read = host.include("src/tree.luau")
 
-local ov = O.new("ARC ON:EAR")
+-- Scaled by the runtime (geometry.luau): every coordinate below is a design coordinate, and
+-- every `at` is written as the plain {x, y} it was measured as.
+local ov = geo.apply(O.new("ARC ON:EAR"))
 local on_ear, ON_EAR_SLOT = app.window, app.SLOT
-local DESIGN_W, DESIGN_H = geo.DESIGN_W, geo.DESIGN_H
-local scaleOf, scaled, screenRect, screenPointOf =
-  geo.scaleOf, geo.scaled, geo.screenRect, geo.screenPointOf
 local dumpFor = read.dumpFor
 
--- The shorthand for this window's own overlay. It lives here rather than in geometry.luau
--- because it is bound to `ov`, and geometry.luau has no window of its own — which is exactly
--- how it broke: the split carried it across with the other coordinate helpers, where `ov` is
--- nothing, and Tone died on a nil the moment somebody pressed an arrow at it.
+-- The shorthand for this window's own overlay: a design point, on screen, for the controls
+-- that click for themselves. Bound to `ov`, because geometry.luau has no window of its own —
+-- which is exactly how an earlier helper broke: the split carried it across with the other
+-- coordinate helpers, where `ov` is nothing, and Tone died on a nil the moment somebody
+-- pressed an arrow at it.
 local function screenPoint(dx, dy)
-  return screenPointOf(ov, dx, dy)
+  return ov:toScreen(dx, dy)
 end
 
 local tree = O.memoByEpoch(function() return dumpFor(ov) end)
@@ -134,7 +134,7 @@ for _, view in ipairs({
 }) do
   ov:addHotspotToggle({
     label = view.label,
-    at = scaled(232, view.y),
+    at = { 232, view.y },
     onColor = { 237, 237, 237 },
     offColor = { 82, 82, 82 },
   })
@@ -194,7 +194,7 @@ ov:addCustomButton({
   end,
 })
 
-ov:addHotspotButton({ label = "Settings", at = scaled(1753, 42), opensMenu = true })
+ov:addHotspotButton({ label = "Settings", at = { 1753, 42 }, opensMenu = true })
 
 -- ── The five preset slots ────────────────────────────────────────────────────
 --
@@ -266,7 +266,7 @@ local curves = {
 for _, c in ipairs(curves) do
   ov:addHotspotToggle({
     label = c.label,
-    at = scaled(c.x, 118),
+    at = { c.x, 118 },
     onColor = c.on,
     offColor = PAGE,
   })
@@ -300,7 +300,7 @@ local fnButtons = {
 for _, b in ipairs(fnButtons) do
   ov:addHotspotToggle({
     label = b.label,
-    at = scaled(b.x, 589),
+    at = { b.x, 589 },
     onColor = FN_ON,
     offColor = FN_OFF,
   })
@@ -388,11 +388,8 @@ end
 -- rather than paying for three. A screen touch costs a compositor frame whatever it reads.
 local function switchReader(name, dx, dy)
   return O.memoByEpoch(function()
-    local o = ov:origin()
-    local k = scaleOf(o)
-    if not k then return nil end
-    local x = math.floor(o.client.x + o.client.w / 2 + k * (dx - DESIGN_W / 2) + 0.5)
-    local y = math.floor(o.client.y + k * dy + 0.5)
+    local x, y = ov:toScreen(dx, dy)
+    if not x then return nil end
     local px = host.screen.pixel(x, y)
     local look = classifySwitch(px)
     if not look then
@@ -431,7 +428,7 @@ for _, sw in ipairs(switches) do
   switchLook[sw.label] = read
   ov:addHotspotToggle({
     label = sw.label,
-    at = scaled(sw.x, sw.y),
+    at = { sw.x, sw.y },
     -- The runtime reads the state from these two lists; the module reads availability from
     -- the same pixel. Both halves of the classification therefore come from one measurement,
     -- and cannot disagree about what is on the screen.
@@ -726,8 +723,7 @@ ov:addStaticText({
   -- picked the words out of the dimmed panel perfectly well. The switch two stops earlier
   -- already says whether it is in use; repeating that here would only cost the name.
   text = function()
-    local o = ov:origin()
-    local r = screenRect(o, 865, 876, 1065, 945)
+    local r = ov:toScreenRect({ 865, 876, 1065, 945 })
     if not r then return "not shown" end
     local got = host.ocr.recognize({ region = r })
     local text = (got and got.text or ""):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
@@ -750,7 +746,7 @@ panelButton("Next virtual speaker", 1072, 891)
 -- at 163 in both. The application keeps this one button alive, which is the sensible design,
 -- because choosing the speakers is how you decide what to switch on. Gating it with the arrows
 -- would have taken away the step that comes first.
-ov:addHotspotButton({ label = "Select speakers", at = scaled(965, 970) })
+ov:addHotspotButton({ label = "Select speakers", at = { 965, 970 } })
 
 -- What is loaded, in the three lines the panel prints: maker, model, impedance. Read from the
 -- tree rather than from the picture, because once a headphone is chosen they are all there as
@@ -767,7 +763,7 @@ ov:addStaticText({
   end,
 })
 
-ov:addHotspotButton({ label = "Select headphone", at = scaled(1306, 970) })
+ov:addHotspotButton({ label = "Select headphone", at = { 1306, 970 } })
 
 for i = 1, 5 do
   ov:addCustomButton({

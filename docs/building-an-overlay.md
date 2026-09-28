@@ -93,6 +93,34 @@ Other control kinds, all origin-relative:
 - `addGraphicalToggle{ region, onImage, offImage }` — reads on/off by matching two template images. For a control with no single distinguishing pixel.
 - `addCustomButton{ onActivate = fn }` — you do the work yourself.
 
+### A plug-in that zooms
+
+A plug-in that draws its whole interface at a size the user picks — VPS Avenger zooms from 50 to 200 % — moves every control with it. Write each coordinate at one size and tell the overlay the factor, and every `at`, `region`, `points` step and calibration crosshair follows ([`O:scale`](api/overlay.md#o-scale)):
+
+```luau
+ov:scale(function(origin)
+  local zoom = zoomOf(origin)            -- read off the plug-in, never guessed
+  -- nil: nothing is clicked until it is known. On Windows a display scaled to 150 % draws the
+  -- plug-in 1.5 times as large at the same zoom, which the factor has to carry too (O:scale,
+  -- Windows): learn it from the screen, as VPS Avenger's module does from its header.
+  return zoom and zoom / 50 * displayFactor(origin) or nil
+end)
+```
+
+What does not zoom — an offset of the plug-in's own corner from the origin, as VPS Avenger's (-2, +2) on a DAW's panel, or a centring as ARC ON:EAR's half width — goes in [`O:frame`](api/overlay.md#o-frame), which is added unscaled. The DAW's own chrome never does: daw-hosts puts the origin below it ([daw-hosts](daw-hosts.md)), so a plug-in's module knows no DAW's geometry. Your own code places points with [`o:toScreen(x, y)`](api/overlay.md#o-toscreen).
+
+### An item in the plug-in's own menu
+
+A popup the plug-in draws is a window of its own, so a click sequence cannot reach its items: the second click is refused, because another window is drawn where the plug-in was. Say what to choose instead, and the overlay clicks it once a [menu test](api/overlay.md#o-menutests) sees the menu, and again if the menu did not take the click ([`O:chooseMenuItem`](api/overlay.md#o-choosemenuitem)):
+
+```luau
+local binding = O.embedded({ hosts = daw.all, control = { windows = "^JUCE_%x+$" }, identify = isMine })
+ov:addHotspotButton({ label = "Load preset", at = { 262, 14 }, menuItem = { 5, 14 } })
+ov:bind(binding, { menus = { O.menuTests.newWindow } })
+```
+
+`menuItem` is the item's offset from the menu's corner; in a calibrating run the menu is photographed with a crosshair on it, which is where that offset is measured from.
+
 ### Finding the coordinates — the calibrator
 
 Do not derive coordinates from another tool's numbers, and do not trust a value because *something* about it looks right. A cautionary tale from this repo: a set of toggles was calibrated by sampling colours, the colours matched, and the positions were taken to be right — they were 16 px off, on the caption row *under* the buttons. Three of five sampled near-black there and reported "off" forever, and the overlay had shipped like that.
@@ -105,6 +133,7 @@ Tick **Calibration keys in overlays** in the module manager's Application settin
 | `Ctrl+Alt+Shift+T` | Crops a template around the **focused** control and writes it into `calibration/`. |
 | `Ctrl+Alt+Shift+V` | Counts **every** match of the focused control's template in the region. |
 | (no key) | Activating a control declared with `opensMenu` saves three pictures of the overlay's origin whole — a snapshot just before it acts, written once the other two are in, and ~600 ms and ~1500 ms after — as `<overlay>-<control>-menu-before.png`, `-menu-after-600.png` and `-menu-after-1500.png`. What a menu test for a menu drawn inside the plug-in is written from; see [calibrating](api/calibrating.md#host-calibrating). |
+| (no key) | A control that chooses an item in its menu also saves `<overlay>-<control>-menu-item.png` on those presses: the menu, with a crosshair on the item, just before it is clicked. What an item's offset is measured from. |
 
 The screenshot is the one that matters: "is my control on its button?" becomes a glance instead of arithmetic. The crosshairs are magenta, a colour these dark plugin interfaces do not use, and are numbered by ticks so they match the log lines.
 

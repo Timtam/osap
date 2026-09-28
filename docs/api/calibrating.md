@@ -39,6 +39,16 @@ end
 
 They are what a module's own [menu test](overlay.md#o-menutests) is written from. A menu a plug-in paints inside its own window has no window, no accessibility element and no notification, and the difference between the "before" picture and the "after" ones is the pixels that only an open menu has.
 
+**The menu item shot.** A control that chooses an item in its menu ([`O:chooseMenuItem`](overlay.md#o-choosemenuitem), or a hotspot with `menuItem`) clicks the item on the pass in which a test sees the menu, so the pictures above — the later two taken 600 and 1500 ms after the press — show the menu already closed. On a press that was photographed (the first two of each control), the item is photographed as well: one [snapshot](screen.md#host-screen-snapshot) of the menu's rectangle as the test gave it, 12 pixels round, taken just before the item's first click, and written after it, on the next pass, with a crosshair on the point clicked. A click the menu did not take and that is made again is not photographed again:
+
+| File, under `modules/overlay-runtime/calibration/` | Taken |
+| --- | --- |
+| `<overlay>-<control>-menu-item.png` | just before the item is first clicked |
+
+numbered like the other pictures (`<overlay>-<control>-2-menu-item.png`, …). Its log line gives the rectangle captured, the item's point and the path: `[calibrate] '<overlay>' '<control>': menu item shot, (x1,y1)-(x2,y2), the item marked at (x,y) -> <path> (true)` — or `(false: …)` with the reason, and the click is made either way. It is the picture an item's offset is measured from: the offset is from the menu's top-left corner, which is the picture's corner plus 12.
+
+**A scaled overlay's calibration shot** ([`O:scale`](overlay.md#o-scale)). Its first line adds the factor its crosshairs were placed with and the frame, `… scale 1.6000 about (0,0), frame (0,0) -> …`, or `no scale now (<why>)`; each control's line adds every region it reads as the screen rectangle, `region (x1,y1)-(x2,y2)` (and `ocrLabel (…)`), since the authored numbers are not where it reads. A control with no factor now has no crosshair and is listed with `no position`. In any overlay, the line of a control that chooses a menu item ends `then item (dx,dy) of its menu` (or `then an item of its menu`, for a `menuItem` function): the opener is what the crosshair marks, and the item is in the menu item shot. An opener a module's own code has asked [`O:chooseMenuItem`](overlay.md#o-choosemenuitem) to click — a stepper's, which no control's `at` names — is marked too once it has been asked for, at the `at` it was last given, after the controls, in label order: `  n <label> screen (x,y)  pixel r,g,b  [menu opener]` (or `-- <label> no position  [menu opener]` when it cannot be placed now).
+
 ```luau
 -- Nothing to call: the control only has to say that it opens a menu.
 ov:addHotspotButton({ label = "Preset menu", at = { 412, 118 }, hotkey = "Alt+M", opensMenu = true })
@@ -53,8 +63,8 @@ ov:addHotspotButton({ label = "Preset menu", at = { 412, 118 }, hotkey = "Alt+M"
 
 ### Windows
 
-The capture before the click goes through the module's [source](screen.md#which-picture-a-read-sees): through the standard path about one compositor frame (~16.7 ms) for a plug-in-sized rectangle. Writing a PNG is the larger cost of a shot — several times larger in a debug build than in a release build — and it runs on the event loop when a picture is written: never between the key and the click, and not before the 600 ms picture has arrived.
+The capture before the click goes through the module's [source](screen.md#which-picture-a-read-sees): through the standard path about one compositor frame (~16.7 ms) for a plug-in-sized rectangle. Writing a PNG is the larger cost of a shot — several times larger in a debug build than in a release build — and it runs on the event loop when a picture is written: never between the key and the click, and not before the 600 ms picture has arrived. The menu item shot puts one capture of the same kind, of the menu's rectangle, between the menu being seen and the item's click, and its PNG is written on the pass after the click.
 
 ### macOS
 
-The capture before the click is taken at the display's own resolution and kept at up to five times the bytes of the rectangle (see [`host.screen.snapshot`](screen.md#host-screen-snapshot)), for the 1.5 seconds until the last picture has arrived; the pictures of a maximised window held at once come close to a module's snapshot budget, and a capture the budget refuses is written as `(false: …)`. Without the Screen Recording permission the pictures show the wallpaper.
+The capture before the click is taken at the display's own resolution and kept at up to five times the bytes of the rectangle (see [`host.screen.snapshot`](screen.md#host-screen-snapshot)), for the 1.5 seconds until the last picture has arrived; the pictures of a maximised window held at once come close to a module's snapshot budget, and a capture the budget refuses is written as `(false: …)`. The menu item shot is one more capture, of the menu's rectangle only, held until the next pass writes it. Without the Screen Recording permission the pictures show the wallpaper.

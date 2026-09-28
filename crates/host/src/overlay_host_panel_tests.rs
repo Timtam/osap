@@ -32,10 +32,11 @@ use mlua::{Function, Lua, Table};
 
 use super::overlay_menu_tests::{HARNESS, RUNTIME};
 
-const WINDOW_PRELUDE: &str = include_str!("window_prelude.luau");
+pub(crate) const WINDOW_PRELUDE: &str = include_str!("window_prelude.luau");
 
 /// The helpers, added to the harness's `T`: the real matcher, the Mac windows and the entries.
-const HP: &str = r##"
+/// Shared with `overlay_avenger_tests.rs`, which loads VPS Avenger's module on top of them.
+pub(crate) const HP: &str = r##"
 local S = T.S
 S.originAsks = 0
 S.rechecks = 0

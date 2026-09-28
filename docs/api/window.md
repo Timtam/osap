@@ -423,11 +423,13 @@ The links are **accessibility elements**. Both platforms start at whatever has f
 
 Depth is still not a fact about the plug-in. A one-link chain says the focus is the window; whether that means "the user is in the plug-in" depends on whether the plug-in exposes anything, which differs per plug-in and per platform.
 
-## host.window.ownsPoint(id, x, y) {#host-window-ownspoint}
+## host.window.ownsPoint(id, x, y, opts?) {#host-window-ownspoint}
 
-**Signature:** `host.window.ownsPoint(id: number, x: number, y: number) -> boolean?`
+**Signature:** `host.window.ownsPoint(id: number, x: number, y: number, opts: { listed: boolean? }?) -> boolean?`
 
 Whether the window `id` belongs to is the one drawn at that screen point.
+
+`opts.listed = true`: `id` is a window as [`host.window.windowsOf`](#host-window-windowsof) lists it, not a `host.window` id — a popup a plug-in draws as a window of its own is known only from that list, and an item in it is clicked only if nothing else is drawn over it (the overlay runtime's [`O:chooseMenuItem`](overlay.md#o-choosemenuitem) asks this way). A listed window is a top-level window already, and the same three answers come back. `listed` other than `true`, `false` or `nil` raises, as does an `opts` that is not a table; a negative `id` with `listed` answers `nil`.
 
 Every hotspot in this project clicks a coordinate worked out from a window's own frame, and knowing the point falls *inside* that frame says nothing about what is drawn there. A notification, a tooltip, another application raised over it: the click goes to whichever window owns the pixel. This is how an overlay finds that out before clicking rather than after.
 
@@ -437,13 +439,13 @@ Compared at the **top level**. An overlay's origin is often a child — an embed
 
 ### Windows
 
-Implemented with `WindowFromPoint` + `GetAncestor(GA_ROOT)` on both sides. `WindowFromPoint` is the window manager's own hit test, so a click-through window (`WS_EX_TRANSPARENT`) is correctly seen through rather than treated as a cover.
+Implemented with `WindowFromPoint` + `GetAncestor(GA_ROOT)` on both sides. `WindowFromPoint` is the window manager's own hit test, so a click-through window (`WS_EX_TRANSPARENT`) is correctly seen through rather than treated as a cover. `windowsOf` lists windows by their `HWND`, so with `listed` the question is the same one about the same number.
 
 ### macOS
 
 `NSWindow.windowNumberAtPoint:belowWindowWithWindowNumber:` — the window server's own hit-test, which names the frontmost window that would receive a mouse-down at the point across every application and skips windows that let clicks through. That is the question a click asks, and the reason the cheap route was not taken: `CGWindowListCopyWindowInfo` answers what is *drawn* there, and a screen reader's cursor ring is drawn over the very control being operated while letting clicks pass, so the drawn-there answer would have refused essentially every press on the machines this exists for.
 
-The window is paired with its `CGWindowID` by owner and frame (`window_id`), once per window. Three answers: the pair matches, `true`; the point belongs to another application's window, `false` — with a log line naming that application and its window level, so a refused press can be explained; and `nil` wherever the question could not be put — no pairing yet, no window at the point, a window of VoiceOver's own that it did not mark click-through, or one of this application's (the announcement window sits over the plugin). Main thread only, which the pump is. Unverified on hardware as of 2026-09-10: the probe records which answer it got.
+The window is paired with its `CGWindowID` by owner and frame (`window_id`), once per window. Three answers: the pair matches, `true`; the point belongs to another window — another application's, or another of the same application's, such as a popup of a DAW over its own plug-in window — `false`, with a log line naming that window's application and its window level, so a refused press can be explained; and `nil` wherever the question could not be put — no pairing yet, no window at the point, a window of VoiceOver's own that it did not mark click-through, or one of this application's (the announcement window sits over the plugin). With `listed`, `id` is the `CGWindowID` itself, which is the numbering `windowsOf` lists in and the hit test answers in: no pairing is needed, and the other answers are the same. Main thread only, which the pump is. Unverified on hardware as of 2026-09-10 without `listed`, and not run at all with it: the probe records which answer it got.
 
 `Overlay:addHotspotButton` and `addHotspotToggle` already ask this before every click; a module only needs it directly when it clicks a coordinate itself.
 
@@ -453,6 +455,13 @@ if host.window.ownsPoint(o.id, x, y) == false then
   return -- something else is covering it
 end
 host.input.click(x, y)
+
+-- A popup a plug-in opened, known from the window list: is anything drawn over the item?
+for _, w in ipairs(host.window.windowsOf(pid)) do
+  if w.id == popupId and host.window.ownsPoint(w.id, ix, iy, { listed = true }) ~= false then
+    host.input.click(ix, iy)
+  end
+end
 ```
 
 ## host.window.find(matcher) {#host-window-find}

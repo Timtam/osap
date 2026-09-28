@@ -23,54 +23,38 @@
 -- So nothing below is a pixel. Every number is a coordinate in the frame it was measured in,
 -- resolved against whatever size the window happens to be now. A fixed offset from a nearby
 -- label would have been no better, because the offset scales too.
+--
+-- The overlay runtime carries the model out now (O:scale, 2026-09-28). This module did it by
+-- hand for a month — an `at` that was a function per control, and a screen-point helper beside
+-- every click its own code made — and it was the one module that did, until VPS Avenger zoomed
+-- from 50 to 200 % and made a second. In the runtime's terms the model is: the frame puts the
+-- design's centre line at half the content's width (unscaled — that half is the window's, not
+-- the design's), and every authored point scales by the height about that centre line,
+-- (960, 0). Its arithmetic is this module's old arithmetic, in the same order, so every point
+-- lands where it did (crates/host/src/overlay_scale_tests.rs holds the two to the pixel).
 local DESIGN_W, DESIGN_H = 1920, 1009
 
+-- The factor, from the content's height; nil while there is no height to read, which the
+-- runtime takes as "place nothing".
 local function scaleOf(o)
   if not (o and o.client and o.client.h and o.client.h > 0) then return nil end
   return o.client.h / DESIGN_H
 end
 
-local function scaled(dx, dy)
-  return function(self)
-    local o = self:origin()
-    local k = scaleOf(o)
-    if not k then return nil end
-    return {
-      math.floor(o.client.w / 2 + k * (dx - DESIGN_W / 2) + 0.5),
-      math.floor(k * dy + 0.5),
-    }
-  end
-end
-
--- The same model, in screen coordinates, for the one thing here that has to be read rather
--- than pressed. An OCR region cannot be a function in the runtime, so this control does its
--- own reading instead of pretending its region is fixed.
-local function screenRect(o, x1, y1, x2, y2)
-  local k = scaleOf(o)
-  if not k then return nil end
-  local cx, cy = o.client.x, o.client.y
-  local half = o.client.w / 2
-  return {
-    math.floor(cx + half + k * (x1 - DESIGN_W / 2) + 0.5), math.floor(cy + k * y1 + 0.5),
-    math.floor(cx + half + k * (x2 - DESIGN_W / 2) + 0.5), math.floor(cy + k * y2 + 0.5),
-  }
-end
-
--- Absolute screen point for a design coordinate, for a control that does its own clicking.
--- Takes the overlay because two of them share this window now.
-local function screenPointOf(overlay, dx, dy)
-  local o = overlay:origin()
-  local k = scaleOf(o)
-  if not k then return nil end
-  return math.floor(o.client.x + o.client.w / 2 + k * (dx - DESIGN_W / 2) + 0.5),
-    math.floor(o.client.y + k * dy + 0.5)
+-- Puts the model on overlay `ov`, and hands it back. Every overlay over this window takes it:
+-- the main one and each panel drawn inside the window, because the panels scale with it too.
+-- A control whose point is worked out from the accessibility tree rather than from the design
+-- — a chooser row's probe — is `rawOrigin`: in the window's own pixels, neither framed nor
+-- scaled.
+local function apply(ov)
+  ov:frame(function(o) return o.client.w / 2, 0 end)
+  ov:scale(scaleOf, { about = { DESIGN_W / 2, 0 } })
+  return ov
 end
 
 return {
   DESIGN_W = DESIGN_W,
   DESIGN_H = DESIGN_H,
   scaleOf = scaleOf,
-  scaled = scaled,
-  screenRect = screenRect,
-  screenPointOf = screenPointOf,
+  apply = apply,
 }
