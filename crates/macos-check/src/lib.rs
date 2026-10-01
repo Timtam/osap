@@ -215,6 +215,15 @@ pub fn permission_calls() -> (
     (backend::permissions, backend::open_pane, backend::ask_for)
 }
 
+/// The Permissions page's line about VoiceOver's AppleScript box, named for the same reason: it
+/// is read by `gui.rs`. (The `[env]` line's half is called by the borrowed `perm.rs`, and the
+/// notice of VoiceOver Utility quitting by the borrowed `system.rs`.)
+pub fn applescript_calls() {
+    let _: fn() -> Option<String> = speech::voiceover_applescript_page;
+    let _: fn() -> String = speech::voiceover_applescript_env;
+    let _: fn(Option<&str>, Option<&str>) = speech::application_quit;
+}
+
 pub fn app_calls() -> (fn(), fn(bool, &str) -> bool, fn(), fn(), fn()) {
     (
         backend::activate_self,

@@ -52,6 +52,10 @@ pub(crate) use macos::app::{
 /// and the path resolves identically in `crates/macos-check`, which borrows this file.
 #[cfg(target_os = "macos")]
 pub(crate) use macos::perm::request_voiceover_automation;
+/// Whether that request's dialog is on screen — asked by the speech path, which must not talk
+/// over it (`speech/vo_script.rs`). Re-exported for the same reason.
+#[cfg(target_os = "macos")]
+pub(crate) use macos::perm::voiceover_automation_asking;
 /// The four permissions as something a window can show — see `macos::perm::permissions`.
 /// Re-exported for the same reason as the call above: `gui.rs` reaches it without a
 /// macOS-only `use`, and the path resolves identically in `crates/macos-check`.

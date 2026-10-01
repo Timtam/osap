@@ -131,7 +131,8 @@ pub const SWITCHES: &[Switch] = &[
                VoiceOver's own queue does not. Turning it off gives the overlay a distinct \
                voice, which some people prefer for telling the two apart. Needs VoiceOver \
                running, and \"Allow VoiceOver to be controlled with AppleScript\" ticked in \
-               VoiceOver Utility's General pane.",
+               VoiceOver Utility's General pane. Without that box VoiceOver drops what it is \
+               handed; the system voice then speaks instead, and says why once.",
         os: Some("macos"),
         // Off until somebody asks for it, and the reason is the permission rather than the
         // feature. Speaking through VoiceOver means an Apple Event, and the first Apple Event

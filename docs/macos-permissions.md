@@ -3,7 +3,8 @@
 *Four switches now, and none can be granted by the application. Three of them, when
 missing, do not produce an error — they produce plausible wrong answers, which for someone
 who cannot see the screen is the worst possible failure. The count grew with Automation,
-whose absence is the quietest of the lot: the setting reads as on and nothing happens. This
+whose absence is the quietest of the lot: the setting reads as on and nothing happens. Beside
+them sits one switch of VoiceOver's own, which "Speak through VoiceOver" needs as well. This
 page is what to grant, how to check, and what each absence looks like.*
 
 ## The short version
@@ -16,6 +17,7 @@ page is what to grant, how to check, and what each absence looks like.*
 | **Screen Recording** | capture, image search, OCR | **captures silently return the desktop wallpaper** — never an error |
 | **Input Monitoring** | intercepting and suppressing keys, if it is needed next to Accessibility (not measured yet) | overlay keys reach the plugin instead of the overlay |
 | **Automation** → VoiceOver | speaking *through* VoiceOver | the setting is on and the overlay still speaks in its own voice |
+| VoiceOver's own **"Allow VoiceOver to be controlled with AppleScript"** — in VoiceOver Utility, General, not in Privacy & Security | speaking *through* VoiceOver | VoiceOver drops every line; the application notices, speaks with the system voice instead, and says why once ([below](#voiceover-applescript)) |
 
 Only the first two need granting for the platform to work at all; **Automation** is asked
 for separately, and only if you switch on "Speak through VoiceOver". **Input Monitoring** is
@@ -44,7 +46,9 @@ halves were measured on a Mac mini with macOS 14.5 on 2026-09-18:
   the old answer; this is the most common reason a permission appears not to have worked.
 - **Input Monitoring**: if *Re-check now* still shows it missing after granting it, quit and
   reopen — this one has not been measured either way.
-- **Automation** (VoiceOver speech) needs no restart.
+- **Automation** (VoiceOver speech) needs no restart, and neither does VoiceOver's AppleScript
+  box: on 2026-10-01 it was ticked with VoiceOver and the application running, and the next
+  lines came through VoiceOver.
 
 ## How the application gets into the Screen Recording list
 
@@ -170,6 +174,7 @@ at every startup, in a block near the top:
 [env] hid post events: granted (IOHIDCheckAccess for posting events, the Accessibility side — …)
 [env] display 1: 1512x982 pt, scale 2.0 (primary)
 [env] voiceover: running
+[env] voiceover applescript: not allowed (/private/var/db/Accessibility/.VoiceOverAppleScriptEnabled is not there; SCREnableAppleScript: not set, not counted on macOS 15 and later)
 [env] translocated: no
 [env] bundle: com.automationplatform.app
 [env] launched by: launchd — opened with `open` or from the Finder, …
@@ -245,6 +250,49 @@ line must never put a dialog on screen. `not asked yet` is the ordinary state un
 setting goes on. When it reads `REFUSED`, a `voiceover automation fix` line follows it with
 the pane to open, the same way the other permissions do, and it names whichever pane this
 machine actually has.
+
+## VoiceOver's own switch: AppleScript {#voiceover-applescript}
+
+"Speak through VoiceOver" needs one more thing, and it is not in Privacy & Security: VoiceOver's
+own **"Allow VoiceOver to be controlled with AppleScript"**, a box in **VoiceOver Utility →
+General**. VO-Fn-F8 opens VoiceOver Utility while VoiceOver runs (VO-F8 where the top row is
+set to standard function keys; VO-Fn-8 works too). Changing the box asks for an administrator's
+password.
+
+Without it VoiceOver **takes every line and drops it**. Nothing is refused, so this is quieter
+still than a missing Automation grant: on 2026-10-01 a tester had every permission granted and
+the setting on, the log said `speech is going to VoiceOver`, and nothing was heard. The
+application now finds out for itself, at start-up, when the setting is ticked, when VoiceOver
+starts or restarts, and when VoiceOver Utility quits:
+
+- it reads the file VoiceOver Utility writes when the box is ticked,
+  `/private/var/db/Accessibility/.VoiceOverAppleScriptEnabled`, and before macOS 15 the
+  preference the box sets, `SCREnableAppleScript`;
+- with the Automation permission granted, it asks VoiceOver one read-only question through
+  `osascript` and waits for the answer. **-1708** ("doesn't understand") means unticked, even
+  when the file is there. An answer means ticked only where the file cannot be looked at: the
+  question is a read, which VoiceOver may answer with the box unticked, and taking that for
+  "ticked" would bring the silence back.
+
+While the box is unticked, **every line goes to the system voice**, and the user hears once,
+in the system voice: *"Automation Platform cannot speak through VoiceOver. Turn on 'Allow
+VoiceOver to be controlled with AppleScript' in VoiceOver Utility, General; VO-Fn-F8 opens it.
+Until then, this voice speaks."* Once the box is ticked — the application looks every few seconds
+while it is not, and at once when VoiceOver Utility quits — lines go to VoiceOver again, and when
+VoiceOver itself answered, it says *"Automation Platform now speaks through VoiceOver."* No
+restart. What is not caught: the lines said between unticking the box and quitting VoiceOver
+Utility are lost. The details, with the schedule and the costs, are in
+[`host.speech.output`](api/speech.md#host-speech-output).
+
+**The application never changes this box**, and never writes the file or the preference. It is
+the user's security setting: with it ticked, any application allowed to send VoiceOver Apple
+Events can make VoiceOver say and do things.
+
+The startup block reports it as `voiceover applescript` — `allowed`, `not allowed` or `unknown`,
+and the file and the preference it comes from — from those alone; VoiceOver's own answer follows
+in the `[speech]` lines. The Permissions page shows it below the four permissions in plain words
+("the box is not ticked"), with VoiceOver's last answer, as a line of text and no button: it says
+where the box is, and *Re-check now* reads it again.
 
 ## When the switch is on and the application still cannot use it
 

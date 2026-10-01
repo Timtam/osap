@@ -8,6 +8,12 @@
 //! whether an Automation question it found open has been answered since, asked without asking
 //! the user — is [`automation_status`], on the speech thread.
 //!
+//! **And VoiceOver's own permission**, which no system call reports: "Allow VoiceOver to be
+//! controlled with AppleScript", in VoiceOver Utility. Unticked, VoiceOver takes every event and
+//! drops it — nothing is refused, so nothing here used to notice. The rules are in `vo_script.rs`;
+//! the reads ([`read_box`]) and the question ([`ask_voiceover`]) are here, and while the box is
+//! not ticked every line goes to the system voice.
+//!
 //! Its own file rather than a block inside `speech`, because this is macOS code written
 //! without a Mac: `crates/macos-check` borrows it by path and asks the compiler whether it
 //! is true, which a module nested inside a file that needs `tts` could not be.
@@ -16,14 +22,16 @@ use std::cell::{Cell, RefCell};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use objc2_app_kit::NSRunningApplication;
+use objc2_core_foundation::{CFPreferencesAppSynchronize, CFPreferencesGetAppBooleanValue, CFString};
 use objc2_core_services::{typeWildCard, AEDeterminePermissionToAutomateTarget};
-use objc2_foundation::{NSAppleEventDescriptor, NSAppleEventSendOptions, NSString};
+use objc2_foundation::{NSAppleEventDescriptor, NSAppleEventSendOptions, NSProcessInfo, NSString};
 
 use super::vo_park::{self, Park, Refusal, Rung};
+use super::vo_script::{self, Gate, Key, Marker, Probe, Reads, Scripting, Verdict};
 
 /// Is VoiceOver up?
 ///
@@ -60,13 +68,31 @@ struct Utterance {
     opening: u64,
 }
 
+/// What the worker is handed, in order.
+enum Job {
+    Say(Utterance),
+    /// Ask VoiceOver whether it accepts AppleScript ([`ask_voiceover`]), on what was read just
+    /// before. Lines handed over after it wait behind it, and go where its answer says.
+    Check(Reads),
+}
+
 /// What the worker tells the event loop about the path, besides the lines it hands back.
 enum Note {
     /// A line handed over in `opening` was refused.
     Failed { refusal: Refusal, opening: u64 },
     /// A line was taken after one or more were refused.
     Spoke,
+    /// VoiceOver's answer to the AppleScript question, asked on `reads`.
+    Checked { reads: Reads, probe: Probe },
 }
+
+/// VoiceOver's last answer to the AppleScript question and the reads it was asked on, for
+/// whoever shows the box's state ([`applescript_now`]) — the Permissions page, which has no way
+/// to the transport. Written by the worker.
+static LAST_ASKED: Mutex<Option<(Reads, Probe)>> = Mutex::new(None);
+
+/// VoiceOver Utility quit since the event loop last looked ([`application_quit`]).
+static UTILITY_QUIT: AtomicBool = AtomicBool::new(false);
 
 /// VoiceOver, spoken to through `osascript` on a thread of its own.
 ///
@@ -76,7 +102,7 @@ enum Note {
 /// the thing being waited on is a child process, whose hangs and crashes are contained in
 /// somebody else's address space.
 pub struct VoiceOver {
-    to_vo: Sender<Utterance>,
+    to_vo: Sender<Job>,
     refused_rx: Receiver<String>,
     notes_rx: Receiver<Note>,
     /// The gate [`say`](Self::say) reads: false from the moment VoiceOver turns a line down
@@ -98,20 +124,33 @@ pub struct VoiceOver {
     pending: Arc<AtomicUsize>,
     /// When the path is tried again after a refusal — see `vo_park.rs`. Event loop only.
     park: RefCell<Park>,
+    /// The second gate: false while VoiceOver does not accept AppleScript, as far as is known
+    /// (`vo_script::Gate`). Kept by the event loop, and by the worker for the lines that waited
+    /// behind its question — both by the same rule, so they cannot disagree for long.
+    accepts: Arc<AtomicBool>,
+    /// Whether VoiceOver accepts AppleScript, and when that is looked at again. Event loop only.
+    script: RefCell<Gate>,
+    /// The VoiceOver process last asked about the box, so a new one is asked again.
+    asked_pid: Cell<Option<i32>>,
+    /// Said through the system voice on the next pass ([`take_tell`](Self::take_tell)).
+    tell: Cell<Option<&'static str>>,
+    /// Said through VoiceOver on the next pass ([`take_confirm`](Self::take_confirm)).
+    confirm: Cell<Option<&'static str>>,
 }
 
 impl VoiceOver {
     pub fn new() -> Self {
-        let (to_vo, rx) = channel::<Utterance>();
+        let (to_vo, rx) = channel::<Job>();
         let (refused_tx, refused_rx) = channel::<String>();
         let (notes_tx, notes_rx) = channel::<Note>();
         let healthy = Arc::new(AtomicBool::new(true));
         let pending = Arc::new(AtomicUsize::new(0));
         let may_prompt = Arc::new(AtomicBool::new(true));
-        let (h, p, m) = (healthy.clone(), pending.clone(), may_prompt.clone());
+        let accepts = Arc::new(AtomicBool::new(true));
+        let (h, p, m, a) = (healthy.clone(), pending.clone(), may_prompt.clone(), accepts.clone());
         std::thread::Builder::new()
             .name("voiceover".into())
-            .spawn(move || run(rx, refused_tx, notes_tx, h, p, m))
+            .spawn(move || run(rx, refused_tx, notes_tx, h, p, m, a))
             .ok();
         Self {
             to_vo,
@@ -123,6 +162,87 @@ impl VoiceOver {
             may_prompt,
             pending,
             park: RefCell::new(Park::default()),
+            accepts,
+            script: RefCell::new(Gate::default()),
+            asked_pid: Cell::new(None),
+            tell: Cell::new(None),
+            confirm: Cell::new(None),
+        }
+    }
+
+    /// Whether VoiceOver accepts AppleScript, as far as is known — false only once something said
+    /// it does not.
+    pub fn accepts_applescript(&self) -> bool {
+        self.accepts.load(Ordering::Relaxed)
+    }
+
+    /// The sentence the user is to hear through the system voice now, once.
+    pub fn take_tell(&self) -> Option<&'static str> {
+        self.tell.take()
+    }
+
+    /// The sentence the user is to hear through VoiceOver now, once.
+    pub fn take_confirm(&self) -> Option<&'static str> {
+        self.confirm.take()
+    }
+
+    /// Writes what a step of the box's gate said, keeps the transport's gate in step with it,
+    /// and keeps what is to be said for the pump.
+    ///
+    /// The transport's gate is lowered whenever the box's gate is closed, and raised only by an
+    /// `answer` — the step that has heard the latest question back. The worker writes the same
+    /// flag, and only ever lowers it (`ask_voiceover`): a step taken here before the event loop
+    /// has read the worker's newer answer must not raise what that answer lowered, and an answer
+    /// the worker heard before a trigger here must not raise what the trigger lowered.
+    fn apply(&self, out: vo_script::Out, answer: bool) {
+        for line in &out.log {
+            crate::logging::line("speech", line);
+        }
+        if out.tell.is_some() {
+            self.tell.set(out.tell);
+        }
+        if out.confirm.is_some() {
+            self.confirm.set(out.confirm);
+        }
+        let open = self.script.borrow().open();
+        if !open {
+            self.accepts.store(false, Ordering::Relaxed);
+        } else if answer {
+            self.accepts.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Asks again whether VoiceOver accepts AppleScript, because of `why`: the file and the
+    /// preference read now, on this thread — a `stat` and one preference read, timed into the
+    /// log — and VoiceOver itself asked on the worker when it runs.
+    fn check(&self, why: &str, running: bool) {
+        let started = Instant::now();
+        let reads = read_box();
+        let took = started.elapsed().as_micros();
+        let out = self.script.borrow_mut().triggered(&reads, &format!("{why}; read in {took} µs"));
+        let ask = out.ask;
+        self.apply(out, false);
+        if ask {
+            self.ask(reads, running);
+        }
+    }
+
+    /// Hands the question to the worker; answered here and now when it cannot be asked, so the
+    /// box's gate is never left waiting for an answer that cannot come.
+    fn ask(&self, reads: Reads, running: bool) {
+        let why = if !running {
+            "VoiceOver is not running, so it was not asked"
+        } else {
+            match self.to_vo.send(Job::Check(reads.clone())) {
+                Ok(()) => return,
+                Err(_) => "the speech thread is gone, so VoiceOver was not asked",
+            }
+        };
+        let out = self.script.borrow_mut().answered(reads, Probe::Inconclusive(why.to_string()), Instant::now(), running);
+        let again = out.ask;
+        self.apply(out, true);
+        if again {
+            self.check("asked again: something happened while VoiceOver was being asked", running);
         }
     }
 
@@ -136,7 +256,8 @@ impl VoiceOver {
     /// Hands `text` to VoiceOver. `false` means it cannot be, and the caller has to say
     /// it another way — now, not later.
     pub fn say(&self, text: &str, interrupt: bool) -> bool {
-        if !self.healthy.load(Ordering::Relaxed) {
+        // VoiceOver would take the line and drop it: its AppleScript box is not ticked.
+        if !self.healthy.load(Ordering::Relaxed) || !self.accepts.load(Ordering::Relaxed) {
             return false;
         }
         // A look lets one line through: the gate goes down behind it until VoiceOver has
@@ -147,7 +268,7 @@ impl VoiceOver {
         }
         self.pending.fetch_add(1, Ordering::Relaxed);
         let opening = self.opened.load(Ordering::Relaxed);
-        if self.to_vo.send(Utterance { text: text.to_string(), interrupt, opening }).is_err() {
+        if self.to_vo.send(Job::Say(Utterance { text: text.to_string(), interrupt, opening })).is_err() {
             self.pending.fetch_sub(1, Ordering::Relaxed);
             self.healthy.store(false, Ordering::Relaxed);
             return false;
@@ -168,9 +289,13 @@ impl VoiceOver {
     }
 
     /// Try VoiceOver again after a failure — what ticking the setting means. The one way back
-    /// from a permission refusal.
+    /// from a permission refusal. The AppleScript box is asked about again at the next
+    /// [`note_pid`](Self::note_pid), which the caller makes at once, and the user hears its
+    /// answer again: ticking the setting is a deliberate act.
     pub fn rearm(&self) {
         self.park.borrow_mut().reset();
+        self.script.borrow_mut().rearmed();
+        self.asked_pid.set(None);
         self.may_prompt.store(true, Ordering::Relaxed);
         let was_down = !self.healthy.load(Ordering::Relaxed);
         self.raise();
@@ -182,18 +307,32 @@ impl VoiceOver {
 
     /// VoiceOver runs as `pid` now (`None`: not running). Asked before every line: a path
     /// parked after a refusal opens at once for a VoiceOver that has started or restarted since.
+    ///
+    /// And a VoiceOver process not asked about its AppleScript box yet is asked — at start,
+    /// after the setting was ticked, and when VoiceOver starts or restarts — before the line
+    /// this is asked for is handed over, so that line waits for the answer instead of being
+    /// dropped.
     pub fn note_pid(&self, pid: Option<i32>) {
         let line = self.park.borrow_mut().pid_seen(pid);
         if let Some(line) = line {
             self.raise();
             crate::logging::line("speech", &line);
         }
+        let Some(now) = pid else {
+            return;
+        };
+        match self.asked_pid.replace(Some(now)) {
+            Some(before) if before == now => {}
+            Some(before) => self.check(&format!("VoiceOver runs as a new process (pid {before}, now {now})"), true),
+            None => self.check(&format!("VoiceOver runs as pid {now}, not asked yet"), true),
+        }
     }
 
     /// What the worker said since the last call, and the scheduled look. Called from the event
     /// loop on every pass; a few loads when there is nothing to do, and one question about
-    /// VoiceOver's process per refusal.
-    pub fn tick(&self) {
+    /// VoiceOver's process per refusal. `wanted`: the setting is on, or a module chose
+    /// `voiceover` — the AppleScript box is looked after only then.
+    pub fn tick(&self, wanted: bool) {
         let now = Instant::now();
         while let Ok(note) = self.notes_rx.try_recv() {
             let line = match note {
@@ -205,6 +344,17 @@ impl VoiceOver {
                     self.park.borrow_mut().failed(&refusal, now, pid)
                 }
                 Note::Spoke => self.park.borrow_mut().spoke(now),
+                // The AppleScript box has its own gate, and says its own lines.
+                Note::Checked { reads, probe } => {
+                    let running = running_pid().is_some();
+                    let out = self.script.borrow_mut().answered(reads, probe, now, running);
+                    let again = out.ask;
+                    self.apply(out, true);
+                    if again {
+                        self.check("asked again: something happened while VoiceOver was being asked", running);
+                    }
+                    continue;
+                }
             };
             if let Some(line) = line {
                 crate::logging::line("speech", &line);
@@ -221,6 +371,35 @@ impl VoiceOver {
             self.raise();
             crate::logging::trace("speech", || "trying VoiceOver again: its next look came due".to_string());
         }
+        // The AppleScript box, only while VoiceOver is wanted — the setting on, or a module that
+        // chose `voiceover`; otherwise looking for it would be work done against the user's
+        // answer. VoiceOver Utility quitting is the moment the box is likeliest to have changed;
+        // while it is known to be unticked, the reads are looked at again on the refusals' pace.
+        // A process lookup per look, a `stat` and a preference read; a question to VoiceOver only
+        // when those say it may be worth one.
+        let utility_quit = UTILITY_QUIT.swap(false, Ordering::Relaxed);
+        if !wanted {
+            return;
+        }
+        if utility_quit {
+            // With VoiceOver not running there is nobody to ask, nothing to drop, and nothing to
+            // tell; the next VoiceOver is asked before its first line (`note_pid`).
+            if running_pid().is_some() {
+                self.check("VoiceOver Utility quit", true);
+            }
+        } else if self.script.borrow().due(now) {
+            let running = running_pid().is_some();
+            let reads = read_box();
+            let out = self.script.borrow_mut().looked(&reads, now, running);
+            let ask = out.ask;
+            if ask {
+                crate::logging::trace("speech", || format!("the AppleScript box, looked at again: {}", reads.words()));
+            }
+            self.apply(out, false);
+            if ask {
+                self.ask(reads, running);
+            }
+        }
     }
 
     /// The Mac woke, the screen was unlocked or this session came back (`why`): a path parked
@@ -234,12 +413,13 @@ impl VoiceOver {
 }
 
 fn run(
-    rx: Receiver<Utterance>,
+    rx: Receiver<Job>,
     refused: Sender<String>,
     notes: Sender<Note>,
     healthy: Arc<AtomicBool>,
     pending: Arc<AtomicUsize>,
     may_prompt: Arc<AtomicBool>,
+    accepts: Arc<AtomicBool>,
 ) {
     // Whether the last line was refused, so the first one taken after it is reported.
     let mut failing = false;
@@ -249,26 +429,45 @@ fn run(
     // answered, each line asks it first, without asking the user (`output`).
     let mut consent_pending = false;
     let mut cost = Cost::default();
-    while let Ok(mut u) = rx.recv() {
+    let mut asked = 0u32;
+    while let Ok(job) = rx.recv() {
+        let mut u = match job {
+            Job::Say(u) => u,
+            Job::Check(reads) => {
+                ask_voiceover(reads, &accepts, &notes, &mut asked);
+                continue;
+            }
+        };
         let mut dropped = 0usize;
+        // A question about the AppleScript box found among the lines dropped below: asked
+        // before the line that is kept is offered, which then goes where its answer says.
+        let mut check = None;
         // An interrupting line makes everything still waiting stale. Saying those anyway
         // would mean announcing where the cursor USED to be, several controls late,
         // which is exactly the failure a screen reader must not have.
         if u.interrupt {
             loop {
                 match rx.try_recv() {
-                    Ok(next) => {
+                    Ok(Job::Say(next)) => {
                         dropped += 1;
                         u = next;
                     }
+                    Ok(Job::Check(reads)) => check = Some(reads),
                     Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
                 }
             }
         }
+        if let Some(reads) = check {
+            ask_voiceover(reads, &accepts, &notes, &mut asked);
+        }
         // Handed over in an opening VoiceOver has already refused a line in — before that
         // refusal lowered the gate. Not offered: each would pay for the same refusal again, one
         // after the other, and come out late. The system voice says it now.
-        if refused_in.is_some_and(|r| u.opening <= r) {
+        //
+        // And handed over before VoiceOver was found not to accept AppleScript — waiting behind
+        // the question that found it, often: VoiceOver would drop it without a word. The system
+        // voice says it now.
+        if refused_in.is_some_and(|r| u.opening <= r) || !accepts.load(Ordering::Relaxed) {
             pending.fetch_sub(1 + dropped, Ordering::Relaxed);
             let _ = refused.send(u.text);
             continue;
@@ -449,9 +648,12 @@ static EVENT_WORKS: AtomicBool = AtomicBool::new(true);
 /// **No reply is asked for**, and that is deliberate twice over. There is nothing in the
 /// answer worth having, and waiting for one would mean an Apple Event reply arriving on a
 /// worker thread that has no run loop to deliver it — the one part of this whose behaviour
-/// nobody here could establish. Failures that matter still surface: a target that is not
+/// nobody here could establish. Failures of the sending still surface: a target that is not
 /// authorised is refused at send time, which is how every application discovers it needs
-/// permission.
+/// permission. **One failure does not**, and a Mac session of 2026-10-01 met it: VoiceOver with
+/// its AppleScript box unticked takes the event and drops it, and the line is lost without a
+/// word. That is asked about separately, with a reply ([`ask_voiceover`], `vo_script.rs`), and
+/// while it is so no line is sent here.
 fn send_event(text: &str) -> Result<(), Refusal> {
     // 'VOAS' / 'outp', and '----' is keyDirectObject — the parameter every command's direct
     // argument travels in.
@@ -612,11 +814,20 @@ fn run_osascript(text: &str) -> Result<(), Refusal> {
 fn run_osascript_inner(text: &str) -> Result<(), (String, bool)> {
     let script =
         format!("tell application \"VoiceOver\" to output \"{}\"", applescript_string(text));
-    let mut child = Command::new("/usr/bin/osascript")
-        .arg("-e")
-        .arg(&script)
+    run_child(&[script.as_str()], false).map(|_| ())
+}
+
+/// `osascript` with one `-e` per line of `lines`, stopped at [`CHILD_LIMIT`]. What it printed
+/// when it succeeded — only with `stdout`, which is otherwise not even opened — or its error
+/// output and whether it had to be stopped.
+fn run_child(lines: &[&str], stdout: bool) -> Result<String, (String, bool)> {
+    let mut command = Command::new("/usr/bin/osascript");
+    for line in lines {
+        command.arg("-e").arg(line);
+    }
+    let mut child = command
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(if stdout { Stdio::piped() } else { Stdio::null() })
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| (format!("osascript could not be started ({e})"), false))?;
@@ -651,16 +862,136 @@ fn run_osascript_inner(text: &str) -> Result<(), (String, bool)> {
         });
     };
 
+    use std::io::Read;
     if status.success() {
-        return Ok(());
+        let mut out = String::new();
+        if let Some(mut pipe) = child.stdout.take() {
+            let _ = pipe.read_to_string(&mut out);
+        }
+        return Ok(out);
     }
     let mut stderr = String::new();
     if let Some(mut pipe) = child.stderr.take() {
-        use std::io::Read;
         let _ = pipe.read_to_string(&mut stderr);
     }
     let why = stderr.trim();
     Err((if why.is_empty() { format!("exit {status}") } else { why.to_string() }, false))
+}
+
+/// The AppleScript box's file and preference, read without asking VoiceOver anything — see
+/// `vo_script.rs` for what each is worth on which macOS. A `stat`, and one preference read
+/// through cfprefsd; nothing is written, and nothing here puts a question on screen.
+///
+/// The preference domain is re-read first (`CFPreferencesAppSynchronize`): a value this process
+/// read earlier would otherwise be served from its own cache, and would not show a box ticked
+/// since. With nothing of ours pending in that domain — nothing here ever sets a value in it —
+/// that call has nothing to write.
+pub(super) fn read_box() -> Reads {
+    let marker = Marker::from_stat(std::fs::metadata(vo_script::MARKER).map(|_| ()));
+    let domain = CFString::from_static_str(vo_script::DOMAIN);
+    let name = CFString::from_static_str(vo_script::KEY);
+    CFPreferencesAppSynchronize(&domain);
+    let mut valid: u8 = 0;
+    // SAFETY: `valid` is a live local, written once by the call.
+    let on = unsafe { CFPreferencesGetAppBooleanValue(&name, &domain, &mut valid) };
+    let key = match (valid != 0, on) {
+        (false, _) => Key::Unset,
+        (true, true) => Key::On,
+        (true, false) => Key::Off,
+    };
+    let major = NSProcessInfo::processInfo().operatingSystemVersion().majorVersion as i64;
+    Reads { marker, key, key_live: major < vo_script::KEY_MOVED_IN }
+}
+
+/// Asks VoiceOver one read-only question through AppleScript ([`vo_script::PROBE`]) and waits
+/// for its answer — the one way to hear from VoiceOver itself whether its AppleScript box is
+/// ticked. On the worker, so the event loop never waits for it; lines handed over meanwhile wait
+/// behind it and go where its answer says ([`run`]).
+///
+/// **Only with the Automation permission granted** ([`automation_status`], which asks nobody):
+/// otherwise `osascript` would put the Automation question on screen and wait for it, for a
+/// question the user did not ask. Then VoiceOver is not asked, and the file and the preference
+/// decide ([`vo_script::unasked`]). While that question is on screen because the setting was
+/// just ticked (`backend::voiceover_automation_asking`), the user is not told about the box over
+/// it, and the next look asks again. The question the `osascript` rung puts on screen
+/// (`vo_park::after_event`) is not counted: only a line handed to VoiceOver puts it, so only
+/// while the reads do not say "not allowed" — when there is nothing to tell.
+///
+/// Through `osascript` and its [`CHILD_LIMIT`], not an Apple Event of our own, for the reason
+/// [`send_event`] gives: a reply arriving on a thread with no run loop is the part of that
+/// nobody here could establish. The cost of the first question that launched `osascript` goes
+/// into the log, and so does any later one slower than [`SLOW_LINE_MS`] — lines handed over
+/// meanwhile wait for it; the answer, read, goes to the event loop, and with the reads it was
+/// asked on to [`LAST_ASKED`].
+fn ask_voiceover(reads: Reads, accepts: &AtomicBool, notes: &Sender<Note>, asked: &mut u32) {
+    let probe = match automation_status() {
+        0 => {
+            let started = Instant::now();
+            let probe = vo_script::classify(&run_child(&vo_script::PROBE, true));
+            let ms = started.elapsed().as_millis();
+            *asked += 1;
+            if *asked == 1 {
+                crate::logging::line(
+                    "speech",
+                    &format!("the first AppleScript question to VoiceOver took {ms} ms, osascript's launch included"),
+                );
+            } else if ms >= u128::from(SLOW_LINE_MS) {
+                crate::logging::line(
+                    "speech",
+                    &format!(
+                        "an AppleScript question to VoiceOver took {ms} ms; lines handed over meanwhile \
+                         waited for it"
+                    ),
+                );
+            } else {
+                crate::logging::trace("speech", || format!("an AppleScript question to VoiceOver took {ms} ms"));
+            }
+            probe
+        }
+        status => vo_script::unasked(status, crate::backend::voiceover_automation_asking()),
+    };
+    // The lines waiting behind this question go to the system voice when its answer says "not
+    // allowed": the event loop's rule, applied here first, because they are offered before the
+    // event loop hears the answer. Only lowered here — raised by the event loop alone, once it
+    // has heard this answer in order with everything else (`VoiceOver::apply`).
+    if vo_script::verdict(&reads, Some(&probe)).state == Scripting::NotAllowed {
+        accepts.store(false, Ordering::Relaxed);
+    }
+    if let Ok(mut last) = LAST_ASKED.lock() {
+        *last = Some((reads.clone(), probe.clone()));
+    }
+    let _ = notes.send(Note::Checked { reads, probe });
+}
+
+/// The AppleScript box as it stands: read now, with VoiceOver's last answer when it was given on
+/// the same reads. For the Permissions page, on the main thread: a `stat` and a preference read,
+/// and no question to VoiceOver.
+pub(super) fn applescript_now() -> Verdict {
+    let reads = read_box();
+    let last = LAST_ASKED.lock().ok().and_then(|l| l.clone());
+    vo_script::shown(&reads, last.as_ref())
+}
+
+/// An application quit (the backend's notice, on the main thread), by its bundle identifier and
+/// its bundle's file name, either of which may be missing. VoiceOver Utility quitting is when its
+/// AppleScript box is likeliest to have just been changed; the event loop's next pass asks again.
+///
+/// Both names go into the log when it is recognised — the identifier has one source, and the log
+/// settles it — and when an application whose names mention VoiceOver is not, so that a wrong
+/// guess at both shows itself too. VoiceOver's own quitting is not written: `note_pid` sees it.
+pub(super) fn application_quit(bundle_id: Option<&str>, bundle_file: Option<&str>) {
+    let names = || format!("bundle id {}, bundle {}", bundle_id.unwrap_or("none"), bundle_file.unwrap_or("none"));
+    if vo_script::is_utility(bundle_id, bundle_file) {
+        UTILITY_QUIT.store(true, Ordering::Relaxed);
+        crate::logging::line("speech", &format!("VoiceOver Utility quit ({})", names()));
+    } else if bundle_id != Some("com.apple.VoiceOver")
+        && [bundle_id, bundle_file].iter().flatten().any(|n| n.contains("VoiceOver"))
+    {
+        crate::logging::line(
+            "speech",
+            &format!("an application named for VoiceOver quit, not taken for VoiceOver Utility ({})", names()),
+        );
+    }
 }
 
 /// The body of an AppleScript string literal.

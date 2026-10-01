@@ -9540,7 +9540,7 @@ mod macos_uptime_wiring_tests {
 
     #[test]
     fn the_voiceover_path_is_looked_at_and_bounded() {
-        assert!(body(SPEECH, "pub fn pump(&self)").contains("self.vo.tick();"), "nothing reopens a parked VoiceOver path");
+        assert!(body(SPEECH, "pub fn pump(&self)").contains("self.vo.tick(wanted);"), "nothing reopens a parked VoiceOver path");
         let say = body(VO, "pub fn say(&self, text: &str, interrupt: bool) -> bool");
         assert!(say.contains(".handed()"), "a look no longer lets only one line through");
         let run = body(VO, "fn run(");
@@ -9551,6 +9551,79 @@ mod macos_uptime_wiring_tests {
         for call in ["automation_status()", "vo_park::after_event(", "vo_park::event_broken("] {
             assert!(out.contains(call), "output no longer uses `{call}`");
         }
+    }
+
+    /// VoiceOver's AppleScript box (`speech::vo_script`, whose rules are tested there): where it
+    /// is asked, where its answer is obeyed, and where it is shown. A Mac session lost every line
+    /// to it in silence; reverting any of these call sites would leave every other test green.
+    #[test]
+    fn voiceover_s_applescript_box_is_asked_obeyed_and_shown() {
+        const PERM: &str = include_str!("backend/macos/perm.rs");
+        const GUI: &str = include_str!("gui.rs");
+        // The worker asks before it offers, and offers nothing VoiceOver would drop.
+        let run = body(VO, "fn run(");
+        let ask = run.find("ask_voiceover(reads, &accepts, &notes, &mut asked);").expect("the worker never asks");
+        let gate = run.find("|| !accepts.load(Ordering::Relaxed)").expect("the worker offers lines VoiceOver would drop");
+        let output = run.find("output(&u.text").expect("the worker no longer says lines");
+        assert!(ask < gate && gate < output, "a line is offered before the box was asked about");
+        // The event loop refuses a line while the box is not ticked, before a look's one line is spent.
+        let say = body(VO, "pub fn say(&self, text: &str, interrupt: bool) -> bool");
+        let refuses = say.find("!self.accepts.load(Ordering::Relaxed)").expect("say no longer asks the box's gate");
+        assert!(refuses < say.find(".handed()").expect("a look"), "a look is spent on a line VoiceOver would drop");
+        // Raised only by an answer the event loop has heard; the worker only lowers.
+        let apply = body(VO, "fn apply(&self, out: vo_script::Out, answer: bool)");
+        assert!(apply.contains("} else if answer {
+            self.accepts.store(true"), "raised by a trigger");
+        assert_eq!(VO.matches("self.apply(out, true);").count(), 2, "the two answers: the worker's, and not asked");
+        assert_eq!(VO.matches("self.apply(out, false);").count(), 2, "the trigger and the look");
+        let asks = body(VO, "fn ask_voiceover(");
+        assert!(!asks.contains("accepts.store(true"), "the worker raises against a newer trigger");
+        // Asked at start, of every VoiceOver process, when the setting is ticked — on the next
+        // pass, not the next line — when VoiceOver Utility quits, and on the looks while parked.
+        assert!(body(VO, "pub fn note_pid(&self, pid: Option<i32>)").contains("self.asked_pid.replace(Some(now))"));
+        assert!(body(VO, "pub fn rearm(&self)").contains("self.asked_pid.set(None);"));
+        assert!(body(SPEECH, "pub fn new() -> Result<Self>").contains("speech.vo.note_pid(voiceover::running_pid());"));
+        let pump = body(SPEECH, "pub fn pump(&self)");
+        assert!(pump.contains("self.vo.rearm();
+                self.vo.note_pid(voiceover::running_pid());"));
+        assert!(pump.contains("|| self.chosen.borrow().values().any(|id| id == VOICEOVER_ID);"), "a module's choice");
+        let tell = pump.find("self.vo.take_tell()").expect("the user is never told");
+        let tick = pump.find("self.vo.tick(wanted);").expect("the tick");
+        let refused = pump.find("for text in self.vo.refused()").expect("the refused lines");
+        assert!(tick < tell && tell < refused, "told after the lines it explains, or before the answer");
+        let told = &pump[tell..refused];
+        assert!(told.contains("self.av.say(text, false, None);"), "told through VoiceOver, which drops it");
+        assert!(told.contains("self.vo.say(text, false)") && !told.contains("self.say(text"), "the word through the system voice");
+        let tick = body(VO, "pub fn tick(&self, wanted: bool)");
+        for call in [
+            "UTILITY_QUIT.swap(false, Ordering::Relaxed)",
+            "self.check(\"VoiceOver Utility quit\"",
+            "self.script.borrow().due(now)",
+            ".looked(&reads, now, running)",
+            "Note::Checked { reads, probe } =>",
+        ] {
+            assert!(tick.contains(call), "VoiceOver::tick no longer does `{call}`");
+        }
+        assert!(
+            SYSTEM.contains("crate::speech::application_quit(bundle_id.as_deref(), bundle_file.as_deref());"),
+            "VoiceOver Utility quitting is not heard"
+        );
+        // The question asks nobody anything: only with the Automation permission granted; and
+        // -1744 holds the sentence back only while the switch's own request is out.
+        assert!(asks.contains("match automation_status() {
+        0 => {"));
+        assert!(asks.contains("vo_script::classify(&run_child(&vo_script::PROBE, true))"));
+        assert!(asks.contains("status => vo_script::unasked(status, crate::backend::voiceover_automation_asking()),"));
+        let request = body(PERM, "pub fn request_voiceover_automation()");
+        let up = request.find("AUTOMATION_ASKING.fetch_add(1, Ordering::SeqCst);").expect("the request is not counted");
+        let spawn = request.find("std::thread::spawn(").expect("the request's thread");
+        let asked = request.find("let after = ask_tcc(true);").expect("the request");
+        let down = request.find("AUTOMATION_ASKING.fetch_sub(1, Ordering::SeqCst);").expect("never counted down");
+        assert!(up < spawn && spawn < asked && asked < down, "counted while the dialog cannot be up, or not while it is");
+        // Shown: the start-up block, from the reads alone, and the Permissions page.
+        assert!(PERM.contains("push(\"voiceover applescript\", crate::speech::voiceover_applescript_env());"));
+        assert!(SPEECH.contains("vo_script::env_value(&voiceover::read_box())"), "the [env] line depends on timing");
+        assert_eq!(GUI.matches("crate::speech::voiceover_applescript_page()").count(), 2, "built and re-checked");
     }
 
     #[test]

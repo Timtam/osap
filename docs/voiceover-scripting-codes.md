@@ -61,6 +61,24 @@ most: a preset name, a file name, a serial number. Being able to ask VoiceOver t
 back — on demand, as a second key on the same control — is something the platform's own voice
 cannot do at all.
 
+## The one read, and what VoiceOver answers with its AppleScript box unticked
+
+`output` is sent without waiting for a reply, so VoiceOver dropping it says nothing — and it
+does drop it while **"Allow VoiceOver to be controlled with AppleScript"** is unticked in
+VoiceOver Utility (a Mac session of 2026-10-01). Whether the box is ticked is therefore asked
+with a read that waits for its answer: `get text under cursor of vo cursor`, through
+`osascript`, the read guidepup's `itemText` makes. It says nothing and moves nothing.
+
+With the box unticked, VoiceOver answers the commands of its own suite with **-1708**,
+`errAEEventNotHandled` — *"right doesn't understand the 'move' message"* (guidepup/setup issue
+66, macOS 26) and *"vo cursor doesn't understand the 'perform action' message"*
+(actions/runner-images issue 11257, macOS 15). Whether a `get` of one of its properties is
+answered the same way has not been seen yet, and issue 66 found the standard suite still answered
+with the box unticked (`quit`) — a `get` belongs to that suite. So the application takes -1708 for
+"unticked" whatever the file says, takes an answer for "ticked" only where the file VoiceOver
+Utility writes cannot be looked at, logs the raw answer, and otherwise decides by the file. See
+`speech/vo_script.rs`.
+
 ## The rest of the suite, for later
 
 Recorded because obtaining it cost a tester session, not because anything uses it yet.

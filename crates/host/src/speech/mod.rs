@@ -32,6 +32,10 @@ mod prism;
 /// session. Pure, so its tests run where `cargo test` runs; see the file.
 #[cfg(any(target_os = "macos", test))]
 mod vo_park;
+/// Whether VoiceOver accepts AppleScript — "Allow VoiceOver to be controlled with AppleScript" —
+/// how that is known, and what the transport does while it does not. Pure; see the file.
+#[cfg(any(target_os = "macos", test))]
+mod vo_script;
 
 #[cfg(any(windows, target_os = "macos"))]
 use std::cell::Cell;
@@ -127,7 +131,7 @@ pub struct Speech {
 
 impl Speech {
     pub fn new() -> Result<Self> {
-        Ok(Self {
+        let speech = Self {
             #[cfg(target_os = "macos")]
             av: avspeech::AvSpeech::new(),
             #[cfg(windows)]
@@ -151,7 +155,15 @@ impl Speech {
             chosen: RefCell::new(HashMap::new()),
             #[cfg(windows)]
             voices: RefCell::new(HashMap::new()),
-        })
+        };
+        // With the setting on and VoiceOver up, whether VoiceOver accepts AppleScript is asked
+        // now, before the first line: unticked, it would drop that line — the start-up
+        // announcement — without a word (`vo_script.rs`).
+        #[cfg(target_os = "macos")]
+        if crate::appcfg::voiceover_speech() {
+            speech.vo.note_pid(voiceover::running_pid());
+        }
+        Ok(speech)
     }
 
     /// Says `text` for a particular module VM, honouring whatever engine it chose.
@@ -279,6 +291,10 @@ impl Speech {
                     "the system voice — \"Speak through VoiceOver\" is off"
                 } else if !running {
                     "the system voice — the setting is on but VoiceOver is not running"
+                } else if !self.vo.accepts_applescript() {
+                    "the system voice — the setting is on and VoiceOver is running, but VoiceOver \
+                     does not accept AppleScript (\"Allow VoiceOver to be controlled with \
+                     AppleScript\" in VoiceOver Utility), so it would drop every line"
                 } else {
                     "the system voice — the setting is on and VoiceOver is running, but the \
                      transport is parked after VoiceOver would not take a line"
@@ -493,11 +509,61 @@ impl Speech {
             );
             self.av.say(&format!("{why} The box has been unticked."), false, None);
         }
+        // Ticking "Speak through VoiceOver" again, watched here as well as in `say`, as the
+        // Windows switch is below: ticking a box makes the application say nothing, and the
+        // AppleScript box is to be asked about — and its answer heard — at once, not at the next
+        // line. Whichever of the two sees the edge first re-arms; the other then sees no edge.
+        #[cfg(target_os = "macos")]
+        {
+            let on = crate::appcfg::voiceover_speech();
+            if on && !self.last_switch.replace(on) {
+                self.vo.rearm();
+                self.vo.note_pid(voiceover::running_pid());
+            } else {
+                self.last_switch.set(on);
+            }
+        }
+        // Whether VoiceOver is wanted at all: the setting, or a module that chose it. The
+        // AppleScript box is looked after only then, and its sentences said only then.
+        #[cfg(target_os = "macos")]
+        let wanted = crate::appcfg::voiceover_speech()
+            || self.chosen.borrow().values().any(|id| id == VOICEOVER_ID);
         // What the VoiceOver worker said about refusals since the last pass, and whether a
         // parked path's next look has come due — before the refused lines are said, so the
         // log's line about the refusal comes first.
         #[cfg(target_os = "macos")]
-        self.vo.tick();
+        self.vo.tick(wanted);
+        // What the AppleScript box's answer has for the user, before the lines it kept from
+        // VoiceOver: why the system voice speaks — once per episode, in the system voice, since
+        // VoiceOver would drop it — or, once VoiceOver has answered that the box is ticked after
+        // that, a word through VoiceOver that it works. Neither once VoiceOver is no longer
+        // wanted (switched off while the question was out). The word only through VoiceOver
+        // itself, never through the system voice, where it would be untrue: handed to VoiceOver
+        // or dropped, and the log says which.
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(text) = self.vo.take_tell() {
+                if wanted {
+                    self.av.say(text, false, None);
+                } else {
+                    crate::logging::line(
+                        "speech",
+                        "not said why the system voice speaks: VoiceOver is no longer wanted",
+                    );
+                }
+            }
+            if let Some(text) = self.vo.take_confirm() {
+                let said = wanted && voiceover::running_pid().is_some() && self.vo.say(text, false);
+                crate::logging::line(
+                    "speech",
+                    if said {
+                        "handed VoiceOver the word that this application speaks through it now"
+                    } else {
+                        "not said that this application speaks through VoiceOver now: VoiceOver is                          no longer wanted, not running, or its path is parked — and the system voice                          would be the wrong one to say it"
+                    },
+                );
+            }
+        }
         #[cfg(target_os = "macos")]
         for text in self.vo.refused() {
             // Not `interrupt`: these are lines VoiceOver turned down, said late and out of
@@ -573,6 +639,41 @@ pub fn personal_voice_supported() -> bool {
 #[cfg(target_os = "macos")]
 pub fn personal_voice_explanation() -> Option<String> {
     avspeech::personal_status().explanation()
+}
+
+/// VoiceOver's "Allow VoiceOver to be controlled with AppleScript" as the Permissions page shows
+/// it, beside the permissions: its state in plain words, what it is for and where to change it —
+/// see `vo_script.rs`; the evidence is in the log. `None` where there is no VoiceOver.
+///
+/// Free-standing for the reason `personal_voice_supported` is, and on every platform so the page
+/// that calls it compiles where it is written. A `stat` and a preference read, with VoiceOver's
+/// last answer when it was given on the same reads; it asks VoiceOver nothing.
+pub fn voiceover_applescript_page() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        Some(vo_script::page_line(&voiceover::applescript_now()))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// The value of the `[env]` line `voiceover applescript`: `allowed`, `not allowed` or `unknown`,
+/// and the two reads it comes from — from those alone, so the line is the same whether or not
+/// VoiceOver, asked at about the same time on the speech thread, has answered yet; its answer
+/// follows in the `[speech]` lines.
+#[cfg(target_os = "macos")]
+pub fn voiceover_applescript_env() -> String {
+    vo_script::env_value(&voiceover::read_box())
+}
+
+/// An application quit — the backend's notice of it, by bundle identifier and bundle file name,
+/// either of which may be missing. VoiceOver Utility quitting makes the VoiceOver path ask again
+/// whether VoiceOver accepts AppleScript.
+#[cfg(target_os = "macos")]
+pub fn application_quit(bundle_id: Option<&str>, bundle_file: Option<&str>) {
+    voiceover::application_quit(bundle_id, bundle_file);
 }
 
 #[cfg(all(test, windows))]

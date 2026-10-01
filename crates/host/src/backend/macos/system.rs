@@ -1,6 +1,8 @@
 //! The machine and the session: the Mac going to sleep and waking, the screen locked and
 //! unlocked, this user's session switched away from and back to, the displays asleep, awake or
-//! rearranged — and applications quitting, which is what lets the pid-keyed tables forget them.
+//! rearranged — and applications quitting, which is what lets the pid-keyed tables forget them
+//! (and, for VoiceOver Utility, what makes speech ask VoiceOver again whether it accepts
+//! AppleScript).
 //!
 //! Heard here, queued with the host's own queue (`crate::system_events::push`), and handed to
 //! the host from the pump as one batch of `SystemEvent`s ([`drain`], first thing in
@@ -152,7 +154,11 @@ fn subscribe_workspace() {
         // handle it.
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // SAFETY: a live notification for the duration of the call.
-            if let Some(pid) = pid_of(unsafe { n.as_ref() }) {
+            if let Some((pid, bundle_id, bundle_file)) = quit_app(unsafe { n.as_ref() }) {
+                // VoiceOver Utility quitting: its AppleScript box may just have been ticked,
+                // and speech asks VoiceOver again (`speech/vo_script.rs`). A flag, read on the
+                // event loop's next pass.
+                crate::speech::application_quit(bundle_id.as_deref(), bundle_file.as_deref());
                 let mut q = TERMINATED.lock().unwrap_or_else(|e| e.into_inner());
                 if q.len() < QUIT_MAX {
                     q.push(pid);
@@ -177,8 +183,10 @@ fn subscribe_workspace() {
     core::mem::forget(token);
 }
 
-/// The process a workspace notification names, from its `NSWorkspaceApplicationKey`.
-fn pid_of(notification: &NSNotification) -> Option<i32> {
+/// The process a workspace notification names, from its `NSWorkspaceApplicationKey`: its pid,
+/// and its bundle identifier and its bundle's file name (`VoiceOver Utility.app`) when it has
+/// them.
+fn quit_app(notification: &NSNotification) -> Option<(i32, Option<String>, Option<String>)> {
     let info = notification.userInfo()?;
     // SAFETY: a framework-owned constant.
     let key: &NSString = unsafe { NSWorkspaceApplicationKey };
@@ -187,7 +195,11 @@ fn pid_of(notification: &NSNotification) -> Option<i32> {
     // application; there is no typed accessor to do it for us (as in `watch::on_app_activated`).
     let app: &NSRunningApplication =
         unsafe { &*(&*object as *const objc2::runtime::AnyObject as *const NSRunningApplication) };
-    Some(app.processIdentifier())
+    Some((
+        app.processIdentifier(),
+        app.bundleIdentifier().map(|b| b.to_string()),
+        app.bundleURL().and_then(|u| u.lastPathComponent()).map(|f| f.to_string()),
+    ))
 }
 
 fn subscribe_lock() -> bool {

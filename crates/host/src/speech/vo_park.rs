@@ -98,7 +98,8 @@ impl Refusal {
 
 /// Every error code written in parentheses in `text` — `(-1743)` — in order. Only a
 /// parenthesised negative number counts, so a figure elsewhere in a message is not a code.
-fn codes_in(text: &str) -> Vec<i64> {
+/// Also how `vo_script` reads VoiceOver's answer to its AppleScript question.
+pub(super) fn codes_in(text: &str) -> Vec<i64> {
     let mut out = Vec::new();
     let mut rest = text;
     while let Some(at) = rest.find("(-") {

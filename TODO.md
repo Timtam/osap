@@ -6125,6 +6125,86 @@ tester's stage-1 instructions are a text of their own, not in the repository.
       envelopes, zones). And a standalone Avenger, if there is one and it is wanted: an `O.window`
       binding beside the embedded one, as sforzando has.
 
+## VoiceOver's AppleScript box, caught (2026-10-01)
+
+The Mac session of 2026-10-01 (an Intel MacBook Air, macOS 15.8, Retina 2x, VoiceOver running):
+every permission granted, "Speak through VoiceOver" on, VoiceOver Utility's "Allow VoiceOver to be
+controlled with AppleScript" unticked — and silence. Each line is an Apple Event sent without
+waiting for a reply, so VoiceOver dropping it could not be told from success: the log said
+`speech is going to VoiceOver`, the first line "took 0 ms", and no refusal ever came, so the
+fallback for refusals never spoke. The maintainer's decision: catch it; the user is never left in
+silence.
+
+- [x] **Built — not yet run on a Mac.** The rules are pure and tested (`speech/vo_script.rs`), the
+      reads and the question are `speech/voiceover.rs`. Read on the event loop, asking VoiceOver
+      nothing: whether `/private/var/db/Accessibility/.VoiceOverAppleScriptEnabled` exists (a
+      `stat`), and below macOS 15 `SCREnableAppleScript` in `com.apple.VoiceOver4/default`
+      (CFPreferences). Then, on the speech thread, `get text under cursor of vo cursor` through
+      `osascript` — only with Automation granted, only while VoiceOver runs (`is running`, and the
+      `tell` compiled by `run script` only after it, so nothing starts VoiceOver). -1708 means not
+      allowed, over the reads too; an answer means allowed only where the reads cannot say, never
+      over a file that is not there (a `get` may be answered with the box unticked, and a wrong
+      "allowed" is the silence); anything else leaves it to the reads. -1744 holds the sentence
+      back only while the switch's own Automation request is out
+      (`perm::voiceover_automation_asking`), since the system answers -1744 before anybody asked
+      too. Asked at start, when the setting is ticked (now watched in `pump` too, as on Windows),
+      for every new VoiceOver process, and when VoiceOver Utility quits (the backend's quit notice,
+      by bundle id or `VoiceOver Utility.app`, both logged); while not allowed, the reads are
+      looked at again on the refusals' pace, and VoiceOver is asked again when they change.
+      Looked after while the setting is on or a module chose `voiceover`. While not allowed every
+      line goes to the system voice, lines that waited behind the question included; the user
+      hears the sentence once per episode — not over the Automation dialog the switch puts up —
+      and VoiceOver says "Automation Platform now speaks through VoiceOver." once VoiceOver itself
+      answered. `[env] voiceover applescript` (from the reads alone), and a plain line on the
+      Permissions page. Nothing writes the box.
+- [ ] **The next Mac session verifies**, each from the log:
+      - **VoiceOver's answer with the box unticked — the question that decides the design:** the
+        raw line `VoiceOver, asked through AppleScript (…), answered: …`. -1708, as the sources
+        say for VoiceOver's own commands: as designed. `answered`: the `get` is not gated — safe
+        now, because an answer never counts over the file, but useless; replace it by something
+        VoiceOver gates that says nothing — `output ""` if an empty `output` does not cut off
+        what VoiceOver is saying, or the first line after each trigger sent through `osascript`,
+        which waits for VoiceOver's reply. Anything else that means "unticked" (-1728, -10000)
+        goes into `vo_script::classify`, with that log as its source;
+      - **the file:** does `… is there` / `… is not there` in `[env] voiceover applescript` follow
+        the box on 15.8, and on 12.7.6 and 14.5? Or does it say `could not be looked at (…)` —
+        then `/private/var/db/Accessibility` cannot be searched by a user, and VoiceOver's answer
+        alone decides;
+      - **the key:** what `SCREnableAppleScript` reads on 15.8, where it is not counted, and on
+        12.7.6 and 14.5, where it is — does it follow the box?
+      - **with the box ticked:** `answered`, and `the first AppleScript question to VoiceOver took
+        … ms`; not -1728 with nothing under the VoiceOver cursor (then the question needs another
+        property);
+      - **the question is silent:** VoiceOver says nothing and its cursor does not move when it is
+        asked, at start and right after VoiceOver Utility quits;
+      - **VoiceOver Utility quitting:** a `VoiceOver Utility quit (bundle id …, bundle …)` line,
+        which settles the id, then `asking VoiceOver whether it accepts AppleScript (VoiceOver
+        Utility quit; …)`. And does the look every 3 s find the box ticked before that, as soon as
+        the administrator's password has been given?
+      - **heard:** at start with the box unticked, the startup announcement and then the sentence,
+        once, in the system voice; after ticking the box, "Automation Platform now speaks through
+        VoiceOver." in VoiceOver's voice, and sforzando's read-outs through VoiceOver;
+      - **VO-Fn-F8** opens VoiceOver Utility on the tester's laptop, as the sentence says;
+      - **a new build with the setting on, Automation never asked and the box unticked:** the
+        sentence comes at start with no Automation dialog; the dialog comes with the first line
+        after the box is ticked;
+      - **the setting ticked with Automation not answered yet:** the sentence is not said over
+        macOS's dialog, and comes within a few seconds of answering it;
+      - whether the Automation dialog the `osascript` rung puts up outlives the child stopped at
+        5 s. It is not counted as "on screen" (`ask_voiceover`): only a line handed to VoiceOver
+        puts it, so only while the reads do not say "not allowed".
+- [ ] **Later, once the answers are in:**
+      - whether `host.speech.engines()` should report `voiceover` unavailable while VoiceOver does
+        not accept AppleScript (today `available` means running);
+      - a line handed to VoiceOver before the box was found unticked is lost, sent without a reply:
+        unticking the box mid-session loses the lines until VoiceOver Utility quits. The
+        maintainer's call: while lines go to VoiceOver, `stat` the file every 10 s (microseconds
+        each) and take it disappearing as a trigger, which caps that loss at 10 s;
+      - whether the sentence is said again when VoiceOver Utility quits with the box still
+        unticked — today once per episode, and an interrupting line cuts it off;
+      - with Automation refused (-1743) the sentence names only the box; whether it should name
+        Privacy & Security, Automation as well.
+
 ## Dev tools
 
 - [x] **OCR window inspector (first version):** `tools/inspect` — **Ctrl+Alt+I** OCRs the focused window's client area and logs every recognized word with its **client-relative coordinates** (+ saves the capture with `AUTOMATION_PLATFORM_OCR_DEBUG=1`). Calibrates overlay regions and reveals where hardcoded (e.g. ReaHotkey) coordinates land vs the real controls. Resolved the sforzando polyphony case (the region was correct; the failures were the hover scrub-value — fixed by `hoverToRead`-off — and UWP OCR being blind to *single* digits). ✓ (2026-06-21)

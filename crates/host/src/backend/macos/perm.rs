@@ -15,7 +15,7 @@
 
 use std::cell::Cell;
 use std::ffi::CString;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Once;
 use std::time::{Duration, Instant};
 
@@ -647,7 +647,7 @@ pub fn permissions() -> Vec<Permission> {
             without: "Only needed for \"Speak through VoiceOver\". Without it that setting \
                       looks on and the overlay goes on speaking in its own voice — macOS \
                       refuses the Apple Event silently. Ticking the setting is what asks for \
-                      it.",
+                      it. VoiceOver's own AppleScript setting, below, is needed as well.",
             anchor: AUTOMATION_PANE,
             can_ask: true,
             blocking: false,
@@ -898,6 +898,17 @@ fn voiceover_automation() -> Automation {
     ask_tcc(false)
 }
 
+/// Requests made by [`request_voiceover_automation`] whose prompting call has not returned yet —
+/// a count, because ticking the setting off and on again quickly makes a second one.
+static AUTOMATION_ASKING: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether the Automation question for VoiceOver is on screen because the setting was ticked: a
+/// request is out and has not come back. The system's own answer cannot say — asked without
+/// asking the user, it gives -1744 both while the question is up and before it was ever put.
+pub fn voiceover_automation_asking() -> bool {
+    AUTOMATION_ASKING.load(Ordering::SeqCst) > 0
+}
+
 /// Asks the USER for the permission, and logs what came back.
 ///
 /// Called when "Speak through VoiceOver" is switched on, and only then. It raises a system
@@ -917,6 +928,10 @@ fn voiceover_automation() -> Automation {
 /// and the second time is exactly when they are trying to fix the thing this asks about.
 /// Whether macOS shows the dialog a second time after a refusal is its decision, not ours —
 /// it does not, in general, which is why the log names the pane instead.
+///
+/// While the request is out, [`voiceover_automation_asking`] says so: the speech path does not
+/// talk over the dialog (`speech/vo_script.rs`, which needs to tell "on screen" from "not asked
+/// yet", both of which the system answers -1744).
 pub fn request_voiceover_automation() {
     if !voiceover_running() {
         crate::logging::line(
@@ -939,8 +954,12 @@ pub fn request_voiceover_automation() {
             before.as_str()
         ),
     );
+    // Counted up before the thread starts, so the speech path's next pass already sees it; down
+    // once the call has returned, which it does when the dialog has been answered.
+    AUTOMATION_ASKING.fetch_add(1, Ordering::SeqCst);
     std::thread::spawn(move || {
         let after = ask_tcc(true);
+        AUTOMATION_ASKING.fetch_sub(1, Ordering::SeqCst);
         crate::logging::line(
             "macos",
             &format!(
@@ -1156,6 +1175,13 @@ pub fn environment_report() -> Vec<(String, String)> {
             ),
         );
     }
+    // VoiceOver's own permission, next to the system's: "Allow VoiceOver to be controlled with
+    // AppleScript". Unticked, VoiceOver drops every line handed to it without a word, and no
+    // system call reports it — so it is read here from the file VoiceOver Utility writes and the
+    // preference it sets (`speech/vo_script.rs`), asking VoiceOver nothing, and from those alone.
+    // VoiceOver's own answer, asked on the speech thread when the setting is on, follows in the
+    // `[speech]` lines.
+    push("voiceover applescript", crate::speech::voiceover_applescript_env());
 
     // macOS records every permission above against the *bundle*, not the executable path.
     // A build run as a bare binary out of `target/` is a different identity from the same

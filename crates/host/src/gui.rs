@@ -989,6 +989,17 @@ pub fn run_gui(
                 ps.add(&btn, 0, SizerFlag::Left | SizerFlag::Bottom, 10);
                 lines.push(line);
             }
+            // VoiceOver's own AppleScript setting, next to the permissions though it is not one
+            // of the system's: "Speak through VoiceOver" needs it as much as Automation, and
+            // without it VoiceOver drops every line it is handed without a word. A line of text
+            // and no button — the setting is the user's, changed in VoiceOver Utility with an
+            // administrator's password, and nothing here writes it; the text says where it is.
+            // Not counted in the head's "granted": it is not the system's to grant.
+            let vo_line = crate::speech::voiceover_applescript_page().map(|_| {
+                let l = StaticText::builder(&perm_tab).with_label("").build();
+                ps.add(&l, 0, SizerFlag::Left | SizerFlag::All, 8);
+                l
+            });
             let recheck = Button::builder(&perm_tab).with_label("Re-check now").build();
             ps.add(&recheck, 0, SizerFlag::Left | SizerFlag::All, 8);
             ps.add(
@@ -1023,6 +1034,9 @@ pub fn run_gui(
                     ));
                     for (line, p) in lines.iter().zip(all.iter()) {
                         line.set_label(&format!("{} — {}. {}", p.name, p.state.word(), p.without));
+                    }
+                    if let (Some(line), Some(text)) = (&vo_line, crate::speech::voiceover_applescript_page()) {
+                        line.set_label(&text);
                     }
                 }
             };

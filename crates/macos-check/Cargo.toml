@@ -72,7 +72,9 @@ features = ["CFBase", "CFString", "CFArray", "CFDictionary", "CFNumber", "CFRunL
     # to arrive while this accessory application is in the background. AppKit suspends those for
     # an application that is not active, and only the CF observer can ask for DeliverImmediately;
     # the NSDistributedNotificationCenter block form cannot.
-    "CFNotificationCenter"]
+    "CFNotificationCenter",
+    # VoiceOver's AppleScript box (speech/voiceover.rs): its preference, read and never written.
+    "CFPreferences"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-core-graphics]
 version = "0.3"
