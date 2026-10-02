@@ -124,6 +124,11 @@ keep="$(mktemp -d)"
 for f in automation-platform.log automation-platform.log.1 settings.toml settings.toml.bak; do
   [ -f "$stage/$f" ] && cp -p "$stage/$f" "$keep/$f"
 done
+# And the text recognition measurements (`ocr-bench`, see measure-text-recognition.command below),
+# which are evidence of the same kind as the log.
+for f in "$stage"/ocr-bench-*.txt; do
+  [ -f "$f" ] && cp -p "$f" "$keep/"
+done
 # And the probe's pictures, which are the other half of what a tester sends. They are written
 # INSIDE the probe's module folder rather than beside the log, because `host.screen.save`
 # resolves a relative name against the calling module's own root — a capability boundary, not
@@ -138,6 +143,9 @@ rm -rf "$dist"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 for f in automation-platform.log automation-platform.log.1 settings.toml settings.toml.bak; do
   [ -f "$keep/$f" ] && cp -p "$keep/$f" "$stage/$f" && echo "  kept $f from the previous build"
+done
+for f in "$keep"/ocr-bench-*.txt; do
+  [ -f "$f" ] && cp -p "$f" "$stage/" && echo "  kept $(basename "$f") from the previous build"
 done
 
 cp "$exe" "$app/Contents/MacOS/automation-platform"
@@ -356,10 +364,71 @@ behave as if the application is broken, so please do them all.
    That file is what to send when something does not work. For much more detail:
        AUTOMATION_PLATFORM_TRACE=1 open $APP_NAME.app
 
+7. Only when we ask you to measure text recognition: connect the power adapter,
+   quit the application (its menu-bar menu, Quit), then in Terminal type
+       zsh ~/$APP_NAME/measure-text-recognition.command
+   (with this folder's path instead if it is not in your home folder). It reads
+   pictures it carries, not your screen, and needs no permission. It prints one
+   line when it starts and one when it is done, so VoiceOver has little to read
+   while it measures; everything else goes into the file. A full run takes several
+   minutes, 84 seconds of which it waits on purpose. It ends with the Glass sound
+   when it finished and the Basso sound when it stopped early, and then shows the
+   file in Finder, selected: send that ocr-bench-N.txt, either way.
+
 Speech goes through the system voice, or through VoiceOver if it is running.
 
 $docs_note$shipped module(s) included.
 TXT
+
+# What the README's step 7 runs: `automation-platform ocr-bench`, which measures what Apple
+# Vision's text recognition costs on this Mac on pictures the executable carries (no screen
+# capture, no permission, no speech; docs/building-on-macos.md). Run as `zsh <file>`, like
+# tools/tester/run.sh, so that it needs no executable bit and asks nothing of Gatekeeper; named
+# .command, so that a double-click in Finder opens it in Terminal as well, where Gatekeeper may
+# ask first.
+#
+# Made for a tester who listens with VoiceOver: `--quiet`, so that VoiceOver reads two lines
+# rather than a hundred while the processor is meant to be measuring; a sound at the end, Glass
+# when the run finished and Basso when it did not, so that the two are told apart without
+# reading; and the file shown in Finder, selected, which VoiceOver announces and which can be
+# attached from there.
+cat > "$stage/measure-text-recognition.command" <<'CMD'
+#!/bin/zsh
+# Measures what text recognition costs on this Mac, for the Automation Platform developers.
+#   zsh <this folder>/measure-text-recognition.command
+# Add --quick for a shorter run. It reads pictures it carries, not the screen.
+here=${0:a:h}
+exe="$here/AutomationPlatform.app/Contents/MacOS/automation-platform"
+if [ ! -x "$exe" ]; then
+  echo "No AutomationPlatform.app beside this file: keep it in the folder it came in."
+  afplay /System/Library/Sounds/Basso.aiff >/dev/null 2>&1
+  exit 1
+fi
+# Its reads would compete with the measurement for the processor. By the executable's path:
+# pgrep -x compares the process name, which macOS cuts to 16 characters, and
+# "automation-platform" has 19, so it would never find it.
+if pgrep -f 'AutomationPlatform\.app/Contents/MacOS/automation-platform' >/dev/null 2>&1; then
+  echo "Automation Platform is running. Quit it first (its menu-bar menu, Quit), then run this again."
+  afplay /System/Library/Sounds/Basso.aiff >/dev/null 2>&1
+  exit 1
+fi
+echo "Measuring text recognition: several minutes. It ends with a sound and shows the file in Finder."
+result=$("$exe" ocr-bench --quiet "$@")
+run_status=$?
+print -r -- "$result"
+file=$(print -r -- "$result" | sed -n 's/^OCR BENCH: writing to //p' | head -n 1)
+if [ $run_status -eq 0 ]; then
+  afplay /System/Library/Sounds/Glass.aiff >/dev/null 2>&1
+else
+  echo "It stopped before the end (exit status $run_status). Please send the file all the same."
+  afplay /System/Library/Sounds/Basso.aiff >/dev/null 2>&1
+fi
+if [ -n "$file" ] && [ -f "$file" ]; then
+  open -R "$file"
+fi
+exit $run_status
+CMD
+chmod +x "$stage/measure-text-recognition.command"
 
 label="${version:-$(date +%Y-%m-%d)}"
 size="$(du -sh "$stage" | cut -f1)"

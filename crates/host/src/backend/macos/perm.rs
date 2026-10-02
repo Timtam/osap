@@ -1370,7 +1370,7 @@ fn listen_state() -> Listen {
 }
 
 /// A string-valued sysctl, or `None` if it is not there.
-fn sysctl_string(name: &str) -> Option<String> {
+pub(super) fn sysctl_string(name: &str) -> Option<String> {
     let key = CString::new(name).ok()?;
     let mut len: usize = 0;
     // First call sizes the buffer; a failure here is the normal answer for "no such name".
@@ -1399,7 +1399,7 @@ fn sysctl_string(name: &str) -> Option<String> {
 }
 
 /// An integer-valued sysctl, or `None` if it is not there.
-fn sysctl_i32(name: &str) -> Option<i32> {
+pub(super) fn sysctl_i32(name: &str) -> Option<i32> {
     let key = CString::new(name).ok()?;
     let mut value: i32 = 0;
     let mut len = std::mem::size_of::<i32>();

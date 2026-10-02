@@ -106,7 +106,19 @@ features = ["std", "hidsystem"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-vision]
 version = "0.3"
-features = ["VNRequest", "VNRecognizeTextRequest", "VNObservation", "VNRequestHandler", "VNTypes", "VNGeometry", "VNError", "VNUtils", "VNRequestRevisionProviding", "objc2-core-graphics", "objc2-core-foundation"]
+features = ["VNRequest", "VNRecognizeTextRequest", "VNObservation", "VNRequestHandler", "VNTypes", "VNGeometry", "VNError", "VNUtils", "VNRequestRevisionProviding", "objc2-core-graphics", "objc2-core-foundation",
+    # `ocr-bench` pins a request to a compute device (`setComputeDevice:forComputeStage:`, macOS 14
+    # and later, asked of the runtime before it is used) and lists what Vision offers per stage.
+    "objc2-core-ml"]
+
+# The compute devices those two calls take and return, by their protocol only. Not the
+# `MLAllComputeDevices` function, which exists from macOS 14 and would stop the application from
+# starting on 12 and 13 if it were imported: `ocr-bench` looks it up by name (backend/macos/ocr/
+# bench.rs), and the macOS workflow checks that it is not imported.
+[target.'cfg(target_os = "macos")'.dependencies.objc2-core-ml]
+version = "0.3"
+default-features = false
+features = ["std", "MLComputeDeviceProtocol"]
 
 # For the one question `objc2-foundation` cannot answer on its own: whether this application
 # is ALLOWED to send Apple Events to VoiceOver. `AEDeterminePermissionToAutomateTarget` both

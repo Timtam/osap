@@ -61,6 +61,10 @@ pub(crate) use macos::perm::voiceover_automation_asking;
 /// macOS-only `use`, and the path resolves identically in `crates/macos-check`.
 #[cfg(target_os = "macos")]
 pub(crate) use macos::perm::{ask_for, open_pane, permissions};
+/// `automation-platform ocr-bench`, which measures Vision on fixed pictures — see
+/// `macos::ocr::bench`. Re-exported for `lib.rs`, and so that `crates/macos-check` can name it.
+#[cfg(target_os = "macos")]
+pub(crate) use macos::ocr::bench::run as ocr_bench;
 #[cfg(not(any(windows, target_os = "macos")))]
 mod stub;
 

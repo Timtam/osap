@@ -224,6 +224,12 @@ pub fn applescript_calls() {
     let _: fn(Option<&str>, Option<&str>) = speech::application_quit;
 }
 
+/// `automation-platform ocr-bench`, named for the reason `app_calls` names its calls: `lib.rs`
+/// calls it, and this crate cannot borrow `lib.rs`. Without a use the re-export only warns.
+pub fn ocr_bench_calls() -> fn(&[String]) -> i32 {
+    backend::ocr_bench
+}
+
 pub fn app_calls() -> (fn(), fn(bool, &str) -> bool, fn(), fn(), fn()) {
     (
         backend::activate_self,

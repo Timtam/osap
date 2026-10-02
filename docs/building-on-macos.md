@@ -126,6 +126,99 @@ AutomationPlatform.app/Contents/MacOS/automation-platform list
 `list`, `search`, `install`, `update` and `uninstall` all work from there and print to the
 terminal.
 
+## Measuring text recognition {#measuring-text-recognition}
+
+`ocr-bench` measures what Apple Vision's text recognition costs on the Mac it runs on. It reads
+ten pictures the executable carries — five layouts, each drawn for a standard display and for a
+Retina one: imitations of sforzando's read-outs (a value in a black well set into grey, the
+digits about 11 pixels tall at 1x as in sforzando's own fields) and a line of words wider than
+400 points — so a CI runner, a tester's Mac and anybody else's read the same pixels. It opens no
+window, captures nothing from the screen, needs no permission, never speaks and leaves the
+application's log alone. Quit the application first: its own reads would compete for the
+processor.
+
+```bash
+AutomationPlatform.app/Contents/MacOS/automation-platform ocr-bench           # the full run
+AutomationPlatform.app/Contents/MacOS/automation-platform ocr-bench --quick   # a shorter one
+```
+
+| Option | What it does |
+|---|---|
+| `--quick` | 3 passes a cell instead of 6, which is too few for a verdict; 2 pictures for the variants instead of 5; one process per warm-up instead of three; 24 s of idle instead of 84 |
+| `--quiet` | prints only where the file is and that it is done; everything else goes to the file alone, so that a screen reader does not read a hundred lines while the processor is meant to be measuring |
+| `--long-idle` | adds one pass after 1, 2, 5 and 10 minutes with nothing to do, on the thread that read before and on a fresh one: 36 minutes more |
+| `--capture-ms N` | counts the retry ladder's 250 ms budget from N ms before each pipeline read, standing in for the screen capture it does not make; 50 by default, the median capture on the tester's Intel Air; 0 to 10000 |
+| `--out FILE` | writes to `FILE` instead of `ocr-bench-N.txt` beside the `.app` (the first N not taken; the fallback folder when that one is read-only) |
+| `--summary FILE` | appends each section's table to `FILE` in Markdown as soon as the section is done; CI passes `$GITHUB_STEP_SUMMARY` |
+
+A download carries `measure-text-recognition.command` beside the `.app`, which runs it with
+`--quiet` and passes on whatever else it is given: `zsh measure-text-recognition.command` in
+Terminal (a double-click opens it in Terminal too, where Gatekeeper may ask first). It does not
+start while the application is running, which it tells by `pgrep -f` on the executable's path.
+It ends with the Glass sound when the run finished and the Basso sound when it did not, and then
+shows the file in Finder, selected.
+
+What it does, in this order. Every line starts with `OCR BENCH:` and is written to the file the
+moment it is known, so a pass that kills the process keeps everything before it:
+
+1. **The machine**: model, processor, cores, memory, the macOS version, the thermal state, Low
+   Power Mode, the load average, the power source and whether VoiceOver runs (these again at the
+   end); the text recognition revisions this macOS has and the one a new request uses; the
+   compute devices Core ML lists and the ones Vision offers text recognition, per stage (both
+   from macOS 14 on).
+2. **First passes**, each in a process of its own that the benchmark starts: after the
+   application's own warm-up (one accurate pass over six dark bars, on a thread of its own),
+   after a warm-up over a line of words, and with none — then the first real pass on another
+   thread, and the pass after it. One process comes first and is not counted, so that the counted
+   ones all find the file cache warm, and the order of the three is turned by one each round.
+3. **Probes**: each variant that calls what no Mac has run for this application yet — request
+   revision 2 or 3, a compute device — runs one pass in a process of its own first. One that dies
+   there, or that Vision refuses, is left out of everything below, with the reason.
+4. **The pipeline**: every picture read as `host.ocr.recognize` reads a region once its capture
+   is in hand — the content crop, the blank guard, the enlargement, the retry ladder — and how
+   many Vision passes each read made. Then the same again with every request of every rung asking
+   for revision 2, where this macOS has it and its probe went through.
+5. **The engine**: one Vision pass with today's request (`prod`) and with variants that change
+   one thing each: the fast level; request revision 2 or 3; a minimum text height of 1/32 or
+   0.25; one request reused; the ink enlarged toward 48 pixels instead of 64; the request pinned
+   to the CPU, the GPU or the Neural Engine, where Vision offers it (macOS 14 and later); and the
+   language en-US. `prod-b` is `prod` again under another name, the control. Every cell (a
+   variant over a picture) runs once a round, in an order that changes from round to round, so
+   that whatever a switch between models costs falls on every variant alike; the first pass of
+   each cell is kept apart. A pass is timed as the application spends it: making the request,
+   the handler, `performRequests` and reading the results out. A variant this Mac cannot run says
+   why.
+6. **Threads**: the first pass on a fresh thread once the process is warm, one thread alone
+   against two at once, and `prod` in the engine against `prod` pass after pass, which says what
+   switching between variants cost.
+7. **Idle**: one pass after 2, 10 and 30 seconds with nothing to do, each once on the thread that
+   read before and once on a fresh one; `--quick` waits 2 and 10 seconds.
+
+Each section ends with its table in Markdown, and the last line says `done`.
+
+**How a variant is judged.** Against `prod`, picture by picture: "clearly faster" when an exact
+two-sided Mann-Whitney test between the two sets of warm passes gives p < 0.01 *and* the median
+is at least 10 % and 5 ms lower; "clearly slower" the other way round; otherwise "no clear
+difference". Three passes against three cannot reach p < 0.01, so `--quick` gives no verdicts.
+If `prod-b` comes out "clearly" anything, the run says it is too noisy for verdicts. Whether a
+variant read each picture right is reported beside its speed, never folded into it.
+
+The timings are the whole machine's at that moment, and those of a command-line process rather
+than the application: every thread that times a pass asks for user-initiated quality of service,
+as the application's recognise thread does (the application's event loop reads at
+user-interactive), and the run says which class each section's thread actually had; nothing
+captures the screen. Compare a variant with `prod` from the same run; milliseconds from two
+machines say as much about the machines as about the settings.
+
+**In CI**, the `ocr-bench` job of `.github/workflows/macos-build.yml` runs the full benchmark
+from the downloaded zip on the `macos-15` and `macos-26` runners (arm64 virtual machines) and on
+`macos-15-intel`, the one runner that executes the x86_64 slice. It runs when the run built the
+executable, and in every run started by hand. The job's log has every line, the run's summary
+page the tables, and each leg's whole output is kept as the artifact `ocr-bench-<runner>.txt`,
+with the runner image on its last line. The job fails only when the benchmark did not finish; a
+picture today's request read wrong, or one Vision refused, is a warning. It also runs the
+tester's `.command` with `--help`, the one path that is harmless there.
+
 ## Checking macOS code from a Windows machine
 
 Most of this port is developed on Windows. Two things make that possible, and it is worth
@@ -158,9 +251,10 @@ grep '\[env\]' dist/AutomationPlatform/automation-platform.log | tail -20
 ```
 
 **A rebuild keeps the evidence, and only the evidence.** `package-macos.sh` empties `dist/`
-and rewrites it, and it carries four things across: `automation-platform.log`, its rotated
-`.log.1`, `settings.toml`, and any `probe-*.png` the probe has written. Everything else there
-is build output. It did not always: `git pull && ./bootstrap-macos.sh` used to throw away the
+and rewrites it, and it carries five things across: `automation-platform.log`, its rotated
+`.log.1`, `settings.toml`, any `probe-*.png` the probe has written, and any `ocr-bench-*.txt`
+the [text recognition measurement](#measuring-text-recognition) has. Everything else there is
+build output. It did not always: `git pull && ./bootstrap-macos.sh` used to throw away the
 log of the session that prompted the fix, along with the settings and the screenshots a tester
 had been asked to send.
 

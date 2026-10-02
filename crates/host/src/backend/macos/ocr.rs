@@ -57,6 +57,11 @@ use crate::backend::{CaptureSource, OcrLine, OcrText, OcrThread, OcrWord, Recogn
 use crate::ocr::plan::{self, Plan as CapturePlan};
 use crate::ocr::types::Rect;
 
+/// `automation-platform ocr-bench`: Vision measured on fixed pictures. A child of this file so
+/// that it runs this file's own pipeline, request and pass rather than a copy; nothing in the
+/// application calls it.
+pub(crate) mod bench;
+
 /// Which of the ladder's last rungs one recognition may climb.
 ///
 /// The legacy calls climb all of them, as they always have. A `host.ocr.read` skips the fast
@@ -152,6 +157,14 @@ fn recognize_inner(
     recognize_captured(&native, scale, x, y, w, h, lang, started, debug, &Ladder::FULL)
 }
 
+/// The slack the content crop leaves round the ink, in capture pixels. A physical distance, not
+/// a pixel count: three pixels of slack round the ink at 1x is one and a half at 2x, and the
+/// crop would start clipping antialias fringes off Retina glyphs. One function, because
+/// `ocr-bench` (`bench.rs`) crops its pictures exactly as a read does.
+fn content_margin(scale: f64) -> usize {
+    (3.0 * scale).round().max(1.0) as usize
+}
+
 /// Everything after the capture, so that a caller who already has the pixels — one bounding-box
 /// capture cut into several regions — runs exactly the same pipeline as a single read.
 #[allow(clippy::too_many_arguments)]
@@ -194,11 +207,7 @@ fn recognize_captured(
         if debug {
             debug_dump("ocr-debug-raw.bmp", &rgba, px_w, px_h);
         }
-        // The margin is a physical distance, not a pixel count: three pixels of slack round
-        // the ink at 1x is one and a half at 2x, and the crop would start clipping antialias
-        // fringes off Retina glyphs.
-        let margin = (3.0 * scale).round().max(1.0) as usize;
-        let plan = Plan::content(&rgba, px_w, px_h, margin);
+        let plan = Plan::content(&rgba, px_w, px_h, content_margin(scale));
 
         // NOTHING TO READ IS AN ANSWER, and it is the one answer a recogniser cannot give.
         //
@@ -877,6 +886,22 @@ fn run_vision(
     level: VNRequestTextRecognitionLevel,
     map: &dyn Fn(CGRect) -> (i32, i32, i32, i32),
 ) -> Option<VisionRead> {
+    let request = new_request(lang, level);
+    match perform(image, &request, map) {
+        Ok(read) => Some(read),
+        Err(why) => {
+            warn_once("ocr-perform", &format!("ocr: Vision refused the request — {why}"));
+            None
+        }
+    }
+}
+
+/// The request every pass makes, configured. Apart from `perform` so that `ocr-bench`
+/// (`bench.rs`) can start from exactly this one and change a single thing on it.
+fn new_request(
+    lang: Option<&str>,
+    level: VNRequestTextRecognitionLevel,
+) -> Retained<VNRecognizeTextRequest> {
     let request = VNRecognizeTextRequest::new();
     request.setRecognitionLevel(level);
     // Language correction is a dictionary pass over the result, and every string this
@@ -899,7 +924,37 @@ fn run_vision(
     // `setCustomWords` is likewise skipped: Vision only consults it during the
     // language-correction stage, which is switched off above, so it would be a no-op that
     // reads like a precaution.
+    if let Some(r) = REVISION_OVERRIDE.with(std::cell::Cell::get) {
+        // SAFETY: a property of a request made on this thread. Only `ocr-bench` sets the
+        // override, and only to a revision this macOS lists and a probe process has run.
+        unsafe { request.setRevision(r) };
+    }
+    request
+}
 
+thread_local! {
+    // The Vision passes this thread has made, for `ocr-bench`'s pipeline section, which reports
+    // how many passes the ladder made for one read. Nothing in the application reads it.
+    static PASSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    // A revision every request made on this thread asks for: `ocr-bench`'s second pipeline round,
+    // which reads its pictures through the whole ladder under revision 2. Nothing in the
+    // application sets it, so every request it makes keeps the default revision, as above.
+    static REVISION_OVERRIDE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// How many Vision passes this thread has made so far.
+fn passes_on_this_thread() -> u64 {
+    PASSES.with(|p| p.get())
+}
+
+/// One pass of `request` over `image`, and its answer; `Err` carries Vision's reason for
+/// refusing it, which `run_vision` logs.
+fn perform(
+    image: &CGImage,
+    request: &VNRecognizeTextRequest,
+    map: &dyn Fn(CGRect) -> (i32, i32, i32, i32),
+) -> Result<VisionRead, String> {
+    PASSES.with(|p| p.set(p.get() + 1));
     let options: Retained<NSDictionary<NSString, AnyObject>> = NSDictionary::new();
     let handler = unsafe {
         VNImageRequestHandler::initWithCGImage_options(
@@ -910,14 +965,10 @@ fn run_vision(
     };
     // Synchronous: it returns when the requests have finished. No completion handler, no
     // queue, no run loop — which is what makes it usable from the pump thread at all.
-    let requests: Retained<NSArray<VNRequest>> =
-        NSArray::from_slice(&[request.as_ref() as &VNRequest]);
+    let base: &VNRequest = request;
+    let requests: Retained<NSArray<VNRequest>> = NSArray::from_slice(&[base]);
     if let Err(e) = handler.performRequests_error(&requests) {
-        warn_once(
-            "ocr-perform",
-            &format!("ocr: Vision refused the request — {}", e.localizedDescription()),
-        );
-        return None;
+        return Err(e.localizedDescription().to_string());
     }
 
     // No results at all is the ordinary "there was no text here" answer, not a failure.
@@ -981,7 +1032,7 @@ fn run_vision(
     let out_lines =
         ordered.iter().map(|l| OcrLine { text: l.text.clone(), words: l.words.clone() }).collect();
     let words = ordered.into_iter().flat_map(|l| l.words).collect();
-    Some((text, words, out_lines))
+    Ok((text, words, out_lines))
 }
 
 /// One observation: a run of text Vision read, and where it put it.
@@ -1360,7 +1411,13 @@ enum Panel {
 /// single small glyph is the difference between comfortably above Apple's recognition floor
 /// and sitting on it.
 fn upscale_for(content_px: usize) -> usize {
-    (TARGET_CONTENT_PX / content_px.max(1)).clamp(1, 10)
+    upscale_toward(TARGET_CONTENT_PX, content_px)
+}
+
+/// [`upscale_for`] toward another target than [`TARGET_CONTENT_PX`]: the one rule, with the
+/// target a parameter for `ocr-bench`'s `target-48` variant.
+fn upscale_toward(target_px: usize, content_px: usize) -> usize {
+    (target_px / content_px.max(1)).clamp(1, 10)
 }
 
 /// Average of the four corners, 0..1 per channel — the region's background.

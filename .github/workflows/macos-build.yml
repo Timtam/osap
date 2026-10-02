@@ -66,6 +66,10 @@ jobs:
     # runner's own architecture. On Intel it re-ran the slice that already worked; here it
     # runs arm64, which no machine has ever executed.
     runs-on: macos-15
+    # Whether the executable was reused from an earlier run rather than built here; the text
+    # recognition measurement below runs only for one built here (or in a run started by hand).
+    outputs:
+      reused: ${{ steps.reuse.outputs.reused }}
     env:
       # The plist's floor (MIN_MACOS in package-macos.sh), which nothing else enforces. rustc's
       # default floor differs per architecture, so without this the two slices would disagree
@@ -568,6 +572,16 @@ jobs:
             echo "::error::the binary imports an obsoleted capture function — on a macOS that has dropped it, the application would not launch"
             exit 1
           fi
+          # The same for what `ocr-bench` (backend/macos/ocr/bench.rs) uses from macOS 14 on: Core
+          # ML's `MLAllComputeDevices` and its three device classes, and Vision's compute-stage
+          # names. It looks the function up by name, the classes up in the runtime and the stage
+          # names out of Vision's own answer, because an import of any of them would stop the
+          # application from launching on macOS 12 and 13. One ordinary use, anywhere, and the
+          # import is back.
+          if grep -E '_MLAllComputeDevices$|_OBJC_CLASS_\$_ML(CPU|GPU|NeuralEngine)ComputeDevice$|_VNComputeStage(Main|PostProcessing)$' imports.txt; then
+            echo "::error::the binary imports a Core ML or Vision symbol that macOS 12 and 13 do not have — there, the application would not launch"
+            exit 1
+          fi
           if ! grep -q '_CGPreflightScreenCaptureAccess$' imports.txt; then
             echo "::error::the import list does not even contain a capture function that IS called — the check above is not looking at the right binary"
             exit 1
@@ -640,6 +654,126 @@ jobs:
           fi
           echo "----- what served the captures -----"
           grep "screen capture paths\|screen captures are coming from\|ScreenCaptureKit refused\|first screen capture\|first capture for reading text\|CAPTURE PROBE:" automation-platform.log || true
+
+  # What Apple Vision's text recognition costs, measured by the download itself:
+  # `automation-platform ocr-bench` reads fixed pictures it carries (crates/host/src/ocr/bench.rs,
+  # docs/building-on-macos.md) — no screen capture, no window, no permission, no speech — and
+  # prints what one pass costs under today's settings and under each variant, how many passes a
+  # read makes, the first pass in a process and on a thread, a pass after idle, and two at once.
+  # Each section's table goes to the run's summary page as soon as the section is done, so a
+  # leg that dies part-way still shows what it measured; the whole output is kept as an artifact
+  # of its own per leg, to compare runs with `gh run download`.
+  #
+  # Why: a tester's Intel MacBook Air (macOS 15) took 143 to 786 ms for a small read-out, against
+  # 22 to 42 ms on Windows and 25 to 56 ms on a warm Mac mini M1. The arm64 runners are virtual
+  # machines on Apple silicon, and whether Vision finds a Neural Engine in them is one of the
+  # lines the benchmark prints. The Intel runner has none, like the Air, and it is the only place
+  # CI ever EXECUTES the universal binary's x86_64 slice. None of them is a 10 W laptop, so what
+  # to compare is each variant against `prod` in the same run, never milliseconds between
+  # machines.
+  #
+  # A measurement, not a gate: a leg goes red only when the benchmark did not finish — the
+  # executable died in it — and a misread picture is a warning. Nothing is built here: each leg
+  # unpacks the download and runs it, so it costs the run itself (84 s of it idle on purpose) and
+  # the time to fetch and unpack the zip. Only for an executable this run built, because a reused
+  # one measured again shows runner noise and nothing else, and in any run started by hand: on
+  # every build with Rust changes, the maintainer's choice (TODO.md, "Text recognition on the
+  # Mac, measured").
+  ocr-bench:
+    needs: build
+    if: needs.build.outputs.reused != 'true' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      # As in newer-macos below: the zip kept as the file it is, and unpacked by one ditto.
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact-prefix }}-macos.zip
+          path: artifact
+          skip-decompress: true
+
+      - name: Unpack it the way a tester does
+        run: |
+          zip=$(find artifact -type f | head -n1)
+          [ -n "$zip" ] || { echo "::error::the download is empty"; exit 1; }
+          mkdir -p dist
+          ditto -x -k "$zip" dist
+          # Said here, so that a download without the application is not later reported as a
+          # benchmark that "did not finish".
+          if [ ! -x dist/AutomationPlatform/AutomationPlatform.app/Contents/MacOS/automation-platform ]; then
+            echo "::error::one unpacking of the download does not give the application, ready to run"
+            find dist -maxdepth 3
+            exit 1
+          fi
+
+      - name: Text recognition, measured
+        env:
+          LEG: ${{ matrix.os }}
+        run: |
+          cd dist/AutomationPlatform
+          # The runner image, so that two runs of one leg can be told apart by it as well.
+          runner="macOS $(sw_vers -productVersion) on $(uname -m), runner image ${ImageOS:-?} ${ImageVersion:-?}"
+          echo "$runner"
+          out="ocr-bench-$LEG.txt"
+          status=0
+          ./AutomationPlatform.app/Contents/MacOS/automation-platform ocr-bench \
+            --out "$out" --summary "$GITHUB_STEP_SUMMARY" || status=$?
+          echo "CI: $runner" >> "$out"
+          if ! grep -q '^OCR BENCH: done' "$out" 2>/dev/null; then
+            echo "::error::the text recognition benchmark did not finish on $LEG (exit status $status)"
+            exit 1
+          fi
+          # Today's request misreading a picture, or Vision refusing it, is a finding about Vision
+          # on this machine, not a reason to fail: the tables say which picture, and what was read
+          # instead. Only prod's rows: a variant reading wrong is what the variants are there to show.
+          if grep -qE '^\| prod \|.*(wrong|refused|\| no: )' "$out"; then
+            echo "::warning::today's request read a picture wrong, or was refused, on $LEG — see the engine and pipeline tables"
+          fi
+
+      # The tester's script (package-macos.sh), on the one path that is harmless here: it looks
+      # for a running application, starts the benchmark quietly with --help, and ends with a
+      # sound. A script error, a misspelt zsh construct, would otherwise first show on the
+      # tester's Mac. Waited for at most a minute: a runner without a sound device is not the
+      # script's fault, so a hang in the sound is a warning.
+      - name: The tester's script runs
+        run: |
+          cd dist/AutomationPlatform
+          zsh measure-text-recognition.command --help > script.out 2>&1 &
+          pid=$!
+          for _ in $(seq 1 60); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+          done
+          if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            cat script.out
+            echo "::warning::measure-text-recognition.command did not end within 60 s (the closing sound, on a runner with no sound device?)"
+            exit 0
+          fi
+          rc=0
+          wait "$pid" || rc=$?
+          cat script.out
+          if [ "$rc" != 0 ]; then
+            echo "::error::measure-text-recognition.command failed with exit status $rc"
+            exit 1
+          fi
+          grep -q 'ocr-bench \[--quick\]' script.out \
+            || { echo "::error::measure-text-recognition.command did not pass --help through to ocr-bench"; exit 1; }
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          # The whole output of one leg, to compare runs with `gh run download`. `archive: false`
+          # uploads the file as it is, named after it, as the build job's download is.
+          path: dist/AutomationPlatform/ocr-bench-${{ matrix.os }}.txt
+          archive: false
+          name: ocr-bench-${{ matrix.os }}.txt
+          if-no-files-found: warn
+          overwrite: true
 
   # The artifact above, run once on the newest macOS GitHub offers. Nothing is built here: this
   # is the very file a tester downloads.
@@ -732,6 +866,23 @@ jobs:
             done
             alive=1
             kill -0 "$pid" 2>/dev/null || alive=0
+            # measure-text-recognition.command will not start while the application runs, and it
+            # finds it by `pgrep -f` on the executable's path; asked here, where one does run.
+            # `pgrep -x` is said beside it: it compares the process name, which macOS cuts to 16
+            # characters, and "automation-platform" has 19.
+            if [ "$alive" = 1 ] && [ -z "$PGREP_ASKED" ]; then
+              PGREP_ASKED=1
+              if pgrep -f 'AutomationPlatform\.app/Contents/MacOS/automation-platform' >/dev/null; then
+                echo "pgrep -f finds the running application"
+              else
+                echo "::warning::pgrep -f does not find the running application — measure-text-recognition.command would start beside it"
+              fi
+              if pgrep -x automation-platform >/dev/null; then
+                echo "pgrep -x automation-platform finds it as well"
+              else
+                echo "pgrep -x automation-platform does not find it (the process name is cut at 16 characters)"
+              fi
+            fi
             kill "$pid" 2>/dev/null || true
             wait "$pid" 2>/dev/null || true
             echo "----- automation-platform.log ($*) -----"

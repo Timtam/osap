@@ -33,3 +33,8 @@ pub mod change;
 
 #[path = "../../host/src/ocr/snap_queue.rs"]
 pub mod snap_queue;
+
+/// `ocr-bench`'s pure half — the pictures (its `include_bytes!` paths are the file's own, so they
+/// resolve here too), the statistics and what it prints — which the macOS half names.
+#[path = "../../host/src/ocr/bench.rs"]
+pub mod bench;

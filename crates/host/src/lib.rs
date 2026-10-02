@@ -4373,6 +4373,23 @@ pub fn app_dir() -> &'static std::path::Path {
     portable::base_dir()
 }
 
+/// `automation-platform ocr-bench [options]` (`ocr::bench::USAGE` lists them): what Apple
+/// Vision's text recognition costs on this Mac, measured on fixed pictures the executable carries
+/// (`ocr::bench`, and `backend/macos/ocr/bench.rs` for the half that runs Vision). No window, no
+/// screen capture, no speech, and the log is not opened. Returns the exit code: 0 when it
+/// finished, 1 when it could not measure, 2 for a wrong argument or on another platform, where
+/// it only says that it runs on macOS.
+pub fn ocr_bench(args: &[String]) -> i32 {
+    #[cfg(target_os = "macos")]
+    {
+        backend::ocr_bench(args)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        ocr::bench::elsewhere(args)
+    }
+}
+
 /// Convenience entry: load each directory as a module and run them together.
 pub fn run(dirs: &[String]) -> Result<()> {
     // The settings before the log, because the log's own header reports them — and before

@@ -6300,6 +6300,90 @@ silence.
       - with Automation refused (-1743) the sentence names only the box; whether it should name
         Privacy & Security, Automation as well.
 
+## Text recognition on the Mac, measured: `ocr-bench` (2026-10-01)
+
+Why a small read-out on the tester's Intel MacBook Air (macOS 15.8, Retina) took 143 to 786 ms,
+against 22 to 42 ms on the Windows machine and 25 to 56 ms on the warm Mac mini M1: the logs
+point at Vision without a Neural Engine, a second ladder pass on some fields, the first pass on a
+thread, and two Vision passes at once — and none of it is measured on its own. The instrument for
+that is built; what the application reads and says is unchanged.
+
+- [x] **Built, never run on a Mac.** `automation-platform ocr-bench [--quick] [--quiet]
+      [--long-idle] [--capture-ms N] [--out FILE] [--summary FILE]` (`crates/host/src/ocr/bench.rs`,
+      the pure half with its tests; `backend/macos/ocr/bench.rs`, the Vision half, a child of
+      `ocr.rs`); ten pictures carried in the executable, drawn by `tools/ocr-fixtures/make.py`
+      (sforzando-like fields at 1x and 2x, the digits about 11 px tall at 1x as in sforzando's own,
+      and a line on the pass-through path); docs/building-on-macos.md, "Measuring text
+      recognition". CI: the job `ocr-bench` in macos-build.yml runs the downloaded zip on macos-15,
+      macos-26 and macos-15-intel, keeps each leg's output as an artifact, and runs the tester's
+      script with `--help`; the import check also refuses `_MLAllComputeDevices`, Core ML's device
+      classes and Vision's compute-stage names. The tester: `measure-text-recognition.command`
+      beside the `.app` (quiet, a sound for done and another for stopped, the file shown in
+      Finder) and README step 7. In `ocr.rs`, `run_vision` was split into `new_request` and
+      `perform`, the crop margin became `content_margin`, `upscale_for` goes through
+      `upscale_toward`, and two per-thread cells only the benchmark touches were added: a pass
+      counter, and a revision override for its revision-2 pipeline round. Nothing the application
+      does changed.
+- [x] **The review's findings, fixed before the first run** (2026-10-01): the engine's order is
+      shuffled over every cell each round instead of rotated, so no variant always follows the
+      same one; `prod-b`, a control, says when a run is too noisy; the verdict is an exact
+      Mann-Whitney test at p < 0.01 plus the 10 %/5 ms gap (no verdicts in `--quick`), and a cell's
+      time cap leaves out its first pass; every line is written the moment it is known, the
+      variants that call what no Mac has run (revisions, compute devices) are tried in a process of
+      their own first, and the summary page gets each table when its section ends; one uncounted
+      first-pass process, the warm-up order turned each round, three rounds; the pipeline counts
+      the ladder's budget from a pretend 50 ms capture (`--capture-ms`); every measuring thread
+      asks for user-initiated and the run says what it got; the timed pass includes making the
+      request, as the application's does; the pictures are decoded once into a bitmap; the
+      fields are redrawn at sforzando's digit height (11 px at 1x; they were 8); idle passes on the
+      known and on a fresh thread, and `--long-idle` for minutes; the tester's script no longer
+      assigns zsh's read-only `status`, and finds a running application with `pgrep -f` (`pgrep
+      -x` compares a name cut to 16 characters). Not done: a Mac-side `#[test]` that decodes the
+      pictures, because the build job's tests gate the download and the benchmark already says
+      which picture it could not use; widening README step 2 to the whole folder, because step 7
+      runs the script through `zsh`, which Gatekeeper does not check.
+- [x] **When the CI job runs** (the maintainer, 2026-10-01): on every build with Rust changes.
+      That is the job's `if:` line as built: every run that built the executable, and every run
+      started by hand. A run that reuses an earlier executable measures nothing new and skips it.
+- [ ] **What to read from the first CI run** — the summary page has the tables, the job log every
+      line, the artifact `ocr-bench-<runner>.txt` the whole output. Compare within one leg, never
+      milliseconds between legs:
+      - Did every leg finish? The Intel leg is the first time CI executes the x86_64 slice at all;
+        one that dies is a crash to fix before the tester runs it. A `probe |` line that says a
+        process died names the call.
+      - `compute devices`: does Vision offer text recognition a Neural Engine or a GPU in the arm64
+        VMs, and anything but the CPU on the Intel runner?
+      - `pipeline`: Vision passes a read for `lone-1` and `field-empty`. 1.0 means the ladder did not
+        climb on these pictures; more means it did, and that many passes is the cost. The `rev2`
+        rows beside them: whether revision 2 reads them in fewer passes or more.
+      - `control`: if prod-b came out "clearly" anything, no verdict of that leg counts.
+      - `switching`: prod in the engine against prod pass after pass; 15 % or more apart means the
+        engine's milliseconds carry the cost of switching models.
+      - `engine` verdicts against `prod`: which variants are "clearly faster" and still read every
+        picture right — above all `rev2` and `cpu`/`gpu` on the Intel leg, and `mth-0.25`,
+        `reuse`, `target-48` and `fast` everywhere. Only data: the fast model's place last in the
+        ladder is a decision, not a finding.
+      - `first passes`: the first real pass after the bars warm-up against the one after a word
+        warm-up and the one with none — do the bars warm the recogniser at all?
+      - `threads`: the first pass on a fresh thread, the process warm — as dear as a first pass in a
+        process (a cost per thread) or as cheap as a warm one? And two threads at once against one.
+      - `idle`: 2, 10 and 30 s on the known thread and on a fresh one, against warm.
+      - Whether `prod` reads every picture right on every leg (a leg says so as a warning).
+      - The quality of service each section's thread had (`this thread at …`).
+      - How long each leg took, for the decision above.
+- [ ] **Revision 2's reading is not decided by these pictures.** They are imitations drawn by
+      FreeType; whether revision 2 reads real plug-in text as well as revision 3 needs real
+      read-outs (OCR debug captures from a session), whatever the benchmark's `rev2` rows say.
+- [ ] **The tester's Intel Air, then an Apple-silicon Mac**: `zsh
+      ~/AutomationPlatform/measure-text-recognition.command`, the application quit, on mains power;
+      send the `ocr-bench-N.txt` Finder shows. Only the Air gives a 10 W laptop's milliseconds, and
+      only the M1 the figures with a Neural Engine. Read the same lines. Once that has run,
+      `--long-idle` on the Air, unattended, for the minutes of idle.
+- [ ] **What it does not answer**: capture on a Retina screen, heat over a session, the load of a
+      DAW, real plug-in text. The application's own log cannot answer the benchmark's questions on
+      real fields yet (Vision passes per read, two passes at once, the first pass per process
+      against per thread): a change of its own.
+
 ## Dev tools
 
 - [x] **OCR window inspector (first version):** `tools/inspect` — **Ctrl+Alt+I** OCRs the focused window's client area and logs every recognized word with its **client-relative coordinates** (+ saves the capture with `AUTOMATION_PLATFORM_OCR_DEBUG=1`). Calibrates overlay regions and reveals where hardcoded (e.g. ReaHotkey) coordinates land vs the real controls. Resolved the sforzando polyphony case (the region was correct; the failures were the hover scrub-value — fixed by `hoverToRead`-off — and UWP OCR being blind to *single* digits). ✓ (2026-06-21)
