@@ -15,6 +15,10 @@ dist/
 # Agent worktrees created by background tasks — separate checkouts, not content.
 /.claude/
 
+# Python's byte-code cache, written beside a tool's module when its tests import it
+# (tools/avenger-presets).
+__pycache__/
+
 # Test data that must never be committed: a frame of a commercial game, and the reference
 # vectors an outside reader computed from it, for the `host.screen.cells` golden test
 # (crates/host/src/cells_golden_tests.rs). The test skips, saying why, when the folder is

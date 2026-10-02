@@ -27,6 +27,15 @@
 //! where it would lie off the screen; a popup a choice left open is closed; a press while a step is
 //! still being carried out sends nothing; and a name with nothing read before the click is never
 //! said as new before the watch is over.
+//!
+//! And for the preset database, the same day's later decision: the module may orient itself on the
+//! avenger_control project's database, installed as an optional data module
+//! (`modules/vps-avenger-presets`), and marks whatever it says that was not read off the screen.
+//! Its scenarios load the data module's real reader against a small fixture catalog (`T.FIXTURE`),
+//! never the real data: without the module the ring and the steps are stage 1's; a database that
+//! cannot be read changes nothing but Preset info's answer; a name read is placed in the catalog
+//! the tool's way; ◀ and ▶ say what was read and add the database's neighbour, marked, when the
+//! read failed or disagrees; and the position is forgotten when the preset may have changed.
 
 use std::path::PathBuf;
 
@@ -219,6 +228,11 @@ function T.avenger()
   }))
   local AH = setmetatable({}, { __index = T.host })
   AH.path = function(p) return "C:/modules/vps-avenger/" .. p end
+  -- Its optional dependency: the preset database T.presets loaded, or nil — not installed.
+  AH.tryRequire = function(id)
+    if id == "com.platform.vps-avenger-presets" then return S.presets end
+    return nil
+  end
   local included = {}
   AH.include = function(rel)
     local key = "modules/vps-avenger/" .. rel
@@ -308,6 +322,127 @@ function T.ok(cond, what)
   print("said: " .. T.said())
   error(tostring(what or "assertion failed"), 2)
 end
+
+-- ── The preset database ──────────────────────────────────────────────────────
+-- A small catalog in the data module's format (modules/vps-avenger-presets/README.md), NOT the
+-- real data: four expansions whose presets carry the cases the lookup has to get right — a name
+-- in three of them ("BA Deep Sub"), one differing from another only in case ("BA Reese", "Ba
+-- Reese"), the acute accent as an apostrophe ("LD Palm´s Lead 1"), a trailing space and a double
+-- one, a capital outside ASCII ("PL Üsch"); oscillators and macros with Avenger's default names
+-- ("" in the file), and a preset with two macro tabs. Alpha's list is in category blocks that are
+-- not in the categories' alphabetical order: Arp, Bass, Pads, Leads. Delta is a numbered series,
+-- whose names are all similar to each other.
+T.FIXTURE = {
+  ["data/index.json"] = [=[{"format":1,"exported":"2026-09-26 18:57","factoryStandard":["Alpha"],
+"expansions":[
+{"name":"Alpha","file":"data/expansions/alpha.json","presets":["AR Band Pass Slide","AR Deep Arp","BA Deep Sub","BA Reese","PD Warm Pad","LD Palm´s Lead 1"]},
+{"name":"Beta","file":"data/expansions/beta.json","presets":["BA Deep Sub","SQ Feel It","PD Soft Pad ","FX  Riser"]},
+{"name":"Gamma","file":"data/expansions/gamma.json","presets":["Ba Reese","BA Deep Sub","PL Üsch"]},
+{"name":"Delta","file":"data/expansions/delta.json","presets":["LD Lead 1","LD Lead 2","LD Lead 3"]}
+]}]=],
+  ["data/expansions/alpha.json"] = [=[{"format":1,"name":"Alpha",
+"categories":[{"name":"Arp","start":1,"count":2},{"name":"Bass","start":3,"count":2},{"name":"Leads","start":6,"count":1},{"name":"Pads","start":5,"count":1}],
+"presets":[
+{"name":"AR Band Pass Slide","osc":["Arp","","Lead"],"macros":[["Tone","","Drive","+12",""]]},
+{"name":"AR Deep Arp","osc":["One Osc"],"macros":[["Cut","Res","Env","Hold","Gate"],["","Wobble","","",""]]},
+{"name":"BA Deep Sub","osc":["Sub","Bass"],"macros":[["Tone","Chorus","Drive","+12","Crush"]]},
+{"name":"BA Reese","osc":["Reese"],"macros":[["","","","",""]]},
+{"name":"PD Warm Pad","osc":["Pad"],"macros":[["Air","","","",""]]},
+{"name":"LD Palm´s Lead 1","osc":["Lead","Sub"],"macros":[["Glide","","","",""]]}
+]}]=],
+  ["data/expansions/beta.json"] = [=[{"format":1,"name":"Beta",
+"categories":[{"name":"Bass","start":1,"count":1},{"name":"Effects","start":4,"count":1},{"name":"Pads","start":3,"count":1},{"name":"Sequences","start":2,"count":1}],
+"presets":[
+{"name":"BA Deep Sub","osc":["Deep"],"macros":[["Tone","","","",""]]},
+{"name":"SQ Feel It","osc":["Seq"],"macros":[["Gate","","","",""]]},
+{"name":"PD Soft Pad ","osc":["Soft"],"macros":[["Air","","","",""]]},
+{"name":"FX  Riser","osc":["Noise"],"macros":[["Rise","","","",""]]}
+]}]=],
+  ["data/expansions/gamma.json"] = [=[{"format":1,"name":"Gamma",
+"categories":[{"name":"Bass","start":1,"count":2},{"name":"Plucked","start":3,"count":1}],
+"presets":[
+{"name":"Ba Reese","osc":["Reese"],"macros":[["","","","",""]]},
+{"name":"BA Deep Sub","osc":["Sub"],"macros":[["","","","",""]]},
+{"name":"PL Üsch","osc":["Pluck"],"macros":[["","","","",""]]}
+]}]=],
+  ["data/expansions/delta.json"] = [=[{"format":1,"name":"Delta",
+"categories":[{"name":"Leads","start":1,"count":3}],
+"presets":[
+{"name":"LD Lead 1","osc":["Lead"],"macros":[["","","","",""]]},
+{"name":"LD Lead 2","osc":["Lead"],"macros":[["","","","",""]]},
+{"name":"LD Lead 3","osc":["Lead"],"macros":[["","","","",""]]}
+]}]=],
+}
+
+-- The preset database installed: its own reader (modules/vps-avenger-presets/src/main.luau), run
+-- as the host runs a code module in a dependent's VM — with a host of its own, whose
+-- host.resource.read reads `files` (a published path -> its text; default T.FIXTURE) and raises
+-- as the host does for one that is not there, and the host's real JSON decoder. Every read is
+-- recorded in S.presetReads. Call it before T.avenger, which hands it to the module.
+function T.presets(files)
+  files = files or T.FIXTURE
+  S.presetReads = {}
+  local PH = setmetatable({}, { __index = T.host })
+  PH.resource = { read = function(rel)
+    S.presetReads[#S.presetReads + 1] = rel
+    local text = files[rel]
+    if text == nil then error("The system cannot find the file specified. (os error 2)", 0) end
+    return text
+  end }
+  PH.json = { decode = T.jsonDecode }
+  S.presets = T.source("modules/vps-avenger-presets/src/main.luau")(PH)
+  return S.presets
+end
+
+-- REAPER's floating window at 80 % with Avenger identified, the name reading `name` on the event
+-- loop (nil: nothing), arrival said: the header overlay, the box overlay.
+function T.avengerAt80(name)
+  local W = T.float(80)
+  S.listed = { W }
+  T.at(W)
+  local header, box = T.avenger()
+  T.answer(T.lastRead("vps-avenger header"), T.header(98, 84, 1.6, 80))
+  T.event()
+  T.nameIs(name)
+  T.run(400)
+  return header, box, W
+end
+
+-- What the preset's name reads, on the event loop (the region the module reads it in at 80 %).
+function T.nameIs(name)
+  S.ocr = function(g) return T.region(g) == "152,95,440,119" and (name or "") or "" end
+end
+
+-- A read of the name off the event loop, answered.
+function T.nameRead(text) return { status = "text", text = text, words = {} } end
+
+-- ◀ or ▶ (control `i`) with the name reading `before` on the event loop, then the reads after the
+-- click answered with `after`: a name, or nil for none at all. Runs the watch to its end, answering
+-- every read it makes, and gives back what was said.
+function T.step(header, i, before, after)
+  T.nameIs(before)
+  local said = #S.speech
+  T.pressAt(header, i)
+  for _ = 1, 25 do
+    T.run(150)
+    local r = T.lastRead("vps-avenger name")
+    if r and not r.answered then
+      T.answer(r, after and T.nameRead(after) or { status = "none", text = "", words = {} })
+    end
+  end
+  T.ok(#S.speech == said + 1, "one thing said per step: " .. T.said(said + 1))
+  return T.lastSaid()
+end
+
+-- Whether `s` begins with `prefix`.
+function T.starts(s, prefix) return string.sub(s or "", 1, #prefix) == prefix end
+
+-- Preset info (control 4 with the database) with the name reading `name`: what it said.
+function T.info(header, name)
+  T.nameIs(name)
+  T.pressAt(header, 4)
+  return T.lastSaid()
+end
 "##;
 
 /// A fresh VM with the scripted host, the runtime, the prelude's matcher, the host-panel helpers
@@ -342,6 +477,8 @@ fn run_on(os: &str, scenario: &str) {
         })
         .unwrap();
     t.set("source", source).unwrap();
+    // The host's own JSON decoder, for the preset database's reader (T.presets).
+    t.set("jsonDecode", lua.create_function(crate::json::decode).unwrap()).unwrap();
     lua.globals().set("T", t).unwrap();
     for (name, chunk) in [("host-panel helpers", HP), ("avenger helpers", AV)] {
         if let Err(e) = lua.load(chunk).set_name(name).exec() {
@@ -1405,5 +1542,356 @@ fn avenger_in_a_reaper_fx_chain_on_a_mac() {
         -- Undo: 237 + 488 = 725, 114 + 22.4 -> 136.
         T.pressAt(header, 8)
         T.ok(T.clickAt() == "725,136", T.clickAt())
+    "##);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The preset database (modules/vps-avenger-presets), an optional dependency: the maintainer's
+// decisions of 2026-09-28 — the module may orient itself on it, and says what it did not read off
+// the screen marked "from the database". Against T.FIXTURE, a catalog of four small expansions,
+// never the real data.
+// ---------------------------------------------------------------------------------------------
+
+/// Not installed: the module is stage 1's — ten stops and no Preset info, and a step says the name
+/// it read, as it was read.
+#[test]
+fn without_the_preset_database_the_module_is_stage_1s() {
+    run_mac(r##"
+        local S = T.S
+        local header = T.avengerAt80("AR Band Pass Slide")
+        local labels = {}
+        for i, c in ipairs(header.controls) do labels[i] = c.label end
+        T.ok(table.concat(labels, "|") == "Preset|Previous preset|Next preset|Load preset|Save preset|"
+          .. "Save preset as|Initialize preset|Undo|Redo list|Zoom", table.concat(labels, "|"))
+        T.ok(T.step(header, 3, "AR Band Pass Slide", "AR Bond Pess Slide") == "AR Bond Pess Slide", T.said())
+        T.ok(T.step(header, 2, nil, nil) == "the preset name cannot be read now", T.said())
+        T.ok(T.count("database") == 0, "nothing of a database: " .. T.dump())
+    "##);
+}
+
+/// Installed but not readable — its index missing, or of another format: Preset info says so, the
+/// log says why, the index is not read again, and ◀ and ▶ say what they read, as without it.
+/// Nothing is read at load.
+#[test]
+fn a_preset_database_that_cannot_be_read_leaves_the_steps_as_they_were() {
+    run_mac(r##"
+        local S = T.S
+        T.presets({})
+        local header = T.avengerAt80("AR Band Pass Slide")
+        T.ok(#header.controls == 11 and header.controls[4].label == "Preset info", tostring(#header.controls))
+        T.ok(#S.presetReads == 0, "nothing read at load")
+        T.ok(T.info(header, "AR Band Pass Slide") == "the preset database cannot be read", T.said())
+        T.ok(T.count("[avenger] the preset database cannot be read: data/index.json cannot be read: The "
+          .. "system cannot find the file specified. (os error 2) — Previous and Next work without it") == 1, T.dump())
+        T.ok(T.step(header, 3, "AR Band Pass Slide", "AR Bond Pess Slide") == "AR Bond Pess Slide", T.said())
+        T.ok(T.step(header, 3, "AR Bond Pess Slide", nil) == "the preset name cannot be read now", T.said())
+        T.ok(#S.presetReads == 1, "asked once: " .. #S.presetReads)
+    "##);
+    run_mac(r##"
+        local S = T.S
+        T.presets({ ["data/index.json"] = '{"format":2,"expansions":[]}' })
+        local header = T.avengerAt80("AR Band Pass Slide")
+        T.ok(T.info(header, "AR Band Pass Slide") == "the preset database cannot be read", T.said())
+        T.ok(T.count("data/index.json is format 2, and this reader reads format 1") == 1, T.dump())
+    "##);
+}
+
+/// The reader's own answers, as the module asks them: the index in its order, an expansion's file
+/// read at the first question and kept, a category by the blocks of the list (Alpha's Pads come
+/// before its Leads), and Avenger's default names for what the file leaves empty — the macros
+/// counted across the tabs.
+#[test]
+fn the_preset_databases_reader_interprets_its_format() {
+    run_mac(r##"
+        local S = T.S
+        local P = T.presets()
+        local idx = P.index()
+        T.ok(idx.exported == "2026-09-26 18:57" and #idx.expansions == 4 and idx.expansions[2].name == "Beta")
+        local x = P.expansion("Alpha")
+        T.ok(x and #x.presets == 6, "Alpha's file")
+        T.ok(P.expansion("Alpha") == x, "kept")
+        local name, k, n = P.category(x, 5)
+        T.ok(name == "Pads" and k == 1 and n == 1, tostring(name))
+        name, k, n = P.category(x, 2)
+        T.ok(name == "Arp" and k == 2 and n == 2, tostring(name))
+        local osc = P.oscillators(x, 1)
+        T.ok(#osc == 3 and osc[1].name == "Arp" and not osc[1].default and osc[2].name == "OSC 2" and osc[2].default)
+        local tabs = P.macros(x, 2)
+        T.ok(#tabs == 2 and tabs[1].buttons[2].name == "Gate" and tabs[2].knobs[1].name == "Macro 4"
+          and tabs[2].knobs[1].default and tabs[2].knobs[2].name == "Wobble" and tabs[2].buttons[1].name == "MacroBtn 3")
+        local none, why = P.expansion("Omega")
+        T.ok(none == nil and why == "the index has no expansion 'Omega'", tostring(why))
+        local reads = table.concat(S.presetReads, " ")
+        T.ok(reads == "data/index.json data/expansions/alpha.json", reads)
+    "##);
+}
+
+/// A name read is placed in the catalog as the project's tool places it: the same words (runs of
+/// spaces as one, the acute accent as an apostrophe, any case) are said in the catalog's spelling
+/// and unmarked; a name only similar enough (0.72) is the database's reading, marked — looked for
+/// first in the expansion Avenger was last known in, then in the whole catalog, where it also has
+/// to stand out from every other name by 0.05; a name that begins with a catalog name and goes on,
+/// and "Init Preset", are not in it. A name in several expansions is placed in the one Avenger was
+/// last known in, and otherwise names them, the marker before the list. Preset info says where the
+/// preset is, its oscillators and its macros, each part marked.
+#[test]
+fn preset_info_places_the_name_read_in_the_catalog_and_marks_what_the_database_says() {
+    run_mac(r##"
+        local S = T.S
+        T.presets()
+        local header = T.avengerAt80("AR Band Pass Slide")
+        local band = "AR Band Pass Slide. Expansion Alpha, category Arp, 1 of 2, from the database. 3 oscillators, "
+          .. "from the database: Arp, OSC 2, Lead. Macros, from the database: Tone, Macro 2, Drive; buttons: +12, MacroBtn 2"
+        T.ok(T.info(header, "AR Band Pass Slide") == band, T.said())
+        T.ok(T.info(header, "ar band pass slide") == band, T.said())
+        T.ok(T.info(header, "AR Bond Pess Slide") == "AR Band Pass Slide, from the database"
+          .. string.sub(band, #"AR Band Pass Slide" + 1), T.said())
+        T.ok(T.count("[avenger] 'Preset info': read 'AR Bond Pess Slide' — Alpha 1 of 6 (by similarity 0.89)") == 1, T.dump())
+        T.ok(T.info(header, "LD Palm's Lead 1") == "LD Palm's Lead 1. Expansion Alpha, category Leads, 1 of 1, from the "
+          .. "database. 2 oscillators, from the database: Lead, Sub. Macros, from the database: Glide, Macro 2, Macro 3; "
+          .. "buttons: MacroBtn 1, MacroBtn 2", T.said())
+        T.ok(T.info(header, "AR Deep Arp") == "AR Deep Arp. Expansion Alpha, category Arp, 2 of 2, from the database. "
+          .. "1 oscillator, from the database: One Osc. 2 macro tabs, from the database. Tab 1: Cut, Res, Env; buttons: "
+          .. "Hold, Gate. Tab 2: Macro 4, Wobble, Macro 6; buttons: MacroBtn 3, MacroBtn 4", T.said())
+        T.ok(T.info(header, "PD  Soft Pad") == "PD Soft Pad. Expansion Beta, category Pads, 1 of 1, from the database. "
+          .. "1 oscillator, from the database: Soft. Macros, from the database: Air, Macro 2, Macro 3; buttons: "
+          .. "MacroBtn 1, MacroBtn 2", T.said())
+        T.ok(T.starts(T.info(header, "pl üsch"), "PL Üsch. Expansion Gamma, category Plucked, 1 of 1, from the database"), T.said())
+        -- Not in the catalog: somebody's own variant, and Avenger's blank preset.
+        T.ok(T.info(header, "BA Deep Sub mine") == "BA Deep Sub mine, not in the database", T.said())
+        T.ok(T.count("read 'BA Deep Sub mine' — a name of its own that begins with 'BA Deep Sub'") == 1, T.dump())
+        T.ok(T.info(header, "Init Preset") == "Init Preset, not in the database", T.said())
+        -- In three expansions, with none known: named, not placed.
+        T.ok(T.info(header, "BA Deep Sub") == "BA Deep Sub, in 3 expansions, from the database: Alpha, Beta and Gamma", T.said())
+        -- Known to be in Beta: placed there.
+        T.info(header, "SQ Feel It")
+        T.ok(T.starts(T.info(header, "BA Deep Sub"), "BA Deep Sub. Expansion Beta, category Bass, 1 of 1, from the database. "), T.said())
+        -- Nothing read: the position the last read placed, marked.
+        T.ok(T.starts(T.info(header, nil), "the preset name cannot be read now; BA Deep Sub, from the "
+          .. "database. Expansion Beta, category Bass, 1 of 1, from the database. "), T.said())
+        -- One case apart from Alpha's "BA Reese": exact is Gamma's; any case is both.
+        T.ok(T.starts(T.info(header, "Ba Reese"), "Ba Reese. Expansion Gamma, category Bass, 1 of 2, from the database. "), T.said())
+        T.info(header, "Init Preset")
+        T.ok(T.info(header, "BA REESE") == "BA Reese, in 2 expansions, from the database: Alpha and Gamma", T.said())
+        T.ok(T.info(header, nil) == "the preset name cannot be read now", T.said())
+        -- A name the catalog does not have, as like three of its names as like each: none of them.
+        T.ok(T.info(header, "LD Lead 4") == "LD Lead 4, not in the database", T.said())
+        T.ok(T.count("[avenger] 'Preset info': read 'LD Lead 4' — not in the catalog: 'LD Lead 1' (0.89) is no "
+          .. "closer than another name (0.89)") == 1, T.dump())
+        -- Found by similarity, and in three expansions: each part marked.
+        T.ok(T.info(header, "BA Dcep Sub") == "BA Deep Sub, from the database, in 3 expansions, from the database: "
+          .. "Alpha, Beta and Gamma", T.said())
+        -- A poor read like names in two expansions: over the whole catalog, the one it is clearly
+        -- closer to; in the expansion Avenger was last known in, that one's, by the threshold alone.
+        T.ok(T.starts(T.info(header, "PD Sarm Pad"), "PD Warm Pad, from the database. Expansion Alpha, category Pads, "), T.said())
+        T.info(header, "SQ Feel It")
+        T.ok(T.starts(T.info(header, "PD Sarm Pad"), "PD Soft Pad, from the database. Expansion Beta, category Pads, "), T.said())
+        -- Each expansion's file read once, at its first question.
+        local reads = table.concat(S.presetReads, " ")
+        T.ok(reads == "data/index.json data/expansions/alpha.json data/expansions/beta.json data/expansions/gamma.json", reads)
+    "##);
+    run_mac(r##"
+        local S = T.S
+        -- Gamma's file missing: where the index puts the preset, and no more.
+        local files = {}
+        for k, v in pairs(T.FIXTURE) do if k ~= "data/expansions/gamma.json" then files[k] = v end end
+        T.presets(files)
+        local header = T.avengerAt80("PL Üsch")
+        T.ok(T.info(header, "PL Üsch") == "PL Üsch. Expansion Gamma, from the database; its categories, oscillators "
+          .. "and macros cannot be read from it", T.said())
+        T.ok(T.count("[avenger] 'Preset info': Gamma's file cannot be read: data/expansions/gamma.json cannot be read") == 1, T.dump())
+    "##);
+    run_mac(r##"
+        -- A name in seven expansions: the first five named, and how many more.
+        local rows = {}
+        for k = 1, 7 do
+          rows[k] = string.format('{"name":"E%d","file":"data/expansions/e%d.json","presets":["PD Everywhere"]}', k, k)
+        end
+        T.presets({ ["data/index.json"] = '{"format":1,"exported":"2026-09-26 18:57","factoryStandard":[],'
+          .. '"expansions":[' .. table.concat(rows, ",") .. ']}' })
+        local header = T.avengerAt80("PD Everywhere")
+        T.ok(T.info(header, "PD Everywhere") == "PD Everywhere, in 7 expansions, from the database: E1, E2, E3, E4, E5 "
+          .. "and 2 more", T.said())
+    "##);
+}
+
+/// ◀ and ▶ with the database: the name read just before the click places the preset, and the
+/// database's neighbour in its list is what the read-back is compared with. The read-back is said
+/// when it is the neighbour (marked when only similar); the neighbour, marked, when nothing could be
+/// read — and the next step goes on from it; both when they disagree, the screen's first — and the
+/// position is then where the screen says. A read that is another catalog name disagrees, however
+/// similar it is to the neighbour (a numbered series). At an expansion's first or last preset there
+/// is no neighbour: Avenger goes on into the user's own next expansion, which the catalog cannot
+/// know. Nothing is said before the watch is over, one thing per step.
+#[test]
+fn previous_and_next_say_what_was_read_and_the_databases_neighbour_marked_when_it_differs() {
+    run_mac(r##"
+        local S = T.S
+        T.presets()
+        local header = T.avengerAt80("AR Band Pass Slide")
+        -- The same words as the neighbour: said, unmarked.
+        T.ok(T.step(header, 3, "AR Band Pass Slide", "AR Deep Arp") == "AR Deep Arp", T.said())
+        T.ok(T.count("[avenger] 'Next preset': the database's neighbour: 'AR Deep Arp' (Alpha 2 of 6)") == 1, T.dump())
+        -- Similar to the neighbour: the neighbour's spelling, marked.
+        T.ok(T.step(header, 3, "AR Deep Arp", "BA Dcep Sub") == "BA Deep Sub, from the database", T.said())
+        T.ok(T.count("[avenger] 'Next preset': read 'BA Dcep Sub', the database's neighbour by similarity 0.91") == 1, T.dump())
+        -- Nothing read, before or after: the neighbour of the last position, marked.
+        T.ok(T.step(header, 3, nil, nil) == "BA Reese, from the database", T.said())
+        -- ... and the step after that goes on from it.
+        T.ok(T.step(header, 3, nil, "PD Warm Pad") == "PD Warm Pad", T.said())
+        -- Another name read (Avenger's own search open, say): the screen's name, then the database's.
+        T.ok(T.step(header, 3, "PD Warm Pad", "PD Soft Pad") == "PD Soft Pad; LD Palm's Lead 1, from the database", T.said())
+        -- The screen wins: the position is Beta's PD Soft Pad now.
+        T.ok(T.step(header, 2, "PD Soft Pad", "SQ Feel It") == "SQ Feel It", T.said())
+        T.ok(T.step(header, 2, "SQ Feel It", "BA Deep Sub") == "BA Deep Sub", T.said())
+        -- Beta's first preset: no neighbour before it, so the step is as without the database.
+        T.ok(T.step(header, 2, "BA Deep Sub", "My Own Preset") == "My Own Preset", T.said())
+        T.ok(T.count("the database's neighbour: none, BA Deep Sub is at the start of its expansion") == 1, T.dump())
+        -- Unchanged on screen: said so, and the neighbour the database expected.
+        T.ok(T.step(header, 3, "AR Band Pass Slide", "AR Band Pass Slide")
+          == "AR Band Pass Slide, unchanged; AR Deep Arp, from the database", T.said())
+        -- A name the catalog does not have: as read, and the neighbour.
+        T.ok(T.step(header, 3, "AR Band Pass Slide", "Zzz Custom Thing") == "Zzz Custom Thing; AR Deep Arp, from the database", T.said())
+        -- ... and with no position after it, the next step has no neighbour to add.
+        T.ok(T.step(header, 3, nil, nil) == "the preset name cannot be read now", T.said())
+        -- Another catalog name, however similar to the neighbour, is that name: in a numbered
+        -- series, LD Lead 3 read where LD Lead 1 was expected.
+        T.ok(T.step(header, 2, "LD Lead 2", "LD Lead 3") == "LD Lead 3; LD Lead 1, from the database", T.said())
+        -- A poor read of the neighbour is the neighbour, marked.
+        T.ok(T.step(header, 2, "LD Lead 3", "LD Laed 2") == "LD Lead 2, from the database", T.said())
+    "##);
+}
+
+/// Where the screen and the database's neighbour disagree, the screen's words are said: a name read
+/// unchanged is not the neighbour, however like it; nor is a poor read closer to another name than
+/// to the neighbour, or somebody's own variant of the neighbour's name — and a read the catalog has
+/// only by similarity is said as read then, with the neighbour after it, and places nothing. At an
+/// expansion's last preset there is no neighbour, and a step from there that reads nothing leaves
+/// no position behind; read unchanged, the position stays.
+#[test]
+fn a_step_says_the_screens_words_where_they_disagree_with_the_databases_neighbour() {
+    run_mac(r##"
+        local S = T.S
+        T.presets()
+        local header = T.avengerAt80("LD Laed 1")
+        -- A swallowed click, the name read poorly the same way before and after: placed on LD Lead 1
+        -- before the click, and the screen then says it did not move — LD Lead 2, as like the read
+        -- as it is, is only what the database expected.
+        T.ok(T.step(header, 3, "LD Laed 1", "LD Laed 1") == "LD Laed 1, unchanged; LD Lead 2, from the database", T.said())
+        T.ok(T.count("[avenger] 'Next preset': read 'LD Laed 1', as before the click — Delta 1 of 3 (by similarity "
+          .. "0.89, said as read); not the database's neighbour 'LD Lead 2'") == 1, T.dump())
+        -- Even when the unchanged read is as like the neighbour as like the name it was placed on
+        -- (in the known expansion the first of equals, LD Lead 1).
+        T.ok(T.step(header, 3, "LD Lead 4", "LD Lead 4") == "LD Lead 4, unchanged; LD Lead 2, from the database", T.said())
+        -- The name after the neighbour, read poorly: closer to LD Lead 3 than to the expected LD Lead
+        -- 1 — as read, then the neighbour; and no position after it.
+        T.ok(T.step(header, 2, "LD Lead 2", "LD Laed 3") == "LD Laed 3; LD Lead 1, from the database", T.said())
+        T.ok(T.step(header, 2, nil, nil) == "the preset name cannot be read now", T.said())
+        -- Somebody's own variant of the neighbour's name is not the neighbour.
+        T.ok(T.step(header, 3, "AR Deep Arp", "BA Deep Sub mine") == "BA Deep Sub mine; BA Deep Sub, from the database", T.said())
+        -- Alpha's last preset: no neighbour after it, and a click from there that reads nothing
+        -- leaves no position — Avenger is in an expansion the catalog cannot name.
+        T.ok(T.step(header, 3, "LD Palm's Lead 1", nil) == "the preset name cannot be read now", T.said())
+        T.ok(T.count("the database's neighbour: none, LD Palm's Lead 1 is at the end of its expansion") == 1, T.dump())
+        T.ok(T.step(header, 2, nil, nil) == "the preset name cannot be read now", T.said())
+        -- Read unchanged there, it stays where it was: the step back has its neighbour.
+        T.ok(T.step(header, 3, "LD Palm's Lead 1", "LD Palm's Lead 1") == "LD Palm's Lead 1, unchanged", T.said())
+        T.ok(T.step(header, 2, nil, "PD Warm Pad") == "PD Warm Pad", T.said())
+        T.ok(T.count("read 'PD Warm Pad', the database's neighbour exactly") == 1, T.dump())
+    "##);
+}
+
+/// The position is forgotten whenever the preset may have changed where the module does not read
+/// it: a MENU item chosen, the redo list opened, the overlay leaving the front. A step overtaken
+/// by another press decides nothing: its neighbour is never said, and the position is the later
+/// step's — and a press made before the step before it has seen its name change has no neighbour
+/// when it reads the name that step started from. After Save preset as and Load preset the name
+/// is the user's own until a step shows another, and is not looked for by similarity.
+#[test]
+fn the_databases_position_is_forgotten_when_the_preset_may_have_changed() {
+    run_mac(r##"
+        local S = T.S
+        T.presets()
+        local header, box, W = T.avengerAt80("AR Band Pass Slide")
+        T.info(header, "AR Deep Arp")
+        T.choose(header, 5, 490, 116, 192, 96)
+        T.ok(T.count("[avenger] the database's position (Alpha 2 of 6) is forgotten: Load preset chosen") == 1, T.dump())
+        T.ok(T.info(header, nil) == "the preset name cannot be read now", T.said())
+        T.info(header, "AR Deep Arp")
+        T.pressAt(header, 10)
+        T.ok(T.lastSaid() == "Redo list, activated", T.said())
+        T.ok(T.count("is forgotten: the redo list opened") == 1, T.dump())
+        T.run(3000)
+        T.info(header, "AR Deep Arp")
+        T.show(T.OTHER)
+        T.ok(not header.active)
+        T.ok(T.count("is forgotten: the overlay left the front") == 1, T.dump())
+        T.show(W)
+        T.answer(T.lastRead("vps-avenger header"), T.header(98, 84, 1.6, 80))
+        T.event()
+        T.ok(header.active)
+        T.ok(T.info(header, nil) == "the preset name cannot be read now", T.said())
+    "##);
+    run_mac(r##"
+        local S = T.S
+        T.presets()
+        local header = T.avengerAt80("AR Band Pass Slide")
+        -- ▶ twice before the first name is read back: the first step's neighbour is AR Deep Arp,
+        -- the second's BA Deep Sub.
+        T.nameIs("AR Band Pass Slide")
+        T.pressAt(header, 3)
+        T.run(150)
+        T.nameIs("AR Deep Arp")
+        T.pressAt(header, 3)
+        for _ = 1, 25 do
+          T.run(150)
+          local r = T.lastRead("vps-avenger name")
+          if r and not r.answered then T.answer(r, T.nameRead("BA Deep Sub")) end
+        end
+        T.ok(string.find(T.said(), "BA Deep Sub", 1, true) ~= nil, T.said())
+        T.ok(string.find(T.said(), "AR Deep Arp, from the database", 1, true) == nil, "the overtaken step's neighbour: " .. T.said())
+        T.ok(T.starts(T.info(header, nil), "the preset name cannot be read now; BA Deep Sub, from the database. Expansion Alpha, "), T.said())
+    "##);
+    run_mac(r##"
+        local S = T.S
+        T.presets()
+        local header = T.avengerAt80("AR Band Pass Slide")
+        -- ▶ twice before the name has changed on screen, the second press reading the name from
+        -- before the first click: a neighbour of that would be one preset behind, so there is none,
+        -- and the step says what it reads.
+        T.nameIs("AR Band Pass Slide")
+        T.pressAt(header, 3)
+        T.run(150)
+        T.pressAt(header, 3)
+        for _ = 1, 25 do
+          T.run(150)
+          local r = T.lastRead("vps-avenger name")
+          if r and not r.answered then T.answer(r, T.nameRead("BA Deep Sub")) end
+        end
+        T.ok(T.count("[avenger] 'Next preset': the step before has not settled, and the name may still be the one "
+          .. "from before its click — no neighbour") == 1, T.dump())
+        T.ok(string.find(T.said(), "BA Deep Sub", 1, true) ~= nil, T.said())
+        T.ok(string.find(T.said(), "from the database", 1, true) == nil, T.said())
+        -- Settled, the next step has its neighbour again.
+        T.ok(T.step(header, 3, "AR Deep Arp", "BA Deep Sub") == "BA Deep Sub", T.said())
+        T.ok(T.count("read 'BA Deep Sub', the database's neighbour exactly") == 1, T.dump())
+    "##);
+    run_mac(r##"
+        local S = T.S
+        T.presets()
+        local header = T.avengerAt80("AR Band Pass Slide")
+        -- After Save preset as, Avenger shows the name the user typed: a catalog name like it is a
+        -- coincidence, so it is looked up as the same words only — until a step shows another name.
+        T.choose(header, 7, 490, 116, 192, 96)
+        T.ok(T.info(header, "AR Bond Pess Slide") == "AR Bond Pess Slide, not in the database", T.said())
+        T.ok(T.count("read 'AR Bond Pess Slide' — not in the catalog as it stands — after Load or Save as, not "
+          .. "looked for by similarity") == 1, T.dump())
+        T.ok(T.step(header, 3, "AR Bond Pess Slide", "AR Bond Pess Slide") == "AR Bond Pess Slide, unchanged", T.said())
+        T.ok(T.step(header, 3, "AR Bond Pess Slide", "AR Deap Arp") == "AR Deep Arp, from the database", T.said())
+        T.ok(T.starts(T.info(header, "AR Bond Pess Slide"), "AR Band Pass Slide, from the database. Expansion Alpha, "), T.said())
+        -- Load preset alike.
+        T.choose(header, 5, 490, 116, 192, 96)
+        T.ok(T.count("is forgotten: Load preset chosen") == 1, T.dump())
+        T.ok(T.info(header, "AR Bond Pess Slide") == "AR Bond Pess Slide, not in the database", T.said())
     "##);
 }

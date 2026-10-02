@@ -3,6 +3,10 @@ name = "VPS Avenger"
 version = "0.1.0"
 license = "GPL-3.0-or-later"
 dependencies = ["com.platform.overlay", "com.platform.daw-hosts"]
+# The catalog of Avenger's expansions (modules/vps-avenger-presets), when it is installed:
+# the preset's expansion, category, oscillators and macros, and the neighbour ◀ and ▶ lead to,
+# said marked as the database's (src/presets.luau). Without it the module is what it was.
+optional_dependencies = ["com.platform.vps-avenger-presets"]
 # No supported_os: the module is meant for both systems and names nothing only one of them has —
 # a JUCE window's class for Avenger's own child window on Windows, the DAW's plug-in panel on a
 # Mac (src/main.luau). Neither has met a real Avenger through this module yet: TODO.md,

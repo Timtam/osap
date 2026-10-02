@@ -1,0 +1,16 @@
+# Written by tools/avenger-presets/convert.py: change that, not this file.
+id = "com.platform.vps-avenger-presets"
+name = "VPS Avenger preset database"
+version = "1.0.0"
+license = "GPL-3.0-or-later"
+# A code module, so that its reader (src/main.luau) runs in the VM of the module that uses
+# it and reads this module's own files: com.platform.vps-avenger, as an optional dependency.
+code_module = true
+# The catalog of VPS Avenger's expansions, exported 2026-09-26 18:57 from the avenger_control
+# project's preset database, given by its developer to this repository without
+# restriction: see NOTICE and README.md. No supported_os: it is data, the same on both
+# systems.
+
+[capabilities]
+# src/main.luau reads this module's own data files, and nothing else.
+require = ["resource"]

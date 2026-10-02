@@ -5989,11 +5989,18 @@ tester's stage-1 instructions are a text of their own, not in the repository.
          (dx,dy) and (dx,dy) from where the table puts them …`. Picture:
          `header-<z>pct-<w>x<h>.png`. Then Command-Option-Shift-S: `VPS-Avenger.png` and
          `VPS-Avenger-clean.png` in the runtime's folder.
-      2. Tab once round the ring: Preset, Previous preset, Next preset, Load preset, Save preset,
-         Save preset as, Initialize preset, Undo, Redo list, Zoom.
+      2. Tab once round the ring: Preset, Previous preset, Next preset, Preset info, Load preset,
+         Save preset, Save preset as, Initialize preset, Undo, Redo list, Zoom. Preset info is there
+         because the build ships the preset database (`modules/vps-avenger-presets`, below);
+         without it the ring has the other ten.
       3. **Next preset**, Return twice, then **Previous preset** once: the new name each time,
          `[watch] VPS Avenger: changed after …`. An "unchanged" at the first press is the swallowed
-         first click (below).
+         first click (below). With the database: the name as before when it is the neighbour the
+         database expected, and the database's name after it, marked "from the database", when
+         the read failed or disagreed; the lines `[avenger] 'Next preset': the database's
+         neighbour: '…'` and `read '…', the database's neighbour exactly` (or `… not the
+         database's neighbour`) show whether Avenger steps through the catalog's order. Then
+         **Preset info**: the expansion, category, oscillators and macros, each marked.
       4. **Zoom**, Left one step at a time to 50 %, then Right back: "Zoom, 75 percent, slider" and
          so on, and `[avenger] 'Zoom': 80 % to 75 %, entry 6 … at y … by the list's height, … by
          the table`; the header picture at each zoom; `VPS-Avenger-Zoom-menu-item.png` (the first
@@ -6117,9 +6124,97 @@ tester's stage-1 instructions are a text of their own, not in the repository.
       first-letter jumps, "n of N"); expansions, categories and presets read by OCR and clicked by
       the word read, not by the project's tables for one library's size; the wheel, measured;
       **free-text search in a native field from `host.gui`** (the maintainer's decision).
-- [ ] **A preset database of our own**, once the developer's arrives (the maintainer's decision):
-      to spell and snap what OCR reads and to name categories — never to say a name before the
-      screen shows it.
+- [x] **The preset database** (the maintainer's decisions of 2026-09-28): the module may orient
+      itself on the avenger_control project's database, as the project's tool does, and says
+      whatever it did not read off the screen marked "from the database". The developer has
+      given the database without restriction. `tools/avenger-presets/convert.py` (stdlib Python, its
+      own tests beside it) turns the project's three exports into the data module
+      `com.platform.vps-avenger-presets` (`modules/vps-avenger-presets`): an index and one file per
+      expansion — 124 expansions, 17,571 presets, their categories, oscillator tab names and macro
+      names, Avenger's default names marked; 129 files, 2.66 MB of data, from the export of
+      2026-09-26. **An allowlist**: only the rosters "Complete" and "Factory Standard" are read,
+      and the lists of what individual people own, and the expansions only such a list has, are
+      dropped unread, counted and never named. A code module whose reader runs in VPS Avenger's VM,
+      an optional dependency (`host.tryRequire`): without it the module is stage 1 exactly. With it
+      (`src/presets.luau`): a name read is snapped to the catalog as the tool does it (exact, then
+      any case, then similarity 0.72 in the known expansion and then everywhere, where the closest
+      name also has to stand out from every other by 0.05; ´ read as '; "Init Preset" and a
+      catalog name with more after it never; after Load and Save as, the same words only until a
+      step shows another name), ◀ and ▶ add the database's neighbour, marked, when the read-back
+      failed or disagrees — the screen's words first, as read when the catalog has them only by
+      similarity (the neighbour rule in `presets.luau`; no timer decides) — and **Preset info**
+      says the expansion, category, oscillators and macros, each part marked. Tested against the
+      scripted host with a small fixture catalog, never the real data (`overlay_avenger_tests.rs`,
+      7 more scenarios); the converter by its own 7 tests on a made-up export.
+- [x] **The database's licence** (2026-10-02). There is none to wait for: the avenger_control tool
+      has not been published and has no licence, and its developer gave the database without
+      restriction, to be integrated. The data module is GPL-3.0-or-later like the rest
+      (`convert.py` writes it so); its `NOTICE` names where the data comes from.
+- [ ] **The Mac package writes no licence text at all** — not the GPL, and not where the source
+      is (the Windows package's `licences\README.txt` does both). Not the database's matter any
+      more, but noticed with it.
+- [x] **Credits in the catalog** (2026-10-02). Two expansions, "The Collection" 1 and 2, name their
+      categories after producers — VPS's published credits, as Avenger's own browser shows them,
+      not anything about who owns what — and Preset info says them ("category …"). The
+      maintainer's call: the presets stay exactly as they are.
+- [ ] **New expansions.** The data is the export of 2026-09-26: an expansion released since is not
+      in it, and neither are its presets: they are said as read, with no neighbour, and Preset
+      info says they are not in the database — unless one stands out as like a catalog name, which
+      is then said as that name, marked (29 % of 279 catalog names tried with their own expansion
+      left out, 71 % without the 0.05 margin; `presets.luau`, SNAPPING). A new export from the project's developer → `convert.py <folder> --version
+      <next>`, and commit the data module (`tools/avenger-presets/README.md`, "When a new export
+      arrives"). Nothing checks for one by itself.
+- [ ] **Whether Avenger's ◀ and ▶ walk the catalog's order** — its lists are category block after
+      category block, not alphabetical, and that is the order the tool steps through; nobody has
+      compared it with Avenger. The step lines in the tester's log (`the database's neighbour` and
+      `read '…', the database's neighbour exactly` or `not the database's neighbour`) answer it,
+      and whether Avenger's own search, open, makes ◀ and ▶ walk its results instead (the manual
+      says so since 1.8.0: every step then disagrees, which is what it should say). If that turns
+      out to be too much to hear, the review's suggestion: after a step whose read is another
+      catalog name, stop saying the neighbour (log it) until a read equals it again — state, no
+      timer; not built, because the decision is to say the neighbour when the read disagrees.
+- [ ] **What the database costs on a real machine.** Measured only in a debug test build against
+      the real data: the index read and indexed at the first ◀, ▶ or Preset info in 130 to 160 ms
+      (a first Preset info 150 to 190 in all), a name compared with the whole catalog — one it does
+      not have, the user's own preset — 150 to 300 ms for ten made-up names (the 0.05 margin's
+      share about a tenth), on the event loop (`presets.luau`, COST; answers are kept, so once per
+      name). ◀ and ▶ do that after their click is sent, so it delays what is said, not the step.
+      The shipped release build is not measured: the `[avenger] the preset database: … read and
+      indexed in … ms` line on the Mac, and a Next onto a preset of the user's own. If it shows, a
+      bigram index for the search over the whole catalog.
+- [ ] **Which expansions the user has, in Avenger's order.** Not in the catalog, deliberately (the
+      owner lists stay out): at an expansion's first and last preset there is no neighbour, and
+      Avenger goes on into the user's own next expansion. Stage 4 reads the expansion list off the
+      browser. The user's own presets and expansions are not in the catalog either: said as read,
+      unless one stands out as like a catalog name (then marked, as a new expansion's above); after
+      Load and Save as, as read until a step shows another name, as the tool skips its snap there.
+- [ ] **The Preset read-out says what the recogniser read**, not the catalog's spelling: it is the
+      runtime's OCR read-out, which has no hook to change its text, and Preset info, ◀ and ▶ are
+      where the catalog's spelling is said. A general `format` for an OCR read-out would do it;
+      not built, as nothing here needed the runtime changed.
+- [ ] **Undo does not forget the database's position** — Undo is the runtime's hotspot, which tells
+      the module nothing of its click (the project's tool forgets its position there: "Undo can
+      revert a preset change"). A MENU item chosen, the redo list opened and the overlay leaving
+      the front do forget it. A stale position shows where a read fails: a step whose name before
+      the click cannot be read takes its neighbour from it, and Preset info whose read fails speaks
+      from it — marked, and replaced by the next name read. Two ways to forget it, both the
+      maintainer's call: Undo as the module's own button (as the redo list is), which loses its
+      crosshair in the runtime's calibration shot and its "not available" answer, both stage 1's
+      and pinned by its scenarios; or a general after-click hook on the runtime's hotspot button.
+      Whether Avenger's undo can change the preset at all is not known.
+- [ ] **A step overtaken by another press says "the preset name cannot be read now"** when its watch
+      runs out, two seconds after the later step said its name (found while adding the database;
+      stage-1 behaviour, kept as it was): the overtaken watch reads nothing more (`nameAfter`) and
+      gives up with nothing. An overtaken watch should say nothing — `gen ~= names.gen` in its
+      `onGiveUp` — which the database's rule already does for its own part (`decided`).
+- [ ] **How long Preset info is**: about 220 characters on average over the catalog, up to 440,
+      "from the database" three or four times. Tabs and macros nobody named are said with
+      Avenger's own captions ("OSC 3", "MacroBtn 1"), as the tool's Info shows them; saying
+      "buttons unnamed" instead, or one marker for the whole answer, is a choice for after the
+      tester has heard it (the reader's `default` flag has what it needs).
+- [ ] **What else the catalog gives, later**: the oscillator and macro names as the vocabulary a
+      stage-2 read of the tabs is checked against (five or eight words per preset); stage 4's
+      lists of categories and presets, and free-text search over all 17,571 names.
 - [ ] **Everything the project's tool does** is the goal: what is left of its actions after stages
       1 to 4, then what it never reached (ARP, Step SQ, the effects, the mixer, the modulation
       envelopes, zones). And a standalone Avenger, if there is one and it is wanted: an `O.window`

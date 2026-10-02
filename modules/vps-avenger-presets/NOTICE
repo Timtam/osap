@@ -1,0 +1,19 @@
+VPS Avenger preset database (com.platform.vps-avenger-presets)
+
+The files under data/ are the catalog of VPS Avenger's expansions — the commercial expansions, as
+the catalog lists them: their categories, preset names, oscillator tab names and macro names —
+taken from the preset database of the avenger_control project. Its developer gave the database to
+this project without restriction, to be part of it (2026-10-02). The avenger_control tool has
+not been published and has no licence of its own.
+
+LICENCE: these files are licensed as the rest of this repository, GPL-3.0-or-later (module.toml's
+`license`).
+
+What is not here: nothing about who owns which expansion, and no expansion the catalog does not
+list. tools/avenger-presets/convert.py keeps only the catalog's two rosters, "Complete" and
+"Factory Standard", and drops everything else in the exports unread.
+
+VPS Avenger, its expansions and their names belong to their makers. They are named here to say
+what this data describes; this project is not affiliated with them.
+
+The reader, src/main.luau, is part of this repository's code and is licensed the same way.

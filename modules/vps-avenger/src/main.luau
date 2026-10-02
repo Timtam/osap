@@ -6,8 +6,11 @@
 -- (geometry.luau). What this stage covers, on the header row Avenger always shows:
 --
 --   Preset             the preset's name, read; the first stop, so it is what arriving says
---   Previous / Next    ◀ and ▶, and then the NEW name — once it is on screen, read, never
---                      predicted from a list of presets (O:watch)
+--   Previous / Next    ◀ and ▶, and then the NEW name — once it is on screen, read (O:watch);
+--                      with the preset database installed, the database's neighbour as well,
+--                      marked, when the read fails or disagrees (presets.luau)
+--   Preset info        only with the preset database: the preset's expansion, category,
+--                      oscillator tabs and macro names, each marked as the database's
 --   Load, Save,        MENU's four items, each chosen in Avenger's own menu once a menu test sees
 --   Save as,           it (O:chooseMenuItem); Save's and Initialize's warning box is an overlay of
 --   Initialize         its own (dialog.luau)
@@ -29,6 +32,8 @@ local daw = host.require("com.platform.daw-hosts")
 local G = host.include("src/geometry.luau")
 local H = host.include("src/header.luau")
 local D = host.include("src/dialog.luau")
+-- The preset database, an optional dependency: DB.present says whether it is installed.
+local DB = host.include("src/presets.luau")
 
 -- The arbiter slot the header and the warning box share: the box, at the dialog layer, takes the
 -- keyboard from the header while it is up.
@@ -124,9 +129,11 @@ end
 
 -- ── The preset's name, after ◀ or ▶ ──────────────────────────────────────────
 -- Said once it has CHANGED on screen: O:watch reads it again and again until it differs from the
--- name read just before the click, and says what it reads then. Never the name a list of presets
--- predicts — the project announces that, from a database of its own, and it is the one thing of it
--- this module must not copy (announce what the plug-in did, not what it should have done).
+-- name read just before the click, and says what it reads then. The project's tool says the name
+-- its database predicts instead, without reading; this module says what the plug-in did. With
+-- the preset database installed, the database's neighbour is said as well — marked, and only
+-- when the read failed or disagrees with it (presets.luau, "THE NEIGHBOUR RULE"): the watch, and
+-- what it waits for, are the same with it and without it.
 --
 -- The readings after the click are made off the event loop (host.ocr.read), one out at a time:
 -- the watch looks every 100 ms and is handed the last answer that belongs to this press. The one
@@ -145,7 +152,10 @@ end
 -- account: unmeasured, TODO.md).
 local NAME_WITHIN = 2000
 
-local names = { gen = 0, reading = false, text = nil, textGen = -1, last = nil }
+-- `pending`: the press whose watch is still out, or nil once it has ended (or the overlay has
+-- left the front, which ends a watch without a word). Only the database's rule asks it: a press
+-- made while it is set may read the name from before that press's click (presets.luau).
+local names = { gen = 0, reading = false, text = nil, textGen = -1, last = nil, pending = nil }
 
 local function tidy(text)
   local t = string.gsub(text or "", "%s+", " ")
@@ -183,22 +193,58 @@ local function nameAfter(o, gen)
   return names.textGen == gen and names.text or nil
 end
 
-local function presetStep(ov, label, at)
+-- With the database: what DB.after says for the watch's outcome, or nil for what the module says
+-- without it. Only for the latest press — a watch another press has overtaken reads nothing more
+-- (nameAfter) and runs out, and its outcome is no evidence about the preset now shown — and
+-- guarded, because the watch swallows an error in its callbacks, and the announcement with it.
+local function decided(step, gen, now, unchanged)
+  if not step or gen ~= names.gen then return nil end
+  local ok, said = pcall(DB.after, step, now, unchanged)
+  if ok then return said end
+  host.log.info("[avenger] the preset database's rule failed: " .. tostring(said) .. " — said without it")
+  return nil
+end
+
+local function settled(gen)
+  if names.pending == gen then names.pending = nil end
+end
+
+local function presetStep(ov, label, at, dir)
   ov:addCustomButton({
     label = label,
     onActivate = function(o)
-      local was = nameNow(o) or names.last
+      local read = nameNow(o)
+      local was = read or names.last
       if not clickAt(o, label, at) then return end
+      -- The name read before the click places the preset the step starts from; worked out once
+      -- the click is sent, so that the first use's index load never holds the click back.
+      local step = nil
+      if DB.present then
+        local ok, s = pcall(DB.before, label, read, dir, names.pending ~= nil)
+        if ok then
+          step = s
+        else
+          host.log.info("[avenger] the preset database's rule failed: " .. tostring(s) .. " — the step goes without it")
+        end
+      end
       names.gen += 1
       local gen = names.gen
+      names.pending = gen
       o:watch({
         read = function(w) return nameAfter(w, gen) end,
         was = was,
         done = function(now, before) return before ~= nil and now ~= before end,
         within = NAME_WITHIN,
-        onDone = function(now) host.speech.output(now, { interrupt = true }) end,
+        onDone = function(now)
+          settled(gen)
+          host.speech.output(decided(step, gen, now, false) or now, { interrupt = true })
+        end,
         onGiveUp = function(now, before)
-          if now == nil then
+          settled(gen)
+          local said = decided(step, gen, now, now ~= nil and now == before)
+          if said then
+            host.speech.output(said, { interrupt = true })
+          elseif now == nil then
             host.speech.output("the preset name cannot be read now", { interrupt = true })
           elseif now == before then
             host.speech.output(now .. ", unchanged", { interrupt = true })
@@ -207,6 +253,27 @@ local function presetStep(ov, label, at)
           end
         end,
       })
+    end,
+  })
+end
+
+-- ── Preset info ──────────────────────────────────────────────────────────────
+-- Only with the preset database: the project's Info. Pressed, it reads the name as a step does
+-- before its click — on the event loop, one read per press — and says what the database has on
+-- it (presets.luau, DB.info): its expansion, category, oscillator tabs and macro names, each part
+-- marked as the database's. A button rather than a read-out: the whole of it is a long sentence
+-- nobody wants on every Tab past it.
+local function presetInfo(ov)
+  ov:addCustomButton({
+    label = "Preset info",
+    onActivate = function(o)
+      local read = nameNow(o)
+      local ok, said = pcall(DB.info, read)
+      if not ok then
+        host.log.info("[avenger] 'Preset info' failed: " .. tostring(said))
+        said = "the preset database cannot be read"
+      end
+      host.speech.output(said, { interrupt = true })
     end,
   })
 end
@@ -269,6 +336,12 @@ local function boxOffScreen(o)
   return r, H.zoom(origin), s
 end
 
+-- What each item leaves on screen, for the preset database (presets.luau, DB.forget): after Load
+-- and Save as, most likely the user's own file, whose name is not looked for in the catalog by
+-- similarity (the project's tool skips its snap there too); after Initialize, Avenger's blank
+-- preset; Save keeps the name, so whether it is the user's own stays as it was.
+local OWN_NAME = { ["Load preset"] = true, ["Save preset as"] = true, ["Initialize preset"] = false }
+
 -- `arms`: the item opens Avenger's warning box, which is looked for once the choice has been
 -- taken.
 local function menuEntry(ov, label, item, arms)
@@ -294,6 +367,9 @@ local function menuEntry(ov, label, item, arms)
         menuItem = menuItemAt(label, item, pick),
         onDone = function(w, chosen, why)
           if chosen then
+            -- Every item may load, rename, overwrite or blank the preset: the database's position
+            -- is not Avenger's any more.
+            DB.forget(label .. " chosen", OWN_NAME[label])
             if arms then D.arm(id, label) end
             return
           end
@@ -423,8 +499,9 @@ local header = placed(O.new("VPS Avenger"))
 -- The first stop: arriving says the preset. Read, never clicked: pressing it reads it again. An
 -- empty read is the recogniser's failure — Avenger always shows a name — and is said as that.
 header:addOCRButton({ label = "Preset", region = G.NAME_REGION, readOnly = true, fallback = "cannot be read now" })
-presetStep(header, "Previous preset", G.PREV)
-presetStep(header, "Next preset", G.NEXT)
+presetStep(header, "Previous preset", G.PREV, -1)
+presetStep(header, "Next preset", G.NEXT, 1)
+if DB.present then presetInfo(header) end
 menuEntry(header, "Load preset", G.LOAD, false)
 menuEntry(header, "Save preset", G.SAVE, true)
 menuEntry(header, "Save preset as", G.SAVE_AS, false)
@@ -441,12 +518,21 @@ header:addCustomButton({
   onActivate = function(o)
     if clickAt(o, "Redo list", G.UNDO, "right") then
       H.popup(o:origin())
+      -- What the list redoes is chosen in the list, which this module does not read.
+      DB.forget("the redo list opened")
       host.speech.output("Redo list, activated", { interrupt = true })
     end
   end,
 })
 zoomStepper(header)
-header:onDeactivate(function() H.left() end)
+-- Away from the overlay, the preset can be changed in ways it does not see — the DAW's own
+-- preset menu, a file dialog, another project: the database's position goes with it.
+header:onDeactivate(function()
+  H.left()
+  -- A watch out now ends without a word (O:watch looks only while the overlay is up).
+  names.pending = nil
+  DB.forget("the overlay left the front")
+end)
 -- `newWindow`: Avenger's popups — MENU, the zoom list, the redo list — are JUCE windows of the
 -- DAW's process (the process Avenger runs in; a DAW that runs plug-ins apart is the popup's owner
 -- then, unmeasured), which is what this test sees, and says where, so an item can be chosen in

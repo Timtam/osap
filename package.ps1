@@ -172,6 +172,10 @@ That commit is what this build was compiled from. prism in turn carries the libr
 whose licences are in the prism\ folder beside this file — fmt 12.2.1, highway 1.4.0,
 simdutf 9.0.0, concurrentqueue, dr_wav, moderncom, djinni, NVGT, and NV Access's NVDA
 controller RPC definitions — and its own NOTICE is in prism-NOTICE.txt.
+
+The VPS Avenger preset database (modules\vps-avenger-presets\data) comes from the
+avenger_control project, whose developer gave it to this project without restriction; it is
+under the GPL like the rest. See modules\vps-avenger-presets\NOTICE.
 "@ | Set-Content (Join-Path $licences "README.txt") -Encoding UTF8
 
 # A note for whoever unpacks it. Short on purpose: the two things that actually go wrong are
