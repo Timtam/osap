@@ -35,26 +35,30 @@
 //! empty text instead. That makes the log the only evidence a remote tester can send, which
 //! is why there is so much of it.
 
-use std::cell::RefCell;
-use std::collections::HashSet;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::AllocAnyThread;
-use objc2_core_foundation::{CFRetained, CGFloat, CGPoint, CGRect, CGSize};
+use objc2::{msg_send, AllocAnyThread, ClassType};
+use objc2_core_foundation::{CFData, CFRetained, CGFloat, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
-    CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext, CGImage,
-    CGImageAlphaInfo, CGImageByteOrderInfo, CGInterpolationQuality, CGPreflightScreenCaptureAccess,
+    CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorRenderingIntent, CGColorSpace,
+    CGContext, CGDataProvider, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo,
+    CGInterpolationQuality, CGPreflightScreenCaptureAccess,
 };
-use objc2_foundation::{NSArray, NSDictionary, NSLocale, NSRange, NSString};
+use objc2_foundation::{NSArray, NSDictionary, NSIndexSet, NSLocale, NSRange, NSString};
 use objc2_vision::{
     VNImageRequestHandler, VNRecognizeTextRequest, VNRequest, VNRequestTextRecognitionLevel,
 };
 
 use crate::backend::{CaptureSource, OcrLine, OcrText, OcrThread, OcrWord, Recognise};
+use crate::ocr::cost::{self, Capture, Pass, Stage};
 use crate::ocr::plan::{self, Plan as CapturePlan};
+use crate::ocr::policy::{SLOW_JOB, SLOW_LOG_EVERY};
 use crate::ocr::types::Rect;
 
 /// `automation-platform ocr-bench`: Vision measured on fixed pictures. A child of this file so
@@ -94,9 +98,11 @@ const OCR_PAD: usize = 24;
 
 /// How tall the content is aimed at in the processed image.
 ///
-/// Apple's own guidance for the accurate recognition level puts the comfortable floor at
-/// around 32 px of text height; 64 is the figure the Windows path settled on and it leaves
-/// room for the crop being a little loose.
+/// 64 is the figure the Windows path settled on, and it leaves room for the crop being a little
+/// loose. Apple names no height in pixels: the one figure Vision documents is the relative
+/// `minimumTextHeight`, a fraction of the image's height — one thirty-second unless it is set, and
+/// it is set to 0 here (`new_request`). This comment used to quote Apple guidance of "around
+/// 32 px"; three searches of Apple's documentation and sessions (2026-10-01) found no such source.
 const TARGET_CONTENT_PX: usize = 64;
 
 /// How long the whole ladder may take before the last rungs are abandoned.
@@ -154,7 +160,8 @@ fn recognize_inner(
         report_capture_failure(x, y, w, h);
         return Ok(empty());
     };
-    recognize_captured(&native, scale, x, y, w, h, lang, started, debug, &Ladder::FULL)
+    let capture = Capture::Took(started.elapsed().as_secs_f64() * 1000.0);
+    recognize_captured(&native, scale, x, y, w, h, lang, started, capture, debug, &Ladder::FULL)
 }
 
 /// The slack the content crop leaves round the ink, in capture pixels. A physical distance, not
@@ -166,7 +173,8 @@ fn content_margin(scale: f64) -> usize {
 }
 
 /// Everything after the capture, so that a caller who already has the pixels — one bounding-box
-/// capture cut into several regions — runs exactly the same pipeline as a single read.
+/// capture cut into several regions — runs exactly the same pipeline as a single read. `capture`
+/// says where the pixels came from, for the slow-read line.
 #[allow(clippy::too_many_arguments)]
 fn recognize_captured(
     native: &CGImage,
@@ -177,11 +185,17 @@ fn recognize_captured(
     h: i32,
     lang: Option<&str>,
     started: Instant,
+    capture: Capture,
     debug: bool,
     ladder: &Ladder,
 ) -> Result<OcrText, String> {
     let nw = CGImage::width(Some(native));
     let nh = CGImage::height(Some(&native));
+    // How long Vision has been idle, taken before this read's own passes, and the journal they
+    // are written into. A read that returns early — nothing in it, pixels that could not be read
+    // back — made no pass, and says nothing about its cost.
+    let idle = idle_now();
+    journal_open();
 
     let small = w <= SMALL_W && h <= SMALL_H;
     let result = if !small {
@@ -195,7 +209,7 @@ fn recognize_captured(
                 debug_dump("ocr-debug.bmp", &rgba, dw, dh);
             }
         }
-        run_vision(native, lang, ACCURATE, &|bb| map_box(&plan, scale, bb))
+        run_vision(native, lang, ACCURATE, Stage::AsCaptured, &|bb| map_box(&plan, scale, bb))
     } else {
         let Some((rgba, px_w, px_h)) = cgimage_to_rgba(native) else {
             warn_once(
@@ -256,7 +270,7 @@ fn recognize_captured(
                 let (pw, ph) = plan.out_size();
                 debug_dump("ocr-debug.bmp", &buf, pw, ph);
             }
-            let r = run_vision(&img, lang, ACCURATE, &|bb| map_box(&plan, scale, bb));
+            let r = run_vision(&img, lang, ACCURATE, Stage::Tight, &|bb| map_box(&plan, scale, bb));
             // `buf` is the bitmap context's backing store and the image created from it is
             // a copy-on-write of that memory. Dropping it before Vision has read the image
             // would be a use-after-free that only shows up on the machine nobody here owns.
@@ -278,7 +292,7 @@ fn recognize_captured(
                         let (pw, ph) = whole.out_size();
                         debug_dump("ocr-debug-retry.bmp", &buf, pw, ph);
                     }
-                    let r = run_vision(&img, lang, ACCURATE, &|bb| map_box(&whole, scale, bb));
+                    let r = run_vision(&img, lang, ACCURATE, Stage::Whole, &|bb| map_box(&whole, scale, bb));
                     drop(buf);
                     r
                 });
@@ -342,7 +356,9 @@ fn recognize_captured(
             text.replace('\n', " ")
         )
     });
-    note_cost(ms, w, h);
+    let passes = journal_take();
+    note_cost(ms, w, h, idle, passes.iter().any(|p| p.beside));
+    note_slow(ms, (x, y, w, h), capture, &passes);
     Ok(OcrText { text, words, lines, fallback: None, skipped: false })
 }
 
@@ -412,7 +428,8 @@ pub fn recognize_regions(
                 match render(&big, &cut) {
                     Some((img, buf)) => {
                         let r = recognize_captured(
-                            &img, scale, *x, *y, *w, *h, lang, started, debug, &Ladder::FULL,
+                            &img, scale, *x, *y, *w, *h, lang, started, Capture::Shared, debug,
+                            &Ladder::FULL,
                         );
                         // `buf` backs the image copy-on-write; it has to outlive every read
                         // of it, which on a machine nobody here owns is not a thing to leave
@@ -553,7 +570,8 @@ pub fn recognise_shot(
                     match render(big, &cut) {
                         Some((img, buf)) => {
                             let r = recognize_captured(
-                                &img, *scale, x, y, w, h, ctx.lang, started, debug, &ladder,
+                                &img, *scale, x, y, w, h, ctx.lang, started, Capture::Apart, debug,
+                                &ladder,
                             );
                             // `buf` backs the image copy-on-write; see `recognize_regions`.
                             drop(buf);
@@ -565,7 +583,7 @@ pub fn recognise_shot(
                 Shot::Failed(why) => Err(why.clone()),
                 Shot::Each(each) => match each.get(i).and_then(|c| c.as_ref()) {
                     Some((native, scale)) => recognize_captured(
-                        native, *scale, x, y, w, h, ctx.lang, started, debug, &ladder,
+                        native, *scale, x, y, w, h, ctx.lang, started, Capture::Apart, debug, &ladder,
                     ),
                     None => Err(
                         "screen capture failed — if every read fails, grant this application \
@@ -618,14 +636,18 @@ fn empty() -> OcrText {
     }
 }
 
-/// Makes Vision load its recognition model now, on a thread of its own, so that the first
-/// real recognition does not.
+/// Makes Vision's first pass now, on a thread of its own, so that the first real recognition
+/// does not.
 ///
-/// The model load is a one-off of anything from half a second to two seconds, and `ocr` runs
-/// synchronously on the pump thread — which is also the thread carrying speech, timers and
-/// the overlay's own polling. Paying it there means a frozen interface and a late
-/// announcement at exactly the moment a user first asked to read something. `docs/macos-
-/// port.md` names this as one of the three failures the port is shaped to avoid.
+/// The first pass in a process costs what no later one does — the warm-up over six bars that this
+/// was until 2026-10 took 0.2–0.33 s on a Mac mini M1, 0.3–0.85 s on the CI's virtual Macs and
+/// 1.7–1.8 s on an Intel MacBook Air (2020); over a line of words it has not been timed on a Mac
+/// yet — and the legacy calls run synchronously on the pump thread, which is also the thread
+/// carrying speech, timers and the overlay's own polling. Paying it there means a frozen interface
+/// and a late announcement at exactly the moment a user first asked to read something. `docs/
+/// macos-port.md` names this as one of the three failures the port is shaped to avoid. Whether a
+/// first pass costs that much again on every other thread is open (TODO.md); the recognise thread
+/// makes one of its own after this one (`warm_up_recognise`), and the two lines tell.
 ///
 /// Nothing crosses the thread boundary: every Objective-C object is made on the thread that
 /// uses it, because none of them are `Send`, and the result is thrown away. Vision's request
@@ -633,84 +655,151 @@ fn empty() -> OcrText {
 /// this legal at all.
 #[allow(dead_code)] // Called from `MacBackend::new`; see this file's entry in docs/macos-port.md.
 pub fn warm_up() {
-    // A thread that is not the main one has no autorelease pool of its own and no run loop to
-    // drain one, so everything Vision autoreleases here would simply stay.
-    std::thread::spawn(|| objc2::rc::autoreleasepool(|_| warm_up_in_pool()));
-}
-
-fn warm_up_in_pool() {
-    let started = Instant::now();
-    let Some((image, buf)) = synthetic_page() else {
+    // The turn is taken before the thread exists, so that the recognise thread, started just
+    // after, cannot find it free; it ends when the pass does, or when the thread unwinds.
+    let turn = FIRST_WARM_UP.take();
+    // Named, so that its line, and the first-pass lines after it, say whose pass was whose.
+    let spawned = std::thread::Builder::new().name("ocr-warm-up".to_string()).spawn(move || {
+        let _turn = turn;
+        warm_up_here(None, None);
+    });
+    // A thread that could not start drops its closure, and the turn with it.
+    if let Err(e) = spawned {
         crate::logging::line(
             "macos",
-            "ocr: could not build a warm-up image; Vision will load its model on the first real recognition instead, which will be slow",
-        );
-        return;
-    };
-    let read = run_vision(&image, None, ACCURATE, &|_| (0, 0, 1, 1));
-    drop(buf);
-    crate::logging::line(
-        "macos",
-        &format!(
-            "ocr: Vision warmed up in {:.0} ms{}",
-            started.elapsed().as_secs_f64() * 1000.0,
-            match read {
-                Some((text, _, _)) if !text.trim().is_empty() => " and read its test page",
-                // The bars are not letters, so finding nothing in them is the expected
-                // outcome; the model is loaded either way, which is the whole point.
-                Some(_) => "",
-                None => ", or rather did not: the request failed",
-            }
-        ),
-    );
-}
-
-/// A small image with dark bars on a light ground, for the warm-up.
-///
-/// Not a screen capture on purpose: warming must not depend on Screen Recording having been
-/// granted, and it must not read the user's screen before anything has asked it to. The bars
-/// are there so the text *detector* passes something to the *recogniser* — it is the second
-/// of those two models that the first real call would otherwise wait for.
-fn synthetic_page() -> Option<(CFRetained<CGImage>, Vec<u8>)> {
-    let (w, h) = (240usize, 64usize);
-    let bytes_per_row = w * 4;
-    let mut buf = vec![0u8; bytes_per_row * h];
-    let space = CGColorSpace::new_device_rgb()?;
-    let info = CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0;
-    // SAFETY: as in `render` — the buffer is sized to the geometry and outlives the context.
-    let ctx = unsafe {
-        CGBitmapContextCreate(
-            buf.as_mut_ptr() as *mut core::ffi::c_void,
-            w,
-            h,
-            8,
-            bytes_per_row,
-            Some(&space),
-            info,
-        )
-    }?;
-    CGContext::set_rgb_fill_color(Some(&ctx), 1.0, 1.0, 1.0, 1.0);
-    CGContext::fill_rect(
-        Some(&ctx),
-        CGRect::new(
-            CGPoint::new(0.0, 0.0),
-            CGSize::new(w as CGFloat, h as CGFloat),
-        ),
-    );
-    CGContext::set_rgb_fill_color(Some(&ctx), 0.05, 0.05, 0.05, 1.0);
-    for i in 0..6 {
-        CGContext::fill_rect(
-            Some(&ctx),
-            CGRect::new(
-                CGPoint::new(24.0 + i as CGFloat * 32.0, 16.0),
-                CGSize::new(8.0, 32.0),
-            ),
+            &format!("ocr: the warm-up thread could not be started ({e}); the first recognition makes Vision's first pass instead, which will be slow"),
         );
     }
-    CGContext::flush(Some(&ctx));
-    let image = CGBitmapContextCreateImage(Some(&ctx))?;
-    drop(ctx);
-    Some((image, buf))
+}
+
+/// The two warm-ups' turns (`cost::Gate`): the one on a thread of its own first, then the
+/// recognise thread's.
+static FIRST_WARM_UP: cost::Gate = cost::Gate::new();
+
+/// The recognise thread's warm-up (`OcrWorker::warm_up`), once it has read the languages: one pass
+/// in `lang`, the language its reads are made in when they name none, so that the first
+/// `host.ocr.read` pays no first pass of any kind — made after the warm-up on a thread of its own
+/// has ended, not beside it. Its line then times a first pass on another thread of a warm
+/// process, and the first line a first pass in the process: whether a first pass is a cost per
+/// process or per thread, the question the logs of September 2026 left open. The wait is on the
+/// hang clock (`ocr/service.rs`): should the first warm-up never end, reads are refused with the
+/// reason after `policy::HANG`, as behind any recognition that does not answer.
+pub fn warm_up_recognise(lang: Option<&str>) {
+    let waited = FIRST_WARM_UP.wait();
+    warm_up_here(lang, Some(waited.as_secs_f64() * 1000.0));
+}
+
+/// The warm-up's pass, on the calling thread: one accurate pass over a line of printed words, in
+/// `lang` (Vision's default for none), and a line saying how long it took and whether Vision read
+/// the words — so the warm-up is a self-test as well. `waited`: how long the calling thread waited
+/// for its turn, for the line.
+pub fn warm_up_here(lang: Option<&str>, waited: Option<f64>) {
+    // A thread that is not the main one has no autorelease pool of its own and no run loop to
+    // drain one, so everything Vision autoreleases here would simply stay.
+    objc2::rc::autoreleasepool(|_| warm_up_in_pool(lang, waited))
+}
+
+/// The picture the warm-up reads: `ocr-bench`'s `line@1x` (crate::ocr::bench::FIXTURES), a line
+/// of nine printed words, drawn by tools/ocr-fixtures/make.py and carried in the executable. One
+/// picture for both, so that the benchmark's warm-up over words is this one.
+///
+/// Words rather than the six dark bars it read until 2026-10: a pass over bars found no text in
+/// any Mac's log, so whether the recogniser — the second of Vision's two models, the one the
+/// first real read would otherwise wait for — ran at all was unproven. And a picture whose text
+/// is known turns the warm-up into a test: a report of macOS 27 has Vision's accurate model
+/// answering nothing, without an error, and with this the first line of a session says so.
+///
+/// Not a screen capture on purpose: warming must not depend on Screen Recording having been
+/// granted, and it must not read the user's screen before anything has asked it to.
+const WARM_UP_PICTURE: &str = "line@1x";
+
+/// The warm-up's picture, drawn into a bitmap, and the text it says.
+fn warm_up_page() -> Result<(CFRetained<CGImage>, Vec<u8>, &'static str), String> {
+    let f = crate::ocr::bench::fixture(WARM_UP_PICTURE)
+        .ok_or_else(|| format!("the executable carries no picture {WARM_UP_PICTURE}"))?;
+    let (image, buf) = picture_from_png(f.png, f.px())?;
+    Ok((image, buf, f.expected))
+}
+
+fn warm_up_in_pool(lang: Option<&str>, waited: Option<f64>) {
+    let started = Instant::now();
+    let (image, buf, expected) = match warm_up_page() {
+        Ok(page) => page,
+        Err(why) => {
+            crate::logging::line(
+                "macos",
+                &format!("ocr: could not draw the warm-up's test line ({why}); the first recognition on this thread makes Vision's first pass instead, which will be slow"),
+            );
+            return;
+        }
+    };
+    // Its boxes placed in the picture, as a read's are in its region: the words then come back in
+    // reading order (`reading_order`), whatever order Vision observed the line's pieces in, and
+    // are compared with the line as printed.
+    let plan = Plan::identity(CGImage::width(Some(&image)), CGImage::height(Some(&image)));
+    journal_open();
+    let read = run_vision(&image, lang, ACCURATE, Stage::WarmUp, &|bb| map_box(&plan, 1.0, bb));
+    let beside = journal_take().iter().any(|p| p.beside);
+    drop(buf);
+    let ms = started.elapsed().as_secs_f64() * 1000.0;
+    let text = read.as_ref().map(|(t, _, _)| t.as_str());
+    crate::logging::line("macos", &cost::warm_up_line(ms, &this_thread(), text, expected, beside, waited));
+}
+
+/// A PNG the executable carries, decoded by CoreGraphics at the size it must have and drawn once
+/// into a bitmap of its own, so that it reaches Vision as a capture does — as pixels — rather than
+/// as an image backed by PNG data that may be decoded again whenever it is read. The bitmap comes
+/// back beside the image, which shares it copy-on-write; see `render`.
+fn picture_from_png(png: &'static [u8], size: (usize, usize)) -> Result<(CFRetained<CGImage>, Vec<u8>), String> {
+    let data = CFData::from_static_bytes(png);
+    let provider = CGDataProvider::with_cf_data(Some(&data))
+        .ok_or_else(|| "CoreGraphics made no data provider for it".to_string())?;
+    // SAFETY: no decode array (null is documented as "none") and a live provider.
+    let decoded = unsafe {
+        CGImage::with_png_data_provider(
+            Some(&provider),
+            std::ptr::null(),
+            false,
+            CGColorRenderingIntent::RenderingIntentDefault,
+        )
+    }
+    .ok_or_else(|| "CoreGraphics did not decode it".to_string())?;
+    let got = (CGImage::width(Some(&decoded)), CGImage::height(Some(&decoded)));
+    if got != size {
+        return Err(format!("it decoded at {}x{} px, not {}x{}", got.0, got.1, size.0, size.1));
+    }
+    render(&decoded, &Plan::identity(got.0, got.1)).ok_or_else(|| "it could not be drawn into a bitmap".to_string())
+}
+
+/// The revisions of text recognition this macOS lists, asked of `VNRecognizeTextRequest`'s class:
+/// `supportedRevisions` is a class method, and the binding's `VNRequest::supportedRevisions()`
+/// would ask the base class.
+fn supported_revisions() -> Vec<usize> {
+    // SAFETY: `+supportedRevisions` is on every request class from macOS 10.13 and returns an
+    // index set, or nil, which `Option` takes.
+    let set: Option<Retained<NSIndexSet>> =
+        unsafe { msg_send![VNRecognizeTextRequest::class(), supportedRevisions] };
+    set.map(|set| (1..=16).filter(|r| set.containsIndex(*r)).collect()).unwrap_or_default()
+}
+
+/// The `[env]` line `vision`: the revision a new text request of this application actually
+/// carries — the request every pass makes, before anything is asked of it — and the revisions this
+/// macOS lists. The request's revision is left at Vision's default (`new_request`), and Apple
+/// documents that default as the newest for the SDK the application was built with, not for the
+/// running system, so the log says which it is. A request object and a class method, on the
+/// event loop at start: no recognition, no model.
+pub fn vision_report() -> String {
+    objc2::rc::autoreleasepool(|_| {
+        // SAFETY: a property of a request made on this thread.
+        let carried = unsafe { new_request(None, ACCURATE).revision() };
+        let listed = supported_revisions();
+        let listed = if listed.is_empty() {
+            "lists none".to_string()
+        } else {
+            format!("lists revisions {}", listed.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", "))
+        };
+        format!("a new text request carries revision {carried}; this macOS {listed}")
+    })
 }
 
 /// Says, once, why nothing could be captured.
@@ -761,40 +850,132 @@ fn screen_capture_permitted() -> bool {
     })
 }
 
-/// Logs the cost of a recognition where a user can act on it.
-///
-/// The first one is called out separately because it is not representative: Vision loads its
-/// model on first use, and that one-off can be an order of magnitude above the steady state.
-/// After that, 50 ms is the host's own threshold for "this blocked the pump" — one module
-/// polls this every 120 ms and issues two calls a tick, measured at 19-31 ms each on
-/// Windows, so a materially larger figure here is the number that decides whether the macOS
-/// port can keep that module at all.
-///
-/// Only a new worst time is written, and only if it is clearly worse than the last one
-/// reported. A slow recogniser is called sixteen times a second by that same module, and a
-/// line per call would bury the log it is meant to be evidence in.
-fn note_cost(ms: f64, w: i32, h: i32) {
-    thread_local! {
-        static WORST: RefCell<Option<f64>> = const { RefCell::new(None) };
+// ── What a recognition cost, in the log ────────────────────────────────────────────────────
+//
+// The wording and the arithmetic are `crate::ocr::cost`'s, tested on every platform; what is
+// here is the state they are worked out from. The logs of September 2026 could not say whether
+// the expensive first read was the first in the process, the first on its thread or the first
+// after a pause, how many passes a field took, or whether two passes ran at once — so every
+// pass is timed and journalled with its rung, the passes running in the process are counted, and
+// the end of each pass is remembered for the process and for its thread.
+
+/// The Vision passes running in the process now (`run_vision`).
+static RUNNING: cost::Running = cost::Running::new();
+
+/// When the last Vision pass in the process ended, a warm-up's included.
+static LAST_PASS: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Whether a recognition — a read, not a warm-up — has run in the process.
+static RECOGNISED: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    /// When this thread's last Vision pass ended, a warm-up's included.
+    static THREAD_LAST_PASS: Cell<Option<Instant>> = const { Cell::new(None) };
+    /// Whether a recognition has run on this thread.
+    static RECOGNISED_HERE: Cell<bool> = const { Cell::new(false) };
+    /// The slowest recognition on this thread so far, for `note_cost`.
+    static SLOWEST: Cell<Option<f64>> = const { Cell::new(None) };
+    /// The passes of the recognition under way on this thread, while one is (`journal_open`).
+    static JOURNAL: RefCell<Option<Vec<Pass>>> = const { RefCell::new(None) };
+    /// When a slow read's line was last said on this thread, per region.
+    static SLOW_SAID: RefCell<HashMap<(i32, i32, i32, i32), Instant>> = RefCell::new(HashMap::new());
+}
+
+/// The calling thread, as the cost lines name it.
+fn this_thread() -> String {
+    cost::thread_word(std::thread::current().name())
+}
+
+/// How long ago the last Vision pass ended, in the process and on this thread, and whether one of
+/// another thread is running — now, before a read makes its own. The firsts are `note_cost`'s.
+fn idle_now() -> cost::Before {
+    let now = Instant::now();
+    let since = |t: Option<Instant>| t.map(|t| now.saturating_duration_since(t));
+    let process = *LAST_PASS.lock().unwrap_or_else(|e| e.into_inner());
+    cost::Before {
+        since_process: since(process),
+        since_thread: since(THREAD_LAST_PASS.with(Cell::get)),
+        busy_at_start: RUNNING.busy(),
+        ..cost::Before::default()
     }
-    let previous = WORST.with(|worst| {
-        let mut worst = worst.borrow_mut();
-        let previous = *worst;
-        if previous.is_none_or(|p| ms > p) {
-            *worst = Some(ms);
+}
+
+/// Starts writing down this thread's passes, forgetting any a read that ended early left.
+fn journal_open() {
+    JOURNAL.with(|j| *j.borrow_mut() = Some(Vec::new()));
+}
+
+/// The passes written down since `journal_open`, and the writing stopped.
+fn journal_take() -> Vec<Pass> {
+    JOURNAL.with(|j| j.borrow_mut().take()).unwrap_or_default()
+}
+
+/// Logs the cost of a recognition where a user can act on it: the first one in the process and
+/// the first on each thread, each with how long Vision had been idle before it (`idle`, taken when
+/// the read began) and whether another pass ran beside its own (`beside`), and after those a new
+/// slowest on the thread that is clearly worse than the slowest before it (`cost::cost_line` has
+/// the rule).
+///
+/// The first ones are called out because they are not representative: the first pass costs what
+/// no later one does. Whether that is a cost per process, per thread or after every pause is what
+/// the two firsts and the pause beside them can tell apart; the line used to call the first on
+/// every thread "Vision's model load", and one on the recognise thread minutes after the warm-up
+/// was read as a model load for it.
+fn note_cost(ms: f64, w: i32, h: i32, idle: cost::Before, beside: bool) {
+    let before = cost::Before {
+        first_in_process: !RECOGNISED.swap(true, Ordering::Relaxed),
+        first_on_thread: !RECOGNISED_HERE.with(|c| c.replace(true)),
+        ..idle
+    };
+    let slowest = SLOWEST.with(|s| {
+        let before = s.get();
+        if before.is_none_or(|p| ms > p) {
+            s.set(Some(ms));
         }
-        previous
+        before
     });
-    match previous {
-        None => crate::logging::line(
-            "macos",
-            &format!("ocr: first recognition of a {w}x{h} pt region took {ms:.0} ms, Vision's model load included"),
-        ),
-        Some(p) if ms >= 50.0 && ms > p * 1.25 => crate::logging::line(
-            "macos",
-            &format!("ocr: reading a {w}x{h} pt region took {ms:.0} ms, the slowest so far"),
-        ),
-        _ => {}
+    if let Some(line) = cost::cost_line(ms, w, h, this_thread, &before, slowest, beside) {
+        crate::logging::line("macos", &line);
+    }
+}
+
+/// A slow read — `SLOW_JOB` or more, the threshold `host.ocr.read`'s own line has — part by part:
+/// its capture, and each Vision pass with its rung, its time, its words and whether another pass
+/// ran beside it. At most one line per region every `SLOW_LOG_EVERY` on each thread, the limit
+/// that line has per module (this file knows no modules): a poll of three read-outs on a slow Mac
+/// is then three lines every ten seconds, not three a second, and two fields of one size each have
+/// their own. The time is from the start of this recognition: a `host.ocr.read`'s picture was
+/// taken before it (`Capture::Apart`), so there the threshold is the recognition's alone.
+fn note_slow(ms: f64, (x, y, w, h): (i32, i32, i32, i32), capture: Capture, passes: &[Pass]) {
+    if ms < SLOW_JOB.as_secs_f64() * 1000.0 {
+        return;
+    }
+    let due = SLOW_SAID.with(|s| cost::due(&mut s.borrow_mut(), (x, y, w, h), Instant::now(), SLOW_LOG_EVERY));
+    if due {
+        crate::logging::line("macos", &cost::slow_line(w, h, ms, &this_thread(), capture, passes));
+    }
+}
+
+/// A pass counted among those running (`RUNNING`) until it is left — or dropped, should the pass
+/// unwind: a count left standing would have every later pass say it had company.
+struct InVision(Option<cost::Entered>);
+
+impl InVision {
+    fn enter() -> InVision {
+        InVision(Some(RUNNING.enter()))
+    }
+
+    /// Whether another pass ran beside this one.
+    fn leave(mut self) -> bool {
+        self.0.take().is_some_and(|e| RUNNING.leave(e))
+    }
+}
+
+impl Drop for InVision {
+    fn drop(&mut self) {
+        if let Some(e) = self.0.take() {
+            RUNNING.leave(e);
+        }
     }
 }
 
@@ -815,7 +996,7 @@ const FAST: VNRequestTextRecognitionLevel = VNRequestTextRecognitionLevel::Fast;
 /// any new dependency:
 ///
 /// **Bigger.** The ladder above already upscales, but only to the target; doubling it puts a
-/// lone digit well clear of the floor rather than near it, and widens the quiet space around
+/// lone digit well past the target rather than near it, and widens the quiet space around
 /// it, which some recognisers need in order to see a glyph as a glyph at all.
 ///
 /// **Faster.** `Fast` is a different model — character-level rather than the accurate path's
@@ -855,7 +1036,7 @@ fn bigger_then_faster(
     }
     // Both passes share one blit: rendering is the expensive part, and the only thing that
     // differs between them is which model reads it.
-    let mut out = run_vision(&img, lang, ACCURATE, &|bb| map_box(&big, scale, bb));
+    let mut out = run_vision(&img, lang, ACCURATE, Stage::Enlarged, &|bb| map_box(&big, scale, bb));
     // The fast model only for a language it reads, and not while an interactive read waits
     // behind a background one.
     if out.as_ref().is_none_or(|(t, _, _)| t.trim().is_empty())
@@ -865,7 +1046,7 @@ fn bigger_then_faster(
         crate::logging::trace("macos", || {
             format!("ocr: {}x enlarged accurate pass read nothing, trying the fast model", big.up)
         });
-        out = run_vision(&img, lang, FAST, &|bb| map_box(&big, scale, bb));
+        out = run_vision(&img, lang, FAST, Stage::Fast, &|bb| map_box(&big, scale, bb));
         if let Some((t, _, _)) = out.as_ref().filter(|(t, _, _)| !t.trim().is_empty()) {
             // Named, because it is the one answer in this file that did not come from the
             // recogniser we trust most, and a reader of the log should know which read it.
@@ -880,20 +1061,42 @@ fn bigger_then_faster(
 /// lines themselves, which `host.ocr.read` groups into rows.
 type VisionRead = (String, Vec<OcrWord>, Vec<OcrLine>);
 
+/// One pass, made and timed the way the cost lines count it: the request made and configured,
+/// the handler, the pass and its answer read out, as one time. `stage` is the rung of the ladder
+/// it is, for the slow-read line. Every pass in the application comes through here.
 fn run_vision(
     image: &CGImage,
     lang: Option<&str>,
     level: VNRequestTextRecognitionLevel,
+    stage: Stage,
     map: &dyn Fn(CGRect) -> (i32, i32, i32, i32),
 ) -> Option<VisionRead> {
+    let inside = InVision::enter();
+    let began = Instant::now();
     let request = new_request(lang, level);
-    match perform(image, &request, map) {
+    let out = match perform(image, &request, map) {
         Ok(read) => Some(read),
         Err(why) => {
             warn_once("ocr-perform", &format!("ocr: Vision refused the request — {why}"));
             None
         }
-    }
+    };
+    let ended = Instant::now();
+    let beside = inside.leave();
+    let pass = Pass {
+        stage,
+        ms: ended.saturating_duration_since(began).as_secs_f64() * 1000.0,
+        words: out.as_ref().map(|(_, words, _)| words.len()),
+        beside,
+    };
+    *LAST_PASS.lock().unwrap_or_else(|e| e.into_inner()) = Some(ended);
+    THREAD_LAST_PASS.with(|t| t.set(Some(ended)));
+    JOURNAL.with(|j| {
+        if let Some(passes) = j.borrow_mut().as_mut() {
+            passes.push(pass);
+        }
+    });
+    out
 }
 
 /// The request every pass makes, configured. Apart from `perform` so that `ocr-bench`
@@ -918,8 +1121,10 @@ fn new_request(
         request.setRecognitionLanguages(&NSArray::from_retained_slice(&langs));
     }
     // The request's revision is deliberately left alone. Naming revision 3 explicitly would
-    // fail the request outright on macOS 12, where it does not exist, and the default is
-    // already the newest revision the running system supports.
+    // fail the request outright on macOS 12, where it does not exist. Apple documents the
+    // default as the newest revision for the SDK the application was built with, not for the
+    // running system; which one a request actually carries on this Mac is what the `[env]` line
+    // `vision` says (`vision_report`).
     //
     // `setCustomWords` is likewise skipped: Vision only consults it during the
     // language-correction stage, which is switched off above, so it would be a no-op that
@@ -1293,9 +1498,9 @@ impl Plan {
         // defect with a measurable cost: for sforzando's polyphony field on a non-Retina
         // Mac — a 40x20 px capture whose digit is about 11 px tall — the margin makes the
         // crop 17 px, so the factor came out as 64/17 = 3 and the glyph reached Vision at
-        // roughly 33 px. This file's own header promises about 64, and Apple's floor for
-        // reliable recognition is around 32. Every lone digit was being handed over sitting
-        // exactly on that floor. From the ink it is 64/11 = 5, and the glyph arrives at 55.
+        // roughly 33 px. This file's own header promises about 64 (`TARGET_CONTENT_PX`), so
+        // every lone digit was being handed over at half the height the preprocessing aims for.
+        // From the ink it is 64/11 = 5, and the glyph arrives at 55.
         let ink_h = y1 - y0 + 1;
         let x0 = x0.saturating_sub(margin);
         let y0 = y0.saturating_sub(margin);
@@ -1408,8 +1613,7 @@ enum Panel {
 ///
 /// **Pass it the height of the ink, not of the crop.** The crop carries a margin on both
 /// sides, and giving that away turns a factor of five into a factor of three — which for a
-/// single small glyph is the difference between comfortably above Apple's recognition floor
-/// and sitting on it.
+/// single small glyph is the difference between near the 64 px aimed for and about half of it.
 fn upscale_for(content_px: usize) -> usize {
     upscale_toward(TARGET_CONTENT_PX, content_px)
 }

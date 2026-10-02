@@ -349,9 +349,14 @@ seconds each time.)
 `screen-capture` (the same `capture_backing` the synchronous calls use) and runs Vision on a
 second one, `ocr-recognise`, which asks for the user-initiated quality of service and wraps
 every job in an autorelease pool. The Vision warm-up keeps its own thread from
-`MacBackend::new`; the recogniser never waits for it. The recognise thread also asks Vision
-which languages it reads (`supportedRecognitionLanguages`, at the accurate and the fast
-level) and the system which ones the user prefers (`NSLocale.preferredLanguages`), and a
-read's `lang` is matched against those. `recognize` and `recognizeMany` still run on the pump
-thread and still stall it; the modules that poll with them have not moved yet (TODO.md). None
-of this has run on a Mac.
+`MacBackend::new` (`ocr-warm-up`). The recognise thread also asks Vision which languages it reads
+(`supportedRecognitionLanguages`, at the accurate and the fast level) and the system which ones
+the user prefers (`NSLocale.preferredLanguages`), and a read's `lang` is matched against those;
+then, once the `ocr-warm-up` pass has ended, it makes a warm-up pass of its own in that language,
+before its first job and on the hang clock of one (2026-10-01: the first read on that thread had
+cost 2.4 s on an Intel Air). One after the other, so that the first line times a first pass in
+the process and the second one on another thread. Both read a line of printed words and say in
+the log whether Vision read it. `recognize` and
+`recognizeMany` still run on the pump thread and still stall it; the overlay runtime's focus
+reads moved to `host.ocr.read` on 2026-10-01, and the modules' own synchronous reads have not
+moved yet (TODO.md).

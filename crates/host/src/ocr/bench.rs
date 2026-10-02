@@ -211,9 +211,11 @@ pub fn variant(name: &str) -> Option<usize> {
 /// Which warm-up a first-pass child makes before its first real pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Warmup {
-    /// The application's own: six dark bars, one accurate pass, on a thread of its own.
+    /// The application's warm-up until 2026-10: six dark bars, one accurate pass, on a thread of
+    /// its own.
     Bars,
-    /// The same with a line of real words.
+    /// The same over a line of printed words, `line@1x`: the application's own since then
+    /// (`warm_up_page` in backend/macos/ocr.rs reads this very picture).
     Word,
     /// None at all.
     Nothing,

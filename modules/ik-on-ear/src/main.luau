@@ -715,21 +715,22 @@ local function panelButton(label, dx, dy)
   })
 end
 
-ov:addStaticText({
+-- Read in every state, including while the panel is greyed. An earlier version answered
+-- "unavailable" here, which was the wrong kind of caution: this control changes nothing, the
+-- name it reads is true whether or not the simulation is using it, and the probe's OCR
+-- picked the words out of the dimmed panel perfectly well. The switch two stops earlier
+-- already says whether it is in use; repeating that here would only cost the name.
+--
+-- A read-only OCR read-out, which is what this static text with a reading `text` was: announced
+-- the same way — the label, then the name, no type word, Space and Return left to the
+-- application — and read by the runtime off the event loop (2026-10-01), where the `text`
+-- function read it with host.ocr.recognize on the loop. A region that cannot be placed now says
+-- "cannot be read now", the runtime's words, where the function said "not shown".
+ov:addOCRButton({
   label = "Virtual speaker",
-  -- Read in every state, including while the panel is greyed. An earlier version answered
-  -- "unavailable" here, which was the wrong kind of caution: this control changes nothing, the
-  -- name it reads is true whether or not the simulation is using it, and the probe's OCR
-  -- picked the words out of the dimmed panel perfectly well. The switch two stops earlier
-  -- already says whether it is in use; repeating that here would only cost the name.
-  text = function()
-    local r = ov:toScreenRect({ 865, 876, 1065, 945 })
-    if not r then return "not shown" end
-    local got = host.ocr.recognize({ region = r })
-    local text = (got and got.text or ""):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
-    if text == "" then return "not shown" end
-    return text
-  end,
+  readOnly = true,
+  region = { 865, 876, 1065, 945 },
+  fallback = "not shown",
 })
 
 -- Measured from the capture rather than estimated off a thumbnail, after the first test

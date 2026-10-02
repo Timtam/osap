@@ -38,6 +38,7 @@ pub(crate) const WINDOW_PRELUDE: &str = include_str!("window_prelude.luau");
 /// Shared with `overlay_avenger_tests.rs`, which loads VPS Avenger's module on top of them.
 pub(crate) const HP: &str = r##"
 local S = T.S
+T.autoFocusReads()
 S.originAsks = 0
 S.rechecks = 0
 S.clicks = {}
@@ -782,8 +783,8 @@ fn sforzando_binds_in_a_logic_window_titled_inst_1_and_in_a_reaper_floating_wind
         local polyphony = nil
         for _ = 1, 3 do
           ov:focusNext()
-          for _, r in ipairs(S.recognized) do
-            if T.region(r) == "590,120,630,140" then polyphony = r end
+          for _, r in ipairs(S.focusReads) do
+            if T.region(r.regions[1]) == "590,120,630,140" then polyphony = r end
           end
         end
         assert(polyphony, "Polyphony read at the panel + {490,38,530,58}: " .. T.dump())

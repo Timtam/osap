@@ -32,6 +32,7 @@ use super::overlay_menu_tests::{HARNESS, RUNTIME};
 /// asked, and a window that owns every point unless a scenario says otherwise.
 const SC: &str = r##"
 local S = T.S
+T.autoFocusReads()
 S.clicks = {}
 S.moves = {}
 S.recognized = {}
@@ -266,7 +267,7 @@ fn no_factor_places_nothing_and_says_so() {
         -- The OCR control: not read, and said so instead of "no text"; its click not made either.
         local from = #S.speech + 1
         o:activate(3)
-        assert(#S.recognized == 0 and #S.clicks == 0, "nothing read, nothing clicked")
+        assert(#S.focusReads == 0 and #S.clicks == 0, "nothing read, nothing clicked")
         assert(T.said(from) == "Preset, button, cannot be read now", T.said(from))
         assert(T.count("[read] 'Preset' not read: its scale function answered nil") == 1, T.dump())
         assert(T.count("[scale] 'Synth': no factor now") == 1, "the state is said once, not per control: " .. T.dump())
@@ -286,7 +287,8 @@ fn no_factor_places_nothing_and_says_so() {
 
 /// Regions scale corner by corner, may be functions of the overlay, and a function that answers
 /// nothing reads nothing. `ocrLabel` likewise; the name falls back to the label. The click of an
-/// OCR button is the middle of the region it read.
+/// OCR button is the middle of the region it read, made once its read is answered. The reads are
+/// host.ocr.read's, answered by T.deliver as the host answers them, on a later turn of the loop.
 #[test]
 fn regions_and_name_regions_scale_and_may_be_functions() {
     run(r##"
@@ -300,13 +302,16 @@ fn regions_and_name_regions_scale_and_may_be_functions() {
           o:addHotspotButton({ label = "Named", at = { 10, 20 }, ocrLabel = { 30, 40, 50, 50 } })
         end)
         o:activate(1)
-        local r = S.recognized[1]
+        local r = S.focusReads[1].regions[1]
         assert(r[1] == 168 and r[2] == 64 and r[3] == 528 and r[4] == 94, "every corner scaled: "
           .. table.concat(r, ","))
+        T.deliver()
         assert(S.speech[#S.speech].text == "Preset, Init Preset", S.speech[#S.speech].text)
         assert(#S.clicks == 0, "readOnly: never clicked")
-        assert(T.count('[read] \'Preset\' = "Init Preset" (region 34,7 180x15, 0 ms, 0 words) at 168,64 360x30 on screen') == 1, T.dump())
+        assert(T.count('[read] \'Preset\' = "Init Preset" (region 34,7 180x15, 0 ms, 1 word, en-US) at 168,64 360x30 on screen; spoken') == 1, T.dump())
         o:activate(2)
+        assert(#S.clicks == 0, "the click waits for the read's answer")
+        T.deliver()
         assert(T.lastClick() == "348,79", "the middle of 168,64-528,94: " .. T.lastClick())
         S.where = nil
         local clicks = #S.clicks
@@ -317,8 +322,9 @@ fn regions_and_name_regions_scale_and_may_be_functions() {
         -- A name read from a scaled region, on arrival.
         o.focus = 2
         T.tab()
-        local last = S.recognized[#S.recognized]
+        local last = S.focusReads[#S.focusReads].regions[1]
         assert(last[1] == 160 and last[2] == 130 and last[3] == 200 and last[4] == 150, table.concat(last, ","))
+        T.deliver()
         assert(S.speech[#S.speech].text == "Name, button", S.speech[#S.speech].text)
     "##);
 }
@@ -365,7 +371,9 @@ fn tabs_toggles_and_hover_points_scale_too() {
 }
 
 /// An overlay that never calls O:scale is placed exactly as before: no rounding, a fractional
-/// frame included, and toScreen answers the plain sum.
+/// frame included, and toScreen answers the plain sum. A region read with such a frame covers the
+/// pixels host.ocr.recognize covered: its corners cut toward zero, which that call's loose reading
+/// did, and which host.ocr.read, reading corners strictly, would otherwise refuse.
 #[test]
 fn an_overlay_without_a_scale_is_placed_exactly_as_before() {
     run(r##"
@@ -379,15 +387,17 @@ fn an_overlay_without_a_scale_is_placed_exactly_as_before() {
         local c = S.clicks[1]
         assert(c[1] == 110.5 and c[2] == 70.25, "no rounding without a scale: " .. c[1] .. "," .. c[2])
         o:activate(2)
-        local r = S.recognized[1]
-        assert(r[1] == 111.5 and r[2] == 71.25 and r[3] == 130.5 and r[4] == 90.25, table.concat(r, ","))
+        local r = S.focusReads[1].regions[1]
+        assert(r[1] == 111 and r[2] == 71 and r[3] == 130 and r[4] == 90, table.concat(r, ","))
+        T.deliver()
         c = S.clicks[2]
         assert(c[1] == 120.5 and c[2] == 80.25, "the old centre, origin + floor(middle): " .. c[1] .. "," .. c[2])
         local x, y = o:toScreen(10, 20)
         assert(x == 110.5 and y == 70.25)
         assert(T.count("[scale]") == 0 and T.count("[place]") == 0, T.dump())
-        assert(T.logged('[read] \'Value\' = "" (region 11,21 19x19, 0 ms, 0 words)'),
-          "the read line as it always was: " .. T.dump())
+        assert(T.logged('[read] \'Value\' = "" (region 11,21 19x19, 0 ms, 0 words, en-US): the recogniser read nothing; spoken'),
+          "the read line as it always was, with what became of the read: " .. T.dump())
+        assert(S.speech[#S.speech].text == "Value, button, no text", T.said())
     "##);
 }
 

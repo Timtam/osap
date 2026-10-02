@@ -543,6 +543,12 @@ pub struct OcrWorker<S = OcrShot> {
     /// Runs first on each of the two threads: WinRT's apartment on Windows, the recognise
     /// thread's quality of service on macOS.
     pub init_thread: fn(OcrThread),
+    /// Runs on the recognise thread once it has read the languages, before its first job, with
+    /// the language a read without `lang` is made in: the recogniser's first pass, made here so
+    /// that the first read does not pay for it, and said in the log. On the hang clock, like a
+    /// job. On macOS one Vision pass over a line of printed words, after the warm-up on a thread
+    /// of its own has ended (`ocr::warm_up_recognise`); nothing on Windows.
+    pub warm_up: fn(Option<&str>),
     /// Photographs `regions` through the source, at once: all of them from one moment. Returns
     /// the pixels and roughly how many bytes they hold. One failed region fails in its own slot.
     pub capture: fn(&[(i32, i32, i32, i32)], CaptureSource) -> (S, usize),
@@ -578,6 +584,7 @@ impl OcrWorker {
         OcrWorker {
             present: false,
             init_thread: |_| {},
+            warm_up: |_| {},
             capture: |_, _| (OcrShot::default(), 0),
             recognise: |_, regions, _| regions.iter().map(|_| Err(NO_RECOGNISER.to_string())).collect(),
             languages: crate::ocr::lang::Languages::default,

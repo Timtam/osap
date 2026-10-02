@@ -167,9 +167,10 @@ moment it is known, so a pass that kills the process keeps everything before it:
    compute devices Core ML lists and the ones Vision offers text recognition, per stage (both
    from macOS 14 on).
 2. **First passes**, each in a process of its own that the benchmark starts: after the
-   application's own warm-up (one accurate pass over six dark bars, on a thread of its own),
-   after a warm-up over a line of words, and with none — then the first real pass on another
-   thread, and the pass after it. One process comes first and is not counted, so that the counted
+   application's own warm-up (one accurate pass over a line of printed words, the picture
+   `line@1x`, on a thread of its own), after the warm-up it made until 2026-10 (the same pass
+   over six dark bars), and with none — then the first real pass on another thread, and the pass
+   after it. One process comes first and is not counted, so that the counted
    ones all find the file cache warm, and the order of the three is turned by one each round.
 3. **Probes**: each variant that calls what no Mac has run for this application yet — request
    revision 2 or 3, a compute device — runs one pass in a process of its own first. One that dies

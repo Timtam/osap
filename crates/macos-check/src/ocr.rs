@@ -38,3 +38,8 @@ pub mod snap_queue;
 /// resolve here too), the statistics and what it prints — which the macOS half names.
 #[path = "../../host/src/ocr/bench.rs"]
 pub mod bench;
+
+/// What a recognition cost, as the log says it — the wording and the arithmetic of the macOS
+/// recogniser's cost lines, which `backend/macos/ocr.rs` names.
+#[path = "../../host/src/ocr/cost.rs"]
+pub mod cost;

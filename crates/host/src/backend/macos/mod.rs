@@ -84,10 +84,15 @@ impl MacBackend {
         // first tick at which Accessibility is granted — after the GUI is up, and never while
         // the Accessibility dialog may be on screen (see `perm::request_screen_recording_once`).
         perm::request_screen_recording_once();
-        // Vision loads its model on the first request — half a second to two seconds — and
-        // `ocr` runs on the thread that carries the keyboard. Warming it on a background
-        // thread now is the difference between a first read-out that is merely slow and one
-        // that stalls the pump long enough for the system to switch off the event tap.
+        // Vision's first pass in a process costs what no later one does — the warm-up over bars
+        // it made until 2026-10 took 0.2–0.33 s on a Mac mini M1 and 1.7–1.8 s on an Intel
+        // MacBook Air — and `ocr` runs on the thread that carries the keyboard. Warming it on a
+        // background thread now is meant to be the difference between a first read-out that is
+        // merely slow and one that stalls the pump long enough for the system to switch off the
+        // event tap; whether a first pass on the event loop costs that again is open (TODO.md).
+        // Before the recognise thread starts: its own warm-up, once it has read the languages,
+        // waits for this one to end (`ocr::warm_up_recognise`), and the two lines time a first
+        // pass in the process and one on another thread apart.
         ocr::warm_up();
         // Which key types which letter under the user's keyboard layout, before the first hotkey
         // is registered on one: a letter in a spec is the key that types it, as on Windows.
@@ -244,6 +249,7 @@ impl Backend for MacBackend {
         super::OcrWorker {
             present: true,
             init_thread: ocr::thread_init,
+            warm_up: ocr::warm_up_recognise,
             capture: ocr::capture_for_read,
             recognise: ocr::recognise_shot,
             languages: ocr::languages,

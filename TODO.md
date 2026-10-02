@@ -6363,8 +6363,9 @@ that is built; what the application reads and says is unchanged.
         picture right — above all `rev2` and `cpu`/`gpu` on the Intel leg, and `mth-0.25`,
         `reuse`, `target-48` and `fast` everywhere. Only data: the fast model's place last in the
         ladder is a decision, not a finding.
-      - `first passes`: the first real pass after the bars warm-up against the one after a word
-        warm-up and the one with none — do the bars warm the recogniser at all?
+      - `first passes`: the first real pass after the former bars warm-up against the one after
+        the application's word warm-up and the one with none — did the bars warm the recogniser
+        at all, and does the line of words?
       - `threads`: the first pass on a fresh thread, the process warm — as dear as a first pass in a
         process (a cost per thread) or as cheap as a warm one? And two threads at once against one.
       - `idle`: 2, 10 and 30 s on the known thread and on a fresh one, against warm.
@@ -6380,9 +6381,146 @@ that is built; what the application reads and says is unchanged.
       only the M1 the figures with a Neural Engine. Read the same lines. Once that has run,
       `--long-idle` on the Air, unattended, for the minutes of idle.
 - [ ] **What it does not answer**: capture on a Retina screen, heat over a session, the load of a
-      DAW, real plug-in text. The application's own log cannot answer the benchmark's questions on
-      real fields yet (Vision passes per read, two passes at once, the first pass per process
-      against per thread): a change of its own.
+      DAW, real plug-in text. The application's own log answers the benchmark's questions on real
+      fields since the change below (Vision passes per read, two passes at once, the first pass
+      per process against per thread).
+
+## Text recognition on the Mac: the logs, the warm-up, focus reads off the loop (2026-10-01)
+
+The maintainer's decisions on the assessment of why a read on the tester's Intel MacBook Air took
+ten times what it takes on Windows: build the items that change nothing that is read — logs that
+let the next ordinary session answer the open questions, a warm-up over real words that is also a
+self-test, a warm-up on the recognise thread, the measured costs in the docs — and move the
+overlay runtime's focus reads off the event loop. Not now: anything that makes Intel faster
+(revision 2, the budget before the second rung, the fast model earlier) waits for the first
+`ocr-bench` CI numbers; no recognition setting was changed.
+
+- [x] **The cost lines** (`backend/macos/ocr.rs`; their wording and arithmetic in `ocr/cost.rs`,
+      tested on Windows). The first recognition in the process and the first on each thread — one
+      line for a recognition that is both — with how long Vision had been idle before it in the
+      process and on that thread, or that a pass of another thread was running when it began, and
+      whether another pass ran beside it — the old line called the first on every thread "Vision's
+      model load". A recognition of 100 ms or more, at most one line per region every 10 s on each
+      thread: its capture, and each Vision pass with its rung (`as captured`, `tight crop`, `whole
+      region`, `enlarged`, `fast model`), its time, its words, and `another pass beside it` when
+      another pass ran in the process at any moment of it (a count of the passes in Vision, around
+      `run_vision`); for a `host.ocr.read` the 100 ms are the recognition's alone (`picture taken
+      apart`, its capture in the `[ocr]` line). The `[ocr] … waited` line names its regions.
+      `[env]` names the processor (`cpu`, on Windows too: CPUID's brand string,
+      `GetLogicalProcessorInformation`, `GetActiveProcessorCount`; on a Mac the `_max` counts) and
+      the revision a request carries (`vision`).
+- [x] **The warm-up reads a line of printed words** — `line@1x`, the benchmark's picture, so its
+      "word" warm-up is the application's — and says whether Vision read it right, how many of its
+      words it read right, or that it read nothing (`… but read NOTHING in its test line …`: a
+      recogniser answering empty, as a report of macOS 27 has it; only that is an alarm). Its
+      boxes are placed in the picture, so the words come back in reading order. Its thread is named
+      `ocr-warm-up`. The recognise thread makes the same pass once it has read the languages and
+      the `ocr-warm-up` pass has ended (`cost::Gate`, no timer), in the language of its reads,
+      before its first job and on the hang clock of one: a warm-up that hangs has reads refused
+      with the reason after 5 s (`OcrWorker::warm_up`; nothing on Windows). One after the other,
+      so the first line times a first pass in the process and the second a first pass on another
+      thread of a warm process. The bars are the benchmark's alone now.
+- [x] **Docs**: docs/api/ocr.md's macOS sections give the measured costs per machine (Mac mini M1,
+      the Intel Air, the CI's arm64 runners), the warm-up and the cost lines; ocr.rs no longer
+      cites Apple guidance of "around 32 px" (no Apple source was found; Apple documents only the
+      relative `minimumTextHeight`), and the warm-up's timings are the measured ones — of the
+      warm-up over bars, said so; what the logs only suggest (two passes for the Instrument field,
+      a second pass for a lone digit) is said as probable, with the line that will tell.
+- [x] **The overlay runtime's focus reads off the event loop.** An OCR control's value region and
+      a control's `ocrLabel` are one `host.ocr.read` per announcement (one picture for both), under
+      one key per overlay (`"com.platform.overlay focus N"`), in the user's language; the
+      announcement is one sentence — name, text, type word, key, value, a toggle's state and hint,
+      as before — said when the answer comes, and only while it is still true: not `"stale"` or
+      `newer`, the overlay active, on the same window, in the same stay, the focus where it was, no
+      key of the overlay's own since (`ownKey` counts them), no other announcement since, no menu
+      open over it now or opened since (`_menuChange` counts them). `"blank"`/`"none"` say the
+      `fallback` or "no text", as an empty read did; `"failed"` says "cannot be read now"; a read
+      refused at the call is said at once without a value; a region turned around is not read and
+      says what an empty read said; lines are said joined with a space. Activating an OCR button
+      clicks after the sentence, once the answer is in — the order it had on the loop: the value
+      from before the click, the sentence not cutting off what the click opens, an `opensMenu`
+      press counted at its click so its menu comes after the value — and only while the overlay is
+      where the key was pressed and no key of its own came since (logged when not). An OCREdit's
+      focus click likewise, after its sentence, while the focus is still on it. A toggle's watch
+      and the arrival announce nothing over a key of the overlay's own that came after them.
+      Corners are cut toward zero as `recognize` read them. Every answer is one `[read]` line with
+      what became of it, the words the recogniser placed and those placed by estimate (Windows's
+      second recogniser) counted apart, and the language. Scenarios:
+      `overlay_focus_read_tests.rs`; the other harnesses answer these reads by themselves
+      (`T.autoFocusReads`). ik-on-ear's "Virtual speaker", a static text whose `text` read a fixed
+      region with `recognize`, is a read-only OCR button now (`fallback = "not shown"`).
+- [ ] **The next ordinary Mac session** (sforzando on the Intel Air, with this build) answers, from
+      the log alone: how many passes the Instrument field takes (`ocr: a slow read … tight crop …;
+      whole region …`); whether passes ran at once (`another pass beside it`); whether the
+      expensive first read is per process, per thread or after a pause (the two warm-up lines, the
+      first-recognition lines with their idle times); which processor the Air has (`cpu`); the
+      revision (`vision`); whether both warm-ups read their test line.
+- [ ] **Whether the recognise thread's warm-up earns its cost**: it runs after the warm-up on
+      `ocr-warm-up` has ended, and reads asked in the first seconds wait for both — up to about
+      1.8 s on the Air for the first, and for the second as long again if a first pass is a cost
+      per thread. Its line's time answers that: dear, and it is worth its wait; as cheap as a warm
+      pass, and the first pass is a cost per process — then it can go again, and the event loop's
+      first synchronous read needs no warm-up of its own either. `ocr-bench threads` asks the same
+      on fixed pictures.
+- [ ] **The focus reads off the loop, live**: on the Air — the sentence as late as the read, but no
+      stall of the keys and no tap switched off by OCR (the `[read]` line's `ms` against the
+      `[focus]` line's); on Windows with NVDA — Tab and Return through sforzando's and a Kontakt
+      library's OCR buttons, the sentence as before, nothing said twice, Return's sentence before
+      what its click opens (sforzando's menus: the value, then the menu), Komplete Kontrol's "Save
+      as" with the caret in the field after its sentence. And whether any answer is dropped that
+      should have been said (`not spoken: …`), or a click (`not clicking — …`). On the Air at
+      plug-in entry: an overlay brought to the front by the landmark poll asks its arrival's read
+      from a timer, so as a background read — does it wait behind the detection reads of entry
+      (up to 4.8 s there) before the arrival is said? The `[read]` line's `ms` says.
+- [ ] **A key between an OCR button's press and its answer drops the press's click** (logged).
+      Chosen because a click after the user moved on — a menu opening over the control they went
+      to — cannot be undone by pressing again; the other choice, the image button's, clicks while
+      the overlay is on the same window. The price: Return twice inside one read (on the Air,
+      within half a second) clicks once. For the maintainer to confirm, or to turn the other way.
+- [ ] **A press's watch and the arrival over a key**: a hotspot toggle's or graphical toggle's
+      announcement after a press, and the arrival's, are not made when a key of the overlay's own
+      came after them; a stepper's (`announceWhenChanged`) still is, while the focus is on it —
+      with a held arrow it says each value it sees settle, as it always did. Whether held keys
+      there want the same rule is open.
+- [ ] **The language of a focus read on a Mac** is now the user's first one Vision reads, where
+      `recognize` gave Vision none. Whether `de-DE` reads a plug-in's English labels and values
+      ("64", "DEF", "-3.0 dB") as Vision's default did is not measured: no tester has had German
+      first (the Air resolves to `en-US`). On Windows both were the user's first installed OCR
+      language.
+- [ ] **Not measured, and so not in the API doc**: ScreenCaptureKit's capture on Apple silicon
+      (macOS 15.2 and later; the M1 session captured with `CGWindowListCreateImage`); any Apple
+      silicon newer than the M1 (an M2 figure exists only in an earlier tester's log that is not
+      here); the idle curve past the M1's 5 s and the Air's minutes (`ocr-bench --long-idle`); two
+      Vision callers at once beyond the Air's few readings (1.2 to 2 times); the Air under
+      `ocr-bench`. The warm-up over words, on any Mac: its time, and whether Vision reads its line
+      right — `line@1x`, 12 px Aileron, never read on a Mac; the first CI run's `pipeline | prod |
+      line@1x` row and the warm-up lines of the `newer-macos` job's log are the first evidence.
+      "One accurate pass about 150 ms" on the Air is worked out (a read less its capture), not
+      timed; the slow-read lines time it.
+- [ ] **The modules' own synchronous reads, not moved** — each is not a focus announcement the
+      runtime makes, or needs more than the runtime's pattern:
+      - `modules/kontakt/src/actions.luau:265`, `invokeMenuItem`: reads the open file menu to find
+        a row, then clicks it, in a timer. Read-then-click, not an announcement; moving it puts the
+        click in the read's callback, with guards of its own (the menu still open, the overlay on
+        the same window). Worth doing; a change of its own.
+      - `modules/vps-avenger/src/main.luau:170`, `nameNow`: the preset's name before a ◀ or ▶
+        click, which has to be the name before the click (the module's own comment); a read whose
+        callback makes the click would do it, and changes when the click is made.
+      - `modules/sforzando/src/main.luau:186`: the wordmark on Windows's own-control path, inside
+        an `identify` that answers a boolean, once per control; the Mac's panel path is already off
+        the loop (`wordmarkOnPanel`).
+      - `modules/ik-on-ear/src/browsers.luau:421` (the search field, an editable custom button) and
+        `modules/melodyne/src/main.luau:860` (`readPosition`, which parses what it reads and reads
+        again): `text` providers, which the runtime calls synchronously for their string. Off the
+        loop they need the runtime to read a region for them with the focus read, or an
+        asynchronous provider — a decision about the runtime's API. (ik-on-ear's virtual speaker
+        was one too; a plain read of a fixed region, it is a read-only OCR button now.)
+      - `modules/ik-on-ear/src/browsers.luau:749` (`relearnGrid`), `modules/melodyne/src/main.luau:
+        754` and `:789` (`readSelection`, the read-out watcher's poll, eight times a second,
+        comparing each reading with the last), `:988` (`beatsPerBar`, once per input epoch, inside
+        the announcement of a move), `:1585` and `:1633` (calibration diagnostics): polls and
+        helpers whose callers want the answer at once; each would be restructured around a
+        callback.
 
 ## Dev tools
 

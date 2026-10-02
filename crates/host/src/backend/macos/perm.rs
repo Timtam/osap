@@ -1017,6 +1017,24 @@ pub fn environment_report() -> Vec<(String, String)> {
             None => "no (sysctl.proc_translated absent)".to_string(),
         },
     );
+    // The processor, which `hw.model` does not name: a MacBookAir9,1 is a two-core i3 or a
+    // four-core i5 or i7, and what a text recognition costs on it depends on which. The two kinds
+    // of core of Apple silicon are counted apart where the system has them. The `_max` counts are
+    // the machine's; the plain ones are what the current power mode makes available.
+    let count = |name: &str| sysctl_i32(name).and_then(|v| u32::try_from(v).ok());
+    let levels = count("hw.perflevel0.physicalcpu_max").zip(count("hw.perflevel1.physicalcpu_max"));
+    push(
+        "cpu",
+        crate::ocr::cost::cpu_text(
+            sysctl_string("machdep.cpu.brand_string").as_deref(),
+            count("hw.physicalcpu_max").or_else(|| count("hw.physicalcpu")),
+            count("hw.logicalcpu_max").or_else(|| count("hw.logicalcpu")),
+            levels,
+        ),
+    );
+    // The Vision text-recognition revision a request of this application carries here, which its
+    // code leaves at Vision's default, and the revisions this macOS lists (`ocr::vision_report`).
+    push("vision", super::ocr::vision_report());
 
     // --- displays --------------------------------------------------------------------
     // The whole port assumes one point of AX geometry equals one pixel of a capture, and

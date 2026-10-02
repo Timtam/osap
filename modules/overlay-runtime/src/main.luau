@@ -130,6 +130,12 @@ function O.new(label)
       -- How many times the overlay has come to the front: one more on every _activate, so a
       -- reply asked for in one stay in front can tell it is not in that stay any more.
       _stay = 0,
+      -- How many of its own keys have reached it (ownKey), how many announcements it has begun
+      -- (speakControl) and how many times a menu has opened over it (_menuChange): an answer to a
+      -- read asked before any of them moved on is not spoken.
+      _keys = 0,
+      _said = 0,
+      _menuOpens = 0,
       -- Token of the dynamically (re)captured Space key, or false. Space activates the
       -- focused control like Return, but is released while an editable field is focused
       -- so the user can type spaces into it — see _syncSpaceCapture.
@@ -1777,6 +1783,48 @@ local function forLog(text)
   return shown
 end
 
+-- One `host.ocr.read` key per overlay for what its announcements read — a control's value
+-- region and its `ocrLabel` — so that a later announcement's read replaces one that has not
+-- started recognising yet. Numbered like the pass-through's keys (readUnnamedStop, below), and
+-- reserved with them: a module does not use keys that begin "com.platform.overlay ".
+local focusReadKeys = 0
+
+-- Corners as host.ocr.read takes them, from corners as host.ocr.recognize took them: each cut
+-- toward zero, which is what that call's loose reading did, so a focus read covers exactly the
+-- pixels it always covered — an unscaled overlay's fractional frame included. nil when nothing is
+-- left: corners turned around, or under one across or down.
+local function readCorners(r)
+  local function cut(v) return v < 0 and math.ceil(v) or math.floor(v) end
+  local x1, y1, x2, y2 = cut(r[1]), cut(r[2]), cut(r[3]), cut(r[4])
+  if x2 <= x1 or y2 <= y1 then return nil end
+  return { x1, y1, x2, y2 }
+end
+
+-- Text a reading says, as one phrase: its rows joined with a space. host.ocr.read joins rows with
+-- a line break, and a read-out of two lines is still one value to say.
+local function oneLine(text)
+  return (text:gsub("%s*[\r\n]+%s*", " "))
+end
+
+-- What an OCR control's value says, from its region's reading (nil: a region with nothing of it
+-- left on screen). Text is said as read. A region with nothing drawn in it, or nothing the
+-- recogniser read, says the control's `fallback` — "no text" without one — as an empty read said
+-- before the read moved off the event loop. A read that FAILED says "cannot be read now", as a
+-- region that cannot be placed does: "no text" would describe a read that was never made.
+local function valueWords(c, reading)
+  if reading == nil then return c.fallback or "no text" end
+  if reading.status == "text" and reading.text ~= "" then return oneLine(reading.text) end
+  if reading.status == "failed" then return "cannot be read now" end
+  return c.fallback or "no text"
+end
+
+-- What a reading's `[read]` line says after its rectangle, for a reading that is not text.
+local READ_NOTE = {
+  blank = "nothing drawn there",
+  none = "the recogniser read nothing",
+  stale = "not recognised",
+}
+
 -- `queued` says this announcement was not asked for by a keypress, so it must not cut off
 -- whatever is already being said.
 --
@@ -1791,9 +1839,18 @@ end
 -- itself off is VoiceOver's decision (see `speech/voiceover.rs`), so this fixes the case
 -- where both lines are still ours — which is this one, the two being about 350 ms apart —
 -- and cannot promise anything about a line VoiceOver has already taken.
-local function speakControl(self, index, moveMouse, withHint, queued)
+--
+-- `andThen(placed)` is what an activation does once an OCR control's sentence is settled — said,
+-- or dropped as no longer true — and at once when there was nothing to read or the read was
+-- refused: the OCR button's click (see activate), which so comes after the value it said, as it
+-- did while the read held the event loop. `placed` says whether the value region could be placed
+-- for the read. Only an OCR control's activation passes it.
+local function speakControl(self, index, moveMouse, withHint, queued, andThen)
   local c = self.controls[index]
   if not c then return end
+  -- Every announcement counts, whatever it says: an answer to a read asked for an earlier one
+  -- describes a moment that has been talked over since (see the read below).
+  self._said += 1
   -- A tab control announces WHICH tab is current, then that it is a tab control (so the
   -- user knows Left/Right — or Ctrl+Tab, Ctrl+number — switch it). Its current tab's
   -- controls are the ones Tab then steps into (see isFocusable's `when` gating).
@@ -1830,20 +1887,17 @@ local function speakControl(self, index, moveMouse, withHint, queued)
   -- sections for another — same buttons, same pixels, different names. A fixed label is
   -- then confidently wrong, which is worse than slow: it tells a user who cannot see the
   -- screen that they toggled something they did not. Falls back to the static label when
-  -- OCR reads nothing, so a failed read never leaves a control nameless.
-  local label = c.label or ""
-  if c.ocrLabel then
-    -- A name region that cannot be placed now leaves the static label, as a read of nothing does.
-    local region = regionOf(self, c, "ocrLabel")
-    if region then
-      local r = host.ocr.recognize({ region = region })
-      if r and r.text and r.text ~= "" then label = r.text end
-    end
-  end
-  local parts = { label }
+  -- OCR reads nothing, so a failed read never leaves a control nameless. Read with the value,
+  -- below. A name region that cannot be placed now leaves the static label, as a read of nothing
+  -- does.
+  local labelRegion, labelAr = nil, nil
+  if c.ocrLabel then labelRegion, labelAr = regionOf(self, c, "ocrLabel") end
+  -- Everything the sentence says between the name and the value, worked out now, at the key,
+  -- as it always was: whatever the read takes, it describes this moment.
+  local rest = {}
   if c.text then
     local ok, v = pcall(c.text, self)
-    if ok and v ~= nil and v ~= "" then parts[#parts + 1] = tostring(v) end
+    if ok and v ~= nil and v ~= "" then rest[#rest + 1] = tostring(v) end
   end
   -- A `readOnly` OCR control is NOT a button, and must not say it is.
   --
@@ -1860,13 +1914,13 @@ local function speakControl(self, index, moveMouse, withHint, queued)
   -- has had this for the same reason (a row of tool icons is not "a tab control").
   local tl = c.typeLabel or TYPE_LABEL[c.kind]
   if c.kind == "ocr" and c.readOnly then tl = "" end
-  if tl ~= "" then parts[#parts + 1] = tl end
+  if tl ~= "" then rest[#rest + 1] = tl end
   -- The KEY, spoken on arrival. Without it a hotkey is only discoverable by being told, and
   -- the whole point of these overlays is that a plug-in with no accessible tree can still be
   -- learned from itself. Only on a focus read — repeating it when the user has just pressed
   -- the key is noise, and they plainly know it. A key the host refuses is not said: it is never
   -- registered, and the bind-time report has named it in the log.
-  if moveMouse and c.hotkey and not hotkeyRefusal(c.hotkey) then parts[#parts + 1] = spokenKey(c.hotkey) end
+  if moveMouse and c.hotkey and not hotkeyRefusal(c.hotkey) then rest[#rest + 1] = spokenKey(c.hotkey) end
   -- The region is placed first: a region function with no answer, or a scaled overlay with no
   -- factor, has nothing to read, and says "cannot be read now" — not "no text", which would
   -- describe a read that was never made.
@@ -1874,57 +1928,26 @@ local function speakControl(self, index, moveMouse, withHint, queued)
   if (c.kind == "ocr" or c.kind == "ocredit") and c.region then
     region, ar = regionOf(self, c)
     if not region then
-      parts[#parts + 1] = "cannot be read now"
-      host.log.info(string.format("[read] '%s' not read: %s", tostring(label), tostring(ar)))
+      rest[#rest + 1] = "cannot be read now"
+      host.log.info(string.format("[read] '%s' not read: %s", tostring(c.label or ""), tostring(ar)))
     end
   end
-  if region then
-    if moveMouse and self.hoverToRead then
-      -- Move the mouse onto the control on focus — only for overlays that opt in.
-      -- Some plugin UIs reveal the value on hover; others (like sforzando) show a
-      -- *different* value while hovered, so this is off by default.
-      local hx, hy = rectCentre(self, c, ar)
-      if hx then host.input.move(hx, hy) end
-    end
-    local t0 = host.now and host.now() or 0
-    local r = host.ocr.recognize({ region = region })
-    local ms = (host.now and host.now() or 0) - t0
-    parts[#parts + 1] = (r.text ~= "" and r.text) or c.fallback or "no text"
-    -- The words the recogniser returned, logged per read, for the same reason as the gbutton
-    -- line below. A read-out that said "550." where the screen showed "DEF" left only its
-    -- timing in the log, and timing cannot tell a dialog's pixels over the region from a
-    -- font-size change from the recogniser itself. The region is the authored one, in content
-    -- coordinates, so the line can be held against the module's source; an empty read is
-    -- logged as "" rather than skipped, because reading nothing is the case being reported.
-    -- Reads here follow a keystroke — a focus step or an activation — never a timer tick, so
-    -- one line per read is one line per key. A watcher re-reading the same region at 500 ms
-    -- would have to gate this on the text changing, or write two lines a second for nothing.
-    local shown = forLog(r.text)
-    local words = r.words and #r.words or 0
-    -- In a scaled overlay the authored numbers are not where the read was made, so the screen
-    -- rectangle is added: the one a calibration picture can be held against.
-    host.log.info(string.format(
-      "[read] '%s' = \"%s\" (region %s,%s %sx%s, %d ms, %d %s)%s",
-      tostring(label), shown, tostring(ar[1]), tostring(ar[2]),
-      tostring(ar[3] - ar[1]), tostring(ar[4] - ar[2]),
-      ms, words, words == 1 and "word" or "words",
-      scaledFor(self, c) and string.format(" at %d,%d %dx%d on screen", region[1], region[2],
-        region[3] - region[1], region[4] - region[2]) or ""
-    ))
-    -- An OCREdit drops the caret into the real edit control on focus, so the user can type
-    -- to change the value right away. Read first (clean), then click. `moveMouse` is true
-    -- only on a focus read, so navigating away doesn't re-click.
-    if c.kind == "ocredit" and moveMouse then
-      local cx, cy = rectCentre(self, c, ar)
-      if cx then host.input.click(cx, cy) end
-    end
+  if region and moveMouse and self.hoverToRead then
+    -- Move the mouse onto the control on focus — only for overlays that opt in.
+    -- Some plugin UIs reveal the value on hover; others (like sforzando) show a
+    -- *different* value while hovered, so this is off by default. Before the read is asked,
+    -- so its picture is taken with the pointer there.
+    local hx, hy = rectCentre(self, c, ar)
+    if hx then host.input.move(hx, hy) end
   end
+  -- What follows the value: a hotspot toggle's state, read off one pixel now, as it always was.
+  local after = {}
   if c.kind == "hotspottoggle" then
     local st = hotspotToggleState(self, c)
     if st then
-      parts[#parts + 1] = st
+      after[#after + 1] = st
       local h = withHint and hintFor(c, st) or nil
-      if h then parts[#parts + 1] = h end
+      if h then after[#after + 1] = h end
     end
   end
   -- The IMAGE-read values — a graphic toggle's state, a slider's position — are announced
@@ -1944,10 +1967,16 @@ local function speakControl(self, index, moveMouse, withHint, queued)
   -- control's state read out while the second one is focused, which would be a plain lie
   -- about what is in front of the user.
   local needsValue = c.kind == "gtoggle" or c.kind == "slider" or c.kind == "gbutton"
-  host.speech.output(table.concat(parts, ", "), { interrupt = not queued })
-  if needsValue then
-    local at = self.focus
-    local pinned = self:hwnd()
+  local at = self.focus
+  local pinned = self:hwnd()
+  -- The sentence, once its name and its value are known, and then an image-read value.
+  local function say(name, value)
+    local parts = { name }
+    for _, part in ipairs(rest) do parts[#parts + 1] = part end
+    if value then parts[#parts + 1] = value end
+    for _, part in ipairs(after) do parts[#parts + 1] = part end
+    host.speech.output(table.concat(parts, ", "), { interrupt = not queued })
+    if not needsValue then return end
     valueOf(self, c, function(value)
       -- The utterance the user actually hears, logged for the one control type whose value
       -- has been in dispute. Everything upstream said "hit"; the ear said "not found". Only
@@ -1966,6 +1995,144 @@ local function speakControl(self, index, moveMouse, withHint, queued)
         host.speech.output(h and (value .. ", " .. h) or value, { interrupt = false })
       end
     end)
+  end
+  -- THE READ IS OFF THE EVENT LOOP, and the sentence waits for it.
+  --
+  -- It was host.ocr.recognize, on the event loop, and on a Mac that loop also carries the
+  -- keyboard's event tap. An Intel MacBook Air (2020) spent 143 to 786 ms in each focus read of
+  -- sforzando, 1.5 s in the first, with every key, timer and hotkey of the application waiting
+  -- behind it, and a key reached the tap 854 ms late. Now the name and the value are read with
+  -- one host.ocr.read — one picture for both, so they agree — and the sentence is said when the
+  -- answer comes: as late as it was, but nothing waits for it. One sentence, as it always was,
+  -- not the name now and the value later: two lines that fast Tabs can cross.
+  --
+  -- The answer is spoken only while it is still about what is in front of the user — the
+  -- pass-through's unnamed stops are checked the same way (readUnnamedStop): not superseded by a
+  -- later announcement's read (`newer`, `"stale"`); the overlay still active, on the same window,
+  -- in the same stay in front; the focus where it was; no key of the overlay's own since (ownKey
+  -- counts them), no other announcement since (counted above); and no menu open over the overlay,
+  -- nor one opened since the read was asked and closed again (_menuChange counts them) — a menu
+  -- the plug-in put up itself, or a choice made in it, after which the value read is the one
+  -- from before. The overlay's own `opensMenu` press puts its menu up only after its sentence
+  -- (activate). Nothing waits on a timer: an answer is taken when it comes, or dropped as no
+  -- longer true.
+  --
+  -- What the read says, reading by reading: see valueWords. The language is the user's, as for
+  -- every host.ocr.read without `lang`; host.ocr.recognize without one used the platform's own
+  -- default, which on Windows is the same language and on a Mac was Vision's (English).
+  --
+  -- The words the recogniser returned are logged per read, for the same reason as the gbutton
+  -- line above. A read-out that said "550." where the screen showed "DEF" left only its timing
+  -- in the log, and timing cannot tell a dialog's pixels over the region from a font-size
+  -- change from the recogniser itself. The region is the authored one, in content coordinates,
+  -- so the line can be held against the module's source; an empty read is logged as "" rather
+  -- than skipped, because reading nothing is the case being reported. Reads here follow a
+  -- keystroke — a focus step or an activation — or arrival, never a timer tick, so one line per
+  -- read is one line per key. The words counted are the ones the recogniser placed; words whose
+  -- place the host estimated are counted apart (`approx`: on Windows the second recogniser's
+  -- answer, which is how a lone digit is read), as host.ocr.recognize's line told the two
+  -- recognisers apart by "0 words". The language the read was made in closes the brackets.
+  local labelAt = labelRegion and readCorners(labelRegion) or nil
+  local valueAt = region and readCorners(region) or nil
+  if region and not valueAt then
+    host.log.info(string.format("[read] '%s' not read: its region is empty on screen (%s,%s to %s,%s)",
+      tostring(c.label or ""), tostring(region[1]), tostring(region[2]), tostring(region[3]), tostring(region[4])))
+  end
+  local said, keys, stay, opens = self._said, self._keys, self._stay, self._menuOpens
+  -- After the sentence: an OCREdit drops the caret into the real edit control on focus, so the
+  -- user can type to change the value right away. Read first (clean), then click — once the read
+  -- is answered, so its picture is from before the click whatever the capture costs — and only
+  -- while the focus is still where the click belongs: the click is the focus's, and a focus that
+  -- has moved on, or a key of the overlay's own since, takes it along. `moveMouse` is true only on
+  -- a focus read, so navigating away doesn't re-click. Then the activation's continuation.
+  local function finish()
+    if region and c.kind == "ocredit" and moveMouse then
+      if self.active and self._stay == stay and self:hwnd() == pinned and self.focus == at
+        and self.controls[index] == c and self._keys == keys then
+        local cx, cy = rectCentre(self, c, ar)
+        if cx then host.input.click(cx, cy) end
+      else
+        host.log.info(string.format("[read] '%s': the focus moved on before the answer; not clicking into "
+          .. "the field", tostring(c.label or "")))
+      end
+    end
+    if andThen then andThen(region ~= nil) end
+  end
+  local entries = {}
+  if labelAt then entries[#entries + 1] = { name = "label", region = labelAt } end
+  if valueAt then entries[#entries + 1] = { name = "value", region = valueAt } end
+  if #entries > 0 then
+    if not self._focusReadKey then
+      focusReadKeys += 1
+      self._focusReadKey = "com.platform.overlay focus " .. focusReadKeys
+    end
+    local t0 = host.now and host.now() or 0
+    local ok, err = pcall(host.ocr.read, entries, { key = self._focusReadKey }, function(_, byName)
+      local ms = (host.now and host.now() or 0) - t0
+      local lr, vr = byName.label, byName.value
+      local name = c.label or ""
+      if lr and lr.status == "text" and lr.text ~= "" then name = oneLine(lr.text) end
+      local value = region and valueWords(c, vr) or nil
+      local why = nil
+      if (lr and lr.status == "stale") or (vr and vr.status == "stale") then
+        why = "a later announcement's read replaced it before it was recognised"
+      elseif (lr and lr.newer) or (vr and vr.newer) then
+        why = "a later announcement asked for another read"
+      elseif not self.active then
+        why = "the overlay is no longer active"
+      elseif self._stay ~= stay then
+        why = "the overlay left the front and came back since"
+      elseif self:hwnd() ~= pinned then
+        why = "the overlay is on another window now"
+      elseif self.focus ~= at or self.controls[index] ~= c then
+        why = "the focus has moved on"
+      elseif self._keys ~= keys then
+        why = "a later key reached the overlay"
+      elseif self._said ~= said then
+        why = "a later announcement was made"
+      elseif self:menuOpen() then
+        why = "a menu is open over the overlay"
+      elseif self._menuOpens ~= opens then
+        why = "a menu opened over the overlay since"
+      end
+      local outcome = why and ("; not spoken: " .. why) or "; spoken"
+      -- One line per region read: the name's first, when there is a value line to carry the outcome.
+      local function line(head, r, authored, onScreen, last)
+        local placed, estimated = 0, 0
+        for _, w in ipairs(r.words or {}) do
+          if w.approx then estimated += 1 else placed += 1 end
+        end
+        local note = READ_NOTE[r.status]
+        if r.status == "failed" then note = "the read failed (" .. tostring(r.error) .. ")" end
+        host.log.info(string.format(
+          "%s = \"%s\" (region %s,%s %sx%s, %d ms, %d %s%s%s)%s%s%s",
+          head, forLog(r.text), tostring(authored[1]), tostring(authored[2]),
+          tostring(authored[3] - authored[1]), tostring(authored[4] - authored[2]),
+          ms, placed, placed == 1 and "word" or "words",
+          estimated > 0 and string.format(", %d placed by estimate", estimated) or "",
+          (type(r.lang) == "string" and r.lang ~= "") and (", " .. r.lang) or "",
+          (onScreen and scaledFor(self, c)) and string.format(" at %d,%d %dx%d on screen", onScreen[1],
+            onScreen[2], onScreen[3] - onScreen[1], onScreen[4] - onScreen[2]) or "",
+          note and (": " .. note) or "", last and outcome or ""
+        ))
+      end
+      if lr then line(string.format("[read] '%s' name", tostring(c.label or "")), lr, labelAr, labelRegion, vr == nil) end
+      if vr then line(string.format("[read] '%s'", tostring(name)), vr, ar, region, true) end
+      if not why then say(name, value) end
+      finish()
+    end)
+    if not ok then
+      -- A read refused at the call: said at once, with what is known — the static name, and for a
+      -- value "cannot be read now" — and the reason in the log.
+      host.log.info(string.format("[read] '%s' could not be read: %s", tostring(c.label or ""), tostring(err)))
+      say(c.label or "", region and "cannot be read now" or nil)
+      finish()
+    end
+  else
+    -- Nothing to read: said now, as it always was. A value region with nothing of it left on
+    -- screen is answered as an empty read was.
+    say(c.label or "", region and valueWords(c, nil) or nil)
+    finish()
   end
 end
 
@@ -2028,8 +2195,9 @@ end
 -- announcement, and any millisecond here is one they wait with nothing to hear. The two
 -- halves cost for different reasons and want different fixes, so they are measured apart —
 -- SCAN is the `when` predicates over every control (a screen pixel or a UIA search, per
--- control, per step), ANNOUNCE is reading the focused control's state (an image search for
--- a graphic toggle, OCR for an `ocrLabel`, a pixel for a hotspot toggle).
+-- control, per step), ANNOUNCE is reading the focused control's state (a pixel for a hotspot
+-- toggle; an image search for a graphic toggle and a text read for an OCR value or an
+-- `ocrLabel` are only asked for here — the read's own time is in its `[read]` line).
 local function focusStep(self, advance, dir)
   local n = #self.controls
   if n == 0 then return end
@@ -2402,6 +2570,13 @@ function Overlay:_stepPassThrough(dir)
   return true
 end
 
+-- A press's late announcement — a toggle's state once it has settled — not made, because a key of
+-- the overlay's own came after the press: said in the log, as every announcement not made is.
+local function notAnnounced(self, c)
+  host.log.info(string.format("[watch] %s: '%s' not announced — a later key reached the overlay",
+    tostring(self.label), tostring(c.label)))
+end
+
 function Overlay:activate(index)
   local i = index or self.focus
   local c = self.controls[i]
@@ -2449,10 +2624,12 @@ function Overlay:activate(index)
   -- (newWindow) needs its starting point from before the menu can exist. A single point counts
   -- as a press only once it has been placed and checked, just before its click: a press whose
   -- opener is never clicked must not set the tests running, take newWindow's list again or use
-  -- up one of the control's menu shots. A sequence counts from its first step, and any other
-  -- control from its activation — its click is the module's own code.
+  -- up one of the control's menu shots. An OCR button counts likewise just before its click,
+  -- which waits for its read and may not be made (below). A sequence counts from its first step,
+  -- and any other control from its activation — its click is the module's own code.
   local onePoint = c.kind == "hotspot" and c.at ~= nil and not c.points
-  if c.opensMenu and not onePoint then self:_menuOpening(c) end
+  local ocrPress = (c.kind == "ocr" or c.kind == "ocredit") and c.region ~= nil
+  if c.opensMenu and not onePoint and not ocrPress then self:_menuOpening(c) end
   if c.kind == "hotspot" and c.points then
     -- Acknowledge at PRESS time, like every other control. Speaking after the last click
     -- instead would land hundreds of milliseconds late — indistinguishable from a key that
@@ -2546,14 +2723,48 @@ function Overlay:activate(index)
     -- centre (it sits over a clickable element), like ReaHotkey — unless it is `readOnly`
     -- (a pure value/label announcer, safe next to a destructive control). An OCREdit
     -- always clicks: activating it re-focuses the edit field for typing.
-    speakControl(self, i, false)
-    if c.kind == "ocredit" or not c.readOnly then
-      local cx, cy, why = ocrCenter(self, c)
-      -- Quiet: the read just said "cannot be read now" about the same region.
-      if not cx then return unplaced(self, c, why, true) end
+    --
+    -- The click comes AFTER the sentence, once the read is answered, in the order it had while
+    -- the read held the event loop: the value said is the one from before the click, however
+    -- long the picture takes; the sentence does not cut off what the click opens (a screen
+    -- reader's announcement of a dialog or a field — speech that interrupts stops it); and a
+    -- menu the click opens cannot be up before the value is said, so its answer is not dropped
+    -- for it. The click is the key's, so it is made only while the overlay is where the key was
+    -- pressed — active, on the same window, in the same stay, the control still its own — and
+    -- no other key of the overlay's own has come since: a user who pressed on has moved on, and
+    -- a click landing after that, a menu opening over the control they went to, is the mistake
+    -- pressing again cannot undo. A click not made is logged.
+    local clicks = c.kind == "ocredit" or not c.readOnly
+    local pinned, stay, keys = self:hwnd(), self._stay, self._keys
+    speakControl(self, i, false, nil, nil, function(placed)
+      if not clicks then return end
+      local why = nil
+      if not self.active then
+        why = "the overlay is no longer active"
+      elseif self._stay ~= stay then
+        why = "the overlay left the front and came back since"
+      elseif self:hwnd() ~= pinned then
+        why = "the overlay is on another window now"
+      elseif self.controls[i] ~= c then
+        why = "the control is not in the overlay any more"
+      elseif self._keys ~= keys then
+        why = "a later key reached the overlay"
+      end
+      if why then
+        host.log.info(string.format("[read] '%s': not clicking — %s", tostring(c.label), why))
+        return
+      end
+      -- The press counts here, just before its click, as a single point's does: newWindow's
+      -- starting point and a calibrating run's menu shots belong to the moment before the click.
+      if c.opensMenu then self:_menuOpening(c) end
+      local cx, cy, cwhy = ocrCenter(self, c)
+      -- Quiet when the read has just said "cannot be read now" about the same region.
+      if not cx then return unplaced(self, c, cwhy, not placed) end
       host.input.click(cx, cy)
-    end
+    end)
   elseif c.kind == "gtoggle" and c.region then
+    -- The press's keys, for its announcement below (see the hotspot toggle's).
+    local keys = self._keys
     -- Reveal first, for the same reason the state read does: a click aimed at a control
     -- inside a collapsed panel lands on the panel, not the control.
     ensureRevealed(self, c, function()
@@ -2562,7 +2773,12 @@ function Overlay:activate(index)
       host.input.click(cx, cy)
       -- Re-read the new state once the UI redraws. `withHint`: this is the transition, the
       -- one moment a state hint is worth hearing (see hintFor).
-      if host.timer then host.timer.after(150, function() speakControl(self, i, false, true) end) end
+      if host.timer then
+        host.timer.after(150, function()
+          if self._keys ~= keys then return notAnnounced(self, c) end
+          speakControl(self, i, false, true)
+        end)
+      end
     end)
   elseif c.kind == "gbutton" and c.image then
     host.log.info(string.format("[gbutton] '%s' activated", tostring(c.label)))
@@ -2672,7 +2888,13 @@ function Overlay:activate(index)
     -- announced correctly instead of early. A control that does not change at all — the
     -- already-chosen member of a radio group — is announced at the deadline, which is the
     -- truth about it.
+    --
+    -- And announced only while it is still the user's last word: a key of the overlay's own since
+    -- the press — a Tab on to the next toggle, a hotkey — has been answered by that key, and the
+    -- press's sentence would take its place, its read the place of that control's read (one key
+    -- for the overlay's announcement reads, see speakControl). Not announced, it is logged.
     if host.timer then
+      local keys = self._keys
       local say = function()
         local after = host.screen.pixel(px, py)
         local function name(q) return q and string.format("%d,%d,%d", q.r, q.g, q.b) or "?" end
@@ -2682,6 +2904,7 @@ function Overlay:activate(index)
           (before and after and before.r == after.r and before.g == after.g
             and before.b == after.b) and " (unchanged: the click changed nothing there)" or ""
         ))
+        if self._keys ~= keys then return notAnnounced(self, c) end
         speakControl(self, i, false, true)
       end
       self:watch({
@@ -2767,6 +2990,9 @@ end
 -- press, which has taken over from it already.
 local function ownKey(self, fn)
   return function(...)
+    -- Counted first, whatever the key does: a focus read's answer that arrives after it is
+    -- about a moment the user has moved on from (speakControl).
+    self._keys += 1
     local p = self._pick
     if not p or p.clicked then
       self:_menuOwnKey()
@@ -3563,6 +3789,10 @@ function Overlay:_activate()
     -- delay of 350 ms can be served at 800 without a single thing being "slow". Reported
     -- only when it overruns, because a punctual timer is not news.
     local asked = host.now and host.now() or nil
+    -- A key of the overlay's own before the announcement — a Tab in the first moments — has said
+    -- where the user is, with the key's own sentence, and the arrival's would take its place:
+    -- its read under the same key as that sentence's, its words queued and without the key.
+    local keys = self._keys
     host.timer.after(ANNOUNCE_DELAY, function()
       if asked then
         local late = host.now() - asked - ANNOUNCE_DELAY
@@ -3572,6 +3802,11 @@ function Overlay:_activate()
             tostring(self.label), late
           ))
         end
+      end
+      if self.active and self._keys ~= keys then
+        host.log.info(string.format("[activate] '%s': a key reached it before its arrival was announced; "
+          .. "not announcing the arrival", tostring(self.label)))
+        return
       end
       -- Queued, not interrupting: see `speakControl`. Nobody pressed a key to hear this.
       if self.active then
@@ -5454,6 +5689,9 @@ function Overlay:_menuChange(open, by)
   local now = host.now()
   st.open = open
   if open then
+    -- Counted, so that an announcement's answer can tell a menu that opened and closed again
+    -- while it was being read (see speakControl).
+    self._menuOpens += 1
     st.since, st.escape = now, nil
     -- Where the keyboard is when the menu is first seen: whether keys that pass through can
     -- reach the menu at all is the question the log could not answer (2026-09-26). Guarded: a

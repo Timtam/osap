@@ -16,10 +16,11 @@
 //!    name: a macOS before 14 does not have it, and importing it would stop the application from
 //!    starting there) and the ones Vision offers text recognition, per stage.
 //! 2. **First passes**, each in a process of its own (this executable again, `--child`): the
-//!    application's warm-up over its bars, one over a line of words, or none, on a thread of its
-//!    own; then the first real pass on another thread, which is what the event loop's first read
-//!    is in the application, and the pass after it. One process first that is not counted, so
-//!    that none of the counted ones meets a cold file cache, and the order turned each round.
+//!    application's warm-up over a line of words, the one it made until 2026-10 over six bars, or
+//!    none, on a thread of its own; then the first real pass on another thread, which is what the
+//!    event loop's first read is in the application, and the pass after it. One process first that
+//!    is not counted, so that none of the counted ones meets a cold file cache, and the order
+//!    turned each round.
 //! 3. **Probes**: each variant that calls what no Mac has run for this application (a request
 //!    revision, a compute device) runs one pass in a process of its own first. One that dies
 //!    there, or that Vision refuses, is left out of everything below.
@@ -50,18 +51,22 @@ use std::time::{Duration, Instant};
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, NSObjectProtocol, ProtocolObject};
-use objc2::{msg_send, sel, ClassType};
-use objc2_core_foundation::{CFData, CFRetained};
-use objc2_core_graphics::{CGColorRenderingIntent, CGDataProvider, CGImage};
+use objc2::sel;
+use objc2_core_foundation::{CFRetained, CGFloat, CGPoint, CGRect, CGSize};
+use objc2_core_graphics::{
+    CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo,
+    CGImageByteOrderInfo,
+};
 use objc2_core_ml::MLComputeDeviceProtocol;
-use objc2_foundation::{NSArray, NSIndexSet, NSProcessInfo, NSString};
+use objc2_foundation::{NSArray, NSProcessInfo, NSString};
 use objc2_vision::VNRecognizeTextRequest;
 
 use super::{
-    cgimage_to_rgba, content_margin, new_request, passes_on_this_thread, perform, recognize_captured,
-    render, run_vision, synthetic_page, upscale_toward, Ladder, Plan, ACCURATE, FAST, LADDER_BUDGET,
-    REVISION_OVERRIDE, TARGET_CONTENT_PX,
+    cgimage_to_rgba, content_margin, new_request, passes_on_this_thread, perform, picture_from_png,
+    recognize_captured, render, run_vision, supported_revisions, upscale_toward, warm_up_page, Ladder, Plan,
+    ACCURATE, FAST, LADDER_BUDGET, REVISION_OVERRIDE, TARGET_CONTENT_PX,
 };
+use crate::ocr::cost::{Capture, Stage};
 use crate::ocr::bench::{
     self as pure, Cell, Child, ChildResult, Device, Fixture, Grid, Idle, Options, Out, PipelineRow,
     Probe, Sample, Stats, Tweak, Warmup, FIXTURES, VARIANTS,
@@ -158,28 +163,11 @@ struct Picture {
 }
 
 /// The PNG decoded by CoreGraphics, at the size its entry says, and drawn once into a bitmap of
-/// its own: a capture reaches the pipeline as pixels, while an image backed by PNG data may be
-/// decoded again whenever it is read.
+/// its own, as the application's warm-up draws its picture (`picture_from_png`): a capture
+/// reaches the pipeline as pixels, while an image backed by PNG data may be decoded again
+/// whenever it is read.
 fn decode(f: &'static Fixture) -> Result<Handed, String> {
-    let data = CFData::from_static_bytes(f.png);
-    let provider = CGDataProvider::with_cf_data(Some(&data))
-        .ok_or_else(|| "CoreGraphics made no data provider for it".to_string())?;
-    // SAFETY: no decode array (null is documented as "none") and a live provider.
-    let png = unsafe {
-        CGImage::with_png_data_provider(
-            Some(&provider),
-            std::ptr::null(),
-            false,
-            CGColorRenderingIntent::RenderingIntentDefault,
-        )
-    }
-    .ok_or_else(|| "CoreGraphics did not decode it".to_string())?;
-    let got = (CGImage::width(Some(&png)), CGImage::height(Some(&png)));
-    if got != f.px() {
-        return Err(format!("it decoded at {}x{} px, not {}x{}", got.0, got.1, f.px().0, f.px().1));
-    }
-    let (image, buf) = render(&png, &Plan::identity(got.0, got.1))
-        .ok_or_else(|| "it could not be drawn into a bitmap".to_string())?;
+    let (image, buf) = picture_from_png(f.png, f.px())?;
     Ok(Handed { image, _buf: Some(buf) })
 }
 
@@ -427,17 +415,6 @@ fn conditions(out: &mut Out, when: &str) {
     ));
 }
 
-/// The revisions this macOS lists for text recognition.
-fn supported_revisions() -> Vec<usize> {
-    // Asked of VNRecognizeTextRequest's class: `supportedRevisions` is a class method, and the
-    // binding's `VNRequest::supportedRevisions()` would ask the base class.
-    // SAFETY: `+supportedRevisions` is on every request class from macOS 10.13 and returns an
-    // index set, or nil, which `Option` takes.
-    let set: Option<Retained<NSIndexSet>> =
-        unsafe { msg_send![VNRecognizeTextRequest::class(), supportedRevisions] };
-    set.map(|set| (1..=16).filter(|r| set.containsIndex(*r)).collect()).unwrap_or_default()
-}
-
 /// Core ML's own list of compute devices, looked up by name: `MLAllComputeDevices` exists from
 /// macOS 14, and an import of it would stop the application from starting on 12 and 13.
 fn all_compute_devices() -> Option<Vec<String>> {
@@ -545,28 +522,53 @@ fn run_child(exe: &Path, role: Child) -> Result<String, String> {
     })
 }
 
-/// The application's warm-up (`warm_up_in_pool`) on a thread of its own, waited for: one accurate
-/// pass with no language, over its bars or over a line of words. Its time, and whether it read
-/// anything. The thread asks for no quality of service, as the application's does not.
+/// A warm-up on a thread of its own, waited for: one accurate pass with no language, over the
+/// application's picture (`warm_up_page`, a line of printed words) or over the six bars it read
+/// until 2026-10. Its time, and whether it read anything. The thread asks for no quality of
+/// service, as the application's does not.
 fn warm_up_on_own_thread(words: bool) -> (f64, bool) {
     std::thread::spawn(move || {
         objc2::rc::autoreleasepool(|_| {
-            let line = if words { pure::fixture("line@1x").and_then(|f| decode(f).ok()) } else { None };
             let t = Instant::now();
-            let read = match (words, line) {
-                (true, Some(img)) => run_vision(&img.image, None, ACCURATE, &|_| (0, 0, 1, 1)),
-                (true, None) => None,
-                (false, _) => synthetic_page().and_then(|(img, buf)| {
-                    let r = run_vision(&img, None, ACCURATE, &|_| (0, 0, 1, 1));
-                    drop(buf);
-                    r
-                }),
-            };
+            let page = if words { warm_up_page().ok().map(|(img, buf, _)| (img, buf)) } else { bars_page() };
+            let read = page.and_then(|(img, buf)| {
+                let r = run_vision(&img, None, ACCURATE, Stage::WarmUp, &|_| (0, 0, 1, 1));
+                drop(buf);
+                r
+            });
             (ms_since(t), read.is_some_and(|(text, _, _)| !text.trim().is_empty()))
         })
     })
     .join()
     .unwrap_or((f64::NAN, false))
+}
+
+/// What the application's warm-up read until 2026-10: six dark bars on a light ground, 240x64 px,
+/// so that the text detector would pass something to the recogniser. Kept here for the first-pass
+/// comparison only — whether bars warm the recogniser at all is one of its questions.
+fn bars_page() -> Option<(CFRetained<CGImage>, Vec<u8>)> {
+    let (w, h) = (240usize, 64usize);
+    let bytes_per_row = w * 4;
+    let mut buf = vec![0u8; bytes_per_row * h];
+    let space = CGColorSpace::new_device_rgb()?;
+    let info = CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0;
+    // SAFETY: as in `render` — the buffer is sized to the geometry and outlives the context.
+    let ctx = unsafe {
+        CGBitmapContextCreate(buf.as_mut_ptr() as *mut core::ffi::c_void, w, h, 8, bytes_per_row, Some(&space), info)
+    }?;
+    CGContext::set_rgb_fill_color(Some(&ctx), 1.0, 1.0, 1.0, 1.0);
+    CGContext::fill_rect(Some(&ctx), CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(w as CGFloat, h as CGFloat)));
+    CGContext::set_rgb_fill_color(Some(&ctx), 0.05, 0.05, 0.05, 1.0);
+    for i in 0..6 {
+        CGContext::fill_rect(
+            Some(&ctx),
+            CGRect::new(CGPoint::new(24.0 + i as CGFloat * 32.0, 16.0), CGSize::new(8.0, 32.0)),
+        );
+    }
+    CGContext::flush(Some(&ctx));
+    let image = CGBitmapContextCreateImage(Some(&ctx))?;
+    drop(ctx);
+    Some((image, buf))
 }
 
 /// A first-pass child: the warm-up asked for, then the first two real passes on this thread, each
@@ -743,6 +745,7 @@ fn read_through_pipeline(p: &Picture, capture: Duration) -> Sample {
             f.h_pt,
             None,
             started,
+            Capture::Took(capture.as_secs_f64() * 1000.0),
             false,
             &Ladder::FULL,
         );
@@ -1171,8 +1174,8 @@ fn bench(opts: &Options) -> i32 {
         }
         for (warmup, results) in &children.by_kind {
             let label = match warmup {
-                Warmup::Bars => "after the application's warm-up (bars)",
-                Warmup::Word => "after a warm-up over a line of words",
+                Warmup::Bars => "after the former warm-up over bars",
+                Warmup::Word => "after the application's warm-up (a line of words)",
                 Warmup::Nothing => "with no warm-up",
             };
             let warmups: Vec<f64> = results.iter().filter_map(|r| r.warmup.map(|w| w.0)).collect();

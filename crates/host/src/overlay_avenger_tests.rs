@@ -123,8 +123,10 @@ end)
 do
   local read = T.host.ocr.read
   rawset(T.host.ocr, "read", function(what, opts, cb)
+    local n = #S.reads
     read(what, opts, cb)
-    S.reads[#S.reads].lang = opts and opts.lang
+    -- Only a read that stayed in S.reads: the runtime's focus reads go to S.focusReads.
+    if #S.reads > n then S.reads[#S.reads].lang = opts and opts.lang end
   end)
 end
 rawset(T.host.screen, "saveMarked", function(path, opts)

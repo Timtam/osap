@@ -142,7 +142,7 @@ local S = {
   ring = nil,       -- { { name, bounds? }, … }: the stops focusStep steps through
   ringAt = 0,       -- the stop the plug-in's keyboard focus is on; 0 before the first step
   focusSteps = 0,   -- host.element.focusStep calls
-  reads = {},       -- { region, key, cb, asked, answered } per host.ocr.read, in order
+  reads = {},       -- { region, regions, names, list, key, cb, asked, answered } per host.ocr.read
   readRaises = nil, -- a message host.ocr.read raises with, when set
 }
 T.S = S
@@ -263,20 +263,41 @@ T.host = strict("host", {
         bounds = b and { x = b.x, y = b.y, w = b.w, h = b.h } or nil }
     end,
   }),
-  -- host.ocr.read, asked and answered later (T.answer in overlay_passthrough_tests.rs). Its
-  -- arguments are checked as the host checks them — corners as whole numbers, not empty or
-  -- turned around; only lang, key and snapshot; a key that is a non-empty string — so a call the
-  -- host would refuse is refused here too.
+  -- host.ocr.read, asked and answered later (T.answer in overlay_passthrough_tests.rs, T.answerList
+  -- in overlay_focus_read_tests.rs). Its arguments are checked as the host checks them — corners
+  -- as whole numbers, not empty or turned around; a list of entries `{ name, region }` (or of
+  -- corners), names not used twice; only lang, key and snapshot; a key that is a non-empty string —
+  -- so a call the host would refuse is refused here too. A list is answered `(list, byName)`.
   ocr = strict("host.ocr", {
     read = function(what, opts, cb)
       if type(opts) == "function" then cb, opts = opts, nil end
-      assert(type(what) == "table" and #what == 4, "host.ocr.read: the scripted host reads corners { x1, y1, x2, y2 }")
-      for k = 1, 4 do
-        local v = what[k]
-        assert(type(v) == "number" and v == math.floor(v),
-          "host.ocr.read: corner " .. k .. " is not a whole number: " .. tostring(v))
+      assert(type(what) == "table", "host.ocr.read: what is not a table")
+      local list = type(what[1]) == "table"
+      local entries = list and what or { what }
+      assert(#entries >= 1 and #entries <= 64, "host.ocr.read: 1 to 64 regions")
+      local regions, names, seen = {}, {}, {}
+      for i, e in ipairs(entries) do
+        local r = e
+        if list and e.region ~= nil then
+          for k in pairs(e) do
+            assert(k == "name" or k == "region", "host.ocr.read: an entry field other than name and region: " .. tostring(k))
+          end
+          r = e.region
+          if e.name ~= nil then
+            assert(type(e.name) == "string" and not seen[e.name], "host.ocr.read: a name used twice or not a string")
+            seen[e.name] = true
+            names[i] = e.name
+          end
+        end
+        assert(type(r) == "table" and #r == 4, "host.ocr.read: the scripted host reads corners { x1, y1, x2, y2 }")
+        for k = 1, 4 do
+          local v = r[k]
+          assert(type(v) == "number" and v == math.floor(v),
+            "host.ocr.read: corner " .. k .. " is not a whole number: " .. tostring(v))
+        end
+        assert(r[3] > r[1] and r[4] > r[2], "host.ocr.read: corners empty or turned around")
+        regions[i] = { r[1], r[2], r[3], r[4] }
       end
-      assert(what[3] > what[1] and what[4] > what[2], "host.ocr.read: corners empty or turned around")
       for k in pairs(opts or {}) do
         assert(k == "key" or k == "lang" or k == "snapshot",
           "host.ocr.read: an option other than lang, key and snapshot: " .. tostring(k))
@@ -285,8 +306,8 @@ T.host = strict("host", {
       assert(key == nil or (type(key) == "string" and key ~= ""), "host.ocr.read: key is not a non-empty string")
       assert(type(cb) == "function", "host.ocr.read: cb is not a function")
       if S.readRaises then error(S.readRaises, 0) end
-      S.reads[#S.reads + 1] = { region = { what[1], what[2], what[3], what[4] }, key = key, cb = cb,
-        asked = S.now, answered = false }
+      S.reads[#S.reads + 1] = { region = regions[1], regions = regions, names = names, list = list, key = key,
+        cb = cb, asked = S.now, answered = false }
     end,
   }),
   window = strict("host.window", {
@@ -574,6 +595,62 @@ function T.tick(n)
     S.now += 150
     T.runDue()
     if S.every then S.every() end
+  end
+end
+
+-- For scenarios about something else than the focus read itself: the runtime's announcement
+-- reads — host.ocr.read under a key "com.platform.overlay focus …" — are kept apart from the other
+-- reads, in S.focusReads, and answered at the end of every T.runDue, as the host answers a read
+-- on a later turn of the loop; T.deliver() answers them at once. Each region reads what
+-- S.ocr(region) says is written there ("none" when it says nothing), and a read with a later one
+-- of its key also waiting is "stale" — the host's rule for a read superseded before it was
+-- recognised. The epoch turns over first, as for any delivery. The scenarios that are about the
+-- focus read answer it by hand (overlay_focus_read_tests.rs).
+function T.autoFocusReads()
+  S.focusReads = {}
+  local read = T.host.ocr.read
+  rawset(T.host.ocr, "read", function(what, opts, cb)
+    if type(opts) == "function" then cb, opts = opts, nil end
+    read(what, opts, cb)
+    local key = opts and opts.key
+    if type(key) == "string" and string.find(key, "com.platform.overlay focus ", 1, true) == 1 then
+      S.focusReads[#S.focusReads + 1] = table.remove(S.reads)
+    end
+  end)
+  local runDue = T.runDue
+  T.runDue = function()
+    runDue()
+    T.deliver()
+  end
+end
+
+function T.deliver()
+  local due = {}
+  for _, r in ipairs(S.focusReads or {}) do
+    if not r.answered then due[#due + 1] = r end
+  end
+  if #due == 0 then return end
+  S.epoch += 1
+  for i, r in ipairs(due) do
+    r.answered = true
+    local stale = false
+    for j = i + 1, #due do
+      if due[j].key == r.key then stale = true end
+    end
+    local list, byName = {}, {}
+    for k, g in ipairs(r.regions) do
+      local text = stale and "" or ((S.ocr and S.ocr(g)) or "")
+      local box = { text = text, x = g[1], y = g[2], w = g[3] - g[1], h = g[4] - g[2] }
+      local reading = {
+        name = r.names[k], x = g[1], y = g[2], w = g[3] - g[1], h = g[4] - g[2],
+        status = stale and "stale" or (text ~= "" and "text" or "none"), newer = stale, text = text,
+        lines = text ~= "" and { { text = text, x = box.x, y = box.y, w = box.w, h = box.h, words = { box } } } or {},
+        words = text ~= "" and { box } or {}, lang = stale and "" or "en-US",
+      }
+      list[k] = reading
+      if r.names[k] then byName[r.names[k]] = reading end
+    end
+    if r.list then r.cb(list, byName) else r.cb(list[1]) end
   end
 end
 

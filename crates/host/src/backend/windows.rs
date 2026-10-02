@@ -940,10 +940,77 @@ fn monitors_with_dpi() -> Vec<MonitorDpi> {
 }
 
 
+/// The `[env]` line `cpu`, as on a Mac: the processor's name, its cores, and the machine's logical
+/// processors in every processor group. A text recognition's cost is half the processor's, and a
+/// log that does not name it cannot be held against one from another machine. Cheap, once at
+/// start: four CPUID calls, and three system calls.
+fn cpu_line() -> String {
+    use windows_sys::Win32::System::Threading::{GetActiveProcessorCount, ALL_PROCESSOR_GROUPS};
+    // SAFETY: no arguments but a group number; 0 is its answer on failure.
+    let threads = Some(unsafe { GetActiveProcessorCount(ALL_PROCESSOR_GROUPS) }).filter(|n| *n > 0);
+    crate::ocr::cost::cpu_text(cpu_brand().as_deref(), physical_cores(), threads, None)
+}
+
+/// The processor's brand string, from CPUID's three brand leaves: what Task Manager shows.
+#[cfg(target_arch = "x86_64")]
+fn cpu_brand() -> Option<String> {
+    use std::arch::x86_64::__cpuid;
+    // SAFETY: CPUID exists on every x86_64 processor; leaf 0x80000000 says how far the extended
+    // leaves go, and the brand leaves are read only when they exist.
+    #[allow(unused_unsafe)]
+    let top = unsafe { __cpuid(0x8000_0000) }.eax;
+    if top < 0x8000_0004 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(48);
+    for leaf in 0x8000_0002u32..=0x8000_0004 {
+        // SAFETY: as above, a leaf the processor said it has.
+        #[allow(unused_unsafe)]
+        let r = unsafe { __cpuid(leaf) };
+        for v in [r.eax, r.ebx, r.ecx, r.edx] {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    Some(String::from_utf8_lossy(&bytes[..end]).trim().to_string())
+}
+
+/// Not asked on an ARM processor, which has no CPUID: the line says `?`. (The registry's
+/// `ProcessorNameString` would name it; the application is not built for ARM Windows.)
+#[cfg(not(target_arch = "x86_64"))]
+fn cpu_brand() -> Option<String> {
+    None
+}
+
+/// The processor's cores, from `GetLogicalProcessorInformation`: one entry per core among its
+/// relationships. A machine of more than 64 logical processors has them counted in this process's
+/// group only.
+fn physical_cores() -> Option<u32> {
+    use windows_sys::Win32::System::SystemInformation::{
+        GetLogicalProcessorInformation, RelationProcessorCore, SYSTEM_LOGICAL_PROCESSOR_INFORMATION,
+    };
+    let each = std::mem::size_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION>();
+    let mut len: u32 = 0;
+    // SAFETY: a null buffer of length 0 asks for the length needed, which is written to `len`.
+    unsafe { GetLogicalProcessorInformation(std::ptr::null_mut(), &mut len) };
+    let n = len as usize / each;
+    if n == 0 {
+        return None;
+    }
+    let mut buf = vec![SYSTEM_LOGICAL_PROCESSOR_INFORMATION::default(); n];
+    // SAFETY: a buffer of exactly the `len` bytes the first call asked for.
+    if unsafe { GetLogicalProcessorInformation(buf.as_mut_ptr(), &mut len) } == 0 {
+        return None;
+    }
+    let got = (len as usize / each).min(n);
+    u32::try_from(buf[..got].iter().filter(|i| i.Relationship == RelationProcessorCore).count()).ok()
+}
+
 impl Backend for WindowsBackend {
     fn environment(&self) -> Vec<(String, String)> {
         let mut out = self.display_environment();
         out.push(("common controls".to_string(), common_controls()));
+        out.push(("cpu".to_string(), cpu_line()));
         // No "screen reader" line here any more. It asked whether `nvdaControllerClient64`
         // or `SAAPI64` was loaded in this process, which was a fair proxy only while Tolk
         // loaded them on demand — with speech going through prism nothing loads either, so
@@ -1227,6 +1294,8 @@ impl Backend for WindowsBackend {
         OcrWorker {
             present: true,
             init_thread: |_: OcrThread| ensure_winrt(),
+            // Nothing measured asks for one here: the first read on Windows is not slow.
+            warm_up: |_| {},
             capture: ocr_capture,
             recognise: ocr_recognise,
             languages: ocr_languages,
@@ -3346,6 +3415,22 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
             .then(|| tight.as_ref().map(|t| (t.off_x as i32, t.off_y as i32, t.cw as i32, t.ch as i32)))
             .flatten();
         Ok(OcrText { text, words, lines, fallback, skipped: false })
+}
+
+/// The `[env]` processor line, asked of this machine: it names something, and counts its cores.
+#[cfg(test)]
+mod cpu_line_tests {
+    use super::*;
+
+    #[test]
+    fn the_cpu_line_names_this_processor_and_counts_its_cores() {
+        let cores = physical_cores();
+        assert!(cores.is_some_and(|n| n > 0), "{cores:?}");
+        let line = cpu_line();
+        assert!(line.starts_with('"') && line.contains(" cores, ") && line.ends_with(" threads"), "{line}");
+        #[cfg(target_arch = "x86_64")]
+        assert!(cpu_brand().is_some_and(|b| !b.is_empty() && !b.contains('\0')), "{line}");
+    }
 }
 
 /// What the keyboard hook keeps and forgets when the watch installs it again.

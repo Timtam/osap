@@ -20,6 +20,9 @@ mod overlay_menu_tests;
 /// The Tab pass-through's unnamed stops, read by OCR, against the same scripted host.
 #[cfg(test)]
 mod overlay_passthrough_tests;
+/// A control's value and `ocrLabel`, read off the event loop on focus, against the same host.
+#[cfg(test)]
+mod overlay_focus_read_tests;
 /// The DAW's plug-in panel on a Mac, the stay, and daw-hosts / sforzando / Kontakt loaded against
 /// the same scripted host with the window prelude's real matcher.
 #[cfg(test)]

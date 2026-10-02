@@ -476,6 +476,22 @@ pub(crate) fn deliverable(owner: Owner, gens: &HashMap<usize, u64>, enabled: &[b
     gens.get(&owner.idx) == Some(&owner.gen) && enabled.get(owner.idx).copied().unwrap_or(false)
 }
 
+/// The regions of a slow job's line, `x,y wxh` each in screen coordinates: the first four, and how
+/// many more. The rectangle is what tells reads from different modules apart as one question
+/// asked several times — the Kontakt header read by five library modules at once, on a Mac — or
+/// as several questions.
+fn regions_text(rects: &[Rect]) -> String {
+    const SHOWN: usize = 4;
+    let mut parts: Vec<String> = rects.iter().take(SHOWN).map(|r| format!("{},{} {}x{}", r.x, r.y, r.w, r.h)).collect();
+    if rects.len() > SHOWN {
+        parts.push(format!("and {} more", rects.len() - SHOWN));
+    }
+    if parts.is_empty() {
+        return "no region".to_string();
+    }
+    parts.join(", ")
+}
+
 /// Whether a newer read with `key` was asked for by `owner` after `ticket`.
 fn newer_than(
     seqs: &HashMap<(usize, u64, String), TicketId>,
@@ -755,6 +771,8 @@ impl Shared {
         if d.timings.total() >= policy::SLOW_JOB.as_millis() as u64 {
             let now = Instant::now();
             let lang = d.readings.iter().map(|r| r.lang.as_str()).find(|l| !l.is_empty()).unwrap_or("-");
+            // Worked out for the first line written, not for a job whose lines are all held back.
+            let mut regions: Option<String> = None;
             for idx in &owners {
                 let mut logged = st.slow_logged.borrow_mut();
                 if logged.get(idx).is_some_and(|t| now.duration_since(*t) < policy::SLOW_LOG_EVERY) {
@@ -764,10 +782,13 @@ impl Shared {
                 logging::line(
                     "ocr",
                     &format!(
-                        "{} region(s) for [{}] waited {} ms for the capture, which took {}, then {} ms \
+                        "{} region(s) for [{}] ({}) waited {} ms for the capture, which took {}, then {} ms \
                          for the recogniser, which took {} ms ({lang})",
                         d.readings.len(),
                         name(*idx),
+                        regions.get_or_insert_with(|| {
+                            regions_text(&d.readings.iter().map(|r| r.rect).collect::<Vec<Rect>>())
+                        }),
                         d.timings.before_capture,
                         d.timings.capture,
                         d.timings.before_recognition,
@@ -914,6 +935,15 @@ mod tests {
             Ok(a) => panic!("{what} / {opts} was accepted: {a:?}"),
             Err(e) => assert!(e.to_string().contains(needle), "{what} / {opts}: {e}"),
         }
+    }
+
+    /// The slow job's line names what was read: four regions at most, then how many more.
+    #[test]
+    fn a_slow_jobs_line_names_its_regions() {
+        assert_eq!(regions_text(&[Rect::new(697, 111, 173, 45)]), "697,111 173x45");
+        let five: Vec<Rect> = (0..5).map(|i| Rect::new(i * 10, -5, 40, 20)).collect();
+        assert_eq!(regions_text(&five), "0,-5 40x20, 10,-5 40x20, 20,-5 40x20, 30,-5 40x20, and 1 more");
+        assert_eq!(regions_text(&[]), "no region");
     }
 
     #[test]

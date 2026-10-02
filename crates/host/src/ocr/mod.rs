@@ -8,11 +8,13 @@
 //! (`snap_queue`), which read the frame type besides. The threads live in `service`, the Luau
 //! side in `lua` (and `crate::snapshot` for the snapshots). `bench` is no part of a read: it is
 //! the pure half of the `ocr-bench` subcommand, which measures Vision on a Mac, and is borrowed
-//! as well.
+//! as well; so is `cost`, what the macOS recogniser's cost lines say.
 
 /// `automation-platform ocr-bench`, its pure half: the pictures, the statistics, what it prints.
 pub mod bench;
 pub mod change;
+/// What a recognition cost, as the log says it: the pure half of the macOS recogniser's cost lines.
+pub mod cost;
 pub mod lang;
 pub mod lua;
 pub mod pipeline;

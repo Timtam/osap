@@ -29,8 +29,10 @@
 //! answer is used only when the system engine reads nothing; its poison-tolerant lock and the
 //! count of its runs that the exit waits for are `paddle_ocr.rs`'s — the count now closes when
 //! that wait begins, because a job of this service can still be starting regions then. The
-//! warm-ups (the neural model's, Vision's) keep their own threads, and the recogniser never
-//! waits for them.
+//! neural model's warm-up keeps its own thread, and the recogniser never waits for it. On a Mac
+//! the recognise thread makes a Vision pass of its own before its first job — after the warm-up on
+//! a thread of its own has ended — and reads asked meanwhile wait for it, on the hang clock
+//! (`OcrWorker::warm_up`).
 //!
 //! Main-thread code talks to this through [`Service`]; the exit, through [`ShutdownHandle`],
 //! which `run` takes out before the manager is built and calls after it is gone.
@@ -687,6 +689,21 @@ fn recognise_loop<S: Send + 'static>(inner: Arc<Inner<S>>, worker: OcrWorker<S>,
     // First, before any job: a module asking for the languages in its `activate` must not find
     // the list missing because a recognition got there first.
     let mut langs = read_languages(&inner, &worker);
+    // Then the recogniser's first pass on this thread, before any read's, in the language a read
+    // without `lang` is made in: on a Mac the first `host.ocr.read` of a session took 2.4 s on
+    // this thread, minutes after the warm-up on a thread of its own (TODO.md). Contained like a
+    // job — a panic here must not end the thread every read goes to — and on the hang clock like
+    // one: reads asked meanwhile wait for it, and should it not come back (a report of macOS 27 has
+    // Vision's first request hang for 27 s) they are refused with the reason after `HANG`, as
+    // behind a job whose region does not come back, instead of piling up without a word.
+    if worker.present {
+        locked(&inner.state).answered_at = Some(Instant::now());
+        let tag = lang::default_tag(&langs);
+        if let Err(report) = logging::contain(|| (worker.warm_up)(tag.as_deref())) {
+            contained("warming the recogniser up", &report);
+        }
+        locked(&inner.state).answered(Instant::now(), false);
+    }
     loop {
         let next = {
             let mut st = locked(&inner.state);
@@ -1024,6 +1041,7 @@ mod tests {
         OcrWorker {
             present: true,
             init_thread: |_| {},
+            warm_up: |_| {},
             capture: fake_capture,
             recognise: fake_recognise,
             languages: fake_langs,
@@ -1083,6 +1101,80 @@ mod tests {
         s.submit(spec(20), ticket(2, None));
         let second = collect(&s, 1);
         assert_eq!(second[0].readings[0].status, Status::Text, "the recogniser still answers");
+        stop.shutdown(Duration::from_secs(2));
+    }
+
+    /// The platform's warm-up runs once, on the recognise thread, after the languages, in the
+    /// language a read without `lang` is made in; one that panics is contained, and the thread
+    /// answers reads as before.
+    #[test]
+    fn the_warm_up_runs_once_on_the_recognise_thread_and_a_panic_in_it_is_contained() {
+        static WHERE: Mutex<Vec<(String, Option<String>)>> = Mutex::new(Vec::new());
+        let mut w = worker();
+        w.warm_up = |lang| {
+            let name = std::thread::current().name().unwrap_or("?").to_string();
+            WHERE.lock().unwrap().push((name, lang.map(str::to_string)));
+        };
+        let (s, stop) = Service::spawn(w);
+        s.submit(spec(20), ticket(1, None));
+        assert_eq!(collect(&s, 1)[0].readings[0].status, Status::Text);
+        s.submit(spec(21), ticket(2, None));
+        assert_eq!(collect(&s, 1)[0].readings[0].status, Status::Text);
+        assert_eq!(
+            *WHERE.lock().unwrap(),
+            vec![("ocr-recognise".to_string(), Some("de-DE".to_string()))],
+            "once, on the recognise thread, in the user's language as the engine names it"
+        );
+        stop.shutdown(Duration::from_secs(2));
+
+        crate::quiet_expected_panics();
+        let mut w = worker();
+        w.warm_up = |_| panic!("{}the warm-up fell over", crate::EXPECTED_PANIC);
+        let (s, stop) = Service::spawn(w);
+        s.submit(spec(20), ticket(1, None));
+        assert_eq!(collect(&s, 1)[0].readings[0].status, Status::Text, "the recogniser answers all the same");
+        stop.shutdown(Duration::from_secs(2));
+    }
+
+    /// The warm-up comes before the first job, and it is on the hang clock: a read asked while it
+    /// runs waits and is answered after it; one asked once it has run longer than the hang bound
+    /// is refused with the reason, as behind a job whose region does not come back; and when it
+    /// ends, reads are taken and answered again.
+    #[test]
+    fn a_read_waits_for_the_warm_up_and_a_warm_up_that_hangs_refuses_reads() {
+        static RELEASED: Mutex<bool> = Mutex::new(false);
+        static RELEASE: Condvar = Condvar::new();
+        static STEPS: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+        let mut w = worker();
+        w.warm_up = |_| {
+            locked(&STEPS).push("warm-up began");
+            let mut go = locked(&RELEASED);
+            while !*go {
+                go = RELEASE.wait(go).unwrap_or_else(|e| e.into_inner());
+            }
+            locked(&STEPS).push("warm-up ended");
+        };
+        let (s, stop) = Service::spawn_with(w, Limits { hang: Duration::from_millis(150), ..Limits::POLICY }, Instant::now);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while locked(&STEPS).is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let early = s.submit(spec(30), ticket(1, None));
+        assert!(early.refused.is_none(), "taken while the warm-up runs: {:?}", early.refused);
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(s.drain().is_empty(), "nothing answered before the warm-up has ended");
+        let other = Owner { idx: 3, gen: 1 };
+        let late = s.submit(spec_at(31, 2), of(other, 2, Priority::Interactive));
+        let why = late.refused.expect("250 ms into a warm-up, against a hang bound of 150");
+        assert!(why.starts_with("the text recogniser has not answered a region for"), "{why}");
+
+        *locked(&RELEASED) = true;
+        RELEASE.notify_all();
+        let done = collect(&s, 1);
+        assert_eq!(done[0].readings[0].status, Status::Text, "the read asked during the warm-up, answered after it");
+        assert_eq!(*locked(&STEPS), vec!["warm-up began", "warm-up ended"]);
+        assert!(s.submit(spec_at(32, 2), of(other, 3, Priority::Interactive)).refused.is_none(), "taken again");
+        assert_eq!(collect(&s, 1)[0].readings[0].status, Status::Text);
         stop.shutdown(Duration::from_secs(2));
     }
 
