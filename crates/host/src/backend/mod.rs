@@ -1848,10 +1848,10 @@ pub fn stop_ocr_warmup() {
 }
 
 /// The exit's last word on text recognition, before [`settle_ocr`]: on a Mac the neural
-/// recogniser's shadow — its readings beside Vision's, compared and counted, never used — writes
-/// its counts once more, with everything counted since its last line (`ocr/shadow.rs`); when no
-/// read was counted, only where the recogniser loaded. A lock and one line. Nothing elsewhere:
-/// Windows answers with the recogniser, and has no shadow.
+/// recogniser's counts — its readings beside Vision's, and who answered each read — are written
+/// once more, with everything counted since their last line (`ocr/shadow.rs`); when no read was
+/// counted, only where the recogniser loaded. A lock and one line. Nothing elsewhere: Windows
+/// keeps no such counts.
 pub fn ocr_exit_report() {
     #[cfg(target_os = "macos")]
     macos::ocr::shadow_report();

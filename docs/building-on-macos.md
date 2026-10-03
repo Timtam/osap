@@ -110,7 +110,10 @@ its local symbols (`strip -x`, both sizes printed) and signs it before the bundl
 PaddleOCR's recognition model (7.8 MB) to `Contents/Resources/ppocr-rec.onnx`. The application
 opens the dylib itself at run time — it is never linked, and the executable must not name it:
 the script refuses one that does (`otool -L`) before it packages anything — after Vision's
-warm-up, and says once in its log whether the recogniser is ready or why it is not. The library
+warm-up, and says once in its log whether the recogniser is ready or why it is not. From then on
+it reads every small region beside Vision and answers where Vision's accurate ladder read nothing,
+by Windows' rule, and on an Intel Mac it checks the fast level's first pass as well (see
+[`host.ocr.read`'s macOS section](api/ocr.md#macos)). The library
 is built for macOS 13.3 and later, and the application does not open it on an older macOS; there,
 where either file is missing, or where the library does not load, Vision reads alone, as in a
 package without it. Every process that loaded it — the application at its quit, and each process
@@ -126,11 +129,9 @@ module window to close, which it refuses (it hides instead), so `terminate:` is 
 long as that window exists; so is the quit Apple Event of the Dock's Quit and of a logout, which
 then ends nothing at all (TODO.md). Should an `exit()` begin without the release all the same, a
 backstop ends it with `_exit(0)` before ONNX Runtime's teardown, with one line on standard error
-— status 0 whatever `exit()` was given, which the backstop cannot know. In
-this build the recogniser changes nothing that is read: it reads every small region beside
-Vision for comparison, and its answers are counted in the log, never used (see
-[host.ocr.read's macOS section](api/ocr.md#macos)). Without `--onnxruntime` the package is what
-it was before.
+— status 0 whatever `exit()` was given, which the backstop cannot know. Without
+`--onnxruntime` the package reads with Vision alone, the fast model as the ladder's last rung,
+as before.
 
 Beside the `.app` the package also holds `licences/` — the application's GPL text, and with the
 recogniser ONNX Runtime's MIT licence and Microsoft's third-party notices, the model's Apache-2.0
@@ -240,31 +241,38 @@ moment it is known, so a pass that kills the process keeps everything before it:
    reason it is not.
 4. **The pipeline**: every picture read as `host.ocr.recognize` reads a region once its capture
    is in hand — the content crop, the blank guard, the enlargement, the retry ladder — under each
-   of eleven ways of reading a small region, the *strategies*: `prod` (today's ladder), `rev2`
+   of twelve ways of reading a small region, the *strategies*: `prod` (the application's own on
+   this Mac: with the neural recogniser loaded, Windows' rule over the accurate ladder, on an Intel
+   Mac with the fast level checked by it first — a line `pipeline | prod reads as the application
+   does on this Mac: …` says which; without it, as `old`), `old` (the ladder the application read
+   with before the recogniser answered on a Mac, the fast model as its last rung), `rev2`
    (every request of every rung under revision 2), `paddle` (the neural recogniser alone),
-   `acc+paddle` and `acc+paddle+rest` (Windows' rule: the recogniser's text when the first
-   accurate pass read nothing, without and with today's rungs after it), `rev2-tight` (the first
+   `acc+paddle` and `acc+paddle+rest` (Windows' rule after the first accurate pass alone: the
+   recogniser's text when that pass read nothing, without and with `old`'s rungs after it), `rev2-tight` (the first
    pass under revision 2), `rev3>rev2` (revision 2 over the same crop after a first pass that read
    nothing, instead of the whole region), `fast=paddle-checked`, `fast=paddle-strict` and
    `fast=paddle` (the fast level first, believed only where the recogniser reads the same; they
-   differ in what they do when fast reads nothing: today's accurate ladder and never the
+   differ in what they do when fast reads nothing: the accurate ladder and never the
    recogniser's text alone, an accurate pass and then the recogniser's text, or the recogniser's
    text at once), and `fast>acc` (the fast level first, unchecked). Six of them are *candidates*,
-   the ways the application may come to read small regions by: `acc+paddle+rest`, `rev2-tight`
-   and `rev3>rev2` for the lone digit, and the three `fast=paddle` ones. `rev2`, `paddle`,
-   `acc+paddle` and `fast>acc` are measured *for comparison* only: they speak a value nothing
-   checked, or leave out or change more than a candidate would. The run prints what each one does,
-   and which it is. A strategy that needs what this Mac lacks — a revision, the recogniser — says
-   why and is left out; one that needs the recogniser reads a region whose ink is not one line, or
-   too wide, as `prod` does. A picture the blank guard answers is read by the pipeline alone, as
+   other ways the application may come to read small regions by: `acc+paddle+rest`, `rev2-tight`
+   and `rev3>rev2` for the lone digit, and the three `fast=paddle` ones. `old`, `rev2`, `paddle`,
+   `acc+paddle` and `fast>acc` are measured *for comparison* only: they read as the application
+   did, speak a value nothing checked, or leave out or change more than a candidate would. The run
+   prints what each one does, and which it is. A strategy that needs what this Mac lacks — a
+   revision, the recogniser — says why and is left out (`prod` never is: it needs nothing), and so
+   is `old` where `prod` reads as it does, without the recogniser; one of the others that needs
+   the recogniser reads a region whose ink is not one line, or too wide, as `old` does. A picture the blank guard answers is read by the pipeline alone, as
    a read would be. The few pictures read for speed are read six times after a first one kept
    apart, every other small picture twice, for whether it is read right, and every row once a
    round in an order that changes from round to round. Each row says what a read cost, the Vision
    passes and the recogniser's runs it made, who answered (`as captured`, `fast first`, `tight`,
    `tight again`, `whole`, `enlarged`, `fast last`, `Paddle`, `nobody`), how often fast and the
    recogniser read the same, and the time that was not Vision's. After the tables one line says
-   what today's ladder read wrong, invented or was refused on, whatever the verdicts:
-   `pipeline | today's ladder (prod) …`.
+   what the application's reading read wrong, invented or was refused on, whatever the verdicts —
+   `pipeline | the application's reading (prod) …` — and one more the same of the ladder before it,
+   `pipeline | the ladder before it (old) …`; the run's summary page has both, after the line
+   saying which reading `prod` was on that Mac, and CI adds the two to the run's notes.
 5. **The engine**: one Vision pass with today's request (`prod`) and with variants that change
    one thing each: the fast level; request revision 2 or 3; a minimum text height of 1/32 or
    0.25; one request reused; the ink enlarged toward 48 pixels instead of 64; the request pinned
@@ -280,8 +288,8 @@ moment it is known, so a pass that kills the process keeps everything before it:
    against two at once, `prod` in the engine against `prod` pass after pass, which says what
    switching between variants cost, the accurate and the fast level each beside the neural
    recogniser at user-initiated and at utility priority against alone, and four blocks of 30
-   seconds, alternately Vision alone and Vision beside the recogniser at utility the way the
-   application's shadow asks it.
+   seconds, alternately Vision alone and Vision beside the recogniser at the measuring thread's own
+   priority, the way a read of the application asks it.
 7. **Idle**: one pass after 2, 10 and 30 seconds with nothing to do, each once on the thread that
    read before and once on a fresh one, and the fast level and the neural recogniser after the
    same pauses; `--quick` waits 2 and 10 seconds.
@@ -334,8 +342,9 @@ leg too when a signal ended it before its answer, where a Vision probe that dies
 findings the probes are there for), or any process whose standard error holds the exit
 backstop's line. Standard error goes into the log as it comes, through `tee`, so it is there
 even when the 45 minutes run out. A picture today's request read wrong or Vision refused (the
-engine table's `prod` row), and whatever the line `pipeline | today's ladder (prod) …` names, are
-warnings. On `macos-15` two
+engine table's `prod` row), and whatever the line `pipeline | the application's reading (prod) …`
+names, are warnings — text the recogniser invents where Vision reads nothing among it, as on
+Windows. On `macos-15` two
 short runs (`--quick`) follow, on copies of the bundle signed again ad hoc: one without ONNX
 Runtime, one with only its x86_64 half, which that Mac cannot load; each has to finish and say
 that the recogniser is not available, and why, and end with status 0. A third copy has only its

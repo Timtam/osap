@@ -24,6 +24,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use super::ladder::Path;
+
 /// The rung of the retry ladder a Vision pass was, or the warm-up's pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
@@ -37,17 +39,18 @@ pub enum Stage {
     Enlarged,
     /// The same enlarged picture, the fast model.
     Fast,
-    /// The fast model over the content crop, before any accurate pass: a ladder whose first level
-    /// is the fast one (`ocr/ladder.rs`), which only `ocr-bench` climbs so far.
+    /// The fast model over the content crop, before any accurate pass: an Intel Mac's, checked by
+    /// the neural recogniser (`ocr/merge.rs`), and `ocr-bench`'s strategies that read fast first.
     FastFirst,
     /// The content crop again under request revision 2, after a first pass that read nothing,
     /// instead of the whole region: `ocr-bench`'s `rev3>rev2`.
     TightAgain,
-    /// The fast model over the content crop right after the first accurate pass, on
-    /// `host.ocr.read`'s recognise thread, for the neural recogniser's shadow (`ocr/shadow.rs`): its
-    /// reading is compared and never answers.
+    /// The fast model over the content crop once the read's answer is picked, on `host.ocr.read`'s
+    /// recognise thread of a Mac that does not check its fast level, for the neural recogniser's
+    /// counts (`ocr/shadow.rs`): its reading is compared and never answers.
     FastCompared,
-    /// The warm-up's own pass over its test line.
+    /// The warm-up's own pass over its test line — the accurate one, and on an Intel Mac the fast
+    /// one after it.
     WarmUp,
 }
 
@@ -78,9 +81,107 @@ pub struct Pass {
     /// Another Vision pass ran in this process at some moment of this one ([`Running`]).
     pub beside: bool,
     /// The neural recogniser ran at some moment of this pass: it was running when the pass began or
-    /// ended, or a run of it began in between. On a Mac only, where it reads beside Vision as a
-    /// shadow (`ocr/shadow.rs`); always false elsewhere.
+    /// ended, or a run of it began in between. On a Mac only, where it reads beside Vision
+    /// (`ocr/merge.rs`); always false elsewhere.
     pub paddle_beside: bool,
+}
+
+/// How a read's wait for the neural recogniser ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Waited {
+    /// It answered with text.
+    Answered,
+    /// It answered nothing, or could not read the region.
+    Nothing,
+    /// It had not answered when the wait's bound — what was left of the ladder's budget — was up.
+    NotYet,
+}
+
+/// What a read waited for the neural recogniser, all told, and how its last wait ended: for the
+/// read's lines. A read that never waited for it has none.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaddleWait {
+    pub ms: f64,
+    pub ended: Waited,
+}
+
+impl PaddleWait {
+    /// How it ended, in Windows' words where it has them (`windows.rs`, `recognize_image`), and in
+    /// the same form for the case only a Mac has: a wait with a bound.
+    pub fn which(&self) -> &'static str {
+        match self.ended {
+            Waited::Answered => "which answered",
+            Waited::Nothing => "which had nothing",
+            Waited::NotYet => "which had not answered by then",
+        }
+    }
+}
+
+/// The wait for the neural recogniser as Windows' own line says it, ` + waited 1.2ms for paddle
+/// (which answered)`, for a Mac's line of a read; nothing for a read that did not wait.
+pub fn waited_text(w: Option<PaddleWait>) -> String {
+    w.map(|w| format!(" + waited {:.1}ms for paddle ({})", w.ms, w.which())).unwrap_or_default()
+}
+
+/// How an Intel Mac's check of its fast pass by the neural recogniser ended (`ocr/merge.rs`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Check {
+    /// It read what the fast level read, its spaces included: the fast level's answer stands.
+    Same,
+    /// It read text, and not that.
+    Otherwise,
+    /// It read nothing, or could not read the region.
+    Nothing,
+    /// It had not answered within the check's wait.
+    NotYet,
+}
+
+/// What an Intel Mac's read waited for the neural recogniser's check, and how the check ended:
+/// apart from [`PaddleWait`], which is Windows' wait where Vision read nothing, so that neither
+/// says the other's outcome.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CheckWait {
+    pub ms: f64,
+    pub ended: Check,
+}
+
+impl CheckWait {
+    /// How it ended, in the form of Windows' words for the other wait.
+    pub fn which(&self) -> &'static str {
+        match self.ended {
+            Check::Same => "which read the same",
+            Check::Otherwise => "which read otherwise",
+            Check::Nothing => "which had nothing",
+            Check::NotYet => "which had not answered by then",
+        }
+    }
+}
+
+/// The check's wait, ` + waited 9.8ms for paddle's check (which read the same)`; nothing for a read
+/// that made no check.
+pub fn check_text(c: Option<CheckWait>) -> String {
+    c.map(|c| format!(" + waited {:.1}ms for paddle's check ({})", c.ms, c.which())).unwrap_or_default()
+}
+
+/// Who answered a read and what it waited for the neural recogniser — an Intel Mac's check, and
+/// the wait where Vision's ladder read nothing — for the cost lines.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Answered {
+    pub path: Path,
+    pub check: Option<CheckWait>,
+    pub waited: Option<PaddleWait>,
+}
+
+impl Answered {
+    /// What the read waited for the neural recogniser, the check first: ` + waited …` for each.
+    pub fn waits_text(&self) -> String {
+        format!("{}{}", check_text(self.check), waited_text(self.waited))
+    }
+
+    /// `, answered by Vision` and the waits, as the cost lines say it after a read's time.
+    fn text(&self) -> String {
+        format!(", answered by {}{}", self.path.word(), self.waits_text())
+    }
 }
 
 /// Where the picture of a slow read came from, for its line.
@@ -196,8 +297,10 @@ pub fn pause_text(b: &Before) -> String {
 /// before it. 50 ms is the host's own threshold for "this held the event loop up"; a poll that
 /// reads sixteen times a second would otherwise bury the log it is meant to be evidence in.
 /// `beside`: another Vision pass ran in the process at some moment of this recognition's passes.
-/// Nothing is formatted, the thread's name included, unless a line is due: this runs after every
-/// recognition, on the event loop too.
+/// `answered`: who answered it, and what it waited for the neural recogniser. Nothing is formatted,
+/// the thread's name included, unless a line is due: this runs after every recognition, on the
+/// event loop too.
+#[allow(clippy::too_many_arguments)]
 pub fn cost_line(
     ms: f64,
     w: i32,
@@ -206,6 +309,7 @@ pub fn cost_line(
     before: &Before,
     slowest_before: Option<f64>,
     beside: bool,
+    answered: Answered,
 ) -> Option<String> {
     let slowest = matches!(slowest_before, Some(p) if ms >= 50.0 && ms > p * 1.25);
     if !(before.first_in_process || before.first_on_thread || slowest) {
@@ -214,22 +318,34 @@ pub fn cost_line(
     let thread = thread();
     let pause = pause_text(before);
     let beside = if beside { "; another Vision pass ran beside it" } else { "" };
+    let by = answered.text();
     Some(if before.first_in_process {
         format!(
-            "ocr: the first recognition in this process, a {w}x{h} pt region on {thread}, took {ms:.0} ms; {pause}{beside}"
+            "ocr: the first recognition in this process, a {w}x{h} pt region on {thread}, took {ms:.0} ms{by}; \
+             {pause}{beside}"
         )
     } else if before.first_on_thread {
-        format!("ocr: the first recognition on {thread}, a {w}x{h} pt region, took {ms:.0} ms; {pause}{beside}")
+        format!("ocr: the first recognition on {thread}, a {w}x{h} pt region, took {ms:.0} ms{by}; {pause}{beside}")
     } else {
-        format!("ocr: reading a {w}x{h} pt region took {ms:.0} ms on {thread}, the slowest there so far; {pause}{beside}")
+        format!(
+            "ocr: reading a {w}x{h} pt region took {ms:.0} ms on {thread}{by}, the slowest there so far; {pause}{beside}"
+        )
     })
 }
 
-/// The line a slow read is worth: its time, then its capture, each Vision pass with its rung, its
-/// milliseconds, its words, whether another pass ran beside it and whether the neural recogniser
-/// did, and what the rest took — the crop, the enlargement, the pixels read back.
-pub fn slow_line(w: i32, h: i32, ms: f64, thread: &str, capture: Capture, passes: &[Pass]) -> String {
-    let mut parts = Vec::with_capacity(passes.len() + 2);
+/// The line a slow read is worth: its time and who answered it, then its capture, each Vision pass
+/// with its rung, its milliseconds, its words, whether another pass ran beside it and whether the
+/// neural recogniser did, the read's wait for the neural recogniser, and what the rest took — the
+/// crop, the enlargement, the pixels read back.
+pub fn slow_line(
+    (w, h): (i32, i32),
+    ms: f64,
+    thread: &str,
+    capture: Capture,
+    passes: &[Pass],
+    answered: Answered,
+) -> String {
+    let mut parts = Vec::with_capacity(passes.len() + 3);
     let mut counted = 0.0;
     match capture {
         Capture::Took(c) => {
@@ -253,8 +369,20 @@ pub fn slow_line(w: i32, h: i32, ms: f64, thread: &str, capture: Capture, passes
         let paddle = if p.paddle_beside { ", the neural recogniser beside it" } else { "" };
         parts.push(format!("{} {:.0} ms, {words}{beside}{paddle}", p.stage.word(), p.ms));
     }
+    if let Some(check) = answered.check {
+        counted += check.ms;
+        parts.push(format!("the wait for paddle's check {:.0} ms, {}", check.ms, check.which()));
+    }
+    if let Some(wait) = answered.waited {
+        counted += wait.ms;
+        parts.push(format!("the wait for paddle {:.0} ms, {}", wait.ms, wait.which()));
+    }
     parts.push(format!("the rest {:.0} ms", (ms - counted).max(0.0)));
-    format!("ocr: a slow read, a {w}x{h} pt region on {thread} in {ms:.0} ms: {}", parts.join("; "))
+    format!(
+        "ocr: a slow read, a {w}x{h} pt region on {thread} in {ms:.0} ms, answered by {}: {}",
+        answered.path.word(),
+        parts.join("; ")
+    )
 }
 
 /// Whether a line for `key` is due: none was said for it within the last `every`. Records it
@@ -324,6 +452,19 @@ pub fn warm_up_line(ms: f64, thread: &str, read: Option<&str>, expected: &str, b
             words_right(&t, &want),
             want.split_whitespace().count()
         ),
+    }
+}
+
+/// The line of an Intel Mac's warm-up of Vision's fast level, one pass over the same test line
+/// right after the accurate one, on the same thread (`backend/macos/ocr.rs`): its time — what an
+/// Intel Mac's first pass of a read, the fast level's checked by the neural recogniser, would
+/// otherwise pay on top — or that Vision refused it (`refused`). What it read is not judged: the
+/// accurate pass's line is the self-test.
+pub fn fast_warm_up_line(ms: f64, thread: &str, refused: bool) -> String {
+    if refused {
+        format!("ocr: Vision's fast level did not warm up on {thread}: the request failed after {ms:.0} ms")
+    } else {
+        format!("ocr: Vision's fast level warmed up in {ms:.0} ms on {thread}, for an Intel Mac's first pass of a read")
     }
 }
 
@@ -570,9 +711,14 @@ mod tests {
         "the event loop".to_string()
     }
 
+    fn by(path: Path) -> Answered {
+        Answered { path, check: None, waited: None }
+    }
+
     /// The first in the process and the first on a thread are two statements now: the old line
     /// said "Vision's model load included" for the first on every thread, and a 2.4 s read on the
-    /// recognise thread, minutes after the warm-up, was taken for a model load.
+    /// recognise thread, minutes after the warm-up, was taken for a model load. Each says who
+    /// answered.
     #[test]
     fn firsts_are_told_apart_and_the_slowest_is_said_only_when_clearly_worse() {
         let first = Before {
@@ -582,27 +728,29 @@ mod tests {
             since_thread: None,
             busy_at_start: false,
         };
-        let line = cost_line(1538.4, 123, 23, loop_word, &first, None, false).unwrap();
+        let line = cost_line(1538.4, 123, 23, loop_word, &first, None, false, by(Path::Vision)).unwrap();
         assert_eq!(
             line,
-            "ocr: the first recognition in this process, a 123x23 pt region on the event loop, took 1538 ms; \
-             the last Vision pass in this process ended 703.0 s before it, none ran on this thread"
+            "ocr: the first recognition in this process, a 123x23 pt region on the event loop, took 1538 ms, answered \
+             by Vision; the last Vision pass in this process ended 703.0 s before it, none ran on this thread"
         );
         assert!(!line.contains("model load"));
 
         let thread_first = Before { first_in_process: false, ..first };
         assert_eq!(
-            cost_line(2412.6, 174, 72, || "thread ocr-recognise".to_string(), &thread_first, None, false).unwrap(),
-            "ocr: the first recognition on thread ocr-recognise, a 174x72 pt region, took 2413 ms; \
+            cost_line(2412.6, 174, 72, || "thread ocr-recognise".to_string(), &thread_first, None, false, by(Path::Nothing))
+                .unwrap(),
+            "ocr: the first recognition on thread ocr-recognise, a 174x72 pt region, took 2413 ms, answered by nobody; \
              the last Vision pass in this process ended 703.0 s before it, none ran on this thread"
         );
         // Begun while another thread's pass ran, and joined by one: said, both.
         let busy = Before { busy_at_start: true, ..thread_first };
+        let paddle = Answered { waited: Some(PaddleWait { ms: 2.04, ended: Waited::Answered }), ..by(Path::Paddle) };
         assert_eq!(
-            cost_line(2412.6, 174, 72, || "thread ocr-recognise".to_string(), &busy, None, true).unwrap(),
-            "ocr: the first recognition on thread ocr-recognise, a 174x72 pt region, took 2413 ms; \
-             another Vision pass in this process was running when it began, none ran on this thread; \
-             another Vision pass ran beside it"
+            cost_line(2412.6, 174, 72, || "thread ocr-recognise".to_string(), &busy, None, true, paddle).unwrap(),
+            "ocr: the first recognition on thread ocr-recognise, a 174x72 pt region, took 2413 ms, answered by Paddle \
+             alone + waited 2.0ms for paddle (which answered); another Vision pass in this process was running when it \
+             began, none ran on this thread; another Vision pass ran beside it"
         );
 
         let later = Before {
@@ -614,46 +762,113 @@ mod tests {
         };
         // No line due: not even the thread's name is asked for.
         let unasked = || -> String { panic!("the thread's name formatted for no line") };
-        assert_eq!(cost_line(200.0, 40, 20, unasked, &later, Some(180.0), false), None, "not 1.25 times worse");
-        assert_eq!(cost_line(45.0, 40, 20, unasked, &later, Some(10.0), true), None, "under 50 ms");
+        assert_eq!(cost_line(200.0, 40, 20, unasked, &later, Some(180.0), false, by(Path::Vision)), None, "not 1.25 times worse");
+        assert_eq!(cost_line(45.0, 40, 20, unasked, &later, Some(10.0), true, by(Path::Vision)), None, "under 50 ms");
         assert_eq!(
-            cost_line(300.0, 40, 20, loop_word, &later, Some(200.0), false).unwrap(),
-            "ocr: reading a 40x20 pt region took 300 ms on the event loop, the slowest there so far; \
-             the last Vision pass in this process ended 1.5 s before it, the last on this thread 1.5 s before"
+            cost_line(300.0, 40, 20, loop_word, &later, Some(200.0), false, by(Path::Agreed)).unwrap(),
+            "ocr: reading a 40x20 pt region took 300 ms on the event loop, answered by the fast level and Paddle \
+             agreeing, the slowest there so far; the last Vision pass in this process ended 1.5 s before it, the last \
+             on this thread 1.5 s before"
         );
+    }
+
+    /// The wait for the neural recogniser in Windows' words, and the bounded wait's own end.
+    #[test]
+    fn the_wait_for_the_recogniser_is_said_as_windows_says_it() {
+        assert_eq!(waited_text(None), "");
+        let w = |ms: f64, ended: Waited| waited_text(Some(PaddleWait { ms, ended }));
+        assert_eq!(w(1.23, Waited::Answered), " + waited 1.2ms for paddle (which answered)");
+        assert_eq!(w(0.0, Waited::Nothing), " + waited 0.0ms for paddle (which had nothing)");
+        assert_eq!(w(14.0, Waited::NotYet), " + waited 14.0ms for paddle (which had not answered by then)");
+        // The two Windows says, word for word (`windows.rs`, `recognize_image`).
+        const WINDOWS: &str = include_str!("../backend/windows.rs");
+        assert!(WINDOWS.contains("\" + waited {wait_ms:.1}ms for paddle ({})\""), "Windows' fragment");
+        assert!(WINDOWS.contains("\"which answered\"") && WINDOWS.contains("\"which had nothing\""));
+    }
+
+    /// An Intel Mac's check has its own fragment, before Windows' wait: a check that read
+    /// otherwise is never said as "which answered", and one that timed out is still said when the
+    /// wait after the ladder found the answer.
+    #[test]
+    fn the_checks_wait_is_said_apart_from_windows_wait() {
+        assert_eq!(check_text(None), "");
+        let c = |ms: f64, ended: Check| Some(CheckWait { ms, ended });
+        assert_eq!(check_text(c(9.84, Check::Same)), " + waited 9.8ms for paddle's check (which read the same)");
+        assert_eq!(check_text(c(9.8, Check::Otherwise)), " + waited 9.8ms for paddle's check (which read otherwise)");
+        assert_eq!(check_text(c(3.0, Check::Nothing)), " + waited 3.0ms for paddle's check (which had nothing)");
+        assert_eq!(check_text(c(14.0, Check::NotYet)), " + waited 14.0ms for paddle's check (which had not answered by then)");
+        let late = Answered {
+            path: Path::Paddle,
+            check: c(14.0, Check::NotYet),
+            waited: Some(PaddleWait { ms: 0.2, ended: Waited::Answered }),
+        };
+        assert_eq!(
+            late.waits_text(),
+            " + waited 14.0ms for paddle's check (which had not answered by then) + waited 0.2ms for paddle (which answered)"
+        );
+        let differed = Answered { path: Path::Vision, check: c(9.8, Check::Otherwise), waited: None };
+        assert_eq!(differed.waits_text(), " + waited 9.8ms for paddle's check (which read otherwise)");
+        assert!(!differed.waits_text().contains("which answered"));
     }
 
     #[test]
     fn a_slow_read_is_said_part_by_part() {
         let passes = [pass(Stage::Tight, 180.4, Some(0), false), pass(Stage::Whole, 210.0, Some(1), true)];
         assert_eq!(
-            slow_line(123, 23, 448.2, "the event loop", Capture::Took(49.0), &passes),
-            "ocr: a slow read, a 123x23 pt region on the event loop in 448 ms: capture 49 ms; \
+            slow_line((123, 23), 448.2, "the event loop", Capture::Took(49.0), &passes, by(Path::Vision)),
+            "ocr: a slow read, a 123x23 pt region on the event loop in 448 ms, answered by Vision: capture 49 ms; \
              tight crop 180 ms, 0 words; whole region 210 ms, 1 word, another pass beside it; the rest 9 ms"
         );
         assert_eq!(
-            slow_line(174, 72, 357.0, "thread ocr-recognise", Capture::Apart, &[pass(Stage::Tight, 350.0, Some(3), false)]),
-            "ocr: a slow read, a 174x72 pt region on thread ocr-recognise in 357 ms: picture taken apart; \
-             tight crop 350 ms, 3 words; the rest 7 ms"
+            slow_line(
+                (174, 72),
+                357.0,
+                "thread ocr-recognise",
+                Capture::Apart,
+                &[pass(Stage::Tight, 350.0, Some(3), false)],
+                by(Path::Vision)
+            ),
+            "ocr: a slow read, a 174x72 pt region on thread ocr-recognise in 357 ms, answered by Vision: picture taken \
+             apart; tight crop 350 ms, 3 words; the rest 7 ms"
         );
         assert_eq!(
-            slow_line(40, 20, 120.0, "the event loop", Capture::Shared, &[pass(Stage::Fast, 130.0, None, false)]),
-            "ocr: a slow read, a 40x20 pt region on the event loop in 120 ms: captured with the call's other \
-             regions; fast model 130 ms, refused; the rest 0 ms",
+            slow_line((40, 20), 120.0, "the event loop", Capture::Shared, &[pass(Stage::Fast, 130.0, None, false)], by(Path::Nothing)),
+            "ocr: a slow read, a 40x20 pt region on the event loop in 120 ms, answered by nobody: captured with the \
+             call's other regions; fast model 130 ms, refused; the rest 0 ms",
             "rounding never makes the rest negative"
         );
-        assert!(slow_line(40, 20, 150.0, "the event loop", Capture::Took(150.0), &[]).contains("capture 150 ms; no Vision pass"));
-        // The neural recogniser beside a pass, as the shadow runs it on a Mac, and the shadow's
-        // own fast pass named as what it is.
-        let shadowed = [
+        assert!(slow_line((40, 20), 150.0, "the event loop", Capture::Took(150.0), &[], by(Path::Nothing))
+            .contains("capture 150 ms; no Vision pass"));
+        // The neural recogniser beside a pass, and the fast pass made only for its counts named as
+        // what it is.
+        let counted = [
             Pass { paddle_beside: true, ..pass(Stage::Tight, 290.0, Some(1), false) },
             pass(Stage::FastCompared, 14.0, Some(1), false),
         ];
         assert_eq!(
-            slow_line(40, 20, 330.0, "thread ocr-recognise", Capture::Apart, &shadowed),
-            "ocr: a slow read, a 40x20 pt region on thread ocr-recognise in 330 ms: picture taken apart; \
-             tight crop 290 ms, 1 word, the neural recogniser beside it; fast model, only compared 14 ms, 1 word; \
-             the rest 26 ms"
+            slow_line((40, 20), 330.0, "thread ocr-recognise", Capture::Apart, &counted, by(Path::Vision)),
+            "ocr: a slow read, a 40x20 pt region on thread ocr-recognise in 330 ms, answered by Vision: picture taken \
+             apart; tight crop 290 ms, 1 word, the neural recogniser beside it; fast model, only compared 14 ms, 1 \
+             word; the rest 26 ms"
+        );
+        // An Intel Mac's check that failed, the accurate ladder, and the recogniser's answer, waited
+        // for at its end: each wait is a part of its own.
+        let checked = [
+            pass(Stage::FastFirst, 12.0, Some(1), false),
+            Pass { paddle_beside: true, ..pass(Stage::Tight, 290.0, Some(0), false) },
+            pass(Stage::Whole, 300.0, Some(0), false),
+        ];
+        let paddle = Answered {
+            path: Path::Paddle,
+            check: Some(CheckWait { ms: 12.0, ended: Check::NotYet }),
+            waited: Some(PaddleWait { ms: 3.2, ended: Waited::Answered }),
+        };
+        assert_eq!(
+            slow_line((20, 20), 624.0, "the event loop", Capture::Took(4.0), &checked, paddle),
+            "ocr: a slow read, a 20x20 pt region on the event loop in 624 ms, answered by Paddle alone: capture 4 ms; \
+             fast model, first 12 ms, 1 word; tight crop 290 ms, 0 words, the neural recogniser beside it; whole \
+             region 300 ms, 0 words; the wait for paddle's check 12 ms, which had not answered by then; the wait for \
+             paddle 3 ms, which answered; the rest 3 ms"
         );
     }
 
@@ -704,6 +919,15 @@ mod tests {
              1650 ms for the warm-up before it"
         );
         assert!(!warm_up_line(160.0, "t", Some(want), want, false, Some(0.2)).contains("waited"), "no wait to speak of");
+        // An Intel Mac's fast level, warmed after it.
+        assert_eq!(
+            fast_warm_up_line(63.4, "thread ocr-warm-up", false),
+            "ocr: Vision's fast level warmed up in 63 ms on thread ocr-warm-up, for an Intel Mac's first pass of a read"
+        );
+        assert_eq!(
+            fast_warm_up_line(2.0, "thread ocr-recognise", true),
+            "ocr: Vision's fast level did not warm up on thread ocr-recognise: the request failed after 2 ms"
+        );
     }
 
     /// The second warm-up waits for the first to end, however it ends — its pass done, or its

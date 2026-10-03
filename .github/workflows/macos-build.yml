@@ -849,7 +849,7 @@ jobs:
   # built here: each leg unpacks the download and runs it, so it costs the run itself (168 s of it
   # idle on purpose) and the time to fetch and unpack the zip. 45 minutes, where the first run
   # took seven: the benchmark grew from ten
-  # pictures to forty-one and from one way of reading to eleven, its sections are estimated at 20 to
+  # pictures to forty-one and from one way of reading to twelve, its sections are estimated at 20 to
   # 30 minutes on the Intel runner, and the first run of this size is what its rounds are set by.
   # Only for an executable this run built, because a reused one measured again shows runner noise
   # and nothing else, and in any run started by hand: on every build with Rust changes, the
@@ -945,14 +945,24 @@ jobs:
           if grep -qE '^\| prod \|.*(wrong|refused|\| no: )' "$out"; then
             echo "::warning::today's request read a picture wrong, or was refused, on $LEG — see the engine and pipeline tables"
           fi
-          # And the pipeline's, a whole read under today's ladder, judged as the closing lines
-          # judge it — every picture with text exactly, text on one without any as invented — in
-          # the one line the benchmark prints for it whatever the verdicts.
-          prod=$(sed -n "s/^OCR BENCH: pipeline | today's ladder (prod) //p" "$out" | head -n1)
+          # And the pipeline's, a whole read as the application reads it — with the neural
+          # recogniser where it loaded, as on Windows — judged as the closing lines judge it: every
+          # picture with text exactly, text on one without any as invented, in the one line the
+          # benchmark prints for it whatever the verdicts. Text the recogniser invents where Vision
+          # reads nothing is Windows' behaviour too (ocr/merge.rs); the warning keeps it in sight.
+          prod=$(sed -n "s/^OCR BENCH: pipeline | the application's reading (prod) //p" "$out" | head -n1)
           case "$prod" in
             ""|"reads every picture it read right") ;;
-            *) echo "::warning::today's ladder on $LEG $prod" ;;
+            *) echo "::warning::the application's reading on $LEG $prod" ;;
           esac
+          # Which reading prod was on this leg, and what the ladder before it (old) made of the same
+          # pictures: notes beside the warning, so that the annotations say what changed.
+          sed -n 's/^OCR BENCH: pipeline | prod reads as the application does on this Mac: //p' "$out" | head -n1 \
+            | while IFS= read -r line; do echo "::notice::$LEG: prod reads as $line"; done
+          old=$(sed -n "s/^OCR BENCH: pipeline | the ladder before it (old) //p" "$out" | head -n1)
+          if [ -n "$old" ]; then
+            echo "::notice::$LEG: the ladder before it (old) $old"
+          fi
           # The closing lines are on the summary page already; each goes to the run's annotations
           # as well, so that the one naming a way of reading is there even when the first says
           # that none does.

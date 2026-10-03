@@ -8,7 +8,8 @@
 //! thread or in a process costs, what a pass costs after the recogniser has sat idle, and what
 //! two passes at once cost. And, where the bundle carries ONNX Runtime, the same for the neural
 //! recogniser beside Vision: what it reads and costs alone, what each way of reading a small
-//! region with it would read and cost ([`STRATEGIES`]), whether it slows Vision, and the
+//! region with it reads and costs ([`STRATEGIES`]: the application's own, `prod`, the ladder it
+//! read with before, `old`, and the others), whether it slows Vision, and the
 //! cheapest way that reads every picture right ([`closing_lines`]). The same pictures are read on
 //! a CI runner, on the Air and on an Apple-silicon Mac, so only the machine differs. It opens no
 //! window, captures no screen, needs no permission and never speaks; it does not open the
@@ -437,19 +438,20 @@ pub static VARIANTS: &[Variant] = &[
 /// come to read by, or one measured for comparison only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
-    /// `prod`, today's ladder.
-    Today,
-    /// A candidate of the plan's c1 or c2, which the closing line may name.
+    /// `prod`, the application's reading on this Mac (`ladder::Shape::production`).
+    Production,
+    /// Another way of reading small regions, which the closing line may name.
     Candidate,
     /// Measured beside them, never named: it speaks a value nothing checked (`fast>acc`, `paddle`),
-    /// leaves out what c1 needs (`acc+paddle`), or changes every rung (`rev2`).
+    /// leaves out what the rest of the ladder gives (`acc+paddle`), changes every rung (`rev2`), or
+    /// is how the application read before (`old`).
     Comparison,
 }
 
 impl Role {
     pub fn word(self) -> &'static str {
         match self {
-            Role::Today => "today",
+            Role::Production => "production",
             Role::Candidate => "candidate",
             Role::Comparison => "comparison",
         }
@@ -461,6 +463,8 @@ impl Role {
 /// with each, as `host.ocr.recognize` reads a region, and compares each with `prod`.
 pub struct Strategy {
     pub name: &'static str,
+    /// The shape it reads with; for `prod`, the one it reads with where the neural recogniser has
+    /// not loaded ([`Strategy::shape_here`]).
     pub shape: Shape,
     /// Every request of every rung asks for this revision.
     pub revision_all: Option<usize>,
@@ -475,9 +479,22 @@ impl Strategy {
         self.revision_all.or(self.shape.rung1_revision).or(self.shape.rev2_second.then_some(2))
     }
 
-    /// Whether it needs the neural recogniser.
+    /// Whether it needs the neural recogniser. `prod` does not: without it, it reads as the
+    /// application does then.
     pub fn paddle(&self) -> bool {
         self.shape.paddle.reads()
+    }
+
+    /// The shape it reads with on this Mac: `prod`'s is the application's
+    /// (`ladder::Shape::production`) — with the neural recogniser where it is ready in this process
+    /// (`paddle_ready`), checked by the fast level first on an Intel Mac (`intel`) — and every
+    /// other strategy's its own.
+    pub fn shape_here(&self, paddle_ready: bool, intel: bool) -> Shape {
+        if self.role == Role::Production {
+            Shape::production(paddle_ready, intel)
+        } else {
+            self.shape
+        }
     }
 
     /// Whether it reads a region larger than 400x200 points as `prod` does: every one but
@@ -491,28 +508,42 @@ const fn shape(first: Level, paddle: PaddleUse, rest: bool, rung1_revision: Opti
     Shape { first, paddle, rest, rung1_revision, rev2_second }
 }
 
-/// `prod` first: every other strategy is reported against it. The candidates for reading small
-/// regions faster on Macs without a Neural Engine: c1, the lone digit (`acc+paddle+rest`,
-/// `rev2-tight`, `rev3>rev2`), and c2, the fast level first with the neural recogniser as its
-/// check (`fast=paddle-checked`, the reading rules as they stand, and `fast=paddle-strict` and
-/// `fast=paddle`, which let the recogniser answer alone); the rest for comparison, never named
-/// ([`Role`]). A strategy that needs the neural recogniser reads a region whose ink is not one
-/// line, or too wide, as `prod` does.
+/// `prod` first: every other strategy is reported against it. `prod` reads as the application
+/// does on this Mac (`ladder::Shape::production`); `old` as it did before the neural recogniser
+/// answered on a Mac, so that every run shows the difference. The other ways of reading small
+/// regions measured beside it: the lone digit (`acc+paddle+rest`, `rev2-tight`, `rev3>rev2`), and
+/// the fast level first with the neural recogniser as its check (`fast=paddle-checked`,
+/// `fast=paddle-strict` and `fast=paddle`, which differ in what follows a check that failed); the
+/// rest for comparison, never named ([`Role`]). A strategy that needs the neural recogniser reads a
+/// region whose ink is not one line, or too wide, as `old` does.
 pub static STRATEGIES: &[Strategy] = &[
     Strategy {
         name: "prod",
         shape: Shape::TODAY,
         revision_all: None,
-        role: Role::Today,
-        what: "today's ladder: accurate over the content crop; the whole region when that read nothing; then the \
-               enlarged crop and the fast model within the 250 ms budget",
+        role: Role::Production,
+        what: "the application's reading: where the neural recogniser has loaded, Windows' rule over the accurate \
+               ladder — it is asked when the read begins, the accurate ladder (the content crop; the whole region \
+               when that read nothing; the enlarged crop within the 250 ms budget; no fast model) answers when it \
+               reads anything, and its text when it reads nothing — and on an Intel Mac the fast level checked by it \
+               first, its text with the recogniser's spacing where the two read the same, spaces included; where it \
+               has not loaded, old",
+    },
+    Strategy {
+        name: "old",
+        shape: Shape::TODAY,
+        revision_all: None,
+        role: Role::Comparison,
+        what: "the ladder the application read with before the neural recogniser answered on a Mac: accurate over \
+               the content crop; the whole region when that read nothing; then the enlarged crop and the fast model \
+               within the 250 ms budget",
     },
     Strategy {
         name: "rev2",
         shape: Shape::TODAY,
         revision_all: Some(2),
         role: Role::Comparison,
-        what: "today's ladder with every request of every rung asking for revision 2",
+        what: "old's ladder with every request of every rung asking for revision 2",
     },
     Strategy {
         name: "paddle",
@@ -526,63 +557,64 @@ pub static STRATEGIES: &[Strategy] = &[
         shape: shape(Level::Accurate, PaddleUse::Fallback, false, None, false),
         revision_all: None,
         role: Role::Comparison,
-        what: "Windows' rule: the neural recogniser asked when the read begins, at low priority; its text when the \
-               first accurate pass read nothing; nothing after",
+        what: "Windows' rule after the first accurate pass alone: the neural recogniser asked when the read begins, \
+               at low priority; its text when the first accurate pass read nothing; nothing after",
     },
     Strategy {
         name: "acc+paddle+rest",
         shape: shape(Level::Accurate, PaddleUse::Fallback, true, None, false),
         revision_all: None,
         role: Role::Candidate,
-        what: "acc+paddle, and today's rungs after it when the neural recogniser read nothing too (c1)",
+        what: "acc+paddle, and old's rungs after it when the neural recogniser read nothing too",
     },
     Strategy {
         name: "rev2-tight",
         shape: shape(Level::Accurate, PaddleUse::Off, true, Some(2), false),
         revision_all: None,
         role: Role::Candidate,
-        what: "today's ladder with its first pass under revision 2 (c1)",
+        what: "old's ladder with its first pass under revision 2",
     },
     Strategy {
         name: "rev3>rev2",
         shape: shape(Level::Accurate, PaddleUse::Off, true, None, true),
         revision_all: None,
         role: Role::Candidate,
-        what: "today's ladder, but when the first pass (Vision's default revision, 3) read nothing, revision 2 over \
-               the same crop instead of the whole region (c1)",
+        what: "old's ladder, but when the first pass (Vision's default revision, 3) read nothing, revision 2 over \
+               the same crop instead of the whole region",
     },
     Strategy {
         name: "fast=paddle-checked",
         shape: shape(Level::Fast, PaddleUse::AgreeChecked, true, None, false),
         revision_all: None,
         role: Role::Candidate,
-        what: "the fast level first, the neural recogniser beside it at high priority: fast's text when the \
-               recogniser read the same; otherwise today's accurate ladder without the fast rung, and nothing when \
-               that reads nothing — the recogniser's text never (c2 under the reading rules as they stand)",
+        what: "the fast level first, the neural recogniser beside it at high priority: fast's text, with the \
+               recogniser's spacing, when the recogniser read the same, spaces included (as prod's check judges); \
+               otherwise old's accurate ladder without the fast rung, and nothing when that reads nothing — the \
+               recogniser's text never (the reading rules of 2026-10-02)",
     },
     Strategy {
         name: "fast=paddle-strict",
         shape: shape(Level::Fast, PaddleUse::AgreeStrict, true, None, false),
         revision_all: None,
         role: Role::Candidate,
-        what: "the fast level first, the neural recogniser beside it at high priority: fast's text when the \
-               recogniser read the same; otherwise today's accurate ladder without the fast rung, and nothing when \
-               that reads nothing; when fast read nothing, an accurate pass first and the recogniser's text only \
-               when that reads nothing too (c2)",
+        what: "the fast level first, the neural recogniser beside it at high priority: fast's text, with the \
+               recogniser's spacing, when the recogniser read the same, spaces included (as prod's check judges); \
+               otherwise old's accurate ladder without the fast rung, and nothing when that reads nothing; when fast \
+               read nothing, an accurate pass first and the recogniser's text only when that reads nothing too",
     },
     Strategy {
         name: "fast=paddle",
         shape: shape(Level::Fast, PaddleUse::Agree, true, None, false),
         revision_all: None,
         role: Role::Candidate,
-        what: "fast=paddle-strict, but the recogniser's text at once when fast read nothing (c2)",
+        what: "fast=paddle-strict, but the recogniser's text at once when fast read nothing",
     },
     Strategy {
         name: "fast>acc",
         shape: shape(Level::Fast, PaddleUse::Off, true, None, false),
         revision_all: None,
         role: Role::Comparison,
-        what: "the fast level first, its text taken unchecked; today's ladder when it read nothing (for comparison: \
+        what: "the fast level first, its text taken unchecked; old's ladder when it read nothing (for comparison: \
                no neural recogniser)",
     },
 ];
@@ -997,8 +1029,8 @@ impl Plan {
                 ],
                 // A field read in one pass at both scales, the lone digit at both, the light
                 // field with its rule, a signed value in a light field and in a well, ink that is
-                // not text, and the real captures the CI set carries: sforzando's lone digit, its
-                // Polyphony and Instrument fields, and Melodyne's cents.
+                // not text, and the real captures the CI set carries: sforzando's two lone zeros,
+                // its Polyphony and Instrument fields, and Melodyne's cents.
                 speed_pictures: &[
                     "field-64@1x",
                     "field-64@2x",
@@ -1009,6 +1041,7 @@ impl Plan {
                     "val-minus12@2x",
                     "none-bars@2x",
                     "sfz-tune@1x",
+                    "sfz-trans@1x",
                     "sfz-polyphony@1x",
                     "sfz-instrument@1x",
                     "mel-cents@1x",
@@ -1674,8 +1707,8 @@ pub struct ReadNote {
     /// A fast first pass beside the neural recogniser: whether the two read the same, when either
     /// read anything.
     pub agreed: Option<bool>,
-    /// The strategy wanted the neural recogniser and today's ladder read the region instead: not
-    /// one line of ink, too wide, or the recogniser was not ready.
+    /// The strategy wanted the neural recogniser and old's ladder read the region instead: not one
+    /// line of ink, too wide, or the recogniser was not ready or not asked.
     pub today: bool,
 }
 
@@ -1764,7 +1797,7 @@ impl PipelineRow {
         Stats::of(&v).map(|s| s.median)
     }
 
-    /// How many reads today's ladder made instead of the strategy's.
+    /// How many reads old's ladder made instead of the strategy's.
     pub fn read_by_today(&self) -> usize {
         self.notes.iter().filter(|r| r.today).count()
     }
@@ -1782,7 +1815,7 @@ impl PipelineRow {
         let runs = self.paddle_runs().filter(|r| *r > 0.0).map(|r| format!(" and {r:.1} neural runs")).unwrap_or_default();
         let today = match self.read_by_today() {
             0 => String::new(),
-            n => format!(", {n} of {} read by today's ladder (not the neural recogniser's to read)", self.notes.len()),
+            n => format!(", {n} of {} read by old's ladder (not the neural recogniser's to read, or it was not asked)", self.notes.len()),
         };
         let agreed = self
             .agreement()
@@ -1839,6 +1872,17 @@ impl Pipeline {
                 row.cell = Cell::skip(why);
             }
         }
+    }
+
+    /// Leaves out `old` where `prod` reads with its ladder (`prod`, prod's shape on this Mac, is
+    /// [`Shape::TODAY`]): where the neural recogniser is not there. Read twice, the same ladder
+    /// tells nothing, and noise could make `old` "clearly faster" somewhere and the closing line
+    /// call the way the application reads there a comparison only. The reason, when it does.
+    pub fn without_old_where_prod_is_old(&mut self, prod: Shape) -> Option<&'static str> {
+        let i = self.strategies.iter().position(|s| s.name == "old").filter(|_| prod.is_today())?;
+        let why = "prod reads as old here: the neural recogniser is not there";
+        self.skip(i, why);
+        Some(why)
     }
 
     pub fn count(&self) -> usize {
@@ -2014,29 +2058,58 @@ impl Pipeline {
         t
     }
 
-    /// What today's ladder came to, in one line whatever the run's verdicts: the pictures `prod`
-    /// read wrong, the text it invented, the refusals — the line CI warns by. `None` when `prod`
-    /// was not measured.
+    /// What the application's reading came to, in one line whatever the run's verdicts: the
+    /// pictures `prod` read wrong, the text it invented, the refusals — the line CI warns by.
+    /// `None` when `prod` was not measured.
     pub fn prod_line(&self) -> Option<String> {
+        self.came_to("prod", "the application's reading (prod)")
+    }
+
+    /// The same of `old`, the ladder the application read with before, beside it: what the
+    /// change made of every picture. Not warned by.
+    pub fn old_line(&self) -> Option<String> {
+        self.came_to("old", "the ladder before it (old)")
+    }
+
+    /// `pipeline | <who> …` for the strategy `name`: what it read wrong, invented and was refused
+    /// on, or that it read every picture right; `None` when it was not measured.
+    fn came_to(&self, name: &str, who: &str) -> Option<String> {
         let outcomes = self.outcomes();
-        let prod = outcomes.iter().find(|o| o.name == "prod" && o.skipped.is_none())?;
+        let o = outcomes.iter().find(|o| o.name == name && o.skipped.is_none())?;
         let labels = |v: &[(String, bool)]| v.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>().join(", ");
         let mut parts = Vec::new();
-        if !prod.misread.is_empty() {
-            parts.push(format!("reads wrong: {}", labels(&prod.misread)));
+        if !o.misread.is_empty() {
+            parts.push(format!("reads wrong: {}", labels(&o.misread)));
         }
-        if !prod.invented.is_empty() {
-            parts.push(format!("invents text on: {}", labels(&prod.invented)));
+        if !o.invented.is_empty() {
+            parts.push(format!("invents text on: {}", labels(&o.invented)));
         }
-        if !prod.refused.is_empty() {
-            parts.push(format!("was refused on: {}", labels(&prod.refused)));
+        if !o.refused.is_empty() {
+            parts.push(format!("was refused on: {}", labels(&o.refused)));
         }
         Some(if parts.is_empty() {
-            "pipeline | today's ladder (prod) reads every picture it read right".to_string()
+            format!("pipeline | {who} reads every picture it read right")
         } else {
-            format!("pipeline | today's ladder (prod) {}", parts.join("; "))
+            format!("pipeline | {who} {}", parts.join("; "))
         })
     }
+}
+
+/// The pipeline's line saying which reading `prod` is on this Mac (`ladder::Shape::production`):
+/// with the neural recogniser where it is ready in this process (`paddle_ready`), checked by the
+/// fast level first on an Intel Mac (`intel`), and old's ladder where it is not there.
+pub fn prod_reads_as(paddle_ready: bool, intel: bool) -> String {
+    format!(
+        "pipeline | prod reads as the application does on this Mac: {}",
+        match (paddle_ready, intel) {
+            (false, _) => "as old, the neural recogniser not being there",
+            (true, false) => "Windows' rule over the accurate ladder, as on Apple silicon",
+            (true, true) => {
+                "the fast level checked by the neural recogniser, then Windows' rule over the accurate ladder, as on an \
+                 Intel Mac"
+            }
+        }
+    )
 }
 
 /// What one strategy came to over every picture, as the closing line weighs it.
@@ -2786,21 +2859,30 @@ mod tests {
         assert_eq!(probed, ["rev2", "rev3", "cpu", "gpu", "ane", "paddle-raw", "paddle-crop"]);
     }
 
-    /// prod is today's ladder and comes first; every other strategy differs from it; the names are
-    /// unique; and what each needs — a revision, the neural recogniser — is what its shape says.
+    /// prod is the application's reading and comes first, and old the ladder it read with before,
+    /// beside it; every other strategy differs from old; the names are unique; and what each needs
+    /// — a revision, the neural recogniser — is what its shape says.
     #[test]
     fn the_strategies() {
         assert_eq!(STRATEGIES[0].name, "prod");
-        assert_eq!(STRATEGIES[0].shape, Shape::TODAY);
-        assert!(STRATEGIES[0].revision().is_none() && !STRATEGIES[0].paddle());
+        let prod = &STRATEGIES[0];
+        assert!(prod.revision().is_none() && !prod.paddle(), "prod is measured wherever the bench runs");
+        // The application's own shape, on each kind of Mac, and old's where the recogniser is not.
+        assert_eq!(prod.shape_here(false, true), Shape::TODAY);
+        assert_eq!(prod.shape_here(true, false), Shape::production(true, false));
+        assert_eq!(prod.shape_here(true, true), Shape::production(true, true));
         let mut names: Vec<&str> = STRATEGIES.iter().map(|s| s.name).collect();
         names.sort();
         names.dedup();
         assert_eq!(names.len(), STRATEGIES.len());
-        for s in &STRATEGIES[1..] {
-            assert!(s.shape != Shape::TODAY || s.revision_all.is_some(), "{} is prod again", s.name);
-        }
         let by = |n: &str| &STRATEGIES[strategy(n).unwrap()];
+        let old = by("old");
+        assert!(old.shape.is_today() && old.revision_all.is_none() && old.role == Role::Comparison);
+        assert_eq!(old.shape_here(true, true), Shape::TODAY, "old is old whatever the Mac");
+        for s in STRATEGIES.iter().filter(|s| !matches!(s.name, "prod" | "old")) {
+            assert!(!s.shape.is_today() || s.revision_all.is_some(), "{} is old again", s.name);
+            assert_eq!(s.shape_here(true, true), s.shape, "{}", s.name);
+        }
         assert_eq!(by("rev2").revision(), Some(2));
         assert_eq!(by("rev2-tight").revision(), Some(2));
         assert_eq!(by("rev3>rev2").revision(), Some(2), "its second pass asks for revision 2");
@@ -2810,18 +2892,19 @@ mod tests {
             with_paddle,
             ["paddle", "acc+paddle", "acc+paddle+rest", "fast=paddle-checked", "fast=paddle-strict", "fast=paddle"]
         );
-        // The closing line names candidates only: c1's three and c2's three.
+        // The closing line names candidates only: the lone digit's three and the fast level's three.
         let candidates: Vec<&str> = STRATEGIES.iter().filter(|s| s.role == Role::Candidate).map(|s| s.name).collect();
         assert_eq!(
             candidates,
             ["acc+paddle+rest", "rev2-tight", "rev3>rev2", "fast=paddle-checked", "fast=paddle-strict", "fast=paddle"]
         );
-        assert_eq!(role("prod"), Role::Today);
+        assert_eq!(role("prod"), Role::Production);
+        assert_eq!(role("old"), Role::Comparison, "how it read before is never a way to read now");
         assert_eq!(role("fast>acc"), Role::Comparison, "unchecked fast text is never a way to read");
         assert_eq!(role("paddle"), Role::Comparison);
         assert_eq!(role("nobody"), Role::Comparison);
         assert_eq!(by("fast=paddle-checked").shape.paddle, PaddleUse::AgreeChecked);
-        // c1's Windows rule asks at low priority, c2 at high.
+        // acc+paddle asks at low priority, the fast level's checks at high.
         assert!(!by("acc+paddle+rest").shape.paddle.urgent() && by("fast=paddle").shape.paddle.urgent());
         assert!(!by("acc+paddle").shape.rest && by("acc+paddle+rest").shape.rest);
         assert_eq!(by("fast>acc").shape.first, Level::Fast);
@@ -3433,7 +3516,56 @@ mod tests {
         let summary = g.summary_table();
         assert!(summary.contains("| acc+paddle+rest | candidate | not measured: the neural recogniser is not available here |"), "{summary}");
         assert!(summary.contains("| fast>acc | comparison | none | none-bars@2x | none |"), "{summary}");
-        assert_eq!(g.prod_line().unwrap(), "pipeline | today's ladder (prod) reads every picture it read right");
+        assert_eq!(g.prod_line().unwrap(), "pipeline | the application's reading (prod) reads every picture it read right");
+        assert_eq!(g.old_line(), None, "old was not measured here");
+    }
+
+    /// prod's line and old's beside it: what the change made of every picture, the one CI warns
+    /// by and the one it does not.
+    #[test]
+    fn the_applications_reading_and_the_ladder_before_it() {
+        let plan = Plan::for_mode(false, false);
+        let names = ["prod", "old"];
+        let strategies: Vec<&Strategy> = names.iter().map(|n| &STRATEGIES[strategy(n).unwrap()]).collect();
+        let pictures: Vec<&Fixture> = ["lone-1@2x", "none-bars@2x"].iter().map(|l| fixture(l).unwrap()).collect();
+        let mut g = Pipeline::new(strategies, pictures, &plan);
+        let read = |g: &mut Pipeline, s: usize, p: usize, text: &str, answer: Answer| {
+            for _ in 0..7 {
+                g.rows[s][p].push(Sample { ms: 100.0, text: Some(text.into()), passes: 1, skipped: false }, note(answer, 100.0, 0, None));
+            }
+        };
+        // The application: the lone digit by the neural recogniser alone, and its invention on the bars.
+        read(&mut g, 0, 0, "1", Answer::Paddle);
+        read(&mut g, 0, 1, "l", Answer::Paddle);
+        // The ladder before it: nothing on either.
+        read(&mut g, 1, 0, "", Answer::Nobody);
+        read(&mut g, 1, 1, "", Answer::Nobody);
+        assert_eq!(g.prod_line().unwrap(), "pipeline | the application's reading (prod) invents text on: none-bars@2x");
+        assert_eq!(g.old_line().unwrap(), "pipeline | the ladder before it (old) reads wrong: lone-1@2x");
+        assert!(g.summary_table().contains("| old | comparison | lone-1@2x | none | none |"), "{}", g.summary_table());
+        assert!(g.summary_table().contains("| prod | production | none | none-bars@2x (prod too) | none |"), "{}", g.summary_table());
+        // Where prod is old — the neural recogniser not there — old is not read at all.
+        assert_eq!(g.without_old_where_prod_is_old(Shape::production(true, true)), None);
+        assert_eq!(g.without_old_where_prod_is_old(Shape::production(true, false)), None);
+        assert!(g.old_line().is_some());
+        let why = g.without_old_where_prod_is_old(Shape::production(false, true)).unwrap();
+        assert!(why.contains("the neural recogniser is not there"));
+        assert_eq!(g.old_line(), None);
+        assert!(g.rows[1].iter().all(|r| r.cell.skipped.is_some()));
+        assert!(g.summary_table().contains("| old | comparison | not measured: prod reads as old here"), "{}", g.summary_table());
+    }
+
+    /// Which reading prod is, in the three ways a Mac can have it.
+    #[test]
+    fn prod_says_which_reading_it_is() {
+        assert_eq!(
+            prod_reads_as(false, true),
+            "pipeline | prod reads as the application does on this Mac: as old, the neural recogniser not being there"
+        );
+        assert!(prod_reads_as(true, false).ends_with("Windows' rule over the accurate ladder, as on Apple silicon"));
+        assert!(prod_reads_as(true, true).ends_with(
+            "the fast level checked by the neural recogniser, then Windows' rule over the accurate ladder, as on an Intel Mac"
+        ));
     }
 
     /// A picture with text on which nothing is right too — Melodyne's lone dash — still holds a
@@ -3479,7 +3611,7 @@ mod tests {
         assert!(g.summary_table().contains("| fast=paddle-checked | candidate | dash@1x | none | none-bars@2x |"));
         // prod's line, which CI warns by, says what prod did not read right.
         read(&mut g, 0, 0, Some("4"));
-        assert_eq!(g.prod_line().unwrap(), "pipeline | today's ladder (prod) reads wrong: dash@1x");
+        assert_eq!(g.prod_line().unwrap(), "pipeline | the application's reading (prod) reads wrong: dash@1x");
         assert!(Accuracy::Refused.refused_only() && !Accuracy::Right.refused_only());
     }
 
@@ -3536,6 +3668,23 @@ mod tests {
         ];
         let lines = closing_lines(&outcomes, false);
         assert!(lines[1].contains("fast=paddle (reads k8-voices@1x (prod too), val-db@2x wrong)"), "{lines:?}");
+        // The case of every Mac with the neural recogniser: prod itself invents on the drawn level
+        // meter, as Windows does, and so does a candidate. Named only with that picture set aside;
+        // old — slower everywhere, wrong where prod is right — in no line.
+        let invents = |name: &str, faster: &[&str], slower: &[&str], misread: &[(&str, bool)], sum: f64| Outcome {
+            invented: vec![("none-bars@2x".to_string(), true)],
+            ..o(name, faster, slower, misread, sum)
+        };
+        let outcomes = [
+            invents("prod", &[], &[], &[], 0.0),
+            invents("acc+paddle+rest", &["lone-1@2x", "sfz-tune@1x"], &[], &[], 900.0),
+            o("old", &[], &["lone-1@2x", "sfz-tune@1x"], &[("sfz-tune@1x", false)], 3000.0),
+        ];
+        let lines = closing_lines(&outcomes, false);
+        assert!(lines[0].ends_with("saves time: none does"), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("faster than prod but not right: acc+paddle+rest (invents text on none-bars@2x (prod too))")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("prod itself does not read none-bars@2x right; set aside") && l.contains(": acc+paddle+rest (")), "{lines:?}");
+        assert!(lines.iter().all(|l| !l.contains("old (") && !l.contains("old;")), "{lines:?}");
         // Noise, and too few reads, name nobody.
         assert!(closing_lines(&outcomes, true)[0].contains("too noisy"));
         let few = [o("prod", &[], &[], &[], 0.0), Outcome { name: "rev2".into(), ..Outcome::default() }];

@@ -512,8 +512,8 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       the `.app` (`package-macos.sh --onnxruntime`). tract was measured as the other engine and not
       taken: the same reads on all 55 inputs, but 7.6 times ONNX Runtime's time, and its build
       script needs a C compiler for each Apple target, so `check-macos.ps1` would break. Every small
-      read hands the recogniser its content crop as a **shadow**, at utility priority and never
-      waited for, and on the recognise thread one pass of the fast level over the same crop; both
+      read hands the recogniser its content crop as a **shadow** (until 2026-10-03, below), at
+      utility, never waited for, and on the recognise thread one pass of the fast level over it; both
       are only compared with the answer and counted (`ocr/shadow.rs`, a line every 200th read and
       at exit, a trace line for each disagreement, `ocr-shadow-*` pictures with the debug switch).
       `ocr-bench`: 28 drawn pictures and 13 real Windows captures (`--pictures`), each with the
@@ -522,15 +522,62 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       and the fast level's first passes, pauses, a second language; `--paddle` and
       `--paddle-probe`, on Windows too. CI fetches and checks the dylib, refuses an executable that
       links it, runs two short runs without it and with the wrong half on macos-15, probes it on
-      macOS 14 and 26, and runs `--paddle` on Windows. Steps b (warm-up, turns) and c (reading on
-      Intel Macs with it) wait for the Air's numbers below.
-- [ ] **The session at the Intel Air** (the plan's a6): the new zip, the measuring script
-      unattended; then with "Save the images OCR was given" on, one round — sforzando's
-      Instrument, Polyphony and Pitchbend (Pitchbend brought to 1 by a fixed key sequence that
-      lands there from any start, so nobody has to confirm the value; the picture is checked
-      afterwards), VPS Avenger's preset name and its header at the smallest zoom, Kontakt's
-      header; no Melodyne, which does not run on a Mac — then the switch off, and the log, the
-      bench file and the pictures sent. It decides b1, b2, c1 and c2.
+      macOS 14 and 26, and runs `--paddle` on Windows. Step b (warm-up, turns) waits for the Air's
+      numbers below; step c (reading on Intel Macs with it) was built on 2026-10-03, below.
+- [x] **The Mac reads with the neural recogniser, by Windows' rule** (2026-10-03, the maintainer's
+      decisions of that day; built and type-checked for both Apple targets, nothing of it run on a
+      Mac). Wherever the recogniser has loaded, a small read hands it the content crop before
+      Vision's first pass, at the reading thread's quality of service, and its text answers where
+      Vision's accurate ladder — the tight crop, the whole region, the enlarged crop within the
+      budget, no fast rung — read nothing: no words, the crop as the box, approximate boxes in
+      `read` (`ocr/merge.rs`, which a test holds to `windows.rs`'s `recognize_image`, unchanged). On
+      an Intel Mac the fast level reads first and answers where the recogniser reads the same, with
+      the recogniser's spacing (`+3ct` read `+3 ct`). Every wait for the recogniser ends within the
+      ladder's 250 ms, the check's within its fast pass's own time. The fast rung stays only where
+      the recogniser is not there. With the debug switch on every read's line says who answered
+      (`answered by the fast level and Paddle agreeing`, `Vision`, `Paddle alone`, `nobody`) and the
+      wait for the recogniser in Windows' words; the cost and slow-read lines say it always, and the
+      counts line (every 200th read and at exit) counts each. `ocr-bench`: `prod` reads as the
+      application on that Mac, `old` as before. After the review of the same day: a request Vision
+      refuses is answered by nothing and the recogniser is not used, as Windows' read fails then;
+      the check agrees only where the recogniser reads a space wherever the fast level does (`1 23`
+      and `12 3` would otherwise have become `1 2 3`); a poll's read that made way for a key press's
+      takes only an answer already there; the fast pass for the counts comes after the answer, so
+      the budget no longer sets any time aside; the check has a log fragment of its own (`+ waited
+      <ms>ms for paddle's check (which read the same|which read otherwise|which had nothing|which
+      had not answered by then)`), so that `which answered` is Windows' wait alone; an Intel Mac
+      warms the fast level up after the accurate one; and the log says once a thread at which class
+      the recogniser runs its regions. What it rests on, CI run 37089023246: the check 11–27 ms
+      where one accurate pass over a value field took 220–470 on the Intel runner; sforzando's 1x
+      "0" read by the recogniser in 4–7 ms where the ladder read nothing (Intel) or "o" (macOS 26,
+      the fast rung); and its inventions on the drawn level meter and speaker ("l.", "D", ")"),
+      which Windows answers alike.
+- [ ] **The session at the Intel Air** (the plan's a6), the recogniser answering now: the new zip,
+      the measuring script unattended; then with "Save the images OCR was given" on, one round —
+      sforzando's Instrument, Polyphony and Pitchbend (Pitchbend brought to 1 by a fixed key
+      sequence that lands there from any start, so nobody has to confirm the value; the picture is
+      checked afterwards), VPS Avenger's preset name and its header at the smallest zoom, Kontakt's
+      header; no Melodyne, which does not run on a Mac — then the switch off, and the log, the bench
+      file and the pictures sent. It has to show: **which way the reads were answered, and how
+      often** — every read's line (`answered by …`, there while the switch is on) and the counts
+      line at exit (`answered by the fast level and Paddle agreeing in …, by Vision in …, by Paddle
+      alone in …, by nobody in …`); **every reading the recogniser gave alone**, each kept as an
+      `ocr-shadow-paddle-alone-*` picture — a digit gained (Pitchbend at 1, a lone digit;
+      sforzando's Tune and Trans "0" no module reads, so they stay the bench's real captures), or
+      text invented on a real plug-in's meter, symbol or empty field, which none of the round's
+      fields should give; how often it came too late — `paddle-late` pictures, and in the per-read
+      lines `which had not answered by then` after `for paddle` at the end of the ladder and after
+      `for paddle's check` at the Intel check; whether the check's answers are right on real 2x
+      text, spacing included, and whether one unchanged field is answered now by the check and now
+      by the ladder (its per-read lines, read again and again): where the two give a dash or a quote
+      in different forms, a polling module would hear a change that is none; the class the log names
+      for the event loop's regions (`ocr: the neural recogniser runs the regions the event loop asks
+      for at …`); the fast level's warm-up line; the event loop's slow reads (the slow-read lines)
+      against the last session's 143–786 ms, the first of the session among them; and **the quit**
+      with the recogniser loaded and used: `ocr: released the neural recogniser's session and ONNX
+      Runtime's environment …` among the log's last lines, and no "quit unexpectedly" (the item on
+      aborting at exit below). It decides b1 and b2, and whether anything of the new reading
+      changes.
 - [x] **The ONNX Runtime archive's SHA-256, pinned** (2026-10-03). GitHub lists no digest for
       `onnxruntime-osx-universal2-1.22.0.tgz` (its release API gives `digest: null`); the macOS
       workflow's first fetch from Microsoft's release address computed
@@ -619,34 +666,67 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       its descenders and measures as one line.
 - [ ] **The recogniser beside Vision on the Air's cores, and its session time and memory there.**
       The bench's threads section (Vision beside it at two priorities, four blocks of sustained
-      load) and its `paddle-first` processes answer it; in sessions, the shadow's line counts the
-      Vision passes it ran beside, and the slow-read line names it. Its warm-up, on `paddle-warm-up`
-      at utility, is let go at the moment the recognise thread's own warm-up pass begins (both
-      wait for the first Vision warm-up), and that pass is on the 5-second hang clock: whether the
-      recogniser's warm-up should wait for the recognise thread's too — a second opener, and a
-      case for a session whose recognise thread never warms — is for the bench's
-      `paddle-first:with-vision` row to say.
+      load) and its `paddle-first` processes answer it; in sessions, the counts line (`ocr: the
+      neural recogniser beside Vision (Paddle) …`) counts the Vision passes it ran beside, and the
+      slow-read line names it. Its warm-up, on `paddle-warm-up` at utility, is let go at the moment
+      the recognise thread's own warm-up pass begins (both wait for the first Vision warm-up), and
+      that pass is on the 5-second hang clock: whether the recogniser's warm-up should wait for the
+      recognise thread's too — a second opener, and a case for a session whose recognise thread
+      never warms — is for the bench's `paddle-first:with-vision` row to say.
 - [ ] **The fast level's first pass in a cold process, and the fast level and the recogniser after
       pauses**: on the CI's Macs from the next run, on the Air from its session.
-- [ ] **Revision 2, if c1 takes it.** Apple lists it as deprecated from macOS 15; macOS 26.6.2 still
-      offers it. Its trial in a process of its own stays. macOS 12 has no revision 3, and the
-      application reads with revision 2 there already.
-- [ ] **The shadow's counts from real sessions** — the fast level, the recogniser and the answer;
-      text read by the recogniser where Vision read none — the Mac's counterpart of O15. c1 with
-      the recogniser needs no invented reading among them, or a measured minimum score that
-      excludes every one and keeps the digits; c2 needs at least 300 reads in which the fast level
-      and the recogniser agreed and none of them wrong (then the rate is below 1 % with 95 %
-      certainty). The `ocr-shadow-*` pictures tell a gained digit from an invention.
-- [ ] **The recogniser alone after an empty Vision pass stays off** until the shadow shows
-      otherwise: on Windows it invented text on 4 of 9 pictures without text (scores up to 0.74),
-      misread a word cut at half its height at both scales ("Veleeity", "Voleoity"), and no
-      minimum score separates that from a right lone digit (0.55, sforzando's TUNE). Windows
-      itself answers such readings today ("ll." on a level meter, "Veleeity" on the half-clipped
-      word) — unchanged by decision, noted for the Windows side. The bench's `fast=paddle-checked`
-      reads by the rules as they stand, without the recogniser alone.
+- [ ] **Revision 2: not taken for the lone digit** (2026-10-03: the recogniser answers it, by
+      Windows' rule); `rev2-tight` and `rev3>rev2` stay in the bench for comparison. Apple lists it
+      as deprecated from macOS 15; macOS 26.6.2 still offers it. Its trial in a process of its own
+      stays. macOS 12 has no revision 3, and the application reads with revision 2 there already.
+- [ ] **The counts from real sessions** — who answered each read, the recogniser's readings beside
+      the ladder's, and where a fast pass ran beside the ladder, the fast level against both — the
+      Mac's counterpart of O15. An Intel Mac's agreed answers meet no accurate pass in a session,
+      since none runs then: a value the fast level and the recogniser both read wrong alike shows
+      only on the bench's pictures, on an Intel read whose recogniser answered after the check had
+      stopped waiting or read the value spaced apart, and on Apple silicon's counted fast pass
+      (`fast = Paddle but not the ladder`, `ocr-shadow-fast-paddle-wrong-*`); 300 agreed reads there
+      without a wrong one would put the rate below 1 % with 95 % certainty. The `ocr-shadow-*`
+      pictures tell a gained digit from an invention.
+- [ ] **The recogniser alone after an empty Vision ladder answers, as on Windows** (decided
+      2026-10-03), its inventions included: on the drawn pictures without text it read "l." and "l"
+      on a level meter and "D" and ")" on a speaker on every CI Mac, and alike on Windows ("ll.",
+      ".", "O", ")"); no minimum score separates that from a right lone digit (0.55, sforzando's
+      TUNE); and it misreads a word cut at half its height ("Veleeity") where Vision misreads it
+      too. Whether it invents on a real plug-in is for the Air's `ocr-shadow-paddle-alone-*`
+      pictures; CI warns on the drawn pictures in every run (`pipeline | the application's reading
+      (prod) invents text on: …`).
 - [ ] **The fast against the accurate level on a Neural Engine** (the Mac mini): whether Apple
-      silicon gets c1, c2 or neither. Until its numbers, no read on Apple silicon uses the
-      recogniser; the shadow runs there too.
+      silicon gets the Intel check too. It reads by Windows' rule over the accurate ladder now, and
+      on its recognise thread makes the fast pass for the counts that answer this.
+- [ ] **The Intel check's wait, and the event loop's longest read — the maintainer's yes needed.**
+      The check waits for the recogniser no longer than the fast pass took (`merge::check_wait`): on
+      CI's Intel runner the recogniser took 4–25 ms a field and the fast pass 11–27, so it should
+      mostly be in time; the Air's per-read lines say how often it was not (`for paddle's check
+      (which had not answered by then)`), and the counts line's `fast = Paddle = the ladder` and
+      `fast = Paddle but not the ladder` count, on an Intel Mac, the checks that agreed too late or
+      spaced the value apart. A read that fails the check climbs the accurate ladder after one fast
+      pass and at most as long again; no wait for the recogniser goes past the ladder's 250 ms, and
+      the fast rung is gone where the recogniser is asked. So the event loop's longest read can be
+      up to two fast passes longer than before, where the check fails and the budget is spent by the
+      ladder — about 22–54 ms warm on CI's Intel runner, against the 220–470 ms an agreed check
+      saves — which breaks "never longer than today's worst case" by that much. More on top, none of
+      it measured yet: a session's first check on a thread, now that an Intel Mac warms the fast
+      level after the accurate one (the fast warm-up line says what that first pass cost; 54–75 ms
+      cold in CI's processes of their own); the recogniser beside Vision's passes at the reader's
+      own class rather than at utility; and `recognizeMany`, which pays it once a region. The
+      check's time also counts against the budget, so a failed check leaves the enlarged rung less
+      of it (on an Intel Mac the first accurate pass alone spends most of it). CI measures the
+      failed check's cost in every run: `prod` against `old` on `lone-1@2x`, `sfz-tune@1x`,
+      `sfz-trans@1x`, `field-empty@2x`, `sfz-polyphony@1x` and `mel-cents@1x`, where the fast level
+      and the recogniser disagree. If the maintainer does not take it, one condition keeps the event
+      loop at its old bound: no check on it (`!ladder.on_event_loop` in `Rungs::merged`), and
+      `recognize` on an Intel Mac reads at the accurate ladder's speed again. Whether the tap
+      notices is for the Air.
+- [ ] **The enlarged rung still invents on macOS 26** (CI run 37089023246: text on the drawn level
+      meter and speaker). The decision kept the accurate ladder as it was, and the recogniser
+      answers only where the ladder read nothing, so an invention of that rung stands. To be looked
+      at with the Air's and the Mac mini's pictures.
 - [ ] **Large regions with the fast level**: nothing checks them, since the recogniser reads one
       line only.
 - [ ] **The tester's real 2x captures, and how their answers were checked.** The real crops in the
@@ -666,14 +746,13 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       minus U+2212 are one hyphen, the en dash U+2013 among them — the form Vision is likeliest to
       give for a minus. A value's minus comes out of either recogniser as any of them, so a Vision
       "–12" and a Paddle "-12" agree.
-- [ ] **What the shadow costs a session**: the recogniser at utility beside every small read on
-      the Air's cores — is Vision clearly slower beside it (the slow-read line's `the neural
-      recogniser beside it`)? — the recognise thread's extra fast pass (11 to 20 ms on the Intel
-      runner), and whether the debug pictures' limits (8 a region, 64 regions and 32 MiB a list,
-      two lists) suit a test round. And on Apple silicon, where Vision reads in 25 to 56 ms, how
-      often the recogniser has not answered by the time the ladder has (the shadow line's "had not
-      answered"): the shadow then compares nothing. Collecting a late answer at the next read of
-      the same region, still without waiting, is not built.
+- [ ] **What the recogniser costs a session**: one recognition beside every small read, now at the
+      reading thread's quality of service (which class, the log says once a thread; the event loop's
+      has not been seen on a real Mac), on the Air's cores — is Vision clearly slower beside it (the
+      slow-read line's `the neural recogniser beside it`; the bench's sustained blocks ask at the
+      measuring thread's priority now)? — the Apple-silicon recognise thread's counted fast pass,
+      made after the answer (5 to 12 ms on the arm64 runners), and whether the debug pictures'
+      limits (8 a region, 64 regions and 32 MiB a list, two lists) suit a test round.
 - [ ] **Name the neural recogniser's model exactly.** `crates/host/models/NOTICE.txt` says what is
       known: an English recognition model of PaddleOCR's PP-OCR mobile series, converted to ONNX
       with paddle2onnx from a PaddlePaddle 3 program (its graph's names say so). Which model, and

@@ -1,25 +1,25 @@
-//! The neural recogniser's shadow on a Mac: what it would have changed, counted from real
-//! sessions, while nothing it reads is used.
+//! The neural recogniser's readings on a Mac beside Vision's, counted from real sessions with who
+//! answered each read — its shadow, as it was called while it only ever read beside the ladder.
 //!
 //! Wherever the neural recogniser (`backend/paddle_ocr.rs`) has loaded, every small region a read
-//! climbs today's ladder for is handed to it as well, at utility priority, the moment the content
-//! crop is known; and on `host.ocr.read`'s recognise thread the fast level of Vision makes one pass
-//! over the same rendered crop right after the first accurate pass. Neither answer is used, and the
-//! ladder climbs the rungs it climbs without them, the fast pass's time set aside from its budget —
-//! though the recogniser's work beside it is load like any other, and can take a read past that
-//! budget. Once the ladder has answered, the recogniser's
-//! answer is taken if it is there — never waited for: one that has not answered is cancelled and
-//! counted as late — and the three are compared ([`Tally::add`]).
+//! does not find blank is handed to it the moment the content crop is known, and it answers where
+//! Vision's accurate ladder read nothing — Windows' rule (`ocr/merge.rs`); on an Intel Mac the fast
+//! level of Vision reads the crop first, and answers where the recogniser reads the same. On
+//! `host.ocr.read`'s recognise thread of a Mac without that check, the fast level makes one pass
+//! over the same rendered crop once the read has its answer, only to be counted here, so that it
+//! changes nothing of the answer or of the ladder's budget. Once the read has answered, the
+//! recogniser's answer is taken if it is there — one that has not answered by then is cancelled
+//! and counted as late — and the readings are compared ([`Tally::add`]).
 //!
-//! The counts are what the two ways of reading small regions faster on an Intel Mac would have
-//! done in real sessions, before either of them is built: the recogniser answering where the first
-//! accurate pass read nothing (the plan's c1, Windows' rule), and the fast level first, believed
-//! only where the recogniser reads the same (c2). Above all they count the one mistake c2 could not
-//! see once it is built, because the accurate pass that shows it would no longer run: the fast
-//! level and the recogniser agreeing on a reading the ladder did not give. And they count how often
-//! the recogniser reads text where Vision reads none — a lone digit gained, or text invented on ink
-//! that is not text, which `ocr-bench` saw it do on Windows on four of nine pictures without
-//! text; the pictures ([`Pictures`]) tell the two apart.
+//! The counts are what a tester's session has to show of the new reading: which way each read was
+//! answered ([`Path`]); how often the recogniser answered alone where Vision read nothing — a lone
+//! digit gained, or text invented on ink that is not text, which `ocr-bench` saw it do on four of
+//! the eight drawn pictures without text (the level meter and the speaker, at both scales), on
+//! every Mac and on Windows; the pictures ([`Pictures`]) tell the two apart; and where the fast
+//! level made a pass beside the accurate ladder, the one
+//! mistake an Intel Mac's check cannot see where it answers, because the accurate pass that shows
+//! it does not run then: the fast level and the recogniser agreeing on a reading the ladder did
+//! not give.
 //!
 //! The log gets one line with every count after each [`LINE_EVERY`]th read and at exit
 //! ([`Tally::line`]) — counted, not timed — and a trace line for each read in which they disagree
@@ -31,14 +31,16 @@
 // Everywhere but on a Mac only the tests use it.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
+use super::ladder::Path;
 use super::paddle_pre::same;
 
-/// What the neural recogniser had to say about one region by the time the ladder had answered.
+/// What the neural recogniser had to say about one region by the time the read had answered.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Paddle {
     /// Not asked: the application's exit had begun, its queue was full, or its thread had gone.
     NotAsked,
-    /// Asked, and not answered yet when the ladder had: cancelled then, since nobody waits for it.
+    /// Asked, and not answered yet when the read had: cancelled then. Where Vision read nothing,
+    /// the read waited for it within the ladder's budget and answered nothing.
     NotDone,
     /// Asked, and no answer will come: the recognition panicked, the pixels did not make a picture,
     /// or the recogniser's thread had gone — each of which the log says on its own.
@@ -53,22 +55,26 @@ pub enum Paddle {
 /// One small read, as the shadow compares it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reading {
+    /// Who answered the read.
+    pub path: Path,
     /// The first accurate pass over the content crop: the words it read, `None` when Vision refused
-    /// the request.
+    /// the request. Not looked at where the fast level and the recogniser answered ([`Path::Agreed`]),
+    /// which makes no accurate pass.
     pub first: Option<usize>,
-    /// What the read answered — the ladder's text; empty for nothing.
-    pub answer: String,
+    /// What Vision's ladder read — the read's answer, unless the recogniser answered alone; empty
+    /// for nothing.
+    pub ladder: String,
     /// Whether the ladder read the whole region, its second rung, after a first pass that read
-    /// nothing: the pass the plan's c1 would spare where the recogniser reads.
+    /// nothing.
     pub whole: bool,
-    /// The fast level's pass over the content crop, made only on the recognise thread and only for a
-    /// language that level reads: its text, empty for nothing; `None` where none was made or Vision
-    /// refused it.
+    /// The fast level's pass over the content crop — an Intel Mac's check, or a pass for these
+    /// counts on the recognise thread — made only for a language that level reads: its text, empty
+    /// for nothing; `None` where none was made or Vision refused it.
     pub fast: Option<String>,
     pub paddle: Paddle,
-    /// Whether the region was the recogniser's to read by `paddle_pre::fits` — one line of ink, not
-    /// too wide. The plan's ways of reading leave any other region to today's ladder, so it is
-    /// counted apart.
+    /// Whether the region is one the fast level may be checked on by `paddle_pre::fits` — one line
+    /// of ink, not too wide. The recogniser reads every small region, as on Windows; only the check
+    /// is for these.
     pub fits: bool,
     /// The read's Vision passes, and how many of them the recogniser ran beside
     /// (`cost::Pass::paddle_beside`).
@@ -76,7 +82,7 @@ pub struct Reading {
     pub passes_beside: usize,
 }
 
-/// How the recogniser's answer stood to the ladder's, by what the first accurate pass read.
+/// How the recogniser's reading stood to the ladder's, by what the first accurate pass read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum First {
     // The first accurate pass read text, which is then the answer.
@@ -86,10 +92,13 @@ pub enum First {
     Differs,
     /// It read nothing.
     Nothing,
-    // The first accurate pass read nothing, or was refused, and the ladder went on.
-    /// The ladder read nothing and the recogniser text: a lone digit gained, or text invented on ink
-    /// that is none — Windows' rule would have said it.
+    // The first accurate pass read nothing, and the ladder went on.
+    /// The ladder read nothing and the recogniser text, which answered — Windows' rule: a lone digit
+    /// gained, or text invented on ink that is none.
     PaddleAlone,
+    /// The ladder read nothing and the recogniser text, which came only after the read had stopped
+    /// waiting for it, at the end of the ladder's budget: the read answered nothing.
+    PaddleLate,
     /// The ladder read text and the recogniser nothing.
     LadderAlone,
     /// Both read text, the same.
@@ -101,11 +110,12 @@ pub enum First {
 }
 
 impl First {
-    const ALL: [First; 8] = [
+    const ALL: [First; 9] = [
         First::Same,
         First::Differs,
         First::Nothing,
         First::PaddleAlone,
+        First::PaddleLate,
         First::LadderAlone,
         First::BothSame,
         First::BothDiffer,
@@ -119,6 +129,7 @@ impl First {
             First::Differs => Some("paddle-differs"),
             First::Nothing => Some("paddle-nothing"),
             First::PaddleAlone => Some("paddle-alone"),
+            First::PaddleLate => Some("paddle-late"),
             First::LadderAlone => Some("ladder-alone"),
             First::BothDiffer => Some("both-differ"),
             First::Same | First::BothSame | First::Neither => None,
@@ -126,25 +137,27 @@ impl First {
     }
 }
 
-/// How the pair the plan's c2 would read with — the fast level and the recogniser — stood to each
-/// other and to the answer, where the fast level made its pass. "Apart" counts the recogniser
-/// reading nothing where the fast level read text: under c2's rules that is a disagreement too.
+/// How the pair an Intel Mac checks with — the fast level and the recogniser — stood to each other
+/// and to the ladder, where the fast level made its pass and the ladder read after it. "Apart"
+/// counts the recogniser reading nothing where the fast level read text: under the check's rules
+/// that is a disagreement too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pair {
     /// Fast and the recogniser read the same, and so did the ladder.
     AgreeRight,
     /// Fast and the recogniser read the same, and the ladder something else, or nothing: the mistake
-    /// the plan's c2 could not see.
+    /// an Intel Mac's check cannot see where it answers. Seen where the fast pass is only counted,
+    /// or where the recogniser answered after the check had stopped waiting for it.
     AgreeWrong,
-    /// Fast and the recogniser apart, and the answer fast's.
+    /// Fast and the recogniser apart, and the ladder fast's.
     SplitFast,
-    /// … the answer the recogniser's.
+    /// … the ladder the recogniser's.
     SplitPaddle,
-    /// … the answer neither's.
+    /// … the ladder neither's.
     SplitOther,
-    /// … no answer.
+    /// … the ladder nothing.
     SplitSilent,
-    /// Fast read nothing and the recogniser text, and the answer is the recogniser's.
+    /// Fast read nothing and the recogniser text, and the ladder read the recogniser's.
     PaddleOnlySame,
     /// … another.
     PaddleOnlyOther,
@@ -169,7 +182,7 @@ impl Pair {
     ];
 
     /// As [`First::slug`]: every case but the two in which the fast level and the recogniser read
-    /// the same as each other and as the answer, or nothing at all.
+    /// the same as each other and as the ladder, or nothing at all.
     pub fn slug(self) -> Option<&'static str> {
         match self {
             Pair::AgreeRight | Pair::BothNothing => None,
@@ -188,26 +201,33 @@ impl Pair {
 /// What one read came to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Case {
+    /// The fast level and the recogniser read the same, and that answered: no accurate pass to
+    /// compare them with.
+    Agreed,
+    /// Vision refused the first accurate pass: no reading, and by Windows' rule no answer of the
+    /// recogniser's either (`ocr/merge.rs`, `Pick::Refused`) — nothing to compare. The log said
+    /// why, once.
+    Refused,
     /// The recogniser was not asked.
     NotAsked,
-    /// It had not answered when the ladder had.
+    /// It had not answered when the read had.
     NotDone,
     /// It could not read the region ([`Paddle::Failed`]).
     Failed,
-    /// The region was not the recogniser's to read; what it read is counted against the answer apart.
-    Unfit,
     /// Compared: by what the first accurate pass read, and, where the fast level made its pass, by
     /// what fast and the recogniser read.
     Compared { first: First, fast: Option<Pair> },
 }
 
 impl Case {
-    /// The name of a case worth looking at, for the trace line and the picture: the fast level's,
-    /// the dangerous one first, then the first pass's; `None` when everything agreed.
+    /// The name of a case worth looking at, for the trace line and the picture: an answer of the
+    /// recogniser's alone first, which nothing checked and which may be invented; then the fast
+    /// level's, the dangerous one first; then the first pass's. `None` when everything agreed.
     pub fn slug(self) -> Option<&'static str> {
         match self {
+            Case::Compared { first: First::PaddleAlone, .. } => First::PaddleAlone.slug(),
             Case::Compared { first, fast } => fast.and_then(Pair::slug).or_else(|| first.slug()),
-            Case::NotAsked | Case::NotDone | Case::Failed | Case::Unfit => None,
+            Case::Agreed | Case::Refused | Case::NotAsked | Case::NotDone | Case::Failed => None,
         }
     }
 }
@@ -216,9 +236,11 @@ impl Case {
 /// `backend/macos/ocr.rs`, behind a lock; a test makes its own.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tally {
-    /// Small reads counted: every one that climbed the ladder with the recogniser loaded.
+    /// Small reads counted: every one that made a pass with the recogniser loaded.
     pub reads: u64,
-    /// Of those, the first accurate pass read nothing — and of these, it was refused.
+    /// Per [`Path`], in the order of [`Path::ALL`]: who answered.
+    paths: [u64; 4],
+    /// Of the reads with an accurate pass, the first read nothing — and of these, it was refused.
     pub first_empty: u64,
     pub first_refused: u64,
     /// The ladder read the whole region.
@@ -226,11 +248,12 @@ pub struct Tally {
     pub not_asked: u64,
     pub not_done: u64,
     pub failed: u64,
-    /// Not the recogniser's to read, and of those, it read what the ladder answered.
+    /// Not one the fast level may be checked on (`fits`), and of those, the recogniser read what
+    /// the ladder did.
     pub unfit: u64,
     pub unfit_same: u64,
     /// Per [`First`] case, in the order of [`First::ALL`].
-    first: [u64; 8],
+    first: [u64; 9],
     /// Reads with a fast pass and an answer of the recogniser's, and per [`Pair`] case, in the order
     /// of [`Pair::ALL`].
     pub fast_reads: u64,
@@ -252,6 +275,7 @@ impl Tally {
     pub const fn new() -> Tally {
         Tally {
             reads: 0,
+            paths: [0; 4],
             first_empty: 0,
             first_refused: 0,
             whole: 0,
@@ -260,7 +284,7 @@ impl Tally {
             failed: 0,
             unfit: 0,
             unfit_same: 0,
-            first: [0; 8],
+            first: [0; 9],
             fast_reads: 0,
             fast: [0; 10],
             paddle_ms: 0.0,
@@ -281,18 +305,43 @@ impl Tally {
         Pair::ALL.iter().position(|x| *x == c).map_or(0, |i| self.fast[i])
     }
 
-    /// Counts one read and says what it came to. A recogniser that was not asked, had not answered or
-    /// could not read the region is counted as that whatever the region was; a region that was not its to read is compared only
-    /// with the answer.
+    /// How many reads `p` answered.
+    pub fn path(&self, p: Path) -> u64 {
+        Path::ALL.iter().position(|x| *x == p).map_or(0, |i| self.paths[i])
+    }
+
+    /// Its time, where the recogniser read text.
+    fn paddle_time(&mut self, paddle: &Paddle) {
+        if let Paddle::Text { ms, .. } = paddle {
+            self.paddle_ms += ms;
+            self.paddle_texts += 1;
+            self.paddle_max_ms = self.paddle_max_ms.max(*ms);
+        }
+    }
+
+    /// Counts one read and says what it came to. Who answered is counted for every read. A read the
+    /// fast level and the recogniser answered has nothing more to compare, nor has one whose first
+    /// accurate pass Vision refused; a recogniser that was not asked, had not answered or could not
+    /// read the region is counted as that; every other read is compared with the ladder's reading,
+    /// a region the fast level may not be checked on included — the recogniser reads those too, as
+    /// on Windows.
     pub fn add(&mut self, r: &Reading) -> Case {
         self.reads += 1;
         self.passes += r.passes as u64;
         self.passes_beside += r.passes_beside as u64;
+        if let Some(i) = Path::ALL.iter().position(|p| *p == r.path) {
+            self.paths[i] += 1;
+        }
+        if r.path == Path::Agreed {
+            self.paddle_time(&r.paddle);
+            return Case::Agreed;
+        }
         let first_read = matches!(r.first, Some(n) if n > 0);
         if !first_read {
             self.first_empty += 1;
             if r.first.is_none() {
                 self.first_refused += 1;
+                return Case::Refused;
             }
         }
         if r.whole {
@@ -312,20 +361,17 @@ impl Tally {
                 return Case::Failed;
             }
             Paddle::Nothing => None,
-            Paddle::Text { text, ms, .. } => {
-                self.paddle_ms += ms;
-                self.paddle_texts += 1;
-                self.paddle_max_ms = self.paddle_max_ms.max(*ms);
+            Paddle::Text { text, .. } => {
+                self.paddle_time(&r.paddle);
                 Some(text.trim()).filter(|t| !t.is_empty())
             }
         };
-        let answer = Some(r.answer.trim()).filter(|a| !a.is_empty());
+        let answer = Some(r.ladder.trim()).filter(|a| !a.is_empty());
         if !r.fits {
             self.unfit += 1;
             if matches!((paddle, answer), (Some(p), Some(a)) if same(p, a)) {
                 self.unfit_same += 1;
             }
-            return Case::Unfit;
         }
 
         let first = if first_read {
@@ -336,7 +382,8 @@ impl Tally {
             }
         } else {
             match (answer, paddle) {
-                (None, Some(_)) => First::PaddleAlone,
+                (None, Some(_)) if r.path == Path::Paddle => First::PaddleAlone,
+                (None, Some(_)) => First::PaddleLate,
                 (Some(_), None) => First::LadderAlone,
                 (Some(a), Some(p)) if same(a, p) => First::BothSame,
                 (Some(_), Some(_)) => First::BothDiffer,
@@ -389,9 +436,11 @@ impl Tally {
     /// Every count, as one line of the log.
     pub fn line(&self) -> String {
         if self.reads == 0 {
-            return "ocr: the neural recogniser's shadow: no small read was counted".to_string();
+            return "ocr: the neural recogniser beside Vision: no small read was counted".to_string();
         }
-        let pct = |n: u64| format!("{:.0} %", n as f64 * 100.0 / self.reads as f64);
+        // Of the reads that made an accurate pass: all but those the check answered.
+        let accurate = self.reads - self.path(Path::Agreed);
+        let pct = |n: u64| if accurate == 0 { "n/a".to_string() } else { format!("{:.0} %", n as f64 * 100.0 / accurate as f64) };
         let f = |c: First| self.first(c);
         let q = |c: Pair| self.fast(c);
         let apart = q(Pair::SplitFast) + q(Pair::SplitPaddle) + q(Pair::SplitOther) + q(Pair::SplitSilent);
@@ -406,16 +455,24 @@ impl Tally {
             )
         };
         format!(
-            "ocr: the neural recogniser's shadow (Paddle) after {} small reads: the first accurate pass read \
-             nothing in {} ({}, refused in {}), the whole region was read in {}; Paddle was not asked in {}, could \
-             not read the region in {}, had not answered when the ladder had in {}, and {} were not its to read (it read the answer in {}). Where \
-             the first pass read text: Paddle the same in {}, something else in {}, nothing in {}; where it read \
-             nothing: Paddle alone read text in {}, the ladder alone in {}, both the same in {}, both differently \
-             in {}, neither in {}. With a fast pass ({}): fast = Paddle = the answer in {}, fast = Paddle but not \
-             the answer in {}, fast and Paddle apart in {} (the answer fast's in {}, Paddle's in {}, another in {}, \
-             nothing in {}), fast nothing and Paddle text in {} (the answer Paddle's in {}, another in {}, nothing \
-             in {}), both nothing in {}. {time}; Vision passes with Paddle beside them: {} of {}",
+            "ocr: the neural recogniser beside Vision (Paddle) after {} small reads: answered by the fast level and \
+             Paddle agreeing in {}, by Vision in {}, by Paddle alone in {}, by nobody in {}. Of the {accurate} with \
+             an accurate pass, the first read nothing in {} ({}, refused in {}), the whole region was read in {}; \
+             Paddle was not asked in {}, could not read the region in {}, had not answered when the read had in {}, \
+             and {} were not one line the fast level may be checked on (Paddle read the ladder's text in {}). \
+             Where the first pass read text: Paddle the same in {}, something else in {}, nothing in {}; where it \
+             read nothing: Paddle alone read text in {} (too late to answer in {}), the ladder alone in {}, both the \
+             same in {}, both differently in {}, neither in {}. With a fast pass beside the ladder ({}): fast = \
+             Paddle = the ladder \
+             in {}, fast = Paddle but not the ladder in {}, fast and Paddle apart in {} (the ladder fast's in {}, \
+             Paddle's in {}, another in {}, nothing in {}), fast nothing and Paddle text in {} (the ladder Paddle's \
+             in {}, another in {}, nothing in {}), both nothing in {}. {time}; Vision passes with Paddle beside \
+             them: {} of {}",
             self.reads,
+            self.path(Path::Agreed),
+            self.path(Path::Vision),
+            self.path(Path::Paddle),
+            self.path(Path::Nothing),
             self.first_empty,
             pct(self.first_empty),
             self.first_refused,
@@ -428,7 +485,8 @@ impl Tally {
             f(First::Same),
             f(First::Differs),
             f(First::Nothing),
-            f(First::PaddleAlone),
+            f(First::PaddleAlone) + f(First::PaddleLate),
+            f(First::PaddleLate),
             f(First::LadderAlone),
             f(First::BothSame),
             f(First::BothDiffer),
@@ -481,16 +539,18 @@ pub fn trace_line(r: &Reading, case: Case, (x, y, w, h): (i32, i32, i32, i32)) -
         Some(n) => format!("{n} words"),
     };
     Some(format!(
-        "ocr: shadow, {slug}, a {w}x{h} pt region at {x},{y}: the answer {}, the first accurate pass {first}, {fast}, \
-         {paddle}",
-        quoted(&r.answer)
+        "ocr: shadow, {slug}, a {w}x{h} pt region at {x},{y}: answered by {}, the ladder {}, the first accurate pass \
+         {first}, {fast}, {paddle}",
+        r.path.word(),
+        quoted(&r.ladder)
     ))
 }
 
 /// A picture's file name: `ocr-<kind>-<x>,<y>,<w>x<h>-<hash>.bmp`, the region in points and the
 /// hash of its pixels ([`pixels_hash`]) in eight hexadecimal digits. `kind` is `debug-raw` for what
 /// the switch "Save the images OCR was given" keeps of every small region, `shadow-<case>` for a
-/// read the shadow found worth looking at.
+/// read the shadow found worth looking at — `shadow-paddle-alone` for every one the recogniser
+/// answered alone.
 pub fn picture_name(kind: &str, (x, y, w, h): (i32, i32, i32, i32), hash: u32) -> String {
     format!("ocr-{kind}-{x},{y},{w}x{h}-{hash:08x}.bmp")
 }
@@ -597,11 +657,21 @@ mod tests {
         Paddle::Text { text: t.to_string(), score: 0.9, ms: 12.0 }
     }
 
-    /// A read that fits, with one pass that read `first` words, answered `answer`, with no fast pass.
-    fn read(first: Option<usize>, answer: &str, paddle: Paddle) -> Reading {
+    /// A read that fits, with one pass that read `first` words, whose ladder read `ladder`, with no
+    /// fast pass, answered as the application answers it: by Vision when the ladder read anything,
+    /// by the recogniser when it did not and the recogniser read text, by nobody otherwise.
+    fn read(first: Option<usize>, ladder: &str, paddle: Paddle) -> Reading {
+        let path = if !ladder.trim().is_empty() {
+            Path::Vision
+        } else if matches!(&paddle, Paddle::Text { text, .. } if !text.trim().is_empty()) {
+            Path::Paddle
+        } else {
+            Path::Nothing
+        };
         Reading {
+            path,
             first,
-            answer: answer.to_string(),
+            ladder: ladder.to_string(),
             whole: false,
             fast: None,
             paddle,
@@ -611,8 +681,8 @@ mod tests {
         }
     }
 
-    fn with_fast(fast: &str, answer: &str, paddle: Paddle) -> Reading {
-        Reading { fast: Some(fast.to_string()), ..read(Some(1), answer, paddle) }
+    fn with_fast(fast: &str, ladder: &str, paddle: Paddle) -> Reading {
+        Reading { fast: Some(fast.to_string()), ..read(Some(1), ladder, paddle) }
     }
 
     #[test]
@@ -626,26 +696,46 @@ mod tests {
         assert_eq!(t.add(&read(Some(1), "1", Paddle::Nothing)), Case::Compared { first: First::Nothing, fast: None });
         assert_eq!((t.first(First::Same), t.first(First::Differs), t.first(First::Nothing)), (3, 1, 1));
         assert_eq!(t.first_empty, 0);
-        assert_eq!(t.reads, 5);
+        assert_eq!((t.reads, t.path(Path::Vision)), (5, 5));
     }
 
     #[test]
-    fn where_the_first_pass_read_nothing_the_five_cases() {
+    fn where_the_first_pass_read_nothing_the_six_cases() {
         let mut t = Tally::new();
-        let miss = |answer: &str, paddle: Paddle| Reading { whole: true, ..read(Some(0), answer, paddle) };
+        let miss = |ladder: &str, paddle: Paddle| Reading { whole: true, ..read(Some(0), ladder, paddle) };
         let case = |c: Case| match c {
             Case::Compared { first, fast: None } => first,
             other => panic!("{other:?}"),
         };
-        assert_eq!(case(t.add(&miss("", text("1")))), First::PaddleAlone, "a digit gained, or an invention");
+        assert_eq!(case(t.add(&miss("", text("1")))), First::PaddleAlone, "a digit gained, or an invention: it answered");
         assert_eq!(case(t.add(&miss("1", Paddle::Nothing))), First::LadderAlone);
         assert_eq!(case(t.add(&miss("1", text("1")))), First::BothSame);
         assert_eq!(case(t.add(&miss("7", text("1")))), First::BothDiffer);
         assert_eq!(case(t.add(&miss("", Paddle::Nothing))), First::Neither);
-        // Refused counts as having read nothing, and is said apart.
-        assert_eq!(case(t.add(&read(None, "", text("1")))), First::PaddleAlone);
-        assert_eq!((t.first_empty, t.first_refused, t.whole), (6, 1, 5));
-        assert_eq!(t.first(First::PaddleAlone), 2);
+        // Refused is no reading: counted among the first passes that read nothing and said apart,
+        // and not compared — by Windows' rule the recogniser does not answer it, whatever it read.
+        let refused = Reading { path: Path::Nothing, ..read(None, "", text("1")) };
+        assert_eq!(t.add(&refused), Case::Refused);
+        assert_eq!(Case::Refused.slug(), None);
+        // Its text came after the read had stopped waiting for it: the read answered nothing.
+        let late = Reading { path: Path::Nothing, ..miss("", text("0")) };
+        assert_eq!(case(t.add(&late)), First::PaddleLate);
+        assert_eq!((t.first_empty, t.first_refused, t.whole), (7, 1, 6));
+        assert_eq!((t.first(First::PaddleAlone), t.first(First::PaddleLate)), (1, 1));
+        assert_eq!((t.path(Path::Paddle), t.path(Path::Vision), t.path(Path::Nothing)), (1, 3, 3));
+    }
+
+    /// A read the fast level and the recogniser answered makes no accurate pass: counted as theirs,
+    /// with the recogniser's time, and compared with nothing.
+    #[test]
+    fn an_answer_of_the_check_is_counted_and_not_compared() {
+        let mut t = Tally::new();
+        let agreed = Reading { path: Path::Agreed, first: None, fast: Some("+3ct".into()), ..read(None, "", text("+3 ct")) };
+        assert_eq!(t.add(&agreed), Case::Agreed);
+        assert_eq!(Case::Agreed.slug(), None);
+        assert_eq!((t.reads, t.path(Path::Agreed), t.first_empty, t.first_refused, t.fast_reads), (1, 1, 0, 0, 0));
+        assert_eq!((t.paddle_texts, t.paddle_ms), (1, 12.0));
+        assert!(First::ALL.iter().all(|c| t.first(*c) == 0));
     }
 
     #[test]
@@ -662,7 +752,7 @@ mod tests {
         assert_eq!(fast(t.add(&with_fast("84", "64", text("64")))), Pair::SplitPaddle);
         assert_eq!(fast(t.add(&with_fast("84", "64", text("34")))), Pair::SplitOther);
         assert_eq!(fast(t.add(&with_fast("84", "", text("34")))), Pair::SplitSilent);
-        // The recogniser reading nothing where fast read text is a disagreement under c2's rules.
+        // The recogniser reading nothing where fast read text is a disagreement under the check's rules.
         assert_eq!(fast(t.add(&with_fast("64", "64", Paddle::Nothing))), Pair::SplitFast);
         assert_eq!(fast(t.add(&with_fast("64", "", Paddle::Nothing))), Pair::SplitSilent);
         assert_eq!(fast(t.add(&with_fast("", "1", text("1")))), Pair::PaddleOnlySame);
@@ -674,23 +764,26 @@ mod tests {
     }
 
     #[test]
-    fn late_unasked_and_unfit_reads_are_counted_apart() {
+    fn late_and_unasked_reads_are_counted_apart_and_the_unfit_ones_compared() {
         let mut t = Tally::new();
         assert_eq!(t.add(&read(Some(1), "64", Paddle::NotDone)), Case::NotDone);
         assert_eq!(t.add(&read(Some(0), "", Paddle::NotAsked)), Case::NotAsked);
         assert_eq!(t.add(&read(Some(0), "", Paddle::Failed)), Case::Failed, "a panic or a thread gone is no reading");
-        let unfit = |answer: &str, paddle: Paddle| Reading { fits: false, ..read(Some(3), answer, paddle) };
-        assert_eq!(t.add(&unfit("Voices: 0", text("Voices:0"))), Case::Unfit);
-        assert_eq!(t.add(&unfit("Voices: 0", text("In Voices: 0"))), Case::Unfit);
-        assert_eq!(t.add(&unfit("Legato", Paddle::Nothing)), Case::Unfit);
-        // A late recogniser on a region that was not its to read is late first.
         assert_eq!(t.add(&Reading { fits: false, ..read(Some(1), "x", Paddle::NotDone) }), Case::NotDone);
-        assert_eq!((t.not_done, t.not_asked, t.failed, t.unfit, t.unfit_same), (2, 1, 1, 3, 1));
-        assert_eq!((t.reads, t.first_empty), (7, 2));
-        assert!(First::ALL.iter().all(|c| t.first(*c) == 0), "nothing was compared");
-        for c in [Case::NotDone, Case::NotAsked, Case::Failed, Case::Unfit] {
+        for c in [Case::NotDone, Case::NotAsked, Case::Failed] {
             assert_eq!(c.slug(), None);
         }
+        assert!(First::ALL.iter().all(|c| t.first(*c) == 0), "nothing was compared");
+        // A region the fast level may not be checked on is the recogniser's all the same, as on
+        // Windows: compared, and counted apart besides.
+        let unfit = |ladder: &str, paddle: Paddle| Reading { fits: false, ..read(Some(3), ladder, paddle) };
+        assert_eq!(t.add(&unfit("Voices: 0", text("Voices:0"))), Case::Compared { first: First::Same, fast: None });
+        assert_eq!(t.add(&unfit("Voices: 0", text("In Voices: 0"))), Case::Compared { first: First::Differs, fast: None });
+        assert_eq!(t.add(&unfit("Legato", Paddle::Nothing)), Case::Compared { first: First::Nothing, fast: None });
+        let header = Reading { fits: false, ..read(Some(0), "", text("Init Preset")) };
+        assert_eq!(t.add(&header).slug(), Some("paddle-alone"), "an unfit region the recogniser answered alone");
+        assert_eq!((t.not_done, t.not_asked, t.failed, t.unfit, t.unfit_same), (2, 1, 1, 4, 1));
+        assert_eq!((t.reads, t.first_empty), (8, 3));
     }
 
     #[test]
@@ -700,36 +793,46 @@ mod tests {
         assert_eq!(compared(First::Neither, Some(Pair::BothNothing)).slug(), None);
         assert_eq!(compared(First::BothSame, None).slug(), None);
         assert_eq!(compared(First::PaddleAlone, None).slug(), Some("paddle-alone"));
-        // The fast level's case before the first pass's: the dangerous one is named first.
+        assert_eq!(compared(First::PaddleLate, None).slug(), Some("paddle-late"));
+        // An answer of the recogniser's alone before anything else: on an Intel Mac whose check
+        // failed, the fast level's case is there too.
+        assert_eq!(compared(First::PaddleAlone, Some(Pair::SplitSilent)).slug(), Some("paddle-alone"));
+        assert_eq!(compared(First::PaddleAlone, Some(Pair::AgreeWrong)).slug(), Some("paddle-alone"));
+        // Then the fast level's case before the first pass's: the dangerous one is named first.
         assert_eq!(compared(First::Differs, Some(Pair::AgreeWrong)).slug(), Some("fast-paddle-wrong"));
+        assert_eq!(compared(First::PaddleLate, Some(Pair::SplitSilent)).slug(), Some("split-silent"));
         assert_eq!(compared(First::Nothing, Some(Pair::BothNothing)).slug(), Some("paddle-nothing"));
         let mut names = std::collections::HashSet::new();
         for c in First::ALL.iter().filter_map(|c| c.slug()).chain(Pair::ALL.iter().filter_map(|c| c.slug())) {
             assert!(c.chars().all(|ch| ch.is_ascii_lowercase() || ch == '-'), "{c} goes into a file name");
             assert!(names.insert(c), "{c} twice");
         }
-        assert_eq!(names.len(), 13);
+        assert_eq!(names.len(), 14);
     }
 
     #[test]
     fn the_line_says_every_count() {
         let mut t = Tally::new();
-        assert_eq!(t.line(), "ocr: the neural recogniser's shadow: no small read was counted");
+        assert_eq!(t.line(), "ocr: the neural recogniser beside Vision: no small read was counted");
         t.add(&Reading { passes: 2, passes_beside: 1, ..with_fast("64", "64", text("64")) });
         t.add(&Reading { whole: true, ..read(Some(0), "", Paddle::Text { text: "1".into(), score: 0.5, ms: 30.0 }) });
         t.add(&read(Some(1), "x", Paddle::NotDone));
         t.add(&Reading { fits: false, ..read(Some(2), "a b", Paddle::Nothing) });
+        t.add(&Reading { path: Path::Agreed, first: None, fast: Some("DEF".into()), ..read(None, "", text("DEF")) });
         assert_eq!(
             t.line(),
-            "ocr: the neural recogniser's shadow (Paddle) after 4 small reads: the first accurate pass read nothing \
-             in 1 (25 %, refused in 0), the whole region was read in 1; Paddle was not asked in 0, could not read the \
-             region in 0, had not answered when the ladder had in 1, and 1 were not its to read (it read the answer in 0). Where the first pass \
-             read text: Paddle the same in 1, something else in 0, nothing in 0; where it read nothing: Paddle alone \
-             read text in 1, the ladder alone in 0, both the same in 0, both differently in 0, neither in 0. With a \
-             fast pass (1): fast = Paddle = the answer in 1, fast = Paddle but not the answer in 0, fast and Paddle \
-             apart in 0 (the answer fast's in 0, Paddle's in 0, another in 0, nothing in 0), fast nothing and \
-             Paddle text in 0 (the answer Paddle's in 0, another in 0, nothing in 0), both nothing in 0. Paddle \
-             took 21 ms on average where it read text, 30 at most; Vision passes with Paddle beside them: 1 of 5"
+            "ocr: the neural recogniser beside Vision (Paddle) after 5 small reads: answered by the fast level and \
+             Paddle agreeing in 1, by Vision in 3, by Paddle alone in 1, by nobody in 0. Of the 4 with an accurate \
+             pass, the first read nothing in 1 (25 %, refused in 0), the whole region was read in 1; Paddle was not \
+             asked in 0, could not read the region in 0, had not answered when the read had in 1, and 1 were not one \
+             line the fast level may be checked on (Paddle read the ladder's text in 0). Where the first pass read \
+             text: Paddle the same in 1, something else in 0, nothing in 1; where it read nothing: Paddle alone read \
+             text in 1 (too late to answer in 0), the ladder alone in 0, both the same in 0, both differently in 0, \
+             neither in 0. With a fast pass beside the ladder (1): fast = Paddle = the ladder in 1, fast = Paddle but \
+             not the ladder in 0, fast and Paddle apart in 0 (the ladder fast's in 0, Paddle's in 0, another in 0, \
+             nothing in 0), fast nothing and Paddle text in 0 (the ladder Paddle's in 0, another in 0, nothing in \
+             0), both nothing in 0. Paddle took 18 ms on average where it read text, 30 at most; Vision passes with \
+             Paddle beside them: 1 of 6"
         );
     }
 
@@ -750,15 +853,15 @@ mod tests {
         let case = t.add(&r);
         assert_eq!(
             trace_line(&r, case, (100, 200, 40, 20)).unwrap(),
-            "ocr: shadow, fast-paddle-wrong, a 40x20 pt region at 100,200: the answer \"64\", the first accurate \
-             pass 1 word, the fast level \"84\", Paddle \"84\" (score 0.912, 12 ms)"
+            "ocr: shadow, fast-paddle-wrong, a 40x20 pt region at 100,200: answered by Vision, the ladder \"64\", the \
+             first accurate pass 1 word, the fast level \"84\", Paddle \"84\" (score 0.912, 12 ms)"
         );
         let r = read(Some(0), "", text("1"));
         let case = t.add(&r);
         assert_eq!(
             trace_line(&r, case, (-1440, 0, 12, 20)).unwrap(),
-            "ocr: shadow, paddle-alone, a 12x20 pt region at -1440,0: the answer nothing, the first accurate pass \
-             nothing, no fast pass, Paddle \"1\" (score 0.900, 12 ms)"
+            "ocr: shadow, paddle-alone, a 12x20 pt region at -1440,0: answered by Paddle alone, the ladder nothing, \
+             the first accurate pass nothing, no fast pass, Paddle \"1\" (score 0.900, 12 ms)"
         );
         let agreed = read(Some(1), "64", text("64"));
         let case = t.add(&agreed);

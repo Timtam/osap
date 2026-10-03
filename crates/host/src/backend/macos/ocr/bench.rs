@@ -73,9 +73,9 @@ use objc2_vision::VNRecognizeTextRequest;
 use image::RgbImage;
 
 use super::{
-    cgimage_to_rgba, content_margin, new_request, paddle_crop, perform, picture_from_png, recognize_noted, render,
-    run_vision, supported_revisions, upscale_toward, warm_up_page, Ladder, Plan, ACCURATE, FAST, LADDER_BUDGET,
-    REVISION_OVERRIDE, TARGET_CONTENT_PX,
+    cgimage_to_rgba, content_margin, intel_mac, new_request, paddle_crop, perform, picture_from_png, qos_word,
+    recognize_noted, render, run_vision, supported_revisions, thread_qos, upscale_toward, warm_up_page, Ladder, Plan,
+    ACCURATE, FAST, LADDER_BUDGET, REVISION_OVERRIDE, TARGET_CONTENT_PX,
 };
 use crate::backend::paddle_ocr::{self, Polled, Qos, IN_FLIGHT};
 use crate::ocr::bench::{
@@ -84,7 +84,7 @@ use crate::ocr::bench::{
     STRATEGIES, VARIANTS,
 };
 use crate::ocr::cost::{Capture, Stage};
-use crate::ocr::ladder::Answer;
+use crate::ocr::ladder::{Answer, Shape};
 use crate::ocr::paddle_pre::Tighten;
 use crate::ocr::policy::{SMALL_H, SMALL_W};
 
@@ -122,47 +122,23 @@ pub fn run(args: &[String]) -> i32 {
 
 // ── Quality of service ───────────────────────────────────────────────────────────────────────
 
-extern "C" {
-    /// `<sys/qos.h>`, macOS 10.10 and later: the calling thread's quality-of-service class.
-    /// Declared here as a plain number: the libc crate binds the class as a Rust enum, into which
-    /// a value it does not list could not be read back soundly.
-    fn qos_class_self() -> u32;
-}
-
 const QOS_USER_INITIATED: u32 = 0x19;
 
 /// A class a measuring thread was left with instead of user-initiated; `u32::MAX` while none was.
 static QOS_MISSED: AtomicU32 = AtomicU32::new(u32::MAX);
 
-fn qos_word(class: u32) -> String {
-    match class {
-        0x21 => "user-interactive".to_string(),
-        0x19 => "user-initiated".to_string(),
-        0x15 => "default".to_string(),
-        0x11 => "utility".to_string(),
-        0x09 => "background".to_string(),
-        0x00 => "unspecified".to_string(),
-        other => format!("class 0x{other:x}"),
-    }
-}
-
 /// This thread's quality of service, in words.
 fn qos_here() -> String {
-    // SAFETY: a plain question about the calling thread.
-    qos_word(unsafe { qos_class_self() })
+    qos_word(thread_qos())
 }
 
 /// What a thread that times a pass does first: ask for user-initiated, as the application's
 /// recognise thread does (`thread_init`). One that is left with another class is remembered, and
 /// the conditions at the end say so.
 fn measuring_thread() {
-    // SAFETY: plain calls about the calling thread.
-    let (rc, got) = unsafe {
-        (
-            libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0),
-            qos_class_self(),
-        )
-    };
+    // SAFETY: a plain call about the calling thread.
+    let rc = unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0) };
+    let got = thread_qos();
     if rc != 0 || got != QOS_USER_INITIATED {
         QOS_MISSED.store(got, Ordering::Relaxed);
     }
@@ -1008,16 +984,17 @@ fn probed_ok(probes: &Probes, v: usize) -> Result<(), String> {
 
 // ── 4. The pipeline ──────────────────────────────────────────────────────────────────────────
 
-/// One read of a picture through `recognize_noted` under strategy `s`, as `host.ocr.recognize`
-/// reads a region once its capture is in hand: no language, the ladder's budget counted from
-/// `capture` before the read, where the application's starts before its capture. The time
-/// reported is the read's alone. Whatever the neural recogniser still runs for the read — a
-/// region a Vision pass answered first is left to finish unread, as on Windows — is waited out
-/// afterwards, outside the clock, so that each read is timed alone and its runs are all counted.
-fn read_through_pipeline(p: &Picture, s: &Strategy, capture: Duration) -> (Sample, ReadNote) {
+/// One read of a picture through `recognize_noted` under strategy `s`, with `shape` its shape on
+/// this Mac (`Strategy::shape_here`), as `host.ocr.recognize` reads a region once its capture is
+/// in hand: no language, the ladder's budget counted from `capture` before the read, where the
+/// application's starts before its capture. The time reported is the read's alone. Whatever the
+/// neural recogniser still runs for the read — a region a Vision pass answered first is left to
+/// finish unread, as on Windows — is waited out afterwards, outside the clock, so that each read
+/// is timed alone and its runs are all counted.
+fn read_through_pipeline(p: &Picture, s: &Strategy, shape: Shape, capture: Duration) -> (Sample, ReadNote) {
     objc2::rc::autoreleasepool(|_| {
         let f = p.fixture;
-        let ladder = Ladder { shape: s.shape, ..Ladder::FULL };
+        let ladder = Ladder { shape, ..Ladder::FULL };
         let revision = s.revision_all.map(RevisionOverride::set);
         let runs = paddle_ocr::runs_started();
         let t = Instant::now();
@@ -1082,7 +1059,8 @@ fn strategy_gate(s: &Strategy, revisions: &[usize], probes: &Probes, paddle: &Re
 
 /// Every strategy over every picture, interleaved: each round visits every row in an order that
 /// changes from round to round, as the engine's cells, so that the load drifting over the minutes
-/// of the section falls on every strategy alike. Each row is written as soon as it is done.
+/// of the section falls on every strategy alike. Each row is written as soon as it is done. With
+/// it, the line saying which reading `prod` is on this Mac, for the summary page.
 #[allow(clippy::too_many_arguments)]
 fn pipeline(
     out: &mut Out,
@@ -1092,14 +1070,23 @@ fn pipeline(
     revisions: &[usize],
     probes: &Probes,
     paddle: &Result<f64, String>,
-) -> Pipeline {
+) -> (Pipeline, String) {
     let mut g = Pipeline::new(STRATEGIES.iter().collect(), pictures.iter().map(|p| p.fixture).collect(), plan);
+    // The shape each strategy reads with here: prod's is the application's on this Mac.
+    let (ready, intel) = (paddle.is_ok() && paddle_ocr::ready(), intel_mac());
+    let shapes: Vec<Shape> = STRATEGIES.iter().map(|s| s.shape_here(ready, intel)).collect();
+    let reads_as = pure::prod_reads_as(ready, intel);
+    out.say(&reads_as);
     for (i, s) in STRATEGIES.iter().enumerate() {
         out.say(&format!("strategy {} ({}): {}", s.name, s.role.word(), s.what));
         if let Some(why) = strategy_gate(s, revisions, probes, paddle) {
             out.say(&format!("pipeline | {} | not measured: {why}", s.name));
             g.skip(i, &why);
         }
+    }
+    // `prod` is the first strategy (`STRATEGIES`).
+    if let Some(why) = g.without_old_where_prod_is_old(shapes[0]) {
+        out.say(&format!("pipeline | old | not measured: {why}"));
     }
     let speed: Vec<String> = g.rows[0].iter().filter(|r| r.speed).map(|r| r.picture.label()).collect();
     out.say(&format!(
@@ -1130,7 +1117,7 @@ fn pipeline(
             if !g.rows[s][p].wants_more(plan) {
                 continue;
             }
-            let (sample, note) = read_through_pipeline(&pictures[p], g.strategies[s], capture);
+            let (sample, note) = read_through_pipeline(&pictures[p], g.strategies[s], shapes[s], capture);
             g.rows[s][p].push(sample, note);
             if !g.rows[s][p].wants_more(plan) {
                 printed[s][p] = true;
@@ -1160,7 +1147,7 @@ fn pipeline(
              answered first)"
         ));
     }
-    g
+    (g, reads_as)
 }
 
 /// While it lives, every request made on this thread asks for this revision (`new_request`).
@@ -1449,9 +1436,10 @@ fn beside_paddle(out: &mut Out, pic: &Picture, k: usize) -> Vec<(String, String)
 }
 
 /// Sustained load: four blocks of `secs` seconds of back-to-back accurate passes over the probe
-/// picture, alternately alone and with the neural recogniser asked about the same region at
-/// utility before each pass and its answer looked for after it, never waited for — the shadow's
-/// shape. Passes a second and the median per block. The timing rows for the table.
+/// picture, alternately alone and with the neural recogniser asked about the same region before
+/// each pass, at this thread's own class (`Qos::Reader`), as a read of the application asks it,
+/// and its answer looked for after it, never waited for. Passes a second and the median per
+/// block. The timing rows for the table.
 fn sustained(out: &mut Out, pic: &Picture, secs: u64) -> Vec<(String, String)> {
     let mut rows = Vec::new();
     let neural = paddle_rgba(pic, PaddleInput::Crop).ok().filter(|_| paddle_ocr::ready());
@@ -1472,7 +1460,7 @@ fn sustained(out: &mut Out, pic: &Picture, secs: u64) -> Vec<(String, String)> {
             let asked = neural
                 .as_ref()
                 .filter(|_| beside)
-                .and_then(|(w, h, rgba)| paddle_ocr::ask_with(*w, *h, rgba, crop_for(pic.fixture), Qos::Utility));
+                .and_then(|(w, h, rgba)| paddle_ocr::ask_with(*w, *h, rgba, crop_for(pic.fixture), Qos::Reader));
             asked_n += usize::from(asked.is_some());
             passes.push(prod_pass(image));
             if let Some(a) = asked {
@@ -1702,7 +1690,7 @@ fn bench(opts: &Options) -> i32 {
     }
 
     let section = Instant::now();
-    let lines = pipeline(&mut out, &pictures, &plan, capture, &revisions, &probed, &paddle);
+    let (lines, reads_as) = pipeline(&mut out, &pictures, &plan, capture, &revisions, &probed, &paddle);
     let pipeline_table = lines.table();
     let strategies_table = lines.summary_table();
     out.say(
@@ -1712,16 +1700,20 @@ fn bench(opts: &Options) -> i32 {
     out.raw(&pipeline_table);
     out.say("table: what each strategy came to over every picture");
     out.raw(&strategies_table);
-    // Today's ladder on its own line, whatever the verdicts: what CI warns by.
-    if let Some(line) = lines.prod_line() {
-        out.say(&line);
+    // The application's reading on its own line, whatever the verdicts: what CI warns by. And the
+    // ladder it read with before, beside it.
+    let came_to: Vec<String> = [lines.prod_line(), lines.old_line()].into_iter().flatten().collect();
+    for line in &came_to {
+        out.say(line);
     }
+    // The summary page says per Mac which reading prod was, and both lines, before the tables.
     summary.add(
         &mut out,
         &format!(
-            "Pipeline: the median ms of a whole read without the capture, one column a strategy; \"faster\" or \
-             \"slower\" than prod by the rule where the picture was read for speed.\n\n{pipeline_table}\n\
-             What each strategy came to.\n\n{strategies_table}\n"
+            "{reads_as}\n\n{}\n\nPipeline: the median ms of a whole read without the capture, one column a strategy; \
+             \"faster\" or \"slower\" than prod by the rule where the picture was read for speed.\n\n{pipeline_table}\n\
+             What each strategy came to.\n\n{strategies_table}\n",
+            came_to.join("\n\n")
         ),
     );
     out.say(&section_took("pipeline", section));
@@ -1790,7 +1782,8 @@ fn bench(opts: &Options) -> i32 {
     }
     out.say(&format!(
         "sustained: four blocks of {} s of back-to-back accurate passes over {}, alternately Vision alone and with the \
-         neural recogniser asked about the same region before each pass, at utility, as the shadow asks it",
+         neural recogniser asked about the same region before each pass, at this thread's own priority, as a read \
+         asks it",
         plan.sustained_secs,
         pure::PROBE
     ));

@@ -50,8 +50,14 @@ pub mod paddle_pre;
 #[path = "../../host/src/ocr/ladder.rs"]
 pub mod ladder;
 
-/// The neural recogniser's shadow — its readings beside the macOS ladder's, compared and counted —
-/// which `backend/macos/ocr.rs` keeps.
+/// How a small region's answer is chosen where the neural recogniser reads beside Vision —
+/// Windows' rule, mirrored — which `backend/macos/ocr.rs` reads by. It names the backend's
+/// `OcrLine` and `OcrWord`, which this crate borrows at its root as `host` has them.
+#[path = "../../host/src/ocr/merge.rs"]
+pub mod merge;
+
+/// The neural recogniser's readings beside the macOS ladder's, counted with who answered each read
+/// — which `backend/macos/ocr.rs` keeps.
 #[path = "../../host/src/ocr/shadow.rs"]
 pub mod shadow;
 

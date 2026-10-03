@@ -7,16 +7,19 @@
 //! rarely. The recognition model is embedded in the binary (via `include_bytes!`) and ONNX Runtime
 //! is linked in statically, so the app stays fully self-contained and portable.
 //!
-//! **On a Mac** this build only measures it: nothing a read answers comes from it yet. ONNX Runtime
-//! is Microsoft's universal dylib in the bundle's `Contents/Frameworks`, opened at run time, and
-//! the model is `Contents/Resources/ppocr-rec.onnx` (`package-macos.sh --onnxruntime`); see
-//! [`init`] for why it is loaded and not linked, and in what order. Where either is missing, on a
-//! macOS before 13.3, where it is not opened at all, or where the dylib does not load — a slice it
-//! lacks — the recogniser is not available, the log says so once, and Vision reads alone. Once it is ready, every small read of the application
-//! hands it the region beside Vision's ladder as a shadow, at utility priority and never waited
-//! for, and its reading is compared with the ladder's answer and counted (`macos/ocr.rs`,
-//! `ocr/shadow.rs`). `ocr-bench` measures it beside Vision (`--paddle`, `--paddle-probe`, and the
-//! pipeline's strategies).
+//! **On a Mac** it is Vision's fallback by the same rule: once it is ready, every small read hands
+//! it the region's content crop the moment the read has it, at the reading thread's own quality
+//! of service ([`Qos::Reader`]), and its text answers only when Vision's accurate ladder read
+//! nothing (`ocr/merge.rs` holds the rule, `macos/ocr.rs` climbs it); on an Intel Mac it also
+//! checks the fast level's first pass, whose text answers where the two read the same. A read
+//! waits for it within the ladder's budget, and its reading is counted beside Vision's
+//! (`ocr/shadow.rs`). ONNX Runtime is Microsoft's universal dylib in the bundle's
+//! `Contents/Frameworks`, opened at run time, and the model is `Contents/Resources/ppocr-rec.onnx`
+//! (`package-macos.sh --onnxruntime`); see [`init`] for why it is loaded and not linked, and in
+//! what order. Where either is missing, on a macOS before 13.3, where it is not opened at all, or
+//! where the dylib does not load — a slice it lacks — the recogniser is not available, the log
+//! says so once, and Vision reads alone, as before. `ocr-bench` measures it beside Vision
+//! (`--paddle`, `--paddle-probe`, and the pipeline's strategies).
 //!
 //! **One recogniser thread, asked in parallel with the system engine.** `recognize_image`
 //! (`windows.rs`) hands every small region to this recogniser the moment it has the pixels —
@@ -54,7 +57,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError};
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -144,7 +147,9 @@ fn made() -> &'static Result<Engine, String> {
 /// Whether the engine has been made and works: asked without making it, so that a read can ask
 /// on any thread without paying for the model. False until the warm-up or a first recognition
 /// has made it, and for good when it could not be made. (On a Mac only: Windows asks every small
-/// region regardless.)
+/// region regardless.) True a moment before the warm-up's own run over its dummy has ended: a read
+/// in that moment queues behind it, and that run took 3.7 to 7 ms in CI's processes of their own
+/// (`ocr-bench`'s first passes, 2026-10-03) — less than a fast pass, so not waited for here.
 #[cfg_attr(windows, allow(dead_code))]
 pub(super) fn ready() -> bool {
     matches!(ENGINE.get(), Some(Ok(_)))
@@ -170,8 +175,8 @@ fn lock_even_if_poisoned<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// `recognize_image` (`windows.rs`) asks the recogniser thread for one of these for every small
 /// region, beside the system recogniser, and when that answers it does not wait for it: that is
 /// the point of running them side by side, so that a miss costs the slower of the two rather than
-/// their sum. (On a Mac every small read asks it beside Vision as a shadow, and `ocr-bench` the
-/// same way.) The recogniser can therefore still be inside ONNX Runtime when
+/// their sum. (On a Mac every small read asks it beside Vision by the same rule, and `ocr-bench`
+/// the same way.) The recogniser can therefore still be inside ONNX Runtime when
 /// the application exits, and a thread in there while `ort`'s static cleanup runs is the fault
 /// the warm-up join in `run` exists for: an access violation at exit. This counts them — from
 /// the moment one is asked for until it is done, skipped or cancelled — so that the exit can
@@ -752,12 +757,39 @@ pub(crate) struct PaddleRead {
 /// for before it runs it. Nothing on Windows, where every region is as it always was.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Qos {
-    /// A read waits for the answer: the recognise thread's own class, user-initiated.
+    /// A read waits for the answer: the recognise thread's own class, user-initiated. What
+    /// `ocr-bench` asks with where it measures the recogniser at a read's urgency.
     Interactive,
     /// Nobody waits for it, or only after a Vision pass has read nothing: utility, meant to leave
-    /// the cores to the Vision pass beside it (measured by `ocr-bench`, not assumed).
+    /// the cores to the Vision pass beside it (measured by `ocr-bench`, not assumed). Only
+    /// `ocr-bench`'s strategies and threads ask with it now.
     #[cfg_attr(windows, allow(dead_code))]
     Utility,
+    /// As urgent as the thread that asks, read from it when it asks ([`class_for`]): the event
+    /// loop's user-interactive, the recognise thread's user-initiated. What every read of the
+    /// application asks with on a Mac, since it may wait for the answer — a wait on a thread of a
+    /// lower class than its own would let any work between the two classes delay the reader.
+    #[cfg_attr(windows, allow(dead_code))]
+    Reader,
+}
+
+/// The quality-of-service class, as `<sys/qos.h>` numbers it, the recogniser thread asks for
+/// before a region asked with `qos`: user-initiated (0x19) for [`Qos::Interactive`], utility (0x11)
+/// for [`Qos::Utility`], and for [`Qos::Reader`] the asking thread's own class (`reader`, asked
+/// only then) — user-initiated when that is unspecified or a value the header does not name. The
+/// decision apart from the call, so that it is tested where the call cannot be made.
+#[cfg_attr(windows, allow(dead_code))]
+pub(crate) fn class_for(qos: Qos, reader: impl FnOnce() -> u32) -> u32 {
+    const USER_INITIATED: u32 = 0x19;
+    match qos {
+        Qos::Interactive => USER_INITIATED,
+        Qos::Utility => 0x11,
+        Qos::Reader => match reader() {
+            // User-interactive, user-initiated, default, utility, background.
+            c @ (0x21 | 0x19 | 0x15 | 0x11 | 0x09) => c,
+            _ => USER_INITIATED,
+        },
+    }
 }
 
 /// A recognition asked of the recogniser thread ([`ask_with`]). Dropping it cancels the
@@ -793,6 +825,22 @@ impl Asked {
             Err(TryRecvError::Disconnected) => Polled::Failed,
         }
     }
+
+    /// The answer, waited for at most `bound`: [`Asked::try_wait`] when `bound` is zero, and
+    /// [`Polled::NotYet`] when the recogniser has not answered by then — the recognition is not
+    /// cancelled, and a later call can still find its answer. What a Mac's read waits with, within
+    /// the ladder's budget (`ocr/merge.rs`); Windows waits with [`Asked::wait`], as it always did.
+    #[cfg_attr(windows, allow(dead_code))]
+    pub(super) fn wait_for(&self, bound: Duration) -> Polled {
+        if bound.is_zero() {
+            return self.try_wait();
+        }
+        match self.answer.recv_timeout(bound) {
+            Ok(read) => Polled::Answered(read),
+            Err(RecvTimeoutError::Timeout) => Polled::NotYet,
+            Err(RecvTimeoutError::Disconnected) => Polled::Failed,
+        }
+    }
 }
 
 /// What [`Asked::try_wait`] found.
@@ -822,8 +870,10 @@ struct Job {
     /// How it is cropped before the model sees it: `Tighten::WINDOWS` for Windows' captures,
     /// `Tighten::for_scale` for a Mac's.
     crop: Tighten,
-    #[cfg_attr(windows, allow(dead_code))]
-    qos: Qos,
+    /// On a Mac, the class the recogniser thread asks for before it runs the region: how urgent
+    /// it was asked to be ([`Qos`]), as [`class_for`] resolved it on the thread that asked.
+    #[cfg(target_os = "macos")]
+    class: u32,
     cancel: Arc<AtomicBool>,
     reply: SyncSender<Option<PaddleRead>>,
     _running: Running<'static>,
@@ -868,11 +918,14 @@ pub(super) fn ask(cap: &CapturedImage) -> Option<Asked> {
 }
 
 /// Hands `w` by `h` pixels of RGBA, top-down, to the recogniser thread, cropped by `crop` and as
-/// urgent as `qos` says. `None`, and nothing started, once the exit's wait has begun (see
-/// [`InFlight::start`]), when the thread could not be started or has gone ([`ALIVE`]), or when
-/// [`QUEUE_MAX`] regions already wait (a recogniser that stopped answering; said once). Copies
-/// the pixels.
+/// urgent as `qos` says ([`Qos::Reader`] is read from the calling thread here). `None`, and
+/// nothing started, once the exit's wait has begun (see [`InFlight::start`]), when the thread
+/// could not be started or has gone ([`ALIVE`]), or when [`QUEUE_MAX`] regions already wait (a
+/// recogniser that stopped answering; said once). Copies the pixels.
 pub(super) fn ask_with(w: u32, h: u32, rgba: &[u8], crop: Tighten, qos: Qos) -> Option<Asked> {
+    // Windows has one priority for every region, as it always had.
+    #[cfg(not(target_os = "macos"))]
+    let _ = qos;
     let running = IN_FLIGHT.start()?;
     if !*RECOGNISER.get_or_init(start_recogniser) {
         return None;
@@ -880,7 +933,15 @@ pub(super) fn ask_with(w: u32, h: u32, rgba: &[u8], crop: Tighten, qos: Qos) -> 
     let cancel = Arc::new(AtomicBool::new(false));
     let (reply, answer) = sync_channel(1);
     let cap = CapturedImage { w, h, rgba: rgba.to_vec() };
-    let job = Job { cap, crop, qos, cancel: cancel.clone(), reply, _running: running };
+    let job = Job {
+        cap,
+        crop,
+        #[cfg(target_os = "macos")]
+        class: class_for(qos, super::macos::ocr::thread_qos),
+        cancel: cancel.clone(),
+        reply,
+        _running: running,
+    };
     let admitted = admit(&mut lock_even_if_poisoned(&JOBS), &ALIVE, job);
     match admitted {
         Ok(()) => {}
@@ -1004,7 +1065,7 @@ fn serve() {
 fn serve_jobs() {
     // The quality of service this thread asked for last, so that it asks again only on a change.
     #[cfg(target_os = "macos")]
-    let mut asked_for: Option<Qos> = None;
+    let mut asked_for: Option<u32> = None;
     loop {
         let job = {
             let mut jobs = lock_even_if_poisoned(&JOBS);
@@ -1021,9 +1082,9 @@ fn serve_jobs() {
         }
         JOBS_BEGUN.fetch_add(1, Ordering::Relaxed);
         #[cfg(target_os = "macos")]
-        if asked_for != Some(job.qos) {
-            take_qos(job.qos);
-            asked_for = Some(job.qos);
+        if asked_for != Some(job.class) {
+            take_qos(job.class);
+            asked_for = Some(job.class);
         }
         let done = match crate::logging::contain(|| recognize_unless(&job.cap, job.crop, &job.cancel)) {
             Ok(done) => done,
@@ -1060,13 +1121,18 @@ fn serve_jobs() {
     }
 }
 
-/// The quality of service the recogniser thread asks for before a region of this urgency, by
-/// the recognise thread's own helper (`macos::ocr::set_thread_qos`). A refusal is said once.
+/// The quality of service the recogniser thread asks for before a region asked at `class`
+/// ([`class_for`]), by the recognise thread's own helper (`macos::ocr::set_thread_qos`). A refusal
+/// is said once.
 #[cfg(target_os = "macos")]
-fn take_qos(qos: Qos) {
-    let class = match qos {
-        Qos::Interactive => libc::qos_class_t::QOS_CLASS_USER_INITIATED,
-        Qos::Utility => libc::qos_class_t::QOS_CLASS_UTILITY,
+fn take_qos(class: u32) {
+    use libc::qos_class_t as Q;
+    let class = match class {
+        0x21 => Q::QOS_CLASS_USER_INTERACTIVE,
+        0x15 => Q::QOS_CLASS_DEFAULT,
+        0x11 => Q::QOS_CLASS_UTILITY,
+        0x09 => Q::QOS_CLASS_BACKGROUND,
+        _ => Q::QOS_CLASS_USER_INITIATED,
     };
     let rc = super::macos::ocr::set_thread_qos(class);
     static SAID: AtomicBool = AtomicBool::new(false);
@@ -1168,8 +1234,8 @@ pub fn warmup() -> std::thread::JoinHandle<()> {
     std::thread::spawn(warm_now)
 }
 
-/// The Mac's warm-up, on a thread named `paddle-warm-up` at the utility quality of service, as
-/// the recogniser's own thread asks for the shadow: it waits until `vision` is opened — Vision's
+/// The Mac's warm-up, on a thread named `paddle-warm-up` at the utility quality of service, below
+/// the reads it serves later: it waits until `vision` is opened — Vision's
 /// own warm-up has ended — and then makes the engine and runs it once, as on Windows. The
 /// recognise thread's warm-up pass is let go at that same moment (`macos/ocr.rs`, `warm_up`), and
 /// the lower class is what keeps the two from competing as equals on an Intel Mac's few cores;
@@ -1278,7 +1344,8 @@ mod exit_safety_tests {
             jobs.push_back(Job {
                 cap,
                 crop: Tighten::WINDOWS,
-                qos: Qos::Interactive,
+                #[cfg(target_os = "macos")]
+                class: 0x19,
                 cancel: cancel.clone(),
                 reply,
                 _running: C.start().expect("open"),
@@ -1319,7 +1386,8 @@ mod exit_safety_tests {
             let job = Job {
                 cap,
                 crop: Tighten::WINDOWS,
-                qos: Qos::Interactive,
+                #[cfg(target_os = "macos")]
+                class: 0x19,
                 cancel: cancel.clone(),
                 reply,
                 _running: C.start().expect("open"),
@@ -1400,6 +1468,54 @@ mod exit_safety_tests {
         let (reply, answer) = sync_channel(1);
         reply.send(Some(read)).unwrap();
         assert_eq!(Asked { cancel: Arc::new(AtomicBool::new(false)), answer }.wait(), Some("1".to_string()));
+    }
+
+    /// A bounded wait: nothing within the bound is "not yet", and neither cancels the recognition
+    /// nor loses its answer, which a later call finds; an answer sent in time is taken; a reply
+    /// dropped unsent ends the wait at once, as a failure, and so does one already taken.
+    #[test]
+    fn a_bounded_wait_leaves_a_late_answer_for_a_later_one() {
+        let read = PaddleRead { text: "0".into(), score: 0.55, ms: 5.0 };
+        let (reply, answer) = sync_channel(1);
+        let asked = Asked { cancel: Arc::new(AtomicBool::new(false)), answer };
+        assert_eq!(asked.wait_for(Duration::ZERO), Polled::NotYet, "no bound: a look");
+        let t = Instant::now();
+        assert_eq!(asked.wait_for(Duration::from_millis(30)), Polled::NotYet);
+        assert!(t.elapsed() >= Duration::from_millis(30), "waited its bound");
+        assert!(!asked.cancel.load(Ordering::Acquire), "not cancelled by being late");
+        let late = read.clone();
+        let sender = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            reply.send(Some(late)).unwrap();
+        });
+        assert_eq!(asked.wait_for(Duration::from_secs(10)), Polled::Answered(Some(read)));
+        sender.join().unwrap();
+        let t = Instant::now();
+        assert_eq!(asked.wait_for(Duration::from_secs(10)), Polled::Failed, "taken, and the reply is gone");
+        assert!(t.elapsed() < Duration::from_secs(5), "at once, not at the bound");
+        let (reply, answer) = sync_channel::<Option<PaddleRead>>(1);
+        drop(reply);
+        let t = Instant::now();
+        assert_eq!(Asked { cancel: Arc::new(AtomicBool::new(false)), answer }.wait_for(Duration::from_secs(10)), Polled::Failed);
+        assert!(t.elapsed() < Duration::from_secs(5));
+    }
+
+    /// The class the recogniser thread asks for: the two fixed ones, and a read's own — the event
+    /// loop's user-interactive, the recognise thread's user-initiated — with an unspecified class
+    /// or a value the header does not name taken as user-initiated; the reader asked only for a
+    /// read's region.
+    #[test]
+    fn a_reads_region_runs_at_the_readers_class() {
+        let never = || -> u32 { panic!("the reader's class was asked for a fixed one") };
+        assert_eq!(class_for(Qos::Interactive, never), 0x19);
+        assert_eq!(class_for(Qos::Utility, never), 0x11);
+        assert_eq!(class_for(Qos::Reader, || 0x21), 0x21, "the event loop");
+        assert_eq!(class_for(Qos::Reader, || 0x19), 0x19, "the recognise thread");
+        for c in [0x15, 0x11, 0x09] {
+            assert_eq!(class_for(Qos::Reader, || c), c);
+        }
+        assert_eq!(class_for(Qos::Reader, || 0), 0x19, "unspecified");
+        assert_eq!(class_for(Qos::Reader, || 0x1a), 0x19, "a value the header does not name");
     }
 
     /// On a Mac `ort::init_from` comes first in `init`, before anything else of `ort`: any other

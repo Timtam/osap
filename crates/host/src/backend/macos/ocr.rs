@@ -17,12 +17,13 @@
 //! uses its answer only when the first comes back empty — that split is why Melodyne's note
 //! field is readable at all, and `modules/melodyne/src/main.luau` documents at length what
 //! happened when a change made the primary non-empty and the fallback stopped firing. On a Mac
-//! that second engine (`backend/paddle_ocr.rs`) is loaded only where the package carries ONNX
-//! Runtime, and in this build it is only measured — `ocr-bench`'s strategies read with it, and
-//! every small read of the application hands it the region beside the ladder as a shadow, whose
-//! reading is compared and counted (`ocr/shadow.rs`, `Beside`) and never answers
-//! (`Ladder::shape_now`). Vision therefore has to carry the small-text case alone, and
-//! everything it is given is chosen for that: the capture is taken at full backing resolution
+//! that second engine (`backend/paddle_ocr.rs`) is loaded where the package carries ONNX Runtime,
+//! and from the moment it is ready a read follows Windows' rule with Vision's accurate ladder in
+//! the first recogniser's place (`ocr/merge.rs` writes the rule down, `Rungs::merged` climbs it):
+//! the recogniser is handed the content crop beside the ladder, and its text answers where the
+//! ladder read nothing. On an Intel Mac the fast level reads first, checked by it. Until then, and
+//! where it is not there at all, Vision carries the small-text case alone, and everything it is
+//! given is chosen for that either way: the capture is taken at full backing resolution
 //! rather than the point-sized one the rest of
 //! the platform uses (`capture::capture_backing`, the same path with the downsample left
 //! off), recognition is `.accurate`, language correction is off (these are
@@ -61,8 +62,9 @@ use objc2_vision::{
 
 use crate::backend::paddle_ocr::{self, Polled, Qos};
 use crate::backend::{CaptureSource, OcrLine, OcrText, OcrThread, OcrWord, Recognise};
-use crate::ocr::cost::{self, Capture, Pass, Stage};
-use crate::ocr::ladder::{Answer, Level, PaddleUse, Shape};
+use crate::ocr::cost::{self, Answered, Capture, Check, CheckWait, PaddleWait, Pass, Stage, Waited};
+use crate::ocr::ladder::{Answer, Level, PaddleUse, Path, Shape};
+use crate::ocr::merge::{self, Pick};
 use crate::ocr::paddle_pre::{self, Tighten};
 use crate::ocr::plan::{self, Plan as CapturePlan};
 use crate::ocr::policy::{SLOW_JOB, SLOW_LOG_EVERY};
@@ -88,8 +90,8 @@ struct Ladder<'a> {
     on_event_loop: bool,
     /// Which level reads first, what the neural recogniser does, whether the rest of the ladder
     /// runs, which revisions the first passes ask for (`ocr/ladder.rs`). Every read the
-    /// application makes passes today's ([`Ladder::shape_now`]); `ocr-bench` passes one per
-    /// strategy.
+    /// application makes passes the production shape ([`Ladder::shape_now`]); `ocr-bench` passes
+    /// one per strategy.
     shape: Shape,
 }
 
@@ -102,11 +104,21 @@ impl Ladder<'_> {
         self.preempt.is_some_and(|p| p.load(Ordering::Relaxed))
     }
 
-    /// The shape every read of the application climbs: today's, with the neural recogniser as a
-    /// shadow once it is ready. The shadow reads nothing into an answer.
+    /// The shape every read of the application climbs: today's until the neural recogniser is
+    /// ready, Windows' rule over the accurate ladder from then on, on an Intel Mac with the fast
+    /// level checked first (`Shape::production`).
     fn shape_now() -> Shape {
-        Shape::today(paddle_ocr::ready())
+        Shape::production(paddle_ocr::ready(), intel_mac())
     }
+}
+
+/// Whether this is an Intel Mac (`ladder::intel_mac`): the x86_64 slice, not translated by Rosetta.
+/// Asked of the system once.
+pub(crate) fn intel_mac() -> bool {
+    static INTEL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *INTEL.get_or_init(|| {
+        crate::ocr::ladder::intel_mac(cfg!(target_arch = "x86_64"), super::perm::sysctl_i32("sysctl.proc_translated"))
+    })
 }
 
 /// Background border added around the upscaled content, in pixels of the processed image.
@@ -131,6 +143,11 @@ const TARGET_CONTENT_PX: usize = 64;
 /// the keyboard event tap, and macOS switches a tap off when its thread stops answering —
 /// which is exactly how the tester lost a Shift+Tab into a plugin that then moved its own
 /// focus. Better a field that says nothing promptly than a keystroke that goes missing.
+///
+/// It bounds a read's waits for the neural recogniser as well (`ocr/merge.rs`): what is left of
+/// it is how long a read may still wait, and once it is spent a read takes the recogniser's answer
+/// only if it is already there. So every wait of a read for the recogniser ends by the budget's
+/// end, where the fast rung it replaces could start right before it.
 const LADDER_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Above this size, in points, the region is passed through untouched.
@@ -221,9 +238,9 @@ struct Note {
     /// A fast first pass beside the neural recogniser: whether the two read the same, when either
     /// read anything.
     agreed: Option<bool>,
-    /// The ladder's shape wanted the neural recogniser, but the region was not its to read — its
-    /// ink more than one line, or too wide (`paddle_pre::fits`) — or it was not ready: today's
-    /// ladder read it.
+    /// The ladder's shape wanted the neural recogniser, but today's ladder read the region: it was
+    /// not ready, or could not be asked, or — for `ocr-bench`'s strategies but the application's —
+    /// the region was not its to read, its ink more than one line, or too wide (`paddle_pre::fits`).
     today: bool,
 }
 
@@ -258,7 +275,7 @@ fn recognize_noted(
     journal_open();
 
     let small = w <= SMALL_W && h <= SMALL_H;
-    let (result, climbed, shadowed) = if !small {
+    let (result, climbed, merged) = if !small {
         // A whole window, or something like it. Multi-word layout and speed matter more
         // than the last per-glyph pixel, and cropping to content would be meaningless.
         let plan = Plan::identity(nw, nh);
@@ -333,10 +350,11 @@ fn recognize_noted(
                 plan.cw, plan.ch, plan.x0, plan.y0, plan.up, plan.lines
             )
         });
-        // The shadow: the neural recogniser asked about the content crop now, the moment it is
-        // known, so that it reads beside the ladder rather than after it. Its answer is looked for
-        // once the ladder has answered, and only compared.
-        let beside = (ladder.shape.paddle == PaddleUse::Shadow).then(|| Beside::ask(&rgba, px_w, &plan, scale));
+        // Windows' rule (`ocr/merge.rs`): the neural recogniser handed the content crop now, the
+        // moment it is known and before the first pass, so that it reads beside the ladder rather
+        // than after it; its answer is waited for only where Vision reads nothing, and on an Intel
+        // Mac as the check of the fast level's first pass.
+        let mut neural = ladder.shape.paddle.merges().then(|| Neural::ask(&rgba, px_w, &plan, scale));
         let rungs = Rungs {
             native,
             plan: &plan,
@@ -350,10 +368,9 @@ fn recognize_noted(
             started,
             w,
             h,
-            aside: Cell::new(Duration::ZERO),
         };
-        let (result, climbed) = rungs.climb();
-        (result, climbed, beside.map(|b| (b, rgba, px_w, px_h)))
+        let (result, climbed) = rungs.climb(neural.as_mut());
+        (result, climbed, neural.map(|n| (n, rgba, px_w, px_h)))
     };
 
     let Climbed { paddle, crop, agreed, today, compared } = climbed;
@@ -368,80 +385,171 @@ fn recognize_noted(
         }
     };
     let ms = started.elapsed().as_secs_f64() * 1000.0;
-    crate::logging::trace("macos", || {
-        format!(
-            "ocr {w}x{h} pt at {x},{y} -> {nw}x{nh} px (scale {scale:.2}), {:.1} ms, {} word(s){}: '{}'",
-            ms,
-            words.len(),
-            if by_paddle { " from the neural recogniser" } else { "" },
-            text.replace('\n', " ")
-        )
-    });
     let passes = journal_take();
-    note_cost(ms, w, h, idle, passes.iter().any(|p| p.beside));
-    note_slow(ms, (x, y, w, h), capture, &passes);
-    if let Some((beside, rgba, px_w, px_h)) = shadowed {
-        beside.count(&text, &passes, compared, (x, y, w, h), debug.then_some((rgba.as_slice(), px_w, px_h)));
-    }
-    // The last pass that could answer: the shadow's fast pass, made right after the first, never
-    // does.
+    // The last pass that could answer: the fast pass made only for the counts, right after the
+    // first, never does.
     let last = passes.iter().rev().find(|p| p.stage != Stage::FastCompared);
     let answer = if by_paddle { Answer::Paddle } else { Answer::of_last_pass(last.map(|p| (p.stage, p.words))) };
+    let answered = Answered {
+        path: Path::of(answer),
+        check: merged.as_ref().and_then(|(n, ..)| n.check),
+        waited: merged.as_ref().and_then(|(n, ..)| n.waited),
+    };
+    // The read's own line, as Windows writes its own (`windows.rs`, `recognize_image`): at line
+    // level while "Save the images OCR was given" is on — so a tester's round with the pictures
+    // has who answered every read — and at trace level otherwise.
+    let line = || {
+        format!(
+            "ocr {w}x{h} pt at {x},{y} -> {nw}x{nh} px (scale {scale:.2}), {:.1} ms, {} word(s), answered by {}{}: '{}'",
+            ms,
+            words.len(),
+            answered.path.word(),
+            answered.waits_text(),
+            text.replace('\n', " ")
+        )
+    };
+    if debug {
+        crate::logging::line("macos", &line());
+    } else {
+        crate::logging::trace("macos", line);
+    }
+    note_cost(ms, w, h, idle, passes.iter().any(|p| p.beside), answered);
+    note_slow(ms, (x, y, w, h), capture, &passes, answered);
+    if let Some((neural, rgba, px_w, px_h)) = merged {
+        // Vision's ladder read nothing where the recogniser answered alone.
+        let ladder_text = if by_paddle { "" } else { text.as_str() };
+        neural.count(answered.path, ladder_text, &passes, compared, (x, y, w, h), debug.then_some((rgba.as_slice(), px_w, px_h)));
+    }
     let note = Note { passes, answer, agreed, today };
     Ok((OcrText { text, words, lines, fallback, skipped: false }, note))
 }
 
-/// The neural recogniser's shadow for one small read (`ocr/shadow.rs`): asked when the read has its
-/// content crop, at utility priority, never waited for, and counted when the ladder has answered.
-/// Only where the recogniser has loaded (`PaddleUse::Shadow`, `Ladder::shape_now`).
+/// The neural recogniser's part in one small read, wherever it has loaded (`PaddleUse::merges`):
+/// asked once, when the read has its content crop — before the first pass, so that it reads beside
+/// the ladder — at the reading thread's own quality of service (`Qos::Reader`); its answer kept
+/// once it has come, since a channel hands it over once; and the read counted with it at the end
+/// (`ocr/shadow.rs`). Dropped with the read, which cancels a recognition nobody took the answer of,
+/// as Windows drops its handle once `Windows.Media.Ocr` has answered.
 ///
 /// What it costs a read: copying the crop and queueing it, on the reading thread — microseconds —
-/// and on the recogniser's own thread `paddle-ocr` one recognition, which took 3 to 36 ms a region
-/// on the Windows machine (an i7-8700K, `ocr-bench --paddle`) and has not been timed on a Mac; at
-/// utility, meant to leave the cores to the Vision pass beside it — whether it does on an Intel
-/// Mac is what `ocr-bench`'s threads section measures (TODO.md). Every small region is
-/// handed over, the recogniser's to read or not (`fits`), so that the counts also say what it would
-/// make of the others.
-struct Beside {
+/// and on the recogniser's own thread `paddle-ocr` one recognition: 4 to 25 ms a small field on CI's
+/// Macs, Intel and Apple-silicon virtual machines alike, against 3 to 36 ms on the Windows machine
+/// (`ocr-bench`, 2026-10-03). A read waits for it only where it needs the answer, and never past
+/// the ladder's budget ([`Neural::poll`]).
+struct Neural {
     /// `None` when it was not asked: the exit had begun, its queue was full or its thread had gone.
     asked: Option<paddle_ocr::Asked>,
-    /// Whether the region is the recogniser's to read (`paddle_pre::fits`).
+    /// What it answered, once it has — its text or nothing, or that it never will.
+    got: Option<Polled>,
+    /// Whether the region is one the fast level may be checked on (`paddle_pre::fits`).
     fits: bool,
+    /// An Intel Mac's check of its fast pass: what the read waited for it, and how the check ended.
+    check: Option<CheckWait>,
+    /// Windows' wait, where Vision's ladder read nothing: how long, and how it ended. `None` where
+    /// the read did not wait so — the ladder read something, or the check had the answer already.
+    waited: Option<PaddleWait>,
 }
 
-impl Beside {
+impl Neural {
     /// Hands the content crop to the recogniser — the crop `Plan::content` found, a well's inside
     /// included, with the crop rule in points (`Tighten::for_scale`), as `ocr-bench`'s
     /// `paddle-crop` measures it.
-    fn ask(rgba: &[u8], px_w: usize, plan: &Plan, scale: f64) -> Beside {
+    fn ask(rgba: &[u8], px_w: usize, plan: &Plan, scale: f64) -> Neural {
+        say_reader_class();
         let (cw, ch, pixels) = paddle_crop(rgba, px_w, plan);
-        Beside {
-            asked: paddle_ocr::ask_with(cw, ch, &pixels, Tighten::for_scale(scale), Qos::Utility),
+        Neural {
+            asked: paddle_ocr::ask_with(cw, ch, &pixels, Tighten::for_scale(scale), Qos::Reader),
+            got: None,
             fits: paddle_pre::fits(plan.ink_w, plan.ink_h, plan.lines),
+            check: None,
+            waited: None,
         }
     }
 
-    /// Counts the read in the process's tally, once the ladder has answered `answer` with `passes`:
-    /// the recogniser's answer if it is there — not waiting for it, and cancelling it when it is
-    /// not — beside the shadow's fast pass (`compared`, on the recognise thread). Every
-    /// `shadow::LINE_EVERY`th read the tally's line; a trace line for a read worth a look, and with
-    /// `picture` (the switch "Save the images OCR was given") its picture, named for its case. The
-    /// same pixels are often the read's `ocr-debug-raw` file as well: kept twice on purpose, since
-    /// only this name says the case when trace logging is off, as it is in a tester's round, and
-    /// the lists' bytes are bounded (`shadow::MAX_BYTES`). A read whose crop could not be rendered
-    /// made no first pass and is not counted.
+    fn asked(&self) -> bool {
+        self.asked.is_some()
+    }
+
+    /// Its text, waited for at most `bound` (`Asked::wait_for`), and what this wait was: `None`
+    /// when it read nothing, could not read the region, or has not answered by then — the
+    /// recognition goes on, and a later call can still find its answer. An answer already had
+    /// (`got`) is taken without a wait, and then the wait is `None`, as it is when it was not asked.
+    fn poll(&mut self, bound: Duration) -> (Option<String>, Option<PaddleWait>) {
+        let mut wait = None;
+        if self.got.is_none() {
+            if let Some(asked) = &self.asked {
+                let began = Instant::now();
+                let polled = asked.wait_for(bound);
+                let ended = match &polled {
+                    Polled::Answered(Some(_)) => Waited::Answered,
+                    Polled::NotYet => Waited::NotYet,
+                    Polled::Answered(None) | Polled::Failed => Waited::Nothing,
+                };
+                wait = Some(PaddleWait { ms: began.elapsed().as_secs_f64() * 1000.0, ended });
+                if polled != Polled::NotYet {
+                    self.got = Some(polled);
+                }
+            }
+        }
+        let text = match &self.got {
+            Some(Polled::Answered(Some(read))) => Some(read.text.clone()),
+            _ => None,
+        };
+        (text, wait)
+    }
+
+    /// Windows' wait, where Vision's ladder read nothing: its text within `bound`, the wait kept
+    /// for the read's lines ([`Neural::waited`]).
+    fn wait(&mut self, bound: Duration) -> Option<String> {
+        let (text, wait) = self.poll(bound);
+        self.waited = wait;
+        text
+    }
+
+    /// Keeps how an Intel Mac's check went, for the read's lines: its `wait`, and whether the fast
+    /// level and the recogniser `agreed` (`merge::check`).
+    fn checked(&mut self, wait: Option<PaddleWait>, agreed: Option<bool>) {
+        let Some(wait) = wait else { return };
+        let ended = match (wait.ended, agreed) {
+            (Waited::NotYet, _) => Check::NotYet,
+            (Waited::Nothing, _) => Check::Nothing,
+            (Waited::Answered, Some(true)) => Check::Same,
+            (Waited::Answered, _) => Check::Otherwise,
+        };
+        self.check = Some(CheckWait { ms: wait.ms, ended });
+    }
+
+    /// Counts the read in the process's tally, once it has answered by `path`, Vision's ladder having
+    /// read `ladder` with `passes`: the recogniser's answer as the read had it, or if it had none
+    /// yet, as it is now — not waiting for it, and cancelling it when it is not there — beside the
+    /// fast level's reading (`fast`: an Intel Mac's check, or the pass made only for these counts).
+    /// Every `shadow::LINE_EVERY`th read the tally's line; a trace line for a read worth a look, and
+    /// with `picture` (the switch "Save the images OCR was given") its picture, named for its case —
+    /// `ocr-shadow-paddle-alone-…` for every one the recogniser answered alone. The same pixels are
+    /// often the read's `ocr-debug-raw` file as well: kept twice on purpose, since only this name
+    /// says the case when trace logging is off, as it is in a tester's round, and the lists' bytes
+    /// are bounded (`shadow::MAX_BYTES`). A read whose crop could not be rendered made no pass and
+    /// is not counted.
     fn count(
         self,
-        answer: &str,
+        path: Path,
+        ladder: &str,
         passes: &[Pass],
-        compared: Option<String>,
+        fast: Option<String>,
         region: (i32, i32, i32, i32),
         picture: Option<(&[u8], usize, usize)>,
     ) {
-        let Some(first) = passes.iter().find(|p| p.stage == Stage::Tight).map(|p| p.words) else {
+        let first = passes.iter().find(|p| p.stage == Stage::Tight).map(|p| p.words);
+        // An Intel Mac's agreed answer makes no accurate pass; any other read made one, or none.
+        if first.is_none() && path != Path::Agreed {
             return;
+        }
+        let polled = match (&self.got, &self.asked) {
+            (Some(got), _) => Some(got.clone()),
+            (None, Some(asked)) => Some(asked.try_wait()),
+            (None, None) => None,
         };
-        let paddle = match self.asked.as_ref().map(paddle_ocr::Asked::try_wait) {
+        let paddle = match polled {
             None => shadow::Paddle::NotAsked,
             Some(Polled::NotYet) => shadow::Paddle::NotDone,
             Some(Polled::Failed) => shadow::Paddle::Failed,
@@ -451,10 +559,11 @@ impl Beside {
         // Dropped here: a recognition that has not answered is cancelled, as nobody waits for it.
         drop(self.asked);
         let reading = shadow::Reading {
-            first,
-            answer: answer.to_string(),
+            path,
+            first: first.flatten(),
+            ladder: ladder.to_string(),
             whole: passes.iter().any(|p| p.stage == Stage::Whole),
-            fast: compared,
+            fast,
             paddle,
             fits: self.fits,
             passes: passes.len(),
@@ -554,8 +663,10 @@ struct Climbed {
     crop: Option<(i32, i32, i32, i32)>,
     agreed: Option<bool>,
     today: bool,
-    /// The shadow's pass of the fast level (`Rungs::shadowed`): its text, empty for nothing; `None`
-    /// where none was made or Vision refused it.
+    /// The fast level's pass over the crop where the application made one — an Intel Mac's check
+    /// (`Rungs::merged`), or the pass made only for the counts once the answer was picked
+    /// (`Rungs::counted`): its text, empty for nothing; `None` where none was made or Vision
+    /// refused it. For `ocr/shadow.rs`.
     compared: Option<String>,
 }
 
@@ -575,9 +686,6 @@ struct Rungs<'a, 'l> {
     /// The region in points, for the lines a ladder given up writes.
     w: i32,
     h: i32,
-    /// The time of the passes made only for the shadow, which the ladder's budget does not count:
-    /// a read reads what it would without them.
-    aside: Cell<Duration>,
 }
 
 /// Whether a pass read any text.
@@ -589,9 +697,10 @@ impl Rungs<'_, '_> {
     /// The rungs the ladder's shape asks for, over the content crop rendered once. Today's shape
     /// is [`Rungs::accurate`] with the fast rung last: an accurate pass over the crop, the whole
     /// region when that read nothing and the plan cropped, then the enlarged crop and the fast
-    /// model within the budget. A crop that could not be rendered reads as nothing, and no rung
-    /// runs.
-    fn climb(&self) -> (Option<VisionRead>, Climbed) {
+    /// model within the budget. The application's, wherever the neural recogniser has loaded, is
+    /// [`Rungs::merged`], with `neural` asked already. A crop that could not be rendered reads as
+    /// nothing, and no rung runs.
+    fn climb(&self, neural: Option<&mut Neural>) -> (Option<VisionRead>, Climbed) {
         let Some((tight, buf)) = render(self.native, self.plan) else {
             return (None, Climbed::default());
         };
@@ -600,7 +709,9 @@ impl Rungs<'_, '_> {
             debug_dump("ocr-debug.bmp", &buf, pw, ph);
         }
         let shape = self.ladder.shape;
-        let out = if shape.paddle.reads() {
+        let out = if shape.paddle.merges() {
+            self.merged(&tight, neural)
+        } else if shape.paddle.reads() {
             self.with_paddle(&tight)
         } else if shape.first == Level::Fast {
             // The fast level first, its text taken unchecked; today's ladder when it read
@@ -611,8 +722,6 @@ impl Rungs<'_, '_> {
             } else {
                 (self.accurate(&tight, true), Climbed::default())
             }
-        } else if self.shadow_fast() {
-            self.shadowed(&tight)
         } else {
             (self.accurate(&tight, true), Climbed::default())
         };
@@ -631,38 +740,102 @@ impl Rungs<'_, '_> {
         self.after_rung_one(first, tight, fast_last)
     }
 
-    /// Whether the shadow makes its pass of the fast level in this read: on `host.ocr.read`'s
-    /// recognise thread only — never on the event loop, which carries the keyboard tap — for a
-    /// language that level reads, for a region the recogniser could be asked to check (one line of
-    /// ink, not too wide: the only regions the plan's c2 would read fast first), and not while an
-    /// interactive read waits behind this one — asked again after the first pass ([`Rungs::shadowed`]).
-    fn shadow_fast(&self) -> bool {
+    /// What is left of the ladder's budget, which bounds a read's waits for the neural recogniser
+    /// (`merge::left`): the budget counts every pass of the read so far, the check's included, and
+    /// the waits.
+    fn left(&self) -> Duration {
+        merge::left(LADDER_BUDGET, self.started.elapsed())
+    }
+
+    /// Windows' rule over Vision's accurate ladder (`ocr/merge.rs`), the application's way wherever
+    /// the neural recogniser has loaded; `neural` was asked when the read had its content crop.
+    ///
+    /// 1. Not asked after all — the exit has begun, its queue is full, its thread has gone — and
+    ///    Vision reads alone: today's ladder, the fast rung included, as Windows' system recogniser
+    ///    reads alone then.
+    /// 2. An Intel Mac's check (`PaddleUse::FastMerge`), for a region whose ink is one line no wider
+    ///    than twelve times its height and a language the fast level reads: one fast pass over the
+    ///    tight crop, then the recogniser's answer, waited for no longer than that pass took and
+    ///    never past the budget (`merge::check_wait`). Where the two read the same, spaces
+    ///    included, that is the answer: the fast level's words, with the recogniser's spacing
+    ///    (`merge::check`). Its time counts against the budget, so that a check that fails leaves
+    ///    the enlarged rung less of it.
+    /// 3. Otherwise Vision's accurate ladder — the tight crop, the whole region, the enlarged crop
+    ///    within the budget — without the fast rung that ends today's: Windows has no such rung,
+    ///    and here the recogniser is the ladder's last resort. It read "o" for sforzando's "0" on CI's
+    ///    macOS 26 Mac, and text on a level meter, where the recogniser reads the digit
+    ///    (`ocr-bench`, 2026-10-03).
+    /// 4. When Vision refused the first accurate pass, the read answers nothing, as a refusal always
+    ///    has here, and the recogniser's answer is not used: Windows' read fails then.
+    /// 5. When the ladder read anything, that is the answer, and the recognition is cancelled with
+    ///    the read; when it read nothing, the recogniser's text, waited for within what is left of
+    ///    the budget — its text locates nothing, so the content crop is its box (`merge::pick`). A
+    ///    read from a poll that made way for a key press's takes an answer already there, or none.
+    /// 6. On the recognise thread of a Mac without the check, one pass of the fast level only for
+    ///    the counts, once the answer is picked ([`Rungs::counted`]).
+    fn merged(&self, tight: &CGImage, neural: Option<&mut Neural>) -> (Option<VisionRead>, Climbed) {
+        let (plan, scale, ladder) = (self.plan, self.scale, self.ladder);
+        let Some(neural) = neural.filter(|n| n.asked()) else {
+            return (self.accurate(tight, true), Climbed { today: true, ..Climbed::default() });
+        };
+        let mut climbed = Climbed::default();
+        if ladder.shape.paddle == PaddleUse::FastMerge && ladder.fast_ok && neural.fits {
+            let began = Instant::now();
+            let fast = run_vision(tight, self.lang, FAST, Stage::FastFirst, &|bb| map_box(plan, scale, bb));
+            // A poll's read that has made way for a key press's waits for this too: a check that
+            // fails costs the accurate ladder, far more than the wait.
+            let (paddle, wait) = neural.poll(merge::check_wait(self.left(), began.elapsed()));
+            let check = merge::check(fast.as_ref().map(|(_, _, lines)| lines.as_slice()), paddle.as_deref());
+            neural.checked(wait, check.agreed);
+            climbed.agreed = check.agreed;
+            climbed.compared = fast.map(|(t, _, _)| t);
+            if let Some(lines) = check.answer {
+                return (Some(vision_read_of(lines)), climbed);
+            }
+        }
+        let first = self.rung_one(tight);
+        // Refused, not read: no reading of nothing, and nothing for the recogniser to answer.
+        let refused = first.is_none();
+        let read = self.after_rung_one(first, tight, false);
+        let system = (!refused).then(|| read.as_ref().map_or("", |(t, _, _)| t.as_str()));
+        // Waited for only where the ladder read nothing, as Windows waits, within what is left of
+        // the budget — and not at all by a poll's read that a key press's waits behind, which
+        // skipped the last rungs for it as well.
+        let bound = if ladder.preempted() { Duration::ZERO } else { self.left() };
+        let paddle = if merge::waits(system) { neural.wait(bound) } else { None };
+        if let Pick::Paddle(text) = merge::pick(system, paddle.as_deref()) {
+            climbed.paddle = Some(text.to_string());
+            climbed.crop = Some(crop_in_points(plan, scale));
+        }
+        if self.counts_fast() {
+            climbed.compared = self.counted(tight);
+        }
+        (read, climbed)
+    }
+
+    /// Whether this read makes a pass of the fast level only for the neural recogniser's counts
+    /// (`ocr/shadow.rs`): on a Mac that does not check its fast level (`PaddleUse::Merge`), on
+    /// `host.ocr.read`'s recognise thread only — never on the event loop, which carries the keyboard
+    /// tap — for a language that level reads, for a region it could be checked on (one line of ink,
+    /// not too wide), and not while an interactive read waits behind this one. What an
+    /// Apple-silicon Mac's check would read, measured before it has one.
+    fn counts_fast(&self) -> bool {
         let ladder = self.ladder;
-        ladder.shape.paddle == PaddleUse::Shadow
+        ladder.shape.paddle == PaddleUse::Merge
             && !ladder.on_event_loop
             && ladder.fast_ok
             && !ladder.preempted()
             && paddle_pre::fits(self.plan.ink_w, self.plan.ink_h, self.plan.lines)
     }
 
-    /// Today's ladder with the shadow's pass of the fast level over the same rendered crop, right
-    /// after the first accurate pass: what the plan's c2 would read first, compared and never used
-    /// (`ocr/shadow.rs`). It costs the fast level's pass — over a small field 11 to 20 ms on the
-    /// CI's Intel Mac, 5 to 12 ms on its arm64 ones, warm (`ocr-bench`, 2026-10-02) — and its time
-    /// is set aside from the ladder's budget, so that the rest of the ladder runs as it would
-    /// without it.
-    fn shadowed(&self, tight: &CGImage) -> (Option<VisionRead>, Climbed) {
-        let first = self.rung_one(tight);
-        // An interactive read that arrived during the first pass waits for nothing more of this
-        // one's than today's ladder would make it: no fast pass for the shadow then.
-        if self.ladder.preempted() {
-            return (self.after_rung_one(first, tight, true), Climbed::default());
-        }
-        let began = Instant::now();
-        let fast = run_vision(tight, self.lang, FAST, Stage::FastCompared, &|bb| map_box(self.plan, self.scale, bb));
-        self.aside.set(began.elapsed());
-        let compared = fast.map(|(t, _, _)| t);
-        (self.after_rung_one(first, tight, true), Climbed { compared, ..Climbed::default() })
+    /// The pass of the fast level over the rendered crop made only for the counts, once the read's
+    /// answer is picked, compared and never used: its text, empty for nothing, `None` where Vision
+    /// refused it. Made after the answer, so that neither the answer nor the ladder's budget nor
+    /// the wait for the recogniser depends on it; the read returns that much later. It costs the
+    /// fast level's pass — over a small field 11 to 20 ms on the CI's Intel Mac, 5 to 12 ms on its
+    /// arm64 ones, warm (`ocr-bench`, 2026-10-02).
+    fn counted(&self, tight: &CGImage) -> Option<String> {
+        run_vision(tight, self.lang, FAST, Stage::FastCompared, &|bb| map_box(self.plan, self.scale, bb)).map(|(t, _, _)| t)
     }
 
     /// The first accurate pass over the content crop, in the revision the shape names.
@@ -707,8 +880,7 @@ impl Rungs<'_, '_> {
                     })
                 };
                 let exhausted = second.as_ref().is_none_or(|(t, _, _)| t.trim().is_empty());
-                // The budget counts the ladder's own passes, not the shadow's (`aside`).
-                let spent = started.elapsed().saturating_sub(self.aside.get());
+                let spent = started.elapsed();
                 if exhausted && spent < LADDER_BUDGET && !ladder.preempted() {
                     bigger_then_faster(
                         self.native, plan, self.rgba, self.px_w, self.px_h, scale, self.lang, self.debug, ladder,
@@ -761,10 +933,10 @@ impl Rungs<'_, '_> {
         }
     }
 
-    /// The shapes that read the neural recogniser's answer (`ocr-bench`'s strategies; nothing in
-    /// the application yet). The recogniser is asked about the content crop when the region is
-    /// its to read — one line of ink, not too wide — and it is ready; any other region is read by
-    /// today's ladder.
+    /// The shapes of `ocr-bench`'s other strategies that read the neural recogniser's answer, as
+    /// they were measured before the application's was chosen ([`Rungs::merged`]). The recogniser
+    /// is asked about the content crop when the region is its to read — one line of ink, not too
+    /// wide — and it is ready; any other region is read by today's ladder.
     fn with_paddle(&self, tight: &CGImage) -> (Option<VisionRead>, Climbed) {
         let shape = self.ladder.shape;
         let plan = self.plan;
@@ -784,11 +956,12 @@ impl Rungs<'_, '_> {
                 (None, climbed)
             }
             PaddleUse::Fallback => {
-                // Windows' rule: the first accurate pass answers when it read anything, and the
-                // recogniser, dropped, is cancelled; when it read nothing or was refused, the
-                // recogniser's text.
+                // Windows' rule after the first accurate pass alone (the application's waits for
+                // the accurate ladder): that pass answers when it read anything, and the
+                // recogniser, dropped, is cancelled — as it is when the pass was refused, which is
+                // no reading; when it read nothing, the recogniser's text.
                 let first = self.rung_one(tight);
-                if has_text(&first) {
+                if first.is_none() || has_text(&first) {
                     drop(asked);
                     return (first, climbed);
                 }
@@ -806,15 +979,16 @@ impl Rungs<'_, '_> {
                 let fast = run_vision(tight, self.lang, FAST, Stage::FastFirst, &|bb| map_box(plan, self.scale, bb));
                 // Waited for whatever fast read: it is the check on fast.
                 let p = asked.wait_read().map(|r| r.text);
+                // Judged as the application's check judges, spaces included, so that these differ
+                // from `prod` on an Intel Mac only in what follows a check that failed.
+                let check = merge::check(fast.as_ref().map(|(_, _, lines)| lines.as_slice()), p.as_deref());
+                climbed.agreed = check.agreed;
+                // Two models read the same: fast's text and words, with the recogniser's spacing.
+                if let Some(lines) = check.answer {
+                    return (Some(vision_read_of(lines)), climbed);
+                }
                 let f = fast.as_ref().map(|(t, _, _)| t.trim().to_string()).filter(|t| !t.is_empty());
-                climbed.agreed = match (&f, &p) {
-                    (None, None) => None,
-                    (Some(f), Some(p)) => Some(paddle_pre::same(f, p)),
-                    _ => Some(false),
-                };
                 match (f, p) {
-                    // Two models read the same: fast's text, with its words and lines.
-                    (Some(_), Some(_)) if climbed.agreed == Some(true) => (fast, climbed),
                     // They differ, or the recogniser read nothing: the accurate ladder, without
                     // the fast rung at its end — an unchecked fast reading is what this avoids.
                     // When it reads nothing too, the answer is nothing.
@@ -841,7 +1015,9 @@ impl Rungs<'_, '_> {
                     (None, None) => (self.accurate(tight, true), climbed),
                 }
             }
-            PaddleUse::Off | PaddleUse::Shadow => (self.accurate(tight, true), climbed),
+            // Not climbed here: `climb` sends the application's own to `merged`, and `Off` reads
+            // nothing of the recogniser's.
+            PaddleUse::Off | PaddleUse::Merge | PaddleUse::FastMerge => (self.accurate(tight, true), climbed),
         }
     }
 }
@@ -1008,6 +1184,58 @@ pub fn thread_init(role: OcrThread) {
 pub(crate) fn set_thread_qos(class: libc::qos_class_t) -> libc::c_int {
     // SAFETY: a plain call about the calling thread.
     unsafe { libc::pthread_set_qos_class_self_np(class, 0) }
+}
+
+extern "C" {
+    /// `<sys/qos.h>`, macOS 10.10 and later: the calling thread's quality-of-service class.
+    /// Declared here as a plain number, for this file and `ocr-bench`: the libc crate binds the
+    /// class as a Rust enum, into which a value it does not list could not be read back soundly.
+    #[link_name = "qos_class_self"]
+    fn qos_class_self_raw() -> u32;
+}
+
+/// The calling thread's quality-of-service class, as `<sys/qos.h>` numbers it: what a read that
+/// may wait for the neural recogniser has it run at (`paddle_ocr::Qos::Reader`).
+pub(crate) fn thread_qos() -> u32 {
+    // SAFETY: a plain question about the calling thread.
+    unsafe { qos_class_self_raw() }
+}
+
+/// A quality-of-service class in words, as the log and `ocr-bench` say it.
+pub(crate) fn qos_word(class: u32) -> String {
+    match class {
+        0x21 => "user-interactive".to_string(),
+        0x19 => "user-initiated".to_string(),
+        0x15 => "default".to_string(),
+        0x11 => "utility".to_string(),
+        0x09 => "background".to_string(),
+        0x00 => "unspecified".to_string(),
+        other => format!("class 0x{other:x}"),
+    }
+}
+
+/// Says once a thread at which quality of service the neural recogniser runs the regions this
+/// thread asks it for (`paddle_ocr::Qos::Reader`), and the thread's own class where the two differ:
+/// what the thread reports depends on how the application was started, and the event loop's had
+/// not been seen on a real Mac when this was written.
+fn say_reader_class() {
+    thread_local! {
+        static SAID: Cell<bool> = const { Cell::new(false) };
+    }
+    if SAID.with(|s| s.replace(true)) {
+        return;
+    }
+    let own = thread_qos();
+    let class = paddle_ocr::class_for(Qos::Reader, || own);
+    let mut line = format!(
+        "ocr: the neural recogniser runs the regions {} asks for at {}",
+        this_thread(),
+        qos_word(class)
+    );
+    if own != class {
+        line.push_str(&format!(", the thread's own class being {}", qos_word(own)));
+    }
+    crate::logging::line("macos", &line);
 }
 
 /// A snapshot round's captures (`OcrWorker::frames`), on the capture thread: one
@@ -1233,7 +1461,8 @@ pub fn warm_up_recognise(lang: Option<&str>) {
 /// The warm-up's pass, on the calling thread: one accurate pass over a line of printed words, in
 /// `lang` (Vision's default for none), and a line saying how long it took and whether Vision read
 /// the words — so the warm-up is a self-test as well. `waited`: how long the calling thread waited
-/// for its turn, for the line.
+/// for its turn, for the line. On an Intel Mac one pass of the fast level after it, with a line of
+/// its own (`cost::fast_warm_up_line`).
 pub fn warm_up_here(lang: Option<&str>, waited: Option<f64>) {
     // A thread that is not the main one has no autorelease pool of its own and no run loop to
     // drain one, so everything Vision autoreleases here would simply stay.
@@ -1281,10 +1510,20 @@ fn warm_up_in_pool(lang: Option<&str>, waited: Option<f64>) {
     journal_open();
     let read = run_vision(&image, lang, ACCURATE, Stage::WarmUp, &|bb| map_box(&plan, 1.0, bb));
     let beside = journal_take().iter().any(|p| p.beside);
-    drop(buf);
     let ms = started.elapsed().as_secs_f64() * 1000.0;
     let text = read.as_ref().map(|(t, _, _)| t.as_str());
     crate::logging::line("macos", &cost::warm_up_line(ms, &this_thread(), text, expected, beside, waited));
+    // On an Intel Mac a read's first pass is the fast level's, checked by the neural recogniser
+    // (`Rungs::merged`), and that pass would otherwise be its level's first on the thread: one more
+    // over the same line, in Vision's default language, which the fast level reads wherever it
+    // reads any. Its own line, so that the accurate pass's stays the self-test it was.
+    if intel_mac() {
+        let started = Instant::now();
+        let fast = run_vision(&image, None, FAST, Stage::WarmUp, &|bb| map_box(&plan, 1.0, bb));
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        crate::logging::line("macos", &cost::fast_warm_up_line(ms, &this_thread(), fast.is_none()));
+    }
+    drop(buf);
 }
 
 /// A PNG the executable carries, decoded by CoreGraphics at the size it must have and drawn once
@@ -1455,14 +1694,15 @@ fn journal_take() -> Vec<Pass> {
 /// the first on each thread, each with how long Vision had been idle before it (`idle`, taken when
 /// the read began) and whether another pass ran beside its own (`beside`), and after those a new
 /// slowest on the thread that is clearly worse than the slowest before it (`cost::cost_line` has
-/// the rule).
+/// the rule). Each says who answered the read and what it waited for the neural recogniser
+/// (`answered`).
 ///
 /// The first ones are called out because they are not representative: the first pass costs what
 /// no later one does. Whether that is a cost per process, per thread or after every pause is what
 /// the two firsts and the pause beside them can tell apart; the line used to call the first on
 /// every thread "Vision's model load", and one on the recognise thread minutes after the warm-up
 /// was read as a model load for it.
-fn note_cost(ms: f64, w: i32, h: i32, idle: cost::Before, beside: bool) {
+fn note_cost(ms: f64, w: i32, h: i32, idle: cost::Before, beside: bool, answered: Answered) {
     let before = cost::Before {
         first_in_process: !RECOGNISED.swap(true, Ordering::Relaxed),
         first_on_thread: !RECOGNISED_HERE.with(|c| c.replace(true)),
@@ -1475,25 +1715,26 @@ fn note_cost(ms: f64, w: i32, h: i32, idle: cost::Before, beside: bool) {
         }
         before
     });
-    if let Some(line) = cost::cost_line(ms, w, h, this_thread, &before, slowest, beside) {
+    if let Some(line) = cost::cost_line(ms, w, h, this_thread, &before, slowest, beside, answered) {
         crate::logging::line("macos", &line);
     }
 }
 
 /// A slow read — `SLOW_JOB` or more, the threshold `host.ocr.read`'s own line has — part by part:
-/// its capture, and each Vision pass with its rung, its time, its words and whether another pass
-/// ran beside it. At most one line per region every `SLOW_LOG_EVERY` on each thread, the limit
+/// who answered it, its capture, each Vision pass with its rung, its time, its words and whether
+/// another pass ran beside it, and its wait for the neural recogniser. At most one line per region
+/// every `SLOW_LOG_EVERY` on each thread, the limit
 /// that line has per module (this file knows no modules): a poll of three read-outs on a slow Mac
 /// is then three lines every ten seconds, not three a second, and two fields of one size each have
 /// their own. The time is from the start of this recognition: a `host.ocr.read`'s picture was
 /// taken before it (`Capture::Apart`), so there the threshold is the recognition's alone.
-fn note_slow(ms: f64, (x, y, w, h): (i32, i32, i32, i32), capture: Capture, passes: &[Pass]) {
+fn note_slow(ms: f64, (x, y, w, h): (i32, i32, i32, i32), capture: Capture, passes: &[Pass], answered: Answered) {
     if ms < SLOW_JOB.as_secs_f64() * 1000.0 {
         return;
     }
     let due = SLOW_SAID.with(|s| cost::due(&mut s.borrow_mut(), (x, y, w, h), Instant::now(), SLOW_LOG_EVERY));
     if due {
-        crate::logging::line("macos", &cost::slow_line(w, h, ms, &this_thread(), capture, passes));
+        crate::logging::line("macos", &cost::slow_line((w, h), ms, &this_thread(), capture, passes, answered));
     }
 }
 
@@ -1606,6 +1847,15 @@ fn bigger_then_faster(
 /// One pass's answer: the text (lines joined with "\n"), every word in reading order, and the
 /// lines themselves, which `host.ocr.read` groups into rows.
 type VisionRead = (String, Vec<OcrWord>, Vec<OcrLine>);
+
+/// A pass's answer made of its lines, as [`perform`] makes one: their texts joined with "\n", and
+/// every line's words, in order. For an answer whose lines were changed after the pass
+/// (`merge::respaced`).
+fn vision_read_of(lines: Vec<OcrLine>) -> VisionRead {
+    let text = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
+    let words = lines.iter().flat_map(|l| l.words.iter().cloned()).collect();
+    (text, words, lines)
+}
 
 /// One pass, made and timed the way the cost lines count it: the request made and configured,
 /// the handler, the pass and its answer read out, as one time. `stage` is the rung of the ladder

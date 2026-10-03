@@ -315,7 +315,9 @@ Every item here needs a Mac. They are listed in the order a first session should
    OCR engine has to become cross-platform. Windows runs a neural fallback specifically
    because the system engine refuses single digits, and that fallback is a Windows-only
    dependency, so on macOS Vision carries the case alone. Ten minutes with one request
-   against the crops the Windows work already produced.
+   against the crops the Windows work already produced. (Answered by `ocr-bench` in 2026-10:
+   Vision is blind to a lone digit at times, and the fallback now runs on a Mac too, by
+   Windows' rule, where the download carries it — see [`host.ocr.read`](api/ocr.md#macos).)
 9. **Do Qt object names survive into `AXIdentifier`** — see the `class` section. If they do
    not, the modules that navigate by them need a different anchor on macOS.
 
