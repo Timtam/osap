@@ -1331,9 +1331,11 @@ dependencies = [
  "dispatch2",
  "fluent-langneg",
  "hex",
+ "image",
  "interprocess",
  "libc",
  "log",
+ "ndarray",
  "objc2",
  "objc2-app-kit",
  "objc2-application-services",
@@ -1347,8 +1349,11 @@ dependencies = [
  "objc2-io-kit",
  "objc2-screen-capture-kit",
  "objc2-vision",
+ "ort",
  "os_info",
  "same-file",
+ "toml",
+ "tracing",
  "winnow",
 ]
 
@@ -2077,6 +2082,7 @@ version = "2.0.0-rc.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fa7e49bd669d32d7bc2a15ec540a527e7764aec722a45467814005725bcd721"
 dependencies = [
+ "libloading",
  "ndarray",
  "ort-sys",
  "smallvec 2.0.0-alpha.10",

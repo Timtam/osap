@@ -1,0 +1,20 @@
+# The ONNX Runtime a macOS package carries for the neural text recogniser — the one place it is
+# fixed. `package-macos.sh --onnxruntime DIR` takes this archive unpacked; the macOS workflow
+# fetches it, checks it against `sha256` below, and rebuilds when this file changes.
+#
+# Microsoft's own build, universal (arm64 and x86_64), for macOS 13.3 and later. 1.22 because the
+# application's `ort` (2.0.0-rc.10) is made for it, and because it is among the last releases with
+# an Intel half: 1.24 dropped x86_64 for macOS and needs macOS 14. Opened at run time from
+# Contents/Frameworks (crates/host/src/backend/paddle_ocr.rs); below 13.3 the application does
+# not open it, and reads text with Vision alone.
+#
+# key=value, one a line; `#` starts a comment.
+version=1.22.0
+archive=onnxruntime-osx-universal2-1.22.0.tgz
+url=https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-osx-universal2-1.22.0.tgz
+# Bytes, as GitHub's release listing gives them (2026-10-02).
+size=54820264
+# Not pinned yet: GitHub lists no digest for this release, and the archive has not been fetched
+# here to take one. The first fetch prints it; it goes here, and from then on a fetch that differs
+# is refused. Until it is here, no download goes to a tester (TODO.md).
+sha256=

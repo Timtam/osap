@@ -11,6 +11,12 @@
 #                                      name the build in the README for that commit (CI passes
 #                                      the run's own); left out, it is this checkout's, marked
 #                                      -modified when the working tree has uncommitted changes
+#   ./package-macos.sh --onnxruntime DIR
+#                                      carry the neural text recogniser: ONNX Runtime's dylib
+#                                      from DIR, Microsoft's onnxruntime-osx-universal2 archive
+#                                      unpacked (tools/onnxruntime-mac.txt names it), into
+#                                      Contents/Frameworks, and its model into Contents/Resources;
+#                                      left out, the application reads text with Vision alone
 #
 # This has to run ON a Mac (it compiles). Nobody on the project owns one, so it is also run
 # by .github/workflows/macos-build.yml on a GitHub runner, as the macOS half of every Build
@@ -25,6 +31,7 @@ do_zip=1
 do_build=1
 universal=0
 commit=""
+onnxruntime=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --version) version="$2"; shift 2 ;;
@@ -32,9 +39,27 @@ while [ $# -gt 0 ]; do
     --no-build) do_build=0; shift ;;
     --universal) universal=1; do_build=0; shift ;;
     --commit) commit="$2"; shift 2 ;;
+    --onnxruntime) onnxruntime="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+# The neural text recogniser's runtime, checked before anything is built: Microsoft's universal
+# archive unpacked, its dylib under lib/ (libonnxruntime.dylib is a link to the versioned file),
+# its LICENSE and ThirdPartyNotices.txt beside. The application opens it at run time from
+# Contents/Frameworks (crates/host/src/backend/paddle_ocr.rs, which says why it is not linked),
+# so a package without it is an application that reads text with Vision alone, not a broken one.
+ort_lib=""
+if [ -n "$onnxruntime" ]; then
+  [ -d "$onnxruntime" ] || { echo "--onnxruntime $onnxruntime is not a folder" >&2; exit 2; }
+  for candidate in "$onnxruntime/lib/libonnxruntime.dylib" "$onnxruntime"/lib/libonnxruntime.*.dylib; do
+    [ -f "$candidate" ] && { ort_lib="$candidate"; break; }
+  done
+  [ -n "$ort_lib" ] || { echo "no lib/libonnxruntime.dylib under $onnxruntime" >&2; exit 2; }
+  for f in LICENSE ThirdPartyNotices.txt; do
+    [ -f "$onnxruntime/$f" ] || { echo "no $f under $onnxruntime: its notices go out with it" >&2; exit 2; }
+  done
+fi
 
 # The build this package is, so that a report can be matched to the download it came from. It
 # goes into the README's `Build:` line below. The application names its build itself, in the
@@ -108,6 +133,20 @@ fi
 
 [ -x "$exe" ] || { echo "no executable at $exe — build first" >&2; exit 1; }
 
+# ONNX Runtime is opened by the application at run time (crates/host/src/backend/paddle_ocr.rs);
+# an executable that LINKS it does not start on a Mac without that file. ort-sys asks pkg-config
+# for it even so (`load-dynamic` downloads nothing but still asks), and a Homebrew onnxruntime on
+# the building Mac answers. Refused here, before anything is packaged — on a tester's own build
+# as in CI, where it would otherwise be found only after the download had gone out.
+if command -v otool >/dev/null 2>&1; then
+  links="$(otool -L "$exe" 2>/dev/null || true)"
+  if printf '%s\n' "$links" | grep -i onnxruntime >/dev/null; then
+    echo "$exe links ONNX Runtime; the application must only open it at run time" >&2
+    echo "(crates/host/Cargo.toml): build where pkg-config finds no onnxruntime — Homebrew's, for one" >&2
+    exit 1
+  fi
+fi
+
 dist="$root/dist"
 stage="$dist/$APP_NAME"
 app="$stage/$APP_NAME.app"
@@ -150,6 +189,23 @@ done
 
 cp "$exe" "$app/Contents/MacOS/automation-platform"
 chmod +x "$app/Contents/MacOS/automation-platform"
+
+# The neural text recogniser, when asked for: ONNX Runtime where the application looks for it,
+# Contents/Frameworks/libonnxruntime.dylib, and the model it reads, Contents/Resources/
+# ppocr-rec.onnx (on Windows both are inside the executable). `-L`, because the archive's
+# libonnxruntime.dylib is a link. Its local symbols stripped (`strip -x`), which Microsoft's file
+# carries for debugging and nothing here reads; whether the stripped file still loads is what CI's
+# `ocr-bench --paddle-probe` answers. Signed below, before the bundle.
+if [ -n "$ort_lib" ]; then
+  mkdir -p "$app/Contents/Frameworks"
+  dylib="$app/Contents/Frameworks/libonnxruntime.dylib"
+  cp -L "$ort_lib" "$dylib"
+  chmod 644 "$dylib"
+  before="$(du -h "$dylib" | cut -f1)"
+  strip -x "$dylib" || echo "  strip -x failed; shipping ONNX Runtime unstripped"
+  echo "ONNX Runtime: $(basename "$ort_lib"), $(lipo -archs "$dylib" 2>/dev/null || echo '?'), $before, $(du -h "$dylib" | cut -f1) stripped"
+  cp "$root/crates/host/models/ppocr-rec.onnx" "$app/Contents/Resources/ppocr-rec.onnx"
+fi
 
 # LSUIElement: no Dock icon, no app-switcher entry — the application lives in the menu bar,
 # which is the macOS shape of the Windows tray. It can still show windows and they can still
@@ -261,6 +317,15 @@ fi
 # because the cost lands on whoever is testing rather than on whoever is building.
 IDENTITY="${OSAP_SIGN_IDENTITY:-OSAP Local Signing}"
 if command -v codesign >/dev/null 2>&1; then
+  # ONNX Runtime first, by the same identity or ad hoc, as nested code is signed before what
+  # holds it: the stripped copy carries no valid signature, and code without one does not load on
+  # Apple silicon at all. `--deep` below signs it again with the bundle; this is what makes it so
+  # whichever way that goes.
+  if [ -f "$app/Contents/Frameworks/libonnxruntime.dylib" ]; then
+    codesign --force --sign "$IDENTITY" "$app/Contents/Frameworks/libonnxruntime.dylib" 2>/dev/null \
+      || codesign --force --sign - "$app/Contents/Frameworks/libonnxruntime.dylib" 2>/dev/null \
+      || echo "  ONNX Runtime could not be signed; the neural recogniser will not load on Apple silicon"
+  fi
   # Tried, not looked up.
   #
   # This used to gate on `security find-identity -v -p codesigning`, and that is what made
@@ -284,6 +349,50 @@ if command -v codesign >/dev/null 2>&1; then
   # side and the two should agree.
   codesign -dv --verbose=2 "$app" 2>&1 | grep -E "^(Authority|Signature)=" | sed 's/^/  /' || true
 fi
+
+# The licences, beside the .app as on Windows: the application's own, and — when the package
+# carries the neural recogniser — ONNX Runtime's (MIT) with Microsoft's notices for what it is
+# built from, and the model's (Apache-2.0) with where it comes from. Both licences ask for
+# exactly this: their text goes out with the program.
+licences="$stage/licences"
+mkdir -p "$licences"
+cp "$root/LICENSE" "$licences/automation-platform-GPL-3.0.txt"
+recogniser_note="The neural text recogniser is not in this package: text is read by Apple Vision alone."
+if [ -n "$ort_lib" ]; then
+  cp "$onnxruntime/LICENSE" "$licences/onnxruntime-MIT.txt"
+  cp "$onnxruntime/ThirdPartyNotices.txt" "$licences/onnxruntime-ThirdPartyNotices.txt"
+  cp "$root/crates/host/models/LICENSE-Apache-2.0.txt" "$licences/paddleocr-model-Apache-2.0.txt"
+  cp "$root/crates/host/models/NOTICE.txt" "$licences/paddleocr-model-NOTICE.txt"
+  recogniser_note="The neural text recogniser runs on ONNX Runtime by Microsoft, used under the MIT
+licence (onnxruntime-MIT.txt), which is built from the projects whose notices are in
+onnxruntime-ThirdPartyNotices.txt; it is AutomationPlatform.app/Contents/Frameworks/
+libonnxruntime.dylib, from https://github.com/microsoft/onnxruntime. Its model is
+PaddleOCR's, used under the Apache License 2.0 (paddleocr-model-Apache-2.0.txt), from
+https://github.com/PaddlePaddle/PaddleOCR; paddleocr-model-NOTICE.txt says which."
+fi
+cat > "$licences/README.txt" <<TXT
+Licences
+========
+
+Automation Platform is free software under the GNU General Public License, version 3 or
+later. The full text is in automation-platform-GPL-3.0.txt. The source is at
+https://github.com/Timtam/osap
+
+$recogniser_note
+
+The VPS Avenger preset database (modules/vps-avenger-presets/data) comes from the
+avenger_control project, whose developer gave it to this project without restriction; it is
+under the GPL like the rest. See modules/vps-avenger-presets/NOTICE.
+TXT
+
+# The real captures `ocr-bench` reads beside its own pictures, as the repository carries them
+# (crates/host/bench-data/ocr/real, with their manifest and NOTICE): value fields and control
+# words of plug-ins, cut on Windows by tools/ocr-fixtures/crop.py. measure-text-recognition.command
+# hands them to it.
+pictures="$stage/ocr-pictures"
+mkdir -p "$pictures"
+cp "$root"/crates/host/bench-data/ocr/real/*.png "$root/crates/host/bench-data/ocr/real/manifest.toml" \
+  "$root/crates/host/bench-data/ocr/real/NOTICE" "$pictures/"
 
 # The README's line about the documentation, only when there is documentation: a package made
 # without it would otherwise point a tester at a file that does not exist.
@@ -368,14 +477,17 @@ behave as if the application is broken, so please do them all.
    quit the application (its menu-bar menu, Quit), then in Terminal type
        zsh ~/$APP_NAME/measure-text-recognition.command
    (with this folder's path instead if it is not in your home folder). It reads
-   pictures it carries, not your screen, and needs no permission. It prints one
-   line when it starts and one when it is done, so VoiceOver has little to read
-   while it measures; everything else goes into the file. A full run takes several
-   minutes, 84 seconds of which it waits on purpose. It ends with the Glass sound
+   pictures it carries and those in the ocr-pictures folder, not your screen, and
+   needs no permission. It prints one line when it starts and one when it is done,
+   so VoiceOver has little to read while it measures; everything else goes into
+   the file. A full run takes up to half an hour on an Intel Mac and less on Apple
+   silicon, 168 seconds of which it waits on purpose. It ends with the Glass sound
    when it finished and the Basso sound when it stopped early, and then shows the
    file in Finder, selected: send that ocr-bench-N.txt, either way.
 
 Speech goes through the system voice, or through VoiceOver if it is running.
+
+Licences are in the licences folder, including where to get the source.
 
 $docs_note$shipped module(s) included.
 TXT
@@ -396,7 +508,8 @@ cat > "$stage/measure-text-recognition.command" <<'CMD'
 #!/bin/zsh
 # Measures what text recognition costs on this Mac, for the Automation Platform developers.
 #   zsh <this folder>/measure-text-recognition.command
-# Add --quick for a shorter run. It reads pictures it carries, not the screen.
+# Add --quick for a shorter run. It reads pictures it carries, and the real captures in
+# ocr-pictures beside this file, not the screen.
 here=${0:a:h}
 exe="$here/AutomationPlatform.app/Contents/MacOS/automation-platform"
 if [ ! -x "$exe" ]; then
@@ -412,7 +525,11 @@ if pgrep -f 'AutomationPlatform\.app/Contents/MacOS/automation-platform' >/dev/n
   afplay /System/Library/Sounds/Basso.aiff >/dev/null 2>&1
   exit 1
 fi
-echo "Measuring text recognition: several minutes. It ends with a sound and shows the file in Finder."
+# The real captures beside this file, unless the command line names other pictures already.
+if [[ -d "$here/ocr-pictures" && ${argv[(I)--pictures]} -eq 0 ]]; then
+  set -- --pictures "$here/ocr-pictures" "$@"
+fi
+echo "Measuring text recognition: up to half an hour. It ends with a sound and shows the file in Finder."
 result=$("$exe" ocr-bench --quiet "$@")
 run_status=$?
 print -r -- "$result"

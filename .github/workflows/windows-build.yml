@@ -285,3 +285,52 @@ jobs:
           path: dist/AutomationPlatform
           if-no-files-found: error
           overwrite: true
+
+      # The neural recogniser measured on its own, as the Mac's plan asks of Windows: `ocr-bench
+      # --paddle` reads every picture the executable carries and the real plug-in captures in
+      # crates/host/bench-data/ocr/real with it alone, beside what Windows.Media.Ocr reads and what
+      # Windows answers (docs/building-on-macos.md, "Measuring text recognition") — no window, no
+      # capture, no hook, no speech; about 20 s. Started by Start-Process and waited for, because
+      # the executable is a windowed one, which PowerShell would not wait for otherwise. The whole
+      # output is uploaded below, named for the version and the commit like the downloads.
+      #
+      # A measurement, not a gate, and so after the download's upload, as the macOS job's capture
+      # steps are: it goes red only when the run did not finish, and that must not also cost the
+      # download. A picture that must be read and that the recogniser reads wrong is a warning —
+      # for now: field-empty, mel-position and k8-voices are known to be, and the recogniser has no
+      # detector, so what it makes of ink that is not text is in the output too. Ten minutes at
+      # most, against the 20 seconds or so it takes: the job has no limit of its own but
+      # GitHub's six hours, and nothing else would end a run that hangs.
+      - name: The neural recogniser, measured
+        shell: pwsh
+        timeout-minutes: 10
+        env:
+          PREFIX: ${{ inputs.artifact-prefix }}
+        run: |
+          $out = "$env:PREFIX-ocr-bench-windows-paddle.txt"
+          $p = Start-Process -FilePath 'target/release/automation-platform.exe' -NoNewWindow -Wait -PassThru `
+                 -ArgumentList @('ocr-bench', '--paddle', '--pictures', 'crates/host/bench-data/ocr/real', '--quiet', '--out', $out)
+          if (Test-Path $out) { Get-Content $out } else { Write-Host 'no output file at all' }
+          if (-not (Test-Path $out) -or -not (Select-String -Path $out -Pattern '^OCR BENCH: done' -Quiet)) {
+            throw "ocr-bench --paddle did not finish (exit code $($p.ExitCode))"
+          }
+          $must = Select-String -Path $out -Pattern '^OCR BENCH: paddle \| small pictures that must be read: (.*)$' | Select-Object -First 1
+          if (-not $must) {
+            Write-Host "::warning::ocr-bench --paddle printed no line about the pictures that must be read"
+          } elseif ($must.Line -notmatch 'wrong: none$') {
+            Write-Host "::warning::the neural recogniser reads a picture that must be read wrong: $($must.Matches[0].Groups[1].Value)"
+          }
+          $invented = Select-String -Path $out -Pattern '^OCR BENCH: paddle \| pictures without text: (.*)$' | Select-Object -First 1
+          if ($invented) { Write-Host "pictures without text: $($invented.Matches[0].Groups[1].Value)" }
+          $global:LASTEXITCODE = 0
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          # The file as it is, named after itself (`archive: false`), as the macOS job keeps its
+          # benchmark's output.
+          path: ${{ inputs.artifact-prefix }}-ocr-bench-windows-paddle.txt
+          archive: false
+          name: ${{ inputs.artifact-prefix }}-ocr-bench-windows-paddle.txt
+          if-no-files-found: warn
+          overwrite: true

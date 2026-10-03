@@ -99,6 +99,31 @@ the folder, without a server. Without either, the package is made without it, an
 says which is missing. Read [macos-permissions.md](macos-permissions.md) before
 launching it, because two of the three ways this can fail look nothing like permissions.
 
+**The neural text recogniser** goes into the package only when it is asked for:
+`./package-macos.sh --onnxruntime DIR`, where `DIR` is Microsoft's
+`onnxruntime-osx-universal2-1.22.0.tgz` unpacked. `tools/onnxruntime-mac.txt` names that archive,
+its address, its size and its SHA-256, and is the one place they are fixed; CI fetches it from
+there. The script copies ONNX Runtime's dylib to `Contents/Frameworks/libonnxruntime.dylib`, strips
+its local symbols (`strip -x`, both sizes printed) and signs it before the bundle, and copies
+PaddleOCR's recognition model (7.8 MB) to `Contents/Resources/ppocr-rec.onnx`. The application
+opens the dylib itself at run time — it is never linked, and the executable must not name it:
+the script refuses one that does (`otool -L`) before it packages anything — after Vision's
+warm-up, and says once in its log whether the recogniser is ready or why it is not. The library
+is built for macOS 13.3 and later, and the application does not open it on an older macOS; there,
+where either file is missing, or where the library does not load, Vision reads alone, as in a
+package without it. In this build the
+recogniser changes nothing that is read: it reads every small region beside Vision for
+comparison, and its answers are counted in the log, never used (see
+[host.ocr.read's macOS section](api/ocr.md#macos)). Without `--onnxruntime` the package is what
+it was before.
+
+Beside the `.app` the package also holds `licences/` — the application's GPL text, and with the
+recogniser ONNX Runtime's MIT licence and Microsoft's third-party notices, the model's Apache-2.0
+licence and where it comes from, and a `README.txt` that says which is which — and
+`ocr-pictures/`, the real plug-in captures `ocr-bench` reads beside its own pictures
+(`crates/host/bench-data/ocr/real/`, with their manifest and their `NOTICE`). The dylib makes the
+zip larger: from about 17 MB to an estimated 53 to 79 MB, which the build job prints.
+
 ## Running it without packaging
 
 `cargo run --release` works and is the fast loop, with one macOS-specific annoyance worth
@@ -129,13 +154,24 @@ terminal.
 ## Measuring text recognition {#measuring-text-recognition}
 
 `ocr-bench` measures what Apple Vision's text recognition costs on the Mac it runs on. It reads
-ten pictures the executable carries — five layouts, each drawn for a standard display and for a
-Retina one: imitations of sforzando's read-outs (a value in a black well set into grey, the
-digits about 11 pixels tall at 1x as in sforzando's own fields) and a line of words wider than
-400 points — so a CI runner, a tester's Mac and anybody else's read the same pixels. It opens no
+28 pictures the executable carries — fourteen layouts, each drawn for a standard display and for
+a Retina one: imitations of sforzando's read-outs (a value in a black well set into grey, the
+digits about 11 pixels tall at 1x as in sforzando's own fields, and its light Instrument field),
+values with a sign or a decimal point (`-12`, `-0.5 dB`, `+3 ct`, `0.50`), four with ink that is
+not text (a level meter, a speaker symbol, an empty well, a text caret), a word cut off at half
+its height, and a line of words wider than 400 points — so a CI runner, a tester's Mac and
+anybody else's read the same pixels. `--pictures` adds real captures from a folder. It opens no
 window, captures nothing from the screen, needs no permission, never speaks and leaves the
 application's log alone. Quit the application first: its own reads would compete for the
 processor.
+
+Each picture lists the answers that are right: its text, or nothing for the four without text,
+where any text read is *invented*; a field whose lone dash a recogniser may drop accepts the dash
+and nothing, and the half-clipped word accepts the word and nothing. A reading is compared after
+runs of whitespace are made one space, case and all; one that is right only once spaces are
+dropped and dash and quote forms made one (`0.00dB` for `0.00 dB`) is reported as right but for
+spaces, not as right. Every picture but those that accept nothing must be read; on those that
+accept text and nothing, any other text is read wrong.
 
 ```bash
 AutomationPlatform.app/Contents/MacOS/automation-platform ocr-bench           # the full run
@@ -144,10 +180,13 @@ AutomationPlatform.app/Contents/MacOS/automation-platform ocr-bench --quick   # 
 
 | Option | What it does |
 |---|---|
-| `--quick` | 3 passes a cell instead of 6, which is too few for a verdict; 2 pictures for the variants instead of 5; one process per warm-up instead of three; 24 s of idle instead of 84 |
+| `--quick` | 3 passes a cell instead of 6, which is too few for a verdict; 2 pictures for the variants instead of 5; 3 pictures for the ways of reading instead of every one; one process per first-pass kind instead of three; blocks of 5 s instead of 30 under sustained load; 48 s of idle instead of 168 |
 | `--quiet` | prints only where the file is and that it is done; everything else goes to the file alone, so that a screen reader does not read a hundred lines while the processor is meant to be measuring |
 | `--long-idle` | adds one pass after 1, 2, 5 and 10 minutes with nothing to do, on the thread that read before and on a fresh one: 36 minutes more |
 | `--capture-ms N` | counts the retry ladder's 250 ms budget from N ms before each pipeline read, standing in for the screen capture it does not make; 50 by default, the median capture on the tester's Intel Air; 0 to 10000 |
+| `--pictures DIR` | also reads every picture `DIR/manifest.toml` lists, each `<name>@<scale>x.png` beside it, in the pipeline with the drawn ones. `crates/host/bench-data/ocr/real/` holds real Windows captures of value fields and control words, which `tools/ocr-fixtures/crop.py` cuts out of calibration shots (its `real.toml` says where each comes from, and how its answers were checked). A manifest with an unknown key, a missing file, a PNG of another size than its entry says, a label taken twice, or a picture that must be read and accepts nothing, is refused before anything runs |
+| `--paddle` | the neural recogniser alone over every picture — on Windows, with what `Windows.Media.Ocr` reads and what Windows answers beside it; on a Mac, where the package carries ONNX Runtime — then how wide a line of words it reads right, four crops of the 2x pictures, and its scores on right and on invented readings. Each picture is read 23 times, the first 3 not timed (`--quick`: 6 and 1). About 20 s on an i7-8700K. `--quiet`, `--pictures` and `--out` work as above; the other options are accepted and change nothing. Exits with 1 when the recogniser cannot be made |
+| `--paddle-probe` | only whether the neural recogniser loads and reads one picture (`lone-1@2x`): one line, `ok` with the runtime, the session's time and what it read, or `not available` with the reason; exits with 0 or 1, and writes no file. On Windows as on a Mac |
 | `--out FILE` | writes to `FILE` instead of `ocr-bench-N.txt` beside the `.app` (the first N not taken; the fallback folder when that one is read-only) |
 | `--summary FILE` | appends each section's table to `FILE` in Markdown as soon as the section is done; CI passes `$GITHUB_STEP_SUMMARY` |
 
@@ -169,33 +208,86 @@ moment it is known, so a pass that kills the process keeps everything before it:
 2. **First passes**, each in a process of its own that the benchmark starts: after the
    application's own warm-up (one accurate pass over a line of printed words, the picture
    `line@1x`, on a thread of its own), after the warm-up it made until 2026-10 (the same pass
-   over six dark bars), and with none — then the first real pass on another thread, and the pass
-   after it. One process comes first and is not counted, so that the counted
-   ones all find the file cache warm, and the order of the three is turned by one each round.
+   over six dark bars), after one over a small field instead, and with none — then the first real
+   pass on another thread, and the pass after it; the fast level's first pass in a process with
+   no warm-up; the first passes in a second language (`de-DE`) after a warm-up in Vision's
+   default; and, where the package carries it, the neural recogniser's first two recognitions
+   after its session alone, after its warm-up, and after its warm-up made beside Vision's, with the
+   process's peak memory before and after. One process comes first and is not counted, so that
+   the counted ones all find the file cache warm, and the order of the kinds is turned by one each
+   round.
 3. **Probes**: each variant that calls what no Mac has run for this application yet — request
-   revision 2 or 3, a compute device — runs one pass in a process of its own first. One that dies
-   there, or that Vision refuses, is left out of everything below, with the reason.
+   revision 2 or 3, a compute device, the neural recogniser — runs one pass in a process of its
+   own first. One that dies there, or that is refused, is left out of everything below, with the
+   reason. The neural recogniser is then made in the benchmark's own process, only once its probe
+   went through: the line `paddle | the neural recogniser in this process: …` gives the session's
+   time and the runtime, and `paddle | the neural recogniser is not measured in this run: …` the
+   reason it is not.
 4. **The pipeline**: every picture read as `host.ocr.recognize` reads a region once its capture
-   is in hand — the content crop, the blank guard, the enlargement, the retry ladder — and how
-   many Vision passes each read made. Then the same again with every request of every rung asking
-   for revision 2, where this macOS has it and its probe went through.
+   is in hand — the content crop, the blank guard, the enlargement, the retry ladder — under each
+   of eleven ways of reading a small region, the *strategies*: `prod` (today's ladder), `rev2`
+   (every request of every rung under revision 2), `paddle` (the neural recogniser alone),
+   `acc+paddle` and `acc+paddle+rest` (Windows' rule: the recogniser's text when the first
+   accurate pass read nothing, without and with today's rungs after it), `rev2-tight` (the first
+   pass under revision 2), `rev3>rev2` (revision 2 over the same crop after a first pass that read
+   nothing, instead of the whole region), `fast=paddle-checked`, `fast=paddle-strict` and
+   `fast=paddle` (the fast level first, believed only where the recogniser reads the same; they
+   differ in what they do when fast reads nothing: today's accurate ladder and never the
+   recogniser's text alone, an accurate pass and then the recogniser's text, or the recogniser's
+   text at once), and `fast>acc` (the fast level first, unchecked). Six of them are *candidates*,
+   the ways the application may come to read small regions by: `acc+paddle+rest`, `rev2-tight`
+   and `rev3>rev2` for the lone digit, and the three `fast=paddle` ones. `rev2`, `paddle`,
+   `acc+paddle` and `fast>acc` are measured *for comparison* only: they speak a value nothing
+   checked, or leave out or change more than a candidate would. The run prints what each one does,
+   and which it is. A strategy that needs what this Mac lacks — a revision, the recogniser — says
+   why and is left out; one that needs the recogniser reads a region whose ink is not one line, or
+   too wide, as `prod` does. A picture the blank guard answers is read by the pipeline alone, as
+   a read would be. The few pictures read for speed are read six times after a first one kept
+   apart, every other small picture twice, for whether it is read right, and every row once a
+   round in an order that changes from round to round. Each row says what a read cost, the Vision
+   passes and the recogniser's runs it made, who answered (`as captured`, `fast first`, `tight`,
+   `tight again`, `whole`, `enlarged`, `fast last`, `Paddle`, `nobody`), how often fast and the
+   recogniser read the same, and the time that was not Vision's. After the tables one line says
+   what today's ladder read wrong, invented or was refused on, whatever the verdicts:
+   `pipeline | today's ladder (prod) …`.
 5. **The engine**: one Vision pass with today's request (`prod`) and with variants that change
    one thing each: the fast level; request revision 2 or 3; a minimum text height of 1/32 or
    0.25; one request reused; the ink enlarged toward 48 pixels instead of 64; the request pinned
-   to the CPU, the GPU or the Neural Engine, where Vision offers it (macOS 14 and later); and the
-   language en-US. `prod-b` is `prod` again under another name, the control. Every cell (a
-   variant over a picture) runs once a round, in an order that changes from round to round, so
-   that whatever a switch between models costs falls on every variant alike; the first pass of
-   each cell is kept apart. A pass is timed as the application spends it: making the request,
-   the handler, `performRequests` and reading the results out. A variant this Mac cannot run says
-   why.
+   to the CPU, the GPU or the Neural Engine, where Vision offers it (macOS 14 and later); the
+   language en-US; and the neural recogniser instead of Vision, over the whole small region
+   (`paddle-raw`) or over the content crop a read makes (`paddle-crop`). `prod-b` is `prod` again
+   under another name, the control. Every cell (a variant over a picture) runs once a round, in an
+   order that changes from round to round, so that whatever a switch between models costs falls on
+   every variant alike; the first pass of each cell is kept apart. A pass is timed as the
+   application spends it: making the request, the handler, `performRequests` and reading the
+   results out. A variant this Mac cannot run says why. Then the **closing lines** (below).
 6. **Threads**: the first pass on a fresh thread once the process is warm, one thread alone
-   against two at once, and `prod` in the engine against `prod` pass after pass, which says what
-   switching between variants cost.
+   against two at once, `prod` in the engine against `prod` pass after pass, which says what
+   switching between variants cost, the accurate and the fast level each beside the neural
+   recogniser at user-initiated and at utility priority against alone, and four blocks of 30
+   seconds, alternately Vision alone and Vision beside the recogniser at utility the way the
+   application's shadow asks it.
 7. **Idle**: one pass after 2, 10 and 30 seconds with nothing to do, each once on the thread that
-   read before and once on a fresh one; `--quick` waits 2 and 10 seconds.
+   read before and once on a fresh one, and the fast level and the neural recogniser after the
+   same pauses; `--quick` waits 2 and 10 seconds.
 
-Each section ends with its table in Markdown, and the last line says `done`.
+Each section ends with its table in Markdown and with how long it took (`… | section took N s`),
+and the last line says `done`. A full run is estimated at 20 to 30 minutes on the CI's Intel
+Mac, less on Apple silicon, 168 seconds of it waiting on purpose; `--pictures` with the 13 real
+captures lengthens the pipeline by an estimated two fifths. The first CI run's section times are what
+the rounds are set by.
+
+**The closing lines** weigh the pipeline's candidates by one rule, printed with them: a way of
+reading is named when it reads every picture with text right on every read (nothing counts as
+right where a picture accepts it), reads nothing on every picture without text, is clearly faster
+than `prod` on at least one picture and clearly slower on none; of those, the cheapest by its
+medians over the pictures read for speed. Any strategy that is faster but not right is said as
+such, never named, with `(prod too)` after a picture `prod` does not read right either. When
+`prod` itself reads a picture wrong, or invents text, a further line says which, and names the
+cheapest candidate that reads the rest right. And a strategy for comparison that would pass the
+rule is said in a line of its own — `for comparison only, never a way the application may read`
+— and never named. A `--quick` run, and one whose control came out "clearly" different, names
+none.
 
 **How a variant is judged.** Against `prod`, picture by picture: "clearly faster" when an exact
 two-sided Mann-Whitney test between the two sets of warm passes gives p < 0.01 *and* the median
@@ -212,22 +304,49 @@ captures the screen. Compare a variant with `prod` from the same run; millisecon
 machines say as much about the machines as about the settings.
 
 **In CI**, the `ocr-bench` job of `.github/workflows/macos-build.yml` runs the full benchmark
-from the downloaded zip on the `macos-15` and `macos-26` runners (arm64 virtual machines) and on
-`macos-15-intel`, the one runner that executes the x86_64 slice. It runs when the run built the
-executable, and in every run started by hand. The job's log has every line, the run's summary
-page the tables, and each leg's whole output is kept as the artifact `ocr-bench-<runner>.txt`,
-with the runner image on its last line. The job fails only when the benchmark did not finish; a
-picture today's request read wrong, or one Vision refused, is a warning. It also runs the
-tester's `.command` with `--help`, the one path that is harmless there.
+from the downloaded zip, with `--pictures ocr-pictures`, on the `macos-15` and `macos-26` runners
+(arm64 virtual machines) and on `macos-15-intel`, the one runner that executes the x86_64 slice.
+It runs when the run built the executable, and in every run started by hand, for at most 45
+minutes a leg. The job's log has every line, the run's summary page the tables and the closing
+lines (each of them also as an annotation of the run), and each leg's whole output is kept as the
+artifact `ocr-bench-<runner>.txt`, with the runner image on its last line. A leg fails when the
+benchmark did not finish, or when the neural recogniser did not load although the bundle carries
+it; a picture today's request read wrong or Vision refused (the engine table's `prod` row), and
+whatever the line `pipeline | today's ladder (prod) …` names, are warnings. On `macos-15` two
+short runs (`--quick`) follow, on copies of the bundle signed again ad hoc: one without ONNX
+Runtime, one with only its x86_64 half, which that Mac cannot load; each has to finish and say
+that the recogniser is not available, and why. A third copy has only its library flagged as a
+browser's download (`com.apple.quarantine`), and `--paddle-probe` there has to answer within two
+minutes, or a warning says so. These steps run even when the measurement went red, and the three
+copies' output is kept as the artifact `ocr-bench-macos-15-copies`. The job also runs the tester's
+`.command` with `--help`, the one path that is harmless there.
+
+The build job fetches ONNX Runtime by `tools/onnxruntime-mac.txt` (cached by its version and
+checksum), checks its size and its SHA-256 — while the file pins none, it prints the one it
+computed as a warning — and refuses a library without both slices, or one whose slices import
+Core ML's `MLComputePlan` or `MLOptimizationHints` strongly (macOS 14.4 and later, where the
+library promises 13.3); it prints each slice's `minos`, and warns when one is not the 13.3 the
+application keeps as its floor. `package-macos.sh` refuses an executable that links ONNX Runtime
+(`otool -L`: the application only ever opens it) before it packages anything; after the upload
+the job asks the bundle again, and refuses one without the library or the model. A zip larger
+than 80 MB is a warning. The `newer-macos` job asks `ocr-bench --paddle-probe` on macOS 14 and
+26, where "not available" is an error, and refuses a download whose signature does not verify
+(`codesign --verify --deep --strict`) in a last step of its own, so that its other steps still
+run. On Windows, the build job runs `ocr-bench --paddle` over the drawn pictures and the real
+captures, for at most ten minutes, and keeps the output as
+`automation-platform-<version>-<commit>-ocr-bench-windows-paddle.txt`; a picture that must be read
+and that the recogniser reads wrong is a warning there.
 
 ## Checking macOS code from a Windows machine
 
 Most of this port is developed on Windows. Two things make that possible, and it is worth
 knowing which one catches what:
 
-- `./check-macos.ps1` runs `cargo check --target aarch64-apple-darwin`. It is the compiler
-  front end only — it never links — and it covers the **backend** and its two support
-  files. It catches wrong signatures and missing feature flags within minutes.
+- `./check-macos.ps1` runs `cargo check` for `aarch64-apple-darwin` and for
+  `x86_64-apple-darwin`, the two halves of the universal application (`-Setup` installs both
+  targets). It is the compiler front end only — it never links — and it covers the **backend**
+  and its two support files. It catches wrong signatures and missing feature flags within
+  minutes.
 - `.github/workflows/macos-build.yml` builds and links the **whole thing** on a real Mac
   runner — both slices, on Apple silicon, see above — and uploads the packaged app. That is the only place a missing framework, a bad
   `#[link]`, or an undefined Carbon symbol shows up — and the only place the GUI layer is

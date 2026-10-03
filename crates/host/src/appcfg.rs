@@ -84,7 +84,10 @@ pub const SWITCHES: &[Switch] = &[
         key: "ocr_debug",
         label: "Save the images OCR was given — takes effect immediately",
         help: "Writes what the recogniser actually saw next to the application, which is the \
-               only way to tell 'the text was unreadable' from 'the region was wrong'.",
+               only way to tell 'the text was unreadable' from 'the region was wrong'. On a Mac \
+               a small region's picture is written once for each region and content, at most \
+               eight of a region, 64 regions and 32 MiB a session, and so is a read in which \
+               Vision and the neural recogniser read differently.",
         os: None,
         default_on: false,
         state: &OCR_DEBUG,

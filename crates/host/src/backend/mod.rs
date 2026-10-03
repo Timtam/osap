@@ -35,7 +35,10 @@ mod hook_watch_thread;
 /// that declare `[screen] capture = "duplication"`, and for nothing else. See the file.
 #[cfg(windows)]
 mod dxgi;
-#[cfg(windows)]
+/// The neural recogniser, PaddleOCR's recognition model under ONNX Runtime: on Windows beside
+/// `Windows.Media.Ocr` on every small region, on a Mac loaded from the bundle and, in this build,
+/// only measured. See the file.
+#[cfg(any(windows, target_os = "macos"))]
 mod paddle_ocr;
 #[cfg(windows)]
 mod uia;
@@ -65,6 +68,19 @@ pub(crate) use macos::perm::{ask_for, open_pane, permissions};
 /// `macos::ocr::bench`. Re-exported for `lib.rs`, and so that `crates/macos-check` can name it.
 #[cfg(target_os = "macos")]
 pub(crate) use macos::ocr::bench::run as ocr_bench;
+
+/// `automation-platform ocr-bench --paddle` on Windows: the neural recogniser measured alone on
+/// the bench's pictures, beside what `Windows.Media.Ocr` reads and what Windows answers — see
+/// `paddle_ocr::bench`; and `--paddle-probe`, whether it loads and reads. For
+/// `ocr::bench::elsewhere`; no host API. (On a Mac `macos::ocr::bench` calls both itself.)
+#[cfg(windows)]
+pub(crate) fn ocr_bench_paddle(o: &crate::ocr::bench::Options) -> i32 {
+    if o.paddle_probe {
+        return paddle_ocr::probe();
+    }
+    let path = o.out.clone().unwrap_or_else(|| crate::ocr::bench::free_name(crate::portable::base_dir()));
+    paddle_ocr::bench_rows(o, Some(&windows::bench_system_read), path)
+}
 #[cfg(not(any(windows, target_os = "macos")))]
 mod stub;
 
@@ -1796,12 +1812,39 @@ pub fn hotkey_claim_for(os: KeyOs, spec: &str) -> Result<(Option<(u32, u8)>, Str
 /// available) so the caller can join it before the process exits — a detached
 /// thread still inside ONNX Runtime init when the process tears down races ort's
 /// static cleanup and faults (the headless / fast-exit "segfault").
+///
+/// On a Mac the thread first waits for Vision's warm-up to end (`macos::ocr::VISION_WARM`):
+/// two engines warming at once compete on the few cores of an Intel Mac. It loads ONNX Runtime
+/// from the bundle then, and says once in the log whether the recogniser is ready. Called before
+/// Vision's warm-up has even started (that is `MacBackend::new`), which is why the exit calls
+/// [`stop_ocr_warmup`] before it joins this thread.
 pub fn warmup_ocr() -> Option<std::thread::JoinHandle<()>> {
     #[cfg(windows)]
     let h = Some(paddle_ocr::warmup());
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    let h = paddle_ocr::warmup_after(&macos::ocr::VISION_WARM);
+    #[cfg(not(any(windows, target_os = "macos")))]
     let h: Option<std::thread::JoinHandle<()>> = None;
     h
+}
+
+/// The exit's call, right before it joins [`warmup_ocr`]'s thread: on a Mac that thread may still
+/// wait for a Vision warm-up that never ended, or never began because the manager could not be
+/// made, and from here it stops waiting and ends without touching ONNX Runtime. Nothing to do
+/// elsewhere.
+pub fn stop_ocr_warmup() {
+    #[cfg(target_os = "macos")]
+    macos::ocr::VISION_WARM.stop();
+}
+
+/// The exit's last word on text recognition, before [`settle_ocr`]: on a Mac the neural
+/// recogniser's shadow — its readings beside Vision's, compared and counted, never used — writes
+/// its counts once more, with everything counted since its last line (`ocr/shadow.rs`); when no
+/// read was counted, only where the recogniser loaded. A lock and one line. Nothing elsewhere:
+/// Windows answers with the recogniser, and has no shadow.
+pub fn ocr_exit_report() {
+    #[cfg(target_os = "macos")]
+    macos::ocr::shadow_report();
 }
 
 /// Waits, for at most half a second, until no recognition of the secondary OCR engine is
@@ -1809,9 +1852,9 @@ pub fn warmup_ocr() -> Option<std::thread::JoinHandle<()>> {
 /// threads of their own whenever the primary engine answers first, and one still inside ONNX
 /// Runtime at exit is the same fault `warmup_ocr` joins its thread against. When there was
 /// anything to wait for, logs how long it waited or that it gave up. Nothing to wait for
-/// anywhere but Windows, which is the only place that engine exists.
+/// anywhere but Windows and macOS, where that engine exists.
 pub fn settle_ocr() {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     paddle_ocr::settle();
 }
 

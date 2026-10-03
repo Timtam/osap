@@ -1,0 +1,31 @@
+# The neural recogniser's model under two inference engines, on the same input: ONNX Runtime (the
+# `ort` crate, what Windows runs today) and tract (pure Rust). It decides which one runs the
+# recogniser on a Mac — see README.md. A measurement made by hand on the Windows machine, in a
+# release build; not part of the repository's workspace and not built by CI.
+[package]
+name = "paddle-engines"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+
+# Its own workspace: the repository's lists crates/* only, and this one must not join it, or the
+# whole application would resolve tract and a second ONNX Runtime set-up.
+[workspace]
+
+[features]
+default = ["ort", "tract"]
+# Each engine on its own, so that one can be type-checked for a Mac without the other (README.md,
+# criterion 3).
+ort = ["dep:ort"]
+tract = ["dep:tract-onnx"]
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+# The version and the binaries Windows' recogniser uses (crates/host/Cargo.toml).
+ort = { version = "=2.0.0-rc.10", optional = true, features = ["download-binaries", "copy-dylibs"] }
+# Without its default `transformers` feature, which the recognition model does not need.
+tract-onnx = { version = "0.23.8", optional = true, default-features = false }
+
+[profile.release]
+debug = false

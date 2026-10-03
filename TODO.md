@@ -18,7 +18,7 @@ Architecture and feasibility foundation: [docs/architecture-feasibility-study.md
 - [x] **Slice 11:** `host.keys` — low-level keyboard hook (`WH_KEYBOARD_LL`) with **suppression**. `capture(name, cb)`/`release(name)`/`releaseAll()`; captured keys are swallowed (not passed to the focused app) and dispatched as `on_key` with `{shift,ctrl,alt}`. Example: `examples/keys` (toggle Tab/Escape capture with Ctrl+Alt+O). ✓ (2026-06-21)
 - [x] **Overlay natural navigation:** `overlay:attach(matcher, { naturalNav = true })` captures (+ suppresses) **Tab / Shift+Tab** for moving between controls and **Enter** to activate, via `host.keys` (modifier-exact, so Alt+Tab passes through); released when the overlay deactivates. Arrows are left for value changes (standard scheme). Activate/deactivate are silent (ReaHotkey-style). ✓ (2026-06-21)
 - [x] **First real ReaHotkey port — Sforzando (`modules/sforzando`):** detect the standalone sforzando window (title/class/exe), attach a self-voicing overlay of 3 OCR read-outs (Instrument / Polyphony / Pitchbend range) with **window-relative** OCR regions (translated to screen via the active window's origin), navigated with Tab. Validates the whole stack on real plugin UI. ✓ (2026-06-21, interactively confirmed)
-- [x] **OCR engine — dual-engine pipeline (embedded PaddleOCR fallback):** the weakness Sforzando exposed — `Windows.Media.Ocr` is fast (~5 ms warm) but **blind to isolated single glyphs** (reads "128" but not a lone "1") — is fixed by a second in-process engine. A **PaddleOCR recognition model via ONNX Runtime** (`ort`, recognition-only, English PP-OCR mobile) is **embedded in the binary** (`crates/host/models/`, `include_bytes!` — portable, no external file) as a **fallback**: for a small region it runs **concurrently** with WinRT (`backend::paddle_ocr`) and its read is used only when WinRT returns empty, so a lone digit costs ≈ max(winrt, paddle) ≈ 15 ms (not their sum) while the common multi-char case stays on WinRT. Shared **content-tight preprocessing** (`tighten`: crop to the glyph + upscale) was the real unlock — it fixed both engines. The model **preloads at startup** off the hot path (`backend::warmup_ocr`). Engine chosen by a measured spike (pure-Rust `ocrs` vs `ort`+PaddleOCR on real crops; PaddleOCR won on speed + single-digit accuracy). WinRT stays the primary + the only multi-word/detection path. **The macOS half of this plan was not built** (noted 2026-09-02): PaddleOCR was to be the cross-platform single-glyph specialist, but `ort` sits under `cfg(windows)` and `mod paddle_ocr` is `#[cfg(windows)]`, so Vision carries the small-text case alone there. That is deliberate and documented in `backend/macos/ocr.rs` — and Vision is given everything that helps: full backing-resolution capture, `.accurate`, language correction off, minimum text height zero, and a second untightened pass on the same "only when empty" rule. See [[ocr-engine-architecture]]. ✓ (2026-06-21, interactively confirmed)
+- [x] **OCR engine — dual-engine pipeline (embedded PaddleOCR fallback):** the weakness Sforzando exposed — `Windows.Media.Ocr` is fast (~5 ms warm) but **blind to isolated single glyphs** (reads "128" but not a lone "1") — is fixed by a second in-process engine. A **PaddleOCR recognition model via ONNX Runtime** (`ort`, recognition-only, English PP-OCR mobile) is **embedded in the binary** (`crates/host/models/`, `include_bytes!` — portable, no external file) as a **fallback**: for a small region it runs **concurrently** with WinRT (`backend::paddle_ocr`) and its read is used only when WinRT returns empty, so a lone digit costs ≈ max(winrt, paddle) ≈ 15 ms (not their sum) while the common multi-char case stays on WinRT. Shared **content-tight preprocessing** (`tighten`: crop to the glyph + upscale) was the real unlock — it fixed both engines. The model **preloads at startup** off the hot path (`backend::warmup_ocr`). Engine chosen by a measured spike (pure-Rust `ocrs` vs `ort`+PaddleOCR on real crops; PaddleOCR won on speed + single-digit accuracy). WinRT stays the primary + the only multi-word/detection path. **The macOS half of this plan was not built** (noted 2026-09-02; since 2026-10-02 the Mac package carries the recogniser and measures it beside Vision, see "macOS (2026-08-13, written blind)"): PaddleOCR was to be the cross-platform single-glyph specialist, but `ort` sits under `cfg(windows)` and `mod paddle_ocr` is `#[cfg(windows)]`, so Vision carries the small-text case alone there. That is deliberate and documented in `backend/macos/ocr.rs` — and Vision is given everything that helps: full backing-resolution capture, `.accurate`, language correction off, minimum text height zero, and a second untightened pass on the same "only when empty" rule. See [[ocr-engine-architecture]]. ✓ (2026-06-21, interactively confirmed)
 - [x] **Overlay UX — resume position, focus announcement, menu pass-through (ReaHotkey parity):** (1) the overlay **remembers the last-focused control** across deactivate/reactivate, so re-entering the window (Alt+Tab out and back) resumes where you were instead of at 0; (2) on regaining focus it **announces the current control after a short delay** (`host.timer.after`, ~350 ms) so it doesn't clash with the screen reader's window-title announcement; (3) **menu pass-through** — captured nav keys (Tab/Enter) are suppressed only while the overlay should own them: the scoped window is foreground (`host.keys.scope`, new `Backend::set_key_scope`) **and** no popup menu is open (the hook checks for a visible `#32768` window — ReaHotkey's `WinExist("ahk_class #32768")` / `GetContext`). So activating an OCR button that opens a context menu lets arrows/Enter drive the menu natively instead of re-clicking the button, and Tab resumes overlay navigation once the menu closes. Adds `host.timer` (one-shot callbacks fired from the loop tick). ✓ (2026-06-21, interactively confirmed)
 - [x] **Embedded plugins — windows-in-windows detection (DAW-hosted VST/AU):** plugins hosted inside a DAW (REAPER / Ableton) render into a child control of the host's plugin window, so the standalone window matcher can't see them. New primitives: `host.window.controls(win?)` (child controls: class + screen geometry + client origin, via `EnumChildWindows`) and `host.window.focusChain()` (controls from the focused element up to its top-level window, via `GetGUIThreadInfo` + ancestor walk). The overlay gains `attachEmbedded({ hosts, control })`: active while the keyboard **focus is inside** a control whose class matches `control` (a Luau pattern, e.g. sforzando's host-independent `^Plugin%x+$`) within any of `hosts` (DAW host-window matchers taken from ReaHotkey), using that control's client area as the coordinate origin — so the *same* OCR regions work standalone and embedded. Activation is driven by a new **`EVENT_OBJECT_FOCUS`** hook (focusing into a plugin within an already-foreground host raises no foreground event — more general than ReaHotkey's REAPER-specific F6); keying on focus-in-plugin (not host-foreground) means the overlay doesn't capture the host's own navigation keys. The overlay runtime was refactored to a **multi-context model** (standalone + embedded side by side); sforzando attaches both. The inspector gains **Ctrl+Alt+C** to dump a window's child controls (calibration). See [[embedded-plugin-detection]]. ✓ (2026-06-22, interactively confirmed)
 - [x] **Plugin identity (UIA + OCR/image checker):** `^Plugin%x+$` matches *any* REAPER plugin, so `attachEmbedded` takes a per-plugin `identify(control)` check (cached per control HWND, since the check is costly). Sforzando uses **UIA** — a Pane (ControlType `50033` = `UIA_PaneControlTypeId`) named `PlogueXMLGUI`, exactly as ReaHotkey — with an **OCR landmark** ("sforzando" wordmark) as the UIA-free fallback (image-search via `host.screen` is another option the same hook allows). New minimal UIA: `host.uia.find(hwnd, name, controlType)` (`backend::uia`, `windows` 0.58 `IUIAutomation` cached in a thread-local; `ElementFromHandle` + AND-condition on Name/ControlType + `FindFirst(Subtree)`; runs on the existing RoInitialize'd MTA thread). Verified: a non-sforzando plugin has no `PlogueXMLGUI` pane → identity rejects it. See [[embedded-plugin-detection]]. ✓ (2026-06-22, interactively confirmed)
@@ -504,6 +504,130 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
     modules/ik-on-ear disappear — a snapshot, a staleness rule and an exception for the two
     read-outs that change on their own. All of it existed to work around the defect, and
     removing it left the module simpler AND less able to be stale.
+
+- [x] **The neural recogniser in the Mac package, measured beside Vision** (2026-10-02, step a of
+      the plan for faster reads on Intel Macs; nothing that is read or said changed). ONNX Runtime
+      1.22.0, Microsoft's universal dylib, in `Contents/Frameworks`, opened at run time (`ort` with
+      `load-dynamic`); the model in `Contents/Resources`; `licences/` and `ocr-pictures/` beside
+      the `.app` (`package-macos.sh --onnxruntime`). tract was measured as the other engine and not
+      taken: the same reads on all 55 inputs, but 7.6 times ONNX Runtime's time, and its build
+      script needs a C compiler for each Apple target, so `check-macos.ps1` would break. Every small
+      read hands the recogniser its content crop as a **shadow**, at utility priority and never
+      waited for, and on the recognise thread one pass of the fast level over the same crop; both
+      are only compared with the answer and counted (`ocr/shadow.rs`, a line every 200th read and
+      at exit, a trace line for each disagreement, `ocr-shadow-*` pictures with the debug switch).
+      `ocr-bench`: 28 drawn pictures and 13 real Windows captures (`--pictures`), each with the
+      answers that are right; eleven ways of reading a small region — six candidates, the rest
+      for comparison — and a closing line naming the cheapest candidate that reads right; Vision beside the recogniser, sustained load, the recogniser's
+      and the fast level's first passes, pauses, a second language; `--paddle` and
+      `--paddle-probe`, on Windows too. CI fetches and checks the dylib, refuses an executable that
+      links it, runs two short runs without it and with the wrong half on macos-15, probes it on
+      macOS 14 and 26, and runs `--paddle` on Windows. Steps b (warm-up, turns) and c (reading on
+      Intel Macs with it) wait for the Air's numbers below.
+- [ ] **The session at the Intel Air** (the plan's a6): the new zip, the measuring script
+      unattended; then with "Save the images OCR was given" on, one round — sforzando's
+      Instrument, Polyphony and Pitchbend (Pitchbend brought to 1 by a fixed key sequence that
+      lands there from any start, so nobody has to confirm the value; the picture is checked
+      afterwards), VPS Avenger's preset name and its header at the smallest zoom, Kontakt's
+      header; no Melodyne, which does not run on a Mac — then the switch off, and the log, the
+      bench file and the pictures sent. It decides b1, b2, c1 and c2.
+- [ ] **Pin the ONNX Runtime archive's SHA-256, before any zip goes to a tester** (the session at
+      the Air above). `tools/onnxruntime-mac.txt` has `sha256=` empty: GitHub lists no digest for
+      `onnxruntime-osx-universal2-1.22.0.tgz` (its release API gives `digest: null`), and it was
+      not fetched on the development machine to take one. Until it is pinned the macOS build
+      checks the size (54820264 bytes) and prints the hash it computed as a warning on every
+      build, so every download carries a 55 MB native library checked by its size alone; copied
+      into the file from the first CI run's warning, a different archive is refused from then on.
+- [ ] **The neural recogniser around macOS 13.3.** Microsoft builds 1.22 for 13.3, and the
+      application does not open the library on an older macOS at all (`RUNTIME_MACOS` in
+      `backend/paddle_ocr.rs`; the log says "not available" with the version, and Vision reads
+      alone), rather than trusting `dlopen` with `RTLD_NOW` to refuse it before any of its
+      initialisers runs. Not seen: whether 13.3 to 13.x loads it — no runner is older than macOS
+      14 — and whether `minos` is 13.3 in both slices, which the build job prints and warns about
+      when it is not. CI shows the refusal path only for a missing dylib and for one without this
+      Mac's half (macos-15).
+- [ ] **Windows stays on `ort` 2.0.0-rc.10.** Cargo allows one package with
+      `links = "onnxruntime"` in the whole project, across every target, so the Mac's `ort` is the
+      same version as Windows'. The way on: both together to rc.13, the Mac with its `api-22`
+      feature; rc.13 needs Rust 1.88.
+- [ ] **The dylib on a tester's Mac: first start, translocation, quarantine.** Whether the bundled
+      dylib loads in a download opened with its quarantine flag still set, and after "Open
+      Anyway": it may stay in quarantine. Does loading then fail quietly — the log's "not
+      available" line, Vision alone — or does Gatekeeper put up a dialog? An unexpected dialog
+      would be bad for a VoiceOver user. The library is opened a few seconds after start, by
+      `paddle-warm-up`, unprompted. The macos-15 leg answers one half of it: a copy whose library
+      alone carries the quarantine flag runs `--paddle-probe` within two minutes or warns
+      (`ocr-bench-macos-15-copies`); a whole download quarantined and opened by "Open Anyway" stays
+      the tester's. And whether `strip -x` and the ad-hoc signature keep it loadable on a real Mac;
+      CI's `--paddle-probe` answers that for its own runners only.
+- [ ] **The recogniser on Retina pictures.** The crop rule in points (`Tighten::for_scale`) and
+      `paddle_pre::MAX_ASPECT` = 12 are measured on drawn pictures and Windows-rendered lines only
+      (all four margin and enlargement settings read alike; every cut of a line up to 14.6 times
+      as wide as tall read right, the first misread at 14.9): confirm on the tester's real 2x
+      captures and macOS-rendered text. And whether `ink_lines`, with the margin as the gap, tells
+      a rule under a word from a second line on real captures: `field-empty`'s dotted rule touches
+      its descenders and measures as one line.
+- [ ] **The recogniser beside Vision on the Air's cores, and its session time and memory there.**
+      The bench's threads section (Vision beside it at two priorities, four blocks of sustained
+      load) and its `paddle-first` processes answer it; in sessions, the shadow's line counts the
+      Vision passes it ran beside, and the slow-read line names it. Its warm-up, on `paddle-warm-up`
+      at utility, is let go at the moment the recognise thread's own warm-up pass begins (both
+      wait for the first Vision warm-up), and that pass is on the 5-second hang clock: whether the
+      recogniser's warm-up should wait for the recognise thread's too — a second opener, and a
+      case for a session whose recognise thread never warms — is for the bench's
+      `paddle-first:with-vision` row to say.
+- [ ] **The fast level's first pass in a cold process, and the fast level and the recogniser after
+      pauses**: on the CI's Macs from the next run, on the Air from its session.
+- [ ] **Revision 2, if c1 takes it.** Apple lists it as deprecated from macOS 15; macOS 26.6.2 still
+      offers it. Its trial in a process of its own stays. macOS 12 has no revision 3, and the
+      application reads with revision 2 there already.
+- [ ] **The shadow's counts from real sessions** — the fast level, the recogniser and the answer;
+      text read by the recogniser where Vision read none — the Mac's counterpart of O15. c1 with
+      the recogniser needs no invented reading among them, or a measured minimum score that
+      excludes every one and keeps the digits; c2 needs at least 300 reads in which the fast level
+      and the recogniser agreed and none of them wrong (then the rate is below 1 % with 95 %
+      certainty). The `ocr-shadow-*` pictures tell a gained digit from an invention.
+- [ ] **The recogniser alone after an empty Vision pass stays off** until the shadow shows
+      otherwise: on Windows it invented text on 4 of 9 pictures without text (scores up to 0.74),
+      misread a word cut at half its height at both scales ("Veleeity", "Voleoity"), and no
+      minimum score separates that from a right lone digit (0.55, sforzando's TUNE). Windows
+      itself answers such readings today ("ll." on a level meter, "Veleeity" on the half-clipped
+      word) — unchanged by decision, noted for the Windows side. The bench's `fast=paddle-checked`
+      reads by the rules as they stand, without the recogniser alone.
+- [ ] **The fast against the accurate level on a Neural Engine** (the Mac mini): whether Apple
+      silicon gets c1, c2 or neither. Until its numbers, no read on Apple silicon uses the
+      recogniser; the shadow runs there too.
+- [ ] **Large regions with the fast level**: nothing checks them, since the recogniser reads one
+      line only.
+- [ ] **The tester's real 2x captures, and how their answers were checked.** The real crops in the
+      repository are Windows 1x only, their answers read off the picture by a model and held
+      against the plug-in's value range and against what Windows.Media.Ocr and the recogniser read
+      (`tools/ocr-fixtures/real.toml`); `k8-voices` is misread by both Windows recognisers, and
+      today's ladder on a Mac may well misread it too (a warning in CI).
+- [ ] **Licences in the Windows package**: ONNX Runtime linked in and the model embedded, without
+      their notices (`package.ps1` ships the GPL text and prism's). A task of its own.
+- [ ] **The bench's rounds**, set after the first CI run of this size so that the Intel Mac stays
+      under 30 minutes (`Plan::speed_pictures`, `samples`); every section prints its time. The CI
+      job's limit is 45 minutes until then. The pipeline's verdicts lean on the engine's control
+      (`prod-b`), which runs in another section at another time: should the pipeline's verdicts
+      look noisy, a control of its own (prod under another name, about a minute more) is the next
+      step.
+- [x] **`paddle_pre::fold`'s dashes** (decided 2026-10-03): every dash U+2010 to U+2015 and the
+      minus U+2212 are one hyphen, the en dash U+2013 among them — the form Vision is likeliest to
+      give for a minus. A value's minus comes out of either recogniser as any of them, so a Vision
+      "–12" and a Paddle "-12" agree.
+- [ ] **What the shadow costs a session**: the recogniser at utility beside every small read on
+      the Air's cores — is Vision clearly slower beside it (the slow-read line's `the neural
+      recogniser beside it`)? — the recognise thread's extra fast pass (11 to 20 ms on the Intel
+      runner), and whether the debug pictures' limits (8 a region, 64 regions and 32 MiB a list,
+      two lists) suit a test round. And on Apple silicon, where Vision reads in 25 to 56 ms, how
+      often the recogniser has not answered by the time the ladder has (the shadow line's "had not
+      answered"): the shadow then compares nothing. Collecting a late answer at the next read of
+      the same region, still without waiting, is not built.
+- [ ] **Name the neural recogniser's model exactly.** `crates/host/models/NOTICE.txt` says what is
+      known: an English recognition model of PaddleOCR's PP-OCR mobile series, converted to ONNX
+      with paddle2onnx from a PaddlePaddle 3 program (its graph's names say so). Which model, and
+      from which release, was not recorded when it came in (2026-06-21); the notice should say.
 
 ## Documentation
 
@@ -1408,14 +1532,24 @@ entire reason the PaddleOCR fallback exists on Windows. macOS does not have that
 by a documented decision, and compensates by giving Vision the best possible input. Whether
 that is *enough* is unknown, because no Mac has ever been asked.
 
-- [ ] **The canary is Melodyne's note field.** It is readable on Windows only because the
+- [x] **Answered on pictures by the first `ocr-bench` CI run** (2026-10-02): Vision's first
+      accurate pass reads nothing on a drawn lone digit on every CI Mac, at one of its two scales
+      (2x on the Intel runner and macOS 15, 1x on macOS 26), and the ladder's pass over the whole
+      region reads it — two passes, 919 ms on the Intel runner — where revision 2 reads it in
+      one. So macOS has a cost there rather than a gap; the neural
+      recogniser is in the Mac package now, measured beside Vision before anything uses it (see
+      "macOS (2026-08-13, written blind)"). The canary below was Melodyne's note field, and
+      Melodyne does not run on a Mac (`supported_os = ["windows"]`).
+- [x] **The canary is Melodyne's note field.** It is readable on Windows only because the
       second engine fires, and `modules/melodyne/src/main.luau` documents at length what
       happened when a change made the primary non-empty and the fallback stopped firing. If
       Vision reads it, the question is closed and the plan's macOS half can be struck for
       good. If it does not, macOS needs the fallback after all — and that means `ort` on the
       Mac, which also means the universal build grows a per-architecture dependency it does
       not have today.
-- [ ] **Not answerable from here, and not answerable by the probe either.** OCR needs
+- [x] **Not answerable from here, and not answerable by the probe either** — answered by
+      `ocr-bench`, which puts known lone digits in front of Vision without a screen: drawn ones,
+      and real captures cut on Windows (`crates/host/bench-data/ocr/real`). OCR needs
       something on screen to read, and this project cannot put a known lone digit there — nor
       ask a blind tester to produce one. It is a question for the test round, on a plug-in
       that has such a field, not for a synthetic check.
@@ -6345,7 +6479,16 @@ that is built; what the application reads and says is unchanged.
 - [x] **When the CI job runs** (the maintainer, 2026-10-01): on every build with Rust changes.
       That is the job's `if:` line as built: every run that built the executable, and every run
       started by hand. A run that reuses an earlier executable measures nothing new and skips it.
-- [ ] **What to read from the first CI run** — the summary page has the tables, the job log every
+- [x] **Read** (2026-10-02, CI run 36972644006): every leg finished, in 226 to 408 s. No CI Mac
+      offers Vision a Neural Engine. On the Intel runner one accurate pass over a small field
+      costs 262 to 312 ms, the fast level 12 to 14 ms and it reads the fields and the line right,
+      but not a lone digit; a lone digit takes today's ladder two passes (919 ms), revision 2 one
+      (427 ms), likewise on the arm64 runners. Two passes at once take 2.3 times as long each on
+      the Intel runner, with no gain in throughput (1.8 and 2 times on the arm64 ones). The first
+      pass is a cost per process, not per thread, and the warm-up over words makes the first real
+      pass as fast as a warm one. What the next run is read for is in "macOS (2026-08-13, written
+      blind)".
+- [x] **What to read from the first CI run** — the summary page has the tables, the job log every
       line, the artifact `ocr-bench-<runner>.txt` the whole output. Compare within one leg, never
       milliseconds between legs:
       - Did every leg finish? The Intel leg is the first time CI executes the x86_64 slice at all;
@@ -6491,10 +6634,10 @@ overlay runtime's focus reads off the event loop. Not now: anything that makes I
       (macOS 15.2 and later; the M1 session captured with `CGWindowListCreateImage`); any Apple
       silicon newer than the M1 (an M2 figure exists only in an earlier tester's log that is not
       here); the idle curve past the M1's 5 s and the Air's minutes (`ocr-bench --long-idle`); two
-      Vision callers at once beyond the Air's few readings (1.2 to 2 times); the Air under
-      `ocr-bench`. The warm-up over words, on any Mac: its time, and whether Vision reads its line
-      right — `line@1x`, 12 px Aileron, never read on a Mac; the first CI run's `pipeline | prod |
-      line@1x` row and the warm-up lines of the `newer-macos` job's log are the first evidence.
+      Vision callers at once on a real Mac beyond the Air's few readings (1.2 to 2 times); the Air
+      under `ocr-bench`. Measured on the CI's virtual Macs since (2026-10-02), and not yet on a real
+      one: the warm-up over words (0.6 to 0.9 s on the arm64 runners, 1.4 to 4.1 s on the Intel
+      one, the line read each time) and two passes at once (1.8 to 2.3 times as long each).
       "One accurate pass about 150 ms" on the Air is worked out (a read less its capture), not
       timed; the slow-read lines time it.
 - [ ] **The modules' own synchronous reads, not moved** — each is not a focus announcement the

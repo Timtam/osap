@@ -55,10 +55,13 @@ jobs:
     #     forces CMAKE_OSX_ARCHITECTURES, as a define AND in the environment so the nested
     #     wxWidgets configure inherits it. It even carries a workaround for a library name you
     #     only ever see when cross-building macOS, so somebody has run this.
-    #   * The other assumed blocker is not there at all: `ort` sits under
-    #     cfg(windows) in crates/host/Cargo.toml, so ONNX Runtime is never resolved for a Mac.
-    #     macOS OCR is Apple Vision. Nothing per-architecture goes into the bundle but the
-    #     executable itself, which is why one `lipo` makes the whole thing universal.
+    #   * The other assumed blocker is not there at all. On a Mac `ort` is built with
+    #     `load-dynamic` (crates/host/Cargo.toml): nothing of ONNX Runtime is compiled or linked
+    #     into the executable, which opens the library at run time, and the library is
+    #     Microsoft's own universal dylib, fetched below and put into the bundle as it is. macOS
+    #     OCR is Apple Vision; that neural recogniser only reads beside it, for comparison. So the
+    #     executable is still the one per-architecture thing that is BUILT, which is why one
+    #     `lipo` makes the whole thing universal.
     #   * Intel runners have a published end date and are stated to be the last x86_64 images.
     #     A job that cross-builds Intel from arm outlives them without changing.
     #
@@ -150,9 +153,11 @@ jobs:
           if ! git cat-file -e "$prev^{commit}" 2>/dev/null; then
             echo "commit $prev is not in this clone"; exit 0
           fi
-          if ! git diff --quiet "$prev" HEAD -- crates Cargo.toml Cargo.lock package-macos.sh; then
+          # tools/onnxruntime-mac.txt fixes the ONNX Runtime the bundle carries: another one is
+          # another package, Rust or not.
+          if ! git diff --quiet "$prev" HEAD -- crates Cargo.toml Cargo.lock package-macos.sh tools/onnxruntime-mac.txt; then
             echo "the Rust has moved since $prev — building"
-            git diff --name-only "$prev" HEAD -- crates Cargo.toml Cargo.lock package-macos.sh
+            git diff --name-only "$prev" HEAD -- crates Cargo.toml Cargo.lock package-macos.sh tools/onnxruntime-mac.txt
             exit 0
           fi
           echo "no Rust change since $prev; trying to reuse its build"
@@ -300,14 +305,139 @@ jobs:
           npm ci
           npm run build
 
+      # ONNX Runtime for the neural text recogniser the package carries (package-macos.sh
+      # --onnxruntime, crates/host/src/backend/paddle_ocr.rs): Microsoft's own universal build,
+      # the archive tools/onnxruntime-mac.txt names — the one place its version, address, size
+      # and checksum are fixed. Read here, so that the cache below is keyed by them; fetched and
+      # checked in the step after it.
+      #
+      # None of the names here begins with ORT_: ort-sys's build script reads variables of that
+      # shape, and one set by accident would change what the executable is built against.
+      - name: Which ONNX Runtime the package carries
+        id: onnxruntime-pin
+        if: steps.reuse.outputs.reused != 'true'
+        run: |
+          pin=tools/onnxruntime-mac.txt
+          # `tr -d '\r'`: the file is edited on Windows, and a value ending in a carriage return
+          # would fail the size check below on an archive that is right.
+          value() { sed -n "s/^$1=//p" "$pin" | tr -d '\r' | head -n1; }
+          version=$(value version) archive=$(value archive) url=$(value url) size=$(value size) sha=$(value sha256)
+          for v in version archive url size; do
+            [ -n "${!v}" ] || { echo "::error::$pin has no $v= line"; exit 1; }
+          done
+          {
+            echo "version=$version"
+            echo "archive=$archive"
+            echo "url=$url"
+            echo "size=$size"
+            echo "sha256=$sha"
+            echo "key=onnxruntime-mac-$version-${sha:-unpinned}"
+          } >> "$GITHUB_OUTPUT"
+          echo "ONNX Runtime $version: $archive, $size bytes, sha256 ${sha:-not pinned yet}"
+
+      # The archive itself, kept between runs: 55 MB fetched from GitHub on every Rust build
+      # otherwise. Keyed by the version and the checksum, so another pin is another archive.
+      - name: Cache the ONNX Runtime archive
+        if: steps.reuse.outputs.reused != 'true'
+        uses: actions/cache@v4
+        with:
+          path: onnxruntime-mac/${{ steps.onnxruntime-pin.outputs.archive }}
+          key: ${{ steps.onnxruntime-pin.outputs.key }}
+
+      # Fetched when the cache had none, checked, unpacked, and asked what the package will carry:
+      # both slices (the application is universal, and a slice the dylib lacks is a Mac on which
+      # the recogniser does not load), the size, the macOS each slice is built for (`minos`), and
+      # whether either slice imports a Core ML symbol strongly that macOS 13.3 does not have —
+      # `MLComputePlan` and `MLOptimizationHints` are macOS 14.4 and later, and a strong import of
+      # either would refuse the whole library below that, which is the opposite of what the 13.3
+      # floor promises. Weak imports are fine: they resolve to nothing where they are missing.
+      #
+      # Until tools/onnxruntime-mac.txt holds the archive's SHA-256 the step prints the one it
+      # computed, as a warning, and goes on with an archive whose size is checked; once it does,
+      # an archive that differs is refused.
+      - name: ONNX Runtime for the neural recogniser
+        id: onnxruntime
+        if: steps.reuse.outputs.reused != 'true'
+        env:
+          ONNXRUNTIME_MAC_ARCHIVE: ${{ steps.onnxruntime-pin.outputs.archive }}
+          ONNXRUNTIME_MAC_URL: ${{ steps.onnxruntime-pin.outputs.url }}
+          ONNXRUNTIME_MAC_SIZE: ${{ steps.onnxruntime-pin.outputs.size }}
+          ONNXRUNTIME_MAC_SHA256: ${{ steps.onnxruntime-pin.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          mkdir -p onnxruntime-mac
+          tgz="onnxruntime-mac/$ONNXRUNTIME_MAC_ARCHIVE"
+          if [ -f "$tgz" ]; then
+            echo "from the cache: $tgz"
+          else
+            curl -fsSL --retry 3 -o "$tgz" "$ONNXRUNTIME_MAC_URL"
+          fi
+          got_size=$(stat -f %z "$tgz")
+          if [ "$got_size" != "$ONNXRUNTIME_MAC_SIZE" ]; then
+            echo "::error::$ONNXRUNTIME_MAC_ARCHIVE is $got_size bytes, and tools/onnxruntime-mac.txt says $ONNXRUNTIME_MAC_SIZE"
+            exit 1
+          fi
+          got_sha=$(shasum -a 256 "$tgz" | cut -d' ' -f1)
+          if [ -z "$ONNXRUNTIME_MAC_SHA256" ]; then
+            echo "::warning::tools/onnxruntime-mac.txt pins no SHA-256 for $ONNXRUNTIME_MAC_ARCHIVE yet; this one is sha256=$got_sha — put it there, and an archive that differs is refused from then on"
+          elif [ "$got_sha" != "$ONNXRUNTIME_MAC_SHA256" ]; then
+            echo "::error::$ONNXRUNTIME_MAC_ARCHIVE has SHA-256 $got_sha, and tools/onnxruntime-mac.txt says $ONNXRUNTIME_MAC_SHA256"
+            exit 1
+          fi
+          rm -rf onnxruntime-mac/unpacked
+          mkdir -p onnxruntime-mac/unpacked
+          tar -xzf "$tgz" -C onnxruntime-mac/unpacked
+          dir=$(find onnxruntime-mac/unpacked -mindepth 1 -maxdepth 1 -type d | head -n1)
+          lib="$dir/lib/libonnxruntime.dylib"
+          [ -e "$lib" ] || { echo "::error::no lib/libonnxruntime.dylib in $ONNXRUNTIME_MAC_ARCHIVE"; find "$dir" -maxdepth 2; exit 1; }
+          archs=$(lipo -archs "$lib")
+          echo "architectures: $archs; size $(du -hL "$lib" | cut -f1)"
+          for a in x86_64 arm64; do
+            case " $archs " in
+              *" $a "*) ;;
+              *) echo "::error::ONNX Runtime has no $a slice ($archs): the recogniser would not load on those Macs"; exit 1 ;;
+            esac
+          done
+          for a in x86_64 arm64; do
+            echo "--- $a: the macOS it is built for"
+            vtool -arch "$a" -show-build "$lib" 2>/dev/null | grep -E 'platform|minos|sdk' \
+              || otool -arch "$a" -l "$lib" | grep -A4 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX' \
+              || echo "(neither vtool nor otool said)"
+            # The application does not open the library below the macOS it is built for, and
+            # keeps that floor itself (RUNTIME_MACOS in crates/host/src/backend/paddle_ocr.rs):
+            # another minos here is a floor to move there too.
+            minos=$(vtool -arch "$a" -show-build "$lib" 2>/dev/null | awk '$1 == "minos" { print $2; exit }' || true)
+            if [ -n "$minos" ] && [ "$minos" != 13.3 ]; then
+              echo "::warning::the $a slice of ONNX Runtime is built for macOS $minos, and the application keeps 13.3 as its floor (RUNTIME_MACOS)"
+            fi
+            # Into a file, and searched there: `grep -q` stops reading at its first match, and
+            # under pipefail a listing still being written into the pipe then fails the step
+            # (SIGPIPE) for a library that has the symbol. Listed apart from the search, so that
+            # an nm that fails fails the step rather than finding nothing; and the entry point the
+            # application asks for has to be in what it listed, or the search below looked at the
+            # wrong thing.
+            listing="onnxruntime-mac/nm-$a.txt"
+            nm -m -arch "$a" "$lib" > "$listing"
+            grep -q '_OrtGetApiBase$' "$listing" \
+              || { echo "::error::nm lists no OrtGetApiBase in the $a slice — the check below would prove nothing"; exit 1; }
+            strong=$(grep -E '\(undefined\) external .*(MLComputePlan|MLOptimizationHints)' "$listing" || true)
+            if [ -n "$strong" ]; then
+              echo "$strong"
+              echo "::error::the $a slice of ONNX Runtime imports a Core ML symbol of macOS 14.4 strongly — it would not load on macOS 13.3 to 14.3"
+              exit 1
+            fi
+          done
+          echo "dir=$PWD/$dir" >> "$GITHUB_OUTPUT"
+
       # With this run's commit as the build, which package-macos.sh writes into the README's
       # `Build:` line; the executable names the same commit, compiled into it. `--no-zip`,
       # because "Zip the download" below zips whichever package this job ends up with, under
-      # the download's name.
+      # the download's name. `--onnxruntime`: the neural recogniser goes in, with its licences.
       - name: Package
         env:
           COMMIT: ${{ inputs.commit }}
-        run: ./package-macos.sh --universal --commit "$COMMIT" --no-zip
+          ONNXRUNTIME_MAC_DIR: ${{ steps.onnxruntime.outputs.dir }}
+        run: ./package-macos.sh --universal --commit "$COMMIT" --no-zip --onnxruntime "$ONNXRUNTIME_MAC_DIR"
         if: steps.reuse.outputs.reused != 'true'
 
       # The reuse step took the earlier build's documentation out; this puts this commit's in, by
@@ -360,6 +490,12 @@ jobs:
           rm -f dist/*.zip
           (cd dist && ditto -c -k --sequesterRsrc --keepParent AutomationPlatform "$ZIP")
           echo "wrote dist/$ZIP ($(du -sh "dist/$ZIP" | cut -f1))"
+          # About 80 MB is what the download may grow to with ONNX Runtime in it (the maintainer,
+          # 2026-10-02): more is worth seeing, never a reason to hold the download back.
+          bytes=$(stat -f %z "dist/$ZIP")
+          if [ "$bytes" -gt 80000000 ]; then
+            echo "::warning::the macOS download is $bytes bytes, more than the 80 MB it was allowed to grow to"
+          fi
 
       # Load every shipped module once, on a Mac, because nothing else ever does.
       #
@@ -563,8 +699,10 @@ jobs:
       # SDK. capture.rs looks them up by name at run time instead of importing them, because an
       # import the running macOS no longer exports stops the application from launching at all —
       # before the log has a single line in it. This is the check that the lookup is the only
-      # way in: one ordinary call to either, anywhere, and the import is back.
-      - name: The binary does not import the obsoleted capture functions
+      # way in: one ordinary call to either, anywhere, and the import is back. And that ONNX
+      # Runtime, which the application opens itself, is in the bundle and not among what the
+      # executable links.
+      - name: The binary imports nothing a supported macOS lacks, and links no ONNX Runtime
         run: |
           exe=dist/AutomationPlatform/AutomationPlatform.app/Contents/MacOS/automation-platform
           nm -u "$exe" > imports.txt
@@ -587,6 +725,31 @@ jobs:
             exit 1
           fi
           echo "neither obsoleted capture function is imported"
+          # ONNX Runtime is opened by the application itself, at run time, from the bundle
+          # (backend/paddle_ocr.rs); the executable must never name it among the libraries it
+          # loads. It would, without anyone writing so: ort-sys asks pkg-config first even with
+          # `load-dynamic` (its build.rs), and a Homebrew onnxruntime on a runner would be linked
+          # in — and then the application would not start on any Mac without that file.
+          # package-macos.sh refuses such an executable before anything is packaged, and so
+          # before the upload; this asks the bundle that went out once more.
+          if otool -L "$exe" | grep -i onnxruntime; then
+            echo "::error::the executable links ONNX Runtime — it would not start on a Mac without that library; it must only open it at run time"
+            exit 1
+          fi
+          # And what it opens has to be there: the dylib, with both slices, and the model.
+          app=dist/AutomationPlatform/AutomationPlatform.app
+          dylib="$app/Contents/Frameworks/libonnxruntime.dylib"
+          if [ ! -f "$dylib" ] || [ ! -f "$app/Contents/Resources/ppocr-rec.onnx" ]; then
+            echo "::error::the bundle lacks ONNX Runtime ($dylib) or the model (Contents/Resources/ppocr-rec.onnx): the neural recogniser would not load anywhere"
+            ls -l "$app/Contents/Frameworks" "$app/Contents/Resources" || true
+            exit 1
+          fi
+          archs=$(lipo -archs "$dylib")
+          case "$archs" in
+            *x86_64*arm64*|*arm64*x86_64*) ;;
+            *) echo "::error::the bundle's ONNX Runtime is not universal ($archs)"; exit 1 ;;
+          esac
+          echo "the executable does not link ONNX Runtime; the bundle carries it ($archs, $(du -h "$dylib" | cut -f1)) and the model ($(du -h "$app/Contents/Resources/ppocr-rec.onnx" | cut -f1))"
 
       # The one question about ScreenCaptureKit no document answers and a runner can: does its
       # completion handler arrive while the pump thread is the thread waiting for it? capture.rs
@@ -657,12 +820,16 @@ jobs:
 
   # What Apple Vision's text recognition costs, measured by the download itself:
   # `automation-platform ocr-bench` reads fixed pictures it carries (crates/host/src/ocr/bench.rs,
-  # docs/building-on-macos.md) — no screen capture, no window, no permission, no speech — and
-  # prints what one pass costs under today's settings and under each variant, how many passes a
-  # read makes, the first pass in a process and on a thread, a pass after idle, and two at once.
-  # Each section's table goes to the run's summary page as soon as the section is done, so a
-  # leg that dies part-way still shows what it measured; the whole output is kept as an artifact
-  # of its own per leg, to compare runs with `gh run download`.
+  # docs/building-on-macos.md), and the real plug-in captures the package carries beside the
+  # .app (`ocr-pictures`) — no screen capture, no window, no permission, no speech — and prints
+  # what one pass costs under today's settings and under each variant, the neural recogniser
+  # among them, what a whole read costs under each way of reading a small region, how many passes
+  # a read makes, the first pass in a process and on a thread, a pass after idle, two at once, and
+  # Vision beside the recogniser. Each section's table goes to the run's summary page as soon as
+  # the section is done, and so do the closing lines, which name the cheapest way of reading
+  # that reads every picture right; a leg that dies part-way still shows what it measured. The
+  # whole output is kept as an artifact of its own per leg, to compare runs with
+  # `gh run download`.
   #
   # Why: a tester's Intel MacBook Air (macOS 15) took 143 to 786 ms for a small read-out, against
   # 22 to 42 ms on Windows and 25 to 56 ms on a warm Mac mini M1. The arm64 runners are virtual
@@ -673,12 +840,16 @@ jobs:
   # machines.
   #
   # A measurement, not a gate: a leg goes red only when the benchmark did not finish — the
-  # executable died in it — and a misread picture is a warning. Nothing is built here: each leg
-  # unpacks the download and runs it, so it costs the run itself (84 s of it idle on purpose) and
-  # the time to fetch and unpack the zip. Only for an executable this run built, because a reused
-  # one measured again shows runner noise and nothing else, and in any run started by hand: on
-  # every build with Rust changes, the maintainer's choice (TODO.md, "Text recognition on the
-  # Mac, measured").
+  # executable died in it — or when the neural recogniser did not load although the bundle
+  # carries it, the Mac's counterpart of package.ps1's check that DirectML is in the Windows
+  # package; a misread picture is a warning. Nothing is built here: each leg unpacks the download
+  # and runs it, so it costs the run itself (168 s of it idle on purpose) and the time to fetch and
+  # unpack the zip. 45 minutes, where the first run took seven: the benchmark grew from ten
+  # pictures to forty-one and from one way of reading to eleven, its sections are estimated at 20 to
+  # 30 minutes on the Intel runner, and the first run of this size is what its rounds are set by.
+  # Only for an executable this run built, because a reused one measured again shows runner noise
+  # and nothing else, and in any run started by hand: on every build with Rust changes, the
+  # maintainer's choice (TODO.md, "Text recognition on the Mac, measured").
   ocr-bench:
     needs: build
     if: needs.build.outputs.reused != 'true' || github.event_name == 'workflow_dispatch'
@@ -687,7 +858,7 @@ jobs:
       matrix:
         os: [macos-15, macos-26, macos-15-intel]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       # As in newer-macos below: the zip kept as the file it is, and unpacked by one ditto.
       - uses: actions/download-artifact@v8
@@ -696,7 +867,11 @@ jobs:
           path: artifact
           skip-decompress: true
 
+      # `id`, so that the steps after the measurement still run when it went red — the short runs
+      # without ONNX Runtime matter most when the recogniser did not load — but not when there is
+      # nothing unpacked to run.
       - name: Unpack it the way a tester does
+        id: unpack
         run: |
           zip=$(find artifact -type f | head -n1)
           [ -n "$zip" ] || { echo "::error::the download is empty"; exit 1; }
@@ -719,9 +894,12 @@ jobs:
           runner="macOS $(sw_vers -productVersion) on $(uname -m), runner image ${ImageOS:-?} ${ImageVersion:-?}"
           echo "$runner"
           out="ocr-bench-$LEG.txt"
+          # The real captures beside the .app, as the tester's script passes them.
+          pictures=()
+          [ -d ocr-pictures ] && pictures=(--pictures ocr-pictures)
           status=0
           ./AutomationPlatform.app/Contents/MacOS/automation-platform ocr-bench \
-            --out "$out" --summary "$GITHUB_STEP_SUMMARY" || status=$?
+            "${pictures[@]}" --out "$out" --summary "$GITHUB_STEP_SUMMARY" || status=$?
           echo "CI: $runner" >> "$out"
           if ! grep -q '^OCR BENCH: done' "$out" 2>/dev/null; then
             echo "::error::the text recognition benchmark did not finish on $LEG (exit status $status)"
@@ -730,9 +908,112 @@ jobs:
           # Today's request misreading a picture, or Vision refusing it, is a finding about Vision
           # on this machine, not a reason to fail: the tables say which picture, and what was read
           # instead. Only prod's rows: a variant reading wrong is what the variants are there to show.
+          # The engine table's prod row, one pass of today's request:
           if grep -qE '^\| prod \|.*(wrong|refused|\| no: )' "$out"; then
             echo "::warning::today's request read a picture wrong, or was refused, on $LEG — see the engine and pipeline tables"
           fi
+          # And the pipeline's, a whole read under today's ladder, judged as the closing lines
+          # judge it — every picture with text exactly, text on one without any as invented — in
+          # the one line the benchmark prints for it whatever the verdicts.
+          prod=$(sed -n "s/^OCR BENCH: pipeline | today's ladder (prod) //p" "$out" | head -n1)
+          case "$prod" in
+            ""|"reads every picture it read right") ;;
+            *) echo "::warning::today's ladder on $LEG $prod" ;;
+          esac
+          # The closing lines are on the summary page already; each goes to the run's annotations
+          # as well, so that the one naming a way of reading is there even when the first says
+          # that none does.
+          grep '^OCR BENCH: closing' "$out" || true
+          sed -n 's/^OCR BENCH: closing | //p' "$out" | while IFS= read -r line; do
+            echo "::notice::$LEG: $line"
+          done
+          # The neural recogniser has to load wherever the bundle carries it: Microsoft builds it
+          # for macOS 13.3, and every runner here is newer. "Not measured in this run" with the
+          # library in the bundle is a library that does not load, or a process that died trying.
+          if [ -f AutomationPlatform.app/Contents/Frameworks/libonnxruntime.dylib ] \
+            && grep -q '^OCR BENCH: paddle | the neural recogniser is not measured in this run' "$out"; then
+            echo "::error::the neural recogniser did not load on $LEG although the bundle carries ONNX Runtime: $(sed -n 's/^OCR BENCH: paddle | the neural recogniser is not measured in this run: //p' "$out" | head -n1)"
+            exit 1
+          fi
+
+      # Only on macos-15, the arm64 leg: the two ways the neural recogniser is missing on a tester's
+      # Mac, made on copies of the bundle, each signed again ad hoc as package-macos.sh signs one —
+      # without ONNX Runtime at all, and with only its x86_64 half, which is in the bundle and which
+      # this Mac's dlopen refuses. A short run of each has to finish and say the recogniser is not
+      # available, with the reason: Vision reads alone then, and nothing else may change. Run even
+      # when the measurement above went red, which is when they say the most.
+      #
+      # And a third copy, the evidence TODO.md asks for about a tester's download: the bundle as it
+      # is, with only the library carrying the quarantine flag a browser sets. `--paddle-probe`
+      # there has to come back — `ok`, or "not available" with the reason — within two minutes; a
+      # Gatekeeper prompt on the runner's screen that held `dlopen` would not. That is a warning,
+      # not a failure: it is about the next tester's Mac, not this build.
+      - name: Without ONNX Runtime, with a half this Mac cannot load, and quarantined
+        if: ${{ !cancelled() && steps.unpack.outcome == 'success' && matrix.os == 'macos-15' }}
+        run: |
+          cd dist
+          fail=0
+          copy=copy-quarantined-onnxruntime
+          rm -rf "$copy"
+          mkdir -p "$copy"
+          ditto AutomationPlatform/AutomationPlatform.app "$copy/AutomationPlatform.app"
+          fw="$copy/AutomationPlatform.app/Contents/Frameworks/libonnxruntime.dylib"
+          xattr -w com.apple.quarantine "0081;$(printf '%x' "$(date +%s)");Safari;" "$fw"
+          xattr -p com.apple.quarantine "$fw" || true
+          status=0
+          # Bounded by perl's alarm, which outlives the exec: macOS has no `timeout`.
+          perl -e 'alarm shift; exec @ARGV' 120 \
+            "$copy/AutomationPlatform.app/Contents/MacOS/automation-platform" ocr-bench --paddle-probe \
+            > ocr-bench-quarantined-onnxruntime.txt 2>&1 || status=$?
+          echo "----- quarantined-onnxruntime (exit status $status) -----"
+          cat ocr-bench-quarantined-onnxruntime.txt
+          if ! grep -qE '^OCR BENCH: paddle probe \| (ok:|not available)' ocr-bench-quarantined-onnxruntime.txt; then
+            echo "::warning::with only ONNX Runtime quarantined, --paddle-probe did not answer within 120 s (exit status $status): a tester's quarantined download may hold the recogniser's loading, or show a prompt"
+          fi
+          for kind in without-onnxruntime x86_64-onnxruntime; do
+            copy="copy-$kind"
+            rm -rf "$copy"
+            mkdir -p "$copy"
+            ditto AutomationPlatform/AutomationPlatform.app "$copy/AutomationPlatform.app"
+            fw="$copy/AutomationPlatform.app/Contents/Frameworks/libonnxruntime.dylib"
+            case "$kind" in
+              without-onnxruntime) rm -f "$fw" ;;
+              x86_64-onnxruntime)
+                lipo "$fw" -thin x86_64 -output "$fw.thin"
+                mv "$fw.thin" "$fw"
+                codesign --force --sign - "$fw" ;;
+            esac
+            codesign --force --deep --sign - "$copy/AutomationPlatform.app"
+            out="$PWD/ocr-bench-$kind.txt"
+            status=0
+            "$copy/AutomationPlatform.app/Contents/MacOS/automation-platform" ocr-bench --quick --quiet --out "$out" \
+              || status=$?
+            echo "----- $kind: what it said of the neural recogniser -----"
+            grep -E '^OCR BENCH: (paddle \||probe \| paddle)' "$out" || true
+            if ! grep -q '^OCR BENCH: done' "$out" 2>/dev/null; then
+              echo "::error::a short benchmark run $kind did not finish (exit status $status)"
+              fail=1
+              continue
+            fi
+            if ! grep -qE '^OCR BENCH: paddle \| the neural recogniser is not measured in this run: .*not available: .+' "$out"; then
+              echo "::error::a short benchmark run $kind did not say that the neural recogniser is not available, and why"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      # The three copies' whole output, beside the leg's own: their `paddle` lines are in the log
+      # above, and the rest of what the short runs measured is here.
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() && matrix.os == 'macos-15' }}
+        with:
+          name: ocr-bench-macos-15-copies
+          path: |
+            dist/ocr-bench-without-onnxruntime.txt
+            dist/ocr-bench-x86_64-onnxruntime.txt
+            dist/ocr-bench-quarantined-onnxruntime.txt
+          if-no-files-found: ignore
+          overwrite: true
 
       # The tester's script (package-macos.sh), on the one path that is harmless here: it looks
       # for a running application, starts the benchmark quietly with --help, and ends with a
@@ -740,6 +1021,7 @@ jobs:
       # tester's Mac. Waited for at most a minute: a runner without a sound device is not the
       # script's fault, so a hang in the sound is a warning.
       - name: The tester's script runs
+        if: ${{ !cancelled() && steps.unpack.outcome == 'success' }}
         run: |
           cd dist/AutomationPlatform
           zsh measure-text-recognition.command --help > script.out 2>&1 &
@@ -813,7 +1095,10 @@ jobs:
 
       # One ditto, as Archive Utility's double-click is one unpacking: what comes out has to be
       # the folder itself, with the application, the documentation and nothing zipped inside.
+      # `id`: the steps after it run whenever it did, so that a red one among them does not hide
+      # what the others would have said.
       - name: Unpack it the way a tester does
+        id: unpack
         run: |
           sw_vers
           ls -l artifact
@@ -836,16 +1121,22 @@ jobs:
             exit 1
           fi
           # The signature is what a tester's granted permissions hang on, and ditto is what is
-          # meant to keep it through the zip. A warning: an ad-hoc signed build that fails this
-          # still runs here.
-          codesign --verify --deep --strict dist/AutomationPlatform/AutomationPlatform.app \
-            || echo "::warning::the application's signature does not verify after unpacking the download"
+          # meant to keep it through the zip. An error, where it was a warning while the bundle
+          # held nothing but the executable: an ad-hoc signed build that fails this still runs
+          # here, but the bundle now carries ONNX Runtime, signed apart before the bundle, and a
+          # nested library whose signature does not hold is one Apple silicon refuses to load.
+          # Recorded here and made the job's error by the last step, so that the steps between
+          # still say what loads, captures, speaks and recognises on this macOS.
+          sig_ok=1
+          codesign --verify --deep --strict dist/AutomationPlatform/AutomationPlatform.app || sig_ok=0
+          echo "sig_ok=$sig_ok" >> "$GITHUB_OUTPUT"
           if [ -f dist/AutomationPlatform/build-info.txt ]; then
             echo "build-info.txt (the executable was reused from an earlier run):"
             cat dist/AutomationPlatform/build-info.txt
           fi
 
       - name: Load, capture and speak, on the newer macOS
+        if: ${{ !cancelled() && steps.unpack.outcome == 'success' }}
         env:
           COMMIT: ${{ inputs.commit }}
         run: |
@@ -948,3 +1239,34 @@ jobs:
           launch "$GITHUB_WORKSPACE/tools/speech-probe"
           grep -q "SPEECH PROBE: still alive after speaking" automation-platform.log \
             || { echo "::error::the speech probe did not report back on the newer macOS"; exit 1; }
+
+      # Whether the neural recogniser's library loads on this macOS: `ocr-bench --paddle-probe`
+      # makes it from the bundle and reads one picture, and says `ok` or `not available` with the
+      # reason, in one line (no window, no permission, no file). Microsoft builds ONNX Runtime 1.22
+      # for macOS 13.3, so on both of these — 14, the oldest runner there is, and 26, the newest —
+      # "not available" is an error: a finding about that macOS, as everything in this job is.
+      # Below 13.3 the application does not open it, and Vision reads alone; no runner is that
+      # old, and whether 13.3 to 13.x loads it is not seen either (TODO.md).
+      - name: The neural recogniser loads on this macOS
+        if: ${{ !cancelled() && steps.unpack.outcome == 'success' }}
+        run: |
+          cd dist/AutomationPlatform
+          if [ ! -f AutomationPlatform.app/Contents/Frameworks/libonnxruntime.dylib ]; then
+            echo "::error::the download carries no ONNX Runtime (Contents/Frameworks/libonnxruntime.dylib)"
+            exit 1
+          fi
+          status=0
+          said=$(./AutomationPlatform.app/Contents/MacOS/automation-platform ocr-bench --paddle-probe 2>&1) || status=$?
+          echo "$said"
+          case "$said" in
+            *"OCR BENCH: paddle probe | ok:"*) ;;
+            *)
+              echo "::error::the neural recogniser does not load on macOS $(sw_vers -productVersion) (exit status $status): $(printf '%s\n' "$said" | grep -m1 'paddle probe' || echo 'no probe line at all')"
+              exit 1 ;;
+          esac
+
+      - name: The signature verified
+        if: ${{ !cancelled() && steps.unpack.outputs.sig_ok == '0' }}
+        run: |
+          echo "::error::the application's signature does not verify after unpacking the download (codesign --verify --deep --strict, in the unpack step's log)"
+          exit 1

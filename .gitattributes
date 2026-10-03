@@ -20,3 +20,7 @@
 *.md text eol=lf
 *.rs text eol=lf
 *.yml text eol=lf
+
+# The ONNX Runtime the Mac package carries (tools/onnxruntime-mac.txt) is read by the macOS
+# workflow's shell, value by value, and edited on Windows when its checksum is pinned.
+tools/onnxruntime-mac.txt text eol=lf

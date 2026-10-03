@@ -6,27 +6,48 @@
 //! is, what one Vision pass costs under today's settings and under each setting that might
 //! change it, how many passes the retry ladder makes for one read, what the first pass on a
 //! thread or in a process costs, what a pass costs after the recogniser has sat idle, and what
-//! two passes at once cost. The same pictures are read on a CI runner, on the Air and on an
-//! Apple-silicon Mac, so only the machine differs. It opens no window, captures no screen,
-//! needs no permission and never speaks; it does not open the application's log either.
+//! two passes at once cost. And, where the bundle carries ONNX Runtime, the same for the neural
+//! recogniser beside Vision: what it reads and costs alone, what each way of reading a small
+//! region with it would read and cost ([`STRATEGIES`]), whether it slows Vision, and the
+//! cheapest way that reads every picture right ([`closing_lines`]). The same pictures are read on
+//! a CI runner, on the Air and on an Apple-silicon Mac, so only the machine differs. It opens no
+//! window, captures no screen, needs no permission and never speaks; it does not open the
+//! application's log either.
 //!
-//! This is the pure half: the pictures and the text each must read, the command line, the
+//! This is the pure half: the pictures and the answers each accepts, the command line, the
 //! order the passes run in, the statistics, the verdict and every line and table it prints.
-//! Std only, so its tests run on Windows, and `crates/macos-check` borrows it. The half that
-//! runs Vision is `backend/macos/ocr/bench.rs`, a child of the recogniser it measures, so it
-//! calls the production code itself and names each deviation from it.
+//! The standard library, and `toml` for the manifest of `--pictures`, so its tests run on
+//! Windows, and `crates/macos-check` borrows it. The half that runs Vision is
+//! `backend/macos/ocr/bench.rs`, a child of the recogniser it measures, so it calls the
+//! production code itself and names each deviation from it. `ocr-bench --paddle` on Windows is
+//! `backend/paddle_ocr/bench.rs`, which prints with this file too.
 //!
-//! The pictures are drawn by `tools/ocr-fixtures/make.py` and carried inside the executable.
+//! The pictures are drawn by `tools/ocr-fixtures/make.py` and carried inside the executable;
+//! real captures, cut by `tools/ocr-fixtures/crop.py`, are read from a folder (`--pictures`).
 
-// Everywhere but on a Mac only the command line and the "macOS only" answer are used; the rest
-// is compiled there for its tests.
+// Everywhere but on a Mac only the command line, the "macOS only" answer and what `--paddle`
+// prints are used; the rest is compiled there for its tests.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// One fixed picture and the text it must read.
+use super::cost::Stage;
+use super::ladder::{Answer, Level, PaddleUse, Shape};
+use super::paddle_pre;
+
+/// Where a picture came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    /// Drawn by `tools/ocr-fixtures/make.py`, with FreeType.
+    Drawn,
+    /// Captured off a real plug-in on this platform (`windows` or `macos`), by its renderer.
+    Captured { platform: &'static str },
+}
+
+/// One fixed picture and the answers that count as reading it right.
+#[derive(PartialEq)]
 pub struct Fixture {
     /// The layout, e.g. `field-64`.
     pub name: &'static str,
@@ -37,10 +58,22 @@ pub struct Fixture {
     /// path (content crop, enlargement, the ladder); a larger one goes to Vision as it is.
     pub w_pt: i32,
     pub h_pt: i32,
-    /// What it reads, compared after whitespace is collapsed, case and all.
-    pub expected: &'static str,
-    /// The PNG, as `tools/ocr-fixtures/make.py` drew it.
+    /// The answers that are right, compared after whitespace is collapsed, case and all. The
+    /// empty string is the answer "nothing": on a picture whose only answer it is, any text is
+    /// invented. More than one where a reader may rightly differ (a lone dash it may drop).
+    pub accept: &'static [&'static str],
+    /// Whether a way of reading must read it right to count as one that works. False where
+    /// nothing is an accepted answer.
+    pub must_read: bool,
+    pub origin: Origin,
+    /// The PNG, as `tools/ocr-fixtures/make.py` drew it or `crop.py` cut it.
     pub png: &'static [u8],
+}
+
+impl std::fmt::Debug for Fixture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Fixture({}, {:?})", self.label(), self.accept)
+    }
 }
 
 impl Fixture {
@@ -53,6 +86,24 @@ impl Fixture {
     pub fn px(&self) -> (usize, usize) {
         ((self.w_pt as u32 * self.scale) as usize, (self.h_pt as u32 * self.scale) as usize)
     }
+
+    /// Whether the only right answer is nothing: ink that is not text.
+    pub fn holds_nothing(&self) -> bool {
+        self.accept == [""]
+    }
+
+    /// Whether the small-text path reads it (400x200 points or less), which is also the only
+    /// size the neural recogniser is handed.
+    pub fn small(&self) -> bool {
+        super::policy::is_small(self.w_pt, self.h_pt)
+    }
+
+    /// The accepted answers as they are printed: `"64"`, or `"-" or nothing`.
+    pub fn accept_text(&self) -> String {
+        let shown: Vec<String> =
+            self.accept.iter().map(|a| if a.is_empty() { "nothing".to_string() } else { format!("\"{a}\"") }).collect();
+        shown.join(" or ")
+    }
 }
 
 macro_rules! fixture {
@@ -62,17 +113,49 @@ macro_rules! fixture {
             scale: $scale,
             w_pt: $w,
             h_pt: $h,
-            expected: $text,
+            accept: &[$text],
+            must_read: true,
+            origin: Origin::Drawn,
+            png: include_bytes!(concat!("../../bench-data/ocr/", $name, "@", $scale, "x.png")),
+        }
+    };
+    (nothing $name:literal, $scale:literal, $w:literal, $h:literal) => {
+        Fixture {
+            name: $name,
+            scale: $scale,
+            w_pt: $w,
+            h_pt: $h,
+            accept: &[""],
+            must_read: false,
+            origin: Origin::Drawn,
+            png: include_bytes!(concat!("../../bench-data/ocr/", $name, "@", $scale, "x.png")),
+        }
+    };
+    (or_nothing $name:literal, $scale:literal, $w:literal, $h:literal, $text:literal) => {
+        Fixture {
+            name: $name,
+            scale: $scale,
+            w_pt: $w,
+            h_pt: $h,
+            accept: &[$text, ""],
+            must_read: false,
+            origin: Origin::Drawn,
             png: include_bytes!(concat!("../../bench-data/ocr/", $name, "@", $scale, "x.png")),
         }
     };
 }
 
-/// Every picture, each layout at 1x and 2x. The fields imitate sforzando's read-outs (a black
-/// well in grey chrome, the digits about 11 pixels tall at 1x as in sforzando's own): `field-64`
-/// its Polyphony, `field-DEF` its Pitchbend range, `lone-1` a single glyph, the ladder's case,
-/// `field-empty` its Instrument. `line` is wider than 400 points and so is handed to Vision as it
-/// is. Kept in step with `LAYOUTS` in make.py.
+/// Every drawn picture, each layout at 1x and 2x. The fields imitate sforzando's read-outs (a
+/// black well in grey chrome, the digits about 11 pixels tall at 1x as in sforzando's own):
+/// `field-64` its Polyphony, `field-DEF` its Pitchbend range, `lone-1` a single glyph, the
+/// ladder's case; `field-empty` is its Instrument field, light with dark text. `val-` are values
+/// with a sign or a decimal point, which a reader can lose: `-12` and `0.50` in a well, `-0.5 dB`
+/// and `+3 ct` in a light field like Melodyne's inspector. `none-` hold ink that is not text — a
+/// level meter, a speaker symbol, an empty well with its bevel, a text caret — and nothing is the
+/// only right answer. `clipped-label` is a word cut off at half its height: its upper half is
+/// there to be read, so the word is right and so is nothing, and anything else is wrong. `line` is
+/// wider than 400 points and so is handed to Vision as it is. Kept in step with `LAYOUTS` in
+/// make.py.
 pub static FIXTURES: &[Fixture] = &[
     fixture!("field-64", 1, 40, 20, "64"),
     fixture!("field-64", 2, 40, 20, "64"),
@@ -84,7 +167,128 @@ pub static FIXTURES: &[Fixture] = &[
     fixture!("field-empty", 2, 123, 23, "empty"),
     fixture!("line", 1, 520, 24, "Instrument Polyphony Pitchbend Range Velocity Curve Release Time Volume"),
     fixture!("line", 2, 520, 24, "Instrument Polyphony Pitchbend Range Velocity Curve Release Time Volume"),
+    fixture!("val-minus12", 1, 40, 20, "-12"),
+    fixture!("val-minus12", 2, 40, 20, "-12"),
+    fixture!("val-db", 1, 70, 14, "-0.5 dB"),
+    fixture!("val-db", 2, 70, 14, "-0.5 dB"),
+    fixture!("val-ct", 1, 50, 14, "+3 ct"),
+    fixture!("val-ct", 2, 50, 14, "+3 ct"),
+    fixture!("val-050", 1, 44, 20, "0.50"),
+    fixture!("val-050", 2, 44, 20, "0.50"),
+    fixture!(nothing "none-bars", 1, 40, 20),
+    fixture!(nothing "none-bars", 2, 40, 20),
+    fixture!(nothing "none-icon", 1, 20, 20),
+    fixture!(nothing "none-icon", 2, 20, 20),
+    fixture!(nothing "none-well", 1, 40, 20),
+    fixture!(nothing "none-well", 2, 40, 20),
+    fixture!(or_nothing "clipped-label", 1, 60, 8, "Velocity"),
+    fixture!(or_nothing "clipped-label", 2, 60, 8, "Velocity"),
+    fixture!(nothing "none-caret", 1, 40, 16),
+    fixture!(nothing "none-caret", 2, 40, 16),
 ];
+
+/// Every picture a run reads: the drawn ones, then those `--pictures` added.
+pub fn all_pictures(o: &Options) -> Vec<&'static Fixture> {
+    FIXTURES.iter().chain(o.pictures.iter().copied()).collect()
+}
+
+/// The keys a `[[picture]]` entry of a manifest may have; any other is a mistake and refused.
+const MANIFEST_KEYS: [&str; 9] = ["name", "scale", "w_pt", "h_pt", "accept", "must_read", "platform", "source", "checked"];
+
+/// The pictures `dir/manifest.toml` lists, each read from `<name>@<scale>x.png` beside it. Read
+/// once, when the command line is, and kept for the rest of the process (they are leaked, as
+/// the drawn ones are static). Refused, with the entry and the reason, when an entry lacks a key
+/// or has one this does not know, when a name is not a plain file name, when its PNG is missing
+/// or not the size `w_pt · scale` by `h_pt · scale`, when a picture that must be read accepts
+/// nothing, or when a label is taken twice, by the manifest or by a drawn picture.
+///
+/// An entry:
+///
+/// ```toml
+/// [[picture]]
+/// name = "sfz-polyphony"       # the file is sfz-polyphony@1x.png
+/// scale = 1                    # 1 to 4 pixels a point
+/// w_pt = 30                    # the region, in points
+/// h_pt = 30
+/// accept = ["64"]              # "" is the answer "nothing"
+/// must_read = true
+/// platform = "windows"         # whose renderer drew it: "windows" or "macos"
+/// source = "…"                 # where it was cut from (kept for the reader, not read)
+/// checked = "…"                # how the accepted answers were checked (the same)
+/// ```
+pub fn load_pictures(dir: &Path) -> Result<Vec<&'static Fixture>, String> {
+    let path = dir.join("manifest.toml");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let table: toml::Table = text.parse().map_err(|e| format!("{}: {e}", path.display()))?;
+    let Some(entries) = table.get("picture").and_then(toml::Value::as_array) else {
+        return Err(format!("{}: no [[picture]] entries", path.display()));
+    };
+    let mut labels: Vec<String> = FIXTURES.iter().map(Fixture::label).collect();
+    let mut out = Vec::new();
+    for (i, e) in entries.iter().enumerate() {
+        let at = format!("{}, picture {}", path.display(), i + 1);
+        let e = e.as_table().ok_or_else(|| format!("{at}: not a table"))?;
+        if let Some(k) = e.keys().find(|k| !MANIFEST_KEYS.contains(&k.as_str())) {
+            return Err(format!("{at}: unknown key '{k}'"));
+        }
+        let text = |k: &str| e.get(k).and_then(toml::Value::as_str).ok_or_else(|| format!("{at}: '{k}' is missing or not text"));
+        let int = |k: &str, max: i64| {
+            e.get(k)
+                .and_then(toml::Value::as_integer)
+                .filter(|v| (1..=max).contains(v))
+                .ok_or_else(|| format!("{at}: '{k}' is missing or not a whole number from 1 to {max}"))
+        };
+        let name = text("name")?;
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+            return Err(format!("{at}: the name '{name}' is not letters, digits, '-', '_' and '.'"));
+        }
+        let at = format!("{at} ({name})");
+        let scale = int("scale", 4)? as u32;
+        let (w_pt, h_pt) = (int("w_pt", 10_000)? as i32, int("h_pt", 10_000)? as i32);
+        let accept: Vec<String> = e
+            .get("accept")
+            .and_then(toml::Value::as_array)
+            .and_then(|a| a.iter().map(|v| v.as_str().map(str::to_string)).collect::<Option<Vec<_>>>())
+            .filter(|a| !a.is_empty())
+            .ok_or_else(|| format!("{at}: 'accept' is missing or not a list of texts"))?;
+        let must_read =
+            e.get("must_read").and_then(toml::Value::as_bool).ok_or_else(|| format!("{at}: 'must_read' is missing or not true or false"))?;
+        if must_read && accept.iter().any(|a| a.trim().is_empty()) {
+            return Err(format!("{at}: a picture that must be read cannot accept nothing"));
+        }
+        let platform = match text("platform")? {
+            "windows" => "windows",
+            "macos" => "macos",
+            other => return Err(format!("{at}: platform '{other}' is neither \"windows\" nor \"macos\"")),
+        };
+        let label = format!("{name}@{scale}x");
+        if labels.contains(&label) {
+            return Err(format!("{at}: the label {label} is taken already"));
+        }
+        let file = dir.join(format!("{label}.png"));
+        let png = std::fs::read(&file).map_err(|e| format!("{at}: cannot read {}: {e}", file.display()))?;
+        let want = (w_pt as u32 * scale, h_pt as u32 * scale);
+        match png_size(&png) {
+            Some(got) if got == want => {}
+            Some((w, h)) => return Err(format!("{at}: {} is {w}x{h} pixels, the entry says {}x{}", file.display(), want.0, want.1)),
+            None => return Err(format!("{at}: {} is not a PNG", file.display())),
+        }
+        labels.push(label);
+        let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+        let accept: Vec<&'static str> = accept.into_iter().map(leak).collect();
+        out.push(&*Box::leak(Box::new(Fixture {
+            name: leak(name.to_string()),
+            scale,
+            w_pt,
+            h_pt,
+            accept: Box::leak(accept.into_boxed_slice()),
+            must_read,
+            origin: Origin::Captured { platform },
+            png: Box::leak(png.into_boxed_slice()),
+        })));
+    }
+    Ok(out)
+}
 
 /// The picture with this label.
 pub fn fixture(label: &str) -> Option<&'static Fixture> {
@@ -160,13 +364,27 @@ pub enum Tweak {
     Device(Device),
     /// This one recognition language, as `host.ocr.read` sends it.
     Lang(&'static str),
+    /// The neural recogniser instead of Vision, handed this much of the region. Small regions
+    /// only.
+    Paddle(PaddleInput),
+}
+
+/// What the neural recogniser is handed of a small region on a Mac.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaddleInput {
+    /// The whole region; its own crop finds the ink (`paddle_pre::tighten`, with the margin and
+    /// the least enlargement in points, `Tighten::for_scale`).
+    Raw,
+    /// The content crop a read makes (`Plan::content`), a well's inside included, with its
+    /// margin: what the strategies hand it.
+    Crop,
 }
 
 impl Tweak {
     /// Whether it calls something no Mac has run for this application yet, and so is tried once
     /// in a process of its own before the benchmark's own process risks it.
     pub fn probed(self) -> bool {
-        matches!(self, Tweak::Revision(_) | Tweak::Device(_))
+        matches!(self, Tweak::Revision(_) | Tweak::Device(_) | Tweak::Paddle(_))
     }
 }
 
@@ -201,7 +419,183 @@ pub static VARIANTS: &[Variant] = &[
     Variant { name: "gpu", tweak: Tweak::Device(Device::Gpu), what: "every stage that offers it pinned to the GPU (macOS 14 and later)" },
     Variant { name: "ane", tweak: Tweak::Device(Device::NeuralEngine), what: "every stage that offers it pinned to the Neural Engine (macOS 14 and later)" },
     Variant { name: "lang-en", tweak: Tweak::Lang("en-US"), what: "recognition language en-US, as host.ocr.read sends it to an English-speaking user" },
+    Variant {
+        name: "paddle-raw",
+        tweak: Tweak::Paddle(PaddleInput::Raw),
+        what: "the neural recogniser instead of Vision, over the whole region, cropped by its own rule in points (small \
+               regions only; preparing and the model, on this thread)",
+    },
+    Variant {
+        name: "paddle-crop",
+        tweak: Tweak::Paddle(PaddleInput::Crop),
+        what: "the neural recogniser instead of Vision, over the content crop a read makes, a well's inside included \
+               (small regions only; preparing and the model, on this thread)",
+    },
 ];
+
+/// What a strategy is in the run: the one every other is held against, a way the application may
+/// come to read by, or one measured for comparison only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// `prod`, today's ladder.
+    Today,
+    /// A candidate of the plan's c1 or c2, which the closing line may name.
+    Candidate,
+    /// Measured beside them, never named: it speaks a value nothing checked (`fast>acc`, `paddle`),
+    /// leaves out what c1 needs (`acc+paddle`), or changes every rung (`rev2`).
+    Comparison,
+}
+
+impl Role {
+    pub fn word(self) -> &'static str {
+        match self {
+            Role::Today => "today",
+            Role::Candidate => "candidate",
+            Role::Comparison => "comparison",
+        }
+    }
+}
+
+/// One way of reading a small region, end to end: a shape of the ladder (`ocr/ladder.rs`), and
+/// for `rev2` a revision every request of every rung asks for. The pipeline reads every picture
+/// with each, as `host.ocr.recognize` reads a region, and compares each with `prod`.
+pub struct Strategy {
+    pub name: &'static str,
+    pub shape: Shape,
+    /// Every request of every rung asks for this revision.
+    pub revision_all: Option<usize>,
+    pub role: Role,
+    pub what: &'static str,
+}
+
+impl Strategy {
+    /// The request revision it asks for somewhere, which this macOS must have and a probe must
+    /// have run.
+    pub fn revision(&self) -> Option<usize> {
+        self.revision_all.or(self.shape.rung1_revision).or(self.shape.rev2_second.then_some(2))
+    }
+
+    /// Whether it needs the neural recogniser.
+    pub fn paddle(&self) -> bool {
+        self.shape.paddle.reads()
+    }
+
+    /// Whether it reads a region larger than 400x200 points as `prod` does: every one but
+    /// `rev2`, since the strategies change only the small-text path.
+    pub fn as_prod_when_large(&self) -> bool {
+        self.revision_all.is_none()
+    }
+}
+
+const fn shape(first: Level, paddle: PaddleUse, rest: bool, rung1_revision: Option<usize>, rev2_second: bool) -> Shape {
+    Shape { first, paddle, rest, rung1_revision, rev2_second }
+}
+
+/// `prod` first: every other strategy is reported against it. The candidates for reading small
+/// regions faster on Macs without a Neural Engine: c1, the lone digit (`acc+paddle+rest`,
+/// `rev2-tight`, `rev3>rev2`), and c2, the fast level first with the neural recogniser as its
+/// check (`fast=paddle-checked`, the reading rules as they stand, and `fast=paddle-strict` and
+/// `fast=paddle`, which let the recogniser answer alone); the rest for comparison, never named
+/// ([`Role`]). A strategy that needs the neural recogniser reads a region whose ink is not one
+/// line, or too wide, as `prod` does.
+pub static STRATEGIES: &[Strategy] = &[
+    Strategy {
+        name: "prod",
+        shape: Shape::TODAY,
+        revision_all: None,
+        role: Role::Today,
+        what: "today's ladder: accurate over the content crop; the whole region when that read nothing; then the \
+               enlarged crop and the fast model within the 250 ms budget",
+    },
+    Strategy {
+        name: "rev2",
+        shape: Shape::TODAY,
+        revision_all: Some(2),
+        role: Role::Comparison,
+        what: "today's ladder with every request of every rung asking for revision 2",
+    },
+    Strategy {
+        name: "paddle",
+        shape: shape(Level::Accurate, PaddleUse::Alone, false, None, false),
+        revision_all: None,
+        role: Role::Comparison,
+        what: "the neural recogniser alone over the content crop, Vision not asked",
+    },
+    Strategy {
+        name: "acc+paddle",
+        shape: shape(Level::Accurate, PaddleUse::Fallback, false, None, false),
+        revision_all: None,
+        role: Role::Comparison,
+        what: "Windows' rule: the neural recogniser asked when the read begins, at low priority; its text when the \
+               first accurate pass read nothing; nothing after",
+    },
+    Strategy {
+        name: "acc+paddle+rest",
+        shape: shape(Level::Accurate, PaddleUse::Fallback, true, None, false),
+        revision_all: None,
+        role: Role::Candidate,
+        what: "acc+paddle, and today's rungs after it when the neural recogniser read nothing too (c1)",
+    },
+    Strategy {
+        name: "rev2-tight",
+        shape: shape(Level::Accurate, PaddleUse::Off, true, Some(2), false),
+        revision_all: None,
+        role: Role::Candidate,
+        what: "today's ladder with its first pass under revision 2 (c1)",
+    },
+    Strategy {
+        name: "rev3>rev2",
+        shape: shape(Level::Accurate, PaddleUse::Off, true, None, true),
+        revision_all: None,
+        role: Role::Candidate,
+        what: "today's ladder, but when the first pass (Vision's default revision, 3) read nothing, revision 2 over \
+               the same crop instead of the whole region (c1)",
+    },
+    Strategy {
+        name: "fast=paddle-checked",
+        shape: shape(Level::Fast, PaddleUse::AgreeChecked, true, None, false),
+        revision_all: None,
+        role: Role::Candidate,
+        what: "the fast level first, the neural recogniser beside it at high priority: fast's text when the \
+               recogniser read the same; otherwise today's accurate ladder without the fast rung, and nothing when \
+               that reads nothing — the recogniser's text never (c2 under the reading rules as they stand)",
+    },
+    Strategy {
+        name: "fast=paddle-strict",
+        shape: shape(Level::Fast, PaddleUse::AgreeStrict, true, None, false),
+        revision_all: None,
+        role: Role::Candidate,
+        what: "the fast level first, the neural recogniser beside it at high priority: fast's text when the \
+               recogniser read the same; otherwise today's accurate ladder without the fast rung, and nothing when \
+               that reads nothing; when fast read nothing, an accurate pass first and the recogniser's text only \
+               when that reads nothing too (c2)",
+    },
+    Strategy {
+        name: "fast=paddle",
+        shape: shape(Level::Fast, PaddleUse::Agree, true, None, false),
+        revision_all: None,
+        role: Role::Candidate,
+        what: "fast=paddle-strict, but the recogniser's text at once when fast read nothing (c2)",
+    },
+    Strategy {
+        name: "fast>acc",
+        shape: shape(Level::Fast, PaddleUse::Off, true, None, false),
+        revision_all: None,
+        role: Role::Comparison,
+        what: "the fast level first, its text taken unchecked; today's ladder when it read nothing (for comparison: \
+               no neural recogniser)",
+    },
+];
+
+/// The strategy with this name, by its index in [`STRATEGIES`].
+pub fn strategy(name: &str) -> Option<usize> {
+    STRATEGIES.iter().position(|s| s.name == name)
+}
+
+/// The role of the strategy with this name; a name that is none is a comparison, never named.
+pub fn role(name: &str) -> Role {
+    strategy(name).map_or(Role::Comparison, |i| STRATEGIES[i].role)
+}
 
 /// The variant with this name, by its index in [`VARIANTS`].
 pub fn variant(name: &str) -> Option<usize> {
@@ -217,17 +611,24 @@ pub enum Warmup {
     /// The same over a line of printed words, `line@1x`: the application's own since then
     /// (`warm_up_page` in backend/macos/ocr.rs reads this very picture).
     Word,
+    /// One accurate pass over a small field, `field-DEF@1x`, through the content crop as a read
+    /// makes it: whether a warm-up a third as long warms as well as the line of words.
+    Field,
     /// None at all.
     Nothing,
 }
 
+/// The field the `Field` warm-up reads.
+pub const WARM_UP_FIELD: &str = "field-DEF@1x";
+
 impl Warmup {
-    pub const ALL: [Warmup; 3] = [Warmup::Bars, Warmup::Word, Warmup::Nothing];
+    pub const ALL: [Warmup; 4] = [Warmup::Bars, Warmup::Word, Warmup::Field, Warmup::Nothing];
 
     pub fn word(self) -> &'static str {
         match self {
             Warmup::Bars => "bars",
             Warmup::Word => "word",
+            Warmup::Field => "field",
             Warmup::Nothing => "none",
         }
     }
@@ -237,39 +638,91 @@ impl Warmup {
     }
 }
 
-/// The warm-up kinds in the order round `r` starts their processes: rotated by one each round,
-/// so that no kind is always the one after the discarded first process, or always the last.
-pub fn warmup_order(r: usize) -> [Warmup; 3] {
-    let a = Warmup::ALL;
-    [a[r % 3], a[(r + 1) % 3], a[(r + 2) % 3]]
+/// What a neural recogniser's first-pass child does before its first recognition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaddleStart {
+    /// Only the session made, timed.
+    Nothing,
+    /// The application's warm-up — the session, and one run over a dark dummy — on a thread of
+    /// its own, waited for.
+    Warm,
+    /// That warm-up and Vision's over the line of words started together, as they would run if
+    /// the neural recogniser did not wait for Vision's: whether one delays the other, and Vision's
+    /// first real pass after them.
+    WithVision,
+}
+
+impl PaddleStart {
+    pub const ALL: [PaddleStart; 3] = [PaddleStart::Nothing, PaddleStart::Warm, PaddleStart::WithVision];
+
+    pub fn word(self) -> &'static str {
+        match self {
+            PaddleStart::Nothing => "none",
+            PaddleStart::Warm => "warm",
+            PaddleStart::WithVision => "with-vision",
+        }
+    }
+
+    fn parse(s: &str) -> Option<PaddleStart> {
+        PaddleStart::ALL.into_iter().find(|w| w.word() == s)
+    }
+}
+
+/// The language of the second-language child's first passes: one of the accurate level's, and
+/// the testers' own, not Vision's default.
+pub const SECOND_LANGUAGE: &str = "de-DE";
+
+/// The first-pass children of round `r`, in the order they are started: every kind once, the
+/// list turned by one each round, so that no kind is always the one after the discarded first
+/// process, or always the last.
+pub fn first_roles(r: usize) -> Vec<Child> {
+    let mut all: Vec<Child> = Warmup::ALL.iter().map(|w| Child::FirstPass(*w)).collect();
+    all.extend([Child::FastFirst, Child::SecondLanguage]);
+    all.extend(PaddleStart::ALL.iter().map(|p| Child::PaddleFirst(*p)));
+    let n = all.len();
+    all.rotate_left(r % n);
+    all
 }
 
 // ── The command line ─────────────────────────────────────────────────────────────────────────
 
 pub const USAGE: &str = "\
 automation-platform ocr-bench [--quick] [--quiet] [--long-idle] [--capture-ms N]
-                              [--out FILE] [--summary FILE]
+                              [--pictures DIR] [--out FILE] [--summary FILE]
+automation-platform ocr-bench --paddle [--quick] [--quiet] [--pictures DIR] [--out FILE]
+automation-platform ocr-bench --paddle-probe
 
 Measures what Apple Vision's text recognition costs on this Mac, on fixed pictures carried
-inside the application: no screen capture, no window, no permission, no speech. Quit
-Automation Platform first, so that its own reads do not compete for the processor.
+inside the application: no screen capture, no window, no permission, no speech; and, where
+the application carries ONNX Runtime, the neural recogniser beside it. Quit Automation
+Platform first, so that its own reads do not compete for the processor.
 
   --quick         a shorter run: 3 passes a cell instead of 6 (too few for a verdict),
-                  2 pictures for the variants instead of 5, one process per warm-up
-                  instead of three, and 24 s of idle instead of 84
+                  2 pictures for the variants instead of 5, 3 pictures for the ways of
+                  reading instead of every one, one process per first-pass kind instead
+                  of three, blocks of 5 s instead of 30 under sustained load, and 48 s of
+                  idle instead of 168
   --quiet         print only where the file is and that it is done; everything else
                   goes to the file alone (for a screen reader, which reads every line)
   --long-idle     also one pass after 1, 2, 5 and 10 minutes with nothing to do, on the
                   thread that read before and on a fresh one: 36 minutes more
   --capture-ms N  count the retry ladder's time budget from N ms before each pipeline
                   read, for the screen capture it does not make (default 50)
+  --pictures DIR  also read every picture DIR/manifest.toml lists, each a PNG beside it
+                  (the real captures in crates/host/bench-data/ocr/real/, which
+                  tools/ocr-fixtures/crop.py cuts); a wrong manifest is refused at once
+  --paddle        the neural recogniser (PaddleOCR) alone over every picture (on Windows
+                  beside what the system recogniser reads); then how wide a line it reads
+                  right, its crop for Retina pictures, and its scores
+  --paddle-probe  only whether the neural recogniser loads and reads one picture: one
+                  line, \"ok\" or \"not available\" with the reason; exit 0 or 1
   --out FILE      where to write what it prints (default: ocr-bench-N.txt beside the
                   application, the first N that is free)
   --summary FILE  append each section's table as Markdown to FILE as soon as the
                   section is done (CI passes $GITHUB_STEP_SUMMARY)
 
-macOS only. Apart from the tables, every line it prints starts with \"OCR BENCH:\", and
-the last one says \"done\".";
+macOS only, but for --paddle and --paddle-probe, which run on Windows too. Apart from the
+tables, every line it prints starts with \"OCR BENCH:\", and the last one says \"done\".";
 
 /// The pretend capture time the pipeline's ladder budget starts with, unless `--capture-ms`
 /// says otherwise: the median capture on the tester's Intel Air, 49 ms, rounded.
@@ -280,6 +733,13 @@ pub const DEFAULT_CAPTURE_MS: u64 = 50;
 pub enum Child {
     /// A first pass in a fresh process, after this warm-up.
     FirstPass(Warmup),
+    /// The fast level's first pass in a fresh process, with no warm-up of any kind.
+    FastFirst,
+    /// The word warm-up in Vision's default language, then the first passes in
+    /// [`SECOND_LANGUAGE`].
+    SecondLanguage,
+    /// The neural recogniser's first recognitions in a fresh process, after this start.
+    PaddleFirst(PaddleStart),
     /// One pass of the variant at this index in [`VARIANTS`], before the benchmark's own
     /// process risks it.
     Probe(usize),
@@ -290,13 +750,35 @@ impl Child {
     pub fn arg(self) -> String {
         match self {
             Child::FirstPass(w) => format!("first-pass:{}", w.word()),
+            Child::FastFirst => "fast-first".to_string(),
+            Child::SecondLanguage => "second-language".to_string(),
+            Child::PaddleFirst(p) => format!("paddle-first:{}", p.word()),
             Child::Probe(i) => format!("probe:{}", VARIANTS[i].name),
+        }
+    }
+
+    /// How the first-pass section names it.
+    pub fn word(self) -> String {
+        match self {
+            Child::FirstPass(w) => format!("warm-up {}", w.word()),
+            Child::FastFirst => "the fast level, no warm-up".to_string(),
+            Child::SecondLanguage => format!("warm-up word, then {SECOND_LANGUAGE}"),
+            Child::PaddleFirst(p) => format!("neural recogniser, {}", p.word()),
+            Child::Probe(i) => format!("probe {}", VARIANTS[i].name),
         }
     }
 
     fn parse(v: &str) -> Option<Child> {
         if let Some(w) = v.strip_prefix("first-pass:") {
             return Warmup::parse(w).map(Child::FirstPass);
+        }
+        if let Some(p) = v.strip_prefix("paddle-first:") {
+            return PaddleStart::parse(p).map(Child::PaddleFirst);
+        }
+        match v {
+            "fast-first" => return Some(Child::FastFirst),
+            "second-language" => return Some(Child::SecondLanguage),
+            _ => {}
         }
         v.strip_prefix("probe:").and_then(variant).map(Child::Probe)
     }
@@ -311,6 +793,12 @@ pub struct Options {
     pub out: Option<PathBuf>,
     pub summary: Option<PathBuf>,
     pub help: bool,
+    /// `--paddle`: the neural recogniser's measurement instead of Vision's.
+    pub paddle: bool,
+    /// `--paddle-probe`: whether the neural recogniser loads and reads, and nothing else.
+    pub paddle_probe: bool,
+    /// The pictures `--pictures` added, read as the command line is.
+    pub pictures: Vec<&'static Fixture>,
     /// Internal: this process is a child of a running benchmark.
     pub child: Option<Child>,
 }
@@ -325,12 +813,16 @@ impl Default for Options {
             out: None,
             summary: None,
             help: false,
+            paddle: false,
+            paddle_probe: false,
+            pictures: Vec::new(),
             child: None,
         }
     }
 }
 
-/// The arguments after `ocr-bench`.
+/// The arguments after `ocr-bench`. `--pictures` reads its manifest and pictures here, so that a
+/// wrong one is said before a run of many minutes starts rather than after.
 pub fn parse(args: &[String]) -> Result<Options, String> {
     let mut o = Options::default();
     let mut it = args.iter();
@@ -339,12 +831,20 @@ pub fn parse(args: &[String]) -> Result<Options, String> {
             "--quick" => o.quick = true,
             "--quiet" => o.quiet = true,
             "--long-idle" => o.long_idle = true,
+            "--paddle" => o.paddle = true,
+            "--paddle-probe" => o.paddle_probe = true,
             "--help" | "-h" => o.help = true,
-            "--out" | "--summary" | "--child" | "--capture-ms" => {
+            "--out" | "--summary" | "--child" | "--capture-ms" | "--pictures" => {
                 let v = it.next().ok_or_else(|| format!("{a} needs a value"))?;
                 match a.as_str() {
                     "--out" => o.out = Some(PathBuf::from(v)),
                     "--summary" => o.summary = Some(PathBuf::from(v)),
+                    "--pictures" => {
+                        if !o.pictures.is_empty() {
+                            return Err("--pictures is given once".to_string());
+                        }
+                        o.pictures = load_pictures(Path::new(v))?;
+                    }
                     "--capture-ms" => {
                         o.capture_ms = v
                             .parse::<u64>()
@@ -361,28 +861,58 @@ pub fn parse(args: &[String]) -> Result<Options, String> {
     Ok(o)
 }
 
-/// One pause in the idle section, and the thread that reads after it.
+/// What reads after a pause in the idle section.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdleEngine {
+    /// One accurate pass of today's request.
+    Accurate,
+    /// One pass of the fast level.
+    Fast,
+    /// One recognition of the neural recogniser, on its own thread.
+    Paddle,
+}
+
+impl IdleEngine {
+    pub fn word(self) -> &'static str {
+        match self {
+            IdleEngine::Accurate => "an accurate pass",
+            IdleEngine::Fast => "a fast pass",
+            IdleEngine::Paddle => "a recognition of the neural recogniser",
+        }
+    }
+}
+
+/// One pause in the idle section, the thread that reads after it, and what it reads with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Idle {
     pub secs: u64,
     /// A thread started for this one pass, rather than the one that read before the pause.
     pub fresh: bool,
+    pub engine: IdleEngine,
 }
 
 impl Idle {
     const fn known(secs: u64) -> Idle {
-        Idle { secs, fresh: false }
+        Idle { secs, fresh: false, engine: IdleEngine::Accurate }
     }
 
     const fn fresh(secs: u64) -> Idle {
-        Idle { secs, fresh: true }
+        Idle { secs, fresh: true, engine: IdleEngine::Accurate }
+    }
+
+    const fn fast(secs: u64) -> Idle {
+        Idle { secs, fresh: false, engine: IdleEngine::Fast }
+    }
+
+    const fn paddle(secs: u64) -> Idle {
+        Idle { secs, fresh: false, engine: IdleEngine::Paddle }
     }
 
     pub fn thread(self) -> &'static str {
-        if self.fresh {
-            "a fresh thread"
-        } else {
-            "the thread that read before"
+        match (self.engine, self.fresh) {
+            (IdleEngine::Paddle, _) => "the neural recogniser's thread",
+            (_, true) => "a fresh thread",
+            (_, false) => "the thread that read before",
         }
     }
 }
@@ -403,8 +933,17 @@ pub struct Plan {
     pub fresh_threads: usize,
     /// Passes per thread in the two-threads section.
     pub pair_passes: usize,
-    /// The pauses, in the order they are taken: the lengths and the threads interleaved.
+    /// The pauses, in the order they are taken: the lengths, the threads and the engines
+    /// interleaved.
     pub idle: Vec<Idle>,
+    /// The pictures every strategy of the pipeline reads `samples` times, for a verdict on its
+    /// speed, by label — a drawn one, or one `--pictures` may add (left out where it is not
+    /// there). Every other small picture is read twice, for whether it is read right.
+    pub speed_pictures: &'static [&'static str],
+    /// Whether the pipeline reads the pictures off that list at all.
+    pub every_picture: bool,
+    /// Each block of the sustained load, in seconds; four blocks.
+    pub sustained_secs: u64,
 }
 
 impl Plan {
@@ -418,7 +957,19 @@ impl Plan {
                 child_rounds: 1,
                 fresh_threads: 1,
                 pair_passes: 4,
-                idle: vec![Idle::known(2), Idle::fresh(10), Idle::fresh(2), Idle::known(10)],
+                idle: vec![
+                    Idle::known(2),
+                    Idle::fresh(10),
+                    Idle::fast(2),
+                    Idle::paddle(10),
+                    Idle::fresh(2),
+                    Idle::known(10),
+                    Idle::fast(10),
+                    Idle::paddle(2),
+                ],
+                speed_pictures: &["field-64@2x", "lone-1@2x", "sfz-tune@1x"],
+                every_picture: false,
+                sustained_secs: 5,
             }
         } else {
             Plan {
@@ -433,11 +984,37 @@ impl Plan {
                 idle: vec![
                     Idle::known(2),
                     Idle::fresh(10),
+                    Idle::fast(2),
+                    Idle::paddle(10),
                     Idle::known(30),
+                    Idle::fast(10),
                     Idle::fresh(2),
+                    Idle::paddle(2),
                     Idle::known(10),
+                    Idle::fast(30),
                     Idle::fresh(30),
+                    Idle::paddle(30),
                 ],
+                // A field read in one pass at both scales, the lone digit at both, the light
+                // field with its rule, a signed value in a light field and in a well, ink that is
+                // not text, and the real captures the CI set carries: sforzando's lone digit, its
+                // Polyphony and Instrument fields, and Melodyne's cents.
+                speed_pictures: &[
+                    "field-64@1x",
+                    "field-64@2x",
+                    "lone-1@1x",
+                    "lone-1@2x",
+                    "field-empty@2x",
+                    "val-db@2x",
+                    "val-minus12@2x",
+                    "none-bars@2x",
+                    "sfz-tune@1x",
+                    "sfz-polyphony@1x",
+                    "sfz-instrument@1x",
+                    "mel-cents@1x",
+                ],
+                every_picture: true,
+                sustained_secs: 30,
             }
         };
         if long_idle {
@@ -554,17 +1131,58 @@ pub fn normalise(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// How a cell's reads compare with the expected text.
+/// Whether `read` is one of `accept`, after [`normalise`]: exactly, case and all.
+pub fn accepted(read: &str, accept: &[&str]) -> bool {
+    let read = normalise(read);
+    accept.iter().any(|a| normalise(a) == read)
+}
+
+/// Whether `read` is one of `accept` once spaces are dropped and dash and quote forms made one
+/// ([`paddle_pre::same`]): "0.00dB" for "0.00 dB", "−12" for "-12". Nothing still has to be
+/// nothing.
+pub fn accepted_loosely(read: &str, accept: &[&str]) -> bool {
+    accept.iter().any(|a| paddle_pre::same(read, a))
+}
+
+/// How a cell's reads compare with the accepted answers.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Accuracy {
     /// Every read was right.
     Right,
-    /// Not every read was right: how many were, of how many, and the commonest wrong reading.
-    Wrong { right: usize, of: usize, got: String },
+    /// Every read was right once spaces and dash and quote forms are set aside
+    /// ([`accepted_loosely`]), and not every one exactly: how many were exactly right, of how
+    /// many, and the commonest reading that was not.
+    Loosely { right: usize, of: usize, got: String },
+    /// Not every read was right even so: how many were exactly right and how many loosely, of
+    /// how many, the commonest wrong reading, and whether it was text on a picture that holds
+    /// none — an invented reading.
+    Wrong { right: usize, loose: usize, of: usize, got: String, invented: bool },
     /// Every request was refused.
     Refused,
     /// Nothing was measured.
     Nothing,
+}
+
+impl Accuracy {
+    /// Exactly right on every read.
+    pub fn right(&self) -> bool {
+        matches!(self, Accuracy::Right)
+    }
+
+    /// Right on every read, loosely or exactly.
+    pub fn loosely_right(&self) -> bool {
+        matches!(self, Accuracy::Right | Accuracy::Loosely { .. })
+    }
+
+    /// Wrong only by refusals: every request refused, or every reading that was not refused
+    /// accepted, loosely at least.
+    pub fn refused_only(&self) -> bool {
+        match self {
+            Accuracy::Refused => true,
+            Accuracy::Wrong { got, .. } => got == "(refused)",
+            _ => false,
+        }
+    }
 }
 
 /// The samples of one cell — a variant over a picture, or one picture through the pipeline.
@@ -621,29 +1239,45 @@ impl Cell {
             .then(|| self.warm.iter().map(|s| s.passes as f64).sum::<f64>() / self.warm.len() as f64)
     }
 
-    pub fn accuracy(&self, expected: &str) -> Accuracy {
+    /// Its reads, the first included, against the answers `accept` allows (see [`Fixture`]).
+    pub fn accuracy(&self, accept: &[&str]) -> Accuracy {
         let all: Vec<&Sample> = self.first.iter().chain(self.warm.iter()).collect();
         if all.is_empty() {
             return Accuracy::Nothing;
         }
         let read: Vec<String> = all.iter().filter_map(|s| s.text.as_deref().map(normalise)).collect();
-        if read.is_empty() {
-            return Accuracy::Refused;
-        }
-        let want = normalise(expected);
-        let right = read.iter().filter(|t| **t == want).count();
-        if right == all.len() {
-            return Accuracy::Right;
-        }
-        let mut wrong: Vec<&String> = read.iter().filter(|t| **t != want).collect();
-        wrong.sort();
-        let got = wrong
-            .iter()
-            .max_by_key(|t| wrong.iter().filter(|u| u == t).count())
-            .map(|t| t.to_string())
-            .unwrap_or_else(|| "(refused)".to_string());
-        Accuracy::Wrong { right, of: all.len(), got }
+        judge(&read, all.len(), accept)
     }
+}
+
+/// `read` (the readings that were not refused) of `of` reads, against `accept`.
+pub fn judge(read: &[String], of: usize, accept: &[&str]) -> Accuracy {
+    if of == 0 {
+        return Accuracy::Nothing;
+    }
+    if read.is_empty() {
+        return Accuracy::Refused;
+    }
+    let right = read.iter().filter(|t| accepted(t, accept)).count();
+    let loose = read.iter().filter(|t| accepted_loosely(t, accept)).count();
+    if right == of {
+        return Accuracy::Right;
+    }
+    let commonest = |pick: &dyn Fn(&String) -> bool| -> String {
+        let mut these: Vec<&String> = read.iter().filter(|t| pick(t)).collect();
+        these.sort();
+        these
+            .iter()
+            .max_by_key(|t| these.iter().filter(|u| u == t).count())
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "(refused)".to_string())
+    };
+    if loose == of {
+        return Accuracy::Loosely { right, of, got: commonest(&|t| !accepted(t, accept)) };
+    }
+    let got = commonest(&|t| !accepted_loosely(t, accept));
+    let invented = accept == [""] && !got.is_empty() && got != "(refused)";
+    Accuracy::Wrong { right, loose, of, got, invented }
 }
 
 /// Milliseconds as they are printed: whole above 10, one decimal below.
@@ -661,18 +1295,42 @@ fn stats_text(s: &Stats) -> String {
 }
 
 fn accuracy_text(a: &Accuracy, cell: &Cell) -> String {
+    let t = cell.warm.first().or(cell.first.as_ref()).and_then(|s| s.text.as_deref()).unwrap_or("");
+    accuracy_words(a, t, cell.error.as_deref())
+}
+
+/// How [`Accuracy`] is said in a line: `read` is a right reading (for [`Accuracy::Right`]), `error`
+/// the reason the recogniser gave for refusing (for [`Accuracy::Refused`]).
+pub fn accuracy_words(a: &Accuracy, read: &str, error: Option<&str>) -> String {
     let shown = |t: &str| if t.is_empty() { "nothing".to_string() } else { format!("\"{t}\"") };
     match a {
-        Accuracy::Right => {
-            let t = cell.warm.first().or(cell.first.as_ref()).and_then(|s| s.text.as_deref()).unwrap_or("");
-            format!("read {} right", shown(&normalise(t)))
+        Accuracy::Right if normalise(read).is_empty() => "read nothing, which is right".to_string(),
+        Accuracy::Right => format!("read {} right", shown(&normalise(read))),
+        Accuracy::Loosely { right, of, got } => {
+            format!("read {} right but for spaces or dash forms ({right} of {of} exactly right)", shown(got))
         }
-        Accuracy::Wrong { right, of, got } => format!("WRONG: read {} ({right} of {of} right)", shown(got)),
-        Accuracy::Refused => format!(
-            "Vision refused every request{}",
-            cell.error.as_deref().map(|e| format!(": {e}")).unwrap_or_default()
-        ),
+        Accuracy::Wrong { got, invented: true, right, of, .. } => {
+            format!("WRONG, INVENTED: read {} where there is no text ({right} of {of} right)", shown(got))
+        }
+        Accuracy::Wrong { right, loose, of, got, .. } if loose > right => {
+            format!("WRONG: read {} ({right} of {of} right, {loose} but for spaces or dash forms)", shown(got))
+        }
+        Accuracy::Wrong { right, of, got, .. } => format!("WRONG: read {} ({right} of {of} right)", shown(got)),
+        Accuracy::Refused => {
+            format!("the recogniser refused every request{}", error.map(|e| format!(": {e}")).unwrap_or_default())
+        }
         Accuracy::Nothing => "nothing measured".to_string(),
+    }
+}
+
+/// A short mark for a table cell: "" when right, else what was not.
+pub fn accuracy_mark(a: &Accuracy) -> &'static str {
+    match a {
+        Accuracy::Right | Accuracy::Nothing => "",
+        Accuracy::Loosely { .. } => ", right but for spaces",
+        Accuracy::Wrong { invented: true, .. } => ", wrong, invented",
+        Accuracy::Wrong { .. } => ", wrong",
+        Accuracy::Refused => ", refused",
     }
 }
 
@@ -856,10 +1514,10 @@ impl Grid {
             return format!("{head} | not measured: {why}");
         }
         let Some(s) = cell.stats() else {
-            return format!("{head} | {}", accuracy_text(&cell.accuracy(picture.expected), cell));
+            return format!("{head} | {}", accuracy_text(&cell.accuracy(picture.accept), cell));
         };
         let first = cell.first.as_ref().map(|f| format!(", first {} ms", ms(f.ms))).unwrap_or_default();
-        format!("{head} | {}{first} | {}", stats_text(&s), accuracy_text(&cell.accuracy(picture.expected), cell))
+        format!("{head} | {}{first} | {}", stats_text(&s), accuracy_text(&cell.accuracy(picture.accept), cell))
     }
 
     /// A variant against prod on one picture, printed once every cell is done.
@@ -873,6 +1531,14 @@ impl Grid {
             ms(prod.median),
             verdict_text(verdict)
         ))
+    }
+
+    /// Whether the control, prod-b, came out "clearly" faster or slower than prod on any
+    /// picture: then this run is too noisy for any verdict, the pipeline's included.
+    pub fn control_loud(&self) -> bool {
+        self.index_of(Tweak::Control).is_some_and(|c| {
+            (0..self.pictures.len()).any(|p| matches!(self.verdict(c, p), Some(Verdict::Faster(..) | Verdict::Slower(..))))
+        })
     }
 
     /// What the control, prod-b, came to: whether this run is quiet enough for its verdicts.
@@ -920,7 +1586,7 @@ impl Grid {
             let (mut right, mut measured) = (0, 0);
             for (p, picture) in self.pictures.iter().enumerate() {
                 let cell = &self.cells[v][p];
-                let acc = cell.accuracy(picture.expected);
+                let acc = cell.accuracy(picture.accept);
                 if !matches!(acc, Accuracy::Nothing) {
                     measured += 1;
                     if acc == Accuracy::Right {
@@ -943,7 +1609,7 @@ impl Grid {
                             Some(Verdict::Slower(..)) => " slower",
                             _ => "",
                         };
-                        let wrong = if acc == Accuracy::Right { "" } else { ", wrong" };
+                        let wrong = accuracy_mark(&acc);
                         format!("{} ({} to {}){ratio}{mark}{wrong}", ms(s.median), ms(s.min), ms(s.max))
                     }
                 };
@@ -952,6 +1618,17 @@ impl Grid {
             t.push_str(&format!(" {right} of {measured} |\n"));
         }
         t
+    }
+}
+
+/// Something measured beside another thing against itself alone, by the engine's rule:
+/// `median 340 ms against 300 ms alone: clearly slower (+13 %, p 0.002)`.
+pub fn against_alone(alone: &[f64], beside: &[f64]) -> String {
+    match (Stats::of(alone), Stats::of(beside)) {
+        (Some(a), Some(b)) => {
+            format!("median {} ms against {} ms alone: {}", ms(b.median), ms(a.median), verdict_text(verdict(alone, beside)))
+        }
+        _ => "not both measured".to_string(),
     }
 }
 
@@ -985,54 +1662,683 @@ pub fn switching_line(interleaved: Option<f64>, alone: Option<f64>) -> String {
 
 // ── The pipeline section ─────────────────────────────────────────────────────────────────────
 
-/// One picture through the whole production pipeline, capture excepted, under one request.
+/// What a read did besides its answer, as the pipeline counts it per strategy.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReadNote {
+    /// The Vision passes it made, and their milliseconds in all.
+    pub passes: usize,
+    pub vision_ms: f64,
+    /// Runs of the neural recogniser's model it began.
+    pub paddle_runs: u64,
+    pub answer: Answer,
+    /// A fast first pass beside the neural recogniser: whether the two read the same, when either
+    /// read anything.
+    pub agreed: Option<bool>,
+    /// The strategy wanted the neural recogniser and today's ladder read the region instead: not
+    /// one line of ink, too wide, or the recogniser was not ready.
+    pub today: bool,
+}
+
+/// One picture through the whole production pipeline, capture excepted, under one strategy.
 pub struct PipelineRow {
-    /// `prod`, or `rev2` when every request the read makes is asked for revision 2.
-    pub request: &'static str,
+    /// A name in [`STRATEGIES`].
+    pub strategy: &'static str,
     pub picture: &'static Fixture,
     pub cell: Cell,
+    /// One a read, the first included, in the order taken.
+    pub notes: Vec<ReadNote>,
+    /// Read `samples` times for a verdict on its speed; otherwise twice, for whether it reads it
+    /// right.
+    pub speed: bool,
 }
 
 impl PipelineRow {
+    pub fn new(strategy: &'static str, picture: &'static Fixture, speed: bool) -> PipelineRow {
+        PipelineRow { strategy, picture, cell: Cell::default(), notes: Vec::new(), speed }
+    }
+
+    pub fn push(&mut self, sample: Sample, note: ReadNote) {
+        self.cell.push(sample);
+        self.notes.push(note);
+    }
+
+    /// Whether this row still takes a read under `plan`.
+    pub fn wants_more(&self, plan: &Plan) -> bool {
+        if self.speed {
+            self.cell.wants_more(plan)
+        } else {
+            self.cell.skipped.is_none() && self.cell.warm.is_empty()
+        }
+    }
+
+    /// The notes of the warm reads.
+    fn warm_notes(&self) -> &[ReadNote] {
+        self.notes.get(usize::from(self.cell.first.is_some())..).unwrap_or_default()
+    }
+
+    /// Mean neural recogniser runs per warm read.
+    pub fn paddle_runs(&self) -> Option<f64> {
+        let n = self.warm_notes();
+        (!n.is_empty()).then(|| n.iter().map(|r| r.paddle_runs as f64).sum::<f64>() / n.len() as f64)
+    }
+
+    /// Who answered how often, over every read, in a fixed order: `tight 6, Paddle 1`.
+    pub fn answers(&self) -> String {
+        let order = [
+            Answer::Pass(Stage::AsCaptured),
+            Answer::Pass(Stage::FastFirst),
+            Answer::Pass(Stage::Tight),
+            Answer::Pass(Stage::TightAgain),
+            Answer::Pass(Stage::Whole),
+            Answer::Pass(Stage::Enlarged),
+            Answer::Pass(Stage::Fast),
+            Answer::Paddle,
+            Answer::Nobody,
+        ];
+        let said: Vec<String> = order
+            .iter()
+            .filter_map(|a| {
+                let n = self.notes.iter().filter(|r| r.answer == *a).count();
+                (n > 0).then(|| format!("{} {n}", a.word()))
+            })
+            .collect();
+        if said.is_empty() {
+            "none".to_string()
+        } else {
+            said.join(", ")
+        }
+    }
+
+    /// How often the fast level and the neural recogniser read the same, of the reads where
+    /// either read anything: `(same, of)`.
+    pub fn agreement(&self) -> Option<(usize, usize)> {
+        let asked: Vec<bool> = self.notes.iter().filter_map(|r| r.agreed).collect();
+        (!asked.is_empty()).then(|| (asked.iter().filter(|a| **a).count(), asked.len()))
+    }
+
+    /// The median of what a warm read spent outside Vision's passes: the conversion, the crop,
+    /// rendering, the neural recogniser's wait.
+    pub fn not_vision(&self) -> Option<f64> {
+        let v: Vec<f64> =
+            self.cell.warm.iter().zip(self.warm_notes()).map(|(s, n)| (s.ms - n.vision_ms).max(0.0)).collect();
+        Stats::of(&v).map(|s| s.median)
+    }
+
+    /// How many reads today's ladder made instead of the strategy's.
+    pub fn read_by_today(&self) -> usize {
+        self.notes.iter().filter(|r| r.today).count()
+    }
+
     pub fn line(&self) -> String {
-        let head = format!("pipeline | {} | {}", self.request, self.picture.label());
-        let acc = accuracy_text(&self.cell.accuracy(self.picture.expected), &self.cell);
+        let head = format!("pipeline | {} | {}", self.strategy, self.picture.label());
+        let acc = accuracy_text(&self.cell.accuracy(self.picture.accept), &self.cell);
         if let Some(why) = &self.cell.skipped {
             return format!("{head} | not measured: {why}");
         }
         let skipped = self.cell.warm.iter().any(|s| s.skipped);
-        match (self.cell.stats(), self.cell.passes()) {
-            (Some(s), Some(p)) => format!(
-                "{head} | {}, {p:.1} Vision passes a read{}{} | {acc}",
-                stats_text(&s),
-                self.cell.first.as_ref().map(|f| format!(", first read {} ms", ms(f.ms))).unwrap_or_default(),
-                if skipped { ", the blank guard answered" } else { "" }
+        let (Some(s), Some(p)) = (self.cell.stats(), self.cell.passes()) else {
+            return format!("{head} | {acc}");
+        };
+        let runs = self.paddle_runs().filter(|r| *r > 0.0).map(|r| format!(" and {r:.1} neural runs")).unwrap_or_default();
+        let today = match self.read_by_today() {
+            0 => String::new(),
+            n => format!(", {n} of {} read by today's ladder (not the neural recogniser's to read)", self.notes.len()),
+        };
+        let agreed = self
+            .agreement()
+            .map(|(same, of)| format!(" | fast and the neural recogniser read the same {same} of {of} times"))
+            .unwrap_or_default();
+        let not_vision = self.not_vision().map(|m| format!(" | not Vision: median {} ms", ms(m))).unwrap_or_default();
+        format!(
+            "{head} | {}, {p:.1} Vision passes{runs} a read{}{}{today} | answered by {}{agreed}{not_vision} | {acc}",
+            stats_text(&s),
+            self.cell.first.as_ref().map(|f| format!(", first read {} ms", ms(f.ms))).unwrap_or_default(),
+            if skipped { ", the blank guard answered" } else { "" },
+            self.answers()
+        )
+    }
+}
+
+/// Every strategy over every picture: `rows[s][p]`.
+pub struct Pipeline {
+    pub strategies: Vec<&'static Strategy>,
+    pub pictures: Vec<&'static Fixture>,
+    pub rows: Vec<Vec<PipelineRow>>,
+}
+
+impl Pipeline {
+    /// Every strategy over every picture, each row marked for speed or for reading only by
+    /// `plan`, and left out — with the reason — where it is no measurement: a large picture
+    /// under a strategy that reads it as prod does, a picture a quick run does not read.
+    pub fn new(strategies: Vec<&'static Strategy>, pictures: Vec<&'static Fixture>, plan: &Plan) -> Pipeline {
+        let rows = strategies
+            .iter()
+            .map(|s| {
+                pictures
+                    .iter()
+                    .map(|p| {
+                        let speed = plan.speed_pictures.contains(&p.label().as_str());
+                        let mut row = PipelineRow::new(s.name, p, speed && p.small());
+                        if !p.small() && s.name != "prod" && s.as_prod_when_large() {
+                            row.cell = Cell::skip("a region this large is read as prod reads it, whatever the strategy");
+                        } else if !speed && !plan.every_picture {
+                            row.cell = Cell::skip("a quick run reads only its few pictures");
+                        }
+                        row
+                    })
+                    .collect()
+            })
+            .collect();
+        Pipeline { strategies, pictures, rows }
+    }
+
+    /// Leaves out every row of strategy `s`, with the reason.
+    pub fn skip(&mut self, s: usize, why: &str) {
+        for row in &mut self.rows[s] {
+            if row.cell.skipped.is_none() {
+                row.cell = Cell::skip(why);
+            }
+        }
+    }
+
+    pub fn count(&self) -> usize {
+        self.strategies.len() * self.pictures.len()
+    }
+
+    /// The strategy and the picture of row `k`.
+    pub fn at(&self, k: usize) -> (usize, usize) {
+        (k / self.pictures.len().max(1), k % self.pictures.len().max(1))
+    }
+
+    fn prod(&self, p: usize) -> Option<&PipelineRow> {
+        self.strategies.iter().position(|s| s.name == "prod").map(|i| &self.rows[i][p])
+    }
+
+    /// Strategy `s` against prod on picture `p`, when both were read for speed.
+    pub fn verdict(&self, s: usize, p: usize) -> Option<Verdict> {
+        if self.strategies[s].name == "prod" {
+            return None;
+        }
+        let (prod, row) = (self.prod(p)?, &self.rows[s][p]);
+        let measured = |r: &PipelineRow| r.cell.skipped.is_none() && !r.cell.warm.is_empty();
+        if !row.speed || !measured(row) || !measured(prod) {
+            return None;
+        }
+        Some(verdict(&prod.cell.warm_ms(), &row.cell.warm_ms()))
+    }
+
+    pub fn verdict_line(&self, s: usize, p: usize) -> Option<String> {
+        let v = self.verdict(s, p)?;
+        let prod = self.prod(p)?.cell.stats()?;
+        Some(format!(
+            "pipeline | verdict | {} | {} | against prod {} ms: {}",
+            self.strategies[s].name,
+            self.pictures[p].label(),
+            ms(prod.median),
+            verdict_text(v)
+        ))
+    }
+
+    /// One row a picture, one column a strategy: the median of a whole read, and what was not as
+    /// it should be — "faster" or "slower" than prod by the rule, "wrong", "invented", "refused".
+    /// "-" for a row not measured.
+    pub fn table(&self) -> String {
+        let mut t = String::from("| picture |");
+        for s in &self.strategies {
+            t.push_str(&format!(" {} |", s.name));
+        }
+        t.push_str("\n|---|");
+        for _ in &self.strategies {
+            t.push_str("---:|");
+        }
+        t.push('\n');
+        for (p, picture) in self.pictures.iter().enumerate() {
+            let mark = if picture.holds_nothing() {
+                " (no text)"
+            } else if picture.accept.contains(&"") {
+                " (or nothing)"
+            } else {
+                ""
+            };
+            t.push_str(&format!("| {}{mark} |", picture.label()));
+            for s in 0..self.strategies.len() {
+                let row = &self.rows[s][p];
+                let cell = match (row.cell.skipped.as_ref(), row.cell.stats()) {
+                    (Some(_), _) => "-".to_string(),
+                    (None, None) => "refused".to_string(),
+                    (None, Some(st)) => {
+                        let mark = match self.verdict(s, p) {
+                            Some(Verdict::Faster(..)) => " faster",
+                            Some(Verdict::Slower(..)) => " slower",
+                            _ => "",
+                        };
+                        format!("{}{mark}{}", ms(st.median), accuracy_mark(&row.cell.accuracy(picture.accept)))
+                    }
+                };
+                t.push_str(&format!(" {cell} |"));
+            }
+            t.push('\n');
+        }
+        t
+    }
+
+    /// What each strategy came to over every picture, for the closing line.
+    pub fn outcomes(&self) -> Vec<Outcome> {
+        let prod = self.strategies.iter().position(|s| s.name == "prod");
+        (0..self.strategies.len())
+            .map(|s| {
+                let mut o = Outcome { name: self.strategies[s].name.to_string(), ..Outcome::default() };
+                let rows = &self.rows[s];
+                if rows.iter().all(|r| r.cell.skipped.is_some()) {
+                    // The strategy's own reason, which a small picture's row carries; a large
+                    // one's says only that prod reads it.
+                    let small = rows.iter().zip(&self.pictures).find(|(_, p)| p.small()).map(|(r, _)| r);
+                    o.skipped = small.or(rows.first()).and_then(|r| r.cell.skipped.clone()).or(Some("no picture".into()));
+                    return o;
+                }
+                for (p, row) in rows.iter().enumerate() {
+                    let picture = self.pictures[p];
+                    let prod_row = prod.map(|i| &self.rows[i][p]).filter(|r| r.cell.skipped.is_none());
+                    // A row this strategy leaves to prod is prod's: read as prod reads it.
+                    let row = if row.cell.skipped.is_some() && !picture.small() { prod_row.unwrap_or(row) } else { row };
+                    if row.cell.skipped.is_some() {
+                        continue;
+                    }
+                    let acc = row.cell.accuracy(picture.accept);
+                    let prod_right = prod_row.is_some_and(|r| r.cell.accuracy(picture.accept).right());
+                    let label = picture.label();
+                    // Judged exactly, as prod is. Text on a picture without any is invented; a
+                    // picture on which nothing is right and that was only refused said nothing,
+                    // which is no mistake; anything else not right is a misreading, on every
+                    // picture with text, whether it must be read or may be read as nothing.
+                    if !acc.right() {
+                        let entry = (label.clone(), !prod_right);
+                        if matches!(acc, Accuracy::Wrong { invented: true, .. }) {
+                            o.invented.push(entry);
+                        } else if acc.refused_only() && picture.accept.contains(&"") {
+                            o.refused.push(entry);
+                        } else {
+                            o.misread.push(entry);
+                        }
+                    }
+                    match self.verdict(s, p) {
+                        Some(Verdict::Faster(..)) => o.faster.push(label.clone()),
+                        Some(Verdict::Slower(..)) => o.slower.push(label.clone()),
+                        _ => {}
+                    }
+                    if let Some(v) = self.verdict(s, p) {
+                        if !matches!(v, Verdict::TooFew) {
+                            o.judged += 1;
+                            o.sum_ms += row.cell.stats().map_or(0.0, |st| st.median);
+                            o.prod_sum_ms += prod_row.and_then(|r| r.cell.stats()).map_or(0.0, |st| st.median);
+                        }
+                    }
+                }
+                o
+            })
+            .collect()
+    }
+
+    /// One row a strategy: its role, what it read right, and its verdicts.
+    pub fn summary_table(&self) -> String {
+        let mut t = String::from(
+            "| strategy | role | pictures read wrong | invented | refused | clearly faster on | clearly slower on | \
+             medians over the judged pictures, ms (prod's) |\n|---|---|---|---|---|---|---|---|\n",
+        );
+        let names = |v: &[(String, bool)]| {
+            if v.is_empty() {
+                "none".to_string()
+            } else {
+                let shown: Vec<String> =
+                    v.iter().map(|(l, prod_too)| format!("{l}{}", if *prod_too { " (prod too)" } else { "" })).collect();
+                shown.join(", ")
+            }
+        };
+        for o in self.outcomes() {
+            let role = role(&o.name).word();
+            if let Some(why) = &o.skipped {
+                t.push_str(&format!("| {} | {role} | not measured: {why} | | | | | |\n", o.name));
+                continue;
+            }
+            t.push_str(&format!(
+                "| {} | {role} | {} | {} | {} | {} | {} | {} |\n",
+                o.name,
+                names(&o.misread),
+                names(&o.invented),
+                names(&o.refused),
+                if o.faster.is_empty() { "none".into() } else { o.faster.join(", ") },
+                if o.slower.is_empty() { "none".into() } else { o.slower.join(", ") },
+                if o.judged == 0 { "n/a".to_string() } else { format!("{} ({})", ms(o.sum_ms), ms(o.prod_sum_ms)) }
+            ));
+        }
+        t
+    }
+
+    /// What today's ladder came to, in one line whatever the run's verdicts: the pictures `prod`
+    /// read wrong, the text it invented, the refusals — the line CI warns by. `None` when `prod`
+    /// was not measured.
+    pub fn prod_line(&self) -> Option<String> {
+        let outcomes = self.outcomes();
+        let prod = outcomes.iter().find(|o| o.name == "prod" && o.skipped.is_none())?;
+        let labels = |v: &[(String, bool)]| v.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>().join(", ");
+        let mut parts = Vec::new();
+        if !prod.misread.is_empty() {
+            parts.push(format!("reads wrong: {}", labels(&prod.misread)));
+        }
+        if !prod.invented.is_empty() {
+            parts.push(format!("invents text on: {}", labels(&prod.invented)));
+        }
+        if !prod.refused.is_empty() {
+            parts.push(format!("was refused on: {}", labels(&prod.refused)));
+        }
+        Some(if parts.is_empty() {
+            "pipeline | today's ladder (prod) reads every picture it read right".to_string()
+        } else {
+            format!("pipeline | today's ladder (prod) {}", parts.join("; "))
+        })
+    }
+}
+
+/// What one strategy came to over every picture, as the closing line weighs it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Outcome {
+    pub name: String,
+    /// Why it was not measured at all.
+    pub skipped: Option<String>,
+    /// Pictures with text that it did not read right on every read — those that must be read, and
+    /// those on which nothing is right too — each with whether prod did not either.
+    pub misread: Vec<(String, bool)>,
+    /// Pictures without text on which it read text, each with whether prod did too.
+    pub invented: Vec<(String, bool)>,
+    /// Pictures on which nothing is right and which Vision only refused: nothing was said, so no
+    /// mistake, but said apart.
+    pub refused: Vec<(String, bool)>,
+    /// Where it was clearly faster than prod, and clearly slower.
+    pub faster: Vec<String>,
+    pub slower: Vec<String>,
+    /// The pictures with a verdict, and its medians and prod's over them.
+    pub judged: usize,
+    pub sum_ms: f64,
+    pub prod_sum_ms: f64,
+}
+
+/// The rule the closing line names a strategy by, printed with it.
+pub const CLOSING_RULE: &str = "a candidate way of reading is named when it reads every picture with text right on \
+                                every read (exactly, as prod is judged; nothing counts as right where a picture \
+                                accepts it), reads nothing on every picture without text, is clearly faster than \
+                                prod on at least one picture and clearly slower on none (the engine's rule, over \
+                                the pictures read for speed); the cheapest is the one whose medians over those \
+                                pictures sum to the least. One that is faster but not right is said, never named, \
+                                and so is a comparison that would pass: those speak values nothing checked, or \
+                                change more than the plan's ways would";
+
+/// The closing lines of a run: the cheapest candidate ([`Role::Candidate`]) that reads right and
+/// saves time; the strategies that are faster but not right, a misreading prod shares marked so;
+/// when prod itself reads a picture wrong or invents on one without text, the same choice with
+/// those pictures set aside; and the comparisons that would pass the rule, which are said and
+/// never named. `noisy`: the engine's control came out "clearly" different, and no verdict of the
+/// run counts.
+pub fn closing_lines(outcomes: &[Outcome], noisy: bool) -> Vec<String> {
+    let head = "closing";
+    if noisy {
+        return vec![format!(
+            "{head} | this run is too noisy for verdicts (prod-b, the engine's control, came out clearly different \
+             from prod): no way of reading is named"
+        )];
+    }
+    let measured: Vec<&Outcome> = outcomes.iter().filter(|o| o.skipped.is_none() && o.name != "prod").collect();
+    if measured.iter().all(|o| o.judged == 0) {
+        return vec![format!("{head} | too few reads for a verdict (as in a quick run): no way of reading is named")];
+    }
+    let pick = |relative: bool, of: Role| -> Vec<&Outcome> {
+        let counts = |v: &[(String, bool)]| v.iter().filter(|(_, prod_too)| !(relative && *prod_too)).count();
+        let mut c: Vec<&Outcome> = measured
+            .iter()
+            .copied()
+            .filter(|o| role(&o.name) == of)
+            .filter(|o| counts(&o.misread) == 0 && counts(&o.invented) == 0 && !o.faster.is_empty() && o.slower.is_empty())
+            .collect();
+        c.sort_by(|a, b| a.sum_ms.total_cmp(&b.sum_ms));
+        c
+    };
+    let said = |o: &Outcome| {
+        format!(
+            "{} (clearly faster on {} of {} pictures judged; medians {} ms against prod's {} ms over them)",
+            o.name,
+            o.faster.len(),
+            o.judged,
+            ms(o.sum_ms),
+            ms(o.prod_sum_ms)
+        )
+    };
+    let named = |c: &[&Outcome]| -> String {
+        match c.split_first() {
+            None => "none does".to_string(),
+            Some((best, [])) => said(best),
+            Some((best, rest)) => {
+                let others: Vec<&str> = rest.iter().map(|o| o.name.as_str()).collect();
+                format!("{}; the others that do, dearer: {}", said(best), others.join(", "))
+            }
+        }
+    };
+    let mut lines = vec![format!(
+        "{head} | the cheapest way of reading that reads right and saves time: {}",
+        named(&pick(false, Role::Candidate))
+    )];
+    // Each picture with "(prod too)" where prod did not read it right either.
+    let shown = |v: &[(String, bool)]| {
+        v.iter().map(|(l, prod_too)| format!("{l}{}", if *prod_too { " (prod too)" } else { "" })).collect::<Vec<_>>().join(", ")
+    };
+    let wrong: Vec<String> = measured
+        .iter()
+        .filter(|o| !o.faster.is_empty() && (!o.misread.is_empty() || !o.invented.is_empty()))
+        .map(|o| {
+            let mut why = Vec::new();
+            if !o.misread.is_empty() {
+                why.push(format!("reads {} wrong", shown(&o.misread)));
+            }
+            if !o.invented.is_empty() {
+                why.push(format!("invents text on {}", shown(&o.invented)));
+            }
+            format!("{} ({})", o.name, why.join("; "))
+        })
+        .collect();
+    if !wrong.is_empty() {
+        lines.push(format!("{head} | faster than prod but not right: {}", wrong.join(", ")));
+    }
+    let prod = outcomes.iter().find(|o| o.name == "prod");
+    let prod_wrong: Vec<&str> = prod
+        .map(|p| p.misread.iter().chain(&p.invented).map(|(l, _)| l.as_str()).collect())
+        .unwrap_or_default();
+    if !prod_wrong.is_empty() {
+        lines.push(format!(
+            "{head} | prod itself does not read {} right; set aside, the cheapest that reads the rest right and \
+             saves time: {}",
+            prod_wrong.join(", "),
+            named(&pick(true, Role::Candidate))
+        ));
+    }
+    // By the same rule as the line before it, with prod's own misses set aside when it has any.
+    let compared = pick(!prod_wrong.is_empty(), Role::Comparison);
+    if !compared.is_empty() {
+        let these: Vec<String> = compared.iter().map(|o| said(o)).collect();
+        lines.push(format!(
+            "{head} | for comparison only, never a way the application may read: {} would also pass the rule",
+            these.join("; ")
+        ));
+    }
+    lines
+}
+
+// ── The neural recogniser alone: `--paddle` ──────────────────────────────────────────────────
+
+/// The words of a line, as column spans `(first, last)` of `ink` (one flag a pixel column: any
+/// ink in it). Ink runs closer than `min_gap` empty columns are one word: the gaps inside a word
+/// are a pixel or two, the space between words more.
+pub fn word_spans(ink: &[bool], min_gap: usize) -> Vec<(usize, usize)> {
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut x = 0;
+    while x < ink.len() {
+        if !ink[x] {
+            x += 1;
+            continue;
+        }
+        let start = x;
+        while x < ink.len() && ink[x] {
+            x += 1;
+        }
+        match spans.last_mut() {
+            Some(last) if start - last.1 - 1 < min_gap => last.1 = x - 1,
+            _ => spans.push((start, x - 1)),
+        }
+    }
+    spans
+}
+
+/// The `words` words of a line, by [`word_spans`] with the gap that makes exactly that many:
+/// the narrowest of the `words − 1` widest gaps between ink runs, provided it is wider than every
+/// other gap. `None` when the ink does not split that way — too few runs, or a space no wider
+/// than a gap inside a word.
+pub fn split_words(ink: &[bool], words: usize) -> Option<Vec<(usize, usize)>> {
+    let runs = word_spans(ink, 1);
+    if words == 0 || runs.len() < words {
+        return None;
+    }
+    let mut gaps: Vec<usize> = runs.windows(2).map(|r| r[1].0 - r[0].1 - 1).collect();
+    gaps.sort_unstable_by(|a, b| b.cmp(a));
+    if words == 1 {
+        return Some(word_spans(ink, gaps.first().map_or(1, |g| g + 1)));
+    }
+    let space = gaps[words - 2];
+    if gaps.get(words - 1).is_some_and(|inside| *inside >= space) {
+        return None;
+    }
+    Some(word_spans(ink, space)).filter(|s| s.len() == words)
+}
+
+/// What the width measurement suggests for `paddle_pre::MAX_ASPECT`, from cuts of a line: each
+/// the ink's width over its height, and whether it was read right (loosely, as `same` would).
+#[derive(Clone, Debug, PartialEq)]
+pub enum AspectAdvice {
+    /// No cut was read wrong; the widest measured.
+    NoMiss { widest: f32, cuts: usize },
+    /// Every cut up to `widest_right` was read right; the narrowest misread was `first_miss` wide.
+    /// `suggest` is `widest_right` rounded down to a whole number.
+    Below { suggest: f32, widest_right: f32, first_miss: f32, right_below: usize },
+    /// Even the narrowest misread was narrower than every right one.
+    NothingRightBelow { first_miss: f32 },
+}
+
+pub fn aspect_advice(cuts: &[(f32, bool)]) -> AspectAdvice {
+    let first_miss = cuts.iter().filter(|c| !c.1).map(|c| c.0).fold(f32::INFINITY, f32::min);
+    if first_miss.is_infinite() {
+        let widest = cuts.iter().map(|c| c.0).fold(0.0, f32::max);
+        return AspectAdvice::NoMiss { widest, cuts: cuts.len() };
+    }
+    let below: Vec<f32> = cuts.iter().filter(|c| c.1 && c.0 < first_miss).map(|c| c.0).collect();
+    match below.iter().copied().reduce(f32::max) {
+        Some(widest_right) => {
+            AspectAdvice::Below { suggest: widest_right.floor(), widest_right, first_miss, right_below: below.len() }
+        }
+        None => AspectAdvice::NothingRightBelow { first_miss },
+    }
+}
+
+impl AspectAdvice {
+    pub fn line(&self) -> String {
+        match self {
+            AspectAdvice::NoMiss { widest, cuts } => format!(
+                "width | all {cuts} cuts were read right, the widest {widest:.1} times as wide as tall: the limit lies \
+                 beyond what this line can show; MAX_ASPECT up to {:.0} is measured",
+                widest.floor()
             ),
-            _ => format!("{head} | {acc}"),
+            AspectAdvice::Below { suggest, widest_right, first_miss, right_below } => format!(
+                "width | every cut up to {widest_right:.1} times as wide as tall was read right ({right_below} cuts), the \
+                 narrowest misread was {first_miss:.1}: MAX_ASPECT suggested {suggest:.0}"
+            ),
+            AspectAdvice::NothingRightBelow { first_miss } => format!(
+                "width | a cut only {first_miss:.1} times as wide as tall was misread, narrower than every right one: \
+                 no width limit can be read from this line; see the cuts above"
+            ),
         }
     }
 }
 
-pub fn pipeline_table(rows: &[PipelineRow]) -> String {
-    let mut t = String::from(
-        "| request | picture | median ms | min to max ms | Vision passes a read | read right |\n|---|---|---:|---:|---:|---|\n",
-    );
-    for r in rows {
-        let (median, range) = r
-            .cell
-            .stats()
-            .map(|s| (ms(s.median), format!("{} to {}", ms(s.min), ms(s.max))))
-            .unwrap_or(("n/a".into(), "n/a".into()));
-        let passes = r.cell.passes().map(|p| format!("{p:.1}")).unwrap_or_else(|| "n/a".into());
-        let right = match r.cell.accuracy(r.picture.expected) {
-            Accuracy::Right => "yes".to_string(),
-            Accuracy::Wrong { got, .. } => format!("no: \"{got}\""),
-            Accuracy::Refused => "refused".to_string(),
-            Accuracy::Nothing => "n/a".to_string(),
-        };
-        t.push_str(&format!("| {} | {} | {median} | {range} | {passes} | {right} |\n", r.request, r.picture.label()));
+/// What the scores say about a minimum: the scores of right readings (text only; a right
+/// "nothing" has no score), of readings invented on pictures that hold no text, and of the
+/// other wrong readings.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ScoreAdvice {
+    /// Nothing was invented: no minimum is needed.
+    NoneNeeded { lowest_right: Option<f32> },
+    /// Every invented reading scored below every right one: `at`, halfway, separates them, and
+    /// would also drop `wrong_dropped` of `wrong` other wrong readings.
+    Threshold { at: f32, highest_invented: f32, lowest_right: f32, wrong_dropped: usize, wrong: usize },
+    /// An invented reading scored at least as high as a right one: no minimum separates them.
+    Inseparable { highest_invented: f32, lowest_right: f32 },
+}
+
+pub fn score_advice(right: &[f32], invented: &[f32], wrong: &[f32]) -> ScoreAdvice {
+    let finite = |v: &[f32]| v.iter().copied().filter(|s| s.is_finite()).collect::<Vec<f32>>();
+    let (right, invented, wrong) = (finite(right), finite(invented), finite(wrong));
+    let lowest_right = right.iter().copied().reduce(f32::min);
+    let Some(highest_invented) = invented.iter().copied().reduce(f32::max) else {
+        return ScoreAdvice::NoneNeeded { lowest_right };
+    };
+    match lowest_right {
+        Some(lowest_right) if highest_invented < lowest_right => {
+            let at = (highest_invented + lowest_right) / 2.0;
+            ScoreAdvice::Threshold {
+                at,
+                highest_invented,
+                lowest_right,
+                wrong_dropped: wrong.iter().filter(|s| **s < at).count(),
+                wrong: wrong.len(),
+            }
+        }
+        // Nothing right to keep: any minimum above the inventions would do, and none can be
+        // checked against a right reading.
+        None => ScoreAdvice::Inseparable { highest_invented, lowest_right: f32::NAN },
+        Some(lowest_right) => ScoreAdvice::Inseparable { highest_invented, lowest_right },
     }
-    t
+}
+
+impl ScoreAdvice {
+    pub fn line(&self) -> String {
+        match self {
+            ScoreAdvice::NoneNeeded { lowest_right } => format!(
+                "score | no reading was invented on a picture without text: no minimum score is needed{}",
+                lowest_right.map(|s| format!(" (the lowest score of a right reading was {s:.3})")).unwrap_or_default()
+            ),
+            ScoreAdvice::Threshold { at, highest_invented, lowest_right, wrong_dropped, wrong } => format!(
+                "score | invented readings scored at most {highest_invented:.3}, right ones at least {lowest_right:.3}: a \
+                 minimum score of {at:.3} separates them, and would also drop {wrong_dropped} of {wrong} other wrong readings"
+            ),
+            ScoreAdvice::Inseparable { highest_invented, lowest_right } => format!(
+                "score | invented readings scored up to {highest_invented:.3}, right ones as low as {lowest_right:.3}: no \
+                 minimum score separates them"
+            ),
+        }
+    }
+}
+
+/// One crop setting of the neural recogniser over the 2x pictures.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SettingResult {
+    pub name: String,
+    /// Pictures with text read right exactly, and loosely, of `of`.
+    pub right: usize,
+    pub loose: usize,
+    pub of: usize,
+    /// Pictures without text read as something, of `nothing_of`.
+    pub invented: usize,
+    pub nothing_of: usize,
+}
+
+/// The setting that reads the most pictures right (loosely), then invents the least, then comes
+/// first in `results` — which the caller orders by preference.
+pub fn best_setting(results: &[SettingResult]) -> Option<usize> {
+    (0..results.len()).min_by_key(|&i| (std::cmp::Reverse(results[i].loose), results[i].invented, i))
 }
 
 // ── Children: first passes and probes ────────────────────────────────────────────────────────
@@ -1075,6 +2381,78 @@ pub fn parse_child(output: &str) -> Option<ChildResult> {
         (w, r) => Some((w.parse::<f64>().ok()?, r == "1")),
     };
     Some(ChildResult { warmup, first: num("first")?, second: num("second")? })
+}
+
+/// What a neural recogniser's first-pass child measured, in milliseconds and megabytes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PaddleChild {
+    /// What came before the first recognition: the session made (`none`), the warm-up (`warm`),
+    /// or the warm-up beside Vision's (`with-vision`).
+    pub start: f64,
+    /// Vision's word warm-up beside it (`with-vision`).
+    pub vision: Option<f64>,
+    /// The first and the second recognition of `lone-1@2x`, the content crop handed to the
+    /// recogniser's thread and waited for, as a read would.
+    pub first: f64,
+    pub second: f64,
+    /// Vision's first real pass after both warm-ups (`with-vision`).
+    pub vision_first: Option<f64>,
+    /// The process's peak resident memory before the recogniser was made and after its second
+    /// recognition.
+    pub mem_before: Option<f64>,
+    pub mem_after: Option<f64>,
+    /// Whether the first recognition read "1".
+    pub right: bool,
+}
+
+/// A neural recogniser's first-pass child: what it measured, or why it could not.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PaddleFirst {
+    Ran(PaddleChild),
+    No(String),
+}
+
+pub fn paddle_child_line(r: &PaddleFirst) -> String {
+    let opt = |v: Option<f64>| v.map(|v| format!("{v:.1}")).unwrap_or_else(|| "-".to_string());
+    match r {
+        PaddleFirst::Ran(c) => format!(
+            "{CHILD_TAG} paddle start={:.1} vision={} first={:.1} second={:.1} vfirst={} mem0={} mem1={} right={}",
+            c.start,
+            opt(c.vision),
+            c.first,
+            c.second,
+            opt(c.vision_first),
+            opt(c.mem_before),
+            opt(c.mem_after),
+            u8::from(c.right)
+        ),
+        PaddleFirst::No(why) => format!("{CHILD_TAG} paddle no {}", why.replace('\n', " ")),
+    }
+}
+
+pub fn parse_paddle_child(output: &str) -> Option<PaddleFirst> {
+    let rest = tagged(output)?.strip_prefix("paddle ")?;
+    if let Some(why) = rest.strip_prefix("no ") {
+        return Some(PaddleFirst::No(why.trim().to_string()));
+    }
+    let field = |key: &str| rest.split_whitespace().find_map(|kv| kv.strip_prefix(key).and_then(|v| v.strip_prefix('=')));
+    let num = |key: &str| field(key).and_then(|v| v.parse::<f64>().ok());
+    let opt = |key: &str| -> Option<Option<f64>> {
+        match field(key)? {
+            "-" => Some(None),
+            v => v.parse::<f64>().ok().map(Some),
+        }
+    };
+    Some(PaddleFirst::Ran(PaddleChild {
+        start: num("start")?,
+        vision: opt("vision")?,
+        first: num("first")?,
+        second: num("second")?,
+        vision_first: opt("vfirst")?,
+        mem_before: opt("mem0")?,
+        mem_after: opt("mem1")?,
+        right: field("right")? == "1",
+    }))
 }
 
 /// What a probe child found: the variant ran one pass, and pinned these stages; or it could not
@@ -1191,7 +2569,8 @@ pub fn append_summary(path: &Path, markdown: &str) -> Result<(), String> {
     f.write_all(markdown.as_bytes()).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
-/// What the subcommand does where there is no Vision.
+/// What the subcommand does where there is no Vision: `--paddle` on Windows, the usage, or
+/// that it runs on macOS.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn elsewhere(args: &[String]) -> i32 {
     match parse(args) {
@@ -1199,6 +2578,8 @@ pub fn elsewhere(args: &[String]) -> i32 {
             println!("{USAGE}");
             0
         }
+        #[cfg(windows)]
+        Ok(o) if o.paddle || o.paddle_probe => crate::backend::ocr_bench_paddle(&o),
         Ok(_) => {
             println!(
                 "OCR BENCH: ocr-bench measures Apple Vision and runs on macOS only; this is {}.",
@@ -1221,13 +2602,41 @@ mod tests {
         Sample { ms, text: Some(text.to_string()), passes: 1, skipped: false }
     }
 
+    /// `crates/host/bench-data/ocr/real`, from either crate that compiles this file: both
+    /// manifests sit beside `host`.
+    fn real_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../host/bench-data/ocr/real")
+    }
+
     #[test]
     fn every_picture_is_the_size_its_entry_says() {
-        assert_eq!(FIXTURES.len(), 10);
-        for f in FIXTURES {
+        assert_eq!(FIXTURES.len(), 28);
+        // The real ones too, through the manifest that `--pictures` reads (the loader checks
+        // each PNG's size against its entry; this checks the loader ran over every file).
+        let real = load_pictures(&real_dir()).expect("the committed manifest");
+        let files = std::fs::read_dir(real_dir()).unwrap().filter(|e| {
+            e.as_ref().is_ok_and(|e| e.path().extension().is_some_and(|x| x == "png"))
+        });
+        assert_eq!(files.count(), real.len(), "every PNG in the folder has an entry");
+        assert!(real.iter().all(|f| f.origin != Origin::Drawn));
+        for f in FIXTURES.iter().chain(real.iter().copied()) {
             let (w, h) = f.px();
             assert_eq!(png_size(f.png), Some((w as u32, h as u32)), "{}", f.label());
-            assert!(!f.expected.is_empty(), "{}", f.label());
+            assert!(!f.accept.is_empty(), "{}", f.label());
+            // Nothing is an answer only where reading is not required.
+            assert!(!(f.must_read && f.accept.iter().any(|a| a.is_empty())), "{}", f.label());
+            assert_eq!(f.holds_nothing(), f.accept == [""], "{}", f.label());
+        }
+        // The drawn pictures: text must be read, only the none- ones hold none, and the clipped
+        // label's half a word may be read or not.
+        for f in FIXTURES {
+            assert_eq!(f.origin, Origin::Drawn);
+            assert_eq!(f.holds_nothing(), f.name.starts_with("none-"), "{}", f.label());
+            let optional = f.name == "clipped-label";
+            assert_eq!(f.must_read, !f.holds_nothing() && !optional, "{}", f.label());
+            if optional {
+                assert_eq!(f.accept, ["Velocity", ""], "{}", f.label());
+            }
         }
         // Each layout at both scales, and the labels unique.
         let mut labels: Vec<String> = FIXTURES.iter().map(Fixture::label).collect();
@@ -1242,6 +2651,65 @@ mod tests {
                 assert!(fixture(p).is_some(), "{p}");
             }
         }
+    }
+
+    /// Every drawn picture has its row in the neural recogniser's golden test, which pins what
+    /// Windows reads (paddle_pre.rs): a new drawing is not left out of it by accident.
+    #[test]
+    fn every_drawn_picture_has_a_golden_row() {
+        let golden = include_str!("paddle_pre.rs");
+        for f in FIXTURES {
+            assert!(golden.contains(&format!("drawn!(\"{}\"", f.label())), "{} has no golden row", f.label());
+        }
+    }
+
+    /// A manifest is refused, with the entry and the reason, for each way it can be wrong.
+    #[test]
+    fn a_wrong_manifest_is_refused_and_says_why() {
+        let dir = std::env::temp_dir().join(format!("ocr-bench-manifest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A real 30x30 picture to point at.
+        let png = std::fs::read(real_dir().join("sfz-polyphony@1x.png")).unwrap();
+        std::fs::write(dir.join("p@1x.png"), &png).unwrap();
+        let entry = |extra: &str| {
+            format!(
+                "[[picture]]\nname = \"p\"\nscale = 1\nw_pt = 30\nh_pt = 30\naccept = [\"64\"]\nmust_read = true\n\
+                 platform = \"windows\"\n{extra}"
+            )
+        };
+        let load = |text: &str| {
+            std::fs::write(dir.join("manifest.toml"), text).unwrap();
+            load_pictures(&dir)
+        };
+        let ok = load(&entry("source = \"a shot\"\nchecked = \"by eye\"\n")).unwrap();
+        assert_eq!(ok.len(), 1);
+        assert_eq!(ok[0].label(), "p@1x");
+        assert_eq!(ok[0].accept, ["64"]);
+        assert_eq!(ok[0].origin, Origin::Captured { platform: "windows" });
+        let refused = |text: &str, says: &str| {
+            let e = load(text).unwrap_err();
+            assert!(e.contains(says), "{e}");
+        };
+        refused(&entry("colour = 3\n"), "unknown key 'colour'");
+        refused(&entry("").replace("w_pt = 30", "w_pt = 31"), "is 30x30 pixels, the entry says 31x30");
+        refused(&entry("").replace("accept = [\"64\"]", "accept = [\"64\", \"\"]"), "cannot accept nothing");
+        refused(&entry("").replace("accept = [\"64\"]", "accept = []"), "'accept'");
+        refused(&entry("").replace("\"windows\"", "\"linux\""), "platform 'linux'");
+        refused(&entry("").replace("name = \"p\"", "name = \"../p\""), "is not letters");
+        refused(&entry("").replace("name = \"p\"", "name = \"q\""), "cannot read");
+        refused(&entry("").replace("scale = 1", "scale = 0"), "'scale'");
+        refused(&format!("{}{}", entry(""), entry("")), "taken already");
+        refused("title = 1\n", "no [[picture]] entries");
+        refused("[[picture]\n", "manifest.toml");
+        // A drawn picture's label cannot be taken.
+        std::fs::write(dir.join("field-64@1x.png"), FIXTURES[0].png).unwrap();
+        refused(
+            &entry("").replace("name = \"p\"", "name = \"field-64\"").replace("w_pt = 30\nh_pt = 30", "w_pt = 40\nh_pt = 20"),
+            "the label field-64@1x is taken",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(load_pictures(&dir).unwrap_err().contains("cannot read"));
     }
 
     #[test]
@@ -1268,7 +2736,49 @@ mod tests {
         assert_eq!(names.len(), VARIANTS.len());
         // Only what has never run on a Mac is tried in a process of its own first.
         let probed: Vec<&str> = VARIANTS.iter().filter(|v| v.tweak.probed()).map(|v| v.name).collect();
-        assert_eq!(probed, ["rev2", "rev3", "cpu", "gpu", "ane"]);
+        assert_eq!(probed, ["rev2", "rev3", "cpu", "gpu", "ane", "paddle-raw", "paddle-crop"]);
+    }
+
+    /// prod is today's ladder and comes first; every other strategy differs from it; the names are
+    /// unique; and what each needs — a revision, the neural recogniser — is what its shape says.
+    #[test]
+    fn the_strategies() {
+        assert_eq!(STRATEGIES[0].name, "prod");
+        assert_eq!(STRATEGIES[0].shape, Shape::TODAY);
+        assert!(STRATEGIES[0].revision().is_none() && !STRATEGIES[0].paddle());
+        let mut names: Vec<&str> = STRATEGIES.iter().map(|s| s.name).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), STRATEGIES.len());
+        for s in &STRATEGIES[1..] {
+            assert!(s.shape != Shape::TODAY || s.revision_all.is_some(), "{} is prod again", s.name);
+        }
+        let by = |n: &str| &STRATEGIES[strategy(n).unwrap()];
+        assert_eq!(by("rev2").revision(), Some(2));
+        assert_eq!(by("rev2-tight").revision(), Some(2));
+        assert_eq!(by("rev3>rev2").revision(), Some(2), "its second pass asks for revision 2");
+        assert!(!by("rev2").as_prod_when_large() && by("fast=paddle").as_prod_when_large());
+        let with_paddle: Vec<&str> = STRATEGIES.iter().filter(|s| s.paddle()).map(|s| s.name).collect();
+        assert_eq!(
+            with_paddle,
+            ["paddle", "acc+paddle", "acc+paddle+rest", "fast=paddle-checked", "fast=paddle-strict", "fast=paddle"]
+        );
+        // The closing line names candidates only: c1's three and c2's three.
+        let candidates: Vec<&str> = STRATEGIES.iter().filter(|s| s.role == Role::Candidate).map(|s| s.name).collect();
+        assert_eq!(
+            candidates,
+            ["acc+paddle+rest", "rev2-tight", "rev3>rev2", "fast=paddle-checked", "fast=paddle-strict", "fast=paddle"]
+        );
+        assert_eq!(role("prod"), Role::Today);
+        assert_eq!(role("fast>acc"), Role::Comparison, "unchecked fast text is never a way to read");
+        assert_eq!(role("paddle"), Role::Comparison);
+        assert_eq!(role("nobody"), Role::Comparison);
+        assert_eq!(by("fast=paddle-checked").shape.paddle, PaddleUse::AgreeChecked);
+        // c1's Windows rule asks at low priority, c2 at high.
+        assert!(!by("acc+paddle+rest").shape.paddle.urgent() && by("fast=paddle").shape.paddle.urgent());
+        assert!(!by("acc+paddle").shape.rest && by("acc+paddle+rest").shape.rest);
+        assert_eq!(by("fast>acc").shape.first, Level::Fast);
+        assert!(!by("fast>acc").paddle());
     }
 
     #[test]
@@ -1291,29 +2801,52 @@ mod tests {
         assert!(parse(&a(&["--child", "probe:soup"])).is_err());
         assert!(parse(&a(&["--out"])).is_err());
         assert!(parse(&a(&["--fast"])).is_err());
+        assert!(parse(&a(&["--paddle"])).unwrap().paddle);
+        assert!(parse(&a(&["--paddle-probe"])).unwrap().paddle_probe);
+        let dir = real_dir().to_string_lossy().into_owned();
+        let with = parse(&a(&["--pictures", &dir])).unwrap();
+        assert!(!with.pictures.is_empty());
+        assert_eq!(all_pictures(&with).len(), FIXTURES.len() + with.pictures.len());
+        assert!(parse(&a(&["--pictures", &dir, "--pictures", &dir])).unwrap_err().contains("once"));
+        assert!(parse(&a(&["--pictures", "no such folder"])).unwrap_err().contains("cannot read"));
+        assert!(parse(&a(&["--pictures"])).is_err());
         assert!(parse(&a(&["-h"])).unwrap().help);
         // What the parent passes is what the child reads.
-        for c in [Child::FirstPass(Warmup::Nothing), Child::Probe(variant("rev2").unwrap())] {
-            assert_eq!(Child::parse(&c.arg()), Some(c));
+        for c in first_roles(0).into_iter().chain([Child::Probe(variant("rev2").unwrap()), Child::Probe(variant("paddle-crop").unwrap())]) {
+            assert_eq!(Child::parse(&c.arg()), Some(c), "{}", c.arg());
         }
+        assert!(parse(&a(&["--child", "paddle-first:cold"])).is_err());
     }
 
     #[test]
     fn the_plans() {
         let full = Plan::for_mode(false, false);
-        assert_eq!(full.idle_secs(), 84);
+        assert_eq!(full.idle_secs(), 168);
         let quick = Plan::for_mode(true, false);
-        assert_eq!(quick.idle_secs(), 24);
-        assert_eq!(Plan::for_mode(false, true).idle_secs(), 84 + 2160);
+        assert_eq!(quick.idle_secs(), 48);
+        assert_eq!(Plan::for_mode(false, true).idle_secs(), 168 + 2160);
         for plan in [&full, &quick, &Plan::for_mode(false, true)] {
-            // Every pause once on the thread that read before and once on a fresh one.
-            let mut known: Vec<u64> = plan.idle.iter().filter(|i| !i.fresh).map(|i| i.secs).collect();
-            let mut fresh: Vec<u64> = plan.idle.iter().filter(|i| i.fresh).map(|i| i.secs).collect();
-            known.sort();
-            fresh.sort();
-            assert_eq!(known, fresh);
+            // Every accurate pause once on the thread that read before and once on a fresh one,
+            // and the fast level and the neural recogniser after the same lengths.
+            let of = |e: IdleEngine, fresh: bool| {
+                let mut v: Vec<u64> = plan.idle.iter().filter(|i| i.engine == e && i.fresh == fresh).map(|i| i.secs).collect();
+                v.sort();
+                v
+            };
+            assert_eq!(of(IdleEngine::Accurate, false), of(IdleEngine::Accurate, true));
+            assert!(of(IdleEngine::Fast, true).is_empty() && of(IdleEngine::Paddle, true).is_empty());
+            let short: Vec<u64> = of(IdleEngine::Accurate, true).into_iter().filter(|s| *s <= 30).collect();
+            assert_eq!(of(IdleEngine::Fast, false), short);
+            assert_eq!(of(IdleEngine::Paddle, false), short);
             assert!(plan.min_samples <= plan.samples);
+            // The pictures read for speed are drawn ones or the CI set's real ones.
+            let real = load_pictures(&real_dir()).unwrap();
+            for p in plan.speed_pictures {
+                assert!(fixture(p).is_some() || real.iter().any(|f| f.label() == *p), "{p}");
+            }
+            assert!(plan.speed_pictures.contains(&PROBE) && plan.speed_pictures.contains(&"lone-1@2x"));
         }
+        assert!(full.every_picture && !quick.every_picture);
         // The full run's cells can reach a verdict even when the cap cuts them short; quick's never.
         assert!(smallest_p(full.samples, full.min_samples) < ALPHA);
         assert!(smallest_p(quick.samples, quick.samples) >= ALPHA);
@@ -1450,16 +2983,97 @@ mod tests {
         let mut c = Cell::default();
         c.push(s(1.0, "Instrument  Polyphony\nPitchbend"));
         c.push(s(1.0, "Instrument Polyphony Pitchbend"));
-        assert_eq!(c.accuracy("Instrument Polyphony Pitchbend"), Accuracy::Right);
+        assert_eq!(c.accuracy(&["Instrument Polyphony Pitchbend"]), Accuracy::Right);
         let mut d = Cell::default();
         d.push(s(1.0, "DEF"));
         d.push(s(1.0, "def"));
         d.push(s(1.0, "def"));
-        assert_eq!(d.accuracy("DEF"), Accuracy::Wrong { right: 1, of: 3, got: "def".into() });
+        let wrong = Accuracy::Wrong { right: 1, loose: 1, of: 3, got: "def".into(), invented: false };
+        assert_eq!(d.accuracy(&["DEF"]), wrong);
+        assert!(accuracy_words(&wrong, "", None).starts_with("WRONG: read \"def\" (1 of 3 right)"));
         let mut r = Cell::default();
         r.push(Sample { ms: 1.0, text: None, passes: 1, skipped: false });
-        assert_eq!(r.accuracy("64"), Accuracy::Refused);
-        assert_eq!(Cell::default().accuracy("64"), Accuracy::Nothing);
+        assert_eq!(r.accuracy(&["64"]), Accuracy::Refused);
+        assert_eq!(Cell::default().accuracy(&["64"]), Accuracy::Nothing);
+    }
+
+    /// Any answer of the set is right; spaces and dash forms make a reading right loosely, not
+    /// exactly; on a picture without text, text is invented, and nothing is right.
+    #[test]
+    fn accuracy_judges_against_the_set() {
+        let read = |v: &[&str]| v.iter().map(|t| normalise(t)).collect::<Vec<String>>();
+        assert_eq!(judge(&read(&["-", ""]), 2, &["-", ""]), Accuracy::Right);
+        assert_eq!(judge(&read(&["0.00 dB"]), 1, &["0.00 dB"]), Accuracy::Right);
+        let loose = judge(&read(&["0.00dB", "0.00 dB", "\u{2212}0.5 dB", "0.00dB"]), 4, &["0.00 dB", "-0.5 dB"]);
+        assert_eq!(loose, Accuracy::Loosely { right: 1, of: 4, got: "0.00dB".into() });
+        assert!(loose.loosely_right() && !loose.right());
+        assert!(accuracy_words(&loose, "", None).contains("right but for spaces or dash forms (1 of 4 exactly right)"));
+        // Nothing, on a picture that holds nothing: right, and said so.
+        assert_eq!(judge(&read(&["", " "]), 2, &[""]), Accuracy::Right);
+        assert_eq!(accuracy_words(&Accuracy::Right, "", None), "read nothing, which is right");
+        // Text there is invented.
+        let invented = judge(&read(&["", "1111", "1111"]), 3, &[""]);
+        assert_eq!(invented, Accuracy::Wrong { right: 1, loose: 1, of: 3, got: "1111".into(), invented: true });
+        assert!(accuracy_words(&invented, "", None).starts_with("WRONG, INVENTED: read \"1111\""));
+        assert_eq!(accuracy_mark(&invented), ", wrong, invented");
+        // Nothing where text must be read is wrong, and not invented; a lost minus is wrong.
+        let missed = judge(&read(&["", "-12"]), 2, &["-12"]);
+        assert_eq!(missed, Accuracy::Wrong { right: 1, loose: 1, of: 2, got: String::new(), invented: false });
+        assert!(matches!(judge(&read(&["12"]), 1, &["-12"]), Accuracy::Wrong { invented: false, .. }));
+        // A refused request counts against the reads, not as a reading.
+        assert!(matches!(judge(&read(&["64"]), 2, &["64"]), Accuracy::Loosely { .. } | Accuracy::Wrong { .. }));
+        assert!(accepted("Voices:  0", &["Voices: 0"]));
+        assert!(!accepted("Voices:0", &["Voices: 0"]) && accepted_loosely("Voices:0", &["Voices: 0"]));
+        assert!(!accepted_loosely("", &["-"]));
+    }
+
+    #[test]
+    fn the_words_of_a_line_are_its_ink_runs_apart_by_a_gap() {
+        let cols = |s: &str| s.chars().map(|c| c == '#').collect::<Vec<bool>>();
+        // Two words of two letters each, one-column gaps inside them, three between.
+        assert_eq!(word_spans(&cols("..##.#...###.##.."), 2), vec![(2, 5), (9, 14)]);
+        assert_eq!(word_spans(&cols("..##.#...###.##.."), 1), vec![(2, 3), (5, 5), (9, 11), (13, 14)]);
+        assert_eq!(word_spans(&cols("#"), 3), vec![(0, 0)]);
+        assert!(word_spans(&cols("...."), 3).is_empty());
+        // The gap is found from the number of words.
+        let line = cols("##.#...###.##....#.#");
+        assert_eq!(split_words(&line, 3), Some(vec![(0, 3), (7, 12), (17, 19)]));
+        assert_eq!(split_words(&line, 1), Some(vec![(0, 19)]));
+        assert_eq!(split_words(&line, 7), None, "more words than ink runs");
+        // A space no wider than a gap inside a word cannot be told from it.
+        assert_eq!(split_words(&cols("#..#..#"), 2), None);
+        assert_eq!(split_words(&line, 0), None);
+    }
+
+    #[test]
+    fn the_width_advice() {
+        let cuts = [(4.0, true), (9.6, true), (12.5, false), (11.0, true), (20.0, false), (13.0, true)];
+        assert_eq!(
+            aspect_advice(&cuts),
+            AspectAdvice::Below { suggest: 11.0, widest_right: 11.0, first_miss: 12.5, right_below: 3 }
+        );
+        assert!(aspect_advice(&cuts).line().contains("MAX_ASPECT suggested 11"));
+        assert_eq!(aspect_advice(&[(3.0, true), (8.5, true)]), AspectAdvice::NoMiss { widest: 8.5, cuts: 2 });
+        assert_eq!(aspect_advice(&[(5.0, true), (2.0, false)]), AspectAdvice::NothingRightBelow { first_miss: 2.0 });
+    }
+
+    #[test]
+    fn the_score_advice() {
+        assert_eq!(score_advice(&[0.9, 0.95, f32::NAN], &[], &[0.2]), ScoreAdvice::NoneNeeded { lowest_right: Some(0.9) });
+        assert!(score_advice(&[], &[], &[]).line().contains("no minimum score is needed"));
+        let t = score_advice(&[0.9, 0.95], &[0.3, 0.5], &[0.4, 0.8]);
+        assert_eq!(t, ScoreAdvice::Threshold { at: 0.7, highest_invented: 0.5, lowest_right: 0.9, wrong_dropped: 1, wrong: 2 });
+        assert!(t.line().contains("a minimum score of 0.700 separates them"));
+        assert_eq!(score_advice(&[0.6], &[0.7], &[]), ScoreAdvice::Inseparable { highest_invented: 0.7, lowest_right: 0.6 });
+        assert!(matches!(score_advice(&[], &[0.7], &[]), ScoreAdvice::Inseparable { .. }));
+    }
+
+    #[test]
+    fn the_best_setting_reads_most_then_invents_least_then_comes_first() {
+        let r = |name: &str, loose, invented| SettingResult { name: name.into(), right: loose, loose, of: 10, invented, nothing_of: 5 };
+        assert_eq!(best_setting(&[r("a", 8, 0), r("b", 9, 1), r("c", 9, 0), r("d", 9, 0)]), Some(2));
+        assert_eq!(best_setting(&[r("a", 8, 0), r("b", 8, 0)]), Some(0));
+        assert_eq!(best_setting(&[]), None);
     }
 
     #[test]
@@ -1494,10 +3108,44 @@ mod tests {
     }
 
     #[test]
-    fn the_warm_ups_take_turns() {
-        assert_eq!(warmup_order(0), Warmup::ALL);
-        let firsts: Vec<Warmup> = (0..3).map(|r| warmup_order(r)[0]).collect();
-        assert_eq!(firsts, Warmup::ALL);
+    fn the_first_pass_kinds_take_turns() {
+        let all = first_roles(0);
+        assert_eq!(all.len(), 9);
+        assert_eq!(all[0], Child::FirstPass(Warmup::Bars));
+        let firsts: Vec<Child> = (0..all.len()).map(|r| first_roles(r)[0]).collect();
+        assert_eq!(firsts, all, "each kind is first once in as many rounds");
+        let mut sorted = first_roles(4).iter().map(|c| c.arg()).collect::<Vec<_>>();
+        sorted.sort();
+        let mut want = all.iter().map(|c| c.arg()).collect::<Vec<_>>();
+        want.sort();
+        assert_eq!(sorted, want, "every round has every kind");
+    }
+
+    #[test]
+    fn a_neural_childs_line_survives_the_round_trip() {
+        let full = PaddleChild {
+            start: 812.25,
+            vision: Some(1650.0),
+            first: 21.5,
+            second: 9.0,
+            vision_first: Some(431.0),
+            mem_before: Some(41.0),
+            mem_after: Some(96.5),
+            right: true,
+        };
+        let plain = PaddleChild { vision: None, vision_first: None, mem_before: None, right: false, ..full.clone() };
+        for r in [PaddleFirst::Ran(full), PaddleFirst::Ran(plain), PaddleFirst::No("ONNX Runtime did not load\nfrom x".into())] {
+            let back = parse_paddle_child(&format!("noise\n{}\n", paddle_child_line(&r))).unwrap();
+            match (&r, &back) {
+                (PaddleFirst::Ran(a), PaddleFirst::Ran(b)) => {
+                    assert!((a.start - b.start).abs() < 0.1 && (a.first - b.first).abs() < 0.1);
+                    assert_eq!((a.vision.is_some(), a.vision_first.is_some(), a.mem_before.is_some(), a.right), (b.vision.is_some(), b.vision_first.is_some(), b.mem_before.is_some(), b.right));
+                }
+                (PaddleFirst::No(_), PaddleFirst::No(why)) => assert_eq!(why, "ONNX Runtime did not load from x"),
+                _ => panic!("{r:?} came back as {back:?}"),
+            }
+        }
+        assert_eq!(parse_paddle_child(&child_line(&ChildResult { warmup: None, first: 1.0, second: 2.0 })), None);
     }
 
     #[test]
@@ -1552,6 +3200,7 @@ mod tests {
         assert!(g.verdict_line(2, 0).is_none());
         let control = g.control_line().unwrap();
         assert!(control.contains("no clear difference on 1 of 1 pictures, as it should"), "{control}");
+        assert!(!g.control_loud());
         let table = g.table();
         assert!(table.contains("| prod | 207 (202 to 212) | 1 of 1 |"), "{table}");
         assert!(table.contains("| fast | 57 (52 to 62), 0.28x faster, wrong | 0 of 1 |"), "{table}");
@@ -1569,6 +3218,7 @@ mod tests {
         let line = g.control_line().unwrap();
         assert!(line.contains("came out field-64@2x (clearly slower"), "{line}");
         assert!(line.contains("too noisy"), "{line}");
+        assert!(g.control_loud());
         let mut few = grid(&["prod", "prod-b"]);
         for i in 0..4 {
             few.cells[0][0].push(s(200.0 + i as f64, "64"));
@@ -1579,6 +3229,18 @@ mod tests {
     }
 
     #[test]
+    fn beside_against_alone() {
+        let alone = [300.0, 301.0, 302.0, 303.0, 304.0, 305.0];
+        let beside = [400.0, 401.0, 402.0, 403.0, 404.0, 405.0];
+        assert_eq!(
+            against_alone(&alone, &beside),
+            "median 402 ms against 302 ms alone: clearly slower (+33 %, p 0.002)"
+        );
+        assert!(against_alone(&alone, &alone).contains("no clear difference"));
+        assert_eq!(against_alone(&[], &beside), "not both measured");
+    }
+
+    #[test]
     fn the_switching_line() {
         assert!(switching_line(Some(220.0), Some(200.0)).contains("costs little"));
         assert!(switching_line(Some(240.0), Some(200.0)).contains("switching between variants costs time here"));
@@ -1586,17 +3248,203 @@ mod tests {
         assert!(switching_line(None, Some(200.0)).contains("not both measured"));
     }
 
+    fn note(answer: Answer, vision_ms: f64, paddle_runs: u64, agreed: Option<bool>) -> ReadNote {
+        ReadNote { passes: 1, vision_ms, paddle_runs, answer, agreed, today: false }
+    }
+
     #[test]
-    fn the_pipeline_line_names_the_passes() {
-        let mut cell = Cell::default();
-        for _ in 0..4 {
-            cell.push(Sample { ms: 450.0, text: Some("1".into()), passes: 3, skipped: false });
+    fn the_pipeline_line_names_the_passes_the_runs_and_who_answered() {
+        let mut row = PipelineRow::new("fast=paddle", fixture("lone-1@2x").unwrap(), true);
+        row.push(s(80.0, "1"), note(Answer::Paddle, 12.0, 1, Some(false)));
+        for i in 0..3 {
+            let mut sample = s(40.0 + i as f64, "1");
+            sample.passes = 1;
+            row.push(sample, note(Answer::Pass(Stage::FastFirst), 10.0, 1, Some(true)));
         }
-        let row = PipelineRow { request: "rev2", picture: fixture("lone-1@2x").unwrap(), cell };
-        assert!(row.line().starts_with("pipeline | rev2 | lone-1@2x | n 3: median 450 ms"), "{}", row.line());
-        assert!(row.line().contains("3.0 Vision passes a read"), "{}", row.line());
-        let table = pipeline_table(std::slice::from_ref(&row));
-        assert!(table.contains("| rev2 | lone-1@2x | 450 | 450 to 450 | 3.0 | yes |"), "{table}");
+        let line = row.line();
+        assert!(line.starts_with("pipeline | fast=paddle | lone-1@2x | n 3: median 41 ms"), "{line}");
+        assert!(line.contains("1.0 Vision passes and 1.0 neural runs a read"), "{line}");
+        assert!(line.contains("answered by fast first 3, Paddle 1"), "{line}");
+        assert!(line.contains("fast and the neural recogniser read the same 3 of 4 times"), "{line}");
+        assert!(line.contains("not Vision: median 31 ms"), "{line}");
+        assert!(line.contains("read \"1\" right"), "{line}");
+        // A row read for whether it reads right takes two reads.
+        let plan = Plan::for_mode(false, false);
+        let mut once = PipelineRow::new("prod", fixture("val-ct@1x").unwrap(), false);
+        assert!(once.wants_more(&plan));
+        once.push(s(400.0, "+3 ct"), note(Answer::Pass(Stage::Tight), 300.0, 0, None));
+        assert!(once.wants_more(&plan));
+        once.push(s(400.0, "+3 ct"), note(Answer::Pass(Stage::Tight), 300.0, 0, None));
+        assert!(!once.wants_more(&plan));
+        assert!(!once.line().contains("neural runs") && !once.line().contains("read the same"), "{}", once.line());
+    }
+
+    /// A pipeline over fabricated reads: which rows are measured, the table, and what each
+    /// strategy comes to.
+    #[test]
+    fn the_pipeline_grid_and_its_outcomes() {
+        let mut plan = Plan::for_mode(false, false);
+        plan.speed_pictures = &["lone-1@2x", "field-64@2x"];
+        let names = ["prod", "rev2", "fast>acc", "acc+paddle+rest"];
+        let strategies: Vec<&Strategy> = names.iter().map(|n| &STRATEGIES[strategy(n).unwrap()]).collect();
+        let pictures: Vec<&Fixture> = ["lone-1@2x", "field-64@2x", "none-bars@2x", "line@1x"].iter().map(|l| fixture(l).unwrap()).collect();
+        let mut g = Pipeline::new(strategies, pictures, &plan);
+        assert_eq!(g.count(), 16);
+        assert_eq!(g.at(5), (1, 1));
+        // A large picture: prod and rev2 read it, the others leave it to prod.
+        assert!(g.rows[0][3].cell.skipped.is_none() && g.rows[1][3].cell.skipped.is_none());
+        assert!(g.rows[2][3].cell.skipped.as_deref().unwrap().contains("as prod reads it"));
+        assert!(g.rows[0][0].speed && !g.rows[0][2].speed && !g.rows[0][3].speed);
+        g.skip(3, "the neural recogniser is not available here");
+        let read = |g: &mut Pipeline, s: usize, p: usize, base: f64, text: &str| {
+            for i in 0..7 {
+                g.rows[s][p].push(Sample { ms: base + 2.0 * i as f64, text: Some(text.into()), passes: 1, skipped: false }, note(Answer::Pass(Stage::Tight), base, 0, None));
+            }
+        };
+        // prod: lone-1 in two passes, slow; field-64 right; nothing on the bars; the line right.
+        read(&mut g, 0, 0, 900.0, "1");
+        read(&mut g, 0, 1, 450.0, "64");
+        read(&mut g, 0, 2, 900.0, "");
+        read(&mut g, 0, 3, 1400.0, "Instrument Polyphony Pitchbend Range Velocity Curve Release Time Volume");
+        // rev2: right everywhere, faster on lone-1, the same on field-64.
+        read(&mut g, 1, 0, 450.0, "1");
+        read(&mut g, 1, 1, 451.0, "64");
+        read(&mut g, 1, 2, 900.0, "");
+        read(&mut g, 1, 3, 1400.0, "Instrument Polyphony Pitchbend Range Velocity Curve Release Time Volume");
+        // fast>acc: far faster, and invents on the bars.
+        read(&mut g, 2, 0, 470.0, "1");
+        read(&mut g, 2, 1, 60.0, "64");
+        read(&mut g, 2, 2, 60.0, "ll");
+        assert!(matches!(g.verdict(1, 0), Some(Verdict::Faster(..))));
+        assert!(matches!(g.verdict(1, 1), Some(Verdict::Same(_))));
+        assert_eq!(g.verdict(1, 2), None, "the bars were read for whether they read right, not for speed");
+        assert_eq!(g.verdict(0, 0), None, "prod is not judged against itself");
+        let table = g.table();
+        assert!(table.contains("| lone-1@2x | 907 | 457 faster | 477 faster | - |"), "{table}");
+        assert!(table.contains("| none-bars@2x (no text) | 907 | 907 | 67, wrong, invented | - |"), "{table}");
+        let outcomes = g.outcomes();
+        assert_eq!(outcomes[1].faster, ["lone-1@2x"]);
+        assert!(outcomes[1].misread.is_empty() && outcomes[1].invented.is_empty());
+        assert_eq!(outcomes[1].judged, 2);
+        assert_eq!(outcomes[2].invented, [("none-bars@2x".to_string(), false)]);
+        assert!(outcomes[2].misread.is_empty(), "the line, left to prod, is prod's and right");
+        assert!(outcomes[3].skipped.as_deref().unwrap().contains("not available"));
+        let lines = closing_lines(&outcomes, false);
+        // rev2 reads right and saves time, but changes every rung: said for comparison, not named.
+        assert!(lines[0].ends_with("reads right and saves time: none does"), "{lines:?}");
+        assert!(lines[1].contains("faster than prod but not right: fast>acc (invents text on none-bars@2x)"), "{lines:?}");
+        assert!(lines[2].contains("for comparison only, never a way the application may read: rev2 (clearly faster on 1 of 2 pictures judged"), "{lines:?}");
+        assert_eq!(lines.len(), 3);
+        let summary = g.summary_table();
+        assert!(summary.contains("| acc+paddle+rest | candidate | not measured: the neural recogniser is not available here |"), "{summary}");
+        assert!(summary.contains("| fast>acc | comparison | none | none-bars@2x | none |"), "{summary}");
+        assert_eq!(g.prod_line().unwrap(), "pipeline | today's ladder (prod) reads every picture it read right");
+    }
+
+    /// A picture with text on which nothing is right too — Melodyne's lone dash — still holds a
+    /// misreading against a strategy; a refusal where nothing is right is no invention.
+    #[test]
+    fn every_picture_with_text_counts_and_a_refusal_is_not_an_invention() {
+        let dash: &'static Fixture = Box::leak(Box::new(Fixture {
+            name: "dash",
+            scale: 1,
+            w_pt: 30,
+            h_pt: 14,
+            accept: &["-", ""],
+            must_read: false,
+            origin: Origin::Captured { platform: "windows" },
+            png: &[],
+        }));
+        let plan = Plan::for_mode(false, false);
+        let names = ["prod", "fast=paddle-checked", "rev2-tight"];
+        let strategies: Vec<&Strategy> = names.iter().map(|n| &STRATEGIES[strategy(n).unwrap()]).collect();
+        let bars = fixture("none-bars@2x").unwrap();
+        let mut g = Pipeline::new(strategies, vec![dash, bars], &plan);
+        let read = |g: &mut Pipeline, s: usize, p: usize, text: Option<&str>| {
+            for _ in 0..2 {
+                g.rows[s][p].push(
+                    Sample { ms: 100.0, text: text.map(str::to_string), passes: 1, skipped: false },
+                    note(Answer::Pass(Stage::Tight), 100.0, 0, None),
+                );
+            }
+        };
+        read(&mut g, 0, 0, Some("-"));
+        read(&mut g, 0, 1, Some(""));
+        read(&mut g, 1, 0, Some("4"));
+        read(&mut g, 1, 1, None);
+        read(&mut g, 2, 0, Some(""));
+        read(&mut g, 2, 1, Some(""));
+        let table = g.table();
+        assert!(table.contains("| dash@1x (or nothing) |") && table.contains("| none-bars@2x (no text) |"), "{table}");
+        let outcomes = g.outcomes();
+        assert_eq!(outcomes[1].misread, [("dash@1x".to_string(), false)], "a 4 for a dash is wrong, required or not");
+        assert!(outcomes[1].invented.is_empty(), "refused is not invented");
+        assert_eq!(outcomes[1].refused, [("none-bars@2x".to_string(), false)]);
+        assert!(outcomes[2].misread.is_empty() && outcomes[2].invented.is_empty(), "nothing is right on both");
+        assert!(g.summary_table().contains("| fast=paddle-checked | candidate | dash@1x | none | none-bars@2x |"));
+        // prod's line, which CI warns by, says what prod did not read right.
+        read(&mut g, 0, 0, Some("4"));
+        assert_eq!(g.prod_line().unwrap(), "pipeline | today's ladder (prod) reads wrong: dash@1x");
+        assert!(Accuracy::Refused.refused_only() && !Accuracy::Right.refused_only());
+    }
+
+    #[test]
+    fn the_closing_lines() {
+        let o = |name: &str, faster: &[&str], slower: &[&str], misread: &[(&str, bool)], sum: f64| Outcome {
+            name: name.into(),
+            faster: faster.iter().map(|s| s.to_string()).collect(),
+            slower: slower.iter().map(|s| s.to_string()).collect(),
+            misread: misread.iter().map(|(l, p)| (l.to_string(), *p)).collect(),
+            judged: 4,
+            sum_ms: sum,
+            prod_sum_ms: 2000.0,
+            ..Outcome::default()
+        };
+        // The cheapest of those that read right and save time; one slower somewhere is out.
+        let outcomes = [
+            o("prod", &[], &[], &[], 0.0),
+            o("rev2-tight", &["lone-1@2x"], &[], &[], 1500.0),
+            o("fast=paddle-strict", &["lone-1@2x", "field-64@2x"], &[], &[], 400.0),
+            o("fast=paddle", &["field-64@2x"], &["sfz-tune@1x"], &[], 300.0),
+            o("fast>acc", &["field-64@2x"], &[], &[("lone-1@2x", false)], 200.0),
+        ];
+        let lines = closing_lines(&outcomes, false);
+        assert!(lines[0].starts_with("closing | the cheapest way of reading that reads right and saves time: fast=paddle-strict (clearly faster on 2 of 4"), "{lines:?}");
+        assert!(lines[0].contains("the others that do, dearer: rev2-tight"), "{lines:?}");
+        assert!(lines[1].contains("fast>acc (reads lone-1@2x wrong)"), "{lines:?}");
+        // Prod itself misreads a picture: the strict line names nobody who misreads it too, the
+        // second line sets it aside.
+        let outcomes = [
+            o("prod", &[], &[], &[("k8-voices@1x", true)], 0.0),
+            o("rev2-tight", &["lone-1@2x"], &[], &[("k8-voices@1x", true)], 1500.0),
+        ];
+        let lines = closing_lines(&outcomes, false);
+        assert!(lines[0].ends_with("saves time: none does"), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("prod itself does not read k8-voices@1x right; set aside") && l.contains(": rev2-tight (")), "{lines:?}");
+        // A comparison that would pass — unchecked fast text, right on every picture and the
+        // cheapest — is said apart and never named; the candidate is.
+        let outcomes = [
+            o("prod", &[], &[], &[], 0.0),
+            o("fast>acc", &["field-64@2x", "lone-1@2x"], &[], &[], 100.0),
+            o("fast=paddle-strict", &["field-64@2x"], &[], &[], 400.0),
+            o("fast=paddle-checked", &["field-64@2x"], &[], &[("mel-note-dash@1x", false)], 380.0),
+        ];
+        let lines = closing_lines(&outcomes, false);
+        assert!(lines[0].ends_with("saves time: fast=paddle-strict (clearly faster on 1 of 4 pictures judged; medians 400 ms against prod's 2000 ms over them)"), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("faster than prod but not right: fast=paddle-checked (reads mel-note-dash@1x wrong)")), "{lines:?}");
+        assert!(lines.last().unwrap().starts_with("closing | for comparison only, never a way the application may read: fast>acc (clearly faster on 2 of 4"), "{lines:?}");
+        assert!(!lines[0].contains("fast>acc"), "{lines:?}");
+        // A misreading prod shares is marked in the line of those faster but not right.
+        let outcomes = [
+            o("prod", &[], &[], &[("k8-voices@1x", true)], 0.0),
+            o("fast=paddle", &["field-64@2x"], &[], &[("k8-voices@1x", true), ("val-db@2x", false)], 300.0),
+        ];
+        let lines = closing_lines(&outcomes, false);
+        assert!(lines[1].contains("fast=paddle (reads k8-voices@1x (prod too), val-db@2x wrong)"), "{lines:?}");
+        // Noise, and too few reads, name nobody.
+        assert!(closing_lines(&outcomes, true)[0].contains("too noisy"));
+        let few = [o("prod", &[], &[], &[], 0.0), Outcome { name: "rev2".into(), ..Outcome::default() }];
+        assert!(closing_lines(&few, false)[0].contains("too few reads for a verdict"));
     }
 
     #[test]

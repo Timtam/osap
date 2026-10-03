@@ -48,10 +48,19 @@ hex = "0.4.3"
 # ocr/lang.rs is borrowed: which recognition language a read gets. The same version and feature as
 # host's [dependencies].
 fluent-langneg = { version = "0.14.2", features = ["cldr"] }
+# ocr/bench.rs reads the manifest of the pictures `--pictures` names, and ocr/paddle_pre.rs crops
+# and resizes for the neural recogniser. Both in host's [dependencies], at these versions.
+toml = "1.1.2"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 libc = "0.2"
 objc2 = "0.6"
 block2 = "0.6"
 dispatch2 = "0.3"
+# The neural recogniser (backend/paddle_ocr.rs): as host's macOS table, ONNX Runtime opened at run
+# time. Without `download-binaries` the check downloads nothing and links nothing.
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "tracing", "load-dynamic"] }
+ndarray = "0.16"
+tracing = { version = "0.1", default-features = false, features = ["log"] }
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-foundation]
 version = "0.3"

@@ -1,0 +1,17 @@
+The pictures in this folder are small crops of screenshots of commercial audio plug-ins,
+captured on Windows:
+
+  - sforzando, by Plogue Art et Technologie Inc.
+  - Melodyne, by Celemony Software GmbH
+  - Kontakt 8, by Native Instruments
+  - Cinematic Studio Strings, by Cinematic Studio Series, in Kontakt 8
+
+Each shows one value field or one plain control word, as a plug-in draws it, and nothing else:
+no wordmark, logo, preset or instrument name. They are here only as test input for the
+text-recognition benchmark (`automation-platform ocr-bench --pictures`), which measures how
+well the recognisers read what an accessibility overlay reads from these plug-ins.
+
+This project is not affiliated with, endorsed by or sponsored by the makers of these
+plug-ins. The plug-ins, their names and their interfaces belong to their makers. The pictures
+are not covered by this repository's licence. tools/ocr-fixtures/real.toml in the source
+repository, https://github.com/Timtam/osap, says where each one was cut from.

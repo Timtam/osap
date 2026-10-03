@@ -120,6 +120,20 @@ libc = "0.2"
 objc2 = "0.6"
 block2 = "0.6"
 dispatch2 = "0.3"
+# The neural recogniser (backend/paddle_ocr.rs), the same model and the same `ort` as on Windows,
+# but ONNX Runtime is Microsoft's own universal dylib in Contents/Frameworks, opened at run time
+# (`load-dynamic`) rather than linked. 1.22 is what this `ort` (rc.10) is made for, and among the
+# last releases with an Intel half (1.23 has one but needs macOS 13.4; 1.24 has none). It needs
+# macOS 13.3, where the application starts from 12.3 — linked, it would stop it from starting
+# below 13.3; loaded, the recogniser is simply missing there. tract, pure Rust, was measured
+# against it first: the same readings, but 7.6 times the time; and its build script assembles
+# kernels with a C compiler for the target, which `check-macos.ps1` on Windows does not have
+# (tools/paddle-engines). Without `download-binaries` the build downloads nothing. The same
+# version as Windows': Cargo allows one package that links "onnxruntime" in the whole graph
+# (TODO.md).
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "tracing", "load-dynamic"] }
+ndarray = "0.16"
+tracing = { version = "0.1", default-features = false, features = ["log"] }
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-foundation]
 version = "0.3"

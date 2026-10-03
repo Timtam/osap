@@ -4521,10 +4521,16 @@ pub fn run(dirs: &[String]) -> Result<()> {
     // before the process tears down, for the reason the OCR warmup is joined below. A no-op
     // everywhere else and in every session that never used it.
     backend::shutdown_capture();
+    // What the neural recogniser's shadow counted on a Mac, once more, after the recognise
+    // thread was stopped above and while the log is still open (nothing elsewhere).
+    backend::ocr_exit_report();
     // Join the OCR warmup before returning: otherwise its background thread can be
     // mid native ONNX-Runtime init when the process tears down, racing ort's static
     // cleanup → an access violation that surfaces as the headless / fast-exit
-    // "segfault". The thread is bounded (load the model + one dummy inference).
+    // "segfault". The thread is bounded (load the model + one dummy inference) — once it has
+    // begun: on a Mac it first waits for Vision's warm-up, and that wait is called off here, so
+    // that a Vision warm-up which never ended cannot hold the exit.
+    backend::stop_ocr_warmup();
     if let Some(h) = warmup {
         let _ = h.join();
     }

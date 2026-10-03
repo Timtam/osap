@@ -2,13 +2,14 @@
 //! line it prints are the pure half, `crate::ocr::bench`, whose header says what it is for.
 //!
 //! A child of `ocr.rs`, so that what it times is that file's own code rather than a copy:
-//! `recognize_captured` for a whole read, `new_request` and `perform` for one pass,
+//! `recognize_noted` for a whole read, `new_request` and `perform` for one pass,
 //! `content_margin`, `Plan::content` and `render` for the picture a pass is handed. Every variant
-//! starts from the production request and changes one thing on it ([`request_for`]). Nothing in
-//! the running application calls this.
+//! starts from the production request and changes one thing on it ([`request_for`]); every
+//! strategy is a shape of the production ladder (`ocr/ladder.rs`). Nothing in the running
+//! application calls this.
 //!
 //! What it does, in this order, each line written to the file the moment it is known, so that a
-//! pass that kills the process keeps everything before it:
+//! pass that kills the process keeps everything before it; each section ends with its duration:
 //!
 //! 1. **The machine**: model, processor, cores, memory, macOS, thermal state, low power mode,
 //!    load, power source, VoiceOver; the text-recognition revisions this macOS has and the one a
@@ -16,24 +17,32 @@
 //!    name: a macOS before 14 does not have it, and importing it would stop the application from
 //!    starting there) and the ones Vision offers text recognition, per stage.
 //! 2. **First passes**, each in a process of its own (this executable again, `--child`): the
-//!    application's warm-up over a line of words, the one it made until 2026-10 over six bars, or
-//!    none, on a thread of its own; then the first real pass on another thread, which is what the
-//!    event loop's first read is in the application, and the pass after it. One process first that
-//!    is not counted, so that none of the counted ones meets a cold file cache, and the order
+//!    application's warm-up over a line of words, the one it made until 2026-10 over six bars,
+//!    one over a small field, or none, on a thread of its own, then the first real pass on another
+//!    thread, which is what the event loop's first read is in the application, and the pass after
+//!    it; the fast level's first pass with no warm-up; the first passes in a second language after
+//!    the warm-up in Vision's default; and the neural recogniser's first recognitions — after its
+//!    session alone, after its warm-up, and after its warm-up beside Vision's. One process first
+//!    that is not counted, so that none of the counted ones meets a cold file cache, and the order
 //!    turned each round.
 //! 3. **Probes**: each variant that calls what no Mac has run for this application (a request
-//!    revision, a compute device) runs one pass in a process of its own first. One that dies
-//!    there, or that Vision refuses, is left out of everything below.
-//! 4. **The pipeline**: every picture through `recognize_captured` as `host.ocr.recognize` reads
-//!    it — no language, every rung of the ladder, the ladder's budget counted from a pretend
-//!    capture — with the Vision passes each read made; then again with every request asking for
-//!    revision 2, when this macOS has it.
+//!    revision, a compute device, the neural recogniser) runs one pass in a process of its own
+//!    first. One that dies there, or that is refused, is left out of everything below; the neural
+//!    recogniser is made in this process only after its probe went through.
+//! 4. **The pipeline**: every picture through `recognize_noted` as `host.ocr.recognize` reads it
+//!    — no language, the ladder's budget counted from a pretend capture — under each strategy, every
+//!    row once a round in an order that changes from round to round, the few pictures of the plan
+//!    read for speed and the rest twice, for whether they are read right. Each row says what a read
+//!    cost, the Vision passes and the neural recogniser's runs it made, who answered, and what was
+//!    not Vision.
 //! 5. **The engine**: one pass of each variant over a few pictures, every cell once a round in an
-//!    order that changes from round to round, the first sample of each cell kept apart.
+//!    order that changes from round to round, the first sample of each cell kept apart. Then the
+//!    closing lines: the cheapest strategy that reads right and saves time.
 //! 6. **Threads**: the first pass on fresh threads once the process is warm, one thread alone
-//!    against two at once, and what switching between variants cost the engine.
+//!    against two at once, what switching between variants cost the engine, Vision beside the
+//!    neural recogniser at two priorities, and four blocks of sustained load.
 //! 7. **Idle**: one pass after 2, 10 and 30 seconds with nothing to do, on the thread that read
-//!    before and on a fresh one.
+//!    before and on a fresh one; and the fast level and the neural recogniser after the same.
 //!
 //! Every Objective-C object is made on the thread that uses it (none of them is `Send`), and each
 //! pass runs inside an autorelease pool of its own: neither the main thread of a command-line
@@ -61,16 +70,22 @@ use objc2_core_ml::MLComputeDeviceProtocol;
 use objc2_foundation::{NSArray, NSProcessInfo, NSString};
 use objc2_vision::VNRecognizeTextRequest;
 
+use image::RgbImage;
+
 use super::{
-    cgimage_to_rgba, content_margin, new_request, passes_on_this_thread, perform, picture_from_png,
-    recognize_captured, render, run_vision, supported_revisions, upscale_toward, warm_up_page, Ladder, Plan,
-    ACCURATE, FAST, LADDER_BUDGET, REVISION_OVERRIDE, TARGET_CONTENT_PX,
+    cgimage_to_rgba, content_margin, new_request, paddle_crop, perform, picture_from_png, recognize_noted, render,
+    run_vision, supported_revisions, upscale_toward, warm_up_page, Ladder, Plan, ACCURATE, FAST, LADDER_BUDGET,
+    REVISION_OVERRIDE, TARGET_CONTENT_PX,
+};
+use crate::backend::paddle_ocr::{self, Polled, Qos, IN_FLIGHT};
+use crate::ocr::bench::{
+    self as pure, Cell, Child, ChildResult, Device, Fixture, Grid, Idle, IdleEngine, Options, Out, PaddleChild,
+    PaddleFirst, PaddleInput, PaddleStart, Pipeline, Probe, ReadNote, Sample, Stats, Strategy, Tweak, Warmup,
+    STRATEGIES, VARIANTS,
 };
 use crate::ocr::cost::{Capture, Stage};
-use crate::ocr::bench::{
-    self as pure, Cell, Child, ChildResult, Device, Fixture, Grid, Idle, Options, Out, PipelineRow,
-    Probe, Sample, Stats, Tweak, Warmup, FIXTURES, VARIANTS,
-};
+use crate::ocr::ladder::Answer;
+use crate::ocr::paddle_pre::Tighten;
 use crate::ocr::policy::{SMALL_H, SMALL_W};
 
 type Devices = Vec<Retained<ProtocolObject<dyn MLComputeDeviceProtocol>>>;
@@ -88,8 +103,18 @@ pub fn run(args: &[String]) -> i32 {
         println!("{}", pure::USAGE);
         return 0;
     }
+    // The neural recogniser alone, as Windows measures it, and whether it loads at all.
+    if opts.paddle_probe {
+        return paddle_ocr::probe();
+    }
+    if opts.paddle {
+        return paddle_ocr::bench_rows(&opts, None, out_path(&opts));
+    }
     match opts.child {
         Some(Child::FirstPass(warmup)) => objc2::rc::autoreleasepool(|_| child(warmup)),
+        Some(Child::FastFirst) => objc2::rc::autoreleasepool(|_| fast_first_child()),
+        Some(Child::SecondLanguage) => objc2::rc::autoreleasepool(|_| second_language_child()),
+        Some(Child::PaddleFirst(start)) => objc2::rc::autoreleasepool(|_| paddle_first_child(start)),
         Some(Child::Probe(v)) => objc2::rc::autoreleasepool(|_| probe_child(v)),
         None => objc2::rc::autoreleasepool(|_| bench(&opts)),
     }
@@ -160,6 +185,10 @@ struct Picture {
     // image, whose pixels live in `native`'s bitmap.
     prod: Handed,
     native: Handed,
+    /// The blank guard answers it: no pass is ever made over it, so it is read only by the
+    /// pipeline — whose reads the guard answers, as it answers the application's — and `prod` is
+    /// the picture itself, which nothing hands Vision.
+    blank: bool,
 }
 
 /// The PNG decoded by CoreGraphics, at the size its entry says, and drawn once into a bitmap of
@@ -196,8 +225,75 @@ fn hand(native: &Handed, f: &Fixture, target: usize) -> Result<Handed, String> {
 
 fn picture(f: &'static Fixture) -> Result<Picture, String> {
     let native = decode(f)?;
+    if f.small() && blank(&native, f) {
+        let prod = Handed { image: native.image.clone(), _buf: None };
+        return Ok(Picture { fixture: f, prod, native, blank: true });
+    }
     let prod = hand(&native, f, TARGET_CONTENT_PX)?;
-    Ok(Picture { fixture: f, prod, native })
+    Ok(Picture { fixture: f, prod, native, blank: false })
+}
+
+/// Whether the blank guard answers a small picture: its content crop finds nothing in it, as in a
+/// read (`Plan::content`).
+fn blank(native: &Handed, f: &Fixture) -> bool {
+    cgimage_to_rgba(&native.image)
+        .is_some_and(|(rgba, w, h)| Plan::content(&rgba, w, h, content_margin(f.scale as f64)).blank)
+}
+
+/// What the neural recogniser is handed of a small picture, as top-down RGBA: the whole region,
+/// or the content crop a read makes (`paddle_crop`). `Err` for a large picture, which production
+/// never hands it, and for one the blank guard answers.
+fn paddle_rgba(p: &Picture, input: PaddleInput) -> Result<(u32, u32, Vec<u8>), String> {
+    let f = p.fixture;
+    if !f.small() {
+        return Err("production hands the neural recogniser small regions only".to_string());
+    }
+    let (rgba, w, h) =
+        cgimage_to_rgba(&p.native.image).ok_or_else(|| "its pixels could not be read back".to_string())?;
+    match input {
+        PaddleInput::Raw => Ok((w as u32, h as u32, rgba)),
+        PaddleInput::Crop => {
+            let plan = Plan::content(&rgba, w, h, content_margin(f.scale as f64));
+            if plan.blank {
+                return Err("the blank guard finds nothing to read in it".to_string());
+            }
+            Ok(paddle_crop(&rgba, w, &plan))
+        }
+    }
+}
+
+/// [`paddle_rgba`] as the RGB the recogniser's preprocessing takes.
+fn paddle_rgb(p: &Picture, input: PaddleInput) -> Result<RgbImage, String> {
+    let (w, h, rgba) = paddle_rgba(p, input)?;
+    let rgba = image::RgbaImage::from_raw(w, h, rgba).ok_or_else(|| "its pixels do not make a picture".to_string())?;
+    Ok(RgbImage::from_fn(w, h, |x, y| {
+        let q = rgba.get_pixel(x, y).0;
+        image::Rgb([q[0], q[1], q[2]])
+    }))
+}
+
+/// The crop in points the recogniser is given for a picture of this scale.
+fn crop_for(f: &Fixture) -> Tighten {
+    Tighten::for_scale(f.scale as f64)
+}
+
+/// One recognition of `p`'s content crop on the recogniser's own thread, as a read asks it, at
+/// `qos`, waited for: what it read, and its milliseconds there (`PaddleRead::ms`) and from the ask
+/// to the answer. `None` when it could not be asked or read nothing.
+fn paddle_on_its_thread(p: &Picture, qos: Qos) -> Option<(paddle_ocr::PaddleRead, f64)> {
+    let (w, h, rgba) = paddle_rgba(p, PaddleInput::Crop).ok()?;
+    let t = Instant::now();
+    let read = paddle_ocr::ask_with(w, h, &rgba, crop_for(p.fixture), qos)?.wait_read()?;
+    Some((read, ms_since(t)))
+}
+
+/// The process's peak resident memory so far, in megabytes (`getrusage`; macOS gives bytes).
+fn peak_memory_mb() -> Option<f64> {
+    // SAFETY: a zeroed struct of the size `getrusage` fills.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid pointer to it, about this process.
+    let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    (rc == 0).then(|| usage.ru_maxrss as f64 / (1024.0 * 1024.0))
 }
 
 // ── One pass ─────────────────────────────────────────────────────────────────────────────────
@@ -255,7 +351,13 @@ fn request_for(tweak: Tweak) -> Result<(Retained<VNRecognizeTextRequest>, Vec<St
         }
         Tweak::MinTextHeight(h) => request.setMinimumTextHeight(h),
         Tweak::Device(d) => pinned = pin(&request, d)?,
-        Tweak::None | Tweak::Control | Tweak::Fast | Tweak::Lang(_) | Tweak::Reuse | Tweak::TargetPx(_) => {}
+        Tweak::None
+        | Tweak::Control
+        | Tweak::Fast
+        | Tweak::Lang(_)
+        | Tweak::Reuse
+        | Tweak::TargetPx(_)
+        | Tweak::Paddle(_) => {}
     }
     Ok((request, pinned))
 }
@@ -523,19 +625,32 @@ fn run_child(exe: &Path, role: Child) -> Result<String, String> {
 }
 
 /// A warm-up on a thread of its own, waited for: one accurate pass with no language, over the
-/// application's picture (`warm_up_page`, a line of printed words) or over the six bars it read
-/// until 2026-10. Its time, and whether it read anything. The thread asks for no quality of
-/// service, as the application's does not.
-fn warm_up_on_own_thread(words: bool) -> (f64, bool) {
+/// application's picture (`warm_up_page`, a line of printed words), over the six bars it read
+/// until 2026-10, or over a small field through the content crop a read makes. Its time, and
+/// whether it read anything. The thread asks for no quality of service, as the application's does
+/// not.
+fn warm_up_on_own_thread(kind: Warmup) -> (f64, bool) {
     std::thread::spawn(move || {
         objc2::rc::autoreleasepool(|_| {
             let t = Instant::now();
-            let page = if words { warm_up_page().ok().map(|(img, buf, _)| (img, buf)) } else { bars_page() };
-            let read = page.and_then(|(img, buf)| {
-                let r = run_vision(&img, None, ACCURATE, Stage::WarmUp, &|_| (0, 0, 1, 1));
-                drop(buf);
-                r
-            });
+            // Each picture with the bitmap behind it, both kept until the pass is done (`render`).
+            let page = match kind {
+                Warmup::Word => warm_up_page().ok().map(|(img, buf, _)| (img, buf)),
+                Warmup::Bars => bars_page(),
+                Warmup::Field | Warmup::Nothing => None,
+            };
+            let field = match kind {
+                Warmup::Field => pure::fixture(pure::WARM_UP_FIELD).and_then(|f| picture(f).ok()),
+                _ => None,
+            };
+            let image: Option<&CGImage> = match (&field, &page) {
+                (Some(pic), _) => Some(&pic.prod.image),
+                (None, Some((img, _))) => Some(img),
+                (None, None) => None,
+            };
+            let read = image.and_then(|img| run_vision(img, None, ACCURATE, Stage::WarmUp, &|_| (0, 0, 1, 1)));
+            drop(field);
+            drop(page);
             (ms_since(t), read.is_some_and(|(text, _, _)| !text.trim().is_empty()))
         })
     })
@@ -571,37 +686,155 @@ fn bars_page() -> Option<(CFRetained<CGImage>, Vec<u8>)> {
     Some((image, buf))
 }
 
+/// The probe picture, for a child.
+fn probe_picture() -> Option<Picture> {
+    pure::fixture(pure::PROBE).and_then(|f| picture(f).ok())
+}
+
 /// A first-pass child: the warm-up asked for, then the first two real passes on this thread, each
 /// with its request made inside the clock, as the application's first read makes one.
 fn child(warmup: Warmup) -> i32 {
     measuring_thread();
-    let Some(pic) = pure::fixture(pure::PROBE).and_then(|f| picture(f).ok()) else {
+    let Some(pic) = probe_picture() else {
         println!("OCR BENCH CHILD: failed: the picture could not be prepared");
         return 1;
     };
-    let warm = match warmup {
-        Warmup::Bars => Some(warm_up_on_own_thread(false)),
-        Warmup::Word => Some(warm_up_on_own_thread(true)),
-        Warmup::Nothing => None,
-    };
+    let warm = (warmup != Warmup::Nothing).then(|| warm_up_on_own_thread(warmup));
     let first = prod_pass(&pic.prod.image);
     let second = prod_pass(&pic.prod.image);
     println!("{}", pure::child_line(&ChildResult { warmup: warm, first, second }));
     0
 }
 
-/// A probe child: one pass of variant `v` over the probe picture.
-fn probe_child(v: usize) -> i32 {
+/// The fast level's first two passes in a process that has made no pass of any kind.
+fn fast_first_child() -> i32 {
     measuring_thread();
-    let Some(pic) = pure::fixture(pure::PROBE).and_then(|f| picture(f).ok()) else {
+    let Some(pic) = probe_picture() else {
         println!("OCR BENCH CHILD: failed: the picture could not be prepared");
         return 1;
     };
-    let probe = match request_for(VARIANTS[v].tweak) {
-        Err(why) => Probe::No(why),
-        Ok((request, pinned)) => match perform(&pic.prod.image, &request, &|_| (0, 0, 1, 1)) {
-            Ok(_) => Probe::Ran { pinned },
-            Err(why) => Probe::No(format!("Vision refused it: {why}")),
+    let fast = |image: &CGImage| timed(image, || Ok(new_request(None, FAST))).map_or(f64::NAN, |(s, _)| s.ms);
+    let first = fast(&pic.prod.image);
+    let second = fast(&pic.prod.image);
+    println!("{}", pure::child_line(&ChildResult { warmup: None, first, second }));
+    0
+}
+
+/// The application's warm-up in Vision's default language, then the first two passes in
+/// [`pure::SECOND_LANGUAGE`]: whether a first pass in another language costs a first pass again.
+fn second_language_child() -> i32 {
+    measuring_thread();
+    let Some(pic) = probe_picture() else {
+        println!("OCR BENCH CHILD: failed: the picture could not be prepared");
+        return 1;
+    };
+    let warm = warm_up_on_own_thread(Warmup::Word);
+    let lang = |image: &CGImage| {
+        timed(image, || Ok(new_request(Some(pure::SECOND_LANGUAGE), ACCURATE))).map_or(f64::NAN, |(s, _)| s.ms)
+    };
+    let first = lang(&pic.prod.image);
+    let second = lang(&pic.prod.image);
+    println!("{}", pure::child_line(&ChildResult { warmup: Some(warm), first, second }));
+    0
+}
+
+/// The application's neural-recogniser warm-up (`paddle_ocr::warm_now`: the session made, one run
+/// over a dummy) on a thread of its own, waited for: its milliseconds.
+fn paddle_warm_up_on_own_thread(start: Option<&Barrier>) -> f64 {
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            if let Some(b) = start {
+                b.wait();
+            }
+            let t = Instant::now();
+            paddle_ocr::warm_now();
+            ms_since(t)
+        })
+        .join()
+        .unwrap_or(f64::NAN)
+    })
+}
+
+/// A neural recogniser's first-pass child: its start, then its first two recognitions of
+/// `lone-1@2x`'s content crop on its own thread, as a read asks them, and the process's peak
+/// memory before and after.
+fn paddle_first_child(start: PaddleStart) -> i32 {
+    measuring_thread();
+    let no = |why: String| {
+        println!("{}", pure::paddle_child_line(&PaddleFirst::No(why)));
+        0
+    };
+    let (Some(lone), Some(probe)) = (pure::fixture("lone-1@2x").and_then(|f| picture(f).ok()), probe_picture()) else {
+        return no("the pictures could not be prepared".to_string());
+    };
+    let mem_before = peak_memory_mb();
+    let (begun, vision, vision_first) = match start {
+        PaddleStart::Nothing => match paddle_ocr::init_timed() {
+            Ok(ms) => (ms, None, None),
+            Err(why) => return no(format!("the neural recogniser is not available: {why}")),
+        },
+        PaddleStart::Warm => (paddle_warm_up_on_own_thread(None), None, None),
+        PaddleStart::WithVision => {
+            let both = Barrier::new(2);
+            let (paddle, vision) = std::thread::scope(|s| {
+                let paddle = s.spawn(|| paddle_warm_up_on_own_thread(Some(&both)));
+                let vision = s.spawn(|| {
+                    both.wait();
+                    warm_up_on_own_thread(Warmup::Word).0
+                });
+                (paddle.join().unwrap_or(f64::NAN), vision.join().unwrap_or(f64::NAN))
+            });
+            (paddle, Some(vision), Some(prod_pass(&probe.prod.image)))
+        }
+    };
+    if let Err(why) = paddle_ocr::init_timed() {
+        return no(format!("the neural recogniser is not available: {why}"));
+    }
+    let (Some((first, first_ms)), Some((_, second_ms))) =
+        (paddle_on_its_thread(&lone, Qos::Interactive), paddle_on_its_thread(&lone, Qos::Interactive))
+    else {
+        return no("the recogniser read nothing in lone-1@2x".to_string());
+    };
+    let right = pure::accepted(&first.text, lone.fixture.accept);
+    println!(
+        "{}",
+        pure::paddle_child_line(&PaddleFirst::Ran(PaddleChild {
+            start: begun,
+            vision,
+            first: first_ms,
+            second: second_ms,
+            vision_first,
+            mem_before,
+            mem_after: peak_memory_mb(),
+            right,
+        }))
+    );
+    0
+}
+
+/// A probe child: one pass of variant `v` over the probe picture — for the neural recogniser, the
+/// recogniser made and run once over its content crop.
+fn probe_child(v: usize) -> i32 {
+    measuring_thread();
+    let Some(pic) = probe_picture() else {
+        println!("OCR BENCH CHILD: failed: the picture could not be prepared");
+        return 1;
+    };
+    let probe = match VARIANTS[v].tweak {
+        Tweak::Paddle(input) => match paddle_ocr::init_timed() {
+            Err(why) => Probe::No(format!("the neural recogniser is not available: {why}")),
+            Ok(_) => match paddle_rgb(&pic, input).map(|rgb| paddle_ocr::recognize_timed(&rgb, crop_for(pic.fixture))) {
+                Ok(Some(_)) => Probe::Ran { pinned: Vec::new() },
+                Ok(None) => Probe::No("the session was made but could not run the model".to_string()),
+                Err(why) => Probe::No(why),
+            },
+        },
+        tweak => match request_for(tweak) {
+            Err(why) => Probe::No(why),
+            Ok((request, pinned)) => match perform(&pic.prod.image, &request, &|_| (0, 0, 1, 1)) {
+                Ok(_) => Probe::Ran { pinned },
+                Err(why) => Probe::No(format!("Vision refused it: {why}")),
+            },
         },
     };
     println!("{}", pure::probe_line(&probe));
@@ -620,23 +853,59 @@ fn first_pass_text(r: &ChildResult) -> String {
     format!("{warm}; first real pass {} ms, the next {} ms", pure::ms(r.first), pure::ms(r.second))
 }
 
+fn paddle_first_text(r: &PaddleFirst) -> String {
+    match r {
+        PaddleFirst::No(why) => format!("not measured: {why}"),
+        PaddleFirst::Ran(c) => {
+            let vision = match (c.vision, c.vision_first) {
+                (Some(w), Some(f)) => format!(
+                    "; Vision's word warm-up beside it {} ms, Vision's first real pass after both {} ms",
+                    pure::ms(w),
+                    pure::ms(f)
+                ),
+                _ => String::new(),
+            };
+            let mem = match (c.mem_before, c.mem_after) {
+                (Some(a), Some(b)) => format!("; peak memory {a:.0} MB before, {b:.0} MB after"),
+                _ => String::new(),
+            };
+            format!(
+                "start {} ms{vision}; first recognition of lone-1@2x {} ms ({}), the next {} ms{mem}",
+                pure::ms(c.start),
+                pure::ms(c.first),
+                if c.right { "read right" } else { "NOT read right" },
+                pure::ms(c.second)
+            )
+        }
+    }
+}
+
 struct FirstPasses {
     /// The process that is not counted, which meets the cold file cache.
     uncounted: Option<ChildResult>,
-    by_kind: Vec<(Warmup, Vec<ChildResult>)>,
+    /// The Vision kinds' results — the warm-ups, the fast level, the second language — by role.
+    by_kind: Vec<(Child, Vec<ChildResult>)>,
+    paddle: Vec<(PaddleStart, Vec<PaddleFirst>)>,
 }
 
 fn first_passes(out: &mut Out, plan: &pure::Plan, exe: &Path) -> FirstPasses {
+    let roles = pure::first_roles(0);
     let mut got = FirstPasses {
         uncounted: None,
-        by_kind: Warmup::ALL.iter().map(|w| (*w, Vec::new())).collect(),
+        by_kind: roles.iter().filter(|c| !matches!(c, Child::PaddleFirst(_))).map(|c| (*c, Vec::new())).collect(),
+        paddle: PaddleStart::ALL.iter().map(|p| (*p, Vec::new())).collect(),
     };
     out.say(&format!(
-        "first passes: each in a process of its own — a warm-up on a thread of its own, then the first real pass of \
-         {} on another thread and the pass after it, each with its request made inside the clock. One process with \
-         the word warm-up first, not counted, so that the counted ones find the file cache warm; then {} round(s), \
-         one process per warm-up, the order turned by one each round",
+        "first passes: each in a process of its own — a warm-up on a thread of its own (over a line of words, six \
+         bars, the small field {}, or none), then the first real pass of {} on another thread and the pass after it, \
+         each with its request made inside the clock; the fast level's first passes with no warm-up; the first passes \
+         in {} after the word warm-up; and the neural recogniser's first two recognitions of lone-1@2x after its \
+         session alone, after its warm-up, and after its warm-up beside Vision's. One process with the word warm-up \
+         first, not counted, so that the counted ones find the file cache warm; then {} round(s), one process per \
+         kind, the order turned by one each round",
+        pure::WARM_UP_FIELD,
         pure::PROBE,
+        pure::SECOND_LANGUAGE,
         plan.child_rounds
     ));
     match run_child(exe, Child::FirstPass(Warmup::Word)).and_then(|t| {
@@ -649,23 +918,36 @@ fn first_passes(out: &mut Out, plan: &pure::Plan, exe: &Path) -> FirstPasses {
         Err(why) => out.say(&format!("first passes | not counted | warm-up word | the process {why}")),
     }
     for round in 0..plan.child_rounds {
-        let order = pure::warmup_order(round);
+        let order = pure::first_roles(round);
         out.say(&format!(
             "first passes | round {} | {}",
             round + 1,
-            order.iter().map(|w| w.word()).collect::<Vec<_>>().join(", then ")
+            order.iter().map(|c| c.word()).collect::<Vec<_>>().join(", then ")
         ));
-        for warmup in order {
-            let result = run_child(exe, Child::FirstPass(warmup))
-                .and_then(|t| pure::parse_child(&t).ok_or_else(|| format!("printed no result: {}", t.trim())));
-            match result {
+        for role in order {
+            let output = run_child(exe, role);
+            if let Child::PaddleFirst(start) = role {
+                let result = output
+                    .and_then(|t| pure::parse_paddle_child(&t).ok_or_else(|| format!("printed no result: {}", t.trim())));
+                match result {
+                    Ok(r) => {
+                        out.say(&format!("first passes | {} | {}", role.word(), paddle_first_text(&r)));
+                        if let Some((_, list)) = got.paddle.iter_mut().find(|(p, _)| *p == start) {
+                            list.push(r);
+                        }
+                    }
+                    Err(why) => out.say(&format!("first passes | {} | not measured: the process {why}", role.word())),
+                }
+                continue;
+            }
+            match output.and_then(|t| pure::parse_child(&t).ok_or_else(|| format!("printed no result: {}", t.trim()))) {
                 Ok(r) => {
-                    out.say(&format!("first passes | warm-up {} | {}", warmup.word(), first_pass_text(&r)));
-                    if let Some((_, list)) = got.by_kind.iter_mut().find(|(w, _)| *w == warmup) {
+                    out.say(&format!("first passes | {} | {}", role.word(), first_pass_text(&r)));
+                    if let Some((_, list)) = got.by_kind.iter_mut().find(|(c, _)| *c == role) {
                         list.push(r);
                     }
                 }
-                Err(why) => out.say(&format!("first passes | warm-up {} | not measured: the process {why}", warmup.word())),
+                Err(why) => out.say(&format!("first passes | {} | not measured: the process {why}", role.word())),
             }
         }
     }
@@ -681,8 +963,8 @@ type Probes = Vec<(usize, Result<Probe, String>)>;
 fn probes(out: &mut Out, exe: &Path, revisions: &[usize]) -> Probes {
     out.say(
         "probes: each variant that calls what no Mac has run for this application yet (a request revision, a \
-         compute device) runs one pass in a process of its own first; one that dies there, or that Vision \
-         refuses, is left out of everything below",
+         compute device, the neural recogniser) runs one pass in a process of its own first; one that dies there, \
+         or that is refused, is left out of everything below",
     );
     let mut got = Vec::new();
     for (v, variant) in VARIANTS.iter().enumerate() {
@@ -726,17 +1008,21 @@ fn probed_ok(probes: &Probes, v: usize) -> Result<(), String> {
 
 // ── 4. The pipeline ──────────────────────────────────────────────────────────────────────────
 
-/// One read of a picture through `recognize_captured`, exactly as `host.ocr.recognize` reads a
-/// region once its capture is in hand: no language, every rung of the ladder. The ladder's
-/// budget starts `capture` before the read, where the application's starts before its capture;
-/// the time reported is the read's alone.
-fn read_through_pipeline(p: &Picture, capture: Duration) -> Sample {
+/// One read of a picture through `recognize_noted` under strategy `s`, as `host.ocr.recognize`
+/// reads a region once its capture is in hand: no language, the ladder's budget counted from
+/// `capture` before the read, where the application's starts before its capture. The time
+/// reported is the read's alone. Whatever the neural recogniser still runs for the read — a
+/// region a Vision pass answered first is left to finish unread, as on Windows — is waited out
+/// afterwards, outside the clock, so that each read is timed alone and its runs are all counted.
+fn read_through_pipeline(p: &Picture, s: &Strategy, capture: Duration) -> (Sample, ReadNote) {
     objc2::rc::autoreleasepool(|_| {
         let f = p.fixture;
-        let before = passes_on_this_thread();
+        let ladder = Ladder { shape: s.shape, ..Ladder::FULL };
+        let revision = s.revision_all.map(RevisionOverride::set);
+        let runs = paddle_ocr::runs_started();
         let t = Instant::now();
         let started = t.checked_sub(capture).unwrap_or(t);
-        let r = recognize_captured(
+        let r = recognize_noted(
             &p.native.image,
             f.scale as f64,
             0,
@@ -747,38 +1033,134 @@ fn read_through_pipeline(p: &Picture, capture: Duration) -> Sample {
             started,
             Capture::Took(capture.as_secs_f64() * 1000.0),
             false,
-            &Ladder::FULL,
+            &ladder,
         );
         let ms = ms_since(t);
-        let passes = passes_on_this_thread() - before;
+        drop(revision);
+        IN_FLIGHT.wait_idle(Duration::from_secs(2));
+        let paddle_runs = paddle_ocr::runs_started() - runs;
         match r {
-            Ok(t) => Sample { ms, text: Some(t.text), passes, skipped: t.skipped },
-            Err(_) => Sample { ms, text: None, passes, skipped: false },
+            Ok((text, note)) => (
+                Sample { ms, text: Some(text.text), passes: note.passes.len() as u64, skipped: text.skipped },
+                ReadNote {
+                    passes: note.passes.len(),
+                    vision_ms: note.passes.iter().map(|p| p.ms).sum(),
+                    paddle_runs,
+                    answer: note.answer,
+                    agreed: note.agreed,
+                    today: note.today,
+                },
+            ),
+            Err(_) => (
+                Sample { ms, text: None, passes: 0, skipped: false },
+                ReadNote { passes: 0, vision_ms: 0.0, paddle_runs, answer: Answer::Nobody, agreed: None, today: false },
+            ),
         }
     })
 }
 
-/// Every picture through the pipeline, each row written as soon as it is done.
+/// What a strategy needs that this run cannot give it — a revision this macOS lacks or whose
+/// probe did not go through, the neural recogniser where it did not load — or `None`.
+fn strategy_gate(s: &Strategy, revisions: &[usize], probes: &Probes, paddle: &Result<f64, String>) -> Option<String> {
+    if let Some(r) = s.revision() {
+        if !revisions.contains(&r) {
+            return Some(format!("this macOS has no revision {r}"));
+        }
+        if let Some(v) = pure::variant(&format!("rev{r}")) {
+            if let Err(why) = probed_ok(probes, v) {
+                return Some(format!("revision {r} did not go through its probe: {why}"));
+            }
+        }
+    }
+    if s.paddle() {
+        if let Err(why) = paddle {
+            return Some(format!("the neural recogniser is not available: {why}"));
+        }
+    }
+    None
+}
+
+/// Every strategy over every picture, interleaved: each round visits every row in an order that
+/// changes from round to round, as the engine's cells, so that the load drifting over the minutes
+/// of the section falls on every strategy alike. Each row is written as soon as it is done.
+#[allow(clippy::too_many_arguments)]
 fn pipeline(
     out: &mut Out,
     pictures: &[Picture],
     plan: &pure::Plan,
-    request: &'static str,
     capture: Duration,
-) -> Vec<PipelineRow> {
-    let mut rows: Vec<PipelineRow> =
-        pictures.iter().map(|p| PipelineRow { request, picture: p.fixture, cell: Cell::default() }).collect();
-    for _ in 0..=plan.samples {
-        for (row, p) in rows.iter_mut().zip(pictures) {
-            if row.cell.wants_more(plan) {
-                row.cell.push(read_through_pipeline(p, capture));
-                if !row.cell.wants_more(plan) {
-                    out.say(&row.line());
-                }
+    revisions: &[usize],
+    probes: &Probes,
+    paddle: &Result<f64, String>,
+) -> Pipeline {
+    let mut g = Pipeline::new(STRATEGIES.iter().collect(), pictures.iter().map(|p| p.fixture).collect(), plan);
+    for (i, s) in STRATEGIES.iter().enumerate() {
+        out.say(&format!("strategy {} ({}): {}", s.name, s.role.word(), s.what));
+        if let Some(why) = strategy_gate(s, revisions, probes, paddle) {
+            out.say(&format!("pipeline | {} | not measured: {why}", s.name));
+            g.skip(i, &why);
+        }
+    }
+    let speed: Vec<String> = g.rows[0].iter().filter(|r| r.speed).map(|r| r.picture.label()).collect();
+    out.say(&format!(
+        "pipeline: every picture as host.ocr.recognize reads it once the capture is in hand, under each of {} \
+         strategies; {} read {} times after a first read kept apart, for a verdict on its speed against prod ({}), \
+         {}; the ladder's {} ms budget counted from {} ms before each read for the capture it does not make \
+         (--capture-ms); a large picture under every strategy but rev2 is prod's; every row once a round in an \
+         order that changes from round to round; this thread at {}",
+        STRATEGIES.len(),
+        speed.len(),
+        plan.samples,
+        speed.join(", "),
+        if plan.every_picture {
+            "every other picture read twice, for whether it reads it right"
+        } else {
+            "no other picture (a quick run)"
+        },
+        LADDER_BUDGET.as_millis(),
+        capture.as_millis(),
+        qos_here()
+    ));
+    let (ns, np) = (g.strategies.len(), g.pictures.len());
+    let mut printed = vec![vec![false; np]; ns];
+    for round in 0..=plan.samples {
+        let order = pure::order(g.count(), round);
+        for k in order.cells {
+            let (s, p) = g.at(k);
+            if !g.rows[s][p].wants_more(plan) {
+                continue;
+            }
+            let (sample, note) = read_through_pipeline(&pictures[p], g.strategies[s], capture);
+            g.rows[s][p].push(sample, note);
+            if !g.rows[s][p].wants_more(plan) {
+                printed[s][p] = true;
+                out.say(&g.rows[s][p].line());
             }
         }
     }
-    rows
+    for (rows, done) in g.rows.iter().zip(&printed) {
+        for (row, done) in rows.iter().zip(done) {
+            if !done && row.cell.skipped.is_none() {
+                out.say(&row.line());
+            }
+        }
+    }
+    for s in 0..ns {
+        for p in 0..np {
+            if let Some(line) = g.verdict_line(s, p) {
+                out.say(&line);
+            }
+        }
+    }
+    let (begun, ran, cancelled) = paddle_ocr::job_counts();
+    if begun + cancelled > 0 {
+        out.say(&format!(
+            "pipeline | the neural recogniser's thread began {begun} regions, ran {ran} through its model to the end, \
+             and gave up on {cancelled} that were no longer wanted (the content crop of a region a Vision pass had \
+             answered first)"
+        ));
+    }
+    g
 }
 
 /// While it lives, every request made on this thread asks for this revision (`new_request`).
@@ -799,11 +1181,18 @@ impl Drop for RevisionOverride {
 
 // ── 5. The engine ────────────────────────────────────────────────────────────────────────────
 
-fn engine(out: &mut Out, pictures: &[Picture], plan: &pure::Plan, revisions: &[usize], probes: &Probes) -> Grid {
+fn engine(
+    out: &mut Out,
+    pictures: &[Picture],
+    plan: &pure::Plan,
+    revisions: &[usize],
+    probes: &Probes,
+    paddle: &Result<f64, String>,
+) -> Grid {
     let chosen: Vec<&Picture> = plan
         .engine_pictures
         .iter()
-        .filter_map(|label| pictures.iter().find(|p| p.fixture.label() == *label))
+        .filter_map(|label| pictures.iter().find(|p| p.fixture.label() == *label && !p.blank))
         .collect();
     let mut grid = Grid::new(VARIANTS.iter().collect(), chosen.iter().map(|p| p.fixture).collect());
     let (nv, np) = (grid.variants.len(), grid.pictures.len());
@@ -811,21 +1200,27 @@ fn engine(out: &mut Out, pictures: &[Picture], plan: &pure::Plan, revisions: &[u
         "engine: {nv} variants over {np} pictures ({}), {} passes a cell after a first one kept apart, every cell \
          once a round in an order that changes from round to round; a pass is making and configuring the request, \
          the handler, performRequests and reading the results out, as run_vision spends it (reuse: the one kept \
-         request); this thread at {}",
+         request; the neural recogniser: its preparation and its model, on this thread); this thread at {}",
         grid.pictures.iter().map(|p| p.label()).collect::<Vec<_>>().join(", "),
         plan.samples,
         qos_here()
     ));
-    // What a target variant is handed, per picture, made once; and which cells have been printed.
+    // What a target variant and the neural recogniser are handed, per picture, made once; and
+    // which cells have been printed.
     let mut alt: Vec<Vec<Option<Handed>>> = Vec::new();
+    let mut neural: Vec<Vec<Option<RgbImage>>> = Vec::new();
     let mut printed = vec![vec![false; np]; nv];
     for (v, variant) in VARIANTS.iter().enumerate() {
         let why = match variant.tweak {
             Tweak::Revision(r) if !revisions.contains(&r) => Some(format!("this macOS has no revision {r}")),
+            Tweak::Paddle(_) => probed_ok(probes, v).err().or_else(|| {
+                paddle.as_ref().err().map(|e| format!("the neural recogniser is not available in this process: {e}"))
+            }),
             t if t.probed() => probed_ok(probes, v).err(),
             _ => None,
         };
         let mut handed = Vec::new();
+        let mut rgb = Vec::new();
         for (p, pic) in chosen.iter().enumerate() {
             if let Some(why) = &why {
                 grid.cells[v][p] = Cell::skip(why.clone());
@@ -841,12 +1236,23 @@ fn engine(out: &mut Out, pictures: &[Picture], plan: &pure::Plan, revisions: &[u
             } else {
                 handed.push(None);
             }
+            match variant.tweak {
+                Tweak::Paddle(input) if why.is_none() => match paddle_rgb(pic, input) {
+                    Ok(image) => rgb.push(Some(image)),
+                    Err(why) => {
+                        grid.cells[v][p] = Cell::skip(why);
+                        rgb.push(None);
+                    }
+                },
+                _ => rgb.push(None),
+            }
             if grid.cells[v][p].skipped.is_some() {
                 printed[v][p] = true;
                 out.say(&grid.line(v, p));
             }
         }
         alt.push(handed);
+        neural.push(rgb);
     }
     // The `reuse` variant's request: one for the whole section, on this thread.
     let reused = new_request(None, ACCURATE);
@@ -875,6 +1281,16 @@ fn engine(out: &mut Out, pictures: &[Picture], plan: &pure::Plan, revisions: &[u
                 None => &chosen[p].prod.image,
             };
             let measured = match tweak {
+                Tweak::Paddle(_) => match neural[v][p].as_ref() {
+                    Some(rgb) => match paddle_ocr::recognize_timed(rgb, crop_for(chosen[p].fixture)) {
+                        Some(s) => {
+                            let ms = s.pre_ms + s.run_ms;
+                            Ok((Sample { ms, text: Some(s.text), passes: 0, skipped: false }, None))
+                        }
+                        None => Err("the session could not run it".to_string()),
+                    },
+                    None => Err("nothing to hand the neural recogniser".to_string()),
+                },
                 Tweak::Reuse => timed(image, || Ok(reused.clone())),
                 _ => timed(image, || request_for(tweak).map(|(r, _)| r)),
             };
@@ -958,18 +1374,185 @@ fn pair(pic: &Picture, k: usize) -> ((Vec<f64>, f64), (Vec<f64>, f64)) {
     ((alone, alone_wall), (both, wall))
 }
 
+/// One pass of the fast level over `image`, its request made inside the clock.
+fn fast_pass(image: &CGImage) -> f64 {
+    match timed(image, || Ok(new_request(None, FAST))) {
+        Ok((s, _)) => s.ms,
+        Err(_) => f64::NAN,
+    }
+}
+
+/// Vision beside the neural recogniser: whether either slows the other. Over the probe picture,
+/// `k` rounds, each one of every kind in an order turned by one each round — a Vision pass alone,
+/// a recognition alone (asked on its thread, as a read asks it, and waited for), and a Vision pass
+/// with a recognition of the same region asked on its thread the moment before, at user-initiated
+/// and at utility quality of service — for the accurate level and for the fast one. Each beside
+/// against itself alone by the engine's rule. The timing rows for the table.
+fn beside_paddle(out: &mut Out, pic: &Picture, k: usize) -> Vec<(String, String)> {
+    let mut rows = Vec::new();
+    let Ok((w, h, rgba)) = paddle_rgba(pic, PaddleInput::Crop) else {
+        out.say("threads | vision beside the neural recogniser | not measured: the probe picture has no content crop");
+        return rows;
+    };
+    let crop = crop_for(pic.fixture);
+    // A recognition on the recogniser's thread: its own milliseconds there.
+    let alone = || {
+        paddle_ocr::ask_with(w, h, &rgba, crop, Qos::Interactive).and_then(|a| a.wait_read()).map_or(f64::NAN, |r| r.ms)
+    };
+    for (level, pass) in [("accurate", prod_pass as fn(&CGImage) -> f64), ("fast", fast_pass as fn(&CGImage) -> f64)] {
+        let image: &CGImage = &pic.prod.image;
+        let (mut v_alone, mut p_alone) = (Vec::new(), Vec::new());
+        let mut v_beside = [Vec::new(), Vec::new()];
+        let mut p_beside = [Vec::new(), Vec::new()];
+        let mut running_at_start = [0usize, 0];
+        for round in 0..k {
+            for kind in (0..4).map(|i| (i + round) % 4) {
+                match kind {
+                    0 => v_alone.push(pass(image)),
+                    1 => p_alone.push(alone()),
+                    q => {
+                        let qos = if q == 2 { Qos::Interactive } else { Qos::Utility };
+                        let i = q - 2;
+                        let asked = paddle_ocr::ask_with(w, h, &rgba, crop, qos);
+                        // Whether the recogniser had begun by the time the Vision pass did.
+                        running_at_start[i] += usize::from(paddle_ocr::running());
+                        v_beside[i].push(pass(image));
+                        p_beside[i].push(asked.and_then(|a| a.wait_read()).map_or(f64::NAN, |r| r.ms));
+                    }
+                }
+            }
+        }
+        let med = |v: &[f64]| median(v).map(pure::ms).unwrap_or_else(|| "?".into());
+        out.say(&format!(
+            "threads | {level} beside the neural recogniser | {} | Vision alone: median {} ms; the recogniser alone: \
+             median {} ms",
+            pure::PROBE,
+            med(&v_alone),
+            med(&p_alone)
+        ));
+        for (i, qos) in ["user-initiated", "utility"].iter().enumerate() {
+            out.say(&format!(
+                "threads | {level} beside the neural recogniser at {qos} | Vision {}; the recogniser {}; it had begun \
+                 when the Vision pass began {} of {k} times",
+                pure::against_alone(&v_alone, &v_beside[i]),
+                pure::against_alone(&p_alone, &p_beside[i]),
+                running_at_start[i]
+            ));
+            rows.push((format!("{level} pass beside the neural recogniser at {qos}, median"), med(&v_beside[i])));
+            rows.push((format!("the neural recogniser beside the {level} pass, at {qos}, median"), med(&p_beside[i])));
+        }
+        rows.push((format!("{level} pass alone in that section, median"), med(&v_alone)));
+        rows.push(("the neural recogniser alone in that section, median".to_string(), med(&p_alone)));
+    }
+    IN_FLIGHT.wait_idle(Duration::from_secs(2));
+    rows
+}
+
+/// Sustained load: four blocks of `secs` seconds of back-to-back accurate passes over the probe
+/// picture, alternately alone and with the neural recogniser asked about the same region at
+/// utility before each pass and its answer looked for after it, never waited for — the shadow's
+/// shape. Passes a second and the median per block. The timing rows for the table.
+fn sustained(out: &mut Out, pic: &Picture, secs: u64) -> Vec<(String, String)> {
+    let mut rows = Vec::new();
+    let neural = paddle_rgba(pic, PaddleInput::Crop).ok().filter(|_| paddle_ocr::ready());
+    let image: &CGImage = &pic.prod.image;
+    for block in 0..4 {
+        let beside = block % 2 == 1;
+        if beside && neural.is_none() {
+            out.say(&format!(
+                "sustained | block {} of 4, beside the neural recogniser | not measured: it is not available",
+                block + 1
+            ));
+            continue;
+        }
+        let began = Instant::now();
+        let mut passes = Vec::new();
+        let (mut asked_n, mut answered_n) = (0usize, 0usize);
+        while began.elapsed() < Duration::from_secs(secs) {
+            let asked = neural
+                .as_ref()
+                .filter(|_| beside)
+                .and_then(|(w, h, rgba)| paddle_ocr::ask_with(*w, *h, rgba, crop_for(pic.fixture), Qos::Utility));
+            asked_n += usize::from(asked.is_some());
+            passes.push(prod_pass(image));
+            if let Some(a) = asked {
+                answered_n += usize::from(a.try_wait() != Polled::NotYet);
+            }
+        }
+        let wall = began.elapsed().as_secs_f64();
+        let rate = passes.len() as f64 / wall.max(f64::MIN_POSITIVE);
+        let med = median(&passes).map(pure::ms).unwrap_or_else(|| "?".into());
+        let what = if beside { "beside the neural recogniser" } else { "Vision alone" };
+        out.say(&format!(
+            "sustained | block {} of 4, {what} | {} passes in {wall:.1} s, {rate:.1} a second, median {med} ms{}",
+            block + 1,
+            passes.len(),
+            if beside {
+                format!("; the recogniser had answered by the end of the pass {answered_n} of {asked_n} times")
+            } else {
+                String::new()
+            }
+        ));
+        rows.push((
+            format!("sustained load, block {} ({what}), median a pass; passes a second", block + 1),
+            format!("{med}; {rate:.1}"),
+        ));
+    }
+    IN_FLIGHT.wait_idle(Duration::from_secs(2));
+    rows
+}
+
 // ── 7. Idle ──────────────────────────────────────────────────────────────────────────────────
 
-/// Three warm passes, then one pass after each pause, each written as it comes (a long-idle run
-/// takes over half an hour).
+/// Three warm passes of each engine, then one pass after each pause, each written as it comes (a
+/// long-idle run takes over half an hour). Right before each pause one pass of the engine it is
+/// for, not timed, on the thread that read before: the pauses of the three engines are taken in
+/// turn, and without it the fast level, say, would have sat idle through the accurate pauses
+/// before its own as well. A pause whose engine is not there — the neural recogniser where it did
+/// not load — is not waited.
 fn idle(out: &mut Out, pic: &Picture, plan: &pure::Plan) -> (Vec<f64>, Vec<(Idle, f64)>) {
-    let warm: Vec<f64> = (0..3).map(|_| prod_pass(&pic.prod.image)).collect();
-    out.say(&format!("idle | {} | warm right before: {} ms", pure::PROBE, pure::ms_list(&warm)));
+    let image: &CGImage = &pic.prod.image;
+    let paddle = || paddle_on_its_thread(pic, Qos::Interactive).map_or(f64::NAN, |(r, _)| r.ms);
+    let warm: Vec<f64> = (0..3).map(|_| prod_pass(image)).collect();
+    out.say(&format!("idle | {} | accurate, warm right before: {} ms", pure::PROBE, pure::ms_list(&warm)));
+    let fast: Vec<f64> = (0..3).map(|_| fast_pass(image)).collect();
+    out.say(&format!("idle | {} | fast, warm right before: {} ms", pure::PROBE, pure::ms_list(&fast)));
+    let neural = paddle_ocr::ready();
+    if neural {
+        let p: Vec<f64> = (0..3).map(|_| paddle()).collect();
+        out.say(&format!("idle | {} | the neural recogniser, warm right before: {} ms", pure::PROBE, pure::ms_list(&p)));
+    }
     let mut after = Vec::new();
     for i in &plan.idle {
+        if i.engine == IdleEngine::Paddle && !neural {
+            out.say(&format!(
+                "idle | {} | after {} s, {}: not measured, the neural recogniser is not available",
+                pure::PROBE,
+                i.secs,
+                i.engine.word()
+            ));
+            continue;
+        }
+        let _ = match i.engine {
+            IdleEngine::Accurate => prod_pass(image),
+            IdleEngine::Fast => fast_pass(image),
+            IdleEngine::Paddle => paddle(),
+        };
         std::thread::sleep(Duration::from_secs(i.secs));
-        let ms = if i.fresh { pass_on_fresh_thread(pic) } else { prod_pass(&pic.prod.image) };
-        out.say(&format!("idle | {} | after {} s, on {}: {} ms", pure::PROBE, i.secs, i.thread(), pure::ms(ms)));
+        let ms = match (i.engine, i.fresh) {
+            (IdleEngine::Accurate, true) => pass_on_fresh_thread(pic),
+            (IdleEngine::Accurate, false) => prod_pass(image),
+            (IdleEngine::Fast, _) => fast_pass(image),
+            (IdleEngine::Paddle, _) => paddle(),
+        };
+        out.say(&format!(
+            "idle | {} | after {} s, {} on {}: {} ms",
+            pure::PROBE,
+            i.secs,
+            i.engine.word(),
+            i.thread(),
+            pure::ms(ms)
+        ));
         after.push((*i, ms));
     }
     (warm, after)
@@ -1035,6 +1618,7 @@ fn bench(opts: &Options) -> i32 {
         plan.min_samples,
         plan.idle_secs()
     ));
+    let section = Instant::now();
     machine(&mut out);
     conditions(&mut out, "at the start");
     let revisions = vision(&mut out);
@@ -1043,9 +1627,17 @@ fn bench(opts: &Options) -> i32 {
     }
 
     let mut pictures = Vec::new();
-    for f in FIXTURES {
+    for f in pure::all_pictures(opts) {
         match picture(f) {
-            Ok(p) => pictures.push(p),
+            Ok(p) => {
+                if p.blank {
+                    out.say(&format!(
+                        "picture {}: the blank guard answers it, so only the pipeline reads it, as a read would",
+                        f.label()
+                    ));
+                }
+                pictures.push(p);
+            }
             Err(why) => out.say(&format!("picture {}: not usable: {why}", f.label())),
         }
     }
@@ -1053,6 +1645,7 @@ fn bench(opts: &Options) -> i32 {
         out.loud(&format!("stopped: the picture {} could not be prepared, so nothing can be compared", pure::PROBE));
         return 1;
     };
+    out.say(&section_took("machine", section));
 
     let mut summary = Summary { path: opts.summary.as_deref(), failed: false };
     summary.add(
@@ -1068,8 +1661,12 @@ fn bench(opts: &Options) -> i32 {
 
     let (children, probed) = match std::env::current_exe() {
         Ok(exe) => {
+            let section = Instant::now();
             let children = first_passes(&mut out, &plan, &exe);
+            out.say(&section_took("first passes", section));
+            let section = Instant::now();
             let probed = probes(&mut out, &exe, &revisions);
+            out.say(&section_took("probes", section));
             (Some(children), probed)
         }
         Err(e) => {
@@ -1078,40 +1675,59 @@ fn bench(opts: &Options) -> i32 {
         }
     };
 
+    // The neural recogniser in this process, once its probe went through in one of its own.
+    let section = Instant::now();
+    let paddle: Result<f64, String> = match pure::variant("paddle-crop").map(|v| probed_ok(&probed, v)) {
+        Some(Ok(())) => paddle_ocr::init_timed(),
+        Some(Err(why)) => Err(why),
+        None => Err("no probe for it".to_string()),
+    };
+    match &paddle {
+        Ok(ms) => out.say(&format!(
+            "paddle | the neural recogniser in this process: the session was made in {} ms: {}",
+            pure::ms(*ms),
+            paddle_ocr::engine_words()
+        )),
+        Err(why) => out.say(&format!("paddle | the neural recogniser is not measured in this run: {why}")),
+    }
+    out.say(&section_took("the neural recogniser", section));
+
     // This process's own first passes are not measured (the children did that); two untimed
-    // passes make the sections below start warm.
+    // passes make the sections below start warm, and one recognition the neural recogniser.
     for _ in 0..2 {
         let _ = prod_pass(&pictures[probe].prod.image);
     }
-
-    out.say(&format!(
-        "pipeline: every picture as host.ocr.recognize reads it once the capture is in hand, the ladder's {} ms budget \
-         counted from {} ms before each read for the capture it does not make (--capture-ms); this thread at {}",
-        LADDER_BUDGET.as_millis(),
-        opts.capture_ms,
-        qos_here()
-    ));
-    let mut rows = pipeline(&mut out, &pictures, &plan, "prod", capture);
-    let rev2 = pure::variant("rev2").expect("rev2 is a variant");
-    let rev2_ok = if revisions.contains(&2) {
-        probed_ok(&probed, rev2)
-    } else {
-        Err("this macOS has no revision 2".to_string())
-    };
-    match rev2_ok {
-        Ok(()) => {
-            out.say("pipeline: the same again with every request of every rung asking for revision 2");
-            let _rev2 = RevisionOverride::set(2);
-            rows.extend(pipeline(&mut out, &pictures, &plan, "rev2", capture));
-        }
-        Err(why) => out.say(&format!("pipeline | rev2 | not measured: {why}")),
+    if paddle.is_ok() {
+        let _ = paddle_on_its_thread(&pictures[probe], Qos::Interactive);
     }
-    let pipeline_table = pure::pipeline_table(&rows);
-    out.say("table: pipeline, a whole read without the capture, as host.ocr.recognize makes it");
-    out.raw(&pipeline_table);
-    summary.add(&mut out, &format!("Pipeline: a whole read without the capture.\n\n{pipeline_table}\n"));
 
-    let grid = engine(&mut out, &pictures, &plan, &revisions, &probed);
+    let section = Instant::now();
+    let lines = pipeline(&mut out, &pictures, &plan, capture, &revisions, &probed, &paddle);
+    let pipeline_table = lines.table();
+    let strategies_table = lines.summary_table();
+    out.say(
+        "table: pipeline, the median ms of a whole read without the capture, as host.ocr.recognize makes it, one \
+         column a strategy; \"faster\" or \"slower\" than prod by the rule where the picture was read for speed",
+    );
+    out.raw(&pipeline_table);
+    out.say("table: what each strategy came to over every picture");
+    out.raw(&strategies_table);
+    // Today's ladder on its own line, whatever the verdicts: what CI warns by.
+    if let Some(line) = lines.prod_line() {
+        out.say(&line);
+    }
+    summary.add(
+        &mut out,
+        &format!(
+            "Pipeline: the median ms of a whole read without the capture, one column a strategy; \"faster\" or \
+             \"slower\" than prod by the rule where the picture was read for speed.\n\n{pipeline_table}\n\
+             What each strategy came to.\n\n{strategies_table}\n"
+        ),
+    );
+    out.say(&section_took("pipeline", section));
+
+    let section = Instant::now();
+    let grid = engine(&mut out, &pictures, &plan, &revisions, &probed, &paddle);
     let engine_table = grid.table();
     out.say(
         "table: engine, median ms of one pass (the fastest to the slowest), against prod, and the verdict where \
@@ -1126,7 +1742,19 @@ fn bench(opts: &Options) -> i32 {
              {engine_table}\n"
         ),
     );
+    out.say(&section_took("engine", section));
 
+    // The closing lines: the pipeline's strategies, weighed by the rule, unless the engine's
+    // control says this run is too noisy for any verdict.
+    out.say(&format!("closing rule: {}", pure::CLOSING_RULE));
+    let closing = pure::closing_lines(&lines.outcomes(), grid.control_loud());
+    for line in &closing {
+        out.say(line);
+    }
+    let listed = closing.iter().map(|l| format!("- {l}")).collect::<Vec<_>>().join("\n");
+    summary.add(&mut out, &format!("{listed}\n\n"));
+
+    let section = Instant::now();
     let pic = &pictures[probe];
     out.say(&format!("threads: one pass of prod over {} at a time; this thread at {}", pure::PROBE, qos_here()));
     let fresh: Vec<f64> = (0..plan.fresh_threads).map(|_| pass_on_fresh_thread(pic)).collect();
@@ -1155,13 +1783,32 @@ fn bench(opts: &Options) -> i32 {
         .and_then(|(v, p)| grid.cells[v][p].stats())
         .map(|s| s.median);
     out.say(&pure::switching_line(interleaved, alone_med));
+    let mut beside_rows = Vec::new();
+    match &paddle {
+        Ok(_) => beside_rows = beside_paddle(&mut out, pic, plan.pair_passes),
+        Err(why) => out.say(&format!("threads | vision beside the neural recogniser | not measured: {why}")),
+    }
+    out.say(&format!(
+        "sustained: four blocks of {} s of back-to-back accurate passes over {}, alternately Vision alone and with the \
+         neural recogniser asked about the same region before each pass, at utility, as the shadow asks it",
+        plan.sustained_secs,
+        pure::PROBE
+    ));
+    let sustained_rows = sustained(&mut out, pic, plan.sustained_secs);
+    out.say(&section_took("threads", section));
 
+    let section = Instant::now();
     out.say(&format!(
         "idle: one pass after each pause, in this order: {}; this thread at {}",
-        plan.idle.iter().map(|i| format!("{} s on {}", i.secs, i.thread())).collect::<Vec<_>>().join(", "),
+        plan.idle
+            .iter()
+            .map(|i| format!("{} s, {} on {}", i.secs, i.engine.word(), i.thread()))
+            .collect::<Vec<_>>()
+            .join("; "),
         qos_here()
     ));
     let (warm, after) = idle(&mut out, pic, &plan);
+    out.say(&section_took("idle", section));
     conditions(&mut out, "at the end");
 
     let mut timing: Vec<(String, String)> = Vec::new();
@@ -1172,36 +1819,66 @@ fn bench(opts: &Options) -> i32 {
                 pure::ms(r.first),
             ));
         }
-        for (warmup, results) in &children.by_kind {
-            let label = match warmup {
-                Warmup::Bars => "after the former warm-up over bars",
-                Warmup::Word => "after the application's warm-up (a line of words)",
-                Warmup::Nothing => "with no warm-up",
+        for (role, results) in &children.by_kind {
+            let label = match role {
+                Child::FirstPass(Warmup::Bars) => "after the former warm-up over bars".to_string(),
+                Child::FirstPass(Warmup::Word) => "after the application's warm-up (a line of words)".to_string(),
+                Child::FirstPass(Warmup::Field) => format!("after a warm-up over the field {}", pure::WARM_UP_FIELD),
+                Child::FirstPass(Warmup::Nothing) => "with no warm-up".to_string(),
+                Child::FastFirst => "of the fast level, with no warm-up".to_string(),
+                Child::SecondLanguage => format!("in {}, after the word warm-up in Vision's default", pure::SECOND_LANGUAGE),
+                other => other.word(),
             };
             let warmups: Vec<f64> = results.iter().filter_map(|r| r.warmup.map(|w| w.0)).collect();
-            if !warmups.is_empty() {
-                timing.push((format!("the warm-up itself, {}", warmup.word()), pure::ms_list(&warmups)));
+            if !warmups.is_empty() && !matches!(role, Child::SecondLanguage) {
+                timing.push((format!("the warm-up itself, {}", role.word()), pure::ms_list(&warmups)));
             }
             let firsts: Vec<f64> = results.iter().map(|r| r.first).collect();
             let seconds: Vec<f64> = results.iter().map(|r| r.second).collect();
             timing.push((format!("first real pass in a process, {label}"), pure::ms_list(&firsts)));
             timing.push((format!("the pass after it, {label}"), pure::ms_list(&seconds)));
         }
+        for (start, results) in &children.paddle {
+            let ran: Vec<&PaddleChild> =
+                results.iter().filter_map(|r| if let PaddleFirst::Ran(c) = r { Some(c) } else { None }).collect();
+            if ran.is_empty() {
+                continue;
+            }
+            let list = |f: &dyn Fn(&PaddleChild) -> Option<f64>| {
+                pure::ms_list(&ran.iter().filter_map(|c| f(c)).collect::<Vec<_>>())
+            };
+            let what = match start {
+                PaddleStart::Nothing => "the neural recogniser's session made",
+                PaddleStart::Warm => "the neural recogniser's warm-up",
+                PaddleStart::WithVision => "the neural recogniser's warm-up beside Vision's",
+            };
+            timing.push((what.to_string(), list(&|c| Some(c.start))));
+            if *start == PaddleStart::WithVision {
+                timing.push(("Vision's word warm-up beside the neural recogniser's".into(), list(&|c| c.vision)));
+                timing.push(("Vision's first real pass after both warm-ups".into(), list(&|c| c.vision_first)));
+            }
+            timing.push((format!("first recognition after {what}"), list(&|c| Some(c.first))));
+            timing.push((format!("the recognition after it ({what})"), list(&|c| Some(c.second))));
+            let added = list(&|c| Some(c.mem_after? - c.mem_before?));
+            timing.push((format!("peak memory the recogniser added, MB ({what})"), added));
+        }
     }
     timing.push(("first pass on a fresh thread, the process warm".into(), pure::ms_list(&fresh)));
     timing.push(("one thread, median a pass".into(), alone_med.map(pure::ms).unwrap_or_else(|| "?".into())));
     timing.push(("two threads at once, median a pass".into(), both_med.map(pure::ms).unwrap_or_else(|| "?".into())));
-    timing.push(("warm pass right before the idle passes".into(), pure::ms_list(&warm)));
+    timing.extend(beside_rows);
+    timing.extend(sustained_rows);
+    timing.push(("warm accurate pass right before the idle passes".into(), pure::ms_list(&warm)));
     let mut pauses: Vec<Idle> = Vec::new();
     for (i, _) in &after {
         if !pauses.contains(i) {
             pauses.push(*i);
         }
     }
-    pauses.sort_by_key(|i| (i.secs, i.fresh));
+    pauses.sort_by_key(|i| (i.engine as u8, i.secs, i.fresh));
     for i in pauses {
         let v: Vec<f64> = after.iter().filter(|(j, _)| *j == i).map(|(_, ms)| *ms).collect();
-        timing.push((format!("pass after {} s idle, on {}", i.secs, i.thread()), pure::ms_list(&v)));
+        timing.push((format!("{} after {} s idle, on {}", i.engine.word(), i.secs, i.thread()), pure::ms_list(&v)));
     }
     let timing_table = pure::timing_table(&timing);
     out.say("table: first passes, threads and idle (in the order taken where there are several)");
@@ -1211,4 +1888,9 @@ fn bench(opts: &Options) -> i32 {
     let wrote = out.path.as_ref().map(|p| format!("; wrote {}", p.display())).unwrap_or_default();
     out.loud(&format!("done in {} s{wrote}", started.elapsed().as_secs()));
     0
+}
+
+/// The line that ends a section: how long it took.
+fn section_took(name: &str, since: Instant) -> String {
+    format!("{name} | section took {:.1} s", since.elapsed().as_secs_f64())
 }

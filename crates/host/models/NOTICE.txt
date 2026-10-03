@@ -1,0 +1,18 @@
+The neural text recogniser's model
+
+ppocr-rec.onnx is an English text recognition model of PaddleOCR's PP-OCR mobile series, and
+ppocr-dict.txt is its dictionary: the characters it can read, one a line. PaddleOCR is the
+PaddlePaddle project's, published under the Apache License, Version 2.0, whose text is
+LICENSE-Apache-2.0.txt beside this file:
+
+    https://github.com/PaddlePaddle/PaddleOCR
+
+The model is not in the form PaddleOCR publishes it: it was converted from PaddlePaddle's own
+format to ONNX with paddle2onnx (https://github.com/PaddlePaddle/Paddle2ONNX), as the names in
+its graph say: "PaddlePaddle Graph in PIR mode", the program format of PaddlePaddle 3, and nodes
+named p2o.*. Which model of the series exactly was not recorded when it came into this
+repository (2026-06-21).
+
+Automation Platform reads small regions of the screen with it: on Windows it is inside the
+executable, and a macOS package carries it as AutomationPlatform.app/Contents/Resources/
+ppocr-rec.onnx, with this notice and the licence in its licences folder.

@@ -8,7 +8,8 @@
 //! and how long Vision had been idle before it, a slow one names every pass with the rung of the
 //! ladder it was and whether another pass ran beside it, the warm-up says whether it read its test
 //! line, and `[env]` names the processor. Nothing here changes what is read. And the warm-ups
-//! take turns ([`Gate`]), so that their two lines time two first passes apart.
+//! take turns ([`Gate`]), so that their two lines time two first passes apart; the neural
+//! recogniser's waits for Vision's to end ([`Latch`]).
 //!
 //! Std only, so the wording and the arithmetic are tested on every platform; `crates/macos-check`
 //! borrows it.
@@ -36,6 +37,16 @@ pub enum Stage {
     Enlarged,
     /// The same enlarged picture, the fast model.
     Fast,
+    /// The fast model over the content crop, before any accurate pass: a ladder whose first level
+    /// is the fast one (`ocr/ladder.rs`), which only `ocr-bench` climbs so far.
+    FastFirst,
+    /// The content crop again under request revision 2, after a first pass that read nothing,
+    /// instead of the whole region: `ocr-bench`'s `rev3>rev2`.
+    TightAgain,
+    /// The fast model over the content crop right after the first accurate pass, on
+    /// `host.ocr.read`'s recognise thread, for the neural recogniser's shadow (`ocr/shadow.rs`): its
+    /// reading is compared and never answers.
+    FastCompared,
     /// The warm-up's own pass over its test line.
     WarmUp,
 }
@@ -48,6 +59,9 @@ impl Stage {
             Stage::Whole => "whole region",
             Stage::Enlarged => "enlarged",
             Stage::Fast => "fast model",
+            Stage::FastFirst => "fast model, first",
+            Stage::TightAgain => "tight crop, revision 2",
+            Stage::FastCompared => "fast model, only compared",
             Stage::WarmUp => "warm-up",
         }
     }
@@ -63,6 +77,10 @@ pub struct Pass {
     pub words: Option<usize>,
     /// Another Vision pass ran in this process at some moment of this one ([`Running`]).
     pub beside: bool,
+    /// The neural recogniser ran at some moment of this pass: it was running when the pass began or
+    /// ended, or a run of it began in between. On a Mac only, where it reads beside Vision as a
+    /// shadow (`ocr/shadow.rs`); always false elsewhere.
+    pub paddle_beside: bool,
 }
 
 /// Where the picture of a slow read came from, for its line.
@@ -208,8 +226,8 @@ pub fn cost_line(
 }
 
 /// The line a slow read is worth: its time, then its capture, each Vision pass with its rung, its
-/// milliseconds, its words and whether another pass ran beside it, and what the rest took — the
-/// crop, the enlargement, the pixels read back.
+/// milliseconds, its words, whether another pass ran beside it and whether the neural recogniser
+/// did, and what the rest took — the crop, the enlargement, the pixels read back.
 pub fn slow_line(w: i32, h: i32, ms: f64, thread: &str, capture: Capture, passes: &[Pass]) -> String {
     let mut parts = Vec::with_capacity(passes.len() + 2);
     let mut counted = 0.0;
@@ -232,7 +250,8 @@ pub fn slow_line(w: i32, h: i32, ms: f64, thread: &str, capture: Capture, passes
             Some(n) => format!("{n} words"),
         };
         let beside = if p.beside { ", another pass beside it" } else { "" };
-        parts.push(format!("{} {:.0} ms, {words}{beside}", p.stage.word(), p.ms));
+        let paddle = if p.paddle_beside { ", the neural recogniser beside it" } else { "" };
+        parts.push(format!("{} {:.0} ms, {words}{beside}{paddle}", p.stage.word(), p.ms));
     }
     parts.push(format!("the rest {:.0} ms", (ms - counted).max(0.0)));
     format!("ocr: a slow read, a {w}x{h} pt region on {thread} in {ms:.0} ms: {}", parts.join("; "))
@@ -361,6 +380,72 @@ impl Default for Gate {
     }
 }
 
+/// A signal that happens once, and a wait for it that the exit can call off.
+///
+/// On a Mac the neural recogniser warms up after Vision's warm-up has ended rather than beside it
+/// (`backend::warmup_ocr`): two engines warming at once on the two to four cores of an Intel Mac
+/// slow each other down, as two Vision passes at once did (2.3 times each on the CI's Intel Mac).
+/// Vision's warm-up holds an [`Opener`], which opens the latch when its pass ends, when its thread
+/// unwinds, and when the thread could not be started at all; the neural recogniser's warm-up waits
+/// with [`wait_or_stopped`](Latch::wait_or_stopped). And the exit calls [`stop`](Latch::stop)
+/// before it joins that warm-up, so that a Vision warm-up which never ends — macOS 27 has been
+/// reported to hang in its first request — cannot hold the exit. Not a timer: it opens when
+/// something has ended, or is stopped when the application quits.
+pub struct Latch {
+    /// Whether it was opened, and whether it was stopped.
+    state: Mutex<(bool, bool)>,
+    changed: Condvar,
+}
+
+/// Opens its latch when dropped.
+pub struct Opener<'a>(&'a Latch);
+
+impl Drop for Opener<'_> {
+    fn drop(&mut self) {
+        self.0.open();
+    }
+}
+
+impl Latch {
+    pub const fn new() -> Latch {
+        Latch { state: Mutex::new((false, false)), changed: Condvar::new() }
+    }
+
+    /// Opened: every wait returns true from now on, unless it was stopped.
+    pub fn open(&self) {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).0 = true;
+        self.changed.notify_all();
+    }
+
+    /// Stopped: every wait returns false from now on, opened or not — a stop is the exit, and
+    /// whatever waited for the signal is no longer wanted.
+    pub fn stop(&self) {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).1 = true;
+        self.changed.notify_all();
+    }
+
+    /// Opens the latch when the returned guard is dropped.
+    pub fn opener(&self) -> Opener<'_> {
+        Opener(self)
+    }
+
+    /// Waits until the latch is opened or stopped, at once when it already is: true when it was
+    /// opened and not stopped.
+    pub fn wait_or_stopped(&self) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        while !state.0 && !state.1 {
+            state = self.changed.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+        !state.1
+    }
+}
+
+impl Default for Latch {
+    fn default() -> Latch {
+        Latch::new()
+    }
+}
+
 /// The `[env]` line `cpu`: the processor's name, its cores and threads, and on a Mac with two kinds
 /// of core how many of each. Any part a platform could not tell is `?`. On both platforms: the
 /// processor is half of what a recognition costs, and a log that does not name it cannot be held
@@ -380,12 +465,22 @@ mod tests {
     use super::*;
 
     fn pass(stage: Stage, ms: f64, words: Option<usize>, beside: bool) -> Pass {
-        Pass { stage, ms, words, beside }
+        Pass { stage, ms, words, beside, paddle_beside: false }
     }
 
     #[test]
     fn every_stage_has_its_own_word() {
-        let all = [Stage::AsCaptured, Stage::Tight, Stage::Whole, Stage::Enlarged, Stage::Fast, Stage::WarmUp];
+        let all = [
+            Stage::AsCaptured,
+            Stage::Tight,
+            Stage::Whole,
+            Stage::Enlarged,
+            Stage::Fast,
+            Stage::FastFirst,
+            Stage::TightAgain,
+            Stage::FastCompared,
+            Stage::WarmUp,
+        ];
         let words: std::collections::HashSet<&str> = all.iter().map(|s| s.word()).collect();
         assert_eq!(words.len(), all.len());
         assert_eq!(Stage::Tight.word(), "tight crop");
@@ -548,6 +643,18 @@ mod tests {
             "rounding never makes the rest negative"
         );
         assert!(slow_line(40, 20, 150.0, "the event loop", Capture::Took(150.0), &[]).contains("capture 150 ms; no Vision pass"));
+        // The neural recogniser beside a pass, as the shadow runs it on a Mac, and the shadow's
+        // own fast pass named as what it is.
+        let shadowed = [
+            Pass { paddle_beside: true, ..pass(Stage::Tight, 290.0, Some(1), false) },
+            pass(Stage::FastCompared, 14.0, Some(1), false),
+        ];
+        assert_eq!(
+            slow_line(40, 20, 330.0, "thread ocr-recognise", Capture::Apart, &shadowed),
+            "ocr: a slow read, a 40x20 pt region on thread ocr-recognise in 330 ms: picture taken apart; \
+             tight crop 290 ms, 1 word, the neural recogniser beside it; fast model, only compared 14 ms, 1 word; \
+             the rest 26 ms"
+        );
     }
 
     /// One line per key per interval; another key is its own; an old key is forgotten.
@@ -624,6 +731,49 @@ mod tests {
         });
         assert!(fell.join().is_err());
         assert!(GATE.wait() < Duration::from_millis(50), "a first warm-up that unwound ended its turn");
+    }
+
+    /// Open: a wait returns true, at once when it was opened before; stopped: false, opened or
+    /// not; and a waiter on another thread is woken by either.
+    #[test]
+    fn the_latch_opens_or_is_stopped() {
+        let open = Latch::new();
+        open.open();
+        assert!(open.wait_or_stopped(), "opened before the wait: at once, and true");
+        assert!(open.wait_or_stopped(), "and again");
+
+        let stopped = Latch::new();
+        stopped.stop();
+        assert!(!stopped.wait_or_stopped());
+        stopped.open();
+        assert!(!stopped.wait_or_stopped(), "a stop is the exit: opening after it changes nothing");
+        let late = Latch::new();
+        late.open();
+        late.stop();
+        assert!(!late.wait_or_stopped(), "nor does opening before it");
+
+        static WAITED: Latch = Latch::new();
+        let waiter = std::thread::spawn(|| WAITED.wait_or_stopped());
+        std::thread::sleep(Duration::from_millis(30));
+        drop(WAITED.opener());
+        assert!(waiter.join().unwrap(), "an opener dropped opens it");
+
+        static CALLED_OFF: Latch = Latch::new();
+        let waiter = std::thread::spawn(|| CALLED_OFF.wait_or_stopped());
+        std::thread::sleep(Duration::from_millis(30));
+        CALLED_OFF.stop();
+        assert!(!waiter.join().unwrap(), "the exit calls the wait off");
+
+        // An opener held by a thread that unwinds opens it too.
+        crate::quiet_expected_panics();
+        static UNWOUND: Latch = Latch::new();
+        let opener = UNWOUND.opener();
+        let fell = std::thread::spawn(move || {
+            let _opener = opener;
+            panic!("{}inside Vision's warm-up", crate::EXPECTED_PANIC);
+        });
+        assert!(fell.join().is_err());
+        assert!(UNWOUND.wait_or_stopped());
     }
 
     #[test]

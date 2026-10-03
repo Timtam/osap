@@ -3417,6 +3417,13 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
         Ok(OcrText { text, words, lines, fallback, skipped: false })
 }
 
+/// `ocr-bench --paddle`'s second opinion: a picture read exactly as a captured region is, by
+/// [`recognize_image`] with no language — the system recogniser, the neural one beside it, the
+/// blank guard. Crate-internal; the bench is its only caller.
+pub(super) fn bench_system_read(cap: &CapturedImage) -> Result<OcrText, String> {
+    recognize_image(cap, None)
+}
+
 /// The `[env]` processor line, asked of this machine: it names something, and counts its cores.
 #[cfg(test)]
 mod cpu_line_tests {

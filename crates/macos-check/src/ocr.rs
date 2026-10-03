@@ -2,7 +2,8 @@
 //!
 //! The macOS backend names these types — the capture plan, the pieces a read is made of — so
 //! they have to exist at `crate::ocr` here exactly as they do in `host`. Only the files that
-//! need nothing but the standard library and `fluent-langneg` are borrowed; the threads
+//! need nothing but the standard library, `fluent-langneg`, `toml` (the bench's picture
+//! manifest) and `image` (the neural recogniser's preprocessing) are borrowed; the threads
 //! (`service.rs`) and the Luau side (`lua.rs`) stay in `host`.
 //!
 //! A file of its own rather than an inline module in `lib.rs`: a `#[path]` inside an inline
@@ -38,6 +39,21 @@ pub mod snap_queue;
 /// resolve here too), the statistics and what it prints — which the macOS half names.
 #[path = "../../host/src/ocr/bench.rs"]
 pub mod bench;
+
+/// The neural recogniser's arithmetic around its model, and when two readings are the same;
+/// `ocr-bench` judges readings with it. Std and `image`, which this crate declares for it.
+#[path = "../../host/src/ocr/paddle_pre.rs"]
+pub mod paddle_pre;
+
+/// The shape of a small region's retry ladder — what the macOS recogniser is told and what
+/// `ocr-bench`'s strategies vary.
+#[path = "../../host/src/ocr/ladder.rs"]
+pub mod ladder;
+
+/// The neural recogniser's shadow — its readings beside the macOS ladder's, compared and counted —
+/// which `backend/macos/ocr.rs` keeps.
+#[path = "../../host/src/ocr/shadow.rs"]
+pub mod shadow;
 
 /// What a recognition cost, as the log says it — the wording and the arithmetic of the macOS
 /// recogniser's cost lines, which `backend/macos/ocr.rs` names.

@@ -1,0 +1,227 @@
+# Real captures for `automation-platform ocr-bench --pictures DIR`, cut by crop.py (beside this
+# file) out of the overlay runtime's calibration shots. Those shots are git-ignored
+# (modules/*/calibration/): a calibrating run writes them on the machine that took them, so
+# only that machine can cut these again. Every one here is a Windows capture at 1x.
+#
+# Two sets:
+#   set = "ci"     value fields and plain control words, nothing else; committed to
+#                  crates/host/bench-data/ocr/real/ with a manifest and a NOTICE naming the
+#                  plug-ins, and read by CI with --pictures.
+#   set = "local"  wordmarks, logos, preset and instrument names; written to
+#                  crates/host/tests-data-local/ocr-real/, which is git-ignored, and read only on
+#                  the machine that has the shots or on a tester's Mac it is handed to.
+#
+# Per picture:
+#   shot       the calibration shot, a file in the calibration folder
+#   origin     where the module's own frame starts in the shot, in pixels: sforzando's content
+#              origin in its menu shots (the window frame and title bar above and left of it),
+#              (0, 0) where the shot is the plug-in's content alone
+#   region     x1, y1, x2, y2 from that origin, as the module's region is written (x2 and y2
+#              not included); where no module reads the field, the field with its surround
+#   accept     the answers that are right: "" is the answer "nothing"
+#   must_read  whether a way of reading must read it right; false where nothing is accepted
+#   what       what the field is, and where its region comes from
+#   checked    how the accepted answers were checked. Both people on this project are blind:
+#              each answer was read off the picture by a model, held against the range of
+#              values the plug-in shows there, and held against what Windows.Media.Ocr and the
+#              neural recogniser read on Windows (`ocr-bench --paddle --pictures`). A doubtful
+#              one gets more than one accepted answer.
+
+[plugins]
+sforzando = "sforzando, by Plogue Art et Technologie Inc."
+melodyne = "Melodyne, by Celemony Software GmbH"
+kontakt = "Kontakt 8, by Native Instruments"
+css = "Cinematic Studio Strings, by Cinematic Studio Series, in Kontakt 8"
+diva = "Diva, by u-he"
+
+[[picture]]
+name = "sfz-polyphony"
+set = "ci"
+plugin = "sforzando"
+shot = "sforzando-Polyphony-menu-before.png"
+origin = [8, 51]
+region = [486, 40, 516, 70]
+accept = ["64"]
+must_read = true
+what = "the POLY. read-out, light digits in a black well; the module's Windows region (modules/sforzando/src/main.luau)"
+checked = "read off the picture as 64; sforzando shows the polyphony as a whole number, 64 by default; on Windows (ocr-bench --paddle, 2026-10-02) the neural recogniser read 64, Windows.Media.Ocr nothing"
+
+[[picture]]
+name = "sfz-pitchbend"
+set = "ci"
+plugin = "sforzando"
+shot = "sforzando-Pitchbend-range-menu-before.png"
+origin = [8, 51]
+region = [576, 40, 602, 60]
+accept = ["DEF"]
+must_read = true
+what = "the PB RANGE read-out; the module's old Windows region, which starts inside the well (modules/sforzando/src/main.luau explains why the macOS one starts earlier)"
+checked = "read off the picture as DEF; sforzando shows DEF (the instrument's default) or a number of semitones there; on Windows (ocr-bench --paddle, 2026-10-02) both recognisers read DEF"
+
+[[picture]]
+name = "sfz-pitchbend-wide"
+set = "ci"
+plugin = "sforzando"
+shot = "sforzando-Pitchbend-range-menu-before.png"
+origin = [8, 51]
+region = [569, 38, 607, 60]
+accept = ["DEF"]
+must_read = true
+what = "the PB RANGE read-out, under the macOS region's numbers: the whole well and a little chrome round it"
+checked = "read off the picture as DEF; sforzando shows DEF (the instrument's default) or a number of semitones there; on Windows (ocr-bench --paddle, 2026-10-02) both recognisers read DEF"
+
+[[picture]]
+name = "sfz-tune"
+set = "ci"
+plugin = "sforzando"
+shot = "sforzando-Polyphony-menu-before.png"
+origin = [8, 51]
+region = [486, 10, 530, 32]
+accept = ["0"]
+must_read = true
+what = "the TUNE read-out, a lone digit in a well; no module reads it, so the region is the well with its surround, clear of the label"
+checked = "read off the picture as 0, a lone digit; sforzando shows the tuning as a whole number, 0 by default; on Windows (ocr-bench --paddle, 2026-10-02) the neural recogniser read 0 (score 0.55), Windows.Media.Ocr nothing"
+
+[[picture]]
+name = "sfz-trans"
+set = "ci"
+plugin = "sforzando"
+shot = "sforzando-Polyphony-menu-before.png"
+origin = [8, 51]
+region = [575, 10, 615, 32]
+accept = ["0"]
+must_read = true
+what = "the TRANS. read-out, a lone digit in a well; no module reads it, so the region is the well with its surround, clear of the label"
+checked = "read off the picture as 0, a lone digit; sforzando shows the transposition as a whole number of semitones, 0 by default; on Windows (ocr-bench --paddle, 2026-10-02) the neural recogniser read 0, Windows.Media.Ocr nothing"
+
+[[picture]]
+name = "sfz-instrument"
+set = "ci"
+plugin = "sforzando"
+shot = "sforzando-Instrument-menu-before.png"
+origin = [8, 51]
+region = [90, 22, 200, 36]
+accept = ["empty"]
+must_read = true
+what = "the INSTRUMENT field with no instrument loaded, dark text on a light panel; the module's Windows region"
+checked = "read off the picture as empty, the word sforzando shows before an instrument is loaded; on Windows (ocr-bench --paddle, 2026-10-02) both recognisers read empty"
+
+[[picture]]
+name = "mel-note-dash"
+set = "ci"
+plugin = "melodyne"
+shot = "Melodyne-clean.png"
+origin = [0, 0]
+region = [220, 61, 287, 74]
+accept = ["-", ""]
+must_read = false
+what = "the note inspector's first field with no note selected: one short dash; NOTE_REGION (modules/melodyne/src/main.luau)"
+checked = "read off the picture as one short dash, three pixels on one row; the module expects a recogniser to drop it, so nothing is right as well; on Windows (ocr-bench --paddle, 2026-10-02) the neural recogniser read -, Windows.Media.Ocr nothing"
+
+[[picture]]
+name = "mel-cents"
+set = "ci"
+plugin = "melodyne"
+shot = "Melodyne-2-clean.png"
+origin = [0, 0]
+region = [220, 61, 287, 74]
+accept = ["0 ct"]
+must_read = true
+what = "the note inspector's first field showing a pitch deviation; NOTE_REGION"
+checked = "read off the picture as 0 ct; Melodyne shows the deviation as a whole number of cents followed by ct; on Windows (ocr-bench --paddle, 2026-10-02) both recognisers read 0 ct"
+
+[[picture]]
+name = "mel-empty"
+set = "ci"
+plugin = "melodyne"
+shot = "Melodyne-3-clean.png"
+origin = [0, 0]
+region = [220, 61, 287, 74]
+accept = [""]
+must_read = false
+what = "the note inspector's first field drawn empty; NOTE_REGION"
+checked = "no text in it: a flat field with its lighter top edge; on Windows (ocr-bench --paddle, 2026-10-02) both recognisers read nothing (Windows' blank guard answered)"
+
+[[picture]]
+name = "mel-gain"
+set = "ci"
+plugin = "melodyne"
+shot = "Melodyne-4-clean.png"
+origin = [0, 0]
+region = [220, 61, 287, 74]
+accept = ["0.00 dB"]
+must_read = true
+what = "the note inspector's first field showing an amplitude; NOTE_REGION"
+checked = "read off the picture as 0.00 dB; Melodyne shows the amplitude with two decimals followed by dB; on Windows (ocr-bench --paddle, 2026-10-02) both recognisers read 0.00 dB"
+
+[[picture]]
+name = "mel-position"
+set = "ci"
+plugin = "melodyne"
+shot = "Melodyne-4-clean.png"
+origin = [0, 0]
+region = [408, 12, 530, 34]
+accept = ["14.1.1"]
+must_read = true
+what = "the transport's position read-out, bar.beat.tick in a larger type; TRANSPORT_REGION"
+checked = "read off the picture as 14.1.1: bar, beat and tick, whole numbers separated by points; on Windows (ocr-bench --paddle, 2026-10-02) Windows.Media.Ocr read 14.1.1, the neural recogniser 4.1.1 (score 0.14), losing the first digit"
+
+[[picture]]
+name = "k8-voices"
+set = "ci"
+plugin = "kontakt"
+shot = "Kontakt-8-in-a-DAW-Cinematic-Studio-Strings-Snapshot-menu-menu-before.png"
+origin = [0, 0]
+region = [555, 100, 625, 116]
+accept = ["Voices: 0"]
+must_read = true
+what = "the instrument header's voice count with its icon in front; measured on the shot, the plug-in's content at (0, 0)"
+checked = "read off the picture as a small icon, then Voices: and 0; Kontakt counts the playing voices there, 0 when nothing plays; on Windows (ocr-bench --paddle, 2026-10-02) neither read it right: Windows.Media.Ocr read Voices: without the 0, the neural recogniser In Voices: 0, the icon as letters"
+
+[[picture]]
+name = "css-legato"
+set = "ci"
+plugin = "css"
+shot = "Kontakt-8-in-a-DAW-Cinematic-Studio-Strings-Snapshot-menu-menu-before.png"
+origin = [0, 0]
+region = [800, 508, 870, 526]
+accept = ["Legato"]
+must_read = true
+what = "a caption under one of the library's buttons, light text on dark blue, the shape of the module's ocrLabel widened to 70 pixels (modules/cinematic-studio-series/src/main.luau)"
+checked = "read off the picture as Legato, one of the library's articulation names; on Windows (ocr-bench --paddle, 2026-10-02) both recognisers read Legato"
+
+[[picture]]
+name = "sfz-wordmark"
+set = "local"
+plugin = "sforzando"
+shot = "sforzando-Polyphony-menu-before.png"
+origin = [8, 51]
+region = [605, 33, 762, 70]
+accept = ["sforzando"]
+must_read = true
+what = "the wordmark, the module's identity region (WORDMARK)"
+checked = "read off the picture as sforzando, in a stylised italic serif; on Windows (ocr-bench --paddle, 2026-10-02) both recognisers read sforzando"
+
+[[picture]]
+name = "diva-preset"
+set = "local"
+plugin = "diva"
+shot = "Diva-clean.png"
+origin = [0, 0]
+region = [480, 20, 720, 48]
+accept = ["HS Gongfission"]
+must_read = true
+what = "the preset name in the header; u-he's region (modules/u-he/src/main.luau)"
+checked = "read off the picture as HS Gongfission, a factory preset's name; on Windows (ocr-bench --paddle, 2026-10-02) both recognisers read HS Gongfission"
+
+[[picture]]
+name = "k8-instrument"
+set = "local"
+plugin = "kontakt"
+shot = "Kontakt-8-in-a-DAW-Cinematic-Studio-Strings-Snapshot-menu-menu-before.png"
+origin = [0, 0]
+region = [420, 80, 560, 98]
+accept = ["CSS Basses"]
+must_read = true
+what = "the instrument header's instrument name; measured on the shot"
+checked = "read off the picture as CSS Basses, the loaded instrument; on Windows (ocr-bench --paddle, 2026-10-02) Windows.Media.Ocr read SSBasses, the neural recogniser nothing"
