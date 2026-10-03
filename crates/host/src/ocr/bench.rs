@@ -2484,6 +2484,53 @@ pub fn parse_probe(output: &str) -> Option<Probe> {
     rest.strip_prefix("no ").map(|why| Probe::No(why.trim().to_string()))
 }
 
+/// Whether a child's output holds its answer — whether it got as far as reading: a first pass's
+/// line, the neural recogniser's measurement (not its "no"), a probe that ran.
+pub fn child_read(role: Child, output: &str) -> bool {
+    match role {
+        Child::FirstPass(_) | Child::FastFirst | Child::SecondLanguage => parse_child(output).is_some(),
+        Child::PaddleFirst(_) => matches!(parse_paddle_child(output), Some(PaddleFirst::Ran(_))),
+        Child::Probe(_) => matches!(parse_probe(output), Some(Probe::Ran { .. })),
+    }
+}
+
+/// How a child of the benchmark ended, from its signal or status and its standard output: the
+/// output when it ended with status 0, or what became of it. `read` ([`child_read`]) says that it
+/// had printed its answer, so that a child that read and then died — at its exit, which is where
+/// ONNX Runtime 1.22's teardown aborted every process that had loaded it — is said apart from one
+/// that died, or could not load, before: `died of signal 6 at exit after reading: …`. Its answer is
+/// not used all the same: a process that dies is a process that dies.
+pub fn child_ended(signal: Option<i32>, code: Option<i32>, output: &str, read: bool) -> Result<String, String> {
+    if signal.is_none() && code == Some(0) {
+        return Ok(output.to_string());
+    }
+    let printed = output.trim();
+    let after = if read {
+        format!(" at exit after reading: {printed}")
+    } else if printed.is_empty() {
+        String::new()
+    } else {
+        format!(" after printing: {printed}")
+    };
+    Err(match (signal, code) {
+        (Some(sig), _) => format!("died of signal {sig}{after}"),
+        (None, Some(code)) => format!("ended with status {code}{after}"),
+        (None, None) => format!("ended without a status{after}"),
+    })
+}
+
+/// A child the parent ended at its limit of `limit_s` seconds, from what it had printed by then:
+/// one that had printed its answer hung at its exit — the other way a teardown can go wrong —
+/// and is said as one at exit after reading, as [`child_ended`] says a death there; one that had
+/// not did not finish.
+pub fn child_timed_out(limit_s: u64, output: &str, read: bool) -> String {
+    if read {
+        format!("hung at exit after reading, and was ended after {limit_s} s: {}", output.trim())
+    } else {
+        format!("did not finish within {limit_s} s")
+    }
+}
+
 /// The "first passes, threads and idle" table: one measurement a row.
 pub fn timing_table(rows: &[(String, String)]) -> String {
     let mut t = String::from("| measurement | ms |\n|---|---:|\n");
@@ -3170,6 +3217,54 @@ mod tests {
             assert_eq!(parse_probe(&format!("2026 noise\n{}\n", probe_line(&p))), Some(p));
         }
         assert_eq!(parse_probe("OCR BENCH CHILD: warmup=- read=- first=1.0 second=2.0"), None);
+    }
+
+    /// A child that read and then died at its exit — CI's first run with ONNX Runtime on a Mac,
+    /// every process that had loaded it — is said apart from one that died before it read, and
+    /// from one that could not load the recogniser at all, which ended normally saying so.
+    #[test]
+    fn a_child_that_read_and_died_at_exit_is_told_apart() {
+        let probe = Child::Probe(variant("paddle-crop").unwrap());
+        let ran = probe_line(&Probe::Ran { pinned: vec![] });
+        assert!(child_read(probe, &ran));
+        assert_eq!(
+            child_ended(Some(6), None, &format!("{ran}\n"), child_read(probe, &ran)),
+            Err(format!("died of signal 6 at exit after reading: {ran}"))
+        );
+        // Could not load: the child says so, and ends normally; its answer is for the caller.
+        let no = probe_line(&Probe::No("the neural recogniser is not available: no x86_64 slice".into()));
+        assert!(!child_read(probe, &no));
+        assert_eq!(child_ended(None, Some(0), &no, false), Ok(no.clone()));
+        // Died before its answer: what it printed, if anything, without "at exit".
+        assert_eq!(child_ended(Some(11), None, "", false), Err("died of signal 11".to_string()));
+        assert_eq!(child_ended(Some(6), None, " half a line ", false), Err("died of signal 6 after printing: half a line".to_string()));
+        // A status other than 0 after its answer is an end that went wrong too.
+        assert_eq!(child_ended(None, Some(1), &ran, true), Err(format!("ended with status 1 at exit after reading: {ran}")));
+        assert_eq!(child_ended(None, None, "", false), Err("ended without a status".to_string()));
+        // Ended at the parent's limit: a hang at exit after its answer, or no answer at all.
+        assert_eq!(
+            child_timed_out(120, &format!("{ran}\n"), child_read(probe, &ran)),
+            format!("hung at exit after reading, and was ended after 120 s: {ran}")
+        );
+        assert_eq!(child_timed_out(120, "", false), "did not finish within 120 s");
+
+        // What counts as reading, by role: the measurement, not its "no".
+        let paddle = Child::PaddleFirst(PaddleStart::Nothing);
+        let measured = paddle_child_line(&PaddleFirst::Ran(PaddleChild {
+            start: 134.4,
+            vision: None,
+            first: 8.7,
+            second: 5.1,
+            vision_first: None,
+            mem_before: Some(15.1),
+            mem_after: Some(60.9),
+            right: true,
+        }));
+        assert!(child_read(paddle, &measured));
+        assert!(!child_read(paddle, &paddle_child_line(&PaddleFirst::No("not available".into()))));
+        let first = Child::FirstPass(Warmup::Word);
+        assert!(child_read(first, &child_line(&ChildResult { warmup: None, first: 200.0, second: 170.0 })));
+        assert!(!child_read(first, "IOServiceMatchingfailed for: AppleM2ScalerParavirtDriver"));
     }
 
     fn grid(names: &[&str]) -> Grid {

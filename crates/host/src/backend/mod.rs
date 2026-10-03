@@ -65,9 +65,19 @@ pub(crate) use macos::perm::voiceover_automation_asking;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::perm::{ask_for, open_pane, permissions};
 /// `automation-platform ocr-bench`, which measures Vision on fixed pictures — see
-/// `macos::ocr::bench`. Re-exported for `lib.rs`, and so that `crates/macos-check` can name it.
+/// `macos::ocr::bench` — and returns the exit code. Every process of it — the run, each child it
+/// starts, `--paddle`, `--paddle-probe` — releases ONNX Runtime here before `main` hands the code
+/// to `exit()` ([`release_ocr`]), or ends through [`end_now`] with the same code when it cannot.
+/// For `lib.rs`, and so that `crates/macos-check` can name it.
 #[cfg(target_os = "macos")]
-pub(crate) use macos::ocr::bench::run as ocr_bench;
+pub(crate) fn ocr_bench(args: &[String]) -> i32 {
+    let code = macos::ocr::bench::run(args);
+    if !release_ocr() {
+        eprintln!("OCR BENCH: ONNX Runtime could not be released; ending without exit()'s teardown, status {code}");
+        end_now(code);
+    }
+    code
+}
 
 /// `automation-platform ocr-bench --paddle` on Windows: the neural recogniser measured alone on
 /// the bench's pictures, beside what `Windows.Media.Ocr` reads and what Windows answers — see
@@ -1856,6 +1866,40 @@ pub fn ocr_exit_report() {
 pub fn settle_ocr() {
     #[cfg(any(windows, target_os = "macos"))]
     paddle_ocr::settle();
+}
+
+/// The last thing a process does with text recognition before it ends, after [`settle_ocr`]: on
+/// a Mac, the neural recogniser's session and ONNX Runtime's environment released while all they
+/// use is still there (`paddle_ocr::release`), because ONNX Runtime 1.22 aborts in `exit()`'s
+/// teardown on an environment still alive. Waits up to half a second for a call still inside
+/// ONNX Runtime; returns at once when there is none, or when the recogniser was never loaded, and
+/// a second call finds nothing. True when the process may end through `exit()` — returning from
+/// `main`; false when something was still inside ONNX Runtime and nothing was released, and it
+/// must end through [`end_now`]. Logged when it released something or gave up. Always true
+/// elsewhere: Windows links ONNX Runtime in statically, and its exit is as it always was.
+pub fn release_ocr() -> bool {
+    #[cfg(target_os = "macos")]
+    let safe = !matches!(paddle_ocr::release(), paddle_ocr::Released::Busy(_));
+    #[cfg(not(target_os = "macos"))]
+    let safe = true;
+    safe
+}
+
+/// Ends this process at once with `code`, for one whose [`release_ocr`] said false: standard
+/// output and error flushed, then `_exit` on a Mac — no `atexit` handler and no static destructor
+/// runs, ONNX Runtime's included, so nothing can abort; the log needs nothing, as every line is
+/// written when it is said. `std::process::exit` elsewhere, where it is never needed.
+pub fn end_now(code: i32) -> ! {
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    #[cfg(target_os = "macos")]
+    // SAFETY: `_exit` ends the process; nothing after it runs.
+    unsafe {
+        libc::_exit(code)
+    }
+    #[cfg(not(target_os = "macos"))]
+    std::process::exit(code)
 }
 
 /// The backend for the current platform.

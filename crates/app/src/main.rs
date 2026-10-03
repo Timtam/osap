@@ -127,6 +127,10 @@ fn main() -> Result<()> {
     // First, so that no log header can be written without it: the panic hook below opens the
     // log too, and may do so before `run` does.
     host::build_info::set_binary_commit(BUILT_FROM);
+    // Dropped last, on every way out of `main` that drops anything — a return, and a panic
+    // unwinding out of it: on a Mac it releases ONNX Runtime before `exit()` runs, whose teardown
+    // aborts on it otherwise (host::ReleaseAtExit). `run` and `ocr-bench` release it themselves.
+    let _ort = host::ReleaseAtExit;
     attach_parent_console();
     log_panics();
     let args: Vec<String> = std::env::args().skip(1).collect();

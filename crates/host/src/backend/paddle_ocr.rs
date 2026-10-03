@@ -39,6 +39,18 @@
 //! here (Windows passes `Tighten::WINDOWS`; a golden test there pins the input bit for bit), so
 //! that it compiles and is tested where this file cannot be. `ocr-bench --paddle` measures this
 //! recogniser alone (`bench.rs`, a child of this file).
+//!
+//! **On a Mac every process that made the engine releases it before it ends** ([`release`]): the
+//! session, then ONNX Runtime's environment, while everything they use is still there. ONNX
+//! Runtime 1.22 keeps the environment in a static `unique_ptr` (`OrtEnv::p_instance_`) whose
+//! destructor, run by `exit()`, deletes one that is still alive; and `ort` never releases it — it
+//! keeps it in a static that is never dropped, as this file keeps the session. That deletion
+//! locks the mutex of ONNX Runtime's logging (`DefaultLoggerMutex`), a function-local static made
+//! when the environment was, so destroyed by `exit()` before the `unique_ptr`; macOS's libc++
+//! throws "mutex lock failed: Invalid argument" out of a destructor, and the process aborts
+//! (signal 6) after its work is done. Every process of CI's first run with the library did, the
+//! `--paddle-probe` that never started the recogniser's thread among them. Released before
+//! `exit()`, the `unique_ptr` is empty when its destructor runs.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -59,7 +71,8 @@ mod bench;
 pub(crate) use bench::{bench_rows, probe};
 
 struct Engine {
-    session: Mutex<Session>,
+    /// `None` once [`release`] has taken it, on a Mac at the end of a process; never on Windows.
+    session: Mutex<Option<Session>>,
     /// Recognition alphabet: class index `i` (1-based, after the CTC blank at 0)
     /// maps to `dict[i - 1]`.
     dict: Vec<String>,
@@ -78,7 +91,18 @@ fn engine() -> Option<&'static Engine> {
 /// the log whether the recogniser is ready; on Windows only when it is not, once, since the
 /// catch keeps the panic from the panic hook's own line and nothing makes it again.
 fn made() -> &'static Result<Engine, String> {
+    if let Some(made) = ENGINE.get() {
+        return made;
+    }
+    // Counted in `IN_ORT` from before ONNX Runtime is first touched until the engine is in
+    // `ENGINE`, where `release` looks for its session — not only until it is made: a release in
+    // between would find no session there and take the environment from under it. Once `release`
+    // has begun, nothing is made, and nothing said about it.
+    let in_ort = IN_ORT.start();
     ENGINE.get_or_init(|| {
+        if in_ort.is_none() {
+            return Err(RELEASED.to_string());
+        }
         let started = Instant::now();
         let made = match crate::logging::contain(init) {
             Ok(Ok(engine)) => Ok(engine),
@@ -114,6 +138,7 @@ fn made() -> &'static Result<Engine, String> {
         }
         made
     })
+    // `in_ort` dropped here, after the engine is in `ENGINE`.
 }
 
 /// Whether the engine has been made and works: asked without making it, so that a read can ask
@@ -132,7 +157,8 @@ pub(super) fn ready() -> bool {
 /// session is still borrowed — poisoned the mutex for good, and every later recognition
 /// answered `None` without a word, which is to say the lone-digit fallback was switched off for
 /// the rest of the session. A panic cannot leave the session half-changed: the only thing done
-/// to it under the lock is `run`, and ONNX Runtime's `Run` does not change the session — its
+/// to it under the lock is `run` (and, at the end of a Mac's process, [`release`] taking it
+/// out), and ONNX Runtime's `Run` does not change the session — its
 /// documentation allows several threads to call it on one session at once. (The mutex is
 /// there because `ort`'s `run` takes `&mut self`, not because the session needs it.)
 fn lock_even_if_poisoned<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -164,6 +190,18 @@ pub(super) struct InFlight {
 /// The recognitions of this process. A struct rather than a bare counter so the tests can
 /// have counters of their own and run beside each other.
 pub(super) static IN_FLIGHT: InFlight = InFlight::new();
+
+/// The calls of this file into ONNX Runtime under way now, on any thread: the engine being made
+/// ([`made`]) and a model run, from its input tensor to the drop of its outputs ([`run_model`]).
+/// Closed by [`release`], which waits for it to be idle before it releases anything, so that
+/// nothing is inside ONNX Runtime when its session and environment go, and nothing enters it
+/// after: a run asked later answers nothing, and an engine not made yet is never made. Never
+/// closed on Windows. The recogniser's thread waiting for work, and the preprocessing, are not
+/// in it.
+static IN_ORT: InFlight = InFlight::new();
+
+/// Why there is no engine once [`release`] has begun; never logged.
+const RELEASED: &str = "the process is ending, and ONNX Runtime has been released";
 
 /// One recognition counted in `InFlight`. Ends when it is dropped, unwinding included, so a
 /// recognition that panics does not keep the exit waiting for it.
@@ -283,7 +321,7 @@ fn init() -> anyhow::Result<Engine> {
         .with_optimization_level(GraphOptimizationLevel::Level3)?
         .with_intra_threads(1)?
         .commit_from_memory(MODEL)?;
-    Ok(Engine { session: Mutex::new(session), dict: paddle_pre::dict() })
+    Ok(Engine { session: Mutex::new(Some(session)), dict: paddle_pre::dict() })
 }
 
 /// The version of ONNX Runtime the Mac loaded, as its library says it (`GetVersionString`).
@@ -324,8 +362,9 @@ fn bundle_files() -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
 /// 5. The library opened by this file itself ([`open_runtime`]), and its version asked: `ort`
 ///    panics on a library it cannot load or that is older than it expects, where this can say
 ///    why. The handle stays open for the life of the process.
-/// 6. Only then the environment (`commit`) and the session, from the model's file. CPU only, one
-///    intra-op thread, graph optimisation level 3, as on Windows: the Core ML provider brings
+/// 6. Only then the environment (`commit`) — said in [`ENV_MADE`] the moment it exists, and the
+///    [`backstop`] registered right after it — and the session, from the model's file. CPU only,
+///    one intra-op thread, graph optimisation level 3, as on Windows: the Core ML provider brings
 ///    nothing a model this small could use, and no Mac without a Neural Engine has one anyway.
 #[cfg(target_os = "macos")]
 fn init() -> anyhow::Result<Engine> {
@@ -341,12 +380,194 @@ fn init() -> anyhow::Result<Engine> {
     let version = open_runtime(&dylib).map_err(anyhow::Error::msg)?;
     let _ = RUNTIME.set(version);
     environment.commit()?;
+    // Before the session, which can fail: an environment made is released at the end whether
+    // or not a session ever was.
+    ENV_MADE.store(true, Ordering::SeqCst);
+    register_backstop();
     let session = Session::builder()?
         .with_optimization_level(GraphOptimizationLevel::Level3)?
         .with_intra_threads(1)?
         .commit_from_file(&model)?;
-    Ok(Engine { session: Mutex::new(session), dict: paddle_pre::dict() })
+    Ok(Engine { session: Mutex::new(Some(session)), dict: paddle_pre::dict() })
 }
+
+/// Whether ONNX Runtime's environment exists and has not been released: set by [`init`] once
+/// `commit` has made it, cleared by [`release`] as it releases it. What the [`backstop`] asks.
+#[cfg(target_os = "macos")]
+static ENV_MADE: AtomicBool = AtomicBool::new(false);
+
+/// What [`release`] did.
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(windows, allow(dead_code))]
+pub(crate) enum Released {
+    /// Nothing of ONNX Runtime's was held: the engine was never made, or released before.
+    Nothing,
+    /// Released now: the session when there was one, then the environment when there was one.
+    Now { session: bool, environment: bool },
+    /// This many calls were still inside ONNX Runtime at the bound: nothing was released, and
+    /// the process must not end through `exit()`, whose static destructors would delete the
+    /// environment under them ([`super::end_now`]).
+    Busy(usize),
+}
+
+/// How long [`release`] waits for the calls still inside ONNX Runtime: the half second the exit
+/// gives recognitions in flight ([`SETTLE_BOUND`]). By then the application has joined its
+/// warm-up and waited that half second already, and the bench has joined its own threads, so
+/// there is nothing left to wait for and it returns at once. The bound matters only for a call
+/// that is stuck, or for the warm-up still making the session when a panic skipped the exit's
+/// join — 68 to 135 ms on CI's arm64 Macs, but 389 to 751 ms on its Intel one, which can outlast
+/// it. Either way a process that has to give up ends promptly, through `_exit`, without the
+/// teardown that aborts: a longer bound would only make such a quit slower.
+#[cfg_attr(windows, allow(dead_code))]
+const RELEASE_BOUND: Duration = SETTLE_BOUND;
+
+/// Releases ONNX Runtime before this process ends, on a Mac: [`release_with`] over this file's
+/// session and ONNX Runtime's environment, after closing [`IN_FLIGHT`] so that no region is even
+/// queued any more. Logged when it released something or had to give up. Called by every way
+/// this process ends that runs its own code (`super::release_ocr`); a second call finds nothing.
+#[cfg(target_os = "macos")]
+pub(crate) fn release() -> Released {
+    let started = Instant::now();
+    IN_FLIGHT.close();
+    let released = release_with(&IN_ORT, RELEASE_BOUND, take_session, release_environment);
+    match &released {
+        Released::Nothing => {}
+        Released::Now { session, environment } => crate::logging::line(
+            "ocr",
+            &format!(
+                "released {}{}{} before the process ends ({} ms)",
+                if *session { "the neural recogniser's session" } else { "" },
+                if *session && *environment { " and " } else { "" },
+                if *environment { "ONNX Runtime's environment" } else { "" },
+                started.elapsed().as_millis()
+            ),
+        ),
+        Released::Busy(n) => crate::logging::line(
+            "ocr",
+            &format!(
+                "{n} call(s) still inside ONNX Runtime after {} ms as the process ends; nothing was released, \
+                 and the process ends without exit()'s teardown, which would abort on it",
+                started.elapsed().as_millis()
+            ),
+        ),
+    }
+    released
+}
+
+/// The release, in its order, over what it acts on — apart from it, so that the tests run it:
+///
+/// 1. `in_ort` closed: nothing enters ONNX Runtime from here on (a run answers nothing, an
+///    engine is not made).
+/// 2. Waited for, at most `bound`, until nothing is inside it; when something still is, nothing
+///    is released ([`Released::Busy`]) — the session and the environment are in use.
+/// 3. The session (`session`, true when there was one), first: it logs through the
+///    environment's logging, and was made in it.
+/// 4. The environment (`environment`, true when there was one).
+///
+/// A second call closes what is closed, finds nothing inside, and the two steps find nothing.
+#[cfg_attr(windows, allow(dead_code))]
+fn release_with(
+    in_ort: &InFlight,
+    bound: Duration,
+    session: impl FnOnce() -> bool,
+    environment: impl FnOnce() -> bool,
+) -> Released {
+    in_ort.close();
+    if !in_ort.wait_idle(bound) {
+        // Counted once more: the last call can leave between the wait's last look and its giving
+        // up, and with the count closed, none now is none for good.
+        let inside = in_ort.count();
+        if inside != 0 {
+            return Released::Busy(inside);
+        }
+    }
+    let session = session();
+    let environment = environment();
+    if session || environment {
+        Released::Now { session, environment }
+    } else {
+        Released::Nothing
+    }
+}
+
+/// The session taken out of the engine and dropped, which is ONNX Runtime's `ReleaseSession`;
+/// true when there was one. Called with nothing inside ONNX Runtime and nothing to enter it.
+#[cfg(target_os = "macos")]
+fn take_session() -> bool {
+    let Some(Ok(eng)) = ENGINE.get() else { return false };
+    let session = lock_even_if_poisoned(&eng.session).take();
+    let had = session.is_some();
+    drop(session);
+    had
+}
+
+/// ONNX Runtime's environment released (`ReleaseEnv`), when [`init`] made it: its count goes from
+/// one to none, and ONNX Runtime deletes it now — its logging's mutex still there — and leaves
+/// `OrtEnv::p_instance_` empty for `exit()`. `ort` keeps its handle to it in a static that is
+/// never dropped, so it is not released twice; nothing of `ort` asks for it after, since a
+/// session is the only thing this file makes in it and none is made once [`IN_ORT`] is closed.
+#[cfg(target_os = "macos")]
+fn release_environment() -> bool {
+    use ort::AsPointer as _;
+    if !ENV_MADE.swap(false, Ordering::SeqCst) {
+        return false;
+    }
+    // Made already, so this hands back `ort`'s own and makes none. Should it ever fail, the
+    // environment is still alive, and the backstop is armed for it again.
+    let Ok(environment) = ort::environment::get_environment() else {
+        ENV_MADE.store(true, Ordering::SeqCst);
+        return false;
+    };
+    // SAFETY: the environment `CreateEnv` made, released once, with no session left in it and no
+    // call of this process inside ONNX Runtime.
+    unsafe { (ort::api().ReleaseEnv)(environment.ptr().cast_mut()) };
+    true
+}
+
+/// Registers the [`backstop`] with `atexit`, once, right after the environment is made. The
+/// order is the point: `exit()` runs what was registered in reverse, so the backstop runs before
+/// everything ONNX Runtime registered up to then — the dylib's own statics, registered when it
+/// was opened, and the logging's mutex, registered when the environment was made — and after
+/// what it registers later, first used while the session is made or run. A failure is logged.
+#[cfg(target_os = "macos")]
+fn register_backstop() {
+    // SAFETY: a function that takes nothing, returns nothing and never unwinds.
+    let rc = unsafe { libc::atexit(backstop) };
+    if rc != 0 {
+        crate::logging::line(
+            "ocr",
+            &format!("could not register the exit backstop for ONNX Runtime ({rc}); a quit that bypasses the release may abort"),
+        );
+    }
+}
+
+/// Run by `exit()` when the environment was never released — an `exit()` this application's own
+/// code did not begin, which no way of quitting it is known to reach. The tray's Quit, File >
+/// Quit and Command-Q (wxWidgets' own Quit) end the main loop, and `run` releases at its end.
+/// AppKit's `terminate:` would call `exit(0)` itself, but it asks wxWidgets first, which asks the
+/// module window to close; that window refuses (it hides instead), so `terminate:` is cancelled
+/// for as long as it exists — and so is the quit Apple Event of the Dock's Quit and of a logout,
+/// which then ends nothing at all (TODO.md). It cannot release anything: what ONNX Runtime
+/// registered after it — first used while the session was made or run — is destroyed by then,
+/// and the release could reach it. So it ends the process with `_exit(0)` — 0 whatever status
+/// `exit()` was given, which it cannot know; AppKit's own for `terminate:` — before ONNX
+/// Runtime's static destructors run, with one line on standard error — a raw `write`, since a
+/// lock here could be held by a thread `exit()` is ending around. Nothing when the release ran.
+#[cfg(target_os = "macos")]
+extern "C" fn backstop() {
+    if ENV_MADE.load(Ordering::SeqCst) {
+        // SAFETY: a static buffer of the length given; `_exit` takes no lock and does not return.
+        unsafe {
+            libc::write(libc::STDERR_FILENO, BACKSTOP_LINE.as_ptr().cast(), BACKSTOP_LINE.len());
+            libc::_exit(0);
+        }
+    }
+}
+
+/// What the [`backstop`] writes; CI fails a step whose output holds it.
+#[cfg_attr(windows, allow(dead_code))]
+pub(crate) const BACKSTOP_LINE: &[u8] =
+    b"automation-platform: exit() began with ONNX Runtime's environment unreleased; ended by _exit(0) before its teardown\n";
 
 /// The oldest macOS Microsoft builds ONNX Runtime 1.22's dylib for, as major and minor version:
 /// its `minos`, which CI prints for both slices and warns about when it is another
@@ -483,14 +704,18 @@ impl Drop for InModel {
 }
 
 /// The model over one prepared input ([`paddle_pre::preprocess`]'s width and data): the decoded
-/// text, untrimmed, and its score. `None` when the session could not run it, or when `cancelled`
-/// says so — looked at before waiting for the session and once it is in hand.
+/// text, untrimmed, and its score. `None` when the session could not run it, when `cancelled`
+/// says so — looked at before waiting for the session and once it is in hand — and once
+/// [`release`] has begun or taken the session.
 fn run_model(eng: &Engine, width: u32, input: Vec<f32>, cancelled: &dyn Fn() -> bool) -> Option<(String, f32)> {
+    // First, so that it is dropped last: after the outputs, the session's lock and the tensor.
+    let _in_ort = IN_ORT.start()?;
     let tensor = Tensor::from_array(([1usize, 3, paddle_pre::INPUT_H as usize, width as usize], input)).ok()?;
     if cancelled() {
         return None;
     }
-    let mut session = lock_even_if_poisoned(&eng.session);
+    let mut held = lock_even_if_poisoned(&eng.session);
+    let session = held.as_mut()?;
     if cancelled() {
         return None;
     }
@@ -1198,6 +1423,112 @@ fn init()").expect("the Mac's init");
         assert!(first("macos_new_enough(") < first("open_runtime("), "no dlopen below the macOS it is built for");
         // Nothing of `ort` before it but its path, worked out without `ort`.
         assert!(!body[..pinned].contains("ort::") && !body[..pinned].contains("Session"), "{}", &body[..pinned]);
+    }
+
+    /// The release's order: nothing enters ONNX Runtime once it has begun, it waits for what is
+    /// inside, the session goes before the environment, and a second call finds nothing.
+    #[test]
+    fn the_release_waits_for_ort_then_takes_the_session_then_the_environment() {
+        let in_ort = InFlight::new();
+        let order = std::cell::RefCell::new(Vec::new());
+        let inside = in_ort.start().expect("open");
+        let released = std::thread::scope(|s| {
+            s.spawn(move || {
+                let _inside = inside;
+                std::thread::sleep(Duration::from_millis(30));
+            });
+            release_with(
+                &in_ort,
+                Duration::from_secs(10),
+                || {
+                    order.borrow_mut().push("session");
+                    true
+                },
+                || {
+                    order.borrow_mut().push("environment");
+                    true
+                },
+            )
+        });
+        assert_eq!(released, Released::Now { session: true, environment: true });
+        assert_eq!(*order.borrow(), ["session", "environment"], "the session first: it was made in the environment");
+        assert!(in_ort.start().is_none(), "nothing enters ONNX Runtime after the release");
+        // A second call (the exit's, then main's guard): nothing to wait for, nothing found.
+        assert_eq!(release_with(&in_ort, Duration::ZERO, || false, || false), Released::Nothing);
+        // An environment made without a session (the session's making failed) is released too.
+        assert_eq!(
+            release_with(&InFlight::new(), Duration::ZERO, || false, || true),
+            Released::Now { session: false, environment: true }
+        );
+    }
+
+    /// Something still inside ONNX Runtime at the bound: nothing is released under it, and the
+    /// caller is told how many, so that it ends the process without `exit()`'s teardown.
+    #[test]
+    fn a_release_that_cannot_wait_releases_nothing() {
+        let in_ort = InFlight::new();
+        let _stuck = in_ort.start().expect("open");
+        let touched = std::cell::Cell::new(false);
+        let t = Instant::now();
+        let released = release_with(
+            &in_ort,
+            Duration::from_millis(40),
+            || {
+                touched.set(true);
+                true
+            },
+            || {
+                touched.set(true);
+                true
+            },
+        );
+        assert_eq!(released, Released::Busy(1));
+        assert!(!touched.get(), "neither the session nor the environment is released under a call");
+        assert!(t.elapsed() >= Duration::from_millis(40));
+        assert!(in_ort.start().is_none(), "closed all the same: nothing new enters");
+    }
+
+    /// Every call of this file into ONNX Runtime is counted from before its first touch to after
+    /// its last — the engine's making, and a run from its tensor to the drop of its outputs — and
+    /// the Mac's environment is said made and the backstop registered right after `commit`, before
+    /// the session that can fail. Checked where it is written: the real calls need the model, and
+    /// the Mac's only compile there.
+    #[test]
+    fn every_call_into_ort_is_counted_and_the_mac_backstop_follows_the_environment() {
+        const SRC: &str = include_str!("paddle_ocr.rs");
+        let body = |head: &str| {
+            let start = SRC.find(head).unwrap_or_else(|| panic!("{head}"));
+            &SRC[start..start + SRC[start..].find("\n}\n").unwrap()]
+        };
+        let made = body("fn made() -> &'static Result<Engine, String> {");
+        let guard = made.find("let in_ort = IN_ORT.start();").expect("made() counts itself");
+        // Taken outside `get_or_init`, so that it is held until the engine is in `ENGINE`, where
+        // the release looks for its session; inside, it would end before that.
+        assert!(guard < made.find("ENGINE.get_or_init(").unwrap(), "counted until the engine is published");
+        assert!(made.find("if in_ort.is_none()").unwrap() < made.find("crate::logging::contain(init)").unwrap());
+        assert!(!made.contains("drop(in_ort)") && !made.contains("let _ = in_ort"), "held to the end of made()");
+        let run = body("fn run_model(");
+        let first = run.find("let _in_ort = IN_ORT.start()?;").expect("run_model counts itself");
+        for later in ["Tensor::from_array(", "lock_even_if_poisoned(&eng.session)", "session.run("] {
+            assert!(first < run.find(later).unwrap(), "counted before {later}");
+        }
+        assert!(run.contains("held.as_mut()?"), "a session taken by the release answers nothing");
+        let init = body("#[cfg(target_os = \"macos\")]\nfn init()");
+        let at = |what: &str| init.find(what).unwrap_or_else(|| panic!("{what} in the Mac's init"));
+        assert!(at("environment.commit()?;") < at("ENV_MADE.store(true"));
+        assert!(at("ENV_MADE.store(true") < at("register_backstop();"));
+        assert!(at("register_backstop();") < at("Session::builder()"), "before the session, which can fail");
+        let release = body("pub(crate) fn release() -> Released {");
+        assert!(release.find("IN_FLIGHT.close()").unwrap() < release.find("release_with(").unwrap());
+        assert!(release.contains("release_with(&IN_ORT, RELEASE_BOUND, take_session, release_environment)"));
+        let backstop = body("extern \"C\" fn backstop() {");
+        assert!(backstop.contains("libc::_exit(0)"));
+        // CI fails a step whose output holds the backstop's line, by these words.
+        const WORKFLOW: &str = include_str!("../../../../.github/workflows/macos-build.yml");
+        let words = "ONNX Runtime's environment unreleased";
+        assert!(std::str::from_utf8(BACKSTOP_LINE).unwrap().contains(words));
+        assert!(WORKFLOW.matches(words).count() >= 4, "the run, the quarantined probe and newer-macos look for it");
+        assert!(!backstop.contains("logging::") && !backstop.contains(".lock(") && !backstop.contains("println"), "{backstop}");
     }
 
     /// One panic under the session lock no longer switches the recogniser off for good.

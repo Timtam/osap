@@ -531,13 +531,63 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       afterwards), VPS Avenger's preset name and its header at the smallest zoom, Kontakt's
       header; no Melodyne, which does not run on a Mac — then the switch off, and the log, the
       bench file and the pictures sent. It decides b1, b2, c1 and c2.
-- [ ] **Pin the ONNX Runtime archive's SHA-256, before any zip goes to a tester** (the session at
-      the Air above). `tools/onnxruntime-mac.txt` has `sha256=` empty: GitHub lists no digest for
-      `onnxruntime-osx-universal2-1.22.0.tgz` (its release API gives `digest: null`), and it was
-      not fetched on the development machine to take one. Until it is pinned the macOS build
-      checks the size (54820264 bytes) and prints the hash it computed as a warning on every
-      build, so every download carries a 55 MB native library checked by its size alone; copied
-      into the file from the first CI run's warning, a different archive is refused from then on.
+- [x] **The ONNX Runtime archive's SHA-256, pinned** (2026-10-03). GitHub lists no digest for
+      `onnxruntime-osx-universal2-1.22.0.tgz` (its release API gives `digest: null`); the macOS
+      workflow's first fetch from Microsoft's release address computed
+      `cfa6f6584d87555ed9f6e7e8a000d3947554d589efe3723b8bfa358cd263d03c`, and that is
+      `sha256=` in `tools/onnxruntime-mac.txt`. An archive that differs is refused, and so is a pin
+      file without a SHA-256, whose error names the archive's own for a new version's pin.
+- [ ] **Every process that loaded ONNX Runtime aborted at exit on a Mac** (CI run 37081778332,
+      2026-10-03): the library loaded and read on macOS 14, 15 and 26, arm64 and Intel, and then
+      each such process died with "libc++abi: terminating due to uncaught exception of type
+      std::__1::system_error: mutex lock failed: Invalid argument" (signal 6) — the bench's
+      children and `--paddle-probe`; by the same teardown the application would at every quit
+      once its warm-up had loaded the recogniser, with macOS's "quit unexpectedly" and a crash
+      report. Cause: ONNX Runtime 1.22 keeps its environment in a static
+      `unique_ptr` (`OrtEnv::p_instance_`, registered with `atexit` when the dylib is opened) and
+      `ort` never releases it; `exit()` destroys the logging's function-local mutex
+      (`DefaultLoggerMutex`, registered later, when the environment is made) first, then that
+      `unique_ptr`, whose `~LoggingManager` locks the dead mutex. The same stack is in
+      microsoft/onnxruntime#25038 (1.22.0, macOS 15.5); 1.23.0 keeps the environment in a plain
+      pointer instead. `--paddle-probe` never starts the recogniser's thread and aborted all the
+      same, so that thread is not the cause. **Fixed, not yet seen on a Mac:** every process
+      releases the session, then the environment, before `exit()` (`paddle_ocr::release`, after
+      everything that can be inside ONNX Runtime has been closed and waited for, at most half a
+      second): the end of `run`, `ocr-bench`'s every process before `main` hands its code to
+      `exit`, and `main`'s guard (`ReleaseAtExit`) on every other way out of `main`, a panic
+      included; a process that cannot release ends through `_exit` with its status. An `atexit`
+      backstop, registered right after the environment is made, ends an `exit()` that begins
+      unreleased with `_exit(0)` and a line on standard error. CI now fails any step whose process
+      read and then ended by a signal or with a status other than 0, says "died of signal N at exit
+      after reading" (or "hung at exit after reading", for a child its two-minute limit ended)
+      apart from "did not load", and fails on the backstop's line. **The next
+      macOS run must show:** `newer-macos` (14, 26): `--paddle-probe` says `ok` and ends with 0;
+      `ocr-bench` on macos-15, macos-26 and macos-15-intel: no `libc++abi` line, the probes `one
+      pass went through` for `paddle-raw` and `paddle-crop`, `paddle | the neural recogniser in
+      this process: the session was made …`, the `neural recogniser, …` first passes measured, and
+      the run ending with 0 after `done` — the first end, on a Mac, of a process that made the
+      environment itself and released it; the copies as before, ending with 0. **Not seen by CI,
+      only on a tester's Mac:** the application's own quit with the recogniser loaded — the tray's
+      Quit, File > Quit and Command-Q end the main loop and go through `run`'s end, which no CI
+      step reaches (its application runs are ended by a signal, which runs no teardown): the log's
+      last lines should hold `ocr: released the neural recogniser's session and ONNX Runtime's
+      environment before the process ends`, and macOS should show no "quit unexpectedly" and write
+      no crash report. The backstop's route, AppKit's own `terminate:`, is cancelled while the
+      module window exists (next item), so it is not expected to be taken; its line in a tester's
+      output would say otherwise.
+- [ ] **On a Mac, the Dock's Quit and a logout, restart or shutdown do not end the application**
+      (read in wxWidgets 3.3.2's sources, 2026-10-03; not seen on a Mac). The quit Apple Event and
+      AppKit's `terminate:` both ask wxWidgets first (`OSXOnShouldTerminate`), which asks the first
+      top-level window to close: the module window, whose close handler always refuses, since
+      closing it only hides it (`gui.rs`). So nothing ends, and the window is hidden. A logout
+      waits on this application; whether macOS then cancels the logout or ends the process is for
+      a Mac to show. For a VoiceOver user that is a restart that stalls. The tray's Quit, File >
+      Quit and Command-Q are not affected. wxdragon 0.9.16 has no binding for
+      `wxEVT_QUERY_END_SESSION`. One way: `NSWorkspaceWillPowerOffNotification`, observed beside
+      the other NSWorkspace notifications in `backend/macos/system.rs`, sets a flag that makes the
+      window's close handler quit (`begin_quit`, `exit_main_loop`) instead of refusing. Windows
+      asks every top-level window to close at a logout as well (`wxApp::OnQueryEndSession`,
+      `src/msw/app.cpp`); whether it is held there too is not looked at here.
 - [ ] **The neural recogniser around macOS 13.3.** Microsoft builds 1.22 for 13.3, and the
       application does not open the library on an older macOS at all (`RUNTIME_MACOS` in
       `backend/paddle_ocr.rs`; the log says "not available" with the version, and Vision reads

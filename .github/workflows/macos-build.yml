@@ -333,7 +333,7 @@ jobs:
             echo "sha256=$sha"
             echo "key=onnxruntime-mac-$version-${sha:-unpinned}"
           } >> "$GITHUB_OUTPUT"
-          echo "ONNX Runtime $version: $archive, $size bytes, sha256 ${sha:-not pinned yet}"
+          echo "ONNX Runtime $version: $archive, $size bytes, sha256 ${sha:-(none)}"
 
       # The archive itself, kept between runs: 55 MB fetched from GitHub on every Rust build
       # otherwise. Keyed by the version and the checksum, so another pin is another archive.
@@ -352,9 +352,9 @@ jobs:
       # either would refuse the whole library below that, which is the opposite of what the 13.3
       # floor promises. Weak imports are fine: they resolve to nothing where they are missing.
       #
-      # Until tools/onnxruntime-mac.txt holds the archive's SHA-256 the step prints the one it
-      # computed, as a warning, and goes on with an archive whose size is checked; once it does,
-      # an archive that differs is refused.
+      # And the archive's SHA-256 against the one tools/onnxruntime-mac.txt pins: one that differs
+      # is refused, and so is a pin file without one — the error then names the archive's own, for
+      # a new version's pin (GitHub lists no digest for 1.22.0).
       - name: ONNX Runtime for the neural recogniser
         id: onnxruntime
         if: steps.reuse.outputs.reused != 'true'
@@ -379,7 +379,8 @@ jobs:
           fi
           got_sha=$(shasum -a 256 "$tgz" | cut -d' ' -f1)
           if [ -z "$ONNXRUNTIME_MAC_SHA256" ]; then
-            echo "::warning::tools/onnxruntime-mac.txt pins no SHA-256 for $ONNXRUNTIME_MAC_ARCHIVE yet; this one is sha256=$got_sha — put it there, and an archive that differs is refused from then on"
+            echo "::error::tools/onnxruntime-mac.txt pins no SHA-256 for $ONNXRUNTIME_MAC_ARCHIVE; this one is sha256=$got_sha — pin it there once it is known to be Microsoft's"
+            exit 1
           elif [ "$got_sha" != "$ONNXRUNTIME_MAC_SHA256" ]; then
             echo "::error::$ONNXRUNTIME_MAC_ARCHIVE has SHA-256 $got_sha, and tools/onnxruntime-mac.txt says $ONNXRUNTIME_MAC_SHA256"
             exit 1
@@ -842,9 +843,12 @@ jobs:
   # A measurement, not a gate: a leg goes red only when the benchmark did not finish — the
   # executable died in it — or when the neural recogniser did not load although the bundle
   # carries it, the Mac's counterpart of package.ps1's check that DirectML is in the Windows
-  # package; a misread picture is a warning. Nothing is built here: each leg unpacks the download
-  # and runs it, so it costs the run itself (168 s of it idle on purpose) and the time to fetch and
-  # unpack the zip. 45 minutes, where the first run took seven: the benchmark grew from ten
+  # package, or when a process that loaded it ended by a signal or with a status other than 0
+  # after its work: the run itself, one of its children ("at exit after reading" in the report),
+  # or the exit backstop's line on standard error; a misread picture is a warning. Nothing is
+  # built here: each leg unpacks the download and runs it, so it costs the run itself (168 s of it
+  # idle on purpose) and the time to fetch and unpack the zip. 45 minutes, where the first run
+  # took seven: the benchmark grew from ten
   # pictures to forty-one and from one way of reading to eleven, its sections are estimated at 20 to
   # 30 minutes on the Intel runner, and the first run of this size is what its rounds are set by.
   # Only for an executable this run built, because a reused one measured again shows runner noise
@@ -894,16 +898,45 @@ jobs:
           runner="macOS $(sw_vers -productVersion) on $(uname -m), runner image ${ImageOS:-?} ${ImageVersion:-?}"
           echo "$runner"
           out="ocr-bench-$LEG.txt"
+          # How a process ended, from its status in bash: one a signal ended is 128 and its number.
+          ended() { if [ "$1" -gt 128 ]; then echo "died of signal $(( $1 - 128 ))"; else echo "ended with status $1"; fi; }
           # The real captures beside the .app, as the tester's script passes them.
           pictures=()
           [ -d ocr-pictures ] && pictures=(--pictures ocr-pictures)
-          status=0
-          ./AutomationPlatform.app/Contents/MacOS/automation-platform ocr-bench \
-            "${pictures[@]}" --out "$out" --summary "$GITHUB_STEP_SUMMARY" || status=$?
+          # Standard error through `tee`: into the log as it comes, so that it is there even when
+          # the job's time limit stops the step, and into a file, so that it can be searched — the
+          # children's messages land there too, and so would the exit backstop's line. Standard
+          # output goes past the pipe on descriptor 3; the pipe's status is tee's (no pipefail
+          # here), the run's own is the first in PIPESTATUS.
+          err="ocr-bench-$LEG.stderr.txt"
+          {
+            ./AutomationPlatform.app/Contents/MacOS/automation-platform ocr-bench \
+              "${pictures[@]}" --out "$out" --summary "$GITHUB_STEP_SUMMARY" 2>&1 >&3 3>&- | tee "$err" >&2
+            status=${PIPESTATUS[0]}
+          } 3>&1
           echo "CI: $runner" >> "$out"
           if ! grep -q '^OCR BENCH: done' "$out" 2>/dev/null; then
-            echo "::error::the text recognition benchmark did not finish on $LEG (exit status $status)"
+            echo "::error::the text recognition benchmark did not finish on $LEG ($(ended "$status"))"
             exit 1
+          fi
+          fail=0
+          # Every process of the benchmark that loaded ONNX Runtime releases it before it ends
+          # (backend/paddle_ocr.rs, `release`): 1.22's teardown in exit() aborts on an environment
+          # still alive. The run's own end after its report is that teardown; its children's are in
+          # the report ("at exit after reading", below), and the backstop says when exit() began
+          # with the environment unreleased.
+          if [ "$status" != 0 ]; then
+            echo "::error::the benchmark finished its report on $LEG and then $(ended "$status") at exit (exit status $status) — the end of a process that loaded ONNX Runtime"
+            fail=1
+          fi
+          if grep -q "ONNX Runtime's environment unreleased" "$err"; then
+            echo "::error::a process of the benchmark on $LEG reached exit() with ONNX Runtime unreleased, and the backstop ended it: $(grep -m1 "ONNX Runtime's environment unreleased" "$err")"
+            fail=1
+          fi
+          # A process that found a call still inside ONNX Runtime half a second into its release
+          # ends without the teardown, cleanly, and says so: no fault of the end, but a call stuck.
+          if grep -q '^OCR BENCH: ONNX Runtime could not be released' "$err"; then
+            echo "::warning::a process of the benchmark on $LEG still had a call inside ONNX Runtime at its end: $(grep -m1 '^OCR BENCH: ONNX Runtime could not be released' "$err")"
           fi
           # Today's request misreading a picture, or Vision refusing it, is a finding about Vision
           # on this machine, not a reason to fail: the tables say which picture, and what was read
@@ -929,12 +962,30 @@ jobs:
           done
           # The neural recogniser has to load wherever the bundle carries it: Microsoft builds it
           # for macOS 13.3, and every runner here is newer. "Not measured in this run" with the
-          # library in the bundle is a library that does not load, or a process that died trying.
+          # library in the bundle is a library that does not load, a process that died trying —
+          # or one that loaded it, read, and died at its exit, which the report says as "at exit
+          # after reading" and which is a fault of the end, not of the loading.
           if [ -f AutomationPlatform.app/Contents/Frameworks/libonnxruntime.dylib ] \
             && grep -q '^OCR BENCH: paddle | the neural recogniser is not measured in this run' "$out"; then
-            echo "::error::the neural recogniser did not load on $LEG although the bundle carries ONNX Runtime: $(sed -n 's/^OCR BENCH: paddle | the neural recogniser is not measured in this run: //p' "$out" | head -n1)"
-            exit 1
+            why=$(sed -n 's/^OCR BENCH: paddle | the neural recogniser is not measured in this run: //p' "$out" | head -n1)
+            case "$why" in
+              *"at exit after reading"*)
+                echo "::error::the neural recogniser loaded and read on $LEG, and the process that loaded it then did not end cleanly: $why" ;;
+              *)
+                echo "::error::the neural recogniser did not load on $LEG although the bundle carries ONNX Runtime: $why" ;;
+            esac
+            fail=1
           fi
+          # A first-pass child of the recogniser's that read and then died or hung at its exit is
+          # the same fault; so is one killed by a signal before its answer — one that made the
+          # environment, could not make the session and said "no", then aborted at exit, among
+          # them. Not every child: a Vision probe that dies is a finding the probes are there for.
+          first='^OCR BENCH: first passes \| neural recogniser.*(at exit after reading|died of signal)'
+          if grep -qE "$first" "$out"; then
+            echo "::error::a process that loaded the neural recogniser on $LEG did not end cleanly: $(grep -m1 -E "$first" "$out")"
+            fail=1
+          fi
+          exit $fail
 
       # Only on macos-15, the arm64 leg: the two ways the neural recogniser is missing on a tester's
       # Mac, made on copies of the bundle, each signed again ad hoc as package-macos.sh signs one —
@@ -947,12 +998,15 @@ jobs:
       # is, with only the library carrying the quarantine flag a browser sets. `--paddle-probe`
       # there has to come back — `ok`, or "not available" with the reason — within two minutes; a
       # Gatekeeper prompt on the runner's screen that held `dlopen` would not. That is a warning,
-      # not a failure: it is about the next tester's Mac, not this build.
+      # not a failure: it is about the next tester's Mac, not this build. An `ok` followed by a
+      # signal or another status than 0 is a failure, as everywhere a process loaded the library;
+      # the short runs load nothing of it, and have to end with 0 after "done" as well.
       - name: Without ONNX Runtime, with a half this Mac cannot load, and quarantined
         if: ${{ !cancelled() && steps.unpack.outcome == 'success' && matrix.os == 'macos-15' }}
         run: |
           cd dist
           fail=0
+          ended() { if [ "$1" -gt 128 ]; then echo "died of signal $(( $1 - 128 ))"; else echo "ended with status $1"; fi; }
           copy=copy-quarantined-onnxruntime
           rm -rf "$copy"
           mkdir -p "$copy"
@@ -969,6 +1023,20 @@ jobs:
           cat ocr-bench-quarantined-onnxruntime.txt
           if ! grep -qE '^OCR BENCH: paddle probe \| (ok:|not available)' ocr-bench-quarantined-onnxruntime.txt; then
             echo "::warning::with only ONNX Runtime quarantined, --paddle-probe did not answer within 120 s (exit status $status): a tester's quarantined download may hold the recogniser's loading, or show a prompt"
+          elif grep -q '^OCR BENCH: paddle probe | ok:' ocr-bench-quarantined-onnxruntime.txt && [ "$status" != 0 ]; then
+            # It loaded and read; what follows is its end, which has to be as clean as the read.
+            echo "::error::with only ONNX Runtime quarantined, --paddle-probe read and then $(ended "$status") at exit (exit status $status)"
+            fail=1
+          fi
+          if grep -q "ONNX Runtime's environment unreleased" ocr-bench-quarantined-onnxruntime.txt; then
+            echo "::error::with only ONNX Runtime quarantined, --paddle-probe reached exit() with ONNX Runtime unreleased, and the backstop ended it"
+            fail=1
+          fi
+          # "Not available" ends with 1 by design, so its status says nothing about its end; an
+          # abort does, after either answer: this process does nothing but ONNX Runtime.
+          if grep -q 'libc++abi: terminating' ocr-bench-quarantined-onnxruntime.txt; then
+            echo "::error::with only ONNX Runtime quarantined, --paddle-probe aborted: $(grep -m1 'libc++abi: terminating' ocr-bench-quarantined-onnxruntime.txt)"
+            fail=1
           fi
           for kind in without-onnxruntime x86_64-onnxruntime; do
             copy="copy-$kind"
@@ -991,9 +1059,14 @@ jobs:
             echo "----- $kind: what it said of the neural recogniser -----"
             grep -E '^OCR BENCH: (paddle \||probe \| paddle)' "$out" || true
             if ! grep -q '^OCR BENCH: done' "$out" 2>/dev/null; then
-              echo "::error::a short benchmark run $kind did not finish (exit status $status)"
+              echo "::error::a short benchmark run $kind did not finish ($(ended "$status"))"
               fail=1
               continue
+            fi
+            # Nothing of ONNX Runtime loads here, so nothing may go wrong at the end either.
+            if [ "$status" != 0 ]; then
+              echo "::error::a short benchmark run $kind finished its report and then $(ended "$status") at exit (exit status $status)"
+              fail=1
             fi
             if ! grep -qE '^OCR BENCH: paddle \| the neural recogniser is not measured in this run: .*not available: .+' "$out"; then
               echo "::error::a short benchmark run $kind did not say that the neural recogniser is not available, and why"
@@ -1244,7 +1317,8 @@ jobs:
       # makes it from the bundle and reads one picture, and says `ok` or `not available` with the
       # reason, in one line (no window, no permission, no file). Microsoft builds ONNX Runtime 1.22
       # for macOS 13.3, so on both of these — 14, the oldest runner there is, and 26, the newest —
-      # "not available" is an error: a finding about that macOS, as everything in this job is.
+      # "not available" is an error: a finding about that macOS, as everything in this job is. So
+      # is an `ok` from a process that then ends by a signal or with another status than 0.
       # Below 13.3 the application does not open it, and Vision reads alone; no runner is that
       # old, and whether 13.3 to 13.x loads it is not seen either (TODO.md).
       - name: The neural recogniser loads on this macOS
@@ -1264,6 +1338,19 @@ jobs:
               echo "::error::the neural recogniser does not load on macOS $(sw_vers -productVersion) (exit status $status): $(printf '%s\n' "$said" | grep -m1 'paddle probe' || echo 'no probe line at all')"
               exit 1 ;;
           esac
+          # It loaded and read. Its end has to be as clean: ONNX Runtime 1.22's teardown in exit()
+          # aborts on an environment still alive, which the probe releases first (backend/
+          # paddle_ocr.rs) — the first run with the library said "ok" here and then died of signal 6.
+          case "$said" in
+            *"ONNX Runtime's environment unreleased"*)
+              echo "::error::--paddle-probe reached exit() with ONNX Runtime unreleased on macOS $(sw_vers -productVersion), and the backstop ended it"
+              exit 1 ;;
+          esac
+          if [ "$status" != 0 ]; then
+            if [ "$status" -gt 128 ]; then how="died of signal $(( status - 128 ))"; else how="ended with status $status"; fi
+            echo "::error::the neural recogniser loaded and read on macOS $(sw_vers -productVersion), and then --paddle-probe $how at exit (exit status $status)"
+            exit 1
+          fi
 
       - name: The signature verified
         if: ${{ !cancelled() && steps.unpack.outputs.sig_ok == '0' }}

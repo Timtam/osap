@@ -4539,6 +4539,13 @@ pub fn run(dirs: &[String]) -> Result<()> {
     // engine has answered. Bounded at half a second; after the warm-up, which they queue
     // behind for the session lock.
     backend::settle_ocr();
+    // And last of text recognition: on a Mac the neural recogniser's session and ONNX Runtime's
+    // environment released, now that nothing above can still be inside it. Returning from `main`
+    // runs `exit()`, and ONNX Runtime 1.22 aborts in its teardown on an environment still alive —
+    // a "quit unexpectedly" on every quit. False only when something was still inside ONNX
+    // Runtime after half a second: then nothing was released, and the process ends below
+    // without that teardown. Nothing elsewhere.
+    let released = backend::release_ocr();
     // Whatever went wrong, it goes in the log before it goes anywhere else.
     //
     // Returning the error is enough on a developer's machine, where it lands in a terminal.
@@ -4552,7 +4559,31 @@ pub fn run(dirs: &[String]) -> Result<()> {
     }
     // Last: the next copy may start the moment this is released.
     drop(instance);
+    if !released {
+        // What `main` would print and return, from here: 1 for an error, as `main` makes it.
+        if let Err(e) = &result {
+            eprintln!("Error: {e:?}");
+        }
+        backend::end_now(i32::from(result.is_err()));
+    }
     result
+}
+
+/// Held by `main` for the whole process: dropped when `main` returns, and when a panic unwinds
+/// out of it, it releases ONNX Runtime on a Mac before `exit()` runs ([`backend::release_ocr`]) —
+/// for the ways out that skip the end of [`run`], which releases it itself; there this finds
+/// nothing. When it cannot release it ends the process without `exit()`'s teardown, with 101
+/// while a panic unwinds (Rust's own status for a panic out of `main`) and 0 otherwise (`run`,
+/// the one way to have loaded it, ended the process itself when it could not). `ocr-bench`
+/// releases before `main` calls `std::process::exit`, which drops nothing. Nothing elsewhere.
+pub struct ReleaseAtExit;
+
+impl Drop for ReleaseAtExit {
+    fn drop(&mut self) {
+        if !backend::release_ocr() {
+            backend::end_now(if std::thread::panicking() { 101 } else { 0 });
+        }
+    }
 }
 
 /// Deliberately awkward. This rebuilds every module's VM while the user is working in some
@@ -9696,5 +9727,59 @@ mod macos_uptime_wiring_tests {
             "the activity no longer follows activity_reasons.rs, where the first hold is said per reason"
         );
         assert!(want.contains("SAID.with(|s| s.set(c.said));"), "what has been said is not kept");
+    }
+}
+
+/// The end of a process that may have loaded ONNX Runtime, on a Mac: it is released after
+/// everything that could still be inside it was stopped, and before `exit()` — by the end of
+/// `run`, by `ocr-bench` before `main` hands its code to `exit`, and by `main`'s guard on every
+/// other way out of `main`. A process that cannot release it ends through `end_now`. None of it
+/// runs here (the release is the Mac's); it is checked where it is written.
+#[cfg(test)]
+mod exit_release_tests {
+    use super::ocr_wiring_tests::body;
+
+    const LIB: &str = include_str!("lib.rs");
+    const BACKEND: &str = include_str!("backend/mod.rs");
+    const MAIN: &str = include_str!("../../app/src/main.rs");
+
+    #[test]
+    fn the_exit_releases_onnx_runtime_last_and_ends_without_teardown_when_it_cannot() {
+        let run = body(LIB, "pub fn run(dirs: &[String]) -> Result<()> {");
+        let at = |what: &str| run.find(what).unwrap_or_else(|| panic!("{what} is no longer in run's exit"));
+        let steps = [
+            "stop.shutdown(ocr::policy::SHUTDOWN)",
+            "backend::shutdown_capture();",
+            "backend::ocr_exit_report();",
+            "backend::stop_ocr_warmup();",
+            "h.join()",
+            "backend::settle_ocr();",
+            "let released = backend::release_ocr();",
+            "drop(instance);",
+            "backend::end_now(i32::from(result.is_err()));",
+        ];
+        for pair in steps.windows(2) {
+            assert!(at(pair[0]) < at(pair[1]), "{} comes before {}", pair[0], pair[1]);
+        }
+        assert!(at("if !released {") < at("backend::end_now("), "ended early only when nothing was released");
+
+        let guard = body(LIB, "impl Drop for ReleaseAtExit {");
+        assert!(guard.contains("if !backend::release_ocr() {"));
+        assert!(guard.contains("backend::end_now(if std::thread::panicking() { 101 } else { 0 });"));
+
+        let bench = body(BACKEND, "pub(crate) fn ocr_bench(args: &[String]) -> i32 {");
+        assert!(bench.find("macos::ocr::bench::run(args)").unwrap() < bench.find("release_ocr()").unwrap());
+        assert!(bench.contains("end_now(code);"), "the bench's own code, when it cannot release");
+    }
+
+    /// `main` holds the guard from its start, before anything that could load ONNX Runtime and
+    /// before `ocr-bench`, whose `std::process::exit` drops nothing — that one releases itself.
+    #[test]
+    fn main_holds_the_guard_before_anything_else_runs() {
+        let main = body(MAIN, "fn main() -> Result<()> {");
+        let guard = main.find("let _ort = host::ReleaseAtExit;").expect("main no longer holds the guard");
+        for later in ["attach_parent_console();", "host::ocr_bench(", "host::run(&dirs)"] {
+            assert!(guard < main.find(later).unwrap_or_else(|| panic!("{later}")), "the guard before {later}");
+        }
     }
 }

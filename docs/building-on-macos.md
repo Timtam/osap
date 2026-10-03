@@ -103,7 +103,9 @@ launching it, because two of the three ways this can fail look nothing like perm
 `./package-macos.sh --onnxruntime DIR`, where `DIR` is Microsoft's
 `onnxruntime-osx-universal2-1.22.0.tgz` unpacked. `tools/onnxruntime-mac.txt` names that archive,
 its address, its size and its SHA-256, and is the one place they are fixed; CI fetches it from
-there. The script copies ONNX Runtime's dylib to `Contents/Frameworks/libonnxruntime.dylib`, strips
+there, and refuses an archive whose SHA-256 differs. The script takes the folder as it is and
+checks nothing of the archive, so compare the archive's `shasum -a 256` with `sha256=` there
+before unpacking it. The script copies ONNX Runtime's dylib to `Contents/Frameworks/libonnxruntime.dylib`, strips
 its local symbols (`strip -x`, both sizes printed) and signs it before the bundle, and copies
 PaddleOCR's recognition model (7.8 MB) to `Contents/Resources/ppocr-rec.onnx`. The application
 opens the dylib itself at run time — it is never linked, and the executable must not name it:
@@ -111,9 +113,22 @@ the script refuses one that does (`otool -L`) before it packages anything — af
 warm-up, and says once in its log whether the recogniser is ready or why it is not. The library
 is built for macOS 13.3 and later, and the application does not open it on an older macOS; there,
 where either file is missing, or where the library does not load, Vision reads alone, as in a
-package without it. In this build the
-recogniser changes nothing that is read: it reads every small region beside Vision for
-comparison, and its answers are counted in the log, never used (see
+package without it. Every process that loaded it — the application at its quit, and each process
+of `ocr-bench` — releases its session and ONNX Runtime's environment before it ends
+(`release` in `backend/paddle_ocr.rs`): ONNX Runtime 1.22 deletes an environment still alive from
+a static destructor that `exit()` runs after the mutex of its logging is gone, and macOS's libc++
+then aborts the process ("mutex lock failed: Invalid argument", signal 6). Should something still
+be inside ONNX Runtime half a second into that release, the process ends without `exit()`'s
+teardown (`_exit`) and the same status. The application's ways of quitting that end it — the
+tray's Quit, File > Quit and Command-Q — end the main loop, and the release runs at the end of
+`run`. AppKit's own `terminate:` would call `exit()` without it, but wxWidgets first asks the
+module window to close, which it refuses (it hides instead), so `terminate:` is cancelled for as
+long as that window exists; so is the quit Apple Event of the Dock's Quit and of a logout, which
+then ends nothing at all (TODO.md). Should an `exit()` begin without the release all the same, a
+backstop ends it with `_exit(0)` before ONNX Runtime's teardown, with one line on standard error
+— status 0 whatever `exit()` was given, which the backstop cannot know. In
+this build the recogniser changes nothing that is read: it reads every small region beside
+Vision for comparison, and its answers are counted in the log, never used (see
 [host.ocr.read's macOS section](api/ocr.md#macos)). Without `--onnxruntime` the package is what
 it was before.
 
@@ -310,27 +325,39 @@ It runs when the run built the executable, and in every run started by hand, for
 minutes a leg. The job's log has every line, the run's summary page the tables and the closing
 lines (each of them also as an annotation of the run), and each leg's whole output is kept as the
 artifact `ocr-bench-<runner>.txt`, with the runner image on its last line. A leg fails when the
-benchmark did not finish, or when the neural recogniser did not load although the bundle carries
-it; a picture today's request read wrong or Vision refused (the engine table's `prod` row), and
-whatever the line `pipeline | today's ladder (prod) …` names, are warnings. On `macos-15` two
+benchmark did not finish, when the neural recogniser did not load although the bundle carries
+it, and when a process that loaded it read and then ended by a signal or with a status other
+than 0: the run itself after its report, one of its children (the report says `died of signal 6
+at exit after reading`, or `hung at exit after reading` for one the two-minute limit ended, apart
+from a recogniser that did not load; a child of the neural recogniser's first passes fails the
+leg too when a signal ended it before its answer, where a Vision probe that dies is one of the
+findings the probes are there for), or any process whose standard error holds the exit
+backstop's line. Standard error goes into the log as it comes, through `tee`, so it is there
+even when the 45 minutes run out. A picture today's request read wrong or Vision refused (the
+engine table's `prod` row), and whatever the line `pipeline | today's ladder (prod) …` names, are
+warnings. On `macos-15` two
 short runs (`--quick`) follow, on copies of the bundle signed again ad hoc: one without ONNX
 Runtime, one with only its x86_64 half, which that Mac cannot load; each has to finish and say
-that the recogniser is not available, and why. A third copy has only its library flagged as a
-browser's download (`com.apple.quarantine`), and `--paddle-probe` there has to answer within two
-minutes, or a warning says so. These steps run even when the measurement went red, and the three
+that the recogniser is not available, and why, and end with status 0. A third copy has only its
+library flagged as a browser's download (`com.apple.quarantine`), and `--paddle-probe` there has
+to answer within two minutes, or a warning says so; an `ok` followed by a signal or another
+status is an error, and so is a libc++ abort after either answer ("not available" ends with 1
+by design). These steps run even when the measurement went red, and the three
 copies' output is kept as the artifact `ocr-bench-macos-15-copies`. The job also runs the tester's
 `.command` with `--help`, the one path that is harmless there.
 
 The build job fetches ONNX Runtime by `tools/onnxruntime-mac.txt` (cached by its version and
-checksum), checks its size and its SHA-256 — while the file pins none, it prints the one it
-computed as a warning — and refuses a library without both slices, or one whose slices import
-Core ML's `MLComputePlan` or `MLOptimizationHints` strongly (macOS 14.4 and later, where the
+checksum), checks its size and its SHA-256 — an archive that differs from the pin is refused, and
+so is a pin file without one, whose error names the archive's own — and refuses a library
+without both slices, or one whose slices import Core ML's `MLComputePlan` or
+`MLOptimizationHints` strongly (macOS 14.4 and later, where the
 library promises 13.3); it prints each slice's `minos`, and warns when one is not the 13.3 the
 application keeps as its floor. `package-macos.sh` refuses an executable that links ONNX Runtime
 (`otool -L`: the application only ever opens it) before it packages anything; after the upload
 the job asks the bundle again, and refuses one without the library or the model. A zip larger
 than 80 MB is a warning. The `newer-macos` job asks `ocr-bench --paddle-probe` on macOS 14 and
-26, where "not available" is an error, and refuses a download whose signature does not verify
+26, where "not available" is an error, and so is an `ok` from a probe that then ends by a signal
+or with another status than 0; it refuses a download whose signature does not verify
 (`codesign --verify --deep --strict`) in a last step of its own, so that its other steps still
 run. On Windows, the build job runs `ocr-bench --paddle` over the drawn pictures and the real
 captures, for at most ten minutes, and keeps the output as

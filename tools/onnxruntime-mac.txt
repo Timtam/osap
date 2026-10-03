@@ -6,7 +6,10 @@
 # application's `ort` (2.0.0-rc.10) is made for it, and because it is among the last releases with
 # an Intel half: 1.24 dropped x86_64 for macOS and needs macOS 14. Opened at run time from
 # Contents/Frameworks (crates/host/src/backend/paddle_ocr.rs); below 13.3 the application does
-# not open it, and reads text with Vision alone.
+# not open it, and reads text with Vision alone. 1.22 aborts in exit() when its environment is
+# still alive ("mutex lock failed: Invalid argument", signal 6), so every process releases it
+# before it ends (`release` there); 1.23 keeps that environment in a plain pointer instead, which
+# exit() leaves alone — worth knowing before that release is ever taken out.
 #
 # key=value, one a line; `#` starts a comment.
 version=1.22.0
@@ -14,7 +17,7 @@ archive=onnxruntime-osx-universal2-1.22.0.tgz
 url=https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-osx-universal2-1.22.0.tgz
 # Bytes, as GitHub's release listing gives them (2026-10-02).
 size=54820264
-# Not pinned yet: GitHub lists no digest for this release, and the archive has not been fetched
-# here to take one. The first fetch prints it; it goes here, and from then on a fetch that differs
-# is refused. Until it is here, no download goes to a tester (TODO.md).
-sha256=
+# GitHub lists no digest for this release; this is the one the macOS workflow computed on its first
+# fetch from `url`, on GitHub's runner (2026-10-03). A fetch that differs is refused, and so is a
+# file without one.
+sha256=cfa6f6584d87555ed9f6e7e8a000d3947554d589efe3723b8bfa358cd263d03c

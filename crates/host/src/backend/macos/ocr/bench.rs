@@ -585,8 +585,11 @@ fn vision(out: &mut Out) -> Vec<usize> {
 // ── Children ─────────────────────────────────────────────────────────────────────────────────
 
 /// This executable again, as `ocr-bench --child <role>`: its standard output when it ended
-/// normally, or what became of it.
+/// normally, or what became of it — a death after it had printed its answer said as one at exit
+/// ([`pure::child_ended`]), and so is a hang there, which the limit ends
+/// ([`pure::child_timed_out`]).
 fn run_child(exe: &Path, role: Child) -> Result<String, String> {
+    const LIMIT_S: u64 = 120;
     let mut child = Command::new(exe)
         .arg("ocr-bench")
         .arg("--child")
@@ -596,7 +599,7 @@ fn run_child(exe: &Path, role: Child) -> Result<String, String> {
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(|e| format!("could not be started: {e}"))?;
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_secs(LIMIT_S);
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -604,7 +607,12 @@ fn run_child(exe: &Path, role: Child) -> Result<String, String> {
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("did not finish within 120 s".to_string());
+                // What it printed before it was ended: the pipe holds it, and is at its end now.
+                let mut text = String::new();
+                if let Some(mut stdout) = child.stdout.take() {
+                    let _ = stdout.read_to_string(&mut text);
+                }
+                return Err(pure::child_timed_out(LIMIT_S, &text, pure::child_read(role, &text)));
             }
             Err(e) => return Err(format!("could not be waited for: {e}")),
         }
@@ -613,15 +621,7 @@ fn run_child(exe: &Path, role: Child) -> Result<String, String> {
     if let Some(mut stdout) = child.stdout.take() {
         let _ = stdout.read_to_string(&mut text);
     }
-    if status.success() {
-        return Ok(text);
-    }
-    let printed = if text.trim().is_empty() { String::new() } else { format!(" after printing: {}", text.trim()) };
-    Err(match (status.signal(), status.code()) {
-        (Some(sig), _) => format!("died of signal {sig}{printed}"),
-        (None, Some(code)) => format!("ended with status {code}{printed}"),
-        (None, None) => format!("ended without a status{printed}"),
-    })
+    pure::child_ended(status.signal(), status.code(), &text, pure::child_read(role, &text))
 }
 
 /// A warm-up on a thread of its own, waited for: one accurate pass with no language, over the

@@ -232,11 +232,19 @@ pub fn ocr_bench_calls() -> fn(&[String]) -> i32 {
 
 /// The neural text recogniser's start and end, which `lib.rs` calls around a session: its warm-up
 /// (on a Mac, after Vision's), the exit's call that stops that warm-up waiting, the shadow's
-/// counts at exit, and the exit's wait for recognitions still running. Named for the reason
-/// `ocr_bench_calls` is.
+/// counts at exit, the exit's wait for recognitions still running, ONNX Runtime's release before
+/// `exit()`, and the end without `exit()`'s teardown when it could not be released. Named for the
+/// reason `ocr_bench_calls` is.
 #[allow(clippy::type_complexity)]
-pub fn ocr_lifecycle_calls() -> (fn() -> Option<std::thread::JoinHandle<()>>, fn(), fn(), fn()) {
-    (backend::warmup_ocr, backend::stop_ocr_warmup, backend::ocr_exit_report, backend::settle_ocr)
+pub fn ocr_lifecycle_calls() -> (fn() -> Option<std::thread::JoinHandle<()>>, fn(), fn(), fn(), fn() -> bool, fn(i32) -> !) {
+    (
+        backend::warmup_ocr,
+        backend::stop_ocr_warmup,
+        backend::ocr_exit_report,
+        backend::settle_ocr,
+        backend::release_ocr,
+        backend::end_now,
+    )
 }
 
 pub fn app_calls() -> (fn(), fn(bool, &str) -> bool, fn(), fn(), fn()) {
