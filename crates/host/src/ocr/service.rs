@@ -916,8 +916,40 @@ mod tests {
     /// The regions photographed in the barrier-order test, in the order they were taken.
     static ORDER: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 
-    /// Photographs at once, except a region at x = 555, which takes 200 ms; panics at x = 667;
-    /// notes the order of x = 556, 557 and 5001.
+    /// Regions from x = 5580 to 5589 whose picture is held until their test lets it go. The
+    /// barrier tests ask whether the barrier gives up at its bound *while* the picture is still
+    /// being taken; a clock cannot show that on a loaded machine (a 50 ms timed wait on a CI Mac
+    /// came back only when the 200 ms picture woke it).
+    static HELD: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+    static HELD_CV: Condvar = Condvar::new();
+
+    fn hold(x: i32) {
+        locked(&HELD).push(x);
+    }
+
+    fn release(x: i32) {
+        locked(&HELD).retain(|&h| h != x);
+        HELD_CV.notify_all();
+    }
+
+    /// A capture of a held region waits here for its release, at most 10 s.
+    fn wait_while_held(x: i32) {
+        if !(5580..5590).contains(&x) {
+            return;
+        }
+        let until = Instant::now() + Duration::from_secs(10);
+        let mut held = locked(&HELD);
+        while held.contains(&x) && Instant::now() < until {
+            held = HELD_CV
+                .wait_timeout(held, until.saturating_duration_since(Instant::now()))
+                .map(|(g, _)| g)
+                .unwrap_or_else(|e| e.into_inner().0);
+        }
+    }
+
+    /// Photographs at once, except a region at x = 555, which takes 200 ms, and a held one
+    /// (5580 to 5589), which waits for its release, at most 10 s; panics at x = 667; notes the
+    /// order of x = 556, 557 and 5001.
     fn fake_capture(regions: &[(i32, i32, i32, i32)], _: CaptureSource) -> (Fake, usize) {
         CAPTURES.fetch_add(1, Ordering::SeqCst);
         if regions.iter().any(|r| r.0 == 667) {
@@ -925,6 +957,9 @@ mod tests {
         }
         if regions.iter().any(|r| r.0 == 555) {
             std::thread::sleep(Duration::from_millis(200));
+        }
+        for r in regions {
+            wait_while_held(r.0);
         }
         for r in regions.iter().filter(|r| matches!(r.0, 556 | 557 | 5001)) {
             locked(&ORDER).push(r.0);
@@ -995,7 +1030,8 @@ mod tests {
 
     /// Snapshot rounds: a frame of each rectangle, grey 10 — except that from x = 7000 to 7099
     /// it turns 200 once the fake clock passes 100 ms, with the fake clock's time as `taken`.
-    /// Panics at x = 668; takes 200 ms at x = 555; notes its thread at x = 4242.
+    /// Panics at x = 668; takes 200 ms at x = 555; waits for a held region's release (5580 to
+    /// 5589); notes its thread at x = 4242.
     fn fake_frames(rects: &[(i32, i32, i32, i32)], _: CaptureSource, _: bool) -> Vec<Result<Frame, String>> {
         rects
             .iter()
@@ -1006,6 +1042,7 @@ mod tests {
                 if x == 555 {
                     std::thread::sleep(Duration::from_millis(200));
                 }
+                wait_while_held(x);
                 if x == 4242 {
                     locked(&SNAP_THREADS).push(std::thread::current().name().unwrap_or("?").to_string());
                 }
@@ -1238,11 +1275,14 @@ mod tests {
     #[test]
     fn the_barrier_gives_up_at_its_bound() {
         let (s, stop) = Service::spawn(worker());
-        s.submit(spec(555), ticket(1, None));
+        hold(5581);
+        s.submit(spec(5581), ticket(1, None));
         let t = Instant::now();
-        assert!(!s.barrier(A.idx, Duration::from_millis(50)), "the picture takes 200 ms");
-        let waited = t.elapsed();
-        assert!(waited >= Duration::from_millis(50) && waited < Duration::from_millis(190), "{waited:?}");
+        // The picture cannot be taken before `release`: a barrier that waited for it would come
+        // back true only after the capture's own 10 s cap.
+        assert!(!s.barrier(A.idx, Duration::from_millis(50)), "the picture is held until released");
+        assert!(t.elapsed() >= Duration::from_millis(50), "{:?}", t.elapsed());
+        release(5581);
         collect(&s, 1);
         stop.shutdown(Duration::from_secs(2));
     }
@@ -1555,11 +1595,12 @@ mod tests {
         let (s, stop) = Service::spawn(worker());
         s.submit_snap(snap(1, Rect::new(20, 0, 10, 10), SnapKind::At(Instant::now() + Duration::from_millis(600)), Instant::now()));
         assert!(s.barrier(A.idx, Duration::ZERO), "a timed snapshot does not hold input");
-        s.submit_snap(snap(2, Rect::new(555, 0, 10, 10), SnapKind::Plain, Instant::now()));
+        hold(5582);
+        s.submit_snap(snap(2, Rect::new(5582, 0, 10, 10), SnapKind::Plain, Instant::now()));
         let t = Instant::now();
-        assert!(!s.barrier(A.idx, Duration::from_millis(50)), "the picture takes 200 ms");
-        let waited = t.elapsed();
-        assert!(waited >= Duration::from_millis(50) && waited < Duration::from_millis(190), "{waited:?}");
+        assert!(!s.barrier(A.idx, Duration::from_millis(50)), "the picture is held until released");
+        assert!(t.elapsed() >= Duration::from_millis(50), "{:?}", t.elapsed());
+        release(5582);
         assert_eq!(collect_snaps(&s, 2).len(), 2);
         stop.shutdown(Duration::from_secs(2));
     }
