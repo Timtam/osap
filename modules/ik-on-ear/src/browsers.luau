@@ -815,12 +815,15 @@ local function chooser(spec)
   -- because a category chosen from the list changes the grid without going through any of
   -- those, and a filter almost always changes how many tiles are filled. It is already
   -- measured and costs nothing to compare.
-  local function tileNameOf(n)
+  local function freshGrid()
     local count = filledCount()
     if gridDirty or count ~= gridAtCount then
       gridAtCount = count
       relearnGrid()
     end
+  end
+  local function tileNameOf(n)
+    freshGrid()
     return gridNames[n]
   end
 
@@ -854,6 +857,10 @@ local function chooser(spec)
           return name or (on and "selected" or nil)
         end,
         onActivate = function()
+          -- Where the grid sits now, so the click below lands on THIS tile after a scroll or a
+          -- refill. The overlay used to read the tile's `text` before every press, which did this
+          -- on the side; it reads nothing before a press now.
+          freshGrid()
           local ry = rowY(r)
           local x, y = b:toScreen(tx, ry)
           if not x then return end

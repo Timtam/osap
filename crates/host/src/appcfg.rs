@@ -9,7 +9,8 @@
 //!
 //! So the store is the source of truth and this module is its live face: a handful of atomics
 //! that any part of the process can read without borrowing anything, written once at startup
-//! from `settings.toml` and again whenever the Application settings tab changes one.
+//! from `settings.toml` and again whenever the Application settings tab changes one. One switch
+//! is never stored (`Switch::persist`): the test switch for slow reads, off at every start.
 //!
 //! **The variables still work**, and deliberately: a CI job runs headless, `bootstrap-macos.sh`
 //! tells a tester to launch with tracing on, and neither has a window to click in. A variable
@@ -41,12 +42,17 @@ pub struct Switch {
     /// installation. Held here rather than only in the `static` because a default hidden in
     /// a static is a default nobody reading this list would find — and one of them is on.
     pub default_on: bool,
+    /// Whether it is stored in `settings.toml` and loaded from there at the next start. Every
+    /// switch is but one: the test switch for slow reads, which must not stay on by being
+    /// forgotten — every overlay 2 s late in normal use, with nothing but the log to say why.
+    pub persist: bool,
     state: &'static AtomicBool,
 }
 
 static TRACE: AtomicBool = AtomicBool::new(false);
 static CALIBRATE: AtomicBool = AtomicBool::new(false);
 static OCR_DEBUG: AtomicBool = AtomicBool::new(false);
+static SLOW_READS: AtomicBool = AtomicBool::new(false);
 static IGNORE_SUPPORTED_OS: AtomicBool = AtomicBool::new(false);
 static HEADLESS: AtomicBool = AtomicBool::new(false);
 static SPEAK_VIA_VOICEOVER: AtomicBool = AtomicBool::new(false);
@@ -78,6 +84,7 @@ pub const SWITCHES: &[Switch] = &[
                leaving on.",
         os: None,
         default_on: false,
+        persist: true,
         state: &TRACE,
     },
     Switch {
@@ -90,7 +97,24 @@ pub const SWITCHES: &[Switch] = &[
                Vision and the neural recogniser read differently.",
         os: None,
         default_on: false,
+        persist: true,
         state: &OCR_DEBUG,
+    },
+    Switch {
+        key: "slow_reads",
+        label: "Slow every text read by 2 seconds, for testing — takes effect immediately, off again \
+                after a restart",
+        help: "Hands every text read's answer to its module 2 seconds later than it came: the module \
+               that asked waits that much longer, everything else goes on. For trying with a screen \
+               reader what happens while a read is still out — switching windows, pressing keys, \
+               another module's hotkey. A module may drop an answer that comes this late, or say it \
+               differently. Never stored: the application always starts with it off.",
+        os: None,
+        default_on: false,
+        // Never stored, so it cannot stay on by being forgotten. Not in `LEGACY_ENV` either:
+        // no environment variable forces it.
+        persist: false,
+        state: &SLOW_READS,
     },
     Switch {
         key: "calibrate",
@@ -100,6 +124,7 @@ pub const SWITCHES: &[Switch] = &[
                counting that template's matches. For authoring an overlay, not for using one.",
         os: None,
         default_on: false,
+        persist: true,
         state: &CALIBRATE,
     },
     Switch {
@@ -110,6 +135,7 @@ pub const SWITCHES: &[Switch] = &[
                its manifest is simply behind the code.",
         os: None,
         default_on: false,
+        persist: true,
         state: &IGNORE_SUPPORTED_OS,
     },
     Switch {
@@ -120,6 +146,7 @@ pub const SWITCHES: &[Switch] = &[
                this tab will not be reachable next time.",
         os: None,
         default_on: false,
+        persist: true,
         state: &HEADLESS,
     },
     Switch {
@@ -144,6 +171,7 @@ pub const SWITCHES: &[Switch] = &[
         // in front of a person who cannot see it to dismiss it. Ticking the box is a request,
         // and that is the moment to ask.
         default_on: false,
+        persist: true,
         state: &SPEAK_VIA_VOICEOVER,
     },
     Switch {
@@ -163,6 +191,7 @@ pub const SWITCHES: &[Switch] = &[
         // authorisation call has no upper bound anybody here can name. Nothing should pay
         // that at start-up for a feature it has not been asked for.
         default_on: false,
+        persist: true,
         state: &PERSONAL_VOICE,
     },
     Switch {
@@ -176,6 +205,7 @@ pub const SWITCHES: &[Switch] = &[
         // newly compiled speech library misbehaves, this is the switch that gets the old
         // voice back without a restart.
         default_on: true,
+        persist: true,
         state: &SCREEN_READER_SPEECH,
     },
     Switch {
@@ -193,6 +223,7 @@ pub const SWITCHES: &[Switch] = &[
         // documentation claimed otherwise. macOS needs no switch: VoiceOver brailles whatever
         // it is told to say, so braille has always followed speech there.
         default_on: true,
+        persist: true,
         state: &BRAILLE,
     },
     Switch {
@@ -208,6 +239,7 @@ pub const SWITCHES: &[Switch] = &[
                happen on his machine.",
         os: Some("macos"),
         default_on: true,
+        persist: true,
         state: &DOCK_WHILE_OPEN,
     },
     Switch {
@@ -227,6 +259,7 @@ pub const SWITCHES: &[Switch] = &[
         // was written for an application the ordinary path cannot read. This is the way out
         // for a machine where it misbehaves, not a way in.
         default_on: true,
+        persist: true,
         state: &DESKTOP_DUPLICATION,
     },
 ];
@@ -299,9 +332,22 @@ pub fn set(key: &str, on: bool) {
 /// configured.
 pub fn load(stored: impl Fn(&str) -> Option<bool>) {
     for s in SWITCHES {
-        let on = stored(s.key).unwrap_or(s.default_on) || forced_by_env(s.key);
-        s.state.store(s.applies_here() && on, Ordering::Relaxed);
+        s.state.store(loaded(s, stored(s.key), forced_by_env(s.key)), Ordering::Relaxed);
     }
+}
+
+/// What switch `s` starts as, given what `settings.toml` holds for it and whether a variable
+/// forces it: a switch that is never stored starts at its default whatever the file says — a
+/// value somebody wrote there by hand included.
+fn loaded(s: &Switch, stored: Option<bool>, forced: bool) -> bool {
+    let stored = if s.persist { stored } else { None };
+    s.applies_here() && (stored.unwrap_or(s.default_on) || forced)
+}
+
+/// Whether switch `key` is written to `settings.toml` when it changes: every one but the
+/// slow-reads test switch (`Switch::persist`). The settings tab asks before it saves.
+pub fn persists(key: &str) -> bool {
+    switch(key).is_some_and(|s| s.persist)
 }
 
 /// Every switch that is on, for the log.
@@ -327,6 +373,10 @@ pub fn calibrate() -> bool {
 }
 pub fn ocr_debug() -> bool {
     OCR_DEBUG.load(Ordering::Relaxed)
+}
+/// The test switch that hands every text read's answer over 2 s late (`ocr/lua.rs`, `fire`).
+pub fn slow_reads() -> bool {
+    SLOW_READS.load(Ordering::Relaxed)
 }
 pub fn ignore_supported_os() -> bool {
     IGNORE_SUPPORTED_OS.load(Ordering::Relaxed)
@@ -425,6 +475,38 @@ mod tests {
         set("desktop_duplication", false);
         set("desktop_duplication", true);
         assert!(desktop_duplication_generation() > before);
+    }
+
+    /// The slow-reads test switch is never stored: whatever `settings.toml` holds, it starts off;
+    /// the settings tab does not save it; and no variable forces it on. Every other switch is
+    /// stored and loaded as before. Asked of `loaded` rather than `load`, which would set every
+    /// switch of the process under the other tests' feet.
+    #[test]
+    fn the_slow_reads_switch_is_never_stored() {
+        let s = switch("slow_reads").expect("the switch");
+        assert!(!s.persist && !persists("slow_reads"));
+        assert!(!loaded(s, Some(true), false), "a stored 'on' — written by hand, say — is not loaded");
+        assert!(!s.default_on);
+        assert!(!LEGACY_ENV.contains(&"slow_reads"));
+        assert!(!forced_in("slow_reads", |_| Some(std::ffi::OsString::from("1"))));
+        assert_eq!(
+            s.label,
+            "Slow every text read by 2 seconds, for testing — takes effect immediately, off again after a restart"
+        );
+        assert!(s.help.ends_with("Never stored: the application always starts with it off."), "{}", s.help);
+        for other in SWITCHES.iter().filter(|o| o.key != "slow_reads") {
+            assert!(persists(other.key), "{}", other.key);
+            assert_eq!(loaded(other, Some(true), false), other.applies_here(), "{}", other.key);
+            assert!(!loaded(other, Some(false), false), "{}", other.key);
+        }
+        assert!(!persists("no such switch"));
+        // The tab's save, the one place a switch is written, asks first.
+        const GUI: &str = include_str!("gui.rs");
+        let toggled = GUI.find("crate::appcfg::set(key, want);").expect("the tab's toggle");
+        let rest = &GUI[toggled..];
+        let gate = rest.find("if crate::appcfg::persists(key) {").expect("the tab saves without asking");
+        let save = rest.find("store.set_app_flag(key, now);").expect("the tab's save");
+        assert!(gate < save, "the save is not behind the question");
     }
 
     #[test]

@@ -11,7 +11,7 @@
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 
-use crate::backend::HostEvents;
+use crate::backend::{HostEvents, Taken};
 
 thread_local! {
     static HOTKEYS: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
@@ -20,7 +20,8 @@ thread_local! {
     /// name is an accessibility round-trip into another process, and that is not something
     /// to do inside a notification handler.
     static ACTIVATED: RefCell<Vec<isize>> = const { RefCell::new(Vec::new()) };
-    static KEYS: RefCell<Vec<(u32, u8)>> = const { RefCell::new(Vec::new()) };
+    /// Captured key-downs the tap took, each with its module — see [`Taken`].
+    static KEYS: RefCell<Vec<Taken>> = const { RefCell::new(Vec::new()) };
     static FOCUS_DIRTY: Cell<bool> = const { Cell::new(false) };
     /// Deadlines for the re-check ladder — see `drain`.
     static RECHECKS: RefCell<Vec<Instant>> = RefCell::new(Vec::new());
@@ -49,8 +50,8 @@ pub fn taken_over(window: isize) {
     }
 }
 
-pub fn push_key(vk: u32, mods: u8) {
-    KEYS.with(|q| q.borrow_mut().push((vk, mods)));
+pub fn push_key(key: Taken) {
+    KEYS.with(|q| q.borrow_mut().push(key));
 }
 
 pub fn mark_focus_dirty() {
@@ -137,8 +138,8 @@ pub fn drain(events: &mut dyn HostEvents) {
         }
     }
 
-    for (vk, mods) in KEYS.with(|q| std::mem::take(&mut *q.borrow_mut())) {
-        events.on_key(vk, mods);
+    for k in KEYS.with(|q| std::mem::take(&mut *q.borrow_mut())) {
+        events.on_key(k.vk, k.mask, k.owner, k.repeat, k.front);
     }
 
     crate::backend::gamepad::drain_into(events);

@@ -30,8 +30,10 @@ use crate::ocr::types as geo;
 use crate::region::{self, ScreenRect};
 use crate::snapshot::{self, Picture};
 use crate::template::{self, Decoded, Rect};
+use crate::mailbox::{self, Event, Opened};
+use crate::task::Ctx;
 use crate::{
-    call_guarded, cells_match_table, logging, one_value, opts_region, read_scales, region_arg, region_lua, with_reason,
+    cells_match_table, logging, one_value, opts_region, read_scales, region_arg, region_lua, with_reason,
     Shared, SHORT_CAPTURE,
 };
 
@@ -739,19 +741,17 @@ impl Shared {
             }
             let verdict = fate(p.owner, p.gen, &self.enabled.borrow(), &self.vm_gens.borrow());
             if verdict == Fate::Deliver {
+                let outcome = match &p.task.job {
+                    Job::Search { .. } => Outcome::Search(Err(why)),
+                    Job::Cells(_) => Outcome::Cells(Err(why)),
+                };
+                // In the lane it was asked from, through its module's mailbox (`open_image`).
                 let _prio = crate::ocr::types::enter_priority(p.prio);
-                if let Ok(f) = p.lua.registry_value::<Function>(&p.cb) {
-                    let outcome = match &p.task.job {
-                        Job::Search { .. } => Outcome::Search(Err(why)),
-                        Job::Cells(_) => Outcome::Cells(Err(why)),
-                    };
-                    let args = result_args(&p.lua, &p.task, &p.names, outcome);
-                    if let Err(e) = call_guarded(&f, args) {
-                        self.report_callback_error(p.scope, p.task.binding(), &e);
-                    }
-                }
+                let (owner, lua) = (p.owner, p.lua.clone());
+                mailbox::deliver(self, owner, &lua, Event::Image { p: Box::new(p), outcome, ended: true });
+            } else {
+                release([p]);
             }
-            release([p]);
         }
         while let Ok(res) = self.image_results.try_recv() {
             // The worker answered one that was ended meanwhile: its id leaves the set here.
@@ -801,22 +801,48 @@ impl Shared {
             let verdict = fate(p.owner, p.gen, &self.enabled.borrow(), &self.vm_gens.borrow());
             match verdict {
                 Fate::Deliver => {
+                    // In the lane it was asked from, through its module's mailbox (`open_image`).
                     let _prio = crate::ocr::types::enter_priority(p.prio);
-                    if let Ok(f) = p.lua.registry_value::<Function>(&p.cb) {
-                        let args = result_args(&p.lua, &p.task, &p.names, res.outcome);
-                        if let Err(e) = call_guarded(&f, args) {
-                            self.report_callback_error(p.scope, p.task.binding(), &e);
-                        }
-                    }
+                    let (owner, lua) = (p.owner, p.lua.clone());
+                    mailbox::deliver(self, owner, &lua, Event::Image { p: Box::new(p), outcome: res.outcome, ended: false });
                 }
                 Fate::Hold => {
                     // The answer itself is let go: it is searched again on re-enable.
                     p.held = true;
                     self.pending_image.borrow_mut().insert(res.id, p);
-                    continue;
                 }
-                Fate::Drop => {}
+                Fate::Drop => release([p]),
             }
+        }
+    }
+
+    /// An answer as it runs (`Event::Image`), its fate asked again: the callback's call for an
+    /// owner that is still the VM that asked and enabled; held again, to be searched afresh on
+    /// re-enable, for one disabled meanwhile — a search, not one ended with a reason; let go
+    /// otherwise.
+    pub(crate) fn open_image(&self, p: PendingImage, outcome: Outcome, ended: bool) -> Opened {
+        let verdict = fate(p.owner, p.gen, &self.enabled.borrow(), &self.vm_gens.borrow());
+        if verdict != Fate::Deliver {
+            self.discard_image(p, ended, verdict == Fate::Hold);
+            return Opened::Gone;
+        }
+        let f = p.lua.registry_value::<Function>(&p.cb);
+        let run = f.map(|f| {
+            let args = result_args(&p.lua, &p.task, &p.names, outcome);
+            Opened::Run { f, args, ctx: Ctx::new(p.task.binding(), p.scope) }
+        });
+        release([p]);
+        run.unwrap_or(Opened::Gone)
+    }
+
+    /// An answer that will not run: put back held — to be searched again when its module is
+    /// enabled — when `hold` (its module was disabled) and it was a search; let go otherwise.
+    pub(crate) fn discard_image(&self, mut p: PendingImage, ended: bool, hold: bool) {
+        if hold && !ended {
+            p.held = true;
+            let id = p.task.id;
+            self.pending_image.borrow_mut().insert(id, p);
+        } else {
             release([p]);
         }
     }

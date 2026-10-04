@@ -210,8 +210,9 @@ pub fn start() -> Result<(), String> {
 /// How much to trust it: the mechanism is right, the coverage is unverified. Cocoa menus
 /// post both notifications and that is what a DAW's own menu bar is made of. A plugin that
 /// draws its own menu inside its window may post neither — which is why the platform has a
-/// second, independent flag for exactly that case (`set_menu_open`, driven by the module
-/// menu watch), and why this one answering "no menu" for such a plugin is not a regression.
+/// second, independent flag for exactly that case (each module's `host.keys.menuOpen`, driven
+/// by the module menu watch), and why this one answering "no menu" for such a plugin is not a
+/// regression.
 /// What a real Mac has to settle is whether the two notifications arrive in balanced pairs
 /// in the applications we care about; the log records every transition, so one session with
 /// a DAW's File menu opened and closed a few times answers it.

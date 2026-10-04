@@ -2,8 +2,11 @@ id = "com.platform.overlay"
 name = "Overlay runtime"
 # 0.2.0 brought O:here, O:stillHere and O:toScreenRect's `whole`: a module that uses them
 # depends on "com.platform.overlay >= 0.2", so an older runtime fails the module's load
-# rather than its first call of one.
-version = "0.2.0"
+# rather than its first call of one. 0.3.0 runs the overlay under handlers: a sentence's mark
+# is taken before its control's hooks, a binding is first evaluated on the next tick, nothing
+# but a stepper is read before a press, and the hooks asked on every scan run in a coroutine of
+# the runtime's own (docs/api/overlay.md, "Where a hook runs"). Nothing a module calls is new.
+version = "0.3.0"
 # Loaded into the VM of every module that depends on it, so its functions
 # (O.new, O.container, the Overlay methods) are reachable via host.require.
 code_module = true

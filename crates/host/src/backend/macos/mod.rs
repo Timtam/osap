@@ -376,38 +376,52 @@ impl Backend for MacBackend {
         watch::start()
     }
 
-    fn set_captured_keys(&self, keys: &[(u32, u8)]) {
+    fn set_captured_keys(&self, keys: &[super::Captured]) {
         tap::set_captured_keys(keys);
     }
 
-    fn set_key_scope(&self, to_foreground: bool) {
-        // Snapshot semantics, exactly as on Windows: `true` freezes the window that is
-        // foreground AT THIS MOMENT. Resolving it lazily at press time would always match
-        // and a menu opened by a control could never be navigated.
-        // A window that could not be resolved pins nothing, which is what 0 already meant
-        // here and is the permissive answer: scope 0 is global, so the overlay's keys are
-        // claimed everywhere rather than nowhere. Said out loud, because it is a scope the
-        // caller did not ask for.
-        let window = if to_foreground {
-            match ax::foreground_window_id() {
-                Some(w) => w,
-                None => {
-                    crate::logging::line(
-                        "macos",
-                        "key scope: the frontmost application did not say which window is in \
-                         front, so the scope stays global for now",
-                    );
-                    0
-                }
-            }
-        } else {
-            0
-        };
-        tap::set_key_scope(window);
+    fn set_key_owners(&self, owners: &[super::OwnerKeys]) {
+        tap::set_key_owners(owners);
     }
 
-    fn set_menu_open(&self, open: bool) {
-        tap::set_menu_open(open);
+    fn resolve_key_scope(&self) -> isize {
+        // Snapshot semantics, exactly as on Windows: the window that is foreground AT THIS
+        // MOMENT is frozen into the module's scope. Resolving it lazily at press time would
+        // always match and a menu opened by a control could never be navigated.
+        //
+        // When the frontmost application does not name its window, the scope is the window the
+        // tap was last told is in front — the one every key is compared with anyway — and only
+        // when that is unknown too, everywhere (`key_scope_window`, which says why everywhere
+        // stopped being the first fallback). Said out loud either way, because it is a window the
+        // module did not get from the application.
+        let asked = ax::foreground_window_id();
+        let (window, from) = super::key_scope_window(asked, tap::foreground());
+        let said = if asked.is_none() { "did not answer" } else { "answered with no window" };
+        match from {
+            super::ScopeFrom::Asked => tap::note_pinned(window),
+            super::ScopeFrom::TapFront => crate::logging::line(
+                "macos",
+                &format!(
+                    "key scope: the frontmost application {said} when asked which window is in \
+                     front, so the scope is the window the event tap last saw in front, {window}"
+                ),
+            ),
+            super::ScopeFrom::Nowhere => crate::logging::line(
+                "macos",
+                &format!(
+                    "key scope: the frontmost application {said} when asked which window is in \
+                     front, and the event tap has seen none in front, so the scope is every \
+                     window for now"
+                ),
+            ),
+        }
+        window
+    }
+
+    /// The tap's own idea of what is in front, which every key is compared with: an atomic, no
+    /// question to the frontmost application.
+    fn key_front(&self) -> isize {
+        tap::foreground()
     }
 
     fn modifiers_down(&self) -> bool {
@@ -463,8 +477,8 @@ impl Backend for MacBackend {
         ax::listed_window_owns_point(id, x, y)
     }
 
-    fn take_menu_pass_through(&self) -> Vec<(u32, u8)> {
-        tap::take_menu_pass_through()
+    fn take_menu_pass_through(&self, owner: u32) -> Vec<(u32, u8)> {
+        tap::take_menu_pass_through(owner)
     }
 
     fn pump_pending(&self, events: &mut dyn HostEvents) {

@@ -105,7 +105,7 @@ end
 -- Right on the stepper, as the captured key delivers it.
 function T.right()
   S.epoch += 1
-  S.captured["Right"]()
+  T.call("key", S.captured["Right"])
 end
 "##;
 
@@ -789,6 +789,7 @@ fn the_item_is_chosen_while_the_overlay_holds_its_place_over_the_menu() {
         o:addHotspotButton({ label = "Load preset", at = { 262, 14 }, menuItem = { 10, 20 } })
         o:attachEmbedded({ hosts = { T.HOST }, control = "Qt%d+.-QWindowIcon" },
           { slot = "com.platform.vps-avenger", menus = { T.O.menuTests.newWindow } })
+        T.runDue() -- its first evaluation, on the module's next turn
         assert(o.active, T.dump())
         T.press(o)
         assert(T.clickAt(1) == "362,64", T.clickAt(1))
@@ -813,6 +814,7 @@ fn a_hold_that_ends_before_the_item_is_placed_says_why() {
         o:addHotspotButton({ label = "Load preset", at = { 262, 14 }, menuItem = { 500, 20 } })
         o:attachEmbedded({ hosts = { T.HOST }, control = "Qt%d+.-QWindowIcon" },
           { slot = "com.platform.vps-avenger", menus = { T.O.menuTests.newWindow } })
+        T.runDue() -- its first evaluation, on the module's next turn
         T.press(o)
         T.popup(900, 400, 180, 180, 220)
         T.show(T.POPUP)
@@ -848,6 +850,7 @@ fn resume_false_starts_every_activation_at_the_first_control() {
         end
         local b = box(false)
         local r = box(true)
+        T.runDue() -- its first evaluation, on the module's next turn
         assert(b.active and r.active, T.dump())
         b.focus, r.focus = 3, 3
         T.show(T.OTHER)

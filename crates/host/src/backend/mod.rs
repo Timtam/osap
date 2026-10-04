@@ -91,8 +91,11 @@ pub(crate) fn ocr_bench_paddle(o: &crate::ocr::bench::Options) -> i32 {
     let path = o.out.clone().unwrap_or_else(|| crate::ocr::bench::free_name(crate::portable::base_dir()));
     paddle_ocr::bench_rows(o, Some(&windows::bench_system_read), path)
 }
-#[cfg(not(any(windows, target_os = "macos")))]
-mod stub;
+/// The backend of a platform with none of its own. Compiled into every test build as well: the
+/// tests that run module VMs against the host's key bindings use it, with a window in front
+/// they set and the captures it was handed (`key_scope_tests.rs`).
+#[cfg(any(test, not(any(windows, target_os = "macos"))))]
+pub(crate) mod stub;
 
 /// The macOS key table, compiled on every other platform too, for its tests alone.
 ///
@@ -755,10 +758,15 @@ pub trait Backend {
     }
 
     /// The captured keys the hook let through to the application because a menu was open,
-    /// since the last call. Drained on read. Return and Escape are what the overlay runtime
-    /// wants: they are the keys that end a menu, and where nothing can see the menu itself,
-    /// one of them going through is the best available word that it is closing.
-    fn take_menu_pass_through(&self) -> Vec<(u32, u8)> {
+    /// since the last call, as they were filed for module `owner`. Drained on read. Return and
+    /// Escape are what the overlay runtime wants: they are the keys that end a menu, and where
+    /// nothing can see the menu itself, one of them going through is the best available word
+    /// that it is closing.
+    ///
+    /// A key let through by a menu flag is filed for every module whose flag counted for the
+    /// window in front ([`menu_flag_owners`]); one let through by a menu the system drew, for
+    /// the module that would have taken it.
+    fn take_menu_pass_through(&self, _owner: u32) -> Vec<(u32, u8)> {
         Vec::new()
     }
 
@@ -1078,20 +1086,31 @@ pub trait Backend {
     /// Starts watching foreground-window changes (delivered as `on_window_activate`).
     fn watch_foreground(&self) -> Result<(), String>;
 
-    /// Sets the (vk, modifier-mask) pairs to intercept + suppress via the
-    /// low-level keyboard hook; captured keys are delivered as `on_key`. A pair
-    /// matches only when the pressed modifier state equals the mask (so "Tab"
-    /// (mask 0) does not swallow Alt+Tab).
-    fn set_captured_keys(&self, keys: &[(u32, u8)]);
-    /// Scopes captured-key suppression to the current foreground window (`true`)
-    /// or makes it global again (`false`). While scoped, the hook only intercepts
-    /// keys when that window is foreground — so a menu opened by a control (which
-    /// brings another window to the foreground) receives the keys natively
-    /// (ReaHotkey's `HotIf WinActive` model).
-    fn set_key_scope(&self, to_foreground: bool);
-    /// Marks a (Qt/UIA) menu as open/closed in the focused plugin, so captured
-    /// nav keys pass through to it (the Win32 menu check misses plugin menus).
-    fn set_menu_open(&self, open: bool);
+    /// Replaces the captures the keyboard hook or the event tap intercepts and suppresses, each
+    /// with the module that holds it, in registration order — see [`Captured`]. A taken key is
+    /// delivered as `on_key`, with its module. A capture matches only when the pressed modifier
+    /// state equals its mask (so "Tab", mask 0, does not swallow Alt+Tab).
+    fn set_captured_keys(&self, keys: &[Captured]);
+    /// Replaces what each module set with `host.keys.scope` and `host.keys.menuOpen` — see
+    /// [`OwnerKeys`] and [`capture_decision`], which the hook or the tap decides every key by.
+    /// The host keeps the table; this is the hook's copy, swapped under the same lock as the
+    /// captures.
+    fn set_key_owners(&self, owners: &[OwnerKeys]);
+    /// The window `host.keys.scope(true)` pins a module's captures to: the window in front at
+    /// this moment, as the hook or the tap will compare it — so a menu opened by a control (which
+    /// brings another window to the front) receives the keys natively (ReaHotkey's
+    /// `HotIf WinActive` model). 0 for everywhere. Windows: `GetForegroundWindow`. macOS:
+    /// [`key_scope_window`].
+    fn resolve_key_scope(&self) -> isize;
+    /// The window in front as the hook or the tap compares every captured key with it, asked of
+    /// nobody: what a hotkey that arrives at a busy module notes, so that a registration of the
+    /// module's made again while the press waits takes it only in the window it was pressed in —
+    /// judged as a captured key is. Windows: `GetForegroundWindow`. macOS: the window the tap was
+    /// last told is in front. Never the accessibility question [`Backend::resolve_key_scope`]
+    /// asks on a Mac: a hotkey arrives on the thread that also carries the event tap, at the
+    /// moment the frontmost application is most likely to be slow, and that question pins nothing
+    /// here.
+    fn key_front(&self) -> isize;
     /// Are any of Ctrl / Alt / Shift / Win held down right now? A hotkey callback runs
     /// WHILE its own combination is still pressed, so anything it synthesises afterwards
     /// arrives with those modifiers attached — see the note in the overlay runtime.
@@ -1142,8 +1161,11 @@ pub trait HostEvents {
     fn on_window_activate(&mut self, win: WinInfo);
     /// The keyboard focus moved (possibly within the same top-level window).
     fn on_focus_change(&mut self);
-    /// A captured key fired; `mods` is the pressed modifier bitmask (MASK_*).
-    fn on_key(&mut self, vk: u32, mods: u8);
+    /// A captured key fired; `mods` is the pressed modifier bitmask (MASK_*). `owner` is the
+    /// module the hook or the tap took it for ([`capture_decision`]), `repeat` whether it is the
+    /// keyboard's auto-repeat of a key held down, and `front` the window that was in front when
+    /// it was pressed ([`Taken`]).
+    fn on_key(&mut self, vk: u32, mods: u8, owner: u32, repeat: bool, front: isize);
     /// What the game-controller sources saw since the last drain, in order — see
     /// [`gamepad::drain_into`]. A default body, so a sink that does not care about pads
     /// (a test's) need not say so.
@@ -1255,6 +1277,194 @@ pub const MASK_TAP: u8 = 0x10;
 /// macOS: the roles that hold Control and Option together — Win and Alt — which is VoiceOver's
 /// modifier. Every chord that holds both is VoiceOver's before it is anybody else's.
 pub const MAC_VOICEOVER_LAYER: u8 = MASK_WIN | MASK_ALT;
+
+/// One capture as the keyboard hook or the event tap holds it: a combination, and the module
+/// that captured it, by the index the host numbers modules with.
+///
+/// The host hands the whole set over in registration order — the order `host.keys.capture` was
+/// called in — and only the captures of enabled modules. The order is what decides between two
+/// modules that capture one key with a scope in front ([`capture_decision`]); each module holds
+/// one capture per combination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Captured {
+    pub vk: u32,
+    pub mask: u8,
+    pub owner: u32,
+}
+
+/// What one module set with `host.keys.scope` and `host.keys.menuOpen`: the window its captures
+/// are pinned to, 0 for everywhere, and whether it says a menu is open. A module with no entry
+/// captures everywhere and has no menu open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OwnerKeys {
+    pub owner: u32,
+    pub scope: isize,
+    pub menu: bool,
+}
+
+/// Why the hook or the tap let a captured key-down through to the application.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PassWhy {
+    /// Every capture of it belongs to a module scoped to a window that is not in front.
+    OutOfScope,
+    /// The application in front has a menu open that the system drew.
+    MenuMode,
+    /// A module whose flag counts for the window in front says a menu is open
+    /// ([`menu_flag_owners`]).
+    MenuFlag,
+}
+
+/// What the hook or the tap does with a captured key-down ([`capture_decision`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Capture {
+    /// Taken, for `owner`: the module of the earliest capture of the combination whose scope is
+    /// the window in front or everywhere.
+    Take { owner: u32 },
+    /// Let through to the application. `owner` is the module that would have taken it; none
+    /// when no capture of the combination is in scope.
+    Pass { why: PassWhy, owner: Option<u32> },
+}
+
+/// The window module `owner`'s captures are scoped to: 0, everywhere, when it never set one.
+pub fn scope_of(owners: &[OwnerKeys], owner: u32) -> isize {
+    owners.iter().find(|e| e.owner == owner).map_or(0, |e| e.scope)
+}
+
+/// The modules whose menu flag counts for the window `front`: each says a menu is open, is
+/// scoped to that window or to everywhere, and holds a capture in `set` right now. A module
+/// that captures nothing cannot open a window's keys to a menu: its flag may be one it set
+/// before its last capture went, and nobody would be left to clear it.
+pub fn menu_flag_owners<'a>(
+    set: &'a [Captured],
+    owners: &'a [OwnerKeys],
+    front: isize,
+) -> impl Iterator<Item = u32> + 'a {
+    owners
+        .iter()
+        .filter(move |e| {
+            e.menu && (e.scope == 0 || e.scope == front) && set.iter().any(|c| c.owner == e.owner)
+        })
+        .map(|e| e.owner)
+}
+
+/// Whether a key-down of `(vk, mask)` is taken, and for which module — one decision for the
+/// Windows hook and the Mac tap. `None`: no module captures the combination.
+///
+/// - **The earliest capture in scope takes it**: of the captures of the combination, in
+///   registration order, the first whose module is scoped to `front` or to everywhere. A
+///   capture scoped to another window does not take it, however early; with none in scope the
+///   key goes to the application.
+/// - **A menu lets it through**: a menu the system drew in the application in front
+///   (`native_menu`, asked only once a capture is in scope, as it costs a call on Windows), or
+///   a menu flag that counts for the window in front ([`menu_flag_owners`]) — the flag of one
+///   module lets every capture in that window through, since a menu open there is open for
+///   every key pressed there.
+///
+/// The scope is a whole top-level window. Two plug-ins inside one DAW window share it, so there
+/// the earlier registration wins.
+///
+/// `front` is the window in front as the hook or the tap knows it: on Windows
+/// `GetForegroundWindow`, on a Mac the window the tap was last told is in front. Called for
+/// every key event a capture matches, inside the hook or the tap: it walks the set once, stops
+/// at the first capture in scope, and looks the owners up linearly — tens of comparisons, no
+/// allocation, nothing asked of another process.
+pub fn capture_decision(
+    set: &[Captured],
+    owners: &[OwnerKeys],
+    vk: u32,
+    mask: u8,
+    front: isize,
+    native_menu: impl FnOnce() -> bool,
+) -> Option<Capture> {
+    let mut any = false;
+    let mut taker = None;
+    for c in set.iter().filter(|c| c.vk == vk && c.mask == mask) {
+        any = true;
+        let s = scope_of(owners, c.owner);
+        if s == 0 || s == front {
+            taker = Some(c.owner);
+            break;
+        }
+    }
+    if !any {
+        return None;
+    }
+    let Some(owner) = taker else {
+        return Some(Capture::Pass { why: PassWhy::OutOfScope, owner: None });
+    };
+    if native_menu() {
+        return Some(Capture::Pass { why: PassWhy::MenuMode, owner: Some(owner) });
+    }
+    if menu_flag_owners(set, owners, front).next().is_some() {
+        return Some(Capture::Pass { why: PassWhy::MenuFlag, owner: Some(owner) });
+    }
+    Some(Capture::Take { owner })
+}
+
+/// A captured key-down the hook or the tap took, as it queues it for the pump: the combination,
+/// the module it was taken for, whether it is the keyboard's auto-repeat of a key held down, and
+/// the window that was in front when it was pressed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Taken {
+    pub vk: u32,
+    pub mask: u8,
+    pub owner: u32,
+    pub repeat: bool,
+    pub front: isize,
+}
+
+/// How many keys one module's record of keys let through for a menu holds until it is read
+/// (`host.keys.passedThrough`): nobody presses more than a few keys inside a menu between two
+/// ticks of the runtime's menu timer, and a reader that never comes must not grow it for ever.
+pub const MENU_PASS_MAX: usize = 32;
+
+/// Files a key let through for a menu under module `owner` in the hook's or the tap's record
+/// of `(owner, vk, mask)`, unless that module's share of it is full. Inside the hook or the
+/// tap: one walk of a record of at most [`MENU_PASS_MAX`] keys per module.
+pub fn file_menu_pass(record: &mut Vec<(u32, u32, u8)>, owner: u32, vk: u32, mask: u8) {
+    if record.iter().filter(|p| p.0 == owner).count() < MENU_PASS_MAX {
+        record.push((owner, vk, mask));
+    }
+}
+
+/// Takes module `owner`'s keys out of the record, in the order they were filed; the other
+/// modules' stay.
+pub fn take_menu_passes(record: &mut Vec<(u32, u32, u8)>, owner: u32) -> Vec<(u32, u8)> {
+    let mine = record.iter().filter(|p| p.0 == owner).map(|p| (p.1, p.2)).collect();
+    record.retain(|p| p.0 != owner);
+    mine
+}
+
+/// Where a Mac's `host.keys.scope(true)` pins a module's captures, and why.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScopeFrom {
+    /// The frontmost application named its window in front.
+    Asked,
+    /// It did not; the window the tap was last told is in front.
+    TapFront,
+    /// Neither knows one: everywhere.
+    Nowhere,
+}
+
+/// The Mac's choice of the window `host.keys.scope(true)` pins: the window the frontmost
+/// application names (`asked`), else the window the tap was last told is in front
+/// (`tap_front`, which every key is compared with anyway), else everywhere.
+///
+/// The fallback was everywhere at first, so that an overlay's keys would rather be claimed
+/// everywhere than nowhere. Once the scope became each module's own, everywhere meant that a
+/// module whose window could not be named claimed its keys in every other window too, before
+/// the module whose window is in front. `asked` is `None` when the application did not answer
+/// and `Some(0)` when it answered with no window; neither names one, so both fall back. Pure,
+/// so it is tested on every platform.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn key_scope_window(asked: Option<isize>, tap_front: isize) -> (isize, ScopeFrom) {
+    match asked {
+        Some(w) if w != 0 => (w, ScopeFrom::Asked),
+        _ if tap_front != 0 => (tap_front, ScopeFrom::TapFront),
+        _ => (0, ScopeFrom::Nowhere),
+    }
+}
 
 /// Which platform's reading of a key spec is wanted.
 ///
@@ -1909,7 +2119,7 @@ pub fn platform() -> Rc<dyn Backend> {
     #[cfg(target_os = "macos")]
     let backend: Rc<dyn Backend> = macos::new();
     #[cfg(not(any(windows, target_os = "macos")))]
-    let backend: Rc<dyn Backend> = Rc::new(stub::StubBackend);
+    let backend: Rc<dyn Backend> = Rc::new(stub::StubBackend::default());
     backend
 }
 
@@ -2666,5 +2876,167 @@ mod key_grammar_tests {
         }
         assert!(seen > 20, "only {seen} key specs found; the scan is not reading the modules");
         assert!(picked_for_a_mac >= 2, "the pick entries were not recognised ({picked_for_a_mac})");
+    }
+}
+
+/// Step K's one decision for the Windows hook and the Mac tap, as a table — and the two small
+/// rules beside it, the menu record per module and the Mac's window for a scope.
+#[cfg(test)]
+mod capture_decision_tests {
+    use super::*;
+
+    const W1: isize = 0x1001;
+    const W2: isize = 0x2002;
+    const TAB: u32 = 0x09;
+    const SPACE: u32 = 0x20;
+
+    fn cap(owner: u32, vk: u32, mask: u8) -> Captured {
+        Captured { vk, mask, owner }
+    }
+
+    fn own(owner: u32, scope: isize, menu: bool) -> OwnerKeys {
+        OwnerKeys { owner, scope, menu }
+    }
+
+    fn take(owner: u32) -> Option<Capture> {
+        Some(Capture::Take { owner })
+    }
+
+    fn pass(why: PassWhy, owner: Option<u32>) -> Option<Capture> {
+        Some(Capture::Pass { why, owner })
+    }
+
+    fn no_menu() -> bool {
+        false
+    }
+
+    /// In scope, out of scope, everywhere; the earliest capture in scope beats an earlier one
+    /// scoped elsewhere; no capture at all; the mask matched exactly.
+    #[test]
+    fn the_earliest_capture_in_scope_takes_the_key() {
+        // Module 1 captured Tab first, scoped to W1; module 2 next, scoped to W2; module 3
+        // last, never scoped.
+        let set = [cap(1, TAB, 0), cap(2, TAB, 0), cap(3, TAB, 0), cap(1, SPACE, 0)];
+        let owners = [own(1, W1, false), own(2, W2, false)];
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W1, no_menu), take(1));
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W2, no_menu), take(2), "1's is earlier, but scoped to W1");
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, 0x3003, no_menu), take(3), "everywhere");
+        assert_eq!(
+            capture_decision(&set, &owners, SPACE, 0, W2, no_menu),
+            pass(PassWhy::OutOfScope, None),
+            "only module 1 captures Space, scoped to W1: to the application"
+        );
+        assert_eq!(capture_decision(&set, &owners, SPACE, 0, W1, no_menu), take(1));
+        assert_eq!(capture_decision(&set, &owners, 0x0D, 0, W1, no_menu), None, "nobody captures Return");
+        assert_eq!(capture_decision(&set, &owners, TAB, MASK_SHIFT, W1, no_menu), None, "Shift+Tab is not Tab");
+        assert_eq!(capture_decision(&set, &owners, TAB, MASK_ALT, W1, no_menu), None, "nor is Alt+Tab");
+        // A module without an entry is everywhere; an entry with scope 0 is too.
+        let owners = [own(1, 0, false)];
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W2, no_menu), take(1));
+        assert_eq!(capture_decision(&set, &[], TAB, 0, W2, no_menu), take(1));
+    }
+
+    /// Two modules in one window share its scope: the earlier registration takes the key.
+    #[test]
+    fn in_one_window_the_earlier_registration_wins() {
+        let set = [cap(2, TAB, 0), cap(1, TAB, 0)];
+        let owners = [own(1, W1, false), own(2, W1, false)];
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W1, no_menu), take(2));
+    }
+
+    /// A menu the system drew lets a key in scope through, and is asked only once a capture is
+    /// in scope — it costs a call on Windows.
+    #[test]
+    fn a_native_menu_lets_the_key_through_and_is_asked_only_in_scope() {
+        let set = [cap(1, TAB, 0)];
+        let owners = [own(1, W1, false)];
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W1, || true), pass(PassWhy::MenuMode, Some(1)));
+        let asked = std::cell::Cell::new(false);
+        let d = capture_decision(&set, &owners, TAB, 0, W2, || {
+            asked.set(true);
+            true
+        });
+        assert_eq!(d, pass(PassWhy::OutOfScope, None));
+        assert!(!asked.get(), "out of scope: not asked");
+        let d = capture_decision(&set, &owners, SPACE, 0, W1, || {
+            asked.set(true);
+            true
+        });
+        assert_eq!(d, None);
+        assert!(!asked.get(), "nothing captured: not asked");
+    }
+
+    /// The menu flag, by the maintainer's answer to question 2: it counts for the window it was
+    /// set for — the module's scope, or every window for a module that has none — and lets every
+    /// capture there through, another module's included; but only while the module that set it
+    /// holds a capture.
+    #[test]
+    fn a_menu_flag_counts_for_its_window_while_its_module_captures() {
+        let set = [cap(1, TAB, 0), cap(2, TAB, 0), cap(2, SPACE, 0)];
+        // Module 2's flag, scoped to W2: module 2's keys there, and module 1's in W2 too.
+        let owners = [own(1, 0, false), own(2, W2, true)];
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W2, no_menu), pass(PassWhy::MenuFlag, Some(1)));
+        assert_eq!(capture_decision(&set, &owners, SPACE, 0, W2, no_menu), pass(PassWhy::MenuFlag, Some(2)));
+        // Not in W1: module 2's flag is not W1's.
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W1, no_menu), take(1));
+        // A module with no scope says it for every window.
+        let owners = [own(1, W1, false), own(2, 0, true)];
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W1, no_menu), pass(PassWhy::MenuFlag, Some(1)));
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, 0x3003, no_menu), pass(PassWhy::MenuFlag, Some(2)));
+        // A flag whose module holds no capture counts nowhere.
+        let owners = [own(1, 0, false), own(3, 0, true)];
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W1, no_menu), take(1));
+        assert_eq!(menu_flag_owners(&set, &owners, W1).count(), 0);
+        // Whose flags count, for the record of keys let through for a menu.
+        let owners = [own(1, W1, true), own(2, 0, true), own(4, W1, true)];
+        assert_eq!(menu_flag_owners(&set, &owners, W1).collect::<Vec<_>>(), vec![1, 2], "4 captures nothing");
+        assert_eq!(menu_flag_owners(&set, &owners, W2).collect::<Vec<_>>(), vec![2]);
+        // A flag never takes a key: with nothing in scope the reason is the scope.
+        let owners = [own(1, W1, true), own(2, W1, false)];
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W2, no_menu), pass(PassWhy::OutOfScope, None));
+    }
+
+    /// The modifier tap is decided as any key: its own mask, the same scopes and menus.
+    #[test]
+    fn a_modifier_tap_is_decided_as_any_key() {
+        let set = [cap(1, 0x12, MASK_TAP), cap(2, 0x12, 0)];
+        let owners = [own(1, W1, false)];
+        assert_eq!(capture_decision(&set, &owners, 0x12, MASK_TAP, W1, no_menu), take(1));
+        assert_eq!(capture_decision(&set, &owners, 0x12, MASK_TAP, W2, no_menu), pass(PassWhy::OutOfScope, None));
+        assert_eq!(capture_decision(&set, &owners, 0x12, MASK_TAP, W1, || true), pass(PassWhy::MenuMode, Some(1)));
+        let owners = [own(1, W1, true)];
+        assert_eq!(capture_decision(&set, &owners, 0x12, MASK_TAP, W1, no_menu), pass(PassWhy::MenuFlag, Some(1)));
+        assert_eq!(scope_of(&owners, 1), W1);
+        assert_eq!(scope_of(&owners, 2), 0);
+    }
+
+    /// Each module's record of keys let through for a menu: filed in order, bounded per module,
+    /// taken by its module only.
+    #[test]
+    fn the_menu_record_is_each_module_s_own() {
+        let mut r = Vec::new();
+        file_menu_pass(&mut r, 1, TAB, 0);
+        file_menu_pass(&mut r, 2, 0x0D, 0);
+        file_menu_pass(&mut r, 1, 0x1B, 0);
+        assert_eq!(take_menu_passes(&mut r, 1), vec![(TAB, 0), (0x1B, 0)]);
+        assert_eq!(take_menu_passes(&mut r, 1), vec![], "drained on read");
+        for _ in 0..MENU_PASS_MAX + 5 {
+            file_menu_pass(&mut r, 3, TAB, 0);
+        }
+        file_menu_pass(&mut r, 2, TAB, 0);
+        assert_eq!(take_menu_passes(&mut r, 3).len(), MENU_PASS_MAX, "a reader that never comes");
+        assert_eq!(take_menu_passes(&mut r, 2), vec![(0x0D, 0), (TAB, 0)], "another module's full record takes nothing from 2");
+        assert!(r.is_empty());
+    }
+
+    /// The Mac's window for `host.keys.scope(true)`: the application's answer, else the window
+    /// the tap was last told is in front, else everywhere.
+    #[test]
+    fn a_mac_scope_falls_back_to_the_window_the_tap_saw_in_front() {
+        assert_eq!(key_scope_window(Some(W1), W2), (W1, ScopeFrom::Asked));
+        assert_eq!(key_scope_window(None, W2), (W2, ScopeFrom::TapFront), "the application did not answer");
+        assert_eq!(key_scope_window(Some(0), W2), (W2, ScopeFrom::TapFront), "it answered with no window");
+        assert_eq!(key_scope_window(None, 0), (0, ScopeFrom::Nowhere));
+        assert_eq!(key_scope_window(Some(0), 0), (0, ScopeFrom::Nowhere));
     }
 }

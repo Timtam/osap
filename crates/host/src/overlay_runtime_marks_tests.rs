@@ -36,7 +36,7 @@ function T.arrow(dir)
   local spec = dir < 0 and "Left" or "Right"
   assert(S.holding[spec], spec .. " is not captured, so it would not reach the overlay")
   S.epoch += 1
-  S.captured[spec]()
+  T.call("key", S.captured[spec])
 end
 
 -- Time passes by `ms`, 100 ms at a time, with every timer that comes due run, as the host runs them.
@@ -442,17 +442,19 @@ fn a_recognize_in_a_text_hook_fails_the_scenario() {
 // The runtime's version.
 // ---------------------------------------------------------------------------------------------
 
-/// The runtime is 0.2.0, so a module that depends on `"com.platform.overlay >= 0.2"` — as one that
-/// takes a mark has to — loads against it, and against nothing older.
+/// The runtime is 0.3.0 (handlers, step B3), so a module that depends on
+/// `"com.platform.overlay >= 0.2"` — as one that takes a mark has to — still loads against it, and
+/// against nothing older.
 #[test]
-fn the_runtime_is_0_2_so_a_module_that_asks_for_it_loads() {
+fn the_runtime_is_0_3_so_a_module_that_asks_for_0_2_loads() {
     let m = module_manifest::ModuleManifest::parse(include_str!("../../../modules/overlay-runtime/module.toml"))
         .expect("the runtime's manifest parses");
     assert_eq!(m.id, "com.platform.overlay");
-    assert_eq!(m.version, "0.2.0");
-    let spec = "com.platform.overlay >= 0.2";
-    let req = module_manifest::dep_constraint(spec).unwrap();
-    let id = module_manifest::dep_id(spec);
-    assert!(crate::check_dep_version("com.example.x", id, req, &m.version).is_ok());
-    assert!(crate::check_dep_version("com.example.x", id, req, "0.1.0").is_err());
+    assert_eq!(m.version, "0.3.0");
+    for spec in ["com.platform.overlay >= 0.2", "com.platform.overlay >= 0.3"] {
+        let req = module_manifest::dep_constraint(spec).unwrap();
+        let id = module_manifest::dep_id(spec);
+        assert!(crate::check_dep_version("com.example.x", id, req, &m.version).is_ok(), "{spec}");
+        assert!(crate::check_dep_version("com.example.x", id, req, "0.1.0").is_err(), "{spec}");
+    }
 }

@@ -41,12 +41,31 @@ mod overlay_avenger_tests;
 /// hook that raises, against the same scripted host.
 #[cfg(test)]
 mod overlay_runtime_marks_tests;
+/// The overlay runtime under handlers (runtime 0.3.0): the mark before a control's hooks, the scan
+/// in a pass of its own, a stored identify asked in the handler, the first evaluation on the next
+/// tick, and identify and present guarded — against the same scripted host.
+#[cfg(test)]
+mod overlay_handler_tests;
 /// Tasks and their two waits against a real Luau VM and a real read service over a fake
 /// recogniser.
 #[cfg(test)]
 mod task_tests;
-/// Tasks: a function that stops at `host.ocr.recognize` while the event loop goes on — no
-/// module's API, the machinery its callbacks are to run in; see the file.
+/// Two modules' key scopes and menu flags against real Luau VMs and the stub backend, one of
+/// them busy: which module a key goes to, and that a late teardown sets back only its own.
+#[cfg(test)]
+mod key_scope_tests;
+/// The mailboxes against real Luau VMs, the stub backend and a real read service: every event
+/// as a handler, one at a time per module, and what waits, folds and drops while a module is busy.
+#[cfg(test)]
+mod mailbox_tests;
+/// Captured keys on the host's side: the registrations, and each module's scope and menu flag —
+/// see the file.
+mod captures;
+/// One mailbox per module: every event runs through it as a handler, one at a time per module —
+/// see the file.
+mod mailbox;
+/// Handlers: each callback of a module as a coroutine that can stop at a wait while the event
+/// loop goes on — no module's API; see the file.
 mod task;
 /// The guard that keeps text recognition off the event loop — see the file.
 mod loop_guard;
@@ -94,10 +113,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
-use mlua::{FromLua, Function, Lua, LuaSerdeExt, RegistryKey, Table};
+use mlua::{FromLua, Function, IntoLuaMulti, Lua, LuaSerdeExt, RegistryKey, Table};
 
 use backend::{Backend, ControlInfo, HostEvents, MouseButton, WinInfo};
 use image_search::{ImageResult, ImageTask, PendingImage};
+use mailbox::{Event, Opened};
 use module_manifest::LoadedModule;
 use template::Decoded;
 
@@ -203,13 +223,13 @@ struct Shared {
     caps: RefCell<Vec<HashSet<String>>>,
     /// Global hotkey id → its registration (owning module, VM, callback, spec).
     hotkeys: RefCell<HashMap<i32, HotkeyReg>>,
-    /// Captured keys: (vk, modifier-mask, module_idx, token, VM, callback). The
-    /// per-capture `token` lets `release` target the exact registration: two overlays
-    /// in the SAME module that both capture a key (e.g. Komplete Kontrol's chrome and
-    /// its Preferences dialog both capturing Tab) would otherwise collide on
-    /// (vk, mask, module_idx), so the first to deactivate would release the key the
+    /// Captured keys, each with its module, release token, VM and callback, and each module's
+    /// key scope and menu flag — see captures.rs. The per-capture token lets `release` target
+    /// the exact registration: two overlays in the SAME module that both capture a key (e.g.
+    /// Komplete Kontrol's chrome and its Preferences dialog both capturing Tab) would otherwise
+    /// collide on (vk, mask, module_idx), so the first to deactivate would release the key the
     /// second still needs. Keyed by token, one overlay's release can't drop another's.
-    keys: RefCell<Vec<(u32, u8, usize, i64, Lua, RegistryKey)>>,
+    captures: captures::Captures,
     /// Unified portable store: per-module enabled-state + settings.
     store: RefCell<settings::Store>,
     /// module_idx → (setting key → schema), for validation + the GUI. Not persisted.
@@ -253,8 +273,6 @@ struct Shared {
     input_epoch: Cell<u64>,
     /// Monotonic id source for arbiter claim handles.
     next_arbiter: Cell<i64>,
-    /// Monotonic id source for captured-key registration tokens.
-    next_key_token: Cell<i64>,
     /// Module callback failures (Lua errors + caught panics) queued for the GUI to
     /// show in an accessible dialog, as (title, message). Drained each tick.
     errors: RefCell<Vec<(String, String)>>,
@@ -313,9 +331,11 @@ struct Shared {
     /// ...and what the event loop keeps for them: the callbacks waiting, the answers decided
     /// without the threads, the newest read per key (ocr/lua.rs).
     ocr_state: ocr::lua::OcrState,
-    /// The tasks, running and waiting, of every module — only the tests start any — and what
-    /// the blocking `recognize` and `recognizeMany` held the event loop for (task.rs).
+    /// The handlers, running and waiting, of every module, and what the blocking `recognize` and
+    /// `recognizeMany` held the event loop for (task.rs).
     tasks: task::Tasks,
+    /// Each module's events that wait while it is busy (mailbox.rs).
+    mail: mailbox::Mailboxes,
     /// module_idx → the generation of the VM it runs now (see `image_search::VmOwner`). A map,
     /// not a fifth parallel vector: `populate_vm` overwrites the entry for its index, so a
     /// rollback has nothing here to keep aligned.
@@ -891,8 +911,39 @@ fn hotkey_winners(
     best.into_iter().map(|(b, (_, _, id))| (b, id)).collect()
 }
 
-/// `Shared::on_change`: (setting owner, key) → [(VM owner, VM, callback)].
-type OnChangeMap = HashMap<(usize, String), Vec<(usize, Lua, RegistryKey)>>;
+/// `Shared::on_change`: (setting owner, key) → [(VM owner, VM, callback, registration id)]. The
+/// id is how a queued `Event::Setting` finds its registration again when it runs.
+pub(crate) type OnChangeMap = HashMap<(usize, String), Vec<(usize, Lua, RegistryKey, u64)>>;
+
+/// Registration `reg` of an `onChange` for module `setting_of`'s `key`, as it runs, looked up in
+/// `map` now: its call with the new and the old value, made in its VM — or nothing, when it was
+/// dropped meanwhile. The map is borrowed for the look-up only. The host's own `open` and the
+/// mailbox tests' holder both run this, so the tests run the host's rule and not a copy of it.
+pub(crate) fn open_on_change(
+    map: &RefCell<OnChangeMap>,
+    setting_of: usize,
+    reg: u64,
+    key: &str,
+    new: &settings::Value,
+    old: Option<&settings::Value>,
+) -> Opened {
+    let found = {
+        let map = map.borrow();
+        map.get(&(setting_of, key.to_string())).and_then(|list| {
+            list.iter()
+                .find(|(.., id)| *id == reg)
+                .and_then(|(_, lua, rk, _)| lua.registry_value::<Function>(rk).ok().map(|f| (lua.clone(), f)))
+        })
+    };
+    let Some((lua, f)) = found else { return Opened::Gone };
+    let new_v = value_to_lua(&lua, new).unwrap_or(mlua::Value::Nil);
+    let old_v = old.and_then(|o| value_to_lua(&lua, o).ok()).unwrap_or(mlua::Value::Nil);
+    let args = mlua::MultiValue::from_vec(vec![new_v, old_v]);
+    Opened::Run { f, args, ctx: task::Ctx::new(format!("settings onChange ({key})"), setting_of) }
+}
+
+/// The last `onChange` registration id handed out: positive, never reused.
+static NEXT_ON_CHANGE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Drops every `onChange` registration made from a VM `gone` names, and every key left with
 /// none.
@@ -949,7 +1000,8 @@ fn file_on_change(
     // path of a failed tag — the rule from before owners were recorded.
     let owner = image_search::vm_owner(lua).map_or(setting_of, |o| o.idx);
     let rk = lua.create_registry_value(cb)?;
-    map.entry((setting_of, key)).or_default().push((owner, lua.clone(), rk));
+    let id = NEXT_ON_CHANGE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    map.entry((setting_of, key)).or_default().push((owner, lua.clone(), rk, id));
     Ok(())
 }
 
@@ -1059,60 +1111,63 @@ impl Shared {
         }
     }
 
-    /// Recomputes the global captured-key set from *enabled* modules and updates
-    /// the hook (so a disabled module's keys are no longer suppressed).
+    /// Hands the hook the captures of *enabled* modules, in registration order, and their
+    /// scopes and menu flags (so a disabled module's keys are no longer suppressed).
     fn refresh_captured(&self) {
-        let enabled = self.enabled.borrow();
-        let mut set: Vec<(u32, u8)> = self
-            .keys
-            .borrow()
-            .iter()
-            .filter(|(_, _, idx, ..)| enabled.get(*idx).copied().unwrap_or(false))
-            .map(|(vk, m, ..)| (*vk, *m))
-            .collect();
-        set.sort_unstable();
-        set.dedup();
-        // Under TRACE, not only under calibration. The trace switch promises in its own help
-        // text to record "every decision the key handling made", and this is the decision:
-        // which keys the application will not see. It sat behind the calibration switch, which
-        // is about measuring coordinates inside an overlay and needs a module reload to arm —
-        // so the one line that answers "who is holding my arrow keys" was unavailable to the
-        // person asking. An evening went into guessing at it instead.
-        //
-        // WHO holds each key, not just which: a key is suppressed for the whole process while
-        // any enabled module captures it, so the module names are the actionable half.
-        //
-        // Written at the end of the tick (`log_housekeeping`), and only when it changed: this
-        // runs once per key an overlay captures, so an activation of eight keys wrote eight
-        // growing lines, and over days of calibrating that was most of the log.
+        let set = self.captures.set(|i| self.module_on(i));
+        self.note_captured_line(&set);
+        self.backend.set_captured_keys(&set);
+        captures::send_owners(self);
+    }
+
+    /// Hands the hook the scopes and menu flags of enabled modules, after one of them changed.
+    fn refresh_key_owners(&self) {
+        if appcfg::trace() || appcfg::calibrate() {
+            let set = self.captures.set(|i| self.module_on(i));
+            self.note_captured_line(&set);
+        }
+        captures::send_owners(self);
+    }
+
+    /// Drops module `idx`'s key scope and menu flag: it captures everywhere again, with no menu.
+    /// Beside dropping its captures, on a disable, a reload and a rolled-back hot-load — after
+    /// the arbiter's re-election, whose `onDeactivate` in the module would otherwise write them
+    /// again (`host.keys.scope(false)`, `menuOpen(false)`) into an entry nobody clears.
+    fn forget_key_owner(&self, idx: usize) {
+        if self.captures.forget_owner(idx) {
+            self.refresh_key_owners();
+        }
+    }
+
+    /// Whether module `idx` is enabled.
+    fn module_on(&self, idx: usize) -> bool {
+        self.enabled.borrow().get(idx).copied().unwrap_or(false)
+    }
+
+    /// The captured-set line, waiting for the end of the tick.
+    ///
+    /// Under TRACE, not only under calibration. The trace switch promises in its own help text to
+    /// record "every decision the key handling made", and this is the decision: which keys the
+    /// application will not see. It sat behind the calibration switch, which is about measuring
+    /// coordinates inside an overlay and needs a module reload to arm — so the one line that
+    /// answers "who is holding my arrow keys" was unavailable to the person asking. An evening
+    /// went into guessing at it instead.
+    ///
+    /// WHO holds each key, not just which, in the order that decides, with each module's scope
+    /// and flag: a key is suppressed while an enabled module scoped to the window in front
+    /// captures it, so the module names are the actionable half.
+    ///
+    /// Written at the end of the tick (`log_housekeeping`), and only when it changed: this runs
+    /// once per key an overlay captures, so an activation of eight keys wrote eight growing
+    /// lines, and over days of calibrating that was most of the log.
+    fn note_captured_line(&self, set: &[backend::Captured]) {
         if appcfg::trace() || appcfg::calibrate() {
             let ids = self.ids.borrow();
-            let keys = self.keys.borrow();
-            self.captured_line.borrow_mut().0 = Some(
-                format!(
-                    "captured set: {}",
-                    set.iter()
-                        .map(|(vk, m)| {
-                            let mut owners: Vec<&str> = keys
-                                .iter()
-                                .filter(|(k, mm, idx, ..)| {
-                                    *k == *vk
-                                        && *mm == *m
-                                        && enabled.get(*idx).copied().unwrap_or(false)
-                                })
-                                .map(|(_, _, idx, ..)| {
-                                    ids.get(*idx).map(String::as_str).unwrap_or("?")
-                                })
-                                .collect();
-                            owners.dedup();
-                            format!("vk 0x{vk:02X}/m{m}[{}]", owners.join(","))
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                ),
-            );
+            let line = self
+                .captures
+                .captured_line(set, |i| ids.get(i).cloned().unwrap_or_else(|| "?".to_string()));
+            self.captured_line.borrow_mut().0 = Some(line);
         }
-        self.backend.set_captured_keys(&set);
     }
 
     /// Removes every registration owned by module `idx` (hotkeys + their OS
@@ -1136,7 +1191,7 @@ impl Shared {
                 hk.remove(&id);
             }
         }
-        self.keys.borrow_mut().retain(|(_, _, i, ..)| *i != idx);
+        self.captures.drop_registrations(|i| i == idx);
         self.os_refused.borrow_mut().retain(|(i, _), _| *i != idx);
         // Its errors are news again in the log: a reload is how the maintainer tries a fix, and
         // the same error after it has to be written in full, not counted into a summary.
@@ -1148,10 +1203,13 @@ impl Shared {
         // The VM that asked is going; the one built in its place asks for itself.
         self.initial_pending.borrow_mut().retain(|(i, _)| *i != idx);
         self.purge_pending_images(idx);
-        // Its reads and tasks are dropped, not answered: they belong to the VM that is going.
+        // Its reads, its handlers and what waits in its mailbox are dropped, not answered: they
+        // belong to the VM that is going.
         self.ocr_drop_owner(idx, true);
         self.snap_drop_owner(idx);
+        mailbox::drop_owner(self, idx, mailbox::Why::Reloaded);
         self.task_drop_owner(idx);
+        self.forget_key_owner(idx);
         self.drop_pad_listeners(|i| i == idx);
         let mut to_resolve: Vec<String> = Vec::new();
         let mut deactivations: Vec<Function> = Vec::new();
@@ -1159,10 +1217,10 @@ impl Shared {
             let mut map = self.arbiter.borrow_mut();
             for (slot, s) in map.iter_mut() {
                 // If this module owns the slot's ACTIVE claim, run its onDeactivate
-                // before dropping it — so an active overlay tears down its global
-                // side effects (key scope / menu-open) exactly once, mirroring
-                // arbiter_unregister. (Otherwise a reload of an active overlay would
-                // strand those process-global flags until the next activation.)
+                // before dropping it — so an active overlay tears down its side effects
+                // exactly once, mirroring arbiter_unregister. (Its key scope and menu flag
+                // are its own and go with it either way — `forget_key_owner` — but what
+                // else it set would be stranded until the next activation.)
                 if let Some(active) = s.active {
                     if let Some(c) =
                         s.claims.iter().find(|c| c.handle == active && c.module_idx == idx)
@@ -1191,11 +1249,14 @@ impl Shared {
         // A second time, after the onDeactivate above: it runs in the VM that is going, and what it
         // started — a timer, a read, a snapshot, a task that waits — would otherwise outlive the
         // purge and come back into the old VM, or keep it in memory. A timer it armed used to fire
-        // into the old VM after a reload.
+        // into the old VM after a reload. Its key scope and menu flag likewise: the onDeactivate
+        // sets them back (`host.keys.scope(false)`, `menuOpen(false)`), which writes them again.
         self.timers.retain(|i| i != idx);
         self.ocr_drop_owner(idx, true);
         self.snap_drop_owner(idx);
+        mailbox::drop_owner(self, idx, mailbox::Why::Reloaded);
         self.task_drop_owner(idx);
+        self.forget_key_owner(idx);
         let id = self.ids.borrow().get(idx).cloned();
         if let Some(id) = id {
             self.exports.borrow_mut().remove(&id);
@@ -1266,7 +1327,13 @@ impl Shared {
         if !enabled {
             self.ocr_drop_owner(idx, false);
             self.snap_drop_owner(idx);
+            // What waits in its mailbox, but a setting's `onChange`, which it still hears; and its
+            // handler, which never goes on — not even after a quick enable.
+            mailbox::drop_owner(self, idx, mailbox::Why::Disabled);
             self.task_drop_owner(idx);
+            // And its key scope and menu flag, which used to stay set — one switch for the
+            // whole application then, left wherever the module last put it.
+            self.forget_key_owner(idx);
         }
         // Searches answered while it was off are asked again, so their callbacks still come.
         if enabled {
@@ -1303,7 +1370,7 @@ impl Shared {
                 hk.remove(&id);
             }
         }
-        self.keys.borrow_mut().retain(|(_, _, idx, ..)| *idx < n);
+        self.captures.drop_registrations(|idx| idx >= n);
         self.os_refused.borrow_mut().retain(|(idx, _), _| *idx < n);
         // Before `ids` is cut below: the log's counts are keyed by the module's id.
         let rolled_back = self.ids.borrow().len();
@@ -1315,6 +1382,7 @@ impl Shared {
         self.initial_pending.borrow_mut().retain(|(idx, _)| *idx < n);
         self.ocr_drop_from(n);
         self.snap_drop_from(n);
+        mailbox::drop_from(self, n);
         self.task_drop_from(n);
         self.drop_pad_listeners(|idx| idx >= n);
         {
@@ -1338,6 +1406,9 @@ impl Shared {
                 self.arbiter_resolve(&slot);
             }
         }
+        // After the re-election, as on a disable: no claim of theirs is left to deactivate, but
+        // nothing they set may outlive them either.
+        self.captures.forget_owners_from(n);
         self.roots.borrow_mut().truncate(n);
         self.ids.borrow_mut().truncate(n);
         self.enabled.borrow_mut().truncate(n);
@@ -1594,13 +1665,25 @@ impl Shared {
     fn fire_due_timers(&self) {
         self.timers.fire_due(
             Instant::now(),
-            |idx| self.enabled.borrow().get(idx).copied().unwrap_or(false),
+            |idx| match (self.module_on(idx), mailbox::busy(self, idx)) {
+                (false, _) => timers::Slot::Off,
+                (true, true) => timers::Slot::Busy,
+                (true, false) => timers::Slot::Free,
+            },
             // Only once a one-shot timer actually comes due — this runs on EVERY loop tick, and
             // an idle tick has changed nothing. Bumping there would make the epoch a tick
             // counter and defeat the memoization it exists for. A recurring tick does not bump
             // it either (see `host.epoch` in timer.md).
             || self.bump_epoch(),
-            |idx, e| self.report_callback_error(idx, "timer", e),
+            // Through each module's mailbox: at once while it is free (`Event::After`, `Every`).
+            |due| match due {
+                timers::Due::Once { token, idx, lua } => {
+                    mailbox::deliver(self, idx, &lua, Event::After { token });
+                }
+                timers::Due::Every { token, idx, lua } => {
+                    mailbox::deliver(self, idx, &lua, Event::Every { token });
+                }
+            },
         );
     }
 
@@ -1621,38 +1704,55 @@ impl Shared {
         let id = self.ids.borrow()[idx].clone();
         let old = self.store.borrow_mut().set(&id, key, value.clone());
         self.dirty.set(true);
-        self.fire_on_change(idx, key, &value, old.as_ref());
+        // From the dialog every `onChange` is queued: it runs in the next tick's queued phase,
+        // never inside the dialog's own event.
+        self.fire_on_change(idx, key, &value, old.as_ref(), None);
     }
 
-    /// Fires the `onChange` callbacks registered for (module, key).
+    /// Fires the `onChange` callbacks registered for (module, key). Those registered from the VM
+    /// of `caller` — the module whose `host.settings.set` changed it — run at once, inside `set`,
+    /// as a plain call: the module is running, and nothing of it waits. Every other one goes to its
+    /// module's mailbox (`mailbox::deliver_later`) and runs as a handler in the queued phase of
+    /// this tick or the next — after `set` has returned; no handler starts inside another. A
+    /// disabled module's run too, as they always did.
     fn fire_on_change(
         &self,
         idx: usize,
         key: &str,
         new: &settings::Value,
         old: Option<&settings::Value>,
+        caller: Option<usize>,
     ) {
-        let cbs: Vec<(Lua, Function)> = {
+        let regs: Vec<(usize, Lua, u64)> = {
             let map = self.on_change.borrow();
-            match map.get(&(idx, key.to_string())) {
-                Some(list) => list
-                    .iter()
-                    .filter_map(|(_, lua, rk)| {
-                        lua.registry_value::<Function>(rk).ok().map(|f| (lua.clone(), f))
-                    })
-                    .collect(),
-                None => Vec::new(),
-            }
+            map.get(&(idx, key.to_string()))
+                .map(|list| list.iter().map(|(owner, lua, _, reg)| (*owner, lua.clone(), *reg)).collect())
+                .unwrap_or_default()
         };
-        for (lua, f) in cbs {
-            let new_v = value_to_lua(&lua, new).unwrap_or(mlua::Value::Nil);
-            let old_v = old
-                .and_then(|o| value_to_lua(&lua, o).ok())
-                .unwrap_or(mlua::Value::Nil);
-            if let Err(e) = call_guarded(&f, (new_v, old_v)) {
-                self.report_callback_error(idx, &format!("settings onChange ({key})"), &e);
+        for (owner, lua, reg) in regs {
+            if Some(owner) == caller {
+                let Opened::Run { f, args, ctx } = self.open_setting(idx, reg, key, new, old) else { continue };
+                if let Err(e) = call_guarded(&f, args) {
+                    self.report_callback_error(ctx.report, &ctx.what, &e);
+                }
+            } else {
+                let ev = Event::Setting { setting_of: idx, reg, key: key.to_string(), new: new.clone(), old: old.cloned() };
+                mailbox::deliver_later(self, owner, &lua, ev);
             }
         }
+    }
+
+    /// Registration `reg` of an `onChange` for module `setting_of`'s `key`, as it runs
+    /// ([`open_on_change`]).
+    fn open_setting(
+        &self,
+        setting_of: usize,
+        reg: u64,
+        key: &str,
+        new: &settings::Value,
+        old: Option<&settings::Value>,
+    ) -> Opened {
+        open_on_change(&self.on_change, setting_of, reg, key, new, old)
     }
 }
 
@@ -1995,6 +2095,51 @@ pub(crate) fn quiet_expected_panics() {
 #[cfg(test)]
 mod hotkey_conflict_tests {
     use super::*;
+
+    /// Where a press of a hotkey goes when it runs — at once, or after it waited in its busy
+    /// module's mailbox: to its registration while that is there, holds the combination and the
+    /// module is on; else to the module's own new registration of the same combination, while the
+    /// module's key scope is everywhere or the window the press came in; never to another module's.
+    #[test]
+    fn a_hotkey_goes_to_its_registration_or_its_modules_new_one_and_never_to_another_module() {
+        use captures::{Gone, Target};
+        let lua = Lua::new();
+        let reg = |module_idx: usize, binding: Option<(u32, u8)>, live: bool| HotkeyReg {
+            module_idx,
+            lua: lua.clone(),
+            cb: lua.create_registry_value(lua.create_function(|_, ()| Ok(())).unwrap()).unwrap(),
+            spec: "Alt+V".to_string(),
+            binding,
+            live,
+        };
+        const V: (u32, u8) = (0x56, 0b010);
+        const W1: isize = 0x111;
+        let on = |_: usize| true;
+        let mut regs: HashMap<i32, HotkeyReg> = HashMap::new();
+        regs.insert(5, reg(1, Some(V), true));
+        assert_eq!(hotkey_target(&regs, on, 0, 1, 5, Some(V), None), Target::Same(5));
+        assert_eq!(hotkey_target(&regs, |_| false, 0, 1, 5, Some(V), None), Target::Gone(Gone::Disabled));
+        // The overlay went and came back while the press waited: id 5 released, 9 made.
+        regs.remove(&5);
+        regs.insert(9, reg(1, Some(V), true));
+        assert_eq!(hotkey_target(&regs, on, 0, 1, 5, Some(V), None), Target::Moved(9), "global scope");
+        assert_eq!(hotkey_target(&regs, on, W1, 1, 5, Some(V), Some(W1)), Target::Moved(9), "pressed in its window");
+        assert_eq!(hotkey_target(&regs, on, W1, 1, 5, Some(V), Some(0x222)), Target::Gone(Gone::ScopeMoved));
+        assert_eq!(hotkey_target(&regs, on, W1, 1, 5, Some(V), None), Target::Gone(Gone::ScopeMoved), "front not known");
+        // Another module holds the combination now: never to it.
+        regs.remove(&9);
+        regs.insert(12, reg(2, Some(V), true));
+        regs.insert(13, reg(1, Some(V), false));
+        assert_eq!(hotkey_target(&regs, on, 0, 1, 5, Some(V), None), Target::Gone(Gone::TakenOver));
+        // Nobody: released. And a spec only the OS read cannot be matched again.
+        regs.clear();
+        assert_eq!(hotkey_target(&regs, on, 0, 1, 5, Some(V), None), Target::Gone(Gone::Released));
+        assert_eq!(hotkey_target(&regs, on, 0, 1, 5, None, None), Target::Gone(Gone::Released));
+        // Its own id, still registered but no longer holding the combination, is not run either.
+        regs.insert(5, reg(1, Some(V), false));
+        regs.insert(14, reg(2, Some(V), true));
+        assert_eq!(hotkey_target(&regs, on, 0, 1, 5, Some(V), None), Target::Gone(Gone::TakenOver));
+    }
 
     /// Ctrl+Alt+H, wanted by two modules.
     const H: (u32, u8) = (0x48, 0b011);
@@ -2636,8 +2781,14 @@ mod initial_trigger_tests {
 
     /// Dispatches the report and returns (fired, how often `before_first` ran).
     fn report(lua: &Lua, win: Option<&WinInfo>, reprime: bool) -> (i64, u32) {
-        let before = Cell::new(0u32);
-        let fired = dispatch_initial(lua, win, reprime, &|| before.set(before.get() + 1)).unwrap();
+        let before = Rc::new(Cell::new(0u32));
+        let b = before.clone();
+        let hook = lua.create_function(move |_, ()| {
+            b.set(b.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+        let fired = dispatch_initial(lua, win, reprime, Some(hook)).unwrap();
         (fired, before.get())
     }
 
@@ -2774,7 +2925,7 @@ mod initial_trigger_tests {
         .call::<()>(&full)
         .unwrap();
         register(&lua, &full, "after", "{ initial = true }");
-        let e = dispatch_initial(&lua, Some(&game()), false, &|| {}).unwrap_err().to_string();
+        let e = dispatch_initial(&lua, Some(&game()), false, None).unwrap_err().to_string();
         assert!(e.contains("boom"), "{e}");
         assert_eq!(report(&lua, Some(&game()), false), (0, 0));
         assert_eq!(count(&lua, "after"), 0);
@@ -2983,10 +3134,12 @@ mod initial_trigger_tests {
     }
 
     /// Runs `drain_initial` over `vms` (module index = position) with `front` in front.
+    /// Each module's report is delivered at once, as a free module's mailbox runs it, with a hook
+    /// standing for the duplication's opening that records the VM it ran in.
     fn drain(vms: &[&Lua], pending: Vec<(usize, bool)>, enabled: &[bool], front: Option<WinInfo>) -> Drained {
         let asked = Cell::new(0);
         let bumps = Cell::new(0);
-        let prewarmed = RefCell::new(Vec::new());
+        let prewarmed: Rc<RefCell<Vec<i64>>> = Rc::default();
         let mut failed = Vec::new();
         drain_initial(
             pending,
@@ -2997,10 +3150,22 @@ mod initial_trigger_tests {
                 front
             },
             || bumps.set(bumps.get() + 1),
-            |lua: &Lua| prewarmed.borrow_mut().push(lua.globals().get::<i64>("vm_id").unwrap()),
-            |i, _| failed.push(i),
+            |i, lua, win, reprime| {
+                let id = lua.globals().get::<i64>("vm_id").unwrap();
+                let p = prewarmed.clone();
+                let hook = lua
+                    .create_function(move |_, ()| {
+                        p.borrow_mut().push(id);
+                        Ok(())
+                    })
+                    .unwrap();
+                if dispatch_initial(lua, win, reprime, Some(hook)).is_err() {
+                    failed.push(i);
+                }
+            },
         );
-        Drained { asked: asked.get(), bumps: bumps.get(), prewarmed: prewarmed.into_inner(), failed }
+        let prewarmed = prewarmed.borrow().clone();
+        Drained { asked: asked.get(), bumps: bumps.get(), prewarmed, failed }
     }
 
     /// A prelude VM for module `id`, told apart by its `vm_id` global.
@@ -3052,6 +3217,20 @@ mod initial_trigger_tests {
         let got = drain(&[&a, &b], vec![(0, false), (1, false)], &[false, true], Some(game()));
         assert_eq!(got, Drained { asked: 1, bumps: 1, prewarmed: vec![1], failed: vec![] });
         assert_eq!((count(&a, "hits"), count(&b, "hits")), (0, 1));
+    }
+
+    /// The input epoch turns when the report is asked for — once, whatever matches — so a module
+    /// that is busy when it comes hears it later without a second turn: with a titled window in
+    /// front and no trigger of the module matching it, it turns all the same.
+    #[test]
+    fn the_input_epoch_turns_once_when_the_report_arrives_whatever_matches() {
+        let (a, fa) = module_vm(0);
+        let (b, fb) = module_vm(1);
+        register(&a, &fa, "hits", "{ initial = true }");
+        register(&b, &fb, "hits", "{ initial = true }");
+        let got = drain(&[&a, &b], vec![(0, false), (1, false)], &[true, true], Some(window_titled("Desktop")));
+        assert_eq!(got, Drained { asked: 1, bumps: 1, prewarmed: vec![], failed: vec![] });
+        assert_eq!((count(&a, "hits"), count(&b, "hits")), (0, 0));
     }
 
     /// Neither platform hands an untitled foreground window to a trigger on activation, so
@@ -3345,6 +3524,10 @@ fn populate_vm(
     // still match the file. The same call keeps the handle the window events are delivered
     // through, for the same reason one level up: the delivery is the host's, not the module's.
     install_window_prelude(lua, &host_m)?;
+    // How long this VM's running handler has been parked, which the prelude's `[dispatch]` line
+    // leaves out of the time it reports (`WAITED_KEY`).
+    let sh = shared.clone();
+    lua.set_named_registry_value(WAITED_KEY, lua.create_function(move |_, ()| Ok(sh.tasks.waited_ms(idx)))?)?;
 
     // From here the module's own code sees only what its manifest declares. `host_m` stays
     // whole, and is what a code dependency's permitted namespaces bind to, so a hotkey or a
@@ -3960,7 +4143,7 @@ impl Manager {
             caps: RefCell::new(Vec::new()),
             excluded: RefCell::new(Vec::new()),
             hotkeys: RefCell::new(HashMap::new()),
-            keys: RefCell::new(Vec::new()),
+            captures: captures::Captures::default(),
             store: RefCell::new(store),
             schemas: RefCell::new(Vec::new()),
             on_change: RefCell::new(HashMap::new()),
@@ -3974,7 +4157,6 @@ impl Manager {
             epoch: Cell::new(0),
             input_epoch: Cell::new(0),
             next_arbiter: Cell::new(0),
-            next_key_token: Cell::new(0),
             errors: RefCell::new(Vec::new()),
             error_seen: RefCell::new(HashSet::new()),
             error_repeats: RefCell::new(logging::Repeats::default()),
@@ -3993,6 +4175,7 @@ impl Manager {
             ocr,
             ocr_state: ocr::lua::OcrState::default(),
             tasks: task::Tasks::default(),
+            mail: mailbox::Mailboxes::default(),
             vm_gens: RefCell::new(HashMap::new()),
             template_cache: RefCell::new(HashMap::new()),
             template_seq: Cell::new(0),
@@ -4073,7 +4256,7 @@ impl Manager {
     /// for pending speech and returns.
     pub fn run(&mut self) -> Result<()> {
         let has_hotkeys = !self.shared.hotkeys.borrow().is_empty();
-        let has_keys = !self.shared.keys.borrow().is_empty();
+        let has_keys = !self.shared.captures.is_empty();
         let has_triggers = self.modules.borrow().iter().any(|m| window_has_triggers(&m.lua));
         // A timer or an outstanding image search is a reason to keep running too, and this
         // is the second half of a bug found by measurement: a headless module that armed
@@ -4090,7 +4273,9 @@ impl Manager {
             || !self.shared.pending_image.borrow().is_empty()
             || self.shared.ocr_state.has_pending()
             || self.shared.snap_state.has_pending()
-            || self.shared.pads.has_listeners();
+            || self.shared.pads.has_listeners()
+            // An `onChange` another module's `set` queued at load runs on a tick too.
+            || !self.shared.mail.is_empty();
         let headless = appcfg::headless();
 
         // The tray manager is shown whenever there's a window (non-headless), even
@@ -4301,6 +4486,11 @@ impl Manager {
                         let t = std::time::Instant::now();
                         shared.fire_snapshot_results();
                         let snapshots_ms = t.elapsed().as_millis();
+                        // The events that waited in a busy module's mailbox, and every setting
+                        // changed in the dialog or by another module since the last tick.
+                        let t = std::time::Instant::now();
+                        let queued = shared.run_queued_events();
+                        let queued_ms = t.elapsed().as_millis();
                         // `onTrigger { initial = true }`: the window already in front, for
                         // the triggers that asked since the last tick (at load, on enable, or
                         // from a timer earlier in this very tick). Inside the measured
@@ -4337,9 +4527,11 @@ impl Manager {
                                      {other_ms}, which is mostly key and hotkey dispatch; \
                                      timers {timers_ms}, image results {images_ms}, text \
                                      recognition results {ocr_ms} ({} callback(s)), snapshot results \
-                                     {snapshots_ms}, initial window report {initial_ms}) — \
-                                     {hazard}",
-                                    ocr_n.callbacks
+                                     {snapshots_ms}, queued module events {queued_ms} ({} event(s), {} \
+                                     waiting), initial window report {initial_ms}) — {hazard}",
+                                    ocr_n.callbacks,
+                                    queued.events,
+                                    queued.parked
                                 ),
                             );
                         }
@@ -4776,8 +4968,9 @@ impl Dispatcher<'_> {
                 win
             },
             || shared.bump_input_epoch(),
-            capture_source::prewarm_if_declared,
-            |idx, e| shared.report_callback_error(idx, "window trigger", e),
+            |idx, lua, win, reprime| {
+                mailbox::deliver(shared, idx, lua, Event::Initial { win: win.cloned().map(Box::new), reprime });
+            },
         );
     }
 }
@@ -4799,21 +4992,22 @@ impl Dispatcher<'_> {
 ///   report is still used up.
 /// - **Delivered through the host's own handle** on each window table (see
 ///   `install_window_prelude`), so a module relying on its runtime's `window` capability is
-///   reported to as its activations are.
-/// - **The preparation an activation makes**, made before the first callback that matches:
-///   `bump_input_epoch` ONCE for the whole report, before the first matching callback of any
-///   module — an activation turns it over once, before any module, and a second turn between
-///   two modules would make stale what the first module's callback just cached against it —
-///   and `prewarm` once per VM, before that VM's first matching callback.
-/// - `failed` hears each module whose dispatch raised; the other modules are still reported to.
+///   reported to as its activations are — to each module's mailbox (`deliver`), as an
+///   `Event::Initial`, which runs at once while the module is free.
+/// - **The input epoch turns ONCE, now**, for the whole report, when any module is owed it and a
+///   titled window is in front — before any module hears it, as an activation turns it once
+///   before any module, and never again when a module that was busy hears it later: a second turn
+///   between two modules would make stale what the first module's callback just cached against
+///   it. It turns even when no trigger of theirs matches the window.
+/// - The duplication a module reads through is opened before its first matching callback, by the
+///   prelude, through the hook an activation hands it too (`capture_source::prewarm_hook`).
 fn drain_initial<'m>(
     pending: Vec<(usize, bool)>,
     enabled: impl Fn(usize) -> bool,
     vm: impl Fn(usize) -> Option<&'m Lua>,
     active_window: impl FnOnce() -> Option<WinInfo>,
-    bump_input_epoch: impl Fn(),
-    prewarm: impl Fn(&Lua),
-    mut failed: impl FnMut(usize, &str),
+    bump_input_epoch: impl FnOnce(),
+    mut deliver: impl FnMut(usize, &'m Lua, Option<&WinInfo>, bool),
 ) {
     let due: Vec<(usize, bool, &Lua)> = initial_due(pending, enabled)
         .into_iter()
@@ -4824,17 +5018,11 @@ fn drain_initial<'m>(
         return;
     }
     let win = active_window().filter(|w| !w.title.is_empty());
-    let bumped = Cell::new(false);
+    if win.is_some() {
+        bump_input_epoch();
+    }
     for (idx, reprime, lua) in due {
-        let before_first = || {
-            if !bumped.replace(true) {
-                bump_input_epoch();
-            }
-            prewarm(lua);
-        };
-        if let Err(e) = guard(|| dispatch_initial(lua, win.as_ref(), reprime, &before_first).map(|_| ())) {
-            failed(idx, &e);
-        }
+        deliver(idx, lua, win.as_ref(), reprime);
     }
 }
 
@@ -4905,6 +5093,7 @@ impl HostEvents for Dispatcher<'_> {
         self.shared.fire_image_results();
         self.shared.fire_ocr_results();
         self.shared.fire_snapshot_results();
+        self.shared.run_queued_events();
         self.dispatch_initial();
         if self.shared.recheck_requested.replace(false) {
             self.on_focus_change();
@@ -4997,61 +5186,45 @@ impl HostEvents for Dispatcher<'_> {
         }
         let found = {
             let map = self.shared.hotkeys.borrow();
-            map.get(&id).and_then(|reg| {
-                if self.enabled(reg.module_idx) {
-                    reg.lua
-                        .registry_value::<Function>(&reg.cb)
-                        .ok()
-                        .map(|f| (reg.module_idx, f))
-                } else {
-                    None
-                }
-            })
+            map.get(&id)
+                .filter(|reg| self.enabled(reg.module_idx))
+                .map(|reg| (reg.module_idx, reg.lua.clone(), reg.binding, reg.spec.clone()))
         };
-        if let Some((idx, f)) = found {
-            if let Err(e) = call_guarded(&f, ()) {
-                self.shared.report_callback_error(idx, "hotkey", &e);
-            }
+        if let Some((owner, lua, binding, spec)) = found {
+            // The window in front now, noted only for a module that is busy: if its registration
+            // is made again while the press waits, the new one takes it only when the module's
+            // scope is this window or everywhere (`hotkey_target`). The window the hook or the tap
+            // compares keys with (`key_front`), never `resolve_key_scope`: on a Mac that asks the
+            // frontmost application, on the tap's thread, and notes a pin nobody made.
+            let front = mailbox::busy(self.shared, owner).then(|| self.shared.backend.key_front());
+            mailbox::deliver(self.shared, owner, &lua, Event::Hotkey { id, owner, front, binding, spec });
         }
     }
 
-    fn on_key(&mut self, vk: u32, mods: u8) {
+    fn on_key(&mut self, vk: u32, mods: u8, owner: u32, repeat: bool, front: isize) {
         // Somebody is waiting for what this dispatch does: a read or a timer it asks for goes
         // in the interactive lane (ocr/types.rs, `enter_priority`).
         let _prio = ocr::types::enter_priority(ocr::types::Priority::Interactive);
         self.shared.bump_epoch();
-        // The hook only calls this for keys in the captured set, so the presence of this line
+        let owner = owner as usize;
+        // The hook only calls this for keys it took for a module, so the presence of this line
         // IS the answer to "did the overlay swallow that keystroke, or did the application
         // simply do nothing with it" — the two are indistinguishable from the outside, and for
         // a user who cannot see the screen they are indistinguishable from each other twice
-        // over. Behind trace, for the reasons written at refresh_captured.
+        // over. Behind trace, for the reasons written at note_captured_line.
         if appcfg::trace() || appcfg::calibrate() {
-            logging::line("keys", &format!("dispatch vk 0x{vk:02X}/m{mods}"));
+            let id = self.shared.ids.borrow().get(owner).cloned().unwrap_or_else(|| "?".to_string());
+            logging::line(
+                "keys",
+                &format!(
+                    "dispatch vk 0x{vk:02X}/m{mods} to {id}, pressed in window {front:#x}{}",
+                    if repeat { ", a repeat" } else { "" }
+                ),
+            );
         }
-        let found = {
-            let keys = self.shared.keys.borrow();
-            keys.iter()
-                .find(|(k, m, idx, ..)| *k == vk && *m == mods && self.enabled(*idx))
-                .and_then(|(_, _, idx, _tok, lua, key)| {
-                    lua.registry_value::<Function>(key).ok().map(|f| (*idx, lua.clone(), f))
-                })
-        };
-        if let Some((idx, lua, f)) = found {
-            let table = lua.create_table().ok();
-            if let Some(t) = &table {
-                // One field per modifier role: on a Mac `ctrl` is Command held, `win` Control.
-                for (name, held) in backend::capture_mods_fields(mods) {
-                    let _ = t.set(name, held);
-                }
-            }
-            let res = match table {
-                Some(t) => call_guarded(&f, t),
-                None => call_guarded(&f, ()),
-            };
-            if let Err(e) = res {
-                self.shared.report_callback_error(idx, "key", &e);
-            }
-        }
+        // To the module the hook took it for, and to that module's own capture of it — never to
+        // another module's — through its mailbox (captures.rs, `arrive`).
+        captures::arrive(self.shared, vk, mods, owner, repeat, front);
     }
 
     fn on_window_activate(&mut self, win: WinInfo) {
@@ -5060,18 +5233,30 @@ impl HostEvents for Dispatcher<'_> {
         let _prio = ocr::types::enter_priority(ocr::types::Priority::Interactive);
         let started = Instant::now();
         // A different window in front is a different screen — this counts as the screen
-        // having changed, not merely the world (see bump_input_epoch).
+        // having changed, not merely the world (see bump_input_epoch). Once, now: a module that
+        // is busy hears it later without a second turn.
         self.shared.bump_input_epoch();
+        let mut queued: Vec<usize> = Vec::new();
         for (idx, m) in self.modules.iter().enumerate() {
             if !self.enabled(idx) {
                 continue;
             }
-            // Through the host's own handle on the window table, not the module's `host`:
-            // see `install_window_prelude`.
-            if let Err(e) = guard(|| dispatch_activate(&m.lua, &win)) {
-                self.shared.report_callback_error(idx, "window trigger", &e);
+            // Only a VM with triggers, asked through the host's own handle on the window table,
+            // not the module's `host` (see `install_window_prelude`); the number of its newest
+            // trigger goes with the event, so one made after it arrived does not get it.
+            let upto = trigger_seq(&m.lua);
+            if upto == 0 {
+                continue;
+            }
+            let ev = Event::Activate { win: Box::new(win.clone()), upto };
+            if mailbox::deliver(self.shared, idx, &m.lua, ev) == mailbox::Delivered::Queued {
+                queued.push(idx);
             }
         }
+        // A module that is busy has this activation waiting in its mailbox: that is its report of
+        // the window in front, so a report it asked for on this tick is dropped — its triggers are
+        // still primed until the activation runs, and the input epoch must not turn twice.
+        self.shared.initial_pending.borrow_mut().retain(|(idx, _)| !queued.contains(idx));
         // To every module it reached, this activation was the report of what is in front, so a
         // re-enable still queued for this tick must not re-arm the triggers it just un-primed.
         initial_reported_by_activation(&mut self.shared.initial_pending.borrow_mut(), |idx| {
@@ -5090,16 +5275,169 @@ impl HostEvents for Dispatcher<'_> {
         let started = Instant::now();
         self.shared.bump_epoch();
         for (idx, m) in self.modules.iter().enumerate() {
-            if !self.enabled(idx) {
+            if !self.enabled(idx) || !window_has_triggers(&m.lua) {
                 continue;
             }
-            if let Err(e) = guard(|| dispatch_focus(&m.lua)) {
-                self.shared.report_callback_error(idx, "focus change", &e);
-            }
+            mailbox::deliver(self.shared, idx, &m.lua, Event::Focus);
         }
         let mut c = self.shared.ev_counts.get();
         c.2 += started.elapsed().as_millis();
         self.shared.ev_counts.set(c);
+    }
+}
+
+/// The hotkey registration a press of hotkey `id`, for module `owner`, goes to as it runs: `id`
+/// while it is registered for that module, holds its combination at the OS (`live`) and the
+/// module is on; and otherwise — the registration released and made again meanwhile, by an
+/// overlay that went and came back while the press waited in its busy module's mailbox — the
+/// module's own registration that holds the same combination now, while the module's key scope
+/// is everywhere or `front`, the window in front when the press arrived. Never another module's:
+/// one that holds the combination now makes it `TakenOver`.
+fn hotkey_target(
+    regs: &HashMap<i32, HotkeyReg>,
+    enabled: impl Fn(usize) -> bool,
+    scope: isize,
+    owner: usize,
+    id: i32,
+    binding: Option<(u32, u8)>,
+    front: Option<isize>,
+) -> captures::Target<i32> {
+    use captures::{Gone, Target};
+    if !enabled(owner) {
+        return Target::Gone(Gone::Disabled);
+    }
+    if regs.get(&id).is_some_and(|r| r.module_idx == owner && r.live) {
+        return Target::Same(id);
+    }
+    let Some(b) = binding else { return Target::Gone(Gone::Released) };
+    let holder = regs.iter().filter(|(_, r)| r.live && r.binding == Some(b)).min_by_key(|(i, _)| **i);
+    match holder {
+        Some((new, r)) if r.module_idx == owner => {
+            if scope == 0 || Some(scope) == front {
+                Target::Moved(*new)
+            } else {
+                Target::Gone(Gone::ScopeMoved)
+            }
+        }
+        Some(_) => Target::Gone(Gone::TakenOver),
+        None => Target::Gone(Gone::Released),
+    }
+}
+
+impl Shared {
+    /// A hotkey as it runs (`Event::Hotkey`): its registration, or the module's new one of the
+    /// same combination ([`hotkey_target`]) — said, as a captured key's is — or nothing.
+    fn open_hotkey(&self, id: i32, owner: usize, front: Option<isize>, binding: Option<(u32, u8)>, spec: &str) -> Opened {
+        let target = hotkey_target(
+            &self.hotkeys.borrow(),
+            |i| self.module_on(i),
+            self.captures.scope_of(owner),
+            owner,
+            id,
+            binding,
+            front,
+        );
+        let module = || self.ids.borrow().get(owner).cloned().unwrap_or_else(|| "?".to_string());
+        // `front` is noted exactly for a press its busy module queued (`on_hotkey`); one with none
+        // ran at once, and its line does not say the module was busy.
+        let queued = front.is_some();
+        let id = match target {
+            captures::Target::Same(id) => id,
+            captures::Target::Moved(new) => {
+                if self.captures.say_moved(owner, Instant::now()) {
+                    logging::line("keys", &captures::moved_line(&module(), spec, queued));
+                }
+                new
+            }
+            captures::Target::Gone(gone) => {
+                if gone != captures::Gone::Disabled && self.captures.say_dropped(owner, Instant::now()) {
+                    let line = if queued {
+                        captures::busy_dropped_line(&module(), spec, gone)
+                    } else {
+                        captures::hotkey_dropped_line(&module(), spec, gone)
+                    };
+                    logging::line("keys", &line);
+                }
+                return Opened::Gone;
+            }
+        };
+        let f = self.hotkeys.borrow().get(&id).and_then(|r| r.lua.registry_value::<Function>(&r.cb).ok());
+        match f {
+            Some(f) => Opened::Run { f, args: mlua::MultiValue::new(), ctx: task::Ctx::new("hotkey", owner) },
+            None => Opened::Gone,
+        }
+    }
+
+    /// The tick's phase for the events that waited in busy modules' mailboxes
+    /// (`mailbox::run_queued`). Said when the budget ended it before every event ran — at most once
+    /// every ten seconds, with how often since (`Mailboxes::say_budget`).
+    fn run_queued_events(&self) -> mailbox::Phase {
+        let phase = mailbox::run_queued(self);
+        if phase.budget {
+            if let Some(unsaid) = self.mail.say_budget(Instant::now()) {
+                logging::line("pump", &mailbox::budget_line(phase.events, unsaid));
+            }
+        }
+        phase
+    }
+
+    /// A window event's call as it runs, or nothing for a VM without triggers; what could not be
+    /// built is reported as the trigger's error.
+    fn window_opened(&self, idx: usize, what: &'static str, call: mlua::Result<Option<(Function, mlua::MultiValue)>>) -> Opened {
+        match call {
+            Ok(Some((f, args))) => Opened::Run { f, args, ctx: task::Ctx::new(what, idx) },
+            Ok(None) => Opened::Gone,
+            Err(e) => {
+                self.report_callback_error(idx, what, &e.to_string());
+                Opened::Gone
+            }
+        }
+    }
+}
+
+/// Every event of every module, as it runs and as it is dropped: one `match` each, calling the
+/// site's own helper (`mailbox.rs`).
+impl mailbox::MailHost for Shared {
+    fn mail(&self) -> &mailbox::Mailboxes {
+        &self.mail
+    }
+
+    fn open(&self, idx: usize, lua: &Lua, ev: Event) -> Opened {
+        match ev {
+            Event::Hotkey { id, owner, front, binding, spec } => self.open_hotkey(id, owner, front, binding, &spec),
+            Event::Key { owner, token, vk, mods, front, .. } => captures::open_key(self, owner, token, vk, mods, front),
+            Event::Pad { token, event, delivery, .. } => self.open_pad(token, &event, &delivery),
+            Event::Activate { win, upto } => self.window_opened(idx, "window trigger", activate_call(lua, &win, Some(upto))),
+            Event::Initial { win, reprime } => {
+                let call = capture_source::prewarm_hook(lua).and_then(|before| initial_call(lua, win.as_deref(), reprime, before));
+                self.window_opened(idx, "window trigger", call)
+            }
+            Event::Focus => self.window_opened(idx, "focus change", focus_call(lua)),
+            Event::After { token } => match self.timers.take_queued(token) {
+                Some(f) => Opened::Run { f, args: mlua::MultiValue::new(), ctx: task::Ctx::new("timer", idx) },
+                None => Opened::Gone,
+            },
+            Event::Every { token } => match self.timers.every_fn(token) {
+                Some(f) => Opened::Run { f, args: mlua::MultiValue::new(), ctx: task::Ctx::new("timer", idx) },
+                None => Opened::Gone,
+            },
+            Event::Read(r) => ocr::lua::open_read(self, *r),
+            Event::Image { p, outcome, ended } => self.open_image(*p, outcome, ended),
+            Event::Snapshot { p, answer } => self.open_snapshot(*p, answer),
+            Event::Setting { setting_of, reg, key, new, old } => self.open_setting(setting_of, reg, &key, &new, old.as_ref()),
+            #[cfg(test)]
+            Event::Call { f, args, what, .. } => mailbox::open_call(idx, f, args, what),
+        }
+    }
+
+    fn discard(&self, _idx: usize, ev: Event, why: mailbox::Why) {
+        match ev {
+            Event::After { token } => self.timers.drop_queued(token),
+            Event::Read(r) => ocr::lua::discard_read(self, *r),
+            Event::Image { p, ended, .. } => self.discard_image(*p, ended, why == mailbox::Why::Disabled),
+            Event::Snapshot { p, .. } => self.discard_snapshot(*p),
+            _ => {}
+        }
     }
 }
 
@@ -5277,6 +5615,132 @@ static CLOCK_ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 fn clock_origin() -> Instant {
     *CLOCK_ORIGIN.get_or_init(Instant::now)
+}
+
+/// `host.keys.capture`, `release`, `releaseAll`, `scope`, `menuOpen` and `passedThrough` for module
+/// `idx` — the module whose VM it is: `keys` is no identity facility, so a code dependency's
+/// `host.keys` falls through to the owner's table (`build_dep_host`), and what Kontakt's VM runs
+/// of the overlay runtime captures and scopes for Kontakt. Over the captures `h` keeps: the host's
+/// `Shared`, or a test's holder (key_scope_tests.rs). In lib.rs with every other binding, so the
+/// reference's checks see them.
+fn install_key_captures<H: captures::KeyHost>(lua: &Lua, keys: &Table, idx: usize, h: Rc<H>) -> mlua::Result<()> {
+    let sh = h.clone();
+    keys.set(
+        "capture",
+        lua.create_function(move |lua, (spec, cb): (String, Function)| {
+            // The parser's own error, which names the part it could not read.
+            let (vk, mask) = backend::parse_key_spec(&spec).map_err(mlua::Error::external)?;
+            // No cross-module conflict surfacing here: captured keys are routinely
+            // shared by window-scoped overlays (each active only while its own
+            // window is focused), so a duplicate is usually legitimate, not a clash.
+            // The hook takes a key for the earliest capture whose module is scoped to the
+            // window in front, and refresh_captured hands it enabled modules' only;
+            // conflict dialogs are for process-wide hotkeys only.
+            //
+            // Within a module we keep ONE entry per (vk, mask): the latest capturer
+            // wins (drop any prior same-module entry, then push). Each entry carries a
+            // unique token, returned to the caller so `release` can target THIS exact
+            // registration and not another overlay's re-capture of the same key.
+            let key = lua.create_registry_value(cb)?;
+            let token = sh.captures().capture(idx, vk, mask, lua.clone(), key);
+            sh.refresh_captured();
+            sh.key_backend().watch_keys().map_err(mlua::Error::external)?;
+            Ok(token)
+        })?,
+    )?;
+    let sh = h.clone();
+    keys.set(
+        "release",
+        // Releases the exact registration returned by `capture` (its token). Keying on
+        // the token, not (vk, mask, module_idx), means one overlay deactivating cannot
+        // drop a key another overlay in the same module has since re-captured. An
+        // unknown/stale token (already superseded by a later capture) is a harmless
+        // no-op.
+        lua.create_function(move |_, token: i64| {
+            if sh.captures().release(token) {
+                sh.refresh_captured();
+            }
+            Ok(())
+        })?,
+    )?;
+    let sh = h.clone();
+    keys.set(
+        "releaseAll",
+        lua.create_function(move |_, ()| {
+            sh.captures().release_all(idx);
+            sh.refresh_captured();
+            Ok(())
+        })?,
+    )?;
+    // host.keys.scope(toForeground) — pins THIS module's captures to the window in front, or
+    // makes them global again. Each module's own: one module's scope(false) no longer unpins
+    // another's (captures.rs).
+    let sh = h.clone();
+    keys.set(
+        "scope",
+        lua.create_function(move |_, to_foreground: bool| {
+            let window = if to_foreground { sh.key_backend().resolve_key_scope() } else { 0 };
+            if sh.captures().set_scope(idx, window) {
+                sh.refresh_key_owners();
+            }
+            Ok(())
+        })?,
+    )?;
+    // host.keys.menuOpen(open) — while a plugin's own (Qt/UIA) menu is open, let
+    // captured nav keys (Tab/Enter) pass through to it instead of the overlay: this module's
+    // flag, which counts for the window its captures are scoped to. The overlay runtime writes
+    // it on every tick of its menu timer, so an unchanged flag is not handed over again.
+    let sh = h.clone();
+    keys.set(
+        "menuOpen",
+        lua.create_function(move |_, open: bool| {
+            if sh.captures().set_menu(idx, open) {
+                sh.refresh_key_owners();
+            }
+            Ok(())
+        })?,
+    )?;
+    // host.keys.passedThrough() -> { {vk, mask, key} } — the captured keys the hook let
+    // through to the application because a menu was open, since the last call, as filed for
+    // this module. Drained on read. The overlay runtime asks on its menu tick and logs what
+    // reached an open menu, and whether the menu was still there after an Escape.
+    let sh = h;
+    keys.set(
+        "passedThrough",
+        lua.create_function(move |lua, ()| {
+            let t = lua.create_table()?;
+            for (vk, mask) in sh.key_backend().take_menu_pass_through(idx as u32) {
+                let k = lua.create_table()?;
+                k.set("vk", vk)?;
+                k.set("mask", mask)?;
+                k.set("key", backend::vk_name(vk).unwrap_or_else(|| format!("vk {vk:#04x}")))?;
+                t.push(k)?;
+            }
+            Ok(t)
+        })?,
+    )?;
+    Ok(())
+}
+
+impl captures::KeyHost for Shared {
+    fn captures(&self) -> &captures::Captures {
+        &self.captures
+    }
+    fn key_backend(&self) -> &dyn Backend {
+        &*self.backend
+    }
+    fn key_module_enabled(&self, idx: usize) -> bool {
+        self.module_on(idx)
+    }
+    fn key_module_id(&self, idx: usize) -> String {
+        self.ids.borrow().get(idx).cloned().unwrap_or_else(|| "?".to_string())
+    }
+    fn refresh_captured(&self) {
+        Shared::refresh_captured(self);
+    }
+    fn refresh_key_owners(&self) {
+        Shared::refresh_key_owners(self);
+    }
 }
 
 fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table> {
@@ -5510,81 +5974,10 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     )?;
     host.set("hotkey", hk)?;
 
-    // host.keys: low-level key capture + suppression (modifier-aware)
+    // host.keys: low-level key capture + suppression (modifier-aware). `capture`, `release`,
+    // `releaseAll`, `scope`, `menuOpen` and `passedThrough` are `install_key_captures`'.
     let keys = lua.create_table()?;
-    let sh = shared.clone();
-    keys.set(
-        "capture",
-        lua.create_function(move |lua, (spec, cb): (String, Function)| {
-            // The parser's own error, which names the part it could not read.
-            let (vk, mask) = backend::parse_key_spec(&spec).map_err(mlua::Error::external)?;
-            // No cross-module conflict surfacing here: captured keys are routinely
-            // shared by window-scoped overlays (each active only while its own
-            // window is focused), so a duplicate is usually legitimate, not a clash.
-            // The dispatcher routes to the first match and refresh_captured filters
-            // by enabled; conflict dialogs are for process-wide hotkeys only.
-            //
-            // Within a module we keep ONE entry per (vk, mask): the latest capturer
-            // wins (drop any prior same-module entry, then push). Each entry carries a
-            // unique token, returned to the caller so `release` can target THIS exact
-            // registration and not another overlay's re-capture of the same key.
-            let key = lua.create_registry_value(cb)?;
-            let token = sh.next_key_token.get() + 1;
-            sh.next_key_token.set(token);
-            sh.keys
-                .borrow_mut()
-                .retain(|(k, m, i, ..)| !(*k == vk && *m == mask && *i == idx));
-            sh.keys.borrow_mut().push((vk, mask, idx, token, lua.clone(), key));
-            sh.refresh_captured();
-            sh.backend.watch_keys().map_err(mlua::Error::external)?;
-            Ok(token)
-        })?,
-    )?;
-    let sh = shared.clone();
-    keys.set(
-        "release",
-        // Releases the exact registration returned by `capture` (its token). Keying on
-        // the token, not (vk, mask, module_idx), means one overlay deactivating cannot
-        // drop a key another overlay in the same module has since re-captured. An
-        // unknown/stale token (already superseded by a later capture) is a harmless
-        // no-op.
-        lua.create_function(move |_, token: i64| {
-            let before = sh.keys.borrow().len();
-            sh.keys.borrow_mut().retain(|(.., t, _, _)| *t != token);
-            if sh.keys.borrow().len() != before {
-                sh.refresh_captured();
-            }
-            Ok(())
-        })?,
-    )?;
-    let sh = shared.clone();
-    keys.set(
-        "releaseAll",
-        lua.create_function(move |_, ()| {
-            // Element .2 is module_idx in (vk, mask, module_idx, token, VM, callback).
-            sh.keys.borrow_mut().retain(|entry| entry.2 != idx);
-            sh.refresh_captured();
-            Ok(())
-        })?,
-    )?;
-    let sh = shared.clone();
-    keys.set(
-        "scope",
-        lua.create_function(move |_, to_foreground: bool| {
-            sh.backend.set_key_scope(to_foreground);
-            Ok(())
-        })?,
-    )?;
-    // host.keys.menuOpen(open) — while a plugin's own (Qt/UIA) menu is open, let
-    // captured nav keys (Tab/Enter) pass through to it instead of the overlay.
-    let sh = shared.clone();
-    keys.set(
-        "menuOpen",
-        lua.create_function(move |_, open: bool| {
-            sh.backend.set_menu_open(open);
-            Ok(())
-        })?,
-    )?;
+    install_key_captures(lua, &keys, idx, shared.clone())?;
     // host.keys.nativeMenuOpen() -> bool. The CHEAP half of "is a menu open": one
     // window-class lookup for a native popup, no accessibility traversal. The menu watch
     // asks this before paying for the expensive question — measured at 50-194 ms per call,
@@ -5602,25 +5995,6 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     keys.set(
         "nativeMenuOpen",
         lua.create_function(move |_, ()| Ok(sh.backend.native_menu_open()))?,
-    )?;
-    // host.keys.passedThrough() -> { {vk, mask, key} } — the captured keys the hook let
-    // through to the application because a menu was open, since the last call. Drained on
-    // read. The overlay runtime asks on its menu tick and logs what reached an open menu, and
-    // whether the menu was still there after an Escape.
-    let sh = shared.clone();
-    keys.set(
-        "passedThrough",
-        lua.create_function(move |lua, ()| {
-            let t = lua.create_table()?;
-            for (vk, mask) in sh.backend.take_menu_pass_through() {
-                let k = lua.create_table()?;
-                k.set("vk", vk)?;
-                k.set("mask", mask)?;
-                k.set("key", backend::vk_name(vk).unwrap_or_else(|| format!("vk {vk:#04x}")))?;
-                t.push(k)?;
-            }
-            Ok(t)
-        })?,
     )?;
     // host.keys.normalize(spec) -> string? — the key a spec stands for on this platform, in one
     // spelling. What the overlay runtime keys its claims by, so `Cmd+S` and `Ctrl+S` are one key
@@ -7031,7 +7405,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     settings_api.set(
         "set",
-        lua.create_function(move |_, (key, value): (String, mlua::Value)| {
+        lua.create_function(move |lua, (key, value): (String, mlua::Value)| {
             let v = lua_to_value(&value)?;
             {
                 let schemas = sh.schemas.borrow();
@@ -7045,7 +7419,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             let id = sh.ids.borrow()[idx].clone();
             let old = sh.store.borrow_mut().set(&id, &key, v.clone());
             sh.dirty.set(true);
-            sh.fire_on_change(idx, &key, &v, old.as_ref());
+            // The caller's own `onChange`s run inside this call; everybody else's after it.
+            let caller = image_search::vm_owner(lua).map_or(idx, |o| o.idx);
+            sh.fire_on_change(idx, &key, &v, old.as_ref(), Some(caller));
             Ok(())
         })?,
     )?;
@@ -7701,6 +8077,22 @@ fn has_triggers(window: &Table) -> mlua::Result<bool> {
     window.get::<Function>("_hasTriggers")?.call::<bool>(())
 }
 
+/// The number of the newest window trigger of `lua`'s VM, 0 for none (or no prelude): asked when
+/// an activation arrives, so a VM with no trigger costs no handler, and a trigger made after it
+/// arrived — by a handler that ran before it — does not get it.
+fn trigger_seq(lua: &Lua) -> i64 {
+    host_window(lua).and_then(|w| w.get::<Function>("_triggerSeq")?.call::<i64>(())).unwrap_or(0)
+}
+
+/// The named registry's per-VM function the window dispatches subtract the time the module's
+/// handler spent parked with (`[dispatch] … ms` counts running time only). Absent in a VM the
+/// host did not build — a test's — where nothing waits.
+const WAITED_KEY: &str = "__handler_waited";
+
+fn waited_fn(lua: &Lua) -> Option<Function> {
+    lua.named_registry_value::<Function>(WAITED_KEY).ok()
+}
+
 /// Whether `_dispatchInitial(win, reprime)` would have anything to do in this VM: a trigger
 /// still waiting for its report, or — re-arming — any `initial` trigger at all. Asked before
 /// the foreground is, so a VM that answers false costs no foreground query. False for a VM
@@ -7717,17 +8109,17 @@ fn window_has_triggers(lua: &Lua) -> bool {
     host_window(lua).and_then(|w| has_triggers(&w)).unwrap_or(false)
 }
 
-/// Delivers a foreground change into one VM's `onTrigger` callbacks.
-///
-/// A VM that registered nothing is skipped before anything is converted: the window table,
-/// the prewarm hook and the prelude's loop are all work for nobody, repeated for every module
-/// on every window switch.
-fn dispatch_activate(lua: &Lua, win: &WinInfo) -> mlua::Result<()> {
+/// The call that delivers a foreground change into one VM's `onTrigger` callbacks — reaching
+/// the triggers numbered up to `upto` and those made during the dispatch itself (`None`: every
+/// one) — or `None` for a VM that registered nothing, skipped before anything is converted: the
+/// window table, the prewarm hook and the prelude's loop are all work for nobody, repeated for
+/// every module on every window switch. Built as the event runs, in the module's handler.
+fn activate_call(lua: &Lua, win: &WinInfo, upto: Option<i64>) -> mlua::Result<Option<(Function, mlua::MultiValue)>> {
     // No handle is a VM the prelude never ran in — none that loaded — and nothing to deliver
     // to, as `window_has_triggers` answers for it too.
-    let Ok(window) = host_window(lua) else { return Ok(()) };
+    let Ok(window) = host_window(lua) else { return Ok(None) };
     if !has_triggers(&window)? {
-        return Ok(());
+        return Ok(None);
     }
     let table = win_to_table(lua, win)?;
     // For a module that reads the screen through desktop duplication, a hook the dispatch
@@ -7735,51 +8127,75 @@ fn dispatch_activate(lua: &Lua, win: &WinInfo) -> mlua::Result<()> {
     // and that callback's detection read is what opening the duplication ahead of time is
     // for. `nil` for every other module.
     let before = capture_source::prewarm_hook(lua)?;
-    window.get::<Function>("_dispatchActivate")?.call::<()>((table, before))
+    let f: Function = window.get("_dispatchActivate")?;
+    let args = (table, before, waited_fn(lua), upto).into_lua_multi(lua)?;
+    Ok(Some((f, args)))
 }
 
-/// Delivers the report `onTrigger { initial = true }` asked for into one VM: the window in
-/// front, or `None` when there is none (then nothing is called, though the primed triggers
-/// are still un-primed — nothing was in front to report). With `reprime`, every `initial`
-/// trigger of the VM is primed again first (the module was just enabled).
-///
-/// `before_first` runs once, before the first callback that matches — the host's preparation,
-/// as the activation dispatch has one. Returns how many callbacks ran. A VM with no triggers,
-/// or without the prelude, is skipped before anything is converted.
-fn dispatch_initial(
+/// The call that delivers the report `onTrigger { initial = true }` asked for into one VM: the
+/// window in front, or `None` when there is none (then nothing is called, though the primed
+/// triggers are still un-primed — nothing was in front to report). With `reprime`, every
+/// `initial` trigger of the VM is primed again first (the module was just enabled). `before`
+/// runs once, before the first callback that matches — the host's preparation, as an
+/// activation's: `capture_source::prewarm_hook`, a plain function, which nothing scoped has to
+/// outlive. `None` for a VM with no triggers, or without the prelude, skipped before anything is
+/// converted.
+fn initial_call(
     lua: &Lua,
     win: Option<&WinInfo>,
     reprime: bool,
-    before_first: &dyn Fn(),
-) -> mlua::Result<i64> {
-    let Ok(window) = host_window(lua) else { return Ok(0) };
+    before: Option<Function>,
+) -> mlua::Result<Option<(Function, mlua::MultiValue)>> {
+    let Ok(window) = host_window(lua) else { return Ok(None) };
     if !has_triggers(&window)? {
-        return Ok(0);
+        return Ok(None);
     }
     let table = match win {
         Some(w) => mlua::Value::Table(win_to_table(lua, w)?),
         None => mlua::Value::Nil,
     };
-    let dispatch: Function = window.get("_dispatchInitial")?;
-    // A scoped function, because what it runs borrows the host: it is gone again when the
-    // dispatch returns, so nothing in the VM can keep it.
-    lua.scope(|scope| {
-        let before = scope.create_function(|_, ()| {
-            before_first();
-            Ok(())
-        })?;
-        dispatch.call::<i64>((table, reprime, before))
-    })
+    let f: Function = window.get("_dispatchInitial")?;
+    let args = (table, reprime, before, waited_fn(lua)).into_lua_multi(lua)?;
+    Ok(Some((f, args)))
 }
 
-/// Delivers a focus change into one VM's `onFocus` callbacks; skipped, like
-/// `dispatch_activate`, for a VM that registered none.
-fn dispatch_focus(lua: &Lua) -> mlua::Result<()> {
-    let Ok(window) = host_window(lua) else { return Ok(()) };
+/// The call that delivers a focus change into one VM's `onFocus` callbacks; `None`, like
+/// `activate_call`, for a VM that registered none.
+fn focus_call(lua: &Lua) -> mlua::Result<Option<(Function, mlua::MultiValue)>> {
+    let Ok(window) = host_window(lua) else { return Ok(None) };
     if !has_triggers(&window)? {
-        return Ok(());
+        return Ok(None);
     }
-    window.get::<Function>("_dispatchFocus")?.call::<()>(())
+    let f: Function = window.get("_dispatchFocus")?;
+    Ok(Some((f, waited_fn(lua).into_lua_multi(lua)?)))
+}
+
+/// An activation delivered at once, as a free module's mailbox runs it: for the tests.
+#[cfg(test)]
+fn dispatch_activate(lua: &Lua, win: &WinInfo) -> mlua::Result<()> {
+    match activate_call(lua, win, None)? {
+        Some((f, args)) => f.call::<()>(args),
+        None => Ok(()),
+    }
+}
+
+/// A focus change delivered at once, as a free module's mailbox runs it: for the tests.
+#[cfg(test)]
+fn dispatch_focus(lua: &Lua) -> mlua::Result<()> {
+    match focus_call(lua)? {
+        Some((f, args)) => f.call::<()>(args),
+        None => Ok(()),
+    }
+}
+
+/// The report of the window in front delivered at once, with `before` as the preparation: for
+/// the tests. How many callbacks ran.
+#[cfg(test)]
+fn dispatch_initial(lua: &Lua, win: Option<&WinInfo>, reprime: bool, before: Option<Function>) -> mlua::Result<i64> {
+    match initial_call(lua, win, reprime, before)? {
+        Some((f, args)) => f.call::<i64>(args),
+        None => Ok(0),
+    }
 }
 
 /// Reads `{ button = "left"|"right"|"middle" }` from input opts (default left).
@@ -8974,6 +9390,8 @@ mod ocr_wiring_tests {
     const GAMEPAD: &str = include_str!("gamepad_api.rs");
     const SNAP: &str = include_str!("snapshot.rs");
     const OCR_LUA: &str = include_str!("ocr/lua.rs");
+    const MAILBOX: &str = include_str!("mailbox.rs");
+    const TIMERS: &str = include_str!("timers.rs");
 
     /// The text of the item that starts with `sig`, up to its closing brace at its own
     /// indentation.
@@ -9030,7 +9448,7 @@ mod ocr_wiring_tests {
         let calls = LIB.matches(call).count();
         assert_eq!(calls, 2, "lib.rs delivers snapshots {calls} times; the GUI tick and the headless one each do it once");
         assert!(
-            LIB.contains(concat!("snapshot results \\", "\n")) && LIB.contains(concat!("{snapshots_", "ms}, initial window report")),
+            LIB.contains(concat!("snapshot results \\", "\n")) && LIB.contains(concat!("{snapshots_", "ms}, queued module events")),
             "the overrun line does not name the snapshots' share"
         );
     }
@@ -9049,11 +9467,16 @@ mod ocr_wiring_tests {
     /// and an image search's do.
     #[test]
     fn a_snapshot_callback_runs_in_its_lane() {
-        let deliver = body(SNAP, "fn deliver(");
-        let lane = deliver.find("let _prio = enter_priority(p.prio);").expect("no priority scope");
-        let call = deliver.find("call_back(&mut p, answer, process)").expect("no callback");
-        assert!(lane < call);
+        let fire = body(SNAP, "pub(crate) fn fire_snapshot_results(");
+        let lane = fire.find("let _prio = enter_priority(p.prio);").expect("no priority scope");
+        let deliver = fire.find("mailbox::deliver(self, idx, &lua, Event::Snapshot").expect("not through the mailbox");
+        assert!(lane < deliver, "the mailbox takes the priority the answer arrives with");
         assert!(body(SNAP, "pub(crate) fn snap_async(").contains("prio: current_priority(),"));
+        // The mailbox runs every event in the priority it arrived with.
+        let run = body(MAILBOX, "fn run<H: MailHost>(");
+        assert!(run.find("let _prio = enter_priority(prio);").expect("no priority scope") < run.find("h.open(").unwrap());
+        let enqueue = body(MAILBOX, "fn enqueue<H: MailHost>(");
+        assert!(enqueue.contains("let prio = current_priority();") && enqueue.contains("Queued { ev, prio }"));
     }
 
     /// Which requests hold their module's input is `snap_queue::holds_input`'s decision (tested
@@ -9481,6 +9904,200 @@ mod ocr_wiring_tests {
         }
     }
 
+    /// A module's key scope and menu flag go with it as its captures do — disabled, reloaded,
+    /// rolled back — after the arbiter's re-election, whose onDeactivate would write them again
+    /// (`scope(false)`, `menuOpen(false)`); on a reload in both passes of the purge. A captured key
+    /// goes to the module the hook took it for (captures.rs, `deliver`), and `host.keys`' capture
+    /// bindings are the generic ones key_scope_tests.rs runs against real VMs.
+    #[test]
+    fn a_modules_key_scope_and_flag_go_with_it_after_its_deactivation() {
+        let enable = body(LIB, "fn apply_enabled(");
+        let resolve = enable.find("self.arbiter_resolve(&slot);").expect("the re-election");
+        assert!(enable.find("self.forget_key_owner(idx);").is_some_and(|at| at > resolve), "before the re-election");
+        let purge = body(LIB, "fn purge_module(");
+        let deactivated = purge.find("for f in deactivations {").expect("the onDeactivate calls");
+        assert!(purge[deactivated..].contains("self.forget_key_owner(idx);"), "not again after the onDeactivate");
+        assert!(purge[..deactivated].contains("self.forget_key_owner(idx);"), "not before it either");
+        let rollback = body(LIB, "fn rollback_to(");
+        let resolve = rollback.find("self.arbiter_resolve(&slot);").expect("the re-election");
+        let forget = rollback.find("self.captures.forget_owners_from(n);").expect("the scopes and flags");
+        assert!(forget > resolve && rollback[forget..].contains("self.refresh_captured();"));
+        let on_key = body(LIB, "fn on_key(&mut self");
+        assert!(on_key.contains("captures::arrive(self.shared, vk, mods, owner, repeat, front);"), "{on_key}");
+        assert!(body(LIB, "fn install_host_api(").contains("install_key_captures(lua, &keys, idx, shared.clone())?;"));
+    }
+
+    /// Every event site hands its event to the module's mailbox, which runs it as a handler: none
+    /// calls a module's callback itself any more. The synchronous places — the arbiter's
+    /// `onActivate` and `onDeactivate`, a module's own `onChange` from its own `set` — are the only
+    /// plain calls left.
+    #[test]
+    fn every_event_site_goes_through_the_mailbox() {
+        for (sig, call) in [
+            ("fn on_hotkey(&mut self", "mailbox::deliver(self.shared, owner, &lua, Event::Hotkey"),
+            ("fn on_key(&mut self", "captures::arrive(self.shared"),
+            ("fn on_window_activate(&mut self", "mailbox::deliver(self.shared, idx, &m.lua, ev)"),
+            ("fn on_focus_change(&mut self", "mailbox::deliver(self.shared, idx, &m.lua, Event::Focus)"),
+            ("fn dispatch_initial(&self)", "mailbox::deliver(shared, idx, lua, Event::Initial"),
+            ("fn fire_due_timers(&self)", "mailbox::deliver(self, idx, &lua, Event::After { token })"),
+            ("fn fire_on_change(", "mailbox::deliver_later(self, owner, &lua, ev)"),
+        ] {
+            let f = body(LIB, sig);
+            assert!(f.contains(call), "`{sig}` does not hand its event to the mailbox");
+            assert!(!f.contains("guard(||"), "`{sig}` still calls a callback itself");
+        }
+        assert!(body(GAMEPAD, "fn deliver_pad_events(").contains("mailbox::deliver(self, idx, &lua, Event::Pad"));
+        assert!(body(IMAGES, "pub(crate) fn fire_image_results(").matches("mailbox::deliver(self, owner, &lua, Event::Image").count() == 2);
+        assert!(body(SNAP, "pub(crate) fn fire_snapshot_results(").contains("mailbox::deliver(self, idx, &lua, Event::Snapshot"));
+        assert!(body(OCR_LUA, "pub(crate) fn fire_at<H: MailHost>(h: &H, now: Instant)").contains("mailbox::deliver(h, idx, &lua, Event::Read"));
+        assert!(body(TIMERS, "pub(crate) fn fire_due(").contains("deliver(Due::Once { token, idx, lua });"));
+        // The one place a module's own onChange runs inside its own set: the caller's VM.
+        let set = bindings(body(LIB, "fn install_host_api("), "settings_api").into_iter().find(|b| b.0 == "set").expect("set").1;
+        assert!(set.contains("sh.fire_on_change(idx, &key, &v, old.as_ref(), Some(caller));"));
+        assert!(body(LIB, "fn set_setting(").contains("self.fire_on_change(idx, key, &value, old.as_ref(), None);"));
+        // Both ticks run the queued phase, after the snapshots' answers and before the report of the
+        // window in front.
+        // Spelt in halves, so that this test's own text is not what is found or counted.
+        let headless = body(LIB, "fn on_tick(&mut self)");
+        let (snaps, queued, initial) = (
+            headless.find(concat!("self.shared.fire_snapshot", "_results();")).unwrap(),
+            headless.find(concat!("self.shared.run_queued", "_events();")).expect("the headless tick runs no queued phase"),
+            headless.find(concat!("self.dispatch", "_initial();")).unwrap(),
+        );
+        assert!(snaps < queued && queued < initial);
+        assert_eq!(LIB.matches(concat!("shared.run_queued", "_events()")).count(), 2, "the GUI tick and the headless one");
+        // A mailbox that is not empty keeps the headless loop running.
+        assert!(body(LIB, "pub fn run(&mut self)").contains("!self.shared.mail.is_empty()"));
+    }
+
+    /// The stretches of `src` only a test build compiles: each item under `#[cfg(test)]`, from the
+    /// attribute to its closing brace at the attribute's own indentation — or to the end of its
+    /// line, for an item written on one (a `use`, a field, an enum variant, a match arm).
+    fn test_only(src: &str) -> Vec<std::ops::Range<usize>> {
+        let mut out = Vec::new();
+        for (at, attr) in src.match_indices("#[cfg(test)]") {
+            let line = src[..at].rfind('\n').map_or(0, |i| i + 1);
+            let indent = &src[line..at];
+            if !indent.chars().all(|c| c == ' ') {
+                continue;
+            }
+            // The item's first line: past the attribute's own line, more attributes and comments.
+            let mut start = at + attr.len();
+            let mut item = "";
+            for l in src[start..].split_inclusive('\n') {
+                let t = l.trim();
+                if !(t.is_empty() || t.starts_with("#[") || t.starts_with("//")) {
+                    item = t;
+                    break;
+                }
+                start += l.len();
+            }
+            let one_line = item.ends_with(';') || item.ends_with(',') || item.ends_with('}');
+            let end = if one_line {
+                start + src[start..].find('\n').unwrap_or(src.len() - start)
+            } else {
+                let close = format!("\n{indent}}}");
+                start + src[start..].find(&close).map_or(src.len() - start, |i| i + close.len())
+            };
+            out.push(at..end);
+        }
+        out
+    }
+
+    /// The name of the function whose text runs up to `at`: the last line before it that starts a
+    /// function.
+    fn enclosing_fn(src: &str, at: usize) -> &str {
+        for l in src[..at].lines().rev() {
+            let mut t = l.trim_start();
+            for prefix in ["pub(crate) ", "pub(super) ", "pub ", "unsafe ", "async ", "const "] {
+                t = t.strip_prefix(prefix).unwrap_or(t);
+            }
+            if let Some(rest) = t.strip_prefix("fn ") {
+                return rest.split(['(', '<']).next().unwrap_or(rest);
+            }
+        }
+        "?"
+    }
+
+    /// A module's callback is called outside its mailbox only at the synchronous places — the
+    /// arbiter's `onActivate` and `onDeactivate` (the purge's, the unregistering's, the
+    /// re-election's) and a module's own `onChange` from its own `set` — wherever the call is
+    /// written: every source file of the crate is searched, its test code left out. So a new
+    /// event site that calls a callback itself — the HTML probe's page callbacks, merged without
+    /// the mailbox — fails here, rather than run a callback inside another module's handler.
+    #[test]
+    fn a_modules_callback_is_called_outside_its_mailbox_only_at_the_synchronous_places() {
+        let mut stack = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+        let mut found: Vec<String> = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                    continue;
+                }
+                let name = p.file_name().unwrap().to_string_lossy().to_string();
+                if !name.ends_with(".rs") || name.ends_with("_tests.rs") {
+                    continue;
+                }
+                let src = std::fs::read_to_string(&p).unwrap();
+                let tests = test_only(&src);
+                // Spelt in halves, so that this test's own text is not what is found.
+                let call = concat!("call_", "guarded(");
+                for (at, _) in src.match_indices(call) {
+                    if !tests.iter().any(|r| r.contains(&at)) {
+                        found.push(format!("{name}: {}", enclosing_fn(&src, at + call.len() - 1)));
+                    }
+                }
+            }
+        }
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                "lib.rs: arbiter_resolve",
+                "lib.rs: arbiter_resolve",
+                "lib.rs: arbiter_unregister",
+                "lib.rs: fire_on_change",
+                "lib.rs: purge_module",
+            ],
+            "a module's callback called outside its mailbox"
+        );
+    }
+
+    /// A hotkey that reaches a busy module notes the window the hook or the tap compares keys with,
+    /// asked of nobody — never the scope's question, which on a Mac asks the frontmost application
+    /// on the tap's thread and notes a pin. And its line says it waited only when it did.
+    #[test]
+    fn a_hotkey_notes_the_window_in_front_without_asking_the_application() {
+        let on = body(LIB, "fn on_hotkey(&mut self");
+        assert!(on.contains("mailbox::busy(self.shared, owner).then(|| self.shared.backend.key_front())"), "{on}");
+        assert!(!on.contains(concat!("backend.resolve_key", "_scope()")), "{on}");
+        let open = body(LIB, "fn open_hotkey(");
+        assert!(open.contains("let queued = front.is_some();"));
+        assert!(open.contains("captures::moved_line(&module(), spec, queued)"));
+        assert!(open.contains("captures::hotkey_dropped_line(&module(), spec, gone)"));
+    }
+
+    /// A module's mailbox goes with it as its handlers do: on a disable — keeping a setting's
+    /// `onChange` — after the re-election; on a reload in both of the purge's passes; on a rollback.
+    /// And an activation that waits in a busy module's mailbox is its report of the window in
+    /// front: its report asked for on that tick is dropped.
+    #[test]
+    fn a_modules_mailbox_goes_with_it() {
+        let enable = body(LIB, "fn apply_enabled(");
+        let resolve = enable.find("self.arbiter_resolve(&slot);").expect("the re-election");
+        let drop = enable.find("mailbox::drop_owner(self, idx, mailbox::Why::Disabled);").expect("the disable's");
+        assert!(drop > resolve && drop < enable.find("self.task_drop_owner(idx);").unwrap());
+        let purge = body(LIB, "fn purge_module(");
+        assert_eq!(purge.matches("mailbox::drop_owner(self, idx, mailbox::Why::Reloaded);").count(), 2);
+        assert!(body(LIB, "fn rollback_to(").contains("mailbox::drop_from(self, n);"));
+        let activate = body(LIB, "fn on_window_activate(&mut self");
+        let queued = activate.find("retain(|(idx, _)| !queued.contains(idx))").expect("L3.9");
+        assert!(queued < activate.find("initial_reported_by_activation(").unwrap());
+        assert_eq!(activate.matches("bump_input_epoch()").count(), 1, "once per activation, at its arrival");
+    }
+
     /// No module can start a task: the host table has no entry for the machinery, whose only
     /// entry is the tests' (`task::table`, built in test builds alone).
     #[test]
@@ -9491,6 +10108,29 @@ mod ocr_wiring_tests {
         let task_rs = include_str!("task.rs");
         let entry = task_rs.find("pub(crate) fn table<H: ReadHost>(").expect("the tests' entry");
         assert!(task_rs[..entry].trim_end().ends_with("#[cfg(test)]"), "the tests' entry is built outside the tests");
+    }
+
+    /// The read service's share of the handlers, checked where it is written — `Shared` is no
+    /// test's holder: the delivery sweeps a hang before it drains, and only while a read is out;
+    /// an event queued in the interactive lane raises the module's parked handler, before folding;
+    /// `Shared` hands the delivery the application's slow-reads switch; and the tests' way into
+    /// handlers that wait is built in test builds alone.
+    #[test]
+    fn the_hang_answer_the_promotion_and_the_slow_switch_are_wired() {
+        let fire = body(OCR_LUA, "pub(crate) fn fire_at<H: MailHost>(h: &H, now: Instant)");
+        let sweep = fire.find("h.ocr().hang_sweep()").expect("the hang answer");
+        assert!(sweep > fire.find("if !st.pending.borrow().is_empty()").unwrap());
+        assert!(sweep < fire.find("h.ocr().drain()").unwrap());
+        assert!(fire.contains("hand_over(st, h.slow_reads(), now, came)"));
+        assert!(body(OCR_LUA, "pub(crate) fn fire<H: MailHost>(h: &H)").contains("fire_at(h, Instant::now())"));
+        assert!(body(OCR_LUA, "impl ReadHost for Shared").contains("crate::appcfg::slow_reads()"));
+        let enqueue = body(MAILBOX, "fn enqueue<H: MailHost>(");
+        let promote = enqueue.find("task::promote(h, owner);").expect("the promotion");
+        assert!(enqueue[..promote].contains("if current_priority() == Priority::Interactive {"));
+        assert!(promote < enqueue.find("fold(&mut b.queue, &mut ev)").unwrap());
+        let task_rs = include_str!("task.rs");
+        let wait_here = task_rs.find("pub(crate) fn handlers_wait_here()").expect("the tests' way in");
+        assert!(task_rs[..wait_here].trim_end().ends_with("#[cfg(test)]"), "built outside the tests");
     }
 }
 
@@ -9635,7 +10275,9 @@ mod uptime_wiring_tests {
         assert!(body(IMAGES, "fn worker_loop(").contains("batch.retain(|t| !set.remove(&t.id));"));
         assert!(body(IMAGES, "pub(crate) fn purge_pending_images(").contains("self.ended_images.borrow_mut()"));
         // OCR keys: forgotten when their last read is answered or dropped.
-        assert!(body(OCR_LUA, "pub(crate) fn fire<H: ReadHost>(h: &H)").contains("st.settled(p.owner, p.key.as_deref());"));
+        assert!(body(OCR_LUA, "pub(crate) fn fire_at<H: MailHost>(h: &H, now: Instant)").contains("st.settled(p.owner, p.key.as_deref());"));
+        assert!(body(OCR_LUA, "pub(crate) fn open_read<H: ReadHost>(").contains("st.settled(p.owner, p.key.as_deref());"));
+        assert!(body(OCR_LUA, "pub(crate) fn discard_read<H: ReadHost>(").contains("st.settled(r.p.owner, r.p.key.as_deref());"));
         assert!(body(OCR_LUA, "pub(crate) fn drop_owner<H: ReadHost>(").contains("st.settled(p.owner, p.key.as_deref());"));
         assert!(body(OCR_LUA, "pub(crate) fn withdraw<H: ReadHost>(").contains("st.settled(p.owner, p.key.as_deref());"));
         // The keyboard watch's windows push the system events.

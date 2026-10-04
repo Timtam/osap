@@ -284,7 +284,9 @@ jobs:
         # wxWidgets, into target/release, because that is a different output directory from
         # target/<triple>/release — roughly tripling the cold cost while looking like a
         # one-word step. arm64 because that is the slice this runner can also execute.
-        run: cargo test --release --target aarch64-apple-darwin
+        # `--nocapture`, as the Windows job runs them, for the lines the tests print as
+        # measurements — `HANDLER COST:`, what one event costs as a handler, among them.
+        run: cargo test --release --target aarch64-apple-darwin -- --nocapture
 
       # The documentation ships inside the download and works offline from the folder, as it does
       # in the Windows one: the same site, built the same way, and turned into pages that work

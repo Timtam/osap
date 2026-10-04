@@ -88,8 +88,12 @@ local calibrationAnnounced = false
 local Overlay = {}
 Overlay.__index = Overlay
 
+-- Every overlay this VM made, held weakly: which of them are active decides who sets back the
+-- module's key scope and menu flag (see _deactivate).
+local overlaysMade = setmetatable({}, { __mode = "k" })
+
 function O.new(label)
-  return setmetatable(
+  local o = setmetatable(
     {
       label = label or "Overlay",
       controls = {},
@@ -146,13 +150,17 @@ function O.new(label)
     },
     Overlay
   )
+  overlaysMade[o] = true
+  return o
 end
 
--- Declaring something AFTER the overlay is bound is always a mistake, and a subtle one:
--- `_join` ends with a synchronous `_recheck`, so a gate or landmark set afterwards misses
--- that first evaluation and the overlay can activate ungated for one pass. Nothing in the
--- code enforced the order, and every call site happened to get it right — which is exactly
--- the kind of rule that holds until someone new writes the next module.
+-- Declaring something AFTER the overlay is bound is always a mistake, and a subtle one: the
+-- binding makes it live. `_join` asks for its first `_recheck` then, on the module's next turn,
+-- and from then on any window or focus event, poll or tick may evaluate it — so a gate or
+-- landmark declared later, from a timer or another callback, is missing from every evaluation
+-- before it, and the overlay can activate ungated meanwhile. Nothing in the code enforced the
+-- order, and every call site happened to get it right — which is exactly the kind of rule that
+-- holds until someone new writes the next module.
 local function assertUnbound(self, what)
   if self._bound then
     error(string.format(
@@ -177,12 +185,83 @@ local function add(self, control)
   return control
 end
 
+-- ── Where a hook runs ────────────────────────────────────────────────────────
+-- Every callback of a module runs as a handler of the host, one at a time per module
+-- (docs/module-runtime-and-lifecycle.md, "Each callback is a handler"), and a handler may stop at
+-- a host wait — a read — while the rest of the application goes on; the module's next events wait
+-- behind it. That is right for a hook that says or does something the user asked for: a control's
+-- `text`, a tab control's `current` and `verticalName`, a stored `identify` asked for a new
+-- control, a control's `onActivate` and `onStep`. It would be wrong for the hooks asked on EVERY
+-- scan or tick — a `when`, a relational `identify`, a binding's `present`, a menu test: a read
+-- there would keep the module busy all the time, and every key of the module would wait behind
+-- its own Tab's scan. So those run in a coroutine of the runtime's own, where a host wait cannot
+-- stop the handler: one coroutine for a whole pass over them — a scan for the next control, a
+-- menu tick's questions — and each hook inline inside it. host.ocr.recognize finds itself "in a
+-- coroutine the module made" there; a pixel, a snapshot, an image search or host.ocr.read, which
+-- answers through a callback, is fine. A hook that yields there anyway is ended, with an error the
+-- caller's guard logs — a menu test's alone (see _menuAsk); a `when`'s ends the scan it was in.
+--
+-- The overlay's origin is resolved BEFORE a pass, outside it: a stored `identify` asked for a new
+-- control runs in the handler, where it may wait, and inside the pass the origin comes from the
+-- epoch's memo. One reached inside a pass all the same — another overlay's origin, asked by a
+-- `when` — is not asked there at all (see attachEmbedded).
+--
+-- Not a host API: plain Luau. A hook asked outside any pass — a single `when` on a key press —
+-- costs one coroutine of its own, as a whole pass does; `passesMade` counts them with the passes,
+-- so a test can hold a scan to one.
+local passDepth = 0
+local passesMade = 0
+
+-- Runs fn(...) in a pass of its own, even inside another: a coroutine of the runtime's, where a
+-- host wait cannot stop the module's handler. For a hook known to yield (a menu test, see
+-- _menuAsk), so that it fails alone rather than end the pass it was asked in.
+local function ownPass(fn, ...)
+  passDepth += 1
+  passesMade += 1
+  local co = coroutine.create(fn)
+  local out = table.pack(coroutine.resume(co, ...))
+  passDepth -= 1
+  if coroutine.status(co) == "suspended" then
+    coroutine.close(co)
+    error("a hook asked on every scan yielded; it must return at once", 0)
+  end
+  if not out[1] then error(out[2], 0) end
+  return table.unpack(out, 2, out.n)
+end
+
+-- Runs fn(...) where a host wait cannot stop the module's handler. Inline inside a pass.
+local function noWait(fn, ...)
+  if passDepth > 0 then return fn(...) end
+  return ownPass(fn, ...)
+end
+
+-- Overlay `o`'s origin, resolved now, in the handler — unless a pass is open already, or the
+-- overlay is not in front (nothing of it is asked then). Guarded: a raise here is raised again
+-- where the origin is asked next, inside the hook that asks it, and logged there as it always was.
+local function originFirst(o)
+  if passDepth == 0 and o.active then pcall(o.origin, o) end
+end
+
+-- One pass over the hooks asked on every scan: the overlay's origin first, outside the pass,
+-- then `fn(...)` in the pass.
+local function scanPass(self, fn, ...)
+  originFirst(self)
+  return noWait(fn, ...)
+end
+
+-- For a test: how many coroutines the passes have made in this VM, and whether one is open now.
+function O._passes()
+  return passesMade, passDepth > 0
+end
+
 -- Is this control shown right now? A `when` predicate must return exactly `true`;
 -- anything else — including a truthy non-boolean such as a `string.find` result — counts
 -- as hidden. Every reader of `when` goes through here, because they must agree: one
 -- place decides Tab-reachability (isFocusable), whether a hotkey press does anything
 -- (activate), and which control owns a shared hotkey (_visibleClaimant). Disagreeing
 -- would make a control silently unreachable while its key still fired something else.
+--
+-- Asked in a pass (above): inline inside one, and in a pass of its own outside one.
 local function isVisible(self, c)
   if c == nil then return false end
   if c.when == nil then return true end
@@ -196,8 +275,10 @@ local function isVisible(self, c)
   --
   -- Hidden rather than shown, because a control whose visibility cannot be determined cannot
   -- promise anything either. Said once per control, so a predicate that fails on every scan
-  -- does not bury the log it is trying to explain itself in.
-  local ok, v = pcall(c.when, self)
+  -- does not bury the log it is trying to explain itself in. A `coroutine.yield` of its own in a
+  -- `when` is ended by the pass, which raises (noWait): asked alone, that hides the control as a
+  -- raise does; inside a scan the yield reaches past this guard, and the scan raises.
+  local ok, v = pcall(scanPass, self, c.when, self)
   if not ok then
     if not c._whenBroke then
       c._whenBroke = true
@@ -225,6 +306,10 @@ end
 -- when standalone — or nil when the overlay isn't active. `:hwnd()` is its handle. This
 -- is the module's handle on the thing it overlays, and every module was re-deriving it.
 function Overlay:origin()
+  -- Its origin raised as it came to the front (see _activate): unknown for the rest of that epoch,
+  -- as on a window whose handle the overlay does not know, so that the activation is not stopped
+  -- half way by the same raise one call later.
+  if self._originRaised ~= nil and host.epoch and self._originRaised == host.epoch() then return nil end
   return self.activeCtx and self.activeCtx.origin() or nil
 end
 
@@ -1098,7 +1183,9 @@ end
 -- Whether mark `m` still holds — true, or false and the first reason in this order. `place = false`
 -- leaves the first three out. `control` is the runtime's own: the control the mark was taken on
 -- still at its index, whatever has the focus, which an OCR button's click asks (a hotkey can press
--- one the focus is not on).
+-- one the focus is not on). So is `menusSince`: only a menu opened since, not one open now — what a
+-- sentence asks after each of its hooks (speakControl), since a menu open before the hook is no news
+-- after it.
 local function stillHereAt(self, m, opts)
   if not (opts and opts.place == false) then
     if not self.active then return false, "the overlay is no longer active" end
@@ -1114,9 +1201,9 @@ local function stillHereAt(self, m, opts)
   end
   if opts.keys and self._keys ~= m.keys then return false, "a later key reached the overlay" end
   if opts.said and self._said ~= m.said then return false, "a later announcement was made" end
-  if opts.menus then
-    if self:menuOpen() then return false, "a menu is open over the overlay" end
-    if self._menuOpens ~= m.menuOpens then return false, "a menu opened over the overlay since" end
+  if opts.menus and self:menuOpen() then return false, "a menu is open over the overlay" end
+  if (opts.menus or opts.menusSince) and self._menuOpens ~= m.menuOpens then
+    return false, "a menu opened over the overlay since"
   end
   return true
 end
@@ -1959,6 +2046,13 @@ local function hookValue(self, c, hook, ...)
   return nil
 end
 
+-- What a sentence asks of its mark after each of its control's hooks (speakControl): the place,
+-- the focus, the keys, the announcements, and a menu opened since. Not a menu open now: one open
+-- before the hook is no news after it — the sentence was asked for with it open, and is said as it
+-- always was (a stepper's value after a step chosen in a menu, still counted open for a tick) —
+-- and an OCR read's answer asks about it itself, as it always has.
+local AFTER_HOOK = { focus = true, keys = true, said = true, menusSince = true }
+
 -- `queued` says this announcement was not asked for by a keypress, so it must not cut off
 -- whatever is already being said.
 --
@@ -1974,28 +2068,50 @@ end
 -- where both lines are still ours — which is this one, the two being about 350 ms apart —
 -- and cannot promise anything about a line VoiceOver has already taken.
 --
--- `andThen(placed)` is what an activation does once an OCR control's sentence is settled — said,
--- or dropped as no longer true — and at once when there was nothing to read or the read was
--- refused: the OCR button's click (see activate), which so comes after the value it said, as it
--- did while the read held the event loop. `placed` says whether the value region could be placed
--- for the read. Only an OCR control's activation passes it.
+-- `andThen(placed, dropped)` is what an activation does once an OCR control's sentence is settled
+-- — said, or dropped as no longer true — and at once when there was nothing to read or the read
+-- was refused: the OCR button's click (see activate), which so comes after the value it said, as
+-- it did while the read held the event loop. `placed` says whether the value region could be
+-- placed for the read; `dropped`, given only when a hook of the control's has outlived the
+-- sentence (below), why. Only an OCR control's activation passes it.
 local function speakControl(self, index, moveMouse, withHint, queued, andThen)
   local c = self.controls[index]
   if not c then return end
   -- Every announcement counts, whatever it says: an answer to a read asked for an earlier one
   -- describes a moment that has been talked over since (see the read below).
   self._said += 1
+  -- WHERE THE OVERLAY IS AS THE SENTENCE IS ASKED FOR, before any of the control's hooks runs: a
+  -- hook — `text`, a tab control's `current` and `verticalName` — runs in the module's handler and
+  -- may wait for a read there, with the module's other events waiting behind it. What it waited
+  -- through is checked against this mark after each hook: the stay, the window, the focus and this
+  -- control, the keys of its own, the announcements (this one counted above) and a menu opened
+  -- since. A sentence its hook has outlived is not said — not the hook's value, nor what the
+  -- sentence would have been without it — and an activation's continuation is told so, and clicks
+  -- nothing. Not a window comparison and no epoch: O:hwnd() resolves the window live for an
+  -- attached overlay and per epoch for an embedded one, and the epoch turns before every answer.
+  -- The read below asks the same mark.
+  local mark = markAt(self, index)
+  local function stillThere(hook)
+    local fine, why = stillHereAt(self, mark, AFTER_HOOK)
+    if not fine then
+      host.log.info(string.format("[read] '%s' not spoken after its %s: %s", tostring(c.label or ""), hook, why))
+      if andThen then andThen(false, why) end
+    end
+    return fine
+  end
   -- A tab control announces WHICH tab is current, then that it is a tab control (so the
   -- user knows Left/Right — or Ctrl+Tab, Ctrl+number — switch it). Its current tab's
   -- controls are the ones Tab then steps into (see isFocusable's `when` gating).
   if c.kind == "tabcontrol" then
     if c.current then
       local n = hookValue(self, c, "current")
+      if not stillThere("current") then return end
       if type(n) == "number" and c.tabs[n] then c._current = n end
     end
     local tab = c.tabs[c._current]
     if c.verticalName then
       local name = hookValue(self, c, "verticalName", c._current)
+      if not stillThere("verticalName") then return end
       if type(name) == "string" and name ~= "" then
         tab = { label = name, hotkeyLabel = tab and tab.hotkeyLabel, hotkey = tab and tab.hotkey }
       end
@@ -2031,6 +2147,7 @@ local function speakControl(self, index, moveMouse, withHint, queued, andThen)
   local rest = {}
   if c.text then
     local v = hookValue(self, c, "text")
+    if not stillThere("text") then return end
     if v ~= nil and v ~= "" then rest[#rest + 1] = tostring(v) end
   end
   -- A `readOnly` OCR control is NOT a button, and must not say it is.
@@ -2101,10 +2218,9 @@ local function speakControl(self, index, moveMouse, withHint, queued, andThen)
   -- control's state read out while the second one is focused, which would be a plain lie
   -- about what is in front of the user.
   local needsValue = c.kind == "gtoggle" or c.kind == "slider" or c.kind == "gbutton"
-  -- Where the overlay is as the sentence is asked for, which every late part of it is checked
-  -- against (O:stillHere): the stay, the window, the focus and this control, the keys of its own,
-  -- the announcements — this one counted above — and the menus.
-  local mark = markAt(self, index)
+  -- Every late part of the sentence is checked against the mark taken above, before the hooks
+  -- (O:stillHere): the stay, the window, the focus and this control, the keys of its own, the
+  -- announcements — this one counted above — and the menus.
   local at, pinned = mark.at, mark.hwnd
   -- The sentence, once its name and its value are known, and then an image-read value.
   local function say(name, value)
@@ -2306,10 +2422,13 @@ end
 -- act as standing on it: a focused control takes the keys it needs (see _syncNativeKeys), and
 -- on arrival those keys still belong to the plug-in.
 local function firstFocusable(self)
-  for i = 1, #self.controls do
-    if isFocusable(self, i) then return i end
-  end
-  return 0
+  -- One pass over the `when`s (see "Where a hook runs").
+  return scanPass(self, function()
+    for i = 1, #self.controls do
+      if isFocusable(self, i) then return i end
+    end
+    return 0
+  end)
 end
 
 -- A Tab step, timed in its two halves.
@@ -2325,14 +2444,15 @@ local function focusStep(self, advance, dir)
   local n = #self.controls
   if n == 0 then return end
   local t0 = host.now and host.now() or 0
-  local found = false
-  for _ = 1, n do
-    self.focus = advance(self.focus, n)
-    if isFocusable(self, self.focus) then
-      found = true
-      break
+  -- The scan, and only the scan, in one pass (see "Where a hook runs"): the announcement after
+  -- it runs in the handler, where its `text` may wait for a read.
+  local found = scanPass(self, function()
+    for _ = 1, n do
+      self.focus = advance(self.focus, n)
+      if isFocusable(self, self.focus) then return true end
     end
-  end
+    return false
+  end)
   local tScan = host.now and host.now() or 0
   -- Nothing focusable (e.g. a control set that is only unfilled slots): don't
   -- announce a phantom empty stop with interrupt.
@@ -2715,13 +2835,17 @@ function Overlay:activate(index)
     local found = false
     if c.hotkey then
       local key = keyOf(c.hotkey)
-      for j, d in ipairs(self.controls) do
-        if j ~= i and d.hotkey and keyOf(d.hotkey) == key and isVisible(self, d) then
-          i, c, found = j, d, true
-          self.focus = j
-          self:_syncNativeKeys()
-          break
+      -- One pass over the `when`s (see "Where a hook runs"); the move after it, outside.
+      local j = scanPass(self, function()
+        for j, d in ipairs(self.controls) do
+          if j ~= i and d.hotkey and keyOf(d.hotkey) == key and isVisible(self, d) then return j end
         end
+        return nil
+      end)
+      if j then
+        i, c, found = j, self.controls[j], true
+        self.focus = j
+        self:_syncNativeKeys()
       end
     end
     if not found then
@@ -2828,8 +2952,12 @@ function Overlay:activate(index)
     -- the person who pressed it heard nothing at all and had no way to tell that from a
     -- control that had simply done its job quietly. Reported as "the overlay crashed", which
     -- from the keyboard is exactly what it looks like.
-    -- Read BEFORE the action, because afterwards is too late to know what it was.
-    local was = c.text and hookValue(self, c, "text") or nil
+    -- A stepper's value is read BEFORE the action, because afterwards is too late to know what it
+    -- was: its announcement waits for that value to change (announceWhenChanged). Nobody else's
+    -- `text` is read here. It was, and nothing used the answer: the read only held the press back
+    -- — ON:EAR's "Search" read its field before clicking into it — or did the press a service on
+    -- the side, which the module now asks for itself (ON:EAR's tiles learn where their grid sits).
+    local was = (c.kind == "stepper" and c.text) and hookValue(self, c, "text") or nil
     local ok, err = pcall(c.onActivate, self) -- the overlay, so a header control can reach it
     if not ok then
       host.log.info(string.format("%s: '%s' failed while activating: %s",
@@ -2861,9 +2989,11 @@ function Overlay:activate(index)
     -- Where the overlay is as the key is pressed. Not the focus: a hotkey can press an OCR button
     -- the focus is not on, and its click is the control's, wherever the focus went.
     local mark = markAt(self, i)
-    speakControl(self, i, false, nil, nil, function(placed)
+    speakControl(self, i, false, nil, nil, function(placed, dropped)
       if not clicks then return end
-      local fine, why = stillHereAt(self, mark, { control = true, keys = true })
+      -- A hook of the control's outlived the sentence (speakControl): the press is over.
+      local fine, why = false, dropped
+      if not dropped then fine, why = stillHereAt(self, mark, { control = true, keys = true }) end
       if not fine then
         host.log.info(string.format("[read] '%s': not clicking — %s", tostring(c.label), why))
         return
@@ -3034,12 +3164,15 @@ end
 
 -- The first of `candidates` (control indices) that is currently visible, or nil when
 -- none is — i.e. which control a shared hotkey belongs to right now.
+-- One pass over their `when`s (see "Where a hook runs"); what the caller does with the answer —
+-- a hotkey's activation — runs after it, outside.
 function Overlay:_visibleClaimant(candidates)
-  for _, i in ipairs(candidates) do
-    local c = self.controls[i]
-    if isVisible(self, c) then return i end
-  end
-  return nil
+  return scanPass(self, function()
+    for _, i in ipairs(candidates) do
+      if isVisible(self, self.controls[i]) then return i end
+    end
+    return nil
+  end)
 end
 
 -- A control's hotkey also puts the overlay's focus on that control, silently — ReaHotkey's
@@ -3814,6 +3947,20 @@ local CONFIRM_DELAY = 250
 
 local ANNOUNCE_DELAY = 350
 
+-- Whether an overlay of this VM other than `self` is active. The key scope and the menu flag are
+-- the MODULE's, one of each for all its overlays (keys.md, "Your module's own"): an overlay that
+-- comes to the front pins the scope to its window, and only the last one to leave sets it back to
+-- every window. Komplete Kontrol's standalone overlay comes back before its Preferences overlay
+-- leaves — they are rechecked in the order they were bound — and the Preferences overlay's
+-- `scope(false)` left Tab, Space and the arrows captured in every window until the standalone one
+-- went again.
+local function anotherActive(self)
+  for o in pairs(overlaysMade) do
+    if o ~= self and o.active then return true end
+  end
+  return false
+end
+
 function Overlay:_activate()
   if self.active then return end
   self.active = true
@@ -3854,7 +4001,18 @@ function Overlay:_activate()
   -- window reusing the very same HWND across close/reopen would resume too, but these
   -- plugin/dialog windows are destroyed and recreated, so their id changes.) Clearing
   -- focus here lets the `if self.focus == 0` block below re-pick the first focusable.
-  local origin = self:origin()
+  --
+  -- Guarded, as the `identify` the origin may ask is: `active` and the stay are set already, and
+  -- an origin that raised here left an overlay that was active and held no keys. A module's
+  -- `control` function can still raise; that is said, and the overlay comes up whole, as on a
+  -- window whose handle it does not know.
+  local okOrigin, origin = pcall(self.origin, self)
+  if not okOrigin then
+    host.log.info(("[overlay] %s: its origin raised as it came to the front: %s")
+      :format(tostring(self.label), tostring(origin)))
+    origin = nil
+    self._originRaised = host.epoch and host.epoch() or nil
+  end
   local id = (origin and origin.id) or false
   if id ~= self._lastActiveId or not self._resume then
     self.focus = 0
@@ -3879,11 +4037,12 @@ function Overlay:_activate()
   -- them is elsewhere, and moving the arrival position only hid the question.
   if self.focus == 0 then self.focus = firstFocusable(self) end
   self:_refocusIfHidden()
-  self:_registerHotkeys()
   -- Scope key suppression to this (now-foreground) window: when a control opens a menu
   -- (another window comes forward), Tab/Enter pass to it natively, and resume here once
-  -- the plugin window is focused again.
+  -- the plugin window is focused again. Pinned BEFORE the keys are taken: the hook runs on a
+  -- thread of its own, and a capture made first would take its key in every window until the pin.
   host.keys.scope(true)
+  self:_registerHotkeys()
   -- Guarded, because a module's own activate hook must not be able to stop the overlay from
   -- coming up. One did: a bad key spec threw out of it, activation aborted half-done, and the
   -- symptom reported was "the plug-in is not detected any more" — which is a long way from the
@@ -3940,20 +4099,24 @@ end
 -- moment later. Alt+Tab out and back then announced the hidden control — "Switch to classic
 -- view" while Kontakt was already in classic view — and Return on it ran the other one.
 function Overlay:_refocusIfHidden()
-  if self.focus <= 0 or isFocusable(self, self.focus) then return false end
+  if self.focus <= 0 then return false end
   local c = self.controls[self.focus]
-  local to
-  if c and c.hotkey then
-    local key = keyOf(c.hotkey)
-    for j, d in ipairs(self.controls) do
-      if j ~= self.focus and d.hotkey and keyOf(d.hotkey) == key and isFocusable(self, j) then
-        to = j
-        break
+  -- Both searches in one pass (see "Where a hook runs"); the move and its line after it, outside.
+  local hidden, to = scanPass(self, function()
+    if isFocusable(self, self.focus) then return false end
+    if c and c.hotkey then
+      local key = keyOf(c.hotkey)
+      for j, d in ipairs(self.controls) do
+        if j ~= self.focus and d.hotkey and keyOf(d.hotkey) == key and isFocusable(self, j) then
+          return true, j
+        end
       end
     end
-  end
+    return true, firstFocusable(self)
+  end)
+  if not hidden then return false end
   local was = c and c.label
-  self.focus = to or firstFocusable(self)
+  self.focus = to
   local now = self.controls[self.focus]
   host.log.info(string.format("[focus] '%s': '%s' is hidden now; resuming on '%s'",
     tostring(self.label), tostring(was), tostring(now and now.label or "nothing")))
@@ -3971,9 +4134,19 @@ function Overlay:_deactivate()
   host.log.info(string.format("[deactivate] '%s' — in front now: '%s' (%s)",
     tostring(self.label), tostring(a and a.title or "nothing"),
     tostring(a and a.app and a.app.exe or "?")))
-  host.keys.scope(false)
-  host.keys.menuOpen(false)
+  -- Its keys go FIRST, while the scope still pins them to the window it is leaving: unpinned
+  -- first, they would take a key pressed in the window that came forward — the hook runs on a
+  -- thread of its own — and the key would then be dropped, its capture released.
   self:_unregisterHotkeys()
+  -- The scope and the flag are the module's (see anotherActive): the last overlay to leave sets
+  -- them back. While another is still in front, its pin stands, and the flag is what the ones in
+  -- front say — this one's no longer counts.
+  if anotherActive(self) then
+    self:_menuFlagLeft()
+  else
+    host.keys.scope(false)
+    host.keys.menuOpen(false)
+  end
   -- The menu state belongs to this stay in front: every test's word and any answer still
   -- outstanding are dropped, and the tests forget the press they were comparing against (see
   -- the Menus section).
@@ -4440,10 +4613,21 @@ end
 -- on exactly one slot. A later join with a different slot is a mistake (its context
 -- would silently fold into the first slot's claim), so log it rather than rebind.
 -- Shared by attach* (via ensureTrigger) and derive.
+-- The overlay's first evaluation after a binding, on the module's next turn rather than inside the
+-- call: a binding is made at a module's top level, where nothing can wait, and the evaluation can
+-- ask a stored `identify` that reads — in the handler of the timer it may wait (see "Where a hook
+-- runs"). `after(0)` is "run this as an event of my module", on the next tick (about 15 ms); no
+-- timer decides anything here.
+local function recheckOnNextTurn(self)
+  host.timer.after(0, function()
+    if self._bound then self:_recheck() end
+  end)
+end
+
 function Overlay:_join(slot, specificity, pollMs)
   report(self, { slot = slot, specificity = specificity })
-  -- From here on the overlay is LIVE: _join ends with a synchronous _recheck, so anything
-  -- that changes what the overlay is must already be in place. See the guard below.
+  -- From here on the overlay is LIVE: its first _recheck is asked for below, so anything that
+  -- changes what the overlay is must already be in place. See the guard below.
   self._bound = true
   if slot then
     if not self._slot then
@@ -4503,9 +4687,9 @@ function Overlay:_join(slot, specificity, pollMs)
   -- already registered, and without this its context was first asked at the next window or
   -- focus event. On a Mac there may be none — moving into a plug-in view that publishes nothing
   -- raises no notification — so a module loaded with its plug-in already in front stayed silent
-  -- until Cmd+Shift+F6. One recheck per extra binding, at bind time.
+  -- until Cmd+Shift+F6. One recheck per extra binding, on the first tick after it.
   if self.triggerSet then
-    self:_recheck()
+    recheckOnNextTurn(self)
     return
   end
   self.triggerSet = true
@@ -4513,7 +4697,7 @@ function Overlay:_join(slot, specificity, pollMs)
   -- an embedded plugin without a foreground change).
   host.window.onTrigger({}, { on = "activate" }, function() self:_recheck() end)
   host.window.onFocus(function() self:_recheck() end)
-  self:_recheck()
+  recheckOnNextTurn(self)
 end
 
 -- Sets the interaction flags from `opts`, then joins the arbiter + arms the trigger.
@@ -5117,6 +5301,54 @@ function Overlay:attachEmbedded(spec, opts)
   -- Per control id, how many "could not tell yet" in a row; the first is logged.
   local idUndecided = boundedCache(MEMO_CAP)
 
+  -- WHERE `identify` RUNS (see "Where a hook runs"). Kept per control — a pattern's control, or a
+  -- panel for a stay — it is asked once for a new control, in the handler, where it may wait for a
+  -- read; that is the stored `identify`. Asked at every evaluation — relational (`cacheIdentity =
+  -- false`), or a function's control where the DAW gives no panel — it must not read, and runs in
+  -- a pass: inline in a scan's, in one of its own otherwise. Either is guarded: a raise is logged
+  -- once per control id, and is no verdict — a stored one counts as "could not tell yet" without
+  -- counting against IDENTIFY_UNDECIDED_MAX, an asked-every-time one as "no" this time.
+  --
+  -- A stored `identify` reached INSIDE a pass — another overlay's `when` asking this one's origin,
+  -- say — is not asked there, where it could not wait: "not now", not counted either, and the
+  -- origin is not kept for the epoch (origin, below), so the next question outside a pass asks
+  -- again. This overlay looks again on its module's next turn, once per epoch, through a recheck
+  -- of its own.
+  local idRaised = boundedCache(MEMO_CAP)
+  local function identifyRaised(c, err, taken)
+    if idRaised.get(c.id) then return end
+    idRaised.set(c.id, true)
+    host.log.info(string.format("attachEmbedded: [%s] id=%s, identify raised: %s — taken as %s — '%s'",
+      tostring(c.class), tostring(c.id), tostring(err), taken, tostring(self.label or "overlay")))
+  end
+  -- Set by a stored identify not asked inside a pass; read and cleared by origin().
+  local deferred = false
+  local deferredAt = nil
+  local notNowSaid = boundedCache(MEMO_CAP)
+  local function notNow(c)
+    deferred = true
+    if not notNowSaid.get(c.id) then
+      notNowSaid.set(c.id, true)
+      host.log.info(string.format("attachEmbedded: [%s] id=%s, identify is not asked inside a scan of the "
+        .. "overlay's hooks — '%s' looks again on its next turn", tostring(c.class), tostring(c.id),
+        tostring(self.label or "overlay")))
+    end
+    local e = host.epoch and host.epoch() or -1
+    if deferredAt ~= e then
+      deferredAt = e
+      recheckOnNextTurn(self)
+    end
+  end
+  -- An `identify` asked at every evaluation: true, false — or false when it raised.
+  local function askedEveryTime(c)
+    local okCall, verdict = pcall(noWait, identify, c)
+    if not okCall then
+      identifyRaised(c, verdict, "no this time")
+      return false
+    end
+    return verdict == true
+  end
+
   -- The module's own control among the window's children, by pattern, or nil. Unchanged from
   -- before the panel existed, and on Windows the whole story.
   local function ownByPattern(focusChain)
@@ -5135,9 +5367,16 @@ function Overlay:attachEmbedded(spec, opts)
         local ok
         if cacheId then
           ok = idCache.get(c.id)
-          if ok == nil then
-            local verdict = identify(c)
-            if verdict ~= nil then
+          if ok == nil and passDepth > 0 then
+            -- Inside a pass: not asked there (above).
+            notNow(c)
+            ok = false
+          elseif ok == nil then
+            local okCall, verdict = pcall(identify, c)
+            if not okCall then
+              identifyRaised(c, verdict, "could not tell yet, and not counted")
+              ok = false
+            elseif verdict ~= nil then
               ok = verdict == true
               idCache.set(c.id, ok)
               idUndecided.set(c.id, 0)
@@ -5170,7 +5409,7 @@ function Overlay:attachEmbedded(spec, opts)
             end
           end
         else
-          ok = identify(c) == true -- relational spec: re-evaluate every recheck
+          ok = askedEveryTime(c) -- relational spec: re-evaluate every recheck
         end
         if ok then return c end
       end
@@ -5203,8 +5442,17 @@ function Overlay:attachEmbedded(spec, opts)
     local s = c.stay
     local held = pv.held
     if held and held.stay == s and held.rect == rect then return held.value end
+    -- Inside a pass: not asked there; and one that raised is no verdict, not counted (above).
+    if passDepth > 0 then
+      notNow(c)
+      return false
+    end
     local label = tostring(self.label or "overlay")
-    local verdict = identify(c)
+    local okCall, verdict = pcall(identify, c)
+    if not okCall then
+      identifyRaised(c, verdict, "could not tell yet, and not counted")
+      return false
+    end
     if verdict == nil then
       if pv.undecided.stay ~= s then pv.undecided = { stay = s, n = 0 } end
       local n = pv.undecided.n + 1
@@ -5332,9 +5580,9 @@ function Overlay:attachEmbedded(spec, opts)
     -- A function's control where the DAW gives no panel, and a relational identify: asked at
     -- every evaluation, as a function's control always was. A relational verdict can change
     -- inside one stay (a Kontakt loaded into a Komplete Kontrol through its own browser), so
-    -- the stay does not pin it either.
+    -- the stay does not pin it either. Asked at every evaluation, so it must not read.
     if not (cacheId and panel) then
-      if identify(c) ~= true then return nil end
+      if not askedEveryTime(c) then return nil end
       return c
     end
     if not panelIdentity(c, active) then return nil end
@@ -5371,6 +5619,10 @@ function Overlay:attachEmbedded(spec, opts)
   -- Keyed on the spec TABLE, so overlays that share a binding share the answer while
   -- overlays with their own binding stay independent. Weak keys, so a spec that goes away
   -- takes its entry with it.
+  --
+  -- An answer made without asking a stored `identify` — reached inside a pass, where it is not
+  -- asked (see "Where `identify` runs", above) — is not kept: the next question outside a pass
+  -- in the same epoch resolves again and asks it, rather than finding "no control" kept.
   local function origin(opts)
     local e = host.epoch and host.epoch() or -1
     local memo = originMemo[spec]
@@ -5379,17 +5631,36 @@ function Overlay:attachEmbedded(spec, opts)
       originMemo[spec] = memo
     end
     if not (opts and opts.fresh) and e == memo.epoch then return memo.value end
-    memo.value = pluginControl()
+    deferred = false
+    local c = pluginControl()
+    if deferred then return c end
+    memo.value = c
     memo.epoch = e
     return memo.value
   end
   -- The match asks the same question ("is the plugin focused?") and so shares the memo:
   -- a recheck plus the activation and coordinate work that follows it resolve once
   -- between them, where each used to enumerate the window afresh.
+  --
+  -- `present` is asked at every evaluation, so it must not read: it runs in a pass, like a `when`
+  -- (see "Where a hook runs"). One that raises is taken as not matching, and said once per binding;
+  -- the recheck asking it goes on to its end.
+  local presentSaid = false
   local function matched()
     local c = origin()
     if not c then return false end
-    if spec.present and not spec.present(c) then return false end
+    if spec.present then
+      local okCall, present = pcall(noWait, spec.present, c)
+      if not okCall then
+        if not presentSaid then
+          presentSaid = true
+          host.log.info(string.format("attachEmbedded: '%s': its binding's present raised: %s — taken as "
+            .. "not matching", tostring(self.label or "overlay"), tostring(present)))
+        end
+        return false
+      end
+      if not present then return false end
+    end
     return true
   end
   self.contexts[#self.contexts + 1] = { match = matched, origin = origin }
@@ -5450,11 +5721,13 @@ end
 --
 -- ONE timer per VM, not one per overlay: the overlays of a module share it. While a menu counts
 -- as open over any of them, every one of them that is in front gives up its hotkeys, because
--- the pass-through is one flag for the whole application.
+-- the pass-through is one flag for the module, which lets every capture in the window it counts
+-- for through.
 --
--- `host.keys.menuOpen` is a process-wide flag, so it is only written while an overlay of this
--- VM that has tests is actually active; otherwise this would clobber the state of whichever
--- overlay is live elsewhere.
+-- `host.keys.menuOpen` is this module's flag, shared by every overlay of the VM and counted for
+-- the window the VM's key scope pins, so it is only written while an overlay of this VM that has
+-- tests is actually active; otherwise this would clobber what an overlay of this module set while
+-- it was live. Another module's flag is its own, and nothing here can touch it.
 local MENU_TICK_MS = 150
 -- How long a test that is not cheap waits between two questions while no menu is open and none
 -- was just opened: 8 ticks x 150 ms, a worst case of ~1.2 s to notice a menu opened by some
@@ -5764,12 +6037,12 @@ end
 
 -- The menu state, applied: the hook's pass-through flag, and the hotkeys of every overlay of
 -- this VM in front — given up by all of them while a menu is open over any, because the
--- pass-through lets every captured key of the application through, not one overlay's.
+-- pass-through lets every captured key in the window it counts for through, not one overlay's.
 -- Idempotent (see _suspendControlHotkeys), so the tick re-applies it: an overlay that came to
 -- the front between two transitions falls into step, and a transition that failed half-way is
 -- completed on the next tick. An overlay holding its place over its menu's window is left out:
--- it holds no keys, and the flag is not written for it — another overlay may be in front of
--- that window, and the flag is one for the whole application.
+-- it holds no keys, and the flag is not written for it — another overlay of this module may be
+-- in front, and the flag is one for the module.
 local function applyMenuState()
   local open, inFront = anyMenuOpen(), false
   for _, o in ipairs(menuWatched) do
@@ -5779,6 +6052,13 @@ local function applyMenuState()
   for _, o in ipairs(menuWatched) do
     if o.active and not heldOnMenu(o) then o:_suspendControlHotkeys(open) end
   end
+end
+
+-- An overlay of this VM left the front while another stays (see _deactivate): the flag is what
+-- the ones in front say now. Not `false` outright — a menu still open over another of them would
+-- lose its keys to the captures — nor left as it was, which may be the leaver's own `true`.
+function Overlay:_menuFlagLeft()
+  host.keys.menuOpen(anyMenuOpen())
 end
 
 -- Calls one hook of every test that has it, guarded: a module's hook must not take the
@@ -5871,6 +6151,24 @@ function Overlay:_menuAnswer(t, seen, value)
   self:_menuSet(false)
 end
 
+-- The menu test being asked inline in a pass, while it is asked, and how it fails. Its own
+-- `coroutine.yield` goes past _menuAsk's guard to the pass, which ends with it (noWait), and
+-- whoever opened the pass finds the test here (menuPassEnded).
+local askingInline = nil
+
+-- A pass of menu questions ended with `err`. When a test yielded in it: that test has failed, as
+-- one that raises has — said once, counted as not seeing a menu, its question answered — and is
+-- asked in a pass of its own from then on, so that it fails alone and the others are asked. True
+-- then; false for any other error, which the caller raises again.
+local function menuPassEnded(err)
+  local a = askingInline
+  askingInline = nil
+  if not a then return false end
+  a.t.yields = true
+  a.failed(err)
+  return true
+end
+
 -- Asks test `t` once. The answer is taken whenever it comes, as long as it answers this
 -- question: a question asked before the overlay left the front is not.
 function Overlay:_menuAsk(t)
@@ -5891,8 +6189,7 @@ function Overlay:_menuAsk(t)
     t.asking = nil
     self:_menuAnswer(t, v ~= nil and v ~= false, v)
   end
-  local ok, err = pcall(t.test, self, answer)
-  if not ok then
+  local function failed(err)
     if not t.saidFailed then
       t.saidFailed = true
       host.log.info(("[menu] '%s': menu test '%s' failed: %s — counted as not seeing a menu")
@@ -5900,6 +6197,20 @@ function Overlay:_menuAsk(t)
     end
     if not answered then answer(false) end
   end
+  -- A test is asked on every tick, so it must not read: it runs in a pass (see "Where a hook
+  -- runs"), inline in the round's. One that yields there has failed, as one that raises: the
+  -- pass ends with the yield, and its opener says so (menuPassEnded); from then on the test is
+  -- asked in a pass of its own.
+  local ok, err
+  if t.yields then
+    ok, err = pcall(ownPass, t.test, self, answer)
+  else
+    local outer = askingInline
+    askingInline = { t = t, failed = failed }
+    ok, err = pcall(noWait, t.test, self, answer)
+    askingInline = outer
+  end
+  if not ok then failed(err) end
 end
 
 -- The tick that has just ended, looked back on before this one's keys and questions: an Escape
@@ -5921,7 +6232,15 @@ end
 -- cheap one sees the menu. A test whose answer is outstanding is not asked again. `tick`: this is
 -- the timer's round, which counts how long an answer has been outstanding; a round asked by a
 -- window event (see _menuHold) does not.
+--
+-- The round is one pass (see "Where a hook runs"): the tick's for all its overlays, or one of its
+-- own when a window event asks it (_menuHold, _menuKeysBack).
 function Overlay:_menuRound(now, tick)
+  if passDepth == 0 then
+    local ok, err = pcall(scanPass, self, self._menuRound, self, now, tick)
+    if not ok and not menuPassEnded(err) then error(err, 0) end
+    return
+  end
   local st = self._menu
   for _, t in ipairs(st.tests) do
     if t.asking and tick then
@@ -5990,9 +6309,22 @@ local function menuTickFn()
     end
   end
   local now = host.now()
+  -- The tests' asking, and only that, in ONE pass for every overlay (see "Where a hook runs"): a
+  -- menu test must not read. Each overlay's origin first, outside the pass, so that a stored
+  -- `identify` asked for it runs in the tick's handler. What follows — the items given up, the
+  -- rechecks of overlays holding their place, the state applied — runs outside it: a recheck
+  -- resolves the origin, and with it a stored `identify` that may wait.
   for _, o in ipairs(menuWatched) do
-    if o.active then o:_menuRound(now, true) end
+    originFirst(o)
   end
+  -- A test that yields ends the pass (see _menuAsk): it has failed, and the overlays after it are
+  -- asked on the next tick, by when it is asked alone. The rest of this tick goes on.
+  local ok, err = pcall(noWait, function()
+    for _, o in ipairs(menuWatched) do
+      if o.active then o:_menuRound(now, true) end
+    end
+  end)
+  if not ok and not menuPassEnded(err) then error(err, 0) end
   -- An item whose press no test has answered with a menu it could be chosen in, for as long as
   -- the tests are asked on every tick after a press: dropped, and said (see "Choosing an item").
   -- One the user has left for another window of the same overlay (a second Avenger) is dropped
@@ -6654,8 +6986,9 @@ function Overlay:_menuHold()
         -- NO KEYS AT ALL while that window is in front: not the navigation keys, not a hotkey,
         -- and no say in the pass-through flag. They are the menu's — and a window the menu
         -- leads to can be another overlay's (Komplete Kontrol's Preferences, opened from its
-        -- menu, has one): an overlay still holding Tab and Return behind it would take them,
-        -- because the host hands a captured key to the first module that holds it.
+        -- menu, has one): an overlay still holding Tab and Return behind it would take them
+        -- wherever its scope reaches, because the host hands a captured key to the earliest
+        -- capture whose module's scope is the window in front.
         self:_unregisterHotkeys()
         self._hotkeysSuspended = true
         host.keys.menuOpen(false)
@@ -6769,8 +7102,9 @@ function Overlay:_menuKeysBack()
   -- The menu's window is over and the plug-in has the keyboard: an item still waiting was never
   -- chosen in it.
   if self._pick then self:_pickEnd("closed") end
-  self:_registerHotkeys(true)
+  -- Pinned before its keys are taken, as in _activate.
   host.keys.scope(true)
+  self:_registerHotkeys(true)
   applyMenuState()
   self:_menuRound(host.now())
 end
@@ -6970,10 +7304,16 @@ end
 -- which is why the menu shots, taken before a click, do not size their picture with it.
 local function calibrationMarks(self)
   local marks, points = {}, {}
+  -- Which controls are shown, in one pass over their `when`s (see "Where a hook runs").
+  local shown = scanPass(self, function()
+    local v = {}
+    for i, c in ipairs(self.controls) do v[i] = isVisible(self, c) end
+    return v
+  end)
   for i, c in ipairs(self.controls) do
     -- A control that is currently HIDDEN gets no crosshair: drawing one would say the user
     -- can reach something they cannot, which is the opposite of what this picture is for.
-    if isVisible(self, c) then
+    if shown[i] then
       local x, y = calibrationPoint(self, c)
       if x then
         marks[#marks + 1] = { x = x, y = y }

@@ -27,6 +27,11 @@
 //! - **The module about to act goes first.** `expedite` marks a module's pictures still to be
 //!   taken as urgent — the input barrier does, before a click — and an urgent job is
 //!   photographed before any other, whatever the budget.
+//! - **A read a person now waits on goes as theirs.** `promote` makes a ticket interactive, and
+//!   its job with it — a handler waiting for a poll's read when a key queues behind it. A job
+//!   already being recognised runs on as it started.
+//! - **A hang ends every wait.** `cancel_all` takes every ticket off every job, the one being
+//!   recognised included, whose late `finished` then answers nobody.
 //!
 //! Generic over the job's description `S` (compared to find a job to join) and its pixels `P`,
 //! so the tests need neither a screen nor an engine. Std only; borrowed by `crates/macos-check`.
@@ -479,6 +484,38 @@ impl<S: Clone + PartialEq, P> Scheduler<S, P> {
         gone
     }
 
+    /// Every ticket of every module taken off its job: the recogniser has answered nothing for
+    /// `HANG` (`Service::hang_sweep`), and nothing behind a recognition that does not come back
+    /// would ever be answered. The jobs go, pixels and all; the one being recognised runs to its
+    /// end with nobody to answer, as `cancel_owner` leaves it for one module.
+    pub fn cancel_all(&mut self) -> Vec<TicketId> {
+        let mut gone = Vec::new();
+        for job in &mut self.jobs {
+            gone.extend(job.tickets.drain(..).map(|t| t.id));
+        }
+        self.tickets_removed();
+        gone
+    }
+
+    /// Ticket `id` is waited on by a person now: a handler waits for it, and an event somebody
+    /// is waiting on queued behind that handler (`task::promote`). The ticket goes as an
+    /// interactive one, and its job with it — photographed and recognised before the polls'. A
+    /// job being recognised already runs on as it started: its priority, and on a Mac the
+    /// permission to leave out its last passes, were handed to the recogniser then. True when a
+    /// job not yet recognising was raised by it.
+    pub fn promote(&mut self, id: TicketId) -> bool {
+        for job in &mut self.jobs {
+            let Some(t) = job.tickets.iter_mut().find(|t| t.id == id) else { continue };
+            t.prio = Priority::Interactive;
+            if job.stage == Stage::Recognising || job.prio == Priority::Interactive {
+                return false;
+            }
+            job.prio = Priority::Interactive;
+            return true;
+        }
+        false
+    }
+
     /// Ticket `id` taken off its job: a task waiting for it was cancelled, or ended. Its job goes
     /// with it when nobody else waits for it; one being recognised runs to its end, and its answer
     /// is simply not handed to this ticket; one another call joined stays for that call. `false`
@@ -780,6 +817,77 @@ mod tests {
         assert_eq!(s.stage(started.id), Some(Stage::Recognising), "a recognition runs to its end");
         assert!(s.finished(started.id).is_empty(), "and answers nobody");
         assert!(s.is_empty());
+    }
+
+    /// A promoted ticket takes its waiting job into the interactive lane — photographed before a
+    /// background job asked earlier and over the budget, recognised before one captured earlier —
+    /// and stays there while it is on the job; one being recognised runs on as it started.
+    #[test]
+    fn a_promoted_ticket_takes_its_waiting_job_into_the_interactive_lane() {
+        let now = Instant::now();
+        let mut s = Sched::new();
+        s.submit("other poll", bg(1, B, None), now);
+        s.submit("poll", bg(2, A, Some("k")), now);
+        assert!(!s.interactive_waiting());
+        assert!(s.take_capture(true, now).is_none(), "background waits for the budget");
+        assert!(s.promote(2));
+        assert!(s.interactive_waiting());
+        assert!(!s.promote(2), "interactive already: nothing more to raise");
+        let (id, spec) = s.take_capture(true, now).unwrap();
+        assert_eq!(spec, "poll", "before the poll asked earlier, and over the budget");
+        assert!(s.captured(id, 0, 0, now));
+        let (other, _) = s.take_capture(false, now).unwrap();
+        assert!(s.captured(other, 0, 0, now));
+        let started = s.next_recognise(now).unwrap();
+        assert_eq!((started.spec, started.prio), ("poll", Priority::Interactive));
+        assert_eq!(s.finished(started.id).iter().map(|t| (t.id, t.prio)).collect::<Vec<_>>(), vec![(2, Priority::Interactive)]);
+
+        // A job being recognised is not raised, and still answers its ticket.
+        let started = s.next_recognise(now).unwrap();
+        assert_eq!(started.spec, "other poll");
+        assert!(!s.promote(1));
+        assert!(!s.interactive_waiting(), "a recognition in progress is waited on by nobody behind it");
+        assert_eq!(s.finished(started.id).len(), 1);
+
+        // Joined: the job is the promoted ticket's as long as it is on it.
+        let mut s = Sched::new();
+        s.submit("menu", bg(3, A, None), now);
+        s.submit("menu", bg(4, B, None), now);
+        assert!(s.promote(4));
+        assert!(s.withdraw(4));
+        assert!(!s.interactive_waiting(), "the promoted ticket took the job's interactive priority with it");
+        assert!(!s.promote(99), "a ticket no job holds");
+    }
+
+    /// The hang answer's share: every ticket off every job, the one being recognised included,
+    /// whose late `finished` answers nobody; nothing is left waiting, and a new read is taken as
+    /// before.
+    #[test]
+    fn cancelling_all_takes_every_ticket_the_running_ones_too() {
+        let now = Instant::now();
+        let mut s = Sched::new();
+        s.submit("running", bg(1, A, None), now);
+        let (id, _) = s.take_capture(false, now).unwrap();
+        assert!(s.captured(id, 0, 64, now));
+        let running = s.next_recognise(now).unwrap();
+        s.submit("captured", fg(2, B, None), now);
+        let (c, _) = s.take_capture(false, now).unwrap();
+        assert!(s.captured(c, 0, 64, now));
+        s.submit("capturing", bg(3, C, Some("k")), now);
+        s.take_capture(false, now).unwrap();
+        s.submit("waiting", bg(4, A, None), now);
+        s.submit("waiting", bg(5, B, None), now);
+        let mut gone = s.cancel_all();
+        gone.sort_unstable();
+        assert_eq!(gone, vec![1, 2, 3, 4, 5]);
+        assert_eq!(s.len(), 1, "only the recognition in progress is left");
+        assert_eq!(s.captured_bytes(), 0, "the pictures waiting for the recogniser are dropped");
+        assert!(!s.interactive_waiting());
+        assert!(s.barrier_clear(C.idx), "nothing left to photograph for anybody");
+        assert!(s.cancel_all().is_empty(), "nothing more to take");
+        assert!(s.finished(running.id).is_empty(), "the late answer finds nobody");
+        assert!(s.is_empty());
+        assert!(s.submit("after", bg(6, A, None), now).job.is_some());
     }
 
     #[test]

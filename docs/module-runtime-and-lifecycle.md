@@ -63,16 +63,44 @@ The host keeps a few more threads that no module call reaches: the module manage
 
 Pure computation — [`host.json`](api/json.md), [`host.keys.normalize`](api/keys.md#host-keys-normalize) and the like, [`host.timer`](api/timer.md) arming — costs what the work does and no more.
 
+### Each callback is a handler {#handlers}
+
+Every callback the host calls for an event runs as a coroutine of the host — a **handler** of its module: a hotkey's, a captured key's, a controller listener's, a timer's, a window trigger's (an activation and the report of the window already in front), an `onFocus`, the callback of a text read, an image search or a snapshot, and a setting's `onChange` called for the settings dialog or for another module's `set`. A module's handlers run one after another: the next one starts when the last has returned, and no handler of any module starts while another is running. A handler costs the event loop about 1 µs per event, where the plain call a callback was before cost about 0.1 µs — 0.75 to 1.6 µs against 0.07 to 0.16 µs over four runs of 20 000 events, in a release build on Windows; the CI prints the figure on Windows and on an Apple Silicon Mac (`HANDLER COST:`).
+
+A few callbacks are plain calls, as before, and are no handlers: an arbiter's `onActivate` and `onDeactivate` (and the overlay runtime's on top of them), your own `onChange` called from your own [`host.settings.set`](api/settings.md#host-settings-onchange), and the top level of your module, of a `code_module` and of an [included](api/include.md) file.
+
+In a handler, `coroutine.running()` returns the handler's coroutine, not `nil`, and `coroutine.isyieldable()` is `true`. A `coroutine.yield` there that reaches the host waits for nothing: it raises where it was made, so a `pcall` around it catches it and the callback goes on, with this message:
+
+```
+this callback runs as a coroutine of the host, and a coroutine.yield in it cannot wait for one of your own callbacks — wrap the code that yields in coroutine.wrap
+```
+
+Coroutines of your own work as they always did: the yields of a coroutine you made go to your own `resume`.
+
+```luau
+-- A generator of the module's own: its yields go to the module's call, not to the host.
+local nextName = coroutine.wrap(function()
+  for _, name in ipairs({ "Volume", "Pan", "Mute" }) do
+    coroutine.yield(name)
+  end
+end)
+host.hotkey.register("Ctrl+Alt+N", function()
+  host.speech.output(nextName() or "done")
+end)
+```
+
+Nothing in a handler waits yet: [`host.ocr.recognize`](api/ocr.md#host-ocr-recognize) still holds the event loop while it reads, in a handler as outside one; [`host.ocr.read`](api/ocr.md#host-ocr-read), which answers through a callback, reads off it. Where the host does let a handler wait, the rule for what may end the wait is fixed now: **a wait is ended by the host** — a thread of its own, such as the text recogniser handing back a reading, or state it keeps — **never by another event of the same module**. That event would be next in line behind the very handler waiting for it, so a "wait until my key comes up" built on the module's own key callbacks could never end.
+
 ## Lifecycle / states
 
 - **Installed** — a folder under `modules/` beside the application (see [where modules are found](module-package-format.md#where-modules-are-found)).
 - **Loaded** — its VM built and its entry file run, then the returned `activate` (if any). Every installed module that its `supported_os` allows is loaded at start-up, **disabled ones included**.
 - **Enabled** — the user wants it active; persisted in `settings.toml` beside the application. Its callbacks are delivered.
-- **Disabled** — still loaded. Its OS hotkeys are released (and may pass to another module's standing claim), its captured keys leave the suppression set, its controller demand is withdrawn, and its overlays lose any contested slot — an overlay that held one gets its `onDeactivate`, so it can tear down. Its other callbacks are not called, with one exception: a `host.settings.onChange` callback still fires when its setting changes, and the Settings dialog in the module manager works for a disabled module too. Nothing else is undone: the **VM, its globals, its recurring timers and its listeners all survive**, recurring timers keep being re-armed (a one-shot `after` that comes due meanwhile is discarded uncalled), and an image search that was answered while it was off is searched again when it is enabled. Enabling it again resumes delivery; the entry file does **not** run again. Its text reads and snapshots waiting for their pictures are dropped — after the `onDeactivate` above, so what that started goes too — and enabling it again does not bring them back: their callbacks never run, so a flag set before a read stays set. Use [`host.ocr.pending`](api/ocr.md#host-ocr-pending) rather than a flag.
+- **Disabled** — still loaded. Its OS hotkeys are released (and may pass to another module's standing claim), its captured keys leave the suppression set and its [key scope and menu flag](api/keys.md#host-keys-scope) are forgotten — after the `onDeactivate` below, which would set them again; enabled again, its captures are back, in every window and with no menu, until it sets them again — its controller demand is withdrawn, and its overlays lose any contested slot — an overlay that held one gets its `onDeactivate`, so it can tear down. Its other callbacks are not called, with one exception: a `host.settings.onChange` callback still fires when its setting changes, and the Settings dialog in the module manager works for a disabled module too. Nothing else is undone: the **VM, its globals, its recurring timers and its listeners all survive**, recurring timers keep being re-armed (a one-shot `after` that comes due meanwhile is discarded uncalled), and an image search that was answered while it was off is searched again when it is enabled. Enabling it again resumes delivery; the entry file does **not** run again. Its text reads and snapshots waiting for their pictures are dropped — after the `onDeactivate` above, so what that started goes too — and enabling it again does not bring them back: their callbacks never run, so a flag set before a read stays set. Use [`host.ocr.pending`](api/ocr.md#host-ocr-pending) rather than a flag.
 
 Two consequences follow. A module that starts disabled has still run its entry file and `activate`, so top-level side effects happen anyway — speech (which is not gated on the enabled state), synthesised input, sounds, `host.settings.define`. And a module-level cache survives a disable and enable; only a reload clears it.
 
-Transitions: *enable* / *disable* flip the flag and recompute what is held at the OS, as above. *Reload* builds a **new VM in place** from the module's folder and runs its entry again — what the old VM had registered, read, armed or started is dropped first; its timers, text reads and snapshots waiting for their pictures are dropped once more after the `onDeactivate` it runs as it goes, so that none of those it started then reaches the old VM (what else that `onDeactivate` registers — a hotkey, a captured key, a listener — is not dropped a second time); every module that depends on it through `dependencies` — directly or through other modules, of any kind — is rebuilt after it, in dependency order, so they take up its new code (a module that reaches it only through `optional_dependencies` is not). A broken `module.toml` leaves the running module untouched; a broken entry leaves the module inactive until the next successful reload.
+Transitions: *enable* / *disable* flip the flag and recompute what is held at the OS, as above. *Reload* builds a **new VM in place** from the module's folder and runs its entry again — what the old VM had registered, read, armed or started is dropped first; its timers, text reads, snapshots waiting for their pictures, and its key scope and menu flag are dropped once more after the `onDeactivate` it runs as it goes, so that none of those it started then reaches the old VM (what else that `onDeactivate` registers — a hotkey, a captured key, a listener — is not dropped a second time); every module that depends on it through `dependencies` — directly or through other modules, of any kind — is rebuilt after it, in dependency order, so they take up its new code (a module that reaches it only through `optional_dependencies` is not). A broken `module.toml` leaves the running module untouched; a broken entry leaves the module inactive until the next successful reload.
 
 ## Enable/disable interface
 

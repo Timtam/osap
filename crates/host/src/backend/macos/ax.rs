@@ -1965,11 +1965,11 @@ pub fn foreground_window_id() -> Option<isize> {
         // changed": `watch` calls it on an `AXFocusedWindowChanged` notification, where the
         // remembered window is by definition the one that is no longer focused, and on an
         // application activation, where memory of that pid may be minutes old;
-        // `tap::set_key_scope` calls it to re-check a pin it already disagrees with, where
+        // `tap::note_pinned` calls it to re-check a pin it already disagrees with, where
         // memory would repeat the number that caused the disagreement and the log would
-        // report it as a fresh answer. `set_key_scope` then FREEZES what this returns into
-        // the hotkey scope for as long as the overlay is active, so a stale answer here does
-        // not expire with the quarantine the way a stale `active_window` does.
+        // report it as a fresh answer. `resolve_key_scope` FREEZES what this returns into
+        // a module's key scope for as long as its overlay is active, so a stale answer here
+        // does not expire with the quarantine the way a stale `active_window` does.
         //
         // And a handle handed back here does not stop at the caller. `watch::on_activated`
         // pushes it into the activation queue, and `queue::drain` resolves it on the pump

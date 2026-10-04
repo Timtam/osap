@@ -109,12 +109,14 @@ T.REAPER_WIN = {
 
 -- An overlay with one button, bound embedded with `spec` (hosts: REAPER on a Mac unless given),
 -- on no slot unless `opts` names one: the scripted arbiter does not tell slots apart, so two
--- overlays on slots would outrank each other.
+-- overlays on slots would outrank each other. Then the first tick, which runs its first
+-- evaluation, asked for as it bound (`host.timer.after(0)`).
 function T.bind(spec, label, opts)
   local o = T.O.new(label or "Plug-in")
   o:addCustomButton({ label = "Preset", hotkey = "Alt+P", onActivate = function() end })
   spec.hosts = spec.hosts or { T.REAPER_MAC }
   o:attachEmbedded(spec, opts or {})
+  T.runDue()
   return o
 end
 
@@ -766,8 +768,11 @@ fn sforzando_binds_in_a_logic_window_titled_inst_1_and_in_a_reaper_floating_wind
         T.source("modules/sforzando/src/main.luau")(T.host)
         local ov = made[1]
         assert(ov and ov.label == "sforzando" and #made == 1, "one overlay, for every place it lives")
-        -- Evaluated as it was bound, its embedded context too: the read is out, nothing was read on
-        -- the event loop, and the panel is not sforzando's until the answer says so.
+        assert(#S.reads == 0, "nothing asked inside the binding: " .. T.dump())
+        T.runDue()
+        -- Evaluated on the tick after it was bound, its embedded context too: the read is out,
+        -- nothing was read on the event loop, and the panel is not sforzando's until the answer
+        -- says so.
         assert(#S.reads == 1 and #S.recognized == 0, T.dump())
         assert(T.region(S.reads[1].region) == "697,111,870,156",
           "the wordmark, relative to the panel: " .. T.region(S.reads[1].region))
@@ -819,8 +824,9 @@ fn sforzando_binds_in_a_logic_window_titled_inst_1_and_in_a_reaper_floating_wind
     "##);
 }
 
-/// sforzando on Windows is found by its own control, as it always was — evaluated as it is bound
-/// — and its wordmark read relative to that control, on the event loop, once per control.
+/// sforzando on Windows is found by its own control, as it always was — evaluated on the tick
+/// after it is bound — and its wordmark read relative to that control, on the event loop, once per
+/// control.
 #[test]
 fn sforzando_still_binds_by_its_control_on_windows() {
     run(r##"
@@ -837,6 +843,7 @@ fn sforzando_still_binds_by_its_control_on_windows() {
         T.turn()
         T.source("modules/sforzando/src/main.luau")(T.host)
         local ov = made[1]
+        T.runDue()
         assert(ov.active and ov:origin().id == 70, T.dump())
         assert(#S.reads == 0, "no read off the loop on Windows")
         assert(T.count("attachEmbedded: matched control [Plugin00A1B2C3] id=70, identify=true") == 1, T.dump())
@@ -876,6 +883,7 @@ fn kontakt_7_binds_in_a_logic_window_titled_inst_1_and_in_a_reaper_floating_wind
         T.at(FLOAT)
         local K = T.source("modules/kontakt/src/main.luau")(T.host)
         K.activate()
+        T.runDue()
         local k7
         for _, o in ipairs(made) do
           if o.label == "Kontakt 7" and o.active then k7 = o end
@@ -980,7 +988,9 @@ fn kontakt_8_is_taken_in_a_wider_box_and_a_miss_is_asked_again_up_to_eight_times
         local K = T.source("modules/kontakt/src/main.luau")(T.host)
         K.activate()
         local NAME = "Kontakt File Menu"
-        assert(T.located(NAME) == 1, "asked once as it was bound: " .. T.located(NAME))
+        assert(T.located(NAME) == 0, "not asked inside the binding: " .. T.located(NAME))
+        T.runDue()
+        assert(T.located(NAME) == 1, "asked once on the tick after it was bound: " .. T.located(NAME))
         for _ = 1, 10 do T.event() end
         assert(T.located(NAME) == 8, "eight evaluations of the stay, then no more: " .. T.located(NAME))
         assert(T.count("[kontakt] 'Inst 1' (1000x800) publishes no button named Kontakt File Menu — no Kontakt 8 "
@@ -1214,6 +1224,7 @@ fn overlays_bound_to_one_binding_share_the_panels_verdict() {
         local first = T.O.new("First")
         first:addCustomButton({ label = "Preset", hotkey = "Alt+P", onActivate = function() end })
         first:bind(b, { slot = "com.test.plugin" })
+        T.runDue() -- its first evaluation, on the module's next turn
         assert(first.active and asked == 1, T.dump())
         assert(T.count("identify=true — 'First'") == 1, T.dump())
         foreign = true
@@ -1249,9 +1260,10 @@ fn an_entry_without_an_origin_and_a_pattern_without_a_panel_say_why() {
 }
 
 /// An overlay already bound — to its standalone window — is evaluated again when an embedded
-/// binding joins it, so a plug-in already in front is recognised with no event to prompt it.
+/// binding joins it, so a plug-in already in front is recognised with no event to prompt it: on the
+/// module's next turn, not inside the call, where nothing could wait.
 #[test]
-fn an_embedded_binding_joining_a_bound_overlay_is_evaluated_at_once() {
+fn an_embedded_binding_joining_a_bound_overlay_is_evaluated_on_the_next_tick() {
     run_mac(r##"
         local S = T.S
         T.at(T.CHAIN)
@@ -1261,6 +1273,8 @@ fn an_embedded_binding_joining_a_bound_overlay_is_evaluated_at_once() {
         assert(not o.active)
         o:attachEmbedded({ hosts = { T.REAPER_MAC }, control = { windows = "x" },
           identify = function() return true end }, {})
-        assert(o.active, "evaluated as it joined: " .. T.dump())
+        assert(not o.active, "not inside the call: " .. T.dump())
+        T.runDue()
+        assert(o.active, "evaluated on the tick after it joined: " .. T.dump())
     "##);
 }

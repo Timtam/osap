@@ -7,7 +7,7 @@
 //! duplication for the modules that declare it — see `dxgi.rs`).
 
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicI32, AtomicBool, AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use super::dxgi::{self, Caller, Fallback};
@@ -16,9 +16,10 @@ use super::hook_watch;
 use super::hook_watch_thread;
 use super::hotkey_hook::{self, Down, Mods, OsPress, Route, NO_ID};
 use super::{
-    Backend, CaptureFn, CaptureSource, CapturedImage, ControlInfo, DumpNode, HostEvents,
-    MouseButton, OcrLine, OcrShot, OcrText, OcrThread, OcrWord, OcrWorker, Recognise, WinInfo,
-    CAPTURE_FAILED, DUPLICATION_UNANSWERED,
+    capture_decision, menu_flag_owners, scope_of, Backend, Capture, CaptureFn, CaptureSource,
+    CapturedImage, Captured, ControlInfo, DumpNode, HostEvents, MouseButton, OcrLine, OcrShot,
+    OcrText, OcrThread, OcrWord, OcrWorker, OwnerKeys, Recognise, Taken, WinInfo, CAPTURE_FAILED,
+    DUPLICATION_UNANSWERED,
 };
 use crate::ocr::plan::{self, Plan};
 use crate::ocr::types::Rect;
@@ -99,11 +100,61 @@ static PUMP_THREAD: AtomicU32 = AtomicU32::new(0);
 // held for a copy, a push or a table lookup — microseconds — and never across a call into
 // another program, so the hook never waits for more than that.
 
-/// (vk, modifier-mask) pairs currently intercepted (+ suppressed) by the hook. Written by the
-/// pump when the captured set changes.
-static CAPTURED_KEYS: Mutex<Vec<(u32, u8)>> = Mutex::new(Vec::new());
-/// Captured key-downs (vk, modifier-mask), queued by the hook for the event loop.
-static KEY_QUEUE: Mutex<Vec<(u32, u8)>> = Mutex::new(Vec::new());
+/// The captures the hook intercepts (and suppresses), each with its module, and what each module
+/// set with `host.keys.scope` and `menuOpen`: what [`super::capture_decision`] decides every key
+/// by. Written by the pump when either changes; one lock, so the hook never sees a set and the
+/// owners from two different moments.
+static KEY_STATE: Mutex<KeyState> = Mutex::new(KeyState { set: Vec::new(), owners: Vec::new() });
+/// Captured key-downs the hook took, with their module, queued for the event loop.
+static KEY_QUEUE: Mutex<Vec<Taken>> = Mutex::new(Vec::new());
+
+/// The hook's copy of the host's key table — see [`KEY_STATE`].
+struct KeyState {
+    set: Vec<Captured>,
+    owners: Vec<OwnerKeys>,
+}
+
+/// Which keys a taken key-down has not been followed by a key-up for yet, one bit per virtual
+/// key: a taken key-down whose bit is already set is the keyboard's auto-repeat of a key held
+/// down ([`Taken::repeat`]). Every key-up passes through the hook, captured or not, and clears
+/// its key's bit; another key going down does not. Forgotten with the rest of what the hook
+/// recorded as held when the keyboard goes where the hook is not called
+/// ([`forget_keys_held_out_of_sight`]), so that a key-up the hook missed does not make the next
+/// deliberate press read as a repeat.
+struct HeldBits([AtomicU64; 4]);
+
+impl HeldBits {
+    const fn new() -> Self {
+        HeldBits([AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)])
+    }
+
+    /// The word and the bit of `vk`. Virtual keys are below 256; anything above wraps round
+    /// rather than reaching outside the words.
+    fn at(vk: u32) -> (usize, u64) {
+        ((vk as usize / 64) & 3, 1u64 << (vk % 64))
+    }
+
+    /// A key-down the hook took: whether it repeats one that is still held. Marks it held.
+    fn taken_down(&self, vk: u32) -> bool {
+        let (word, bit) = Self::at(vk);
+        self.0[word].fetch_or(bit, Ordering::Relaxed) & bit != 0
+    }
+
+    /// A key-up of `vk`, whatever happened to it.
+    fn up(&self, vk: u32) {
+        let (word, bit) = Self::at(vk);
+        self.0[word].fetch_and(!bit, Ordering::Relaxed);
+    }
+
+    fn clear(&self) {
+        for w in &self.0 {
+            w.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The keys whose last taken key-down is still held — see [`HeldBits`].
+static CAPTURED_HELD: HeldBits = HeldBits::new();
 /// Hotkey presses, drained by the pump: ids the message-only window proc received as
 /// `WM_HOTKEY` on the pump's thread, and ids the keyboard hook matched itself on its own (see
 /// `hotkey_hook`), each with the way it came, so that the pump can tell the two deliveries of
@@ -187,18 +238,9 @@ static SCREEN_READER_MOD_DOWN_AT: AtomicU32 = AtomicU32::new(0);
 static KEY_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 static FG_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 
-/// HWND (isize) the captured-key suppression is scoped to (0 = global). The hook
-/// only intercepts a captured key while this window is foreground — so a menu a
-/// control opened (another window) gets Tab/Enter natively, ReaHotkey-style.
 /// Which modifier is currently held with nothing pressed since — 0 when none is, which is
 /// also what any other key down resets it to. See the tap branch in the hook.
 static TAP_ARMED: AtomicI32 = AtomicI32::new(0);
-static KEY_SCOPE: AtomicIsize = AtomicIsize::new(0);
-
-/// Set by an overlay while a (Qt/UIA) menu is open in the focused plugin, so its
-/// captured nav keys (Tab/Enter) pass through to the menu. The Win32 menu check
-/// (`popup_menu_open`) only sees `#32768` menus, not a plugin's own Qt menus.
-static MENU_OPEN: AtomicBool = AtomicBool::new(false);
 
 pub struct WindowsBackend;
 
@@ -1604,7 +1646,7 @@ impl Backend for WindowsBackend {
         Ok(())
     }
 
-    fn set_captured_keys(&self, keys: &[(u32, u8)]) {
+    fn set_captured_keys(&self, keys: &[Captured]) {
         // Built, and the old set freed, outside the lock, so the hook waits for a swap and
         // nothing more.
         let keys = keys.to_vec();
@@ -1613,22 +1655,41 @@ impl Backend for WindowsBackend {
             // again, even in the same window (`report_capture_passes`).
             PASS_SAID_FOR.with(|said| said.set([None; 5]));
         }
-        let old = std::mem::replace(&mut *locked(&CAPTURED_KEYS), keys);
+        let old = std::mem::replace(&mut locked(&KEY_STATE).set, keys);
         drop(old);
     }
 
-    fn set_key_scope(&self, to_foreground: bool) {
-        let hwnd = if to_foreground {
-            let fg = unsafe { GetForegroundWindow() };
-            fg as isize
-        } else {
-            0
-        };
-        KEY_SCOPE.store(hwnd, Ordering::Relaxed);
+    fn set_key_owners(&self, owners: &[OwnerKeys]) {
+        let new = owners.to_vec();
+        let old = std::mem::replace(&mut locked(&KEY_STATE).owners, new);
+        // The menu record of a module whose entry the host dropped — disabled, reloaded,
+        // removed — goes with the entry. Any other module keeps its record until it reads it.
+        let gone: Vec<u32> =
+            old.iter().map(|e| e.owner).filter(|o| !owners.iter().any(|e| e.owner == *o)).collect();
+        if !gone.is_empty() {
+            locked(&MENU_PASS).retain(|p| !gone.contains(&p.0));
+        }
     }
 
-    fn set_menu_open(&self, open: bool) {
-        MENU_OPEN.store(open, Ordering::Relaxed);
+    /// The window in front, which the hook compares with a live `GetForegroundWindow` at every
+    /// key. Windows answers with no window for a moment while the foreground changes hands; the
+    /// scope is then every window, as it is on a Mac when neither the application nor the tap
+    /// names one, and said as it is there.
+    fn resolve_key_scope(&self) -> isize {
+        // SAFETY: no arguments; reads which window is in front.
+        let window = unsafe { GetForegroundWindow() as isize };
+        if window == 0 {
+            crate::logging::line(
+                "keys",
+                "key scope: no window was in front when asked, so the scope is every window for now",
+            );
+        }
+        window
+    }
+
+    fn key_front(&self) -> isize {
+        // SAFETY: as above.
+        unsafe { GetForegroundWindow() as isize }
     }
 
     fn modifiers_down(&self) -> bool {
@@ -1693,8 +1754,8 @@ impl Backend for WindowsBackend {
         popup_menu_open()
     }
 
-    fn take_menu_pass_through(&self) -> Vec<(u32, u8)> {
-        MENU_PASS.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default()
+    fn take_menu_pass_through(&self, owner: u32) -> Vec<(u32, u8)> {
+        super::take_menu_passes(&mut locked(&MENU_PASS), owner)
     }
 
     /// Visible top-level windows of a process — including a `#32768` popup menu, which is a
@@ -1865,9 +1926,9 @@ impl Backend for WindowsBackend {
                 None => unmatched_fg = true,
             }
         }
-        let pending_keys: Vec<(u32, u8)> = std::mem::take(&mut *locked(&KEY_QUEUE));
-        for (vk, mask) in pending_keys {
-            events.on_key(vk, mask);
+        let pending_keys: Vec<Taken> = std::mem::take(&mut *locked(&KEY_QUEUE));
+        for k in pending_keys {
+            events.on_key(k.vk, k.mask, k.owner, k.repeat, k.front);
         }
         report_capture_passes();
         // Game controllers, from the hub their own thread feeds (never a thread-local: that
@@ -2056,32 +2117,41 @@ unsafe extern "system" fn win_event_proc(
     }
 }
 
-/// Captured keys the hook let through because a menu was open. A mutex rather than a
-/// thread-local because the hook runs on its own thread and the reader is the pump.
-static MENU_PASS: Mutex<Vec<(u32, u8)>> = Mutex::new(Vec::new());
-const MENU_PASS_MAX: usize = 32;
+/// Captured keys the hook let through because a menu was open, as `(module, vk, mask)` — each
+/// module's own record, read by `host.keys.passedThrough` (`super::file_menu_pass`). A mutex
+/// rather than a thread-local because the hook runs on its own thread and the reader is the pump.
+static MENU_PASS: Mutex<Vec<(u32, u32, u8)>> = Mutex::new(Vec::new());
 
-fn note_menu_pass(vk: u32, mask: u8) {
-    if let Ok(mut m) = MENU_PASS.lock() {
-        if m.len() < MENU_PASS_MAX {
-            m.push((vk, mask));
-        }
-    }
+fn note_menu_pass(owner: u32, vk: u32, mask: u8) {
+    super::file_menu_pass(&mut locked(&MENU_PASS), owner, vk, mask);
 }
 
-/// Why the hook let a captured key-down through to the application instead of taking it.
+/// Why the hook let a captured key-down through to the application instead of taking it. The
+/// three that [`super::capture_decision`] decides, and the hook's own screen-reader rule; each is
+/// an index into [`PASS_SAID_FOR`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PassWhy {
     /// The hook's own record says a screen reader's modifier is held.
     ReaderRecorded = 0,
     /// The system says a screen reader's modifier is down (`GetAsyncKeyState`).
     ReaderDown = 1,
-    /// The captures are scoped to a window that is not in front.
+    /// Every capture of it belongs to a module scoped to a window that is not in front.
     OutOfScope = 2,
     /// The window in front is in menu mode (`GetGUIThreadInfo`).
     MenuMode = 3,
-    /// A menu was declared open (`host.keys.menuOpen`).
+    /// A module whose flag counts for the window in front declared a menu open
+    /// (`host.keys.menuOpen`).
     MenuFlag = 4,
+}
+
+impl From<super::PassWhy> for PassWhy {
+    fn from(why: super::PassWhy) -> PassWhy {
+        match why {
+            super::PassWhy::OutOfScope => PassWhy::OutOfScope,
+            super::PassWhy::MenuMode => PassWhy::MenuMode,
+            super::PassWhy::MenuFlag => PassWhy::MenuFlag,
+        }
+    }
 }
 
 /// A captured key-down the hook let through, and the state it decided by.
@@ -2091,6 +2161,7 @@ struct PassNote {
     mask: u8,
     why: PassWhy,
     foreground: isize,
+    /// The scope of the module of the earliest capture of the key, 0 for everywhere.
     scope: isize,
     /// For [`PassWhy::ReaderRecorded`]: how long ago the hook saw the modifier go down.
     reader_ms: u32,
@@ -2152,12 +2223,14 @@ fn capture_pass_line(n: &PassNote) -> String {
                                 screen reader's"
             .to_string(),
         PassWhy::OutOfScope => format!(
-            "the captures are scoped to window {:#x} (host.keys.scope) and window {:#x} is in \
-             front",
+            "every capture of it is scoped to another window (host.keys.scope) — the earliest to \
+             window {:#x} — and window {:#x} is in front",
             n.scope, n.foreground
         ),
         PassWhy::MenuMode => "the window in front is in menu mode (a Win32 menu is open)".to_string(),
-        PassWhy::MenuFlag => "a menu is declared open (host.keys.menuOpen(true))".to_string(),
+        PassWhy::MenuFlag => "a module scoped to the window in front, or to every window, has \
+                              declared a menu open (host.keys.menuOpen(true))"
+            .to_string(),
     };
     format!(
         "captured {key} (vk {:#04x}/m{}) was let through to the application: {why}. Said once \
@@ -2284,10 +2357,10 @@ thread_local! {
 /// new one is taken out again, rather than leave two of ours handling every key twice.
 ///
 /// **What carries over.** Everything the application set — the captured set, the granted
-/// hotkeys, the scope, the menu flags — is in statics the new hook reads exactly as the old one
-/// did. What the old hook remembered of keys going by is forgotten ([`forget_seen_keys`]) only
-/// when Windows had removed it: a hook still installed saw every key-up, and forgetting its
-/// record would drop a screen reader's modifier held across the swap.
+/// hotkeys, the modules' scopes and menu flags — is in statics the new hook reads exactly as the
+/// old one did. What the old hook remembered of keys going by is forgotten
+/// ([`forget_seen_keys`]) only when Windows had removed it: a hook still installed saw every
+/// key-up, and forgetting its record would drop a screen reader's modifier held across the swap.
 unsafe fn reinstall(hmod: HMODULE, reason: usize) {
     let current = HOOK.with(|h| h.get());
     let (now, outcome) = STALE_HOOKS.with(|stale| {
@@ -2321,8 +2394,8 @@ unsafe fn reinstall(hmod: HMODULE, reason: usize) {
 /// - the **modifiers as the hook saw them go by**, which a late call is judged by (a call on
 ///   time asks the system and brings the record in line anyway).
 ///
-/// Everything else carries over as it is. The captured set, the granted hotkeys, the scope and
-/// the menu flags are the application's. The hotkeys' record of held keys already treats a
+/// Everything else carries over as it is. The captured set, the granted hotkeys, and the modules'
+/// scopes and menu flags are the application's. The hotkeys' record of held keys already treats a
 /// press remembered for longer than the auto-repeat threshold as released (see
 /// `hotkey_hook::REPEAT_MS`), so a lost key-up costs nothing there, and forgetting it would
 /// make the repeat of a hotkey held across the swap fire it a second time. The keys owed their
@@ -2338,16 +2411,19 @@ fn forget_seen_keys() {
 /// hook — so a key the hook saw go down may go up unseen. Forgets what the hook recorded as held
 /// from key-downs alone: a **screen reader's modifier** (else every captured key would be let
 /// through to the screen reader until that modifier next went up in front of a window the hook
-/// sees) and a **pending modifier tap** (else a tap could fire at a release that ends a
-/// combination). Returns how long ago the screen reader's modifier was seen going down, when
-/// it was recorded as held, for the watch's log line.
+/// sees), a **pending modifier tap** (else a tap could fire at a release that ends a
+/// combination) and the **captured keys held down** (else the next deliberate press of one
+/// would read as the keyboard's auto-repeat, [`CAPTURED_HELD`]). Returns how long ago the screen
+/// reader's modifier was seen going down, when it was recorded as held, for the watch's log line.
 ///
-/// Any thread: two atomics. The watch calls it on those events; the hook's thread after a
-/// re-install that found the old hook gone. The cost of forgetting too much is one keystroke
+/// Any thread: a handful of atomics. The watch calls it on those events; the hook's thread after
+/// a re-install that found the old hook gone. The cost of forgetting too much is one keystroke
 /// made while a screen reader's modifier was held across such a moment, which is then taken by
-/// a capture of it instead of going to the screen reader.
+/// a capture of it instead of going to the screen reader, and the repeat of a captured key held
+/// across it, which reads as a new press.
 pub(super) fn forget_keys_held_out_of_sight() -> Option<u32> {
     TAP_ARMED.store(0, Ordering::Relaxed);
+    CAPTURED_HELD.clear();
     if SCREEN_READER_MOD_DOWN.swap(false, Ordering::Relaxed) {
         // SAFETY: reads the tick clock.
         let now = unsafe { GetTickCount() };
@@ -2478,34 +2554,51 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
             } else if let Some(generic) = generic {
                 let armed = TAP_ARMED.swap(0, Ordering::Relaxed);
                 if armed == vk as i32 {
-                    let wanted = locked(&CAPTURED_KEYS)
-                        .iter()
-                        .any(|&(v, m)| v == generic && m == crate::backend::MASK_TAP);
-                    let scope = KEY_SCOPE.load(Ordering::Relaxed);
-                    let in_scope = scope == 0 || GetForegroundWindow() as isize == scope;
-                    if wanted && in_scope && !popup_menu_open() && !MENU_OPEN.load(Ordering::Relaxed)
-                    {
-                        locked(&KEY_QUEUE).push((generic, crate::backend::MASK_TAP));
+                    // Decided as a captured key-down is, below: the earliest capture of the tap
+                    // whose module's scope is in front, and no menu open there.
+                    let tap = crate::backend::MASK_TAP;
+                    let taken = {
+                        let st = locked(&KEY_STATE);
+                        if st.set.iter().any(|c| c.vk == generic && c.mask == tap) {
+                            let front = GetForegroundWindow() as isize;
+                            match capture_decision(&st.set, &st.owners, generic, tap, front, popup_menu_open) {
+                                Some(Capture::Take { owner }) => Some((owner, front)),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some((owner, front)) = taken {
+                        locked(&KEY_QUEUE).push(Taken { vk: generic, mask: tap, owner, repeat: false, front });
                         wake_pump();
                     }
                 }
             }
-            // The two keys that END a menu, remembered whenever the runtime says a plugin
-            // menu is open — captured or not. Escape is captured by no overlay and Return
-            // only while the focused control wants it, so a record kept inside the
-            // captured-key branch below never held the Escape that cancelled a menu. Noted
-            // only; never suppressed.
+            // The two keys that END a menu, remembered whenever a module's menu flag counts for
+            // the window in front — captured or not — in the record of every module whose flag
+            // does. Escape is captured by no overlay and Return only while the focused control
+            // wants it, so a record kept inside the captured-key branch below never held the
+            // Escape that cancelled a menu. Noted only; never suppressed.
             //
             // Remembered as noted, so that the captured-key branch below does not note the same
             // press again: a captured Return passes both, and one press read as "Return,
             // Return" in the runtime's log.
             let mut menu_key_noted = false;
-            if is_down && mask == 0 && (vk == 0x0D || vk == 0x1B) && MENU_OPEN.load(Ordering::Relaxed) {
-                let scope = KEY_SCOPE.load(Ordering::Relaxed);
-                if scope == 0 || GetForegroundWindow() as isize == scope {
-                    note_menu_pass(vk, mask);
-                    menu_key_noted = true;
+            if is_down && mask == 0 && (vk == 0x0D || vk == 0x1B) {
+                let st = locked(&KEY_STATE);
+                if st.owners.iter().any(|e| e.menu) {
+                    let front = GetForegroundWindow() as isize;
+                    for owner in menu_flag_owners(&st.set, &st.owners, front) {
+                        note_menu_pass(owner, vk, mask);
+                        menu_key_noted = true;
+                    }
                 }
+            }
+            // Any key-up ends a hold: the next taken key-down of that key is a press of its own,
+            // not the keyboard's auto-repeat (`CAPTURED_HELD`). Every key-up passes here.
+            if is_up {
+                CAPTURED_HELD.up(vk);
             }
             // The hotkeys' record of which keys are held (`hotkey_hook::Table`) is kept for every
             // key that is not a modifier, whatever happens to it below: the captured keys'
@@ -2521,7 +2614,7 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                 }
             }
             // Match only the exact combo, so "Tab" (mask 0) leaves Alt+Tab alone.
-            let matched = locked(&CAPTURED_KEYS).iter().any(|&(v, m)| v == vk && m == mask);
+            let matched = locked(&KEY_STATE).set.iter().any(|c| c.vk == vk && c.mask == mask);
             if matched {
                 // A keystroke made with a SCREEN READER'S own modifier held is addressed to
                 // the screen reader, whatever this overlay has claimed.
@@ -2564,7 +2657,8 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                             mask,
                             why: if recorded { PassWhy::ReaderRecorded } else { PassWhy::ReaderDown },
                             foreground: GetForegroundWindow() as isize,
-                            scope: KEY_SCOPE.load(Ordering::Relaxed),
+                            // Not part of a screen reader's reason, and not said with it.
+                            scope: 0,
                             reader_ms: now.wrapping_sub(SCREEN_READER_MOD_DOWN_AT.load(Ordering::Relaxed)),
                         });
                     }
@@ -2573,19 +2667,50 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                     }
                     return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
                 }
-                // Intercept a captured nav key only while the overlay should own
-                // it (ReaHotkey's GetContext): the scoped window is foreground AND
-                // no popup menu is open. A control that opened a #32768 menu must
-                // let Tab/Enter/arrows reach the menu natively — the menu window is
-                // owned by the plugin, so the foreground doesn't change.
-                let scope = KEY_SCOPE.load(Ordering::Relaxed);
+                // Intercept a captured nav key only while an overlay should own it (ReaHotkey's
+                // GetContext): a module that captures it is scoped to the window in front, or to
+                // every window, AND no menu is open there. A control that opened a #32768 menu
+                // must let Tab/Enter/arrows reach the menu natively — the menu window is owned by
+                // the plugin, so the foreground doesn't change. Which module takes it is decided
+                // here, while the window in front is the one it was pressed in, and goes with the
+                // key: the earliest capture in scope (`capture_decision`).
                 let foreground = GetForegroundWindow() as isize;
-                let in_scope = scope == 0 || foreground == scope;
-                let menu_mode = in_scope && popup_menu_open();
-                let menu_flag = in_scope && !menu_mode && MENU_OPEN.load(Ordering::Relaxed);
-                if in_scope && !menu_mode && !menu_flag {
+                let decided = {
+                    let st = locked(&KEY_STATE);
+                    let d = capture_decision(&st.set, &st.owners, vk, mask, foreground, popup_menu_open);
+                    if let (true, Some(Capture::Pass { why, owner })) = (is_down, d) {
+                        let first = st.set.iter().find(|c| c.vk == vk && c.mask == mask);
+                        let scope = first.map_or(0, |c| scope_of(&st.owners, c.owner));
+                        if !menu_key_noted {
+                            // Let through because a menu is open. Remembered, not discarded:
+                            // the overlay runtime asks for these to log which keys reached the
+                            // menu, and whether it was still there after an Escape — in the
+                            // record of each module whose flag let it through, or of the module
+                            // that would have taken it from a menu the system drew. See
+                            // `take_menu_pass_through`.
+                            match why {
+                                super::PassWhy::MenuFlag => {
+                                    for o in menu_flag_owners(&st.set, &st.owners, foreground) {
+                                        note_menu_pass(o, vk, mask);
+                                    }
+                                }
+                                super::PassWhy::MenuMode => {
+                                    if let Some(o) = owner {
+                                        note_menu_pass(o, vk, mask);
+                                    }
+                                }
+                                super::PassWhy::OutOfScope => {}
+                            }
+                        }
+                        drop(st);
+                        note_capture_pass(PassNote { vk, mask, why: why.into(), foreground, scope, reader_ms: 0 });
+                    }
+                    d
+                };
+                if let Some(Capture::Take { owner }) = decided {
                     if is_down {
-                        locked(&KEY_QUEUE).push((vk, mask));
+                        let repeat = CAPTURED_HELD.taken_down(vk);
+                        locked(&KEY_QUEUE).push(Taken { vk, mask, owner, repeat, front: foreground });
                         wake_pump();
                         if hotkeys_filed {
                             note_captured_down(kb, vk, mask, late, false);
@@ -2595,28 +2720,6 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                     // suppressed too (see `swallow_captured`).
                     if swallow_captured(is_down, || down(vk as u16)) {
                         return 1;
-                    }
-                } else if is_down {
-                    note_capture_pass(PassNote {
-                        vk,
-                        mask,
-                        why: if !in_scope {
-                            PassWhy::OutOfScope
-                        } else if menu_mode {
-                            PassWhy::MenuMode
-                        } else {
-                            PassWhy::MenuFlag
-                        },
-                        foreground,
-                        scope,
-                        reader_ms: 0,
-                    });
-                    if in_scope && !menu_key_noted {
-                        // Let through because a menu is open. Remembered, not discarded: the
-                        // overlay runtime asks for these to log which keys reached the menu,
-                        // and whether it was still there after an Escape. See
-                        // `take_menu_pass_through`.
-                        note_menu_pass(vk, mask);
                     }
                 }
             }
@@ -3502,8 +3605,19 @@ mod hook_carry_over_tests {
     /// no hook is installed in a test run; puts them back afterwards.
     #[test]
     fn a_reinstall_keeps_the_application_s_keys_and_forgets_what_the_old_hook_saw() {
-        let captured = vec![(0x09u32, 0u8), (0x09, 1), (0x0D, 0)];
-        *locked(&CAPTURED_KEYS) = captured.clone();
+        let captured = vec![
+            Captured { vk: 0x09, mask: 0, owner: 1 },
+            Captured { vk: 0x09, mask: 1, owner: 1 },
+            Captured { vk: 0x0D, mask: 0, owner: 2 },
+        ];
+        let owners = vec![OwnerKeys { owner: 1, scope: 0x1234, menu: true }];
+        {
+            let mut st = locked(&KEY_STATE);
+            st.set = captured.clone();
+            st.owners = owners.clone();
+        }
+        // Tab held down, taken: its next key-down would be a repeat.
+        assert!(!CAPTURED_HELD.taken_down(0x09));
         {
             let mut t = locked(&HOOK_HOTKEYS);
             // Alt+V granted (MOD_ALT is 0x1), and pressed: the hook fired it and swallows its
@@ -3529,6 +3643,7 @@ mod hook_carry_over_tests {
         assert!((5_000..60_000).contains(&age), "{age}");
         assert_eq!(forget_keys_held_out_of_sight(), None, "nothing left to forget");
         assert_eq!(TAP_ARMED.load(Ordering::Relaxed), 0);
+        assert!(!CAPTURED_HELD.taken_down(0x09), "Tab's key-up may have gone by unseen: a new press");
         assert_eq!(HOOK_MODS.with(|m| m.get()), {
             let mut mods = Mods::default();
             mods.on_key(0xA4, true);
@@ -3539,8 +3654,13 @@ mod hook_carry_over_tests {
         TAP_ARMED.store(0xA4, Ordering::Relaxed);
         forget_seen_keys();
 
-        // The application's: the captured set and the granted hotkeys, as they were.
-        assert_eq!(*locked(&CAPTURED_KEYS), captured);
+        // The application's: the captured set, the modules' scopes and flags, and the granted
+        // hotkeys, as they were.
+        {
+            let st = locked(&KEY_STATE);
+            assert_eq!(st.set, captured);
+            assert_eq!(st.owners, owners);
+        }
         {
             let mut t = locked(&HOOK_HOTKEYS);
             let t = t.as_mut().unwrap();
@@ -3555,8 +3675,14 @@ mod hook_carry_over_tests {
         assert!(!SCREEN_READER_MOD_DOWN.load(Ordering::Relaxed));
         assert_eq!(TAP_ARMED.load(Ordering::Relaxed), 0);
         assert_eq!(HOOK_MODS.with(|m| m.get()), Mods::default());
+        assert!(!CAPTURED_HELD.taken_down(0x09), "forgotten again with the rest");
 
-        locked(&CAPTURED_KEYS).clear();
+        {
+            let mut st = locked(&KEY_STATE);
+            st.set.clear();
+            st.owners.clear();
+        }
+        CAPTURED_HELD.clear();
         *locked(&HOOK_HOTKEYS) = None;
         SCREEN_READER_PASSED.with(|s| s.borrow_mut().clear());
     }
@@ -3588,11 +3714,45 @@ mod hook_carry_over_tests {
         assert!(l.contains("recorded as held"), "{l}");
         assert!(l.contains("36000000 ms ago"), "{l}");
         let l = capture_pass_line(&note(PassWhy::OutOfScope, 0));
-        assert!(l.contains("scoped to window 0x5678"), "{l}");
+        assert!(l.contains("every capture of it is scoped to another window"), "{l}");
+        assert!(l.contains("the earliest to window 0x5678"), "{l}");
         assert!(l.contains("window 0x1234 is in front"), "{l}");
         assert!(capture_pass_line(&note(PassWhy::MenuMode, 0)).contains("menu mode"));
-        assert!(capture_pass_line(&note(PassWhy::MenuFlag, 0)).contains("host.keys.menuOpen"));
+        let l = capture_pass_line(&note(PassWhy::MenuFlag, 0));
+        assert!(l.contains("host.keys.menuOpen") && l.contains("a module scoped to the window in front"), "{l}");
         assert!(capture_pass_line(&note(PassWhy::ReaderDown, 0)).contains("as far as the system"));
+        // The three the shared decision names are the hook's own three.
+        assert_eq!(PassWhy::from(crate::backend::PassWhy::OutOfScope), PassWhy::OutOfScope);
+        assert_eq!(PassWhy::from(crate::backend::PassWhy::MenuMode), PassWhy::MenuMode);
+        assert_eq!(PassWhy::from(crate::backend::PassWhy::MenuFlag), PassWhy::MenuFlag);
+    }
+
+    /// The repeat bit: down, down is a repeat; the key's up clears it; another key's up does
+    /// not; forgetting clears every key's. A bitmap of its own, not the hook's.
+    #[test]
+    fn a_taken_key_down_with_its_key_still_held_is_a_repeat() {
+        let held = HeldBits::new();
+        assert!(!held.taken_down(0x09), "the first press");
+        assert!(held.taken_down(0x09), "held: the keyboard's auto-repeat");
+        assert!(held.taken_down(0x09));
+        held.up(0x20);
+        assert!(held.taken_down(0x09), "another key's up leaves Tab held");
+        assert!(!held.taken_down(0x20), "Space is a press of its own");
+        held.up(0x09);
+        assert!(!held.taken_down(0x09), "released and pressed again: a new press");
+        // Keys at both ends of the table, each in its own word.
+        for vk in [0x01, 0x3F, 0x40, 0x7F, 0x80, 0xFE, 0xFF] {
+            assert!(!held.taken_down(vk), "{vk:#x}");
+            assert!(held.taken_down(vk), "{vk:#x}");
+        }
+        held.clear();
+        for vk in [0x09, 0x20, 0x01, 0xFF] {
+            assert!(!held.taken_down(vk), "forgotten: {vk:#x}");
+        }
+        // Past the table it wraps round rather than reaching outside it.
+        held.clear();
+        assert!(!held.taken_down(0x109));
+        assert!(held.taken_down(0x09), "0x109 shares Tab's bit");
     }
 }
 

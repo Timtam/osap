@@ -46,8 +46,33 @@
 //! The same scripted host carries the plug-in's own focus ring (`host.element.focusStep`) and
 //! `host.ocr.read`, answered when a scenario says so, for the Tab pass-through's scenarios in
 //! `overlay_passthrough_tests.rs`, which run through `run_with` with helpers of their own.
+//!
+//! **Every event through the real mailbox.** What the scripted host delivers — a captured key, a
+//! timer, the menu tick, a window or focus event, an answer — goes through the host's own
+//! mailbox (`mailbox.rs`) and runs as a handler of the scenario's module (`T.call`), one at a time,
+//! as in the real host; a key delivered while the module is busy waits, and the next `T.tick()`
+//! runs it in its queued phase. The module is made busy with the tests' own wait point,
+//! `T.waitPoint(name)`, answered by `T.release(name, value)`. `recognize` and `recognizeMany` are
+//! the host's own, built by task.rs over this host's holder (`Scripted`); where they cannot wait —
+//! in this build, anywhere but in a task of the tests' entry `T.task` — this host raises the
+//! message the host is to raise once the blocking call is gone, so nothing a scenario runs can
+//! hold the loop unseen.
 
-use mlua::{Function, Lua, Table, Value};
+use std::cell::{Cell, OnceCell, Ref, RefCell};
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+use mlua::{Function, Lua, MultiValue, Table, Value};
+
+use crate::backend::CaptureSource;
+use crate::image_search::VmOwner;
+use crate::mailbox::{self, Event, MailHost, Mailboxes, Opened, Why};
+use crate::ocr::lua::{self as reads, OcrState, ReadHost};
+use crate::ocr::service::{Service, ShutdownHandle};
+use crate::task::{self, Tasks};
+use crate::task_tests::{worker, Fake};
 
 pub(crate) const RUNTIME: &str = include_str!("../../../modules/overlay-runtime/src/main.luau");
 
@@ -151,8 +176,8 @@ local S = {
   -- A scenario about a hook that raises sets this; otherwise a `[overlay] '…': its <hook> raised:`
   -- line fails it at its end (`finish`), since that is where a `recognize` that cannot wait shows.
   hooksMayRaise = false,
-  -- A scenario about a task that raises sets this; otherwise an error a task ended with — the
-  -- `[task]` line and the dialog of the real host — fails it at its end (`finish`).
+  -- A scenario about a handler that raises sets this; otherwise an error a handler ended with —
+  -- the log line and the dialog of the real host — fails it at its end (`finish`).
   tasksMayRaise = false,
 }
 T.S = S
@@ -210,7 +235,7 @@ T.host = strict("host", {
   end }),
   timer = strict("host.timer", {
     -- The menu tick every 150 ms, one per VM; any other interval is a pollMatch poll (joinPoll),
-    -- one per interval, run by T.poll.
+    -- one per interval, run by T.poll. Each runs as an event of the module (`T.call`).
     every = function(ms, fn)
       if ms == 150 then
         assert(S.every == nil, "one menu timer per VM")
@@ -397,7 +422,8 @@ T.host = strict("host", {
       S.epoch += 1
       return S.focusAnswer
     end,
-    controls = function() return S.controls end,
+    -- A list of its own on every call, as the host hands one: the runtime adds the focus chain to it.
+    controls = function() return table.clone(S.controls) end,
     -- The matchers these scenarios bind with name a window class and nothing else.
     test = function(m, w) return w ~= nil and m.class ~= nil and w.class == m.class end,
     onTrigger = function(_, _, cb) S.triggers[#S.triggers + 1] = cb end,
@@ -494,8 +520,10 @@ end
 -- Komplete Kontrol in REAPER, bound for real: `attachEmbedded` against the scripted FX window,
 -- with REAPER's chrome classes, so the runtime's own context match — the focus gate included —
 -- decides whether the overlay is in front, through the arbiter on KK's slot. It starts with the
--- keyboard in KK, so it is active. `tests` as its menu tests; `setup(o)`, when given, runs
--- before it binds; `pollMatch`, when given, is the binding's poll interval (see T.poll).
+-- keyboard in KK, so it is active once its first evaluation has run: the runtime asks for that as
+-- it binds, on the module's next turn (`host.timer.after(0)`), which T.runDue plays here. `tests`
+-- as its menu tests; `setup(o)`, when given, runs before it binds; `pollMatch`, when given, is the
+-- binding's poll interval (see T.poll).
 function T.embedded(tests, label, setup, pollMatch)
   S.front, S.controls, S.chain = T.FX, { T.LIST, T.WRAP, T.KK }, { T.KK, T.WRAP, T.FX }
   T.turn()
@@ -506,6 +534,7 @@ function T.embedded(tests, label, setup, pollMatch)
   if setup then setup(o) end
   o:attachEmbedded({ hosts = { T.HOST }, control = "Qt%d+.-QWindowIcon" },
     { slot = "com.platform.kontakt", menus = tests, pollMatch = pollMatch })
+  T.runDue()
   return o
 end
 
@@ -524,7 +553,7 @@ end
 function T.poll(ms)
   local fn = S.polls[ms]
   assert(fn ~= nil, "no poll of " .. tostring(ms) .. " ms")
-  fn()
+  T.call("timer", fn)
 end
 
 -- Something turns the epoch over that the scenario does not otherwise play: another module's
@@ -537,7 +566,7 @@ function T.event()
   S.epoch += 1
   local w = S.front
   if w and w.hidden then w = nil end
-  for _, cb in ipairs(S.triggers) do cb(w) end
+  for _, cb in ipairs(S.triggers) do T.call("window", cb, w) end
 end
 
 -- `win` comes to the front, shown, with the keyboard on `chain` (default: the window itself), and
@@ -577,7 +606,7 @@ function T.runDue()
     local a = S.after[i]
     if a.at <= S.now then
       table.remove(S.after, i)
-      a.fn()
+      T.call("timer", a.fn)
     else
       i += 1
     end
@@ -597,19 +626,21 @@ function T.runDue()
       S.order[#S.order + 1] = "snapshotAsync"
       local s = T.snap(r.region)
       s.time = r.at
-      r.cb(s, nil, { waited = r.at - r.asked, frames = 1 })
+      T.call("answer", r.cb, s, nil, { waited = r.at - r.asked, frames = 1 })
     else
       i += 1
     end
   end
 end
 
--- One tick of the menu timer, 150 ms after the last, with any timer.after that came due first.
+-- One tick of the menu timer, 150 ms after the last, with any timer.after that came due first,
+-- and then — as the host's tick — the events that waited in the module's mailbox.
 function T.tick(n)
   for _ = 1, n or 1 do
     S.now += 150
     T.runDue()
-    if S.every then S.every() end
+    if S.every then T.call("timer", S.every) end
+    T.queued()
   end
 end
 
@@ -665,7 +696,7 @@ function T.deliver()
       list[k] = reading
       if r.names[k] then byName[r.names[k]] = reading end
     end
-    if r.list then r.cb(list, byName) else r.cb(list[1]) end
+    if r.list then T.call("answer", r.cb, list, byName) else T.call("answer", r.cb, list[1]) end
   end
 end
 
@@ -681,14 +712,14 @@ function T.press(o)
   o.focus = 1
   assert(S.holding["Return"], "Return is not captured, so it would not reach the overlay")
   S.epoch += 1
-  S.captured["Return"]()
+  T.call("key", S.captured["Return"])
 end
 
 -- One of the overlay's own keys (Tab), as the captured key delivers it.
 function T.tab()
   assert(S.holding["Tab"], "Tab is not captured, so it would not reach the overlay")
   S.epoch += 1
-  S.captured["Tab"]()
+  T.call("key", S.captured["Tab"])
 end
 
 -- Whether the overlay holds captured key `spec` now.
@@ -730,199 +761,191 @@ end
 
 function T.dump() return table.concat(S.logs, "\n") end
 
--- Tasks, around the host's own waits: `shim` is task_shim.luau, which the loader (`harness`)
--- hands in, so a scenario meets the real rules of where a task can wait. No module can start a
--- task, so `T.task` — `run`, `cancel`, `alive` — is the tests' entry, as `task::table` is the
--- real host's, and never part of `T.host`: a runtime that asked the host table for a task
--- entry would be told the scripted host has none. Its `start`, `where_`,
--- `legacy` and `disown` are this host's, and play the real host's rules (task.rs). A wait is
--- kept in S.waits until T.answer hands it its reading. Where a task cannot wait — and outside
--- every task — recognize raises the message the host is to raise once the blocking call is gone
--- (`message(name, why)`): this host plays that end already, so nothing a scenario runs can hold
--- the loop unseen. A task's own coroutine.yield raises where it was made
--- (`resumeError`, mlua's `Thread::resume_error`, with `foreignYield`), as in the real host, so a
--- pcall around it goes on. What a task raises is kept in S.taskErrors, as the host reports it,
--- and fails the scenario at its end unless it sets S.tasksMayRaise.
-function T.installTasks(shim, message, resumed, resumeError, foreignYield)
-  local tasks, running, nextTask = {}, {}, 0
-  local WAIT = {}
-  S.waits = {}
-  S.taskErrors = {}
-  local function innermost() return running[#running] end
-  local function where_()
-    local id = innermost()
-    if id == nil then return "none" end
-    return coroutine.running() == tasks[id].co and "task" or "foreign"
-  end
-  local function start(name, opts, nonce)
-    local id = innermost()
-    local t = id and tasks[id]
-    if not t or coroutine.running() ~= t.co or t.wait then
-      error(name .. ": the host's wait was called from outside its place", 0)
-    end
-    t.wait = { task = id, name = name, opts = opts, nonce = nonce, asked = S.now, answered = false }
-    S.waits[#S.waits + 1] = t.wait
-  end
-  local function legacy(name, _, why) return false, message(name, why) end
-  -- Module code resumed a waiting task's coroutine itself: it is no task any more. Forgotten,
-  -- not reset, its wait withdrawn — T.answer then finds nothing to resume.
-  local function disown()
-    local co = coroutine.running()
-    for id, t in pairs(tasks) do
-      if t.co == co and not t.running then
-        if t.wait then t.wait.withdrawn = true end
-        tasks[id] = nil
-        return
-      end
-    end
-  end
-  local function stretch(id, go, ...)
-    local t = tasks[id]
-    running[#running + 1] = id
-    t.running = true
-    local out = table.pack(go(t.co, ...))
-    t.running = false
-    running[#running] = nil
-    return out
-  end
-  -- What became of a stretch: ended, raised, or stopped at its wait. A wait of a cancelled task
-  -- ends it. Any other yield raises where it was made, and the task goes on from there.
-  local function step(id, out)
-    while true do
-      local t = tasks[id]
-      if t == nil then return end -- module code resumed it, and it is no task any more
-      local ok, a, b = out[1], out[2], out[3]
-      if not ok then
-        S.taskErrors[#S.taskErrors + 1] = tostring(a)
-        tasks[id] = nil
-        return
-      elseif coroutine.status(t.co) == "dead" then
-        tasks[id] = nil
-        return
-      elseif rawequal(a, WAIT) and t.wait and rawequal(t.wait.nonce, b) then
-        if t.ending then
-          t.wait.withdrawn = true
-          tasks[id] = nil
-        end
-        return
-      end
-      if t.wait then -- a wait registered by calling `start` itself: withdrawn
-        t.wait.withdrawn = true
-        t.wait = nil
-      end
-      out = stretch(id, resumeError, foreignYield)
-    end
-  end
-  local function resume(id, ...)
-    step(id, stretch(id, coroutine.resume, ...))
-  end
-  local waits = shim(start, where_, legacy, disown, coroutine.yield, coroutine.isyieldable,
-    rawequal, error, WAIT, resumed)
-  rawset(T.host.ocr, "recognize", waits.recognize)
-  rawset(T.host.ocr, "recognizeMany", waits.recognizeMany)
-  T.task = strict("task", {
-    run = function(fn, ...)
-      assert(type(fn) == "function" and select("#", ...) == 0, "task.run takes one function")
-      nextTask += 1
-      local id = nextTask
-      tasks[id] = { co = coroutine.create(fn) }
-      resume(id)
-      return id
-    end,
-    -- A waiting task ends now; a running one at its next wait. False for one that ended, and
-    -- for a running one a cancel marked already.
-    cancel = function(id)
-      local t = tasks[id]
-      if t == nil then return false end
-      if not t.running then
-        if t.wait then t.wait.withdrawn = true end
-        tasks[id] = nil
-        return true
-      end
-      if t.ending then return false end
-      t.ending = true
-      return true
-    end,
-    -- A task module code closed has ended, as in the real host.
-    alive = function(id)
-      local t = tasks[id]
-      if t == nil then return false end
-      if not t.running and coroutine.status(t.co) ~= "suspended" then
-        tasks[id] = nil
-        return false
-      end
-      return true
-    end,
-  })
-  -- A wait is answered: its task goes on with `reading`, as the host's delivery resumes it, the
-  -- epoch turned over first. Nothing for a task that ended meanwhile, or for a wait withdrawn.
-  function T.answer(w, reading)
-    assert(not w.answered, "a wait answered twice")
-    w.answered = true
-    local t = tasks[w.task]
-    if t == nil or t.wait ~= w or t.running or coroutine.status(t.co) ~= "suspended" then
-      if t ~= nil and t.wait == w then tasks[w.task] = nil end -- closed by module code
-      return
-    end
-    t.wait = nil
-    S.epoch += 1
-    resume(w.task, w.nonce, reading)
-  end
-end
-
 return T
 "##;
 
-/// The host's own wait shim, which the scripted host's tasks are built around.
-const TASK_SHIM: &str = include_str!("task_shim.luau");
+/// What the real host keeps for the scenario's one module, without the speech engines: its
+/// handlers, its mailbox, and — made at the first read a task of the tests' entry asks — the read
+/// service over the fake recogniser of task_tests.rs. What a handler raises goes to `S.taskErrors`,
+/// as the real host reports it.
+pub(crate) struct Scripted {
+    ocr: OnceCell<(Service<Fake>, ShutdownHandle)>,
+    state: OcrState,
+    tasks: Tasks,
+    mail: Mailboxes,
+    gens: RefCell<HashMap<usize, u64>>,
+    epoch: Cell<u64>,
+    /// The scenario's VM, for `S.taskErrors`; weak, since the VM holds this.
+    lua: mlua::WeakLua,
+}
+
+impl Drop for Scripted {
+    fn drop(&mut self) {
+        if let Some((_, stop)) = self.ocr.get() {
+            stop.shutdown(Duration::from_secs(2));
+        }
+    }
+}
+
+/// The scenario's module's index.
+const IDX: usize = 0;
+
+/// VM generations, process-wide as the host's are; apart from the other holders'.
+static NEXT_GEN: AtomicU64 = AtomicU64::new(900_000);
+
+impl ReadHost for Scripted {
+    type Shot = Fake;
+    fn ocr(&self) -> &Service<Fake> {
+        &self.ocr.get_or_init(|| Service::spawn(worker())).0
+    }
+    fn ocr_state(&self) -> &OcrState {
+        &self.state
+    }
+    fn tasks(&self) -> &Tasks {
+        &self.tasks
+    }
+    fn vm_gens(&self) -> Ref<'_, HashMap<usize, u64>> {
+        self.gens.borrow()
+    }
+    fn module_enabled(&self, idx: usize) -> bool {
+        idx == IDX
+    }
+    fn module_id(&self, _: usize) -> String {
+        "com.platform.overlay".to_string()
+    }
+    fn bump_epoch(&self) {
+        self.epoch.set(self.epoch.get() + 1);
+    }
+    fn report_error(&self, _: usize, _: &str, message: &str) {
+        let Some(lua) = self.lua.try_upgrade() else { return };
+        if let Ok(errors) = lua.named_registry_value::<Table>("__scripted_task_errors") {
+            let _ = errors.raw_push(message);
+        }
+    }
+    fn read_source(&self, _: &Lua, _: (i32, i32, i32, i32)) -> CaptureSource {
+        CaptureSource::Standard
+    }
+    fn screen_size(&self) -> (i32, i32) {
+        (1920, 1080)
+    }
+    fn slow_reads(&self) -> bool {
+        false
+    }
+}
+
+/// The scripted host's events are the tests' own (`Event::Call`).
+impl MailHost for Scripted {
+    fn mail(&self) -> &Mailboxes {
+        &self.mail
+    }
+    fn open(&self, idx: usize, _: &Lua, ev: Event) -> Opened {
+        match ev {
+            Event::Call { f, args, what, .. } => mailbox::open_call(idx, f, args, what),
+            Event::Read(r) => reads::open_read(self, *r),
+            _ => Opened::Gone,
+        }
+    }
+    fn discard(&self, _: usize, ev: Event, _: Why) {
+        if let Event::Read(r) = ev {
+            reads::discard_read(self, *r);
+        }
+    }
+}
 
 /// The scripted host and its helpers, as the table `T`, with what only Rust can give it:
 /// `T.hostCall(f, …)`, a plain `Function::call` as the host makes when it calls Lua back — an
 /// arbiter's onActivate and onDeactivate, an onChange, an included file's top level, none of
-/// which can wait — and the tests' `T.task` with `host.ocr.recognize` and `recognizeMany` built around
-/// the host's own shim (`T.installTasks`), whose stray yields raise through mlua's
-/// `Thread::resume_error` as the host's do (`resumeError(co, msg)`, answering as
-/// `coroutine.resume` does).
+/// which can wait; `T.call(kind, f, …)`, an event of the scenario's module through the real
+/// mailbox, run as a handler — "key", "hotkey", "timer", "window", "focus" or "answer" — which
+/// says what became of it (`Ran`, `Parked`, `Queued`, `Dropped`); `T.queued()`, the tick's queued
+/// phase; the tests' wait point `T.waitPoint(name)`, `T.release(name, value)` and
+/// `T.waiting(name)`; the tests' entry `T.task` and `T.settle()`, which hands the reads its tasks
+/// asked their readings; and `host.ocr.recognize` and `recognizeMany`, the host's own, raising
+/// where they cannot wait.
 pub(crate) fn harness(lua: &Lua) -> Table {
     let t: Table = lua.load(HARNESS).set_name("harness").eval().expect("the harness loads");
     let host_call = lua
         .create_function(|_, (f, args): (Function, mlua::MultiValue)| f.call::<mlua::MultiValue>(args))
         .unwrap();
     t.set("hostCall", host_call).unwrap();
-    let resume_error = lua
-        .create_function(|lua, (co, msg): (mlua::Thread, String)| {
-            let mut out = mlua::MultiValue::new();
-            match co.resume_error::<mlua::MultiValue>(msg) {
-                Ok(values) => {
-                    out.push_back(Value::Boolean(true));
-                    out.extend(values);
+    let gen = NEXT_GEN.fetch_add(1, Ordering::Relaxed);
+    lua.set_app_data(VmOwner { idx: IDX, gen });
+    let h = Rc::new(Scripted {
+        ocr: OnceCell::new(),
+        state: OcrState::default(),
+        tasks: Tasks::default(),
+        mail: Mailboxes::default(),
+        gens: RefCell::new([(IDX, gen)].into_iter().collect()),
+        epoch: Cell::new(0),
+        lua: lua.weak(),
+    });
+    let s: Table = t.get("S").unwrap();
+    let errors = lua.create_table().unwrap();
+    s.set("taskErrors", errors.clone()).unwrap();
+    lua.set_named_registry_value("__scripted_task_errors", errors).unwrap();
+    let hh = h.clone();
+    let call = lua
+        .create_function(move |lua, (kind, f, args): (String, Function, MultiValue)| {
+            let (input, what) = match kind.as_str() {
+                "key" => (true, "key"),
+                "hotkey" => (true, "hotkey"),
+                "timer" => (false, "timer"),
+                "window" => (false, "window trigger"),
+                "focus" => (false, "focus change"),
+                "answer" => (false, "ocr.read"),
+                other => return Err(mlua::Error::external(format!("T.call: no event of kind '{other}'"))),
+            };
+            Ok(format!("{:?}", mailbox::deliver(&*hh, IDX, lua, Event::Call { f, args, input, what })))
+        })
+        .unwrap();
+    t.set("call", call).unwrap();
+    let hh = h.clone();
+    t.set("queued", lua.create_function(move |_, ()| Ok(mailbox::run_queued(&*hh).events)).unwrap()).unwrap();
+    t.set("waitPoint", task::test_wait(lua, IDX, h.clone()).unwrap()).unwrap();
+    let hh = h.clone();
+    t.set(
+        "release",
+        lua.create_function(move |_, (name, value): (String, Value)| Ok(task::test_release(&*hh, &name, value))).unwrap(),
+    )
+    .unwrap();
+    let hh = h.clone();
+    t.set("waiting", lua.create_function(move |_, name: String| Ok(task::test_waiting(&*hh, &name))).unwrap()).unwrap();
+    t.set("task", task::table(lua, IDX, h.clone()).unwrap()).unwrap();
+    let hh = h.clone();
+    t.set(
+        "settle",
+        lua.create_function(move |_, ()| {
+            let until = Instant::now() + Duration::from_secs(10);
+            loop {
+                reads::fire(&*hh);
+                if !hh.state.has_pending() || Instant::now() >= until {
+                    return Ok(());
                 }
-                Err(e) => {
-                    out.push_back(Value::Boolean(false));
-                    out.push_back(Value::String(lua.create_string(e.to_string())?));
-                }
+                std::thread::sleep(Duration::from_millis(2));
             }
-            Ok(out)
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let legacy = lua
+        .create_function(|lua, (name, _opts, why): (String, Value, String)| {
+            let message = task::wait_message(&name, task::Case::of(&why));
+            Ok((false, Value::String(lua.create_string(message)?)))
         })
         .unwrap();
-    let shim: Function = lua.load(TASK_SHIM).set_name(crate::task::SHIM_NAME).eval().expect("the shim compiles");
-    let message = lua
-        .create_function(|_, (name, why): (String, String)| {
-            Ok(crate::task::wait_message(&name, crate::task::Case::of(&why)))
-        })
-        .unwrap();
-    t.get::<Function>("installTasks")
-        .unwrap()
-        .call::<()>((shim, message, crate::task::RESUMED, resume_error, crate::task::FOREIGN_YIELD))
-        .expect("the tasks install");
+    let waits = task::waits(lua, IDX, h, legacy).expect("the waits build");
+    let host: Table = t.get("host").unwrap();
+    let ocr: Table = host.raw_get("ocr").unwrap();
+    ocr.raw_set("recognize", waits.get::<Function>("recognize").unwrap()).unwrap();
+    ocr.raw_set("recognizeMany", waits.get::<Function>("recognizeMany").unwrap()).unwrap();
     t
 }
 
 /// What every scenario ends on, whichever loader ran it: nothing was asked of the scripted host
 /// that it does not have — a raise that a `pcall` of the runtime swallowed included (`S.missing`) —
 /// no control's hook raised (`[overlay] '…': its text raised: …`) unless the scenario is about
-/// one (`S.hooksMayRaise`), and no task ended with an error unless the scenario is about that
-/// (`S.tasksMayRaise`). A `recognize` in a hook that cannot wait raises there in this host, which
+/// one (`S.hooksMayRaise`), and no handler ended with an error — a key's, a timer's, the menu
+/// tick's — unless the scenario is about that (`S.tasksMayRaise`). A `recognize` in a hook that cannot wait raises there in this host, which
 /// plays the end of the blocking call, so this is where such a hook is found rather than as a value
 /// that went missing without a word.
 pub(crate) fn finish(lua: &Lua) {
@@ -936,7 +959,7 @@ pub(crate) fn finish(lua: &Lua) {
           end
         end
         if not S.tasksMayRaise then
-          assert(#S.taskErrors == 0, "a task raised: " .. table.concat(S.taskErrors, " | "))
+          assert(#S.taskErrors == 0, "a handler raised: " .. table.concat(S.taskErrors, " | "))
         end
     "#;
     if let Err(e) = lua.load(check).set_name("the end of the scenario").exec() {
@@ -1980,6 +2003,7 @@ fn a_dialog_that_a_native_menus_item_opened_is_not_held_and_its_overlay_keeps_th
         local prefs = T.O.new("Komplete Kontrol Preferences")
         prefs:addCustomButton({ label = "Close", onActivate = function() end })
         prefs:attach({ class = "#32770" })
+        T.runDue() -- its first evaluation, on the module's next turn
         assert(o.active and not prefs.active, T.dump())
         T.press(o)
         S.native = true
@@ -3010,6 +3034,8 @@ fn an_identity_that_could_not_be_told_yet_is_asked_again() {
         o:addCustomButton({ label = "Search library browser", hotkey = "Alt+S", onActivate = function() end })
         o:attachEmbedded({ hosts = { T.HOST }, control = "Qt%d+.-QWindowIcon",
           identify = function() asked += 1; return answer end }, { slot = "com.platform.kontakt" })
+        assert(asked == 0, "not asked as it binds, at the module's top level: " .. asked)
+        T.runDue() -- its first evaluation, on the module's next turn
         assert(asked >= 1 and not o.active, "not recognised yet: " .. asked)
         answer = true
         T.event()
@@ -3116,13 +3142,15 @@ fn an_identify_that_keeps_answering_nil_is_taken_as_no_after_eight() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Tasks in the scripted host: the host's own shim, and the end of the blocking call played.
+// Handlers in the scripted host: the host's own mailbox, wait point and shim, and the end of the
+// blocking call played.
 // ---------------------------------------------------------------------------------------------
 
 /// The arbiter's onActivate is Lua the host calls back, where nothing can wait — in this host as
 /// in the real one, since its setMatching calls through `T.hostCall`. A `recognize` there, in an
-/// onActivate a task's own setMatching ran, raises the second message; outside every task, the
-/// first. In the task itself it waits, and `T.answer` hands it its reading.
+/// onActivate a task of the tests' entry ran, raises the second message; outside every task, the
+/// first — and in a handler too, in this build, whose handlers never wait. In the task itself it
+/// waits, and the read service's answer resumes it.
 #[test]
 fn recognize_in_an_onactivate_a_task_ran_cannot_wait() {
     run(r#"
@@ -3135,64 +3163,58 @@ fn recognize_in_an_onactivate_a_task_ran_cannot_wait() {
         assert(string.find(err, "host.ocr.recognize cannot wait here: this is inside a function that cannot be suspended", 1, true), err)
         local ok2, err2 = pcall(T.host.ocr.recognizeMany, { regions = { { 0, 0, 10, 10 } } })
         assert(ok2 == false and string.find(err2, "host.ocr.recognizeMany cannot wait for the text recogniser here", 1, true), err2)
-        local t = T.task.run(function() got = T.host.ocr.recognize({ region = { 0, 0, 10, 10 } }).text end)
-        assert(got == nil and #S.waits == 1 and T.task.alive(t))
-        T.answer(S.waits[1], { status = "text", text = "seen" })
-        assert(got == "seen" and not T.task.alive(t) and #S.taskErrors == 0)
+        T.call("key", function() ok3, err3 = pcall(T.host.ocr.recognize, { region = { 0, 0, 10, 10 } }) end)
+        assert(ok3 == false and string.find(err3, "host.ocr.recognize cannot wait for the text recogniser here", 1, true), err3)
+        local t = T.task.run(function() got = T.host.ocr.recognize({ region = { 9701, 5, 9731, 15 } }).text end)
+        assert(got == nil and T.task.alive(t))
+        T.settle()
+        assert(got == "9701,5" and not T.task.alive(t) and #S.taskErrors == 0)
     "#);
 }
 
-/// A task's own `coroutine.yield` raises where it was made, as in the real host: a `pcall` around
-/// it catches it and the task goes on — to a wait of its own, here; without one the task ends with
-/// that error, and the end of the scenario would fail on it unless the scenario expects it.
+/// A callback's own `coroutine.yield` raises where it was made, as in the real host: a `pcall`
+/// around it catches it and the callback goes on; without one the callback ends with that error,
+/// and the end of the scenario would fail on it unless the scenario expects it.
 #[test]
-fn a_tasks_own_yield_raises_at_the_yield_in_the_scripted_host() {
+fn a_callbacks_own_yield_raises_at_the_yield_in_the_scripted_host() {
     run(r#"
         local S = T.S
-        local a = T.task.run(function()
+        assert(T.call("timer", function()
           okY, errY = pcall(coroutine.yield, "anything")
           after = true
-          got = T.host.ocr.recognize({ region = { 0, 0, 10, 10 } }).text
-        end)
-        assert(okY == false and string.find(tostring(errY), "coroutine.yield cannot wait here", 1, true), tostring(errY))
-        assert(after == true and #S.waits == 1 and T.task.alive(a), "it went on to its wait")
-        T.answer(S.waits[1], { status = "text", text = "seen" })
-        assert(got == "seen" and not T.task.alive(a))
-        assert(#S.taskErrors == 0, table.concat(S.taskErrors, " | "))
+        end) == "Ran")
+        assert(okY == false and string.find(tostring(errY), "cannot wait for one of your own callbacks", 1, true), tostring(errY))
+        assert(after == true and #S.taskErrors == 0, table.concat(S.taskErrors, " | "))
         S.tasksMayRaise = true
-        local b = T.task.run(function() coroutine.yield() end)
-        assert(not T.task.alive(b) and #S.taskErrors == 1, table.concat(S.taskErrors, " | "))
-        assert(string.find(S.taskErrors[1], "coroutine.yield cannot wait here", 1, true), S.taskErrors[1])
+        T.call("timer", function() coroutine.yield() end)
+        assert(#S.taskErrors == 1, table.concat(S.taskErrors, " | "))
+        assert(string.find(S.taskErrors[1], "cannot wait for one of your own callbacks", 1, true), S.taskErrors[1])
     "#);
 }
 
-/// Module code that resumes a waiting task's coroutine itself takes it from the host, as in the
-/// real host: the wait raises in the coroutine the module now runs, the task is forgotten and its
-/// wait withdrawn, and the answer that comes later resumes nothing. One the module closes has
-/// ended.
+/// Module code that resumes a waiting handler's coroutine itself takes it from the host, as in the
+/// real host: the wait raises in the coroutine the module now runs, the handler is forgotten, and
+/// a later answer resumes nothing. One the module closes has ended.
 #[test]
-fn module_code_resuming_or_closing_a_task_takes_it_from_the_scripted_host() {
+fn module_code_resuming_or_closing_a_handler_takes_it_from_the_scripted_host() {
     run(r#"
-        local S = T.S
-        local id = T.task.run(function()
+        assert(T.call("timer", function()
           co = coroutine.running()
-          ok, err = pcall(T.host.ocr.recognize, { region = { 0, 0, 10, 10 } })
+          ok, err = pcall(T.waitPoint, "w")
           finished = true
-        end)
-        assert(#S.waits == 1 and T.task.alive(id))
+        end) == "Parked")
+        assert(T.waiting("w") and finished == nil)
         assert(coroutine.resume(co, "not the host"))
-        assert(ok == false and string.find(tostring(err), "the task was resumed by the module's own code", 1, true), tostring(err))
-        assert(finished == true and not T.task.alive(id) and S.waits[1].withdrawn)
-        T.answer(S.waits[1], { status = "text", text = "late" })
-        local c = T.task.run(function()
+        assert(ok == false and string.find(tostring(err), "resumed by the module's own code", 1, true), tostring(err))
+        assert(finished == true and not T.waiting("w"))
+        assert(T.release("w") == false)
+        assert(T.call("timer", function()
           co2 = coroutine.running()
-          T.host.ocr.recognize({ region = { 0, 0, 10, 10 } })
+          T.waitPoint("w2")
           resumed = true
-        end)
+        end) == "Parked")
         assert(coroutine.close(co2))
-        assert(not T.task.alive(c), "a closed task has ended")
-        T.answer(S.waits[2], { status = "text", text = "late" })
-        assert(resumed == nil)
+        assert(T.release("w2") == false and resumed == nil)
     "#);
 }
 
@@ -3201,15 +3223,34 @@ fn module_code_resuming_or_closing_a_task_takes_it_from_the_scripted_host() {
 #[test]
 fn a_second_cancel_of_a_running_task_is_false_in_the_scripted_host() {
     run(r#"
-        local S = T.S
         local t
         t = T.task.run(function()
-          T.host.ocr.recognize({ region = { 0, 0, 10, 10 } })
+          T.host.ocr.recognize({ region = { 9711, 5, 9741, 15 } })
           first, second = T.task.cancel(t), T.task.cancel(t)
-          T.host.ocr.recognize({ region = { 0, 0, 10, 10 } })
+          T.host.ocr.recognize({ region = { 9712, 5, 9742, 15 } })
           reached = true
         end)
-        T.answer(S.waits[#S.waits], { status = "text", text = "x" })
+        T.settle()
         assert(first == true and second == false and reached == nil and not T.task.alive(t))
+    "#);
+}
+
+/// The scripted host's keys go through the real mailbox: a Tab pressed while the module is busy
+/// waits, and the next tick's queued phase runs it — after the handler that made it wait has
+/// ended, never while it waits.
+#[test]
+fn a_key_pressed_while_the_scripted_module_is_busy_runs_on_the_next_tick() {
+    run(r#"
+        local S = T.S
+        local o = T.overlay(nil)
+        assert(o.focus == 1)
+        assert(T.call("timer", function() T.waitPoint("busy") end) == "Parked")
+        T.tab()
+        assert(o.focus == 1, "the Tab waits")
+        T.tick()
+        assert(o.focus == 1, "not while the module is busy")
+        assert(T.release("busy"))
+        T.tick()
+        assert(o.focus == 2, "the Tab ran on the tick after")
     "#);
 }

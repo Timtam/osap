@@ -34,6 +34,7 @@ use mlua::{Function, Lua, MultiValue, Table, Value};
 
 use crate::backend::{CaptureSource, OcrLine, OcrText, OcrWord, OcrWorker, Recognise};
 use crate::image_search::VmOwner;
+use crate::mailbox::{self, Event, MailHost, Mailboxes, Opened, Why};
 use crate::ocr::lang::Languages;
 use crate::ocr::lua::{self as reads, Delivered, OcrState, ReadHost};
 use crate::ocr::service::{Service, ShutdownHandle};
@@ -43,8 +44,9 @@ use crate::timers::{self, Timers};
 
 // ── The fake recogniser ──────────────────────────────────────────────────────────────────────
 
-/// The fake's pixels: the regions it was asked to photograph.
-type Fake = Vec<(i32, i32, i32, i32)>;
+/// The fake's pixels: the regions it was asked to photograph. Also the key-scope tests' (key_scope_tests.rs),
+/// whose busy module waits for a read of it.
+pub(crate) type Fake = Vec<(i32, i32, i32, i32)>;
 
 fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -124,7 +126,7 @@ fn fake_recognise(shot: &Fake, _: &[(i32, i32, i32, i32)], ctx: &Recognise) -> V
     })
 }
 
-fn worker() -> OcrWorker<Fake> {
+pub(crate) fn worker() -> OcrWorker<Fake> {
     OcrWorker {
         present: true,
         init_thread: |_| {},
@@ -152,6 +154,7 @@ struct Host {
     stop: ShutdownHandle,
     state: OcrState,
     tasks: Tasks,
+    mail: Mailboxes,
     timers: Timers,
     gens: RefCell<HashMap<usize, u64>>,
     enabled: RefCell<Vec<bool>>,
@@ -163,6 +166,8 @@ struct Host {
     raise: Cell<bool>,
     /// (module, call, the shim's word for where) of every legacy call.
     legacy: RefCell<Vec<(usize, String, String)>>,
+    /// The "Slow every text read" switch, as this holder's own.
+    slow: Cell<bool>,
     /// This thread is the loop's while the holder lives.
     _loop: crate::loop_guard::TestLoop,
 }
@@ -205,15 +210,54 @@ impl ReadHost for Host {
     fn screen_size(&self) -> (i32, i32) {
         (1920, 1080)
     }
+    fn slow_reads(&self) -> bool {
+        self.slow.get()
+    }
+}
+
+/// The events this holder's modules hear: the answers to their reads and their timers.
+impl MailHost for Host {
+    fn mail(&self) -> &Mailboxes {
+        &self.mail
+    }
+    fn open(&self, idx: usize, _: &Lua, ev: Event) -> Opened {
+        let timer = |f: Option<Function>| match f {
+            Some(f) => Opened::Run { f, args: MultiValue::new(), ctx: task::Ctx::new("timer", idx) },
+            None => Opened::Gone,
+        };
+        match ev {
+            Event::Read(r) => reads::open_read(self, *r),
+            Event::After { token } => timer(self.timers.take_queued(token)),
+            Event::Every { token } => timer(self.timers.every_fn(token)),
+            Event::Call { f, args, what, .. } => mailbox::open_call(idx, f, args, what),
+            _ => Opened::Gone,
+        }
+    }
+    fn discard(&self, _: usize, ev: Event, _: Why) {
+        match ev {
+            Event::Read(r) => reads::discard_read(self, *r),
+            Event::After { token } => self.timers.drop_queued(token),
+            _ => {}
+        }
+    }
 }
 
 fn host() -> Rc<Host> {
-    let (ocr, stop) = Service::spawn(worker());
+    holder(Service::spawn(worker()))
+}
+
+/// A holder whose read service counts a hang after `hang` instead of five seconds.
+fn host_hanging_after(hang: Duration) -> Rc<Host> {
+    holder(Service::spawn_hanging_after(worker(), hang))
+}
+
+fn holder((ocr, stop): (Service<Fake>, ShutdownHandle)) -> Rc<Host> {
     Rc::new(Host {
         ocr,
         stop,
         state: OcrState::default(),
         tasks: Tasks::default(),
+        mail: Mailboxes::default(),
         timers: Timers::default(),
         gens: RefCell::new(HashMap::new()),
         enabled: RefCell::new(Vec::new()),
@@ -221,6 +265,7 @@ fn host() -> Rc<Host> {
         errors: RefCell::new(Vec::new()),
         raise: Cell::new(false),
         legacy: RefCell::new(Vec::new()),
+        slow: Cell::new(false),
         _loop: crate::loop_guard::mark_for_a_test(),
     })
 }
@@ -317,12 +362,24 @@ fn fire(h: &Host) -> Delivered {
     reads::fire(h)
 }
 
+/// The timers due at `at`, through each module's mailbox as the host fires them.
 fn fire_timers(h: &Host, at: Instant) {
     h.timers.fire_due(
         at,
-        |idx| h.module_enabled(idx),
+        |idx| match (h.module_enabled(idx), mailbox::busy(h, idx)) {
+            (false, _) => timers::Slot::Off,
+            (true, true) => timers::Slot::Busy,
+            (true, false) => timers::Slot::Free,
+        },
         || h.bump_epoch(),
-        |idx, e| h.report_error(idx, "timer", e),
+        |due| match due {
+            timers::Due::Once { token, idx, lua } => {
+                mailbox::deliver(h, idx, &lua, Event::After { token });
+            }
+            timers::Due::Every { token, idx, lua } => {
+                mailbox::deliver(h, idx, &lua, Event::Every { token });
+            }
+        },
     );
 }
 
@@ -912,10 +969,10 @@ fn a_tasks_own_yield_raises_at_the_yield() {
     );
     assert!(yes(&lua, "return okY == false and after == true and task.alive(a) == false and task.alive(b) == false"));
     let e: String = lua.load("return tostring(errY)").eval().unwrap();
-    assert!(e.contains(task::FOREIGN_YIELD), "{e}");
+    assert!(e.contains(task::OWN_YIELD), "{e}");
     let errs = errors(&h);
     assert_eq!(errs.len(), 1, "{errs:?}");
-    assert!(errs[0].1 == "task" && errs[0].2.contains(task::FOREIGN_YIELD), "{errs:?}");
+    assert!(errs[0].1 == "task" && errs[0].2.contains(task::OWN_YIELD), "{errs:?}");
     assert_eq!(h.tasks.len(), 0);
 }
 
@@ -1227,7 +1284,7 @@ fn a_task_that_waits_in_a_trigger_lets_the_initial_report_count_it() {
         client_w: 800,
         client_h: 600,
     };
-    let fired = crate::dispatch_initial(&lua, Some(&win), false, &|| {}).unwrap();
+    let fired = crate::dispatch_initial(&lua, Some(&win), false, None).unwrap();
     assert_eq!(fired, 2);
     assert!(yes(&lua, r#"return #order == 3 and order[2] == "first callback returns" and order[3] == "second callback""#));
     settle(&h);
@@ -1377,6 +1434,226 @@ fn pending_says_whether_a_read_or_a_wait_with_the_key_is_out() {
         let e = lua.load(bad).exec().expect_err(bad).to_string();
         assert!(e.contains(says), "{bad}: {e}");
     }
+}
+
+// ── A read a key waits behind, the hang answer, the slow-reads switch ────────────────────────
+
+/// Turns of the loop — the readings only — until `cond` holds in `lua`, 10 s at most.
+fn fire_until(h: &Host, lua: &Lua, cond: &str) {
+    let until = Instant::now() + Duration::from_secs(10);
+    while !yes(lua, cond) {
+        assert!(Instant::now() < until, "never: {cond}");
+        reads::fire(h);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// `f`, a global of `lua`, as an event of module 1 through its mailbox: an input or not.
+fn event(h: &Host, lua: &Lua, f: &str, args: Vec<Value>, input: bool) -> mailbox::Delivered {
+    let f: Function = lua.globals().get(f).unwrap();
+    let what = if input { "key" } else { "timer" };
+    mailbox::deliver(h, 1, lua, Event::Call { f, args: MultiValue::from_vec(args), input, what })
+}
+
+/// A key queued behind a handler that waits at a poll's read makes that read interactive — taken
+/// and recognised as a key's, and so never allowed to leave out its last passes
+/// (`preempt=false`) — and every read the handler waits for after it: its next read is
+/// interactive too. What it arms after them stays a poll's: a read with a callback asked then is
+/// recognised as a poll's (`preempt=true`), so a poll that re-arms itself does not become a
+/// person's for good. The key runs after it, in order. Without the key, every read is a poll's.
+#[test]
+fn a_key_queued_behind_a_polls_read_makes_the_read_interactive() {
+    let _wait = task::handlers_wait_here();
+    let h = host();
+    let lua = vm(&h, 1);
+    run(
+        &lua,
+        r#"
+        heard = {}
+        function poll(x)
+          heard[#heard + 1] = host.ocr.recognize({ region = { x, 79, x + 30, 89 } }).text
+          heard[#heard + 1] = host.ocr.recognize({ region = { x + 1, 79, x + 31, 89 } }).text
+          host.ocr.read({ x + 2, 79, x + 32, 89 }, function(r) armed = r.text end)
+        end
+        function key() heard[#heard + 1] = "key" end
+        "#,
+    );
+    let heard = || lua.load("return table.concat(heard, ' | ')").eval::<String>().unwrap();
+    assert_eq!(event(&h, &lua, "poll", vec![Value::Integer(9301)], false), mailbox::Delivered::Parked);
+    settle(&h);
+    assert_eq!(heard(), "preempt=true | preempt=true", "a poll's reads, with nothing behind them");
+    fire_until(&h, &lua, "return armed ~= nil");
+    assert!(yes(&lua, r#"return armed == "preempt=true""#));
+
+    run(&lua, "heard = {}; armed = nil");
+    hold(9311); // its picture is not taken before the key has queued
+    assert_eq!(event(&h, &lua, "poll", vec![Value::Integer(9311)], false), mailbox::Delivered::Parked);
+    {
+        let _key = enter_priority(Priority::Interactive);
+        assert_eq!(event(&h, &lua, "key", Vec::new(), true), mailbox::Delivered::Queued);
+    }
+    release(9311);
+    settle(&h);
+    mailbox::run_queued(&*h);
+    assert_eq!(heard(), "preempt=false | preempt=false | key");
+    assert_eq!(current_priority(), Priority::Background, "restored after each stretch");
+    fire_until(&h, &lua, "return armed ~= nil");
+    assert!(yes(&lua, r#"return armed == "preempt=true""#), "what the raised handler armed is still a poll's");
+
+    // Behind it a poll's own timer, which nobody waits on: nothing is raised.
+    run(&lua, "heard = {}; armed = nil");
+    hold(9341);
+    assert_eq!(event(&h, &lua, "poll", vec![Value::Integer(9341)], false), mailbox::Delivered::Parked);
+    assert_eq!(event(&h, &lua, "key", Vec::new(), false), mailbox::Delivered::Queued);
+    release(9341);
+    settle(&h);
+    mailbox::run_queued(&*h);
+    assert_eq!(heard(), "preempt=true | preempt=true | key");
+    fire_until(&h, &lua, "return armed ~= nil");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
+}
+
+/// The hang answer on the event loop: once the recogniser has answered no region for the hang
+/// bound, every read still out ends `"failed"` with the reason — the one being recognised and the
+/// ones behind it, a callback's and a task's wait alike — once; `pending` is false for them
+/// afterwards; a read asked meanwhile is refused with the reason; and once the recogniser answers
+/// again, reads are taken again and the held recognition's late answer reaches nobody. Held, not
+/// timed: the recognition does not come back until the test lets it.
+#[test]
+fn a_hang_ends_every_read_still_out_with_the_reason() {
+    let h = host_hanging_after(Duration::from_millis(100));
+    let lua = vm(&h, 1);
+    hold_recognition(9321);
+    run(
+        &lua,
+        r#"
+        ended = {}
+        local function note(what)
+          return function(r) ended[#ended + 1] = { what = what, status = r.status, error = r.error } end
+        end
+        host.ocr.read({ 9321, 5, 9351, 15 }, { key = "running" }, note("running"))
+        host.ocr.read({ 9322, 5, 9352, 15 }, { key = "queued" }, note("queued"))
+        task.run(function() note("waited")(host.ocr.recognize({ region = { 9323, 5, 9353, 15 } })) end)
+        "#,
+    );
+    wait_recognising(9321);
+    fire_until(&h, &lua, "return #ended == 3");
+    assert!(
+        yes(
+            &lua,
+            r#"local seen = {}
+            for _, e in ipairs(ended) do
+              if e.status ~= "failed" or string.find(e.error, "the text recogniser has not answered a region for", 1, true) ~= 1 then
+                return false
+              end
+              seen[e.what] = true
+            end
+            return seen.running and seen.queued and seen.waited
+              and host.ocr.pending("running") == false and host.ocr.pending("queued") == false"#
+        ),
+        "{:?}",
+        lua.load("local t = {} for _, e in ipairs(ended) do t[#t + 1] = e.what .. ' ' .. e.status .. ' ' .. tostring(e.error) end return table.concat(t, ' | ')").eval::<String>()
+    );
+    run(&lua, r#"host.ocr.read({ 9324, 5, 9354, 15 }, function(r) late = r.status .. " " .. r.error end)"#);
+    fire_until(&h, &lua, "return late ~= nil");
+    assert!(yes(&lua, r#"return string.find(late, "failed the text recogniser has not answered a region for", 1, true) == 1"#));
+
+    release(9321);
+    // Taken again once the recogniser has answered; it reads one job at a time, so by the time
+    // this one is answered the held one's late answer has come — and gone to nobody.
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        run(&lua, r#"again = nil; host.ocr.read({ 9325, 5, 9355, 15 }, function(r) again = r.status end)"#);
+        fire_until(&h, &lua, "return again ~= nil");
+        if yes(&lua, "return again == 'text'") {
+            break;
+        }
+        assert!(Instant::now() < until, "never taken again");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    settle(&h);
+    assert!(yes(&lua, "return #ended == 3"), "the hang's reads were answered once");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
+}
+
+/// The slow-reads switch: an answer is handed over 2 s after it came, on a clock the test steps,
+/// to a callback and to a task's wait alike; the read is still out for `pending` meanwhile; the
+/// loop goes on — no turn is held, and a timer of the same module runs while the answer is held;
+/// a disable meanwhile drops it; switched off, everything held is handed over at once, in the
+/// order it came.
+#[test]
+fn the_slow_reads_switch_hands_answers_over_two_seconds_late() {
+    let h = host();
+    let lua = vm(&h, 1);
+    h.slow.set(true);
+    let got = || lua.load("return table.concat(got, ' | ')").eval::<String>().unwrap();
+    // Turns of the loop at `now` until `n` answers are held; none of them holds the loop.
+    let held = |n: usize, now: Instant| {
+        let until = Instant::now() + Duration::from_secs(10);
+        while h.state.held() < n {
+            assert!(Instant::now() < until, "never held");
+            let turn = Instant::now();
+            reads::fire_at(&*h, now);
+            assert!(turn.elapsed() < Duration::from_millis(500), "a turn of the loop waited");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    run(
+        &lua,
+        r#"
+        got = {}
+        host.ocr.read({ 9331, 5, 9361, 15 }, { key = "k" }, function(r)
+          got[#got + 1] = "read " .. r.text
+          inCallback = host.ocr.pending("k")
+        end)
+        task.run(function()
+          local r = host.ocr.recognize({ region = { 9332, 5, 9362, 15 } })
+          got[#got + 1] = "waited " .. r.text
+        end)
+        "#,
+    );
+    let t0 = Instant::now();
+    held(2, t0);
+    assert!(yes(&lua, "return #got == 0 and host.ocr.pending('k') == true"), "{}", got());
+    run(&lua, "host.timer.after(0, function() got[#got + 1] = 'timer' end)");
+    fire_timers(&h, Instant::now());
+    assert_eq!(got(), "timer", "the module goes on while its answers are held");
+    reads::fire_at(&*h, t0 + Duration::from_millis(1999));
+    assert_eq!(got(), "timer");
+    reads::fire_at(&*h, t0 + Duration::from_secs(2));
+    assert_eq!(got(), "timer | read 9331,5 | waited 9332,5");
+    assert!(yes(&lua, "return inCallback == false"));
+    assert!(!h.state.has_pending());
+
+    // A disable while it is held drops it.
+    run(&lua, "got = {}; host.ocr.read({ 9333, 5, 9363, 15 }, function() got[#got + 1] = 'dropped' end)");
+    let t1 = Instant::now();
+    held(1, t1);
+    disable(&h, 1);
+    assert_eq!(h.state.held(), 0);
+    assert!(!h.state.has_pending(), "nothing is left to turn the loop for");
+    reads::fire_at(&*h, t1 + Duration::from_secs(3));
+    enable(&h, 1);
+    assert_eq!(got(), "");
+
+    // Off: everything held is handed over on the next turn, in the order it came.
+    run(
+        &lua,
+        r#"
+        host.ocr.read({ 9334, 5, 9364, 15 }, function(r) got[#got + 1] = r.text end)
+        host.ocr.read({ 9335, 5, 9365, 15 }, function(r) got[#got + 1] = r.text end)
+        "#,
+    );
+    let t2 = Instant::now();
+    held(2, t2);
+    h.slow.set(false);
+    reads::fire_at(&*h, t2);
+    assert_eq!(got(), "9334,5 | 9335,5");
+    assert_eq!(h.state.held(), 0);
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
 }
 
 /// A key reads and speaks, and a new press ends the one before it while that one still waits.

@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 165 entries.
+Every call the platform offers a module, in one place. 166 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -216,7 +216,7 @@ Claiming keys before the focused application sees them, and the key spec every c
 | [`host.keys.passedThrough()`](keys#host-keys-passedthrough) | The keys the hook let through to the application because a menu was open, since the last call |
 | [`host.keys.release(token)`](keys#host-keys-release) | Undoes the exact capture identified by the `token` `host.keys.capture` returned, recomputing the global captured set so the… |
 | [`host.keys.releaseAll()`](keys#host-keys-releaseall) | Removes **all** key captures owned by this module and refreshes the suppression set. |
-| [`host.keys.scope(toForeground)`](keys#host-keys-scope) | Scopes captured-key suppression. |
+| [`host.keys.scope(toForeground)`](keys#host-keys-scope) | Scopes your module's captured keys. |
 
 ## host.hotkey
 
@@ -393,5 +393,6 @@ The shapes and grammars the calls above are written in.
 | [`Recognition language`](ocr#recognition-language) | What `lang` means, and what leaving it out means. |
 | [`Region form`](screen#region-form) | A region is a rectangle on screen, written in one of two forms: by its **corners**, or as **fractions of a window's client area**. |
 | [`Table shapes`](window#table-shapes) | Returned by `host.window.list()`, `host.window.active()`, `host.window.find()`, `host.window.findAll()`, and passed to trigger/test callbacks. |
+| [`Where a hook runs`](overlay#where-a-hook-runs) | Every callback of a module runs as a handler of the host, one at a time per module, and the runtime calls an overlay's hooks inside them. |
 | [`Which picture a read sees`](screen#which-picture-a-read-sees) | Every call on this page, and `host.ocr.read` / `recognize` / `recognizeMany`, reads the screen one way for the whole module,… |
 | [`ocrLabel — reading a control's name off the screen`](overlay#ocrlabel) | Any hotspot or hotspot-toggle may carry `ocrLabel = {x1, y1, x2, y2}` (origin-relative) |

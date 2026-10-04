@@ -23,11 +23,13 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use mlua::{Function, Lua, RegistryKey, Table};
+use mlua::{Function, Lua, MultiValue, RegistryKey, Table, Value};
 
 use crate::backend::gamepad::chord::{Chord, PadNow, Pending};
 use crate::backend::gamepad::{self as gp, demand, names, Axis, Button, PadEvent, PadEventKind, PadInfo, PadState};
-use crate::{appcfg, call_guarded, clock_origin, logging, Shared};
+use crate::mailbox::{self, Event, Opened, PadKind};
+use crate::task::Ctx;
+use crate::{appcfg, clock_origin, logging, Shared};
 
 /// Which events a listener is for — the first argument of `host.gamepad.on`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -660,28 +662,55 @@ impl Shared {
         self.deliver_pad_events(&batch, &deliveries);
     }
 
-    /// Makes the callbacks. The listener list is NOT borrowed while one runs: a callback may
-    /// call `on` or `off` — the usual way to stop listening is from inside the listener — and
-    /// each callback is looked up by token afresh, so one that was removed by an earlier
-    /// callback in the same batch is skipped instead of called.
+    /// Hands each delivery to its listener's module, through its mailbox (`mailbox.rs`): run at
+    /// once while the module is free. The listener list is NOT borrowed while one runs: a callback
+    /// may call `on` or `off` — the usual way to stop listening is from inside the listener — and
+    /// each callback is looked up by token afresh as it runs (`open_pad`), so one that was removed
+    /// by an earlier callback in the same batch is skipped instead of called.
     fn deliver_pad_events(&self, batch: &[PadEvent], deliveries: &[Delivery]) {
         for d in deliveries {
             let found = {
                 let ls = self.pads.listeners.borrow();
-                ls.iter().find(|l| l.token == d.token).and_then(|l| {
-                    let chord = l.filter.chord.as_ref().map(|c| c.buttons().to_vec());
-                    l.lua.registry_value::<Function>(&l.cb).ok().map(|f| (l.module_idx, l.lua.clone(), f, chord))
-                })
+                ls.iter().find(|l| l.token == d.token).map(|l| (l.module_idx, l.lua.clone(), l.filter.chord.is_some()))
             };
-            let Some((idx, lua, f, chord)) = found else { continue };
-            let now = Instant::now();
-            let table = match &chord {
-                Some(set) => chord_table(&lua, &batch[d.event], set, now),
-                None => event_table(&lua, &batch[d.event], d.value, d.partner, now),
+            let Some((idx, lua, chord)) = found else { continue };
+            let ev = &batch[d.event];
+            let kind = match &ev.kind {
+                PadEventKind::Down(_) => PadKind::Button,
+                PadEventKind::Up(_) => PadKind::Release,
+                _ if chord => PadKind::Button,
+                // The half of the stick this delivery is about: its own axis, or its partner's.
+                PadEventKind::Axis { axis, .. } => PadKind::Axis(match names::partner(*axis) {
+                    Some(p) if d.partner => p,
+                    _ => *axis,
+                }),
+                PadEventKind::Connected(_) | PadEventKind::Disconnected(_) => PadKind::Other,
             };
-            let result = table.map_err(|e| e.to_string()).and_then(|t| call_guarded(&f, t));
-            if let Err(e) = result {
-                self.report_callback_error(idx, "gamepad", &e);
+            mailbox::deliver(self, idx, &lua, Event::Pad { token: d.token, kind, event: Box::new(ev.clone()), delivery: *d });
+        }
+    }
+
+    /// A controller event as it runs (`Event::Pad`): its listener, looked up by token now — gone
+    /// when the listener was removed meanwhile — with the event's table; `age` counts to now.
+    pub(crate) fn open_pad(&self, token: i64, ev: &PadEvent, d: &Delivery) -> Opened {
+        let found = {
+            let ls = self.pads.listeners.borrow();
+            ls.iter().find(|l| l.token == token).and_then(|l| {
+                let chord = l.filter.chord.as_ref().map(|c| c.buttons().to_vec());
+                l.lua.registry_value::<Function>(&l.cb).ok().map(|f| (l.module_idx, l.lua.clone(), f, chord))
+            })
+        };
+        let Some((idx, lua, f, chord)) = found else { return Opened::Gone };
+        let now = Instant::now();
+        let table = match &chord {
+            Some(set) => chord_table(&lua, ev, set, now),
+            None => event_table(&lua, ev, d.value, d.partner, now),
+        };
+        match table {
+            Ok(t) => Opened::Run { f, args: MultiValue::from_vec(vec![Value::Table(t)]), ctx: Ctx::new("gamepad", idx) },
+            Err(e) => {
+                self.report_callback_error(idx, "gamepad", &e.to_string());
+                Opened::Gone
             }
         }
     }

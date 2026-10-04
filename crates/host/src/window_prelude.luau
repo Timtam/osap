@@ -195,6 +195,12 @@ end
 -- every foreground change; here we run the matching registered callbacks.
 local triggers = {}
 
+-- Every trigger gets a number when it is registered, one more than the last. An activation
+-- carries the newest number there was when it arrived (`_triggerSeq`): it may run later, after
+-- an earlier event of a busy module, and a trigger that event registered does not get it — its
+-- own initial report is still to come.
+local triggerSeq = 0
+
 local focusCbs = {}
 
 -- The keys of a matcher whose type decides what it means, checked when a trigger registers.
@@ -255,12 +261,14 @@ function W.onTrigger(matcher, opts, cb)
   if opts.initial ~= nil and type(opts.initial) ~= "boolean" then
     error("host.window.onTrigger: initial is true or false, not a " .. type(opts.initial), 2)
   end
+  triggerSeq += 1
   local t = {
     matcher = matcher or {},
     on = opts.on or "activate",
     cb = cb,
     initial = opts.initial == true,
     primed = false,
+    seq = triggerSeq,
   }
   triggers[#triggers + 1] = t
   if t.initial then
@@ -282,6 +290,11 @@ end
 
 function W._hasTriggers()
   return #triggers > 0 or #focusCbs > 0
+end
+
+-- The number of the newest trigger, 0 with none: what an activation carries when it arrives.
+function W._triggerSeq()
+  return #triggers > 0 and triggerSeq or 0
 end
 
 -- Whether `_dispatchInitial(win, reprime)` would have anything to do: a trigger still waiting
@@ -310,34 +323,55 @@ end
 -- Reported per VM with a count, because the shape of the number is the diagnosis: one
 -- expensive callback reads differently from a hundred cheap ones, and a single VM standing
 -- out differently again from all nine sharing the load.
+--
+-- The time is the dispatch's own: what its module's handler spent parked at a wait meanwhile is
+-- left out. `waited`, which the host passes, says how long that handler has been parked so far
+-- (milliseconds); it is absent where nothing waits.
 local SLOW_DISPATCH_MS = 40
+
+local function parked(waited)
+  return waited and waited() or 0
+end
 
 -- `beforeFirst`, when the host passes one, runs once before the first matching callback:
 -- the host's preparation for the reads that callback is about to make (opening desktop
 -- duplication for a module that reads through it — see capture_source.rs). Before it, not
 -- after them all, because by then that first read has already paid for the opening.
-function W._dispatchActivate(win, beforeFirst)
+--
+-- `upto` is the newest trigger number when the activation arrived (`_triggerSeq`; nil: every
+-- trigger): a trigger registered after that and before this dispatch — by an earlier event of
+-- the module that ran first — is neither reached nor un-primed; one a callback of this very
+-- dispatch registers is.
+function W._dispatchActivate(win, beforeFirst, waited, upto)
   local started = host.now and host.now() or nil
+  local parkedBefore = parked(waited)
   local fired = 0
+  local atStart = triggerSeq
+  upto = upto or atStart
+  local function reached(t)
+    return t.seq <= upto or t.seq > atStart
+  end
   for _, t in ipairs(triggers) do
-    -- This activation IS the report of what is in front now, for every trigger: one still
-    -- waiting for its initial report has had it (see onTrigger).
-    t.primed = false
+    -- This activation IS the report of what is in front now, for every trigger it reaches: one
+    -- still waiting for its initial report has had it (see onTrigger).
+    if reached(t) then t.primed = false end
   end
   for _, t in ipairs(triggers) do
     -- Again here, for a trigger a callback of this very dispatch registered: the loop reaches
     -- it and reports this window to it, so its initial report would be the same one twice.
-    t.primed = false
-    if t.on == "activate" and matches(t.matcher, win) then
-      fired = fired + 1
-      if fired == 1 and beforeFirst then
-        beforeFirst()
+    if reached(t) then
+      t.primed = false
+      if t.on == "activate" and matches(t.matcher, win) then
+        fired = fired + 1
+        if fired == 1 and beforeFirst then
+          beforeFirst()
+        end
+        t.cb(win)
       end
-      t.cb(win)
     end
   end
   if started then
-    local ms = host.now() - started
+    local ms = host.now() - started - (parked(waited) - parkedBefore)
     if ms >= SLOW_DISPATCH_MS then
       host.log.info(string.format(
         "[dispatch] activate %d ms — %d of %d trigger(s) fired", ms, fired, #triggers
@@ -353,9 +387,10 @@ end
 -- as with an activation, an error skips the module's later triggers for this report. With
 -- `reprime` — the module was just enabled — every `initial` trigger is primed again first.
 -- `beforeFirst` is the host's preparation before the first matching callback, as in
--- `_dispatchActivate`. Returns how many callbacks ran.
-function W._dispatchInitial(win, reprime, beforeFirst)
+-- `_dispatchActivate`, and `waited` the same. Returns how many callbacks ran.
+function W._dispatchInitial(win, reprime, beforeFirst, waited)
   local started = host.now and host.now() or nil
+  local parkedBefore = parked(waited)
   local due = {}
   for _, t in ipairs(triggers) do
     if reprime and t.initial then t.primed = true end
@@ -377,7 +412,7 @@ function W._dispatchInitial(win, reprime, beforeFirst)
     end
   end
   if started then
-    local ms = host.now() - started
+    local ms = host.now() - started - (parked(waited) - parkedBefore)
     if ms >= SLOW_DISPATCH_MS then
       host.log.info(string.format(
         "[dispatch] initial %d ms — %d of %d trigger(s) fired", ms, fired, #due
@@ -387,13 +422,14 @@ function W._dispatchInitial(win, reprime, beforeFirst)
   return fired
 end
 
-function W._dispatchFocus()
+function W._dispatchFocus(waited)
   local started = host.now and host.now() or nil
+  local parkedBefore = parked(waited)
   for _, cb in ipairs(focusCbs) do
     cb()
   end
   if started then
-    local ms = host.now() - started
+    local ms = host.now() - started - (parked(waited) - parkedBefore)
     if ms >= SLOW_DISPATCH_MS then
       host.log.info(string.format(
         "[dispatch] focus %d ms — %d callback(s)", ms, #focusCbs

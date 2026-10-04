@@ -14,7 +14,10 @@
 //!
 //! **A hang is a region that does not come back**, not a long job: the recognisers report each
 //! region they answer, and new reads are refused only when none has been answered for
-//! `policy::HANG`. The same per-region loop is where a closing application stops a job.
+//! `policy::HANG`. Then every read still waiting — the one being recognised, and those queued
+//! behind it, which would never be answered — is ended too, once, by the event loop's sweep
+//! ([`Service::hang_sweep`]): a module waiting for one would hear nothing otherwise. The same
+//! per-region loop is where a closing application stops a job.
 //!
 //! **One capture thread**, named `screen-capture`, for the text reads' pictures and for
 //! `host.screen.snapshotAsync`'s: a snapshot is the same act as the first half of a read. The
@@ -148,12 +151,16 @@ struct State<S> {
     answered_at: Option<Instant>,
     /// Said once per hang, and once when it ends.
     hang_said: bool,
+    /// The reads waiting during this hang were ended (`hang_sweep`): once per hang.
+    swept: bool,
 }
 
 impl<S> State<S> {
     /// The running recognition answered a region (`still_running`), or finished: the hang clock
-    /// starts again, or stops, and a hang that was reported is reported over.
+    /// starts again, or stops, a hang that was reported is reported over, and the next one ends
+    /// the reads waiting then.
     fn answered(&mut self, now: Instant, still_running: bool) {
+        self.swept = false;
         let since = if still_running { self.answered_at.replace(now) } else { self.answered_at.take() };
         if self.hang_said {
             self.hang_said = false;
@@ -235,6 +242,13 @@ impl<S: Send + 'static> Service<S> {
         Self::spawn_with(worker, Limits::POLICY, Instant::now)
     }
 
+    /// [`Service::spawn`] with `hang` for the hang bound: the tests of what a hang does to the
+    /// reads waiting on the event loop, which cannot wait out the real five seconds.
+    #[cfg(test)]
+    pub(crate) fn spawn_hanging_after(worker: OcrWorker<S>, hang: Duration) -> (Service<S>, ShutdownHandle) {
+        Self::spawn_with(worker, Limits { hang, ..Limits::POLICY }, Instant::now)
+    }
+
     fn spawn_with(worker: OcrWorker<S>, limits: Limits, clock: Clock) -> (Service<S>, ShutdownHandle) {
         let inner = Arc::new(Inner {
             limits,
@@ -244,6 +258,7 @@ impl<S: Send + 'static> Service<S> {
                 lane: SnapLane::new(worker.display_of),
                 answered_at: None,
                 hang_said: false,
+                swept: false,
             }),
             capture_cv: Condvar::new(),
             recognise_cv: Condvar::new(),
@@ -408,6 +423,57 @@ impl<S: Send + 'static> Service<S> {
             self.inner.recognise_cv.notify_one();
         }
         found
+    }
+
+    /// Makes `ticket` an interactive read, and its job with it, unless that job is being
+    /// recognised already (`Scheduler::promote`): a handler waits for it, and somebody waits on
+    /// what queued behind that handler. Woken as `submit` wakes: the picture may be taken now,
+    /// over the budget, and a background recognition in progress may leave out its last passes.
+    /// True when a job was raised.
+    pub fn promote(&self, ticket: TicketId) -> bool {
+        let mut st = locked(&self.inner.state);
+        let raised = st.sched.promote(ticket);
+        self.inner.preempt.store(st.sched.interactive_waiting(), Ordering::Relaxed);
+        drop(st);
+        if raised {
+            self.inner.capture_cv.notify_one();
+            self.inner.recognise_cv.notify_one();
+        }
+        raised
+    }
+
+    /// The hang answer, asked by the event loop each turn while a read is out: once the
+    /// recogniser has answered no region for the hang bound — a region, or a Mac's warm-up, that
+    /// does not come back — every ticket still waiting, the one being recognised included, is
+    /// taken off its job, once per hang, and handed back with the reason it is to be answered
+    /// `"failed"` with: behind a recognition that does not come back nothing would ever be
+    /// answered, and a module waiting for a read would hear nothing. The recognition goes on;
+    /// should it come back, its job finds nobody to answer. New reads are refused meanwhile, as
+    /// before, and the next hang after the recogniser answers again is swept again. `None` while
+    /// there is no hang, and after the sweep until then. Failure detection on the hang bound, not
+    /// a timer deciding what is said.
+    pub fn hang_sweep(&self) -> Option<(Vec<TicketId>, String)> {
+        let now = (self.inner.clock)();
+        let mut st = locked(&self.inner.state);
+        if st.swept {
+            return None;
+        }
+        let why = hang_refusal(&mut st, &self.inner.limits, now)?;
+        st.swept = true;
+        let failed = st.sched.cancel_all();
+        self.inner.preempt.store(st.sched.interactive_waiting(), Ordering::Relaxed);
+        drop(st);
+        // Nothing is left to photograph: an input barrier stops waiting, and the pictures that
+        // went free the budget.
+        self.inner.barrier_cv.notify_all();
+        self.inner.capture_cv.notify_one();
+        if !failed.is_empty() {
+            logging::line(
+                "ocr",
+                &format!("the {} read(s) waiting for the text recogniser were answered \"failed\": {why}", failed.len()),
+            );
+        }
+        Some((failed, why))
     }
 
     /// Waits until module `idx` has no picture left to be taken — of a text read, a plain
@@ -767,6 +833,9 @@ fn recognise_loop<S: Send + 'static>(inner: Arc<Inner<S>>, worker: OcrWorker<S>,
         inner.capture_cv.notify_one();
 
         let began = Instant::now();
+        // Decided at the start, for the whole job: a read promoted while it is being recognised
+        // (`promote`) runs on as the background read it started as, a flag per job not being
+        // worth it for the rare read promoted in that moment (docs/api/ocr.md says so).
         let preempt = (job.prio == Priority::Background).then_some(&inner.preempt);
         // Each region answered restarts the hang clock.
         let answered = || locked(&inner.state).answered(Instant::now(), true);
@@ -978,9 +1047,33 @@ mod tests {
 
     /// A capture of a held region waits here for its release, at most 10 s.
     fn wait_while_held(x: i32) {
-        if !(5580..5590).contains(&x) {
-            return;
+        if (5580..5590).contains(&x) {
+            held_until_released(x);
         }
+    }
+
+    /// Regions from x = 5590 to 5599 are photographed at once and their recognition is held until
+    /// their test lets it go, at most 10 s: a recognition that does not come back, for the hang
+    /// tests, without a clock.
+    fn wait_while_recognition_held(x: i32) {
+        if (5590..5600).contains(&x) {
+            locked(&RECOGNITION_BEGUN).push(x);
+            held_until_released(x);
+        }
+    }
+
+    /// The held regions whose recognition has begun.
+    static RECOGNITION_BEGUN: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+
+    /// Waits until the recognition of held region `x` has begun, at most 10 s.
+    fn wait_recognising(x: i32) {
+        let until = Instant::now() + Duration::from_secs(10);
+        while !locked(&RECOGNITION_BEGUN).contains(&x) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn held_until_released(x: i32) {
         let until = Instant::now() + Duration::from_secs(10);
         let mut held = locked(&HELD);
         while held.contains(&x) && Instant::now() < until {
@@ -1030,11 +1123,12 @@ mod tests {
 
     /// Reads "x,y lang" for every region, one at a time through `Recognise::each` as the platform
     /// recognisers do. Slowly for x = 999 (60 ms); for y = 77, 100 ms; for y = 78, 400 ms; for
-    /// y = 81, 50 ms. Panics at x = 666. At y = 79 it says whether it may be preempted; at y = 80
-    /// it answers a word no screen has (x = i32::MAX), which the host's own arithmetic cannot
-    /// place.
+    /// y = 81, 50 ms; a held region (x = 5590 to 5599) until its release. Panics at x = 666. At
+    /// y = 79 it says whether it may be preempted; at y = 80 it answers a word no screen has
+    /// (x = i32::MAX), which the host's own arithmetic cannot place.
     fn fake_recognise(shot: &Fake, _: &[(i32, i32, i32, i32)], ctx: &Recognise) -> Vec<Result<OcrText, String>> {
         ctx.each(shot.iter(), |&(x, y, _, _)| {
+            wait_while_recognition_held(x);
             if x == 666 {
                 panic!("{}inside the fake recogniser", crate::EXPECTED_PANIC);
             }
@@ -1411,6 +1505,65 @@ mod tests {
         collect(&s, 1);
         assert!(s.submit(spec_at(42, 2), of(other, 5, Priority::Interactive)).refused.is_none(), "over");
         collect(&s, 1);
+        stop.shutdown(Duration::from_secs(2));
+    }
+
+    /// The hang answer: once no region has been answered for the hang bound, every read still out
+    /// — the one being recognised, one waiting for the recogniser, one whose picture is being
+    /// taken — is handed back with the reason, once; the recognition's late answer finds nobody;
+    /// a read asked meanwhile is refused with the reason; and once the recogniser answers again,
+    /// the next hang is swept again. Held, not timed: the recognition does not come back until
+    /// the test lets it.
+    #[test]
+    fn a_hang_ends_every_read_still_out_once() {
+        let (s, stop) = Service::spawn_with(worker(), Limits { hang: Duration::from_millis(100), ..Limits::POLICY }, Instant::now);
+        let b = Owner { idx: 2, gen: 1 };
+        let swept = |s: &Service<Fake>| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Some(out) = s.hang_sweep() {
+                    return out;
+                }
+                assert!(Instant::now() < deadline, "never swept");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        hold(5590);
+        hold(5586);
+        s.submit(spec(5590), ticket(1, Some("k")));
+        s.submit(spec(33), of(b, 2, Priority::Background));
+        s.submit(spec(5586), ticket(3, None));
+        wait_recognising(5590);
+        let (mut failed, why) = swept(&s);
+        failed.sort_unstable();
+        assert_eq!(failed, vec![1, 2, 3], "the running read, one waiting for the recogniser, one being photographed");
+        assert!(why.starts_with("the text recogniser has not answered a region for"), "{why}");
+        assert!(s.hang_sweep().is_none(), "once per hang");
+        let refused = s.submit(spec(34), of(b, 4, Priority::Interactive)).refused.expect("refused while it hangs");
+        assert!(refused.starts_with("the text recogniser has not answered a region for"), "{refused}");
+
+        release(5586);
+        release(5590);
+        // Taken again once the recogniser answered; and since it reads one job at a time, the
+        // late answer of the held one has come and gone by the time this one is answered.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut id = 10;
+        while s.submit(spec(35), of(b, id, Priority::Interactive)).refused.is_some() {
+            assert!(Instant::now() < deadline, "never taken again");
+            id += 1;
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let done = collect(&s, 1);
+        let answered: Vec<TicketId> = done.iter().flat_map(|d| d.tickets.iter().map(|t| t.id)).collect();
+        assert_eq!(answered, vec![id], "nothing for the reads the hang ended");
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(s.drain().is_empty());
+
+        hold(5591);
+        s.submit(spec(5591), ticket(20, None));
+        wait_recognising(5591);
+        assert_eq!(swept(&s).0, vec![20], "the next hang is swept again");
+        release(5591);
         stop.shutdown(Duration::from_secs(2));
     }
 

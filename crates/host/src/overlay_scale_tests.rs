@@ -819,3 +819,48 @@ fn on_ear_chooser_rows_are_clicked_in_the_windows_own_pixels() {
         assert(T.lastClick() == "340,168", "the row's left edge + 170, its middle: " .. T.lastClick())
     "##);
 }
+
+/// A tile's press reads nothing of the tile first — the runtime reads a stepper's value before a
+/// press and nobody else's (runtime 0.3.0) — and still clicks where the grid sits NOW: the tile
+/// learns that itself, from one read of the whole grid, before it clicks. The read before the press
+/// used to do it on the side, through the tile's `text`.
+#[test]
+fn on_ear_a_tile_press_reads_no_text_first_and_clicks_on_a_fresh_grid() {
+    run(r##"
+        local S = T.S
+        local made = T.collect()
+        T.module("modules/ik-on-ear/")
+        local phones
+        for _, o in ipairs(made) do
+          if o.label == "Headphone Browser" then phones = o end
+        end
+        assert(phones, "the headphone chooser")
+        -- The design's own size, at the screen's corner: one design pixel is one screen pixel.
+        S.origin = { id = 7, app = { pid = 4242 }, client = { x = 0, y = 0, w = 1920, h = 1009 },
+          bounds = { x = 0, y = 0, w = 1920, h = 1009 } }
+        T.front(phones)
+        local tile
+        for i, c in ipairs(phones.controls) do
+          if c.label == "Headphone 1" then tile = i end
+        end
+        local texts, text = 0, phones.controls[tile].text
+        phones.controls[tile].text = function(...)
+          texts += 1
+          return text(...)
+        end
+        -- The grid has slid 20 down: the first tile's printed name sits 70 below its middle,
+        -- at 314 + 20 + 70 = 404.
+        rawset(T.host.ocr, "recognize", function(opts)
+          local r = opts.region
+          S.recognized[#S.recognized + 1] = { r[1], r[2], r[3], r[4] }
+          return { text = "HD600", skipped = false,
+            words = { { text = "HD600", x = 727, y = 398, w = 40, h = 12 } } }
+        end)
+        phones:activate(tile)
+        assert(texts == 0, "the tile's text is not read before the press: " .. texts)
+        assert(#S.recognized == 1 and table.concat(S.recognized[1], ",") == "652,214,1616,801",
+          "one read of the whole grid: " .. #S.recognized)
+        assert(T.lastClick() == "747,334", "the tile where the grid sits now: " .. T.lastClick())
+        assert(T.count("[on-ear] Headphone Browser: read the grid in") == 1, T.dump())
+    "##);
+}

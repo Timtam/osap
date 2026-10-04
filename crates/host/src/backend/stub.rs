@@ -1,12 +1,39 @@
 //! Fallback backend for platforms without a real implementation yet.
 //! Window queries return empty; hotkey registration returns an error.
+//!
+//! Also the backend of the tests that run module VMs against the host's key bindings: it keeps
+//! the captures and the owners it is handed, as a hook would, so a test can decide a key by them
+//! with [`super::capture_decision`], and it answers `resolve_key_scope` with the window a test
+//! put in front.
+
+use std::cell::{Cell, RefCell};
 
 use super::{
-    Backend, CaptureFn, CaptureSource, CapturedImage, ControlInfo, DumpNode, HostEvents,
-    MouseButton, OcrText, WinInfo, CAPTURE_FAILED,
+    Backend, CaptureFn, CaptureSource, CapturedImage, Captured, ControlInfo, DumpNode, HostEvents,
+    MouseButton, OcrText, OwnerKeys, WinInfo, CAPTURE_FAILED,
 };
 
-pub struct StubBackend;
+#[derive(Default)]
+pub struct StubBackend {
+    /// The window in front, as far as this backend knows: 0, unless a test put one there.
+    front: Cell<isize>,
+    /// The captures and the owners as the host last handed them over.
+    keys: RefCell<(Vec<Captured>, Vec<OwnerKeys>)>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl StubBackend {
+    /// Puts window `w` in front, for `resolve_key_scope`.
+    pub(crate) fn set_front(&self, w: isize) {
+        self.front.set(w);
+    }
+
+    /// The captures and the owners as the host last handed them over — what a hook would decide
+    /// a key by.
+    pub(crate) fn keys(&self) -> (Vec<Captured>, Vec<OwnerKeys>) {
+        self.keys.borrow().clone()
+    }
+}
 
 impl Backend for StubBackend {
     fn environment(&self) -> Vec<(String, String)> {
@@ -159,9 +186,18 @@ impl Backend for StubBackend {
     fn element_focus_step(&self, _hwnd: isize, _direction: i32) -> Option<super::FocusStep> {
         None
     }
-    fn set_captured_keys(&self, _keys: &[(u32, u8)]) {}
-    fn set_key_scope(&self, _to_foreground: bool) {}
-    fn set_menu_open(&self, _open: bool) {}
+    fn set_captured_keys(&self, keys: &[Captured]) {
+        self.keys.borrow_mut().0 = keys.to_vec();
+    }
+    fn set_key_owners(&self, owners: &[OwnerKeys]) {
+        self.keys.borrow_mut().1 = owners.to_vec();
+    }
+    fn resolve_key_scope(&self) -> isize {
+        self.front.get()
+    }
+    fn key_front(&self) -> isize {
+        self.front.get()
+    }
     fn modifiers_down(&self) -> bool {
         false
     }

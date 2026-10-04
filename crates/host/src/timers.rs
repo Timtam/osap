@@ -30,6 +30,10 @@ struct Once {
     /// The priority of the dispatch that armed it, which its callback runs under: a re-read
     /// 150 ms after a key press is still the user waiting (see `ocr::types::Priority`).
     prio: Priority,
+    /// Handed to its module's mailbox, where it waits while the module is busy: still in this
+    /// list, so `cancel` still finds it, and taken out only as it runs (`take_queued`). Not
+    /// collected again by a later tick.
+    queued: bool,
 }
 
 /// A recurring timer: fired at `next`, then re-armed `interval` later — also while its module
@@ -66,7 +70,7 @@ impl Timers {
         let cb = lua.create_registry_value(cb)?;
         let token = self.token();
         let prio = current_priority();
-        self.once.borrow_mut().push(Once { token, deadline: now + delay, idx, lua: lua.clone(), cb, prio });
+        self.once.borrow_mut().push(Once { token, deadline: now + delay, idx, lua: lua.clone(), cb, prio, queued: false });
         Ok(token)
     }
 
@@ -123,47 +127,60 @@ impl Timers {
         self.once.borrow().is_empty() && self.every.borrow().is_empty()
     }
 
-    /// Fires every timer due at `now`: the one-shot ones first, then the recurring ones, each
-    /// group in the order it was armed.
+    /// Hands every timer due at `now` to `deliver` — each module's mailbox, which runs it at once
+    /// when the module is free: the one-shot ones first, then the recurring ones, each group in
+    /// the order it was armed, each under its priority (`enter_priority`).
     ///
     /// **No list is borrowed while a callback runs.** A callback may arm, and cancel, timers —
     /// the usual way to stop a poll is from inside it — so the due timers are collected as
-    /// TOKENS, and each is looked up again just before it is called. One that an earlier
-    /// callback of the same tick cancelled is gone by then and is skipped, which is what makes
-    /// "stop the other timer" work when both were due together. A timer armed during the tick
-    /// is not among the collected tokens, so it waits for a later tick, whatever its delay.
+    /// TOKENS, and each is looked up again just before it is handed over, and once more as it
+    /// runs (`take_queued`, `every_fn`). One that an earlier callback of the same tick cancelled
+    /// is gone by then and is skipped, which is what makes "stop the other timer" work when both
+    /// were due together. A timer armed during the tick is not among the collected tokens, so it
+    /// waits for a later tick, whatever its delay.
     ///
-    /// `enabled` says whether a module's callbacks may run; a one-shot timer that comes due
-    /// while its module is disabled is discarded uncalled, and a recurring one is re-armed
-    /// uncalled. `before_once` runs once, before the first one-shot callback, when any one-shot
-    /// timer was due (the host turns its epoch over there). `failed` hears every callback error.
+    /// `state` says what each module is now. A one-shot timer that comes due while its module is
+    /// disabled is discarded uncalled; one whose module is busy waits in the mailbox — marked
+    /// queued, so no later tick collects it again — and runs late, never early, cancellable until
+    /// it runs. A recurring one is re-armed from now either way, and called only when its module
+    /// is free: skipped while it is busy or disabled. `before_once` runs once, before the first
+    /// one-shot timer is handed over, when any was due and not queued already (the host turns its
+    /// epoch over there).
     pub(crate) fn fire_due(
         &self,
         now: Instant,
-        enabled: impl Fn(usize) -> bool,
+        state: impl Fn(usize) -> Slot,
         before_once: impl FnOnce(),
-        mut failed: impl FnMut(usize, &str),
+        mut deliver: impl FnMut(Due),
     ) {
         let due_once: Vec<i64> =
-            self.once.borrow().iter().filter(|t| t.deadline <= now).map(|t| t.token).collect();
+            self.once.borrow().iter().filter(|t| t.deadline <= now && !t.queued).map(|t| t.token).collect();
         if !due_once.is_empty() {
             before_once();
         }
         for token in due_once {
-            let taken = {
+            let found = {
                 let mut once = self.once.borrow_mut();
-                once.iter().position(|t| t.token == token).map(|i| once.remove(i))
-            };
-            let Some(t) = taken else { continue };
-            if enabled(t.idx) {
-                let _prio = enter_priority(t.prio);
-                if let Ok(f) = t.lua.registry_value::<Function>(&t.cb) {
-                    if let Err(e) = crate::call_guarded(&f, ()) {
-                        failed(t.idx, &e);
+                match once.iter().position(|t| t.token == token) {
+                    None => None,
+                    Some(i) if state(once[i].idx) == Slot::Off => Some(Err(once.remove(i))),
+                    Some(i) => {
+                        let t = &mut once[i];
+                        t.queued = true;
+                        Some(Ok((t.idx, t.lua.clone(), t.prio)))
                     }
                 }
+            };
+            match found {
+                None => {}
+                Some(Err(t)) => {
+                    let _ = t.lua.remove_registry_value(t.cb);
+                }
+                Some(Ok((idx, lua, prio))) => {
+                    let _prio = enter_priority(prio);
+                    deliver(Due::Once { token, idx, lua });
+                }
             }
-            let _ = t.lua.remove_registry_value(t.cb);
         }
 
         let due_every: Vec<i64> =
@@ -173,19 +190,62 @@ impl Timers {
                 let mut every = self.every.borrow_mut();
                 every.iter_mut().find(|t| t.token == token).map(|t| {
                     t.next = now + t.interval;
-                    (t.idx, t.lua.registry_value::<Function>(&t.cb).ok())
+                    (t.idx, t.lua.clone())
                 })
             };
-            let Some((idx, Some(f))) = found else { continue };
-            if enabled(idx) {
+            let Some((idx, lua)) = found else { continue };
+            if state(idx) == Slot::Free {
                 // A poll is background work, whatever armed it.
                 let _prio = enter_priority(Priority::Background);
-                if let Err(e) = crate::call_guarded(&f, ()) {
-                    failed(idx, &e);
-                }
+                deliver(Due::Every { token, idx, lua });
             }
         }
     }
+
+    /// The one-shot timer `token`, handed to its mailbox and running now: taken out of the list,
+    /// and its callback. `None` when it was cancelled or dropped meanwhile.
+    pub(crate) fn take_queued(&self, token: i64) -> Option<Function> {
+        let t = {
+            let mut once = self.once.borrow_mut();
+            let i = once.iter().position(|t| t.token == token && t.queued)?;
+            once.remove(i)
+        };
+        let f = t.lua.registry_value::<Function>(&t.cb).ok();
+        let _ = t.lua.remove_registry_value(t.cb);
+        f
+    }
+
+    /// The one-shot timer `token` will not run — its module was disabled or reloaded while it
+    /// waited in the mailbox: gone, as one that comes due while its module is disabled.
+    pub(crate) fn drop_queued(&self, token: i64) {
+        let t = {
+            let mut once = self.once.borrow_mut();
+            once.iter().position(|t| t.token == token && t.queued).map(|i| once.remove(i))
+        };
+        if let Some(t) = t {
+            let _ = t.lua.remove_registry_value(t.cb);
+        }
+    }
+
+    /// The recurring timer `token`'s callback, as it runs; `None` when it was cancelled meanwhile.
+    pub(crate) fn every_fn(&self, token: i64) -> Option<Function> {
+        self.every.borrow().iter().find(|t| t.token == token).and_then(|t| t.lua.registry_value::<Function>(&t.cb).ok())
+    }
+}
+
+/// What a module is, for its timers: free; busy — its handler waits, or its mailbox is not
+/// empty; or disabled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Slot {
+    Free,
+    Busy,
+    Off,
+}
+
+/// A timer that came due, for its module's mailbox (`Event::After`, `Event::Every`).
+pub(crate) enum Due {
+    Once { token: i64, idx: usize, lua: Lua },
+    Every { token: i64, idx: usize, lua: Lua },
 }
 
 /// A token as `cancel` receives it: a whole number, or nothing. Anything else — `nil`, a
@@ -274,17 +334,29 @@ mod tests {
     }
 
     /// Moves the clock to `ms` after `t0` and fires what is due then — a callback that arms a
-    /// timer arms it at that instant too.
+    /// timer arms it at that instant too. Every module is free: each timer runs at once, as a
+    /// free module's mailbox runs it (mailbox_tests.rs has the busy ones).
     fn fire(
         c: &Clocked,
         ms: u64,
         enabled: impl Fn(usize) -> bool,
         before_once: impl FnOnce(),
-        failed: impl FnMut(usize, &str),
+        mut failed: impl FnMut(usize, &str),
     ) {
         let at = c.t0 + Duration::from_millis(ms);
         c.now.set(at);
-        c.timers.fire_due(at, enabled, before_once, failed);
+        let state = |i| if enabled(i) { Slot::Free } else { Slot::Off };
+        c.timers.fire_due(at, state, before_once, |due| {
+            let (f, idx) = match due {
+                Due::Once { token, idx, .. } => (c.timers.take_queued(token), idx),
+                Due::Every { token, idx, .. } => (c.timers.every_fn(token), idx),
+            };
+            if let Some(f) = f {
+                if let Err(e) = crate::call_guarded(&f, ()) {
+                    failed(idx, &e);
+                }
+            }
+        });
     }
 
     /// [`fire`] with every module enabled, no epoch hook and no callback allowed to fail.

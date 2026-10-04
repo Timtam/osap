@@ -777,7 +777,8 @@ pub fn run_gui(
             &StaticText::builder(&app_tab)
                 .with_label(
                     "Settings for the application itself. Each takes effect when its \
-                     label says, and is remembered.",
+                     label says, and is remembered, unless its label says it is off again \
+                     after a restart.",
                 )
                 .build(),
             0,
@@ -913,9 +914,14 @@ pub fn run_gui(
                     crate::backend::request_voiceover_automation();
                 }
                 let now = crate::appcfg::get(key);
-                let mut store = settings::Store::load();
-                store.set_app_flag(key, now);
-                store.save();
+                // A switch that is never stored — the slow-reads test switch — is off again after
+                // a restart, as its label says; one left on by being forgotten would make every
+                // overlay late in normal use.
+                if crate::appcfg::persists(key) {
+                    let mut store = settings::Store::load();
+                    store.set_app_flag(key, now);
+                    store.save();
+                }
                 crate::logging::line(
                     "settings",
                     &format!("{key} is now {}", if now { "on" } else { "off" }),

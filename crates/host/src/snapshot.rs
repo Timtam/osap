@@ -54,6 +54,8 @@ use mlua::{Function, Lua, MetaMethod, MultiValue, RegistryKey, Table, UserData, 
 
 use crate::backend::frame::{self, Area, Frame, FrameVia};
 use crate::backend::CapturedImage;
+use crate::mailbox::{self, Event, Opened};
+use crate::task::Ctx;
 use crate::ocr::change::{ChangeSpec, Wait};
 use crate::ocr::policy::{
     AT_MAX, MAX_WAIT_PIXELS, MAX_WATCH, SLOW_LOG_EVERY, SNAP_PER_OWNER, SNAP_TOTAL, SNAP_WAITS, SNAP_WAITS_PER_OWNER,
@@ -64,7 +66,7 @@ use crate::ocr::snap_queue::{self, ChangeInfo, SnapDone, SnapId, SnapKind, SnapO
 use crate::ocr::types::{current_priority, enter_priority, Priority, Rect};
 use crate::region::{self, ScreenRect};
 use crate::region_lua::{self, PointArg};
-use crate::{call_guarded, capture_source, describe_value, logging, one_value, with_reason, Shared};
+use crate::{capture_source, describe_value, logging, one_value, with_reason, Shared};
 
 /// What one module VM's snapshots may hold between them. A constant like the template budget,
 /// not a setting: a snapshot of a whole 4K screen is 33 MB, so three of them held at once is a
@@ -1179,34 +1181,60 @@ fn info_table(lua: &Lua, frames: u32, change: Option<ChangeInfo>, waited: Durati
     Ok(t)
 }
 
-/// Calls one request's callback: `cb(snap, nil, info)` with a handle charged by its reservation
-/// settled to what the picture holds, or `cb(nil, reason, info)`.
-fn call_back(p: &mut PendingSnap, answer: Answer, process: &Rc<Cell<usize>>) -> Result<(), String> {
+/// One request's callback and what it is called with: `cb(snap, nil, info)` with a handle charged
+/// by its reservation settled to what the picture holds, or `cb(nil, reason, info)`.
+fn call_args(p: &mut PendingSnap, answer: Answer, process: &Rc<Cell<usize>>) -> mlua::Result<(Function, MultiValue)> {
     let lua = p.lua.clone();
-    let f: Function = lua.registry_value(&p.cb).map_err(|e| e.to_string())?;
-    let args = (|| -> mlua::Result<Vec<Value>> {
-        Ok(match answer {
-            Answer::Picture { frame, frames, change, waited } => {
-                let res = p.res.take().unwrap_or_else(|| Reservation::nothing(&lua, process));
-                let h = SnapshotHandle::of(frame, res, process.clone());
-                vec![Value::UserData(lua.create_userdata(h)?), Value::Nil, Value::Table(info_table(&lua, frames, change, waited)?)]
-            }
-            Answer::Failed { why, frames, change, waited } => {
-                p.res.take();
-                vec![Value::Nil, Value::String(lua.create_string(why)?), Value::Table(info_table(&lua, frames, change, waited)?)]
-            }
-        })
-    })()
-    .map_err(|e| e.to_string())?;
-    call_guarded(&f, MultiValue::from_vec(args))
+    let f: Function = lua.registry_value(&p.cb)?;
+    let args = match answer {
+        Answer::Picture { frame, frames, change, waited } => {
+            let res = p.res.take().unwrap_or_else(|| Reservation::nothing(&lua, process));
+            let h = SnapshotHandle::of(frame, res, process.clone());
+            vec![Value::UserData(lua.create_userdata(h)?), Value::Nil, Value::Table(info_table(&lua, frames, change, waited)?)]
+        }
+        Answer::Failed { why, frames, change, waited } => {
+            p.res.take();
+            vec![Value::Nil, Value::String(lua.create_string(why)?), Value::Table(info_table(&lua, frames, change, waited)?)]
+        }
+    };
+    Ok((f, MultiValue::from_vec(args)))
 }
 
-/// Delivers `answers`: each to a VM that `alive` says is still the one that asked and enabled,
-/// under the priority it was asked with; the others are dropped. An answer whose key a newer
-/// request of its module VM has taken since — made by a callback earlier in this batch — is
-/// answered [`SUPERSEDED`], its picture let go, as it would have been had the newer request come
-/// before the thread answered. Every callback is let go afterwards. `report` hears of a callback
-/// that raised.
+/// An answer as it runs (`Event::Snapshot`), its module still the VM that asked and enabled: answered
+/// [`SUPERSEDED`], its picture let go, when a newer request with its key was made since — by an
+/// event that ran before it, earlier in the same batch or in its module's mailbox — as it would
+/// have been had the newer request come before the thread answered. Its key is forgotten when it
+/// was the newest with it, and its callback let go: the call it returns holds what it needs.
+pub(crate) fn open_answer(
+    st: &SnapState,
+    mut p: PendingSnap,
+    answer: Answer,
+    process: &Rc<Cell<usize>>,
+) -> Result<(Function, MultiValue), String> {
+    let answer = if st.replaced(&p) {
+        p.res = None;
+        let (Answer::Picture { change, waited, .. } | Answer::Failed { change, waited, .. }) = answer;
+        Answer::Failed { why: SUPERSEDED.to_string(), frames: 0, change: change.map(|_| ChangeInfo::default()), waited }
+    } else {
+        answer
+    };
+    let call = call_args(&mut p, answer, process).map_err(|e| e.to_string());
+    st.forget_key(&p);
+    release(p);
+    call
+}
+
+/// An answer that will not run — its module was disabled, reloaded or rolled back: its key
+/// forgotten when it was the newest with it, its callback and its charge let go.
+pub(crate) fn drop_answer(st: &SnapState, p: PendingSnap) {
+    st.forget_key(&p);
+    release(p);
+}
+
+/// A batch of answers as the tick and the mailboxes deliver it, every module free: each to a VM
+/// that `alive` says is still the one that asked and enabled ([`open_answer`]), the others
+/// dropped. `report` hears of a callback that raised.
+#[cfg(test)]
 fn deliver(
     st: &SnapState,
     answers: Vec<(PendingSnap, Answer)>,
@@ -1214,22 +1242,21 @@ fn deliver(
     process: &Rc<Cell<usize>>,
     report: &dyn Fn(usize, &str),
 ) {
-    for (mut p, answer) in answers {
-        if alive(p.owner) {
-            let answer = if st.replaced(&p) {
-                p.res = None;
-                let (Answer::Picture { change, waited, .. } | Answer::Failed { change, waited, .. }) = answer;
-                Answer::Failed { why: SUPERSEDED.to_string(), frames: 0, change: change.map(|_| ChangeInfo::default()), waited }
-            } else {
-                answer
-            };
-            let _prio = enter_priority(p.prio);
-            if let Err(e) = call_back(&mut p, answer, process) {
-                report(p.scope, &e);
-            }
+    for (p, answer) in answers {
+        if !alive(p.owner) {
+            drop_answer(st, p);
+            continue;
         }
-        st.forget_key(&p);
-        release(p);
+        let scope = p.scope;
+        let _prio = enter_priority(p.prio);
+        match open_answer(st, p, answer, process) {
+            Ok((f, args)) => {
+                if let Err(e) = crate::call_guarded(&f, args) {
+                    report(scope, &e);
+                }
+            }
+            Err(e) => report(scope, &e),
+        }
     }
 }
 
@@ -1371,9 +1398,30 @@ impl Shared {
         }
         // One epoch for the drain: every answer in it is a fresh look at the screen.
         self.bump_epoch();
-        let alive = |o: Owner| crate::ocr::lua::deliverable(o, &self.vm_gens.borrow(), &self.enabled.borrow());
-        let report = |scope: usize, e: &str| self.report_callback_error(scope, "screen.snapshotAsync", e);
-        deliver(&self.snap_state, answers, &alive, &self.snap_bytes, &report);
+        for (p, answer) in answers {
+            // In the lane it was asked from, through its module's mailbox, which decides whether
+            // it may still be delivered and judges its key when it runs (`open_snapshot`).
+            let _prio = enter_priority(p.prio);
+            let (idx, lua) = (p.owner.idx, p.lua.clone());
+            mailbox::deliver(self, idx, &lua, Event::Snapshot { p: Box::new(p), answer });
+        }
+    }
+
+    /// An answer as it runs ([`open_answer`]); a call that could not be built is reported.
+    pub(crate) fn open_snapshot(&self, p: PendingSnap, answer: Answer) -> Opened {
+        let scope = p.scope;
+        match open_answer(&self.snap_state, p, answer, &self.snap_bytes) {
+            Ok((f, args)) => Opened::Run { f, args, ctx: Ctx::new("screen.snapshotAsync", scope) },
+            Err(e) => {
+                self.report_callback_error(scope, "screen.snapshotAsync", &e);
+                Opened::Gone
+            }
+        }
+    }
+
+    /// An answer that will not run ([`drop_answer`]).
+    pub(crate) fn discard_snapshot(&self, p: PendingSnap) {
+        drop_answer(&self.snap_state, p);
     }
 
     /// Drops every snapshot request of module `idx`, never calling back: disabled, reloaded or

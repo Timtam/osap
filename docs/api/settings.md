@@ -114,6 +114,26 @@ is disabled — the dialog can be opened for a disabled module too. `old` is not
 practice: `define` stores the default when nothing is stored, so the first change
 after load reports the default (or the persisted value) as `old`, never `nil`.
 
+**When it runs.** A callback registered from your own module runs inside your
+`host.settings.set`, before `set` returns. One registered from another module's VM — a
+dependent running your `code_module`'s code, say — runs after `set` has returned, as one of
+that module's callbacks, one at a time with its others: later in the same turn of the event
+loop — or in the next turn when `set` ran late in a turn, after the callbacks that waited for
+their modules had run: inside another such `onChange`, in a window trigger's report of the window
+already in front ([`initial = true`](window.md#host-window-ontrigger)), or in the round a
+[`host.window.recheck()`](window.md#host-window-recheck) asked for. A change made in the settings
+dialog reaches every callback in the turn after OK, about 15 ms later — never inside the dialog's
+own event — and a disabled module's in that turn too.
+
+```luau
+-- Module A defines "lang" and watches it.
+host.settings.onChange("lang", function(new) host.log.info("A heard " .. new) end)
+host.hotkey.register("Ctrl+Alt+L", function()
+  host.settings.set("lang", "de") -- "A heard de" is logged here, inside set
+  host.log.info("set returned")   -- then this; a dependent's callback for "lang" runs after it
+end)
+```
+
 A callback belongs to the VM it was registered from, and goes when that module is
 reloaded. That matters for a `code_module`, whose code also runs inside every module
 that depends on it (see [`host.require`](./require.md#host-require)): a callback it

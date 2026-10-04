@@ -63,7 +63,7 @@ use objc2_core_graphics::{
 };
 
 use super::{key_age, keys, queue, watch};
-use crate::backend::MASK_TAP;
+use crate::backend::{capture_decision, menu_flag_owners, Capture, Captured, OwnerKeys, PassWhy, Taken, MASK_TAP};
 use crate::logging;
 
 /// What the tap asks to see.
@@ -137,17 +137,21 @@ static INSTALLED: AtomicBool = AtomicBool::new(false);
 /// dereferenced from inside an OS callback.
 static PORT: AtomicPtr<CFMachPort> = AtomicPtr::new(std::ptr::null_mut());
 
-/// The (vk, mask) pairs the overlay currently wants. Replaced wholesale by the host.
-static CAPTURED: Mutex<Vec<(u32, u8)>> = Mutex::new(Vec::new());
+/// The captures the modules currently want, each with its module, and what each module set with
+/// `host.keys.scope` and `host.keys.menuOpen`: what [`crate::backend::capture_decision`] decides
+/// every key by. Replaced by the host, each half wholesale; one lock, so the callback never
+/// reads a set and the owners from two different moments.
+static KEY_STATE: Mutex<KeyState> = Mutex::new(KeyState { set: Vec::new(), owners: Vec::new() });
 
-/// The window suppression is scoped to, 0 for everywhere. A snapshot the caller took.
-static KEY_SCOPE: AtomicIsize = AtomicIsize::new(0);
+/// The tap's copy of the host's key table — see [`KEY_STATE`].
+struct KeyState {
+    set: Vec<Captured>,
+    owners: Vec<OwnerKeys>,
+}
 
-/// The frontmost window as `watch` last saw it. See `gate_closed`.
+/// The frontmost window as `watch` last saw it: the window every module's scope is compared
+/// with, read rather than asked — see [`decide`].
 static FOREGROUND: AtomicIsize = AtomicIsize::new(0);
-
-/// A plugin-drawn menu is open, so captured navigation keys belong to it, not to us.
-static MENU_OPEN: AtomicBool = AtomicBool::new(false);
 
 /// Keycode + 1 of the modifier held with nothing pressed since, 0 when none is.
 static TAP_ARMED: AtomicU32 = AtomicU32::new(0);
@@ -472,20 +476,25 @@ fn recheck_words(bits: u32) -> String {
     words.join(", ")
 }
 
+/// The key table, for the host's side: only a panic while the lock was held can poison it, and
+/// nothing here panics. Take the contents anyway rather than give up the key set for the rest of
+/// the session.
+fn key_state() -> std::sync::MutexGuard<'static, KeyState> {
+    match KEY_STATE.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 /// Replaces the whole captured set. Called on every focus move inside an overlay, so it
 /// has to stay cheap.
-pub fn set_captured_keys(keys: &[(u32, u8)]) {
+pub fn set_captured_keys(keys: &[Captured]) {
     // Reuse the vector's capacity: the set is a handful of pairs, replaced on every focus
     // move, and the allocator is not something to visit that often on the pump thread.
-    let mut held = match CAPTURED.lock() {
-        Ok(g) => g,
-        // Only a panic while the lock was held can poison it, and nothing here panics. Take
-        // the contents anyway rather than give up the key set for the rest of the session.
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    held.clear();
-    held.extend_from_slice(keys);
-    let n = held.len();
+    let mut held = key_state();
+    held.set.clear();
+    held.set.extend_from_slice(keys);
+    let n = held.set.len();
     drop(held);
     logging::trace("macos", || format!("tap: {n} captured key(s)"));
     // While anything is captured, App Nap is kept away: a napped main thread hands these keys
@@ -495,10 +504,35 @@ pub fn set_captured_keys(keys: &[(u32, u8)]) {
     // the tap never sees the press — and is explained the same way, once per chord. The
     // permissions page says the log warns for captures as well as registrations, and a
     // module's own capture can sit on the layer as easily as a hotkey can.
-    for &(vk, mask) in keys {
-        super::hotkey::warn_if_voiceover_owns(vk, mask, "captured");
-        warn_if_reserved(vk, mask);
+    for c in keys {
+        super::hotkey::warn_if_voiceover_owns(c.vk, c.mask, "captured");
+        warn_if_reserved(c.vk, c.mask);
     }
+}
+
+/// Replaces what each module set with `host.keys.scope` and `host.keys.menuOpen`. The record of
+/// keys let through for a menu of a module whose entry the host dropped — disabled, reloaded,
+/// removed — goes with the entry.
+pub fn set_key_owners(owners: &[OwnerKeys]) {
+    let mut held = key_state();
+    let gone: Vec<u32> =
+        held.owners.iter().map(|e| e.owner).filter(|o| !owners.iter().any(|e| e.owner == *o)).collect();
+    held.owners.clear();
+    held.owners.extend_from_slice(owners);
+    drop(held);
+    if !gone.is_empty() {
+        MENU_PASS.with(|m| m.borrow_mut().retain(|p| !gone.contains(&p.0)));
+    }
+    logging::trace("macos", || {
+        let each: Vec<String> = owners
+            .iter()
+            .map(|e| match (e.scope, e.menu) {
+                (0, m) => format!("module {} everywhere{}", e.owner, if m { ", menu open" } else { "" }),
+                (w, m) => format!("module {} in window {w}{}", e.owner, if m { ", menu open" } else { "" }),
+            })
+            .collect();
+        format!("tap: key scopes: {}", if each.is_empty() { "none".to_string() } else { each.join("; ") })
+    });
 }
 
 /// Chords already said to be the system's, by (vk, mask). The set is replaced on every focus
@@ -525,26 +559,32 @@ fn warn_if_reserved(vk: u32, mask: u8) {
     logging::line("macos", &line);
 }
 
-/// Which window suppression applies to; 0 means everywhere. The value is a SNAPSHOT taken
-/// when the caller asked, which is what lets a menu opened by a control receive keys
-/// natively — the menu is a different window, so the comparison stops matching.
+/// The window the tap was last told is in front, for the scope's fallback
+/// (`crate::backend::key_scope_window`).
+pub fn foreground() -> isize {
+    FOREGROUND.load(Ordering::Relaxed)
+}
+
+/// A module's captures were just pinned to `window`, the application's answer for the window in
+/// front; 0 means everywhere. The value is a SNAPSHOT taken when the module asked, which is what
+/// lets a menu opened by a control receive keys natively — the menu is a different window, so
+/// the comparison stops matching.
 ///
-/// It also settles a disagreement, and that is the interesting half. The gate compares this
-/// against [`FOREGROUND`], which is told to us by two notifications: the frontmost
-/// application changing, and the focused window changing inside an application we already
-/// observe. Neither is guaranteed when a window merely *opens* — the application was already
-/// frontmost, and the observer for it may be a moment younger than the window. The overlay
-/// gets there by another route (the re-check ladder resolves the window itself), so it can
-/// pin a scope while the tap still believes something else is in front — and the gate then
-/// declines to claim a single key. Tab does nothing, and switching out and back fixes it,
+/// This settles a disagreement, and that is the interesting half. The callback compares every
+/// module's scope against [`FOREGROUND`], which is told to us by two notifications: the
+/// frontmost application changing, and the focused window changing inside an application we
+/// already observe. Neither is guaranteed when a window merely *opens* — the application was
+/// already frontmost, and the observer for it may be a moment younger than the window. The
+/// overlay gets there by another route (the re-check ladder resolves the window itself), so it
+/// can pin a scope while the tap still believes something else is in front — and the callback
+/// then declines to claim a single key. Tab does nothing, and switching out and back fixes it,
 /// because that finally raises the notification.
 ///
 /// So a pin that disagrees asks once, here, on the activation path where an accessibility
 /// round trip is already the going rate, rather than in the callback where it would be paid
 /// per keystroke. And it says so in the log: this was diagnosed from a tester's description,
 /// not from evidence, and the line is what turns the next occurrence into evidence.
-pub fn set_key_scope(window: isize) {
-    KEY_SCOPE.store(window, Ordering::Relaxed);
+pub fn note_pinned(window: isize) {
     if window != 0 && FOREGROUND.load(Ordering::Relaxed) != window {
         let stale = FOREGROUND.load(Ordering::Relaxed);
         match super::ax::foreground_window_id() {
@@ -581,12 +621,6 @@ pub fn set_key_scope(window: isize) {
         0 => "tap: key scope is global".to_string(),
         w => format!("tap: key scope pinned to window {w}"),
     });
-}
-
-/// A plugin-drawn menu is open; let captured navigation keys through to it.
-pub fn set_menu_open(open: bool) {
-    MENU_OPEN.store(open, Ordering::Relaxed);
-    logging::trace("macos", || format!("tap: plugin menu open = {open}"));
 }
 
 /// Is the tap still alive? Re-enables it and says so if not.
@@ -801,51 +835,42 @@ unsafe extern "C-unwind" fn tap_callback(
         logging::trace("macos", || format!("tap: keycode {keycode} has no Win32 equivalent"));
         return pass;
     };
-    // The two keys that END a menu, remembered whenever the runtime says a plugin menu is
-    // open — captured or not. Escape is captured by no overlay, and Return only while the
-    // focused control wants it, so a record kept only for captured keys never held the one
-    // Escape that cancelled a menu.
-    //
-    // Remembered as noted, so that the gate below does not note the same press again: a
-    // captured Return passes both, and one press read as "Return, Return" in the runtime's log.
-    let mut menu_key_noted = false;
-    if is_menu_key(vk) && mask == 0 && MENU_OPEN.load(Ordering::Relaxed) {
-        note_menu_pass(vk, mask, "a plugin menu is open");
-        menu_key_noted = true;
-        if !captured(vk, mask) {
+    let front = FOREGROUND.load(Ordering::Relaxed);
+    let Some(decided) = decide(vk, mask, front, true) else {
+        return pass; // the pump was mid-replacement; said by `decide`
+    };
+    let owner = match decided {
+        None => {
+            // Traced, because the alternative is a whole class of question nobody can answer.
+            // "The overlay did not react to that key" has two causes that look identical from
+            // outside: the event never reached this tap, or it reached it and no module had
+            // claimed that exact combination. Silence here made them indistinguishable, and the
+            // Control-Option experiment turned on precisely that difference.
+            logging::trace("macos", || {
+                format!("tap: saw vk {vk:#04x} mask {mask}, nothing had claimed it")
+            });
             return pass;
         }
-    }
-    if !captured(vk, mask) {
-        // Traced, because the alternative is a whole class of question nobody can answer.
-        // "The overlay did not react to that key" has two causes that look identical from
-        // outside: the event never reached this tap, or it reached it and no module had
-        // claimed that exact combination. Silence here made them indistinguishable, and the
-        // Control-Option experiment turned on precisely that difference.
-        logging::trace("macos", || {
-            format!("tap: saw vk {vk:#04x} mask {mask}, nothing had claimed it")
-        });
-        return pass;
-    }
-    // Only now, with a match in hand, is it worth asking the questions that cost something.
-    if let Some(why) = gate_closed() {
-        // Said out loud, not traced, because this is the one event that explains a whole
-        // class of report. "The overlay did not react to that key" has three causes that
-        // sound identical from outside — the event never arrived, nothing had claimed it, or
-        // something HAD claimed it and this gate let it through anyway — and only the third
-        // means a key reached the application underneath and moved its focus. The tester met
-        // exactly that and could only describe it as "VoiceOver said dimmed button".
-        //
-        // Rate-limited on the reason rather than on the key, because a gate that is closed
-        // stays closed for as long as a menu is open or a window is not frontmost, and one
-        // line per keystroke would bury the log it is meant to explain.
-        report_gate_pass(vk, mask, why);
-        if !menu_key_noted {
-            note_menu_pass(vk, mask, why);
+        Some(Capture::Pass { why, .. }) => {
+            // Said out loud, not traced, because this is the one event that explains a whole
+            // class of report. "The overlay did not react to that key" has three causes that
+            // sound identical from outside — the event never arrived, nothing had claimed it, or
+            // something HAD claimed it and the tap let it through anyway — and only the third
+            // means a key reached the application underneath and moved its focus. The tester met
+            // exactly that and could only describe it as "VoiceOver said dimmed button".
+            //
+            // Rate-limited on the reason rather than on the key, because a reason that holds
+            // holds for as long as a menu is open or a window is not frontmost, and one line per
+            // keystroke would bury the log it is meant to explain.
+            report_gate_pass(vk, mask, pass_words(why));
+            return pass;
         }
-        return pass;
-    }
-    queue::push_key(vk, mask);
+        Some(Capture::Take { owner }) => owner,
+    };
+    // Read only for a key that is taken: the system's own word for the keyboard's auto-repeat
+    // of a key held down, handed to the host with the key. One field read, no call out.
+    let repeat = CGEvent::integer_value_field(Some(ev), CGEventField::KeyboardEventAutorepeat) != 0;
+    queue::push_key(Taken { vk, mask, owner, repeat, front });
     note_suppressed(keycode);
 
     // The first suppression of a run, said out loud once.
@@ -866,7 +891,7 @@ unsafe extern "C-unwind" fn tap_callback(
         );
     }
 
-    logging::trace("macos", || format!("tap: captured vk {vk:#04x} mask {mask}"));
+    logging::trace("macos", || format!("tap: captured vk {vk:#04x} mask {mask} for module {owner}"));
     std::ptr::null_mut()
 }
 
@@ -920,28 +945,52 @@ fn modifier_changed(keycode: u16, flags: CGEventFlags) {
     if TAP_ARMED.swap(0, Ordering::Relaxed) != keycode as u32 + 1 {
         return;
     }
-    if !captured(modifier.vk, MASK_TAP) {
-        return;
+    let front = FOREGROUND.load(Ordering::Relaxed);
+    match decide(modifier.vk, MASK_TAP, front, false) {
+        Some(Some(Capture::Take { owner })) => {
+            queue::push_key(Taken { vk: modifier.vk, mask: MASK_TAP, owner, repeat: false, front });
+            logging::trace("macos", || format!("tap: modifier tap vk {:#04x} for module {owner}", modifier.vk));
+        }
+        Some(Some(Capture::Pass { why, .. })) => {
+            logging::trace("macos", || format!("tap: modifier tap not dispatched ({})", pass_words(why)));
+        }
+        // Nothing claims the tap, or the pump was mid-replacement.
+        Some(None) | None => {}
     }
-    if let Some(why) = gate_closed() {
-        logging::trace("macos", || format!("tap: modifier tap not dispatched ({why})"));
-        return;
-    }
-    queue::push_key(modifier.vk, MASK_TAP);
-    logging::trace("macos", || format!("tap: modifier tap vk {:#04x}", modifier.vk));
 }
 
-/// Is this pair in the captured set? Exact equality on the mask, never "at least these".
+/// Whether a key-down of `(vk, mask)` is taken, and for which module, by the modules' captures,
+/// scopes and menu flags ([`capture_decision`]): the earliest capture whose module is scoped to
+/// `front` or to everywhere, unless a native menu is open or a module's flag counts for `front`.
+/// Matching is exact on the mask, never "at least these": `"Tab"` is mask 0 and must not swallow
+/// Command-Tab, which is the same key with the Ctrl role's mask (2); a subset test would take
+/// both.
 ///
-/// `"Tab"` is mask 0 and must not swallow Command-Tab, which is the same key with the Ctrl
-/// role's mask (2); a subset test would take both.
-fn captured(vk: u32, mask: u8) -> bool {
-    match CAPTURED.try_lock() {
-        Ok(set) => set.iter().any(|&(v, m)| v == vk && m == mask),
-        Err(TryLockError::Poisoned(p)) => p.into_inner().iter().any(|&(v, m)| v == vk && m == mask),
+/// With `menu_keys`, also files the keys let through for a menu in the record of every module
+/// whose flag counts for `front` — or, for a native menu, of the module that would have taken
+/// it — and an unmodified Return or Escape whenever a flag counts, captured or not: Escape is
+/// captured by no overlay, and Return only while the focused control wants it, so a record kept
+/// only for captured keys never held the one Escape that cancelled a menu. Each press is filed
+/// once: a captured Return is both.
+///
+/// **What it costs, in the callback whose promptness decides whether the system leaves the tap
+/// switched on.** A `try_lock`, never a wait. One walk of the captured set that stops at the
+/// first capture in scope, the owners looked up by a linear search of one entry per module that
+/// ever set a scope or a flag, and the menu rule only for the modules whose flag is up — tens of
+/// comparisons. Nothing allocates unless a key is filed for a menu. `front` is a number the tap
+/// was told ([`note_foreground`]), never a question to another process: resolving the frontmost
+/// window here would be a synchronous accessibility round trip against an application that may be
+/// busy redrawing, and the keystroke that paid for it is the one the user is pressing. The native
+/// menu's answer is a counter `watch` keeps, read only once a capture is in scope.
+///
+/// `None`: the pump was replacing the table when the key arrived, and the key goes to the
+/// application. It cannot happen while both live on this thread, and it is a key silently not
+/// captured if it ever does, so it is said.
+fn decide(vk: u32, mask: u8, front: isize, menu_keys: bool) -> Option<Option<Capture>> {
+    let state = match KEY_STATE.try_lock() {
+        Ok(state) => state,
+        Err(TryLockError::Poisoned(p)) => p.into_inner(),
         Err(TryLockError::WouldBlock) => {
-            // The pump was mid-replacement when the key arrived. It cannot happen while both
-            // live on this thread, and it is a key silently not captured if it ever does.
             if due(&LAST_LOCK_FAIL_MS, 5000) {
                 logging::line(
                     "macos",
@@ -949,8 +998,38 @@ fn captured(vk: u32, mask: u8) -> bool {
                      through; the tap and the pump are no longer on one thread",
                 );
             }
-            false
+            return None;
         }
+    };
+    let decided = capture_decision(&state.set, &state.owners, vk, mask, front, watch::native_menu_open);
+    if menu_keys {
+        let mut noted = false;
+        if is_menu_key(vk) && mask == 0 && state.owners.iter().any(|e| e.menu) {
+            for owner in menu_flag_owners(&state.set, &state.owners, front) {
+                note_menu_pass(owner, vk, mask);
+                noted = true;
+            }
+        }
+        // A Return filed above and let through by the same flag is the same press, filed once.
+        match (noted, decided) {
+            (false, Some(Capture::Pass { why: PassWhy::MenuFlag, .. })) => {
+                for o in menu_flag_owners(&state.set, &state.owners, front) {
+                    note_menu_pass(o, vk, mask);
+                }
+            }
+            (false, Some(Capture::Pass { why: PassWhy::MenuMode, owner: Some(o) })) => note_menu_pass(o, vk, mask),
+            _ => {}
+        }
+    }
+    Some(decided)
+}
+
+/// The words a let-through says, for the log line.
+fn pass_words(why: PassWhy) -> &'static str {
+    match why {
+        PassWhy::OutOfScope => "no module that claimed it is scoped to the window in front",
+        PassWhy::MenuMode => "a native menu is open",
+        PassWhy::MenuFlag => "a module scoped to the window in front says a plugin menu is open",
     }
 }
 
@@ -969,26 +1048,16 @@ fn mask_of(flags: CGEventFlags) -> u8 {
 }
 
 thread_local! {
-    // Captured keys let through because a menu was open, waiting for the overlay runtime
-    // to ask. Bounded: nobody presses more than a few keys inside a menu between two ticks
-    // of the watch, and a reader that never comes must not grow this for ever.
-    static MENU_PASS: std::cell::RefCell<Vec<(u32, u8)>> = const { std::cell::RefCell::new(Vec::new()) };
+    // Captured keys let through because a menu was open, as (module, vk, mask), waiting for
+    // each module's overlay runtime to ask. Bounded per module (`crate::backend::file_menu_pass`).
+    static MENU_PASS: std::cell::RefCell<Vec<(u32, u32, u8)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
-const MENU_PASS_MAX: usize = 32;
 
-/// A captured key went to the application because a menu was open. Remembered so the
-/// overlay runtime can log which keys reached the menu, and whether the menu was still there
-/// after an Escape went through.
-fn note_menu_pass(vk: u32, mask: u8, why: &'static str) {
-    if !why.contains("menu") {
-        return;
-    }
-    MENU_PASS.with(|m| {
-        let mut m = m.borrow_mut();
-        if m.len() < MENU_PASS_MAX {
-            m.push((vk, mask));
-        }
-    });
+/// A captured key went to the application because a menu was open. Remembered for module
+/// `owner`, so its overlay runtime can log which keys reached the menu, and whether the menu was
+/// still there after an Escape went through.
+fn note_menu_pass(owner: u32, vk: u32, mask: u8) {
+    MENU_PASS.with(|m| crate::backend::file_menu_pass(&mut m.borrow_mut(), owner, vk, mask));
 }
 
 /// Return or Escape — the keys that end a menu, and the two the overlay runtime wants to hear
@@ -997,10 +1066,10 @@ fn is_menu_key(vk: u32) -> bool {
     vk == 0x0D || vk == 0x1B
 }
 
-/// Hands over, and forgets, everything `note_menu_pass` saw since the last call. Main
-/// thread only, like the tap itself.
-pub fn take_menu_pass_through() -> Vec<(u32, u8)> {
-    MENU_PASS.with(|m| std::mem::take(&mut *m.borrow_mut()))
+/// Hands over, and forgets, everything `note_menu_pass` filed for module `owner` since the last
+/// call. Main thread only, like the tap itself.
+pub fn take_menu_pass_through(owner: u32) -> Vec<(u32, u8)> {
+    MENU_PASS.with(|m| crate::backend::take_menu_passes(&mut m.borrow_mut(), owner))
 }
 
 /// One line per reason, at most every few seconds. See the call site for why it exists.
@@ -1031,44 +1100,13 @@ fn report_gate_pass(vk: u32, mask: u8, why: &'static str) {
     }
 }
 
-/// The three conditions that have to hold together before a matched key is taken: in scope,
-/// no native menu, no plugin-drawn menu. `None` means take it, `Some(reason)` means let it
-/// past — and when it goes past, nothing is queued either.
-///
-/// Every one of them is an atomic read. Nothing in here reaches into another process, and
-/// that is a requirement rather than an optimisation — see the scope comparison.
-fn gate_closed() -> Option<&'static str> {
-    if MENU_OPEN.load(Ordering::Relaxed) {
-        return Some("a plugin menu is open");
-    }
-    if watch::native_menu_open() {
-        return Some("a native menu is open");
-    }
-    let scope = KEY_SCOPE.load(Ordering::Relaxed);
-    if scope == 0 {
-        return None; // global: nothing to compare, and nothing to pay for
-    }
-    // Read, not asked. Resolving the frontmost window here would mean a synchronous
-    // cross-process accessibility round trip inside the callback whose promptness decides
-    // whether the system leaves this tap switched on at all — and against an application
-    // that is busy redrawing, that round trip can take the whole messaging timeout. The
-    // keystroke that pays for it is the one the user is pressing.
-    //
-    // `watch` is already listening to the two notifications that can change the answer —
-    // the frontmost application changing, and the focused window changing within one — so
-    // the answer is here before the key arrives.
-    if FOREGROUND.load(Ordering::Relaxed) == scope {
-        None
-    } else {
-        Some("the scoped window is not frontmost")
-    }
-}
-
 /// Told to us by [`super::watch`] whenever the frontmost window can have changed.
 ///
-/// A number the callback can read rather than a question it has to ask. Deliberately not
-/// resolved here: this is called from notification handlers on the main thread, where the
-/// work is already being done for other reasons.
+/// A number the callback can read rather than a question it has to ask ([`decide`]): `watch`
+/// is already listening to the two notifications that can change the answer — the frontmost
+/// application changing, and the focused window changing within one — so the answer is here
+/// before the key arrives. Deliberately not resolved here: this is called from notification
+/// handlers on the main thread, where the work is already being done for other reasons.
 pub fn note_foreground(window: isize) {
     FOREGROUND.store(window, Ordering::Relaxed);
 }

@@ -1,57 +1,74 @@
-//! Tasks: a function, run as a coroutine of its VM, that can stop at a wait while the event loop
-//! goes on, and the two waits it can stop at, `host.ocr.recognize` and `host.ocr.recognizeMany`.
+//! Handlers: every callback of a module runs as a coroutine of its VM — a handler — that can stop
+//! at a wait while the event loop goes on; and the two waits it can stop at, `host.ocr.recognize`
+//! and `host.ocr.recognizeMany`.
 //!
-//! **No module's API.** No module can start a task — the host table has no entry for it. This is
-//! the machinery each callback of a module is to run in, one at a time per module (TODO.md, "a
-//! mailbox per module"); until then only the tests start tasks, through the test-only `table`.
-//! So in the application `recognize` and `recognizeMany` are always the blocking calls, and a
-//! module's first such call is logged with how long it held the event loop.
+//! **One handler per module at a time.** Every event a module hears — a hotkey, a captured key, a
+//! controller event, a timer, a window trigger, a focus change, the answer to a read, an image
+//! search or a snapshot, a setting's `onChange` — comes through its mailbox (`mailbox.rs`) and runs
+//! here, as a handler, one after another. A module whose handler waits is busy; its later events
+//! wait in its mailbox, in order. The synchronous places — an arbiter's `onActivate` and
+//! `onDeactivate`, a module's own `onChange` from its own `host.settings.set`, the top level of a
+//! module or of an included file — are plain calls, as ever.
+//!
+//! **No handler waits yet.** In this build `recognize` and `recognizeMany` take the old blocking
+//! call in a handler too (`Kind::Handler { waits: false }`), so in the application no module is
+//! ever busy. Only the tests make a handler wait: through the tests' entry (`table`), whose tasks
+//! wait at `recognize`, and through the wait point only the tests have (`test_wait`).
 //!
 //! **Why.** No text recognition may burden the event loop. `recognize` used to photograph and
-//! recognise on the loop and return the reading; inside a task it asks the read service instead
-//! (`ocr/lua.rs`), and only the task waits. Outside a task — and at a place inside one that cannot
-//! stop — it is still the old blocking call.
+//! recognise on the loop and return the reading; where it waits it asks the read service instead
+//! (`ocr/lua.rs`), and only its module waits. Where it cannot wait, it is still the old blocking
+//! call.
 //!
 //! **How it waits.** A Rust function cannot yield through mlua, so the wait is a `coroutine.yield`
 //! in a small Luau shim the host builds once per VM (`task_shim.luau`), with every helper an
-//! upvalue. The host creates and resumes every task with mlua's own `Thread` API: the first stretch
-//! at once, inside `run`; every later one from the tick, in the delivery of text readings, while
-//! the module is enabled and its VM is the one that asked. A task is never resumed into a VM that
-//! was disabled, reloaded or removed, and nothing of it runs after it ends — Luau has no `__gc`
-//! and no `__close`, so throwing a stopped thread away runs no code.
+//! upvalue. The host creates and resumes every handler with mlua's own `Thread` API: the first
+//! stretch at once, inside `run_handler`; every later one from the tick, in the delivery of text
+//! readings, while the module is enabled and its VM is the one that asked. A handler is never
+//! resumed into a VM that was disabled, reloaded or removed, and nothing of it runs after it ends —
+//! Luau has no `__gc` and no `__close`, so throwing a stopped thread away runs no code.
 //!
-//! **What module code can do to a task, and what the host does about it.**
-//! - It can get the task's coroutine (`coroutine.running()`) and resume it itself. The shim sees
-//!   that it was not the host (the wait's nonce is a fresh table nobody else holds), and the host
-//!   forgets the task without resetting it — the module's code is running it now — and withdraws
-//!   its read. The wait raises there.
-//! - It can close it (`coroutine.close`): the task has ended, and is found so at its delivery.
-//! - It can yield it with its own `coroutine.yield` through to the host: that raises at the yield,
-//!   with `resume_error`, as the same yield does on the event loop, so a `pcall` around it goes on.
+//! **Who answers a wait.** A wait point is answered only by a thread of the host or by state the
+//! host keeps — the capture and recognise threads through the delivery of readings, the tests'
+//! `test_release` — never by an event delivered to the waiting module: that event waits in the
+//! module's mailbox behind the very handler it would answer. A "wait for my own key-up" built on
+//! the module's own key events could never end; one answered from the hook's record of held keys
+//! could.
+//!
+//! **What module code can do to a handler, and what the host does about it.**
+//! - It can get the handler's coroutine (`coroutine.running()`, which is never `nil` in a callback
+//!   now) and resume it itself. The shim sees that it was not the host (the wait's nonce is a fresh
+//!   table nobody else holds), and the host forgets the handler without resetting it — the
+//!   module's code is running it now — and withdraws its read. The wait raises there.
+//! - It can close it (`coroutine.close`): the handler has ended, and is found so at its delivery.
+//! - It can yield it with its own `coroutine.yield` through to the host: that raises at the yield
+//!   with [`OWN_YIELD`], with `resume_error`, as the same yield does on the event loop, so a `pcall`
+//!   around it goes on.
 //! - It can reach the shim's `start` through `debug.info` while `start` reads its own arguments,
-//!   and call it itself: `start` checks that the innermost running task of the VM calls it in its
-//!   own coroutine with no wait yet in this stretch, registers the wait only after every check,
-//!   and a task is parked — and later resumed — only on the very wait it registered.
+//!   and call it itself: `start` checks that the innermost running handler of the VM calls it in
+//!   its own coroutine with no wait yet in this stretch, registers the wait only after every check,
+//!   and a handler is parked — and later resumed — only on the very wait it registered.
 //! - Before every reset the host asks Luau itself (`coroutine.status`, held from before any module
 //!   code ran) whether the thread is suspended or dead. mlua reports a thread that is resuming
 //!   another one as new, and resetting it would cut a live stack.
 //!
 //! Kept in a file of its own, with the bindings generic over [`ReadHost`], so the rules can be
-//! tested against a real Luau VM and a real read service (`task_tests.rs`).
+//! tested against a real Luau VM and a real read service (`task_tests.rs`, `mailbox_tests.rs`).
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use mlua::{Function, Lua, MultiValue, RegistryKey, Table, Thread, Value};
+use mlua::{Function, Lua, MultiValue, RegistryKey, Table, Thread, ThreadStatus, Value};
 
 use crate::logging;
 use crate::ocr::lua::{self as reads, owner_of, ReadHost, Waiter};
 use crate::ocr::sched::{Owner, TicketId};
 use crate::ocr::types::{current_priority, enter_priority, Priority};
 
-/// A task's number: positive, unique for the life of the process, never reused — as a timer's.
+/// A handler's number: positive, unique for the life of the process, never reused — as a timer's.
 pub(crate) type TaskId = i64;
 
 /// The shim, compiled once per VM (`waits`).
@@ -61,21 +78,61 @@ const SHIM: &str = include_str!("task_shim.luau");
 /// carries. The `=` keeps Luau from wrapping it as `[string "…"]`.
 pub(crate) const SHIM_NAME: &str = "=host.ocr";
 
-/// How many task stretches may be on the host's stack at once, one inside the other — a task
-/// started in the stretch of another, before that one waited again — across every VM. Each is a
-/// resume on the event loop's own stack, and a stack that overflows ends the application: Luau
-/// counts one C call per level against its limit of 200, and the main thread's stack is used up
-/// well before that in a debug build. The seventeenth is not started.
+/// How many handler stretches may be on the host's stack at once, one inside the other — a
+/// test's task started in the stretch of another, before that one waited again — across every VM.
+/// Each is a resume on the event loop's own stack, and a stack that overflows ends the
+/// application: Luau counts one C call per level against its limit of 200, and the main thread's
+/// stack is used up well before that in a debug build. The seventeenth is not started. Events
+/// never nest: no handler starts while another is on the stack (`mailbox.rs`).
 pub(crate) const MAX_NESTED: usize = 16;
 
-/// What a task's own `coroutine.yield` through to the host raises, at the yield.
-pub(crate) const FOREIGN_YIELD: &str =
-    "a task waits only in host.ocr.recognize and host.ocr.recognizeMany; coroutine.yield cannot wait here";
+/// Whether `recognize` and `recognizeMany` wait in a handler. Not in this build: they take the
+/// blocking call there, as they did in a plain callback, so no module is ever busy.
+const HANDLERS_WAIT: bool = false;
 
-/// What a wait raises after module code resumed the task's coroutine itself, after the call's
+#[cfg(test)]
+thread_local! {
+    /// The tests' way into the build in which handlers wait (`handlers_wait_here`).
+    static WAIT_HERE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether a handler started now waits at `recognize` and `recognizeMany`: [`HANDLERS_WAIT`], or
+/// in a test that asked for it on its thread.
+fn handlers_wait() -> bool {
+    #[cfg(test)]
+    if WAIT_HERE.with(Cell::get) {
+        return true;
+    }
+    HANDLERS_WAIT
+}
+
+/// While the returned guard lives, a handler started on this thread waits at `recognize` and
+/// `recognizeMany` as it will once handlers wait: what the tests of a module busy at a read — the
+/// priority it inherits (B2) — stand on. The thread's own, so the tests beside it are not touched.
+#[cfg(test)]
+pub(crate) fn handlers_wait_here() -> WaitHere {
+    WAIT_HERE.with(|w| w.set(true));
+    WaitHere(())
+}
+
+#[cfg(test)]
+pub(crate) struct WaitHere(());
+
+#[cfg(test)]
+impl Drop for WaitHere {
+    fn drop(&mut self) {
+        WAIT_HERE.with(|w| w.set(false));
+    }
+}
+
+/// What a callback's own `coroutine.yield` through to the host raises, at the yield.
+pub(crate) const OWN_YIELD: &str = "this callback runs as a coroutine of the host, and a coroutine.yield in it cannot wait \
+     for one of your own callbacks — wrap the code that yields in coroutine.wrap";
+
+/// What a wait raises after module code resumed the handler's coroutine itself, after the call's
 /// name.
-pub(crate) const RESUMED: &str = ": the task was resumed by the module's own code, and so is no task any more; \
-     a task's coroutine is the host's to resume";
+pub(crate) const RESUMED: &str = ": this callback's coroutine was resumed by the module's own code, and so the host \
+     runs it no more; a callback's coroutine is the host's to resume";
 
 /// The named registry's per-VM entries: the handles below, and the shim's two waits. Luau has no
 /// `debug.getregistry`, so no module reaches them.
@@ -85,17 +142,17 @@ const WAITS_KEY: &str = "__task_waits";
 /// The three places `recognize` cannot wait, as the shim names them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Case {
-    /// No task of this VM is running.
+    /// Not in a handler that waits: outside every callback, or — in this build — in any callback.
     Outside,
-    /// In a task, at a place Luau cannot stop it: a metamethod, a sort comparator, Lua the host
+    /// In a handler, at a place Luau cannot stop it: a metamethod, a sort comparator, Lua the host
     /// itself called.
     CannotWait,
-    /// In a coroutine the module made, inside a task.
+    /// In a coroutine the module made, inside a handler.
     OwnCoroutine,
 }
 
 impl Case {
-    /// The shim's word for it; a word it never says is read as outside a task.
+    /// The shim's word for it; a word it never says is read as outside a handler.
     pub(crate) fn of(why: &str) -> Case {
         match why {
             "cannot-wait" => Case::CannotWait,
@@ -138,26 +195,74 @@ pub(crate) fn legacy_line(module: &str, name: &str, ms: u128) -> String {
     format!("[{module}] {name} held the event loop {ms} ms; host.ocr.read with a callback does not hold it")
 }
 
-/// The wait a task registered in its current stretch, or is parked on.
+/// Under what a handler's error is reported, kept with it across its waits: the kind of callback
+/// the log line and the dialog name, and the module they are reported for — the one `report_callback_error`
+/// was given before handlers: the module for most events, the identity that asked for an answer,
+/// the module whose setting changed for an `onChange`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Ctx {
+    /// "hotkey", "key", "gamepad", "window trigger", "focus change", "timer", "ocr.read", an image
+    /// search's binding, "screen.snapshotAsync", "settings onChange (<key>)".
+    pub what: Cow<'static, str>,
+    pub report: usize,
+}
+
+impl Ctx {
+    pub(crate) fn new(what: impl Into<Cow<'static, str>>, report: usize) -> Ctx {
+        Ctx { what: what.into(), report }
+    }
+}
+
+/// What started a task.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    /// An event's handler (`run_handler`). `waits`: whether `recognize` and `recognizeMany` wait
+    /// in it — not in this build ([`HANDLERS_WAIT`]).
+    Handler { waits: bool },
+    /// The tests' entry (`table`), whose waits wait.
+    Test,
+}
+
+/// What a wait waits for.
+enum On {
+    /// A read of the service.
+    Read(TicketId),
+    /// The tests' own wait point, by name (`test_wait`): answered by `test_release`.
+    #[cfg(test)]
+    Test(String),
+    /// Nothing: a wait that ends the handler instead — it was cancelled while it ran, or its
+    /// module is disabled.
+    Void,
+}
+
+/// The wait a handler registered in its current stretch, or is parked on.
 struct Wait {
-    /// The read it waits for; `None` for a wait that ends the task instead — it was cancelled
-    /// while it ran, or its module is disabled.
-    ticket: Option<TicketId>,
+    on: On,
     /// The fresh table the shim yields beside `WAIT` and gets back from the host, and nobody else.
     nonce: RegistryKey,
 }
 
-/// One task. Main thread only, like the rest of `Shared`.
+/// One handler, or one task of the tests' entry. Main thread only, like the rest of `Shared`.
 struct Task {
-    /// Strong: a parked task keeps its VM, as a pending read does. Dropped with the task.
+    /// Strong: a parked handler keeps its VM, as a pending read does. Dropped with the handler.
     lua: Lua,
-    thread: RegistryKey,
+    thread: Thread,
     /// The thread's identity, to tell which coroutine is calling.
     ptr: usize,
     /// The VM that runs it, which owns it — a dependency's code included.
     owner: Owner,
-    /// The priority of the dispatch that started it, which each of its waits asks with.
+    kind: Kind,
+    /// Under what its error is reported, after a wait as before.
+    ctx: Ctx,
+    /// The priority of the dispatch that started it, which each of its later stretches runs under
+    /// — and so every timer it arms and every read it asks for with a callback — and each of its
+    /// waits asks with, unless it was `raised`.
     prio: Priority,
+    /// An event somebody waits on queued behind it while it was parked in the background lane
+    /// (`promote`): its read then waiting, and every read it waits for after it, are interactive.
+    /// Its own lane is not raised with them: a poll chained through `host.timer.after`, whose read
+    /// a key once queued behind, would otherwise be a person's for good.
+    raised: bool,
     /// On the host's stack: its first stretch, or one the delivery resumed.
     running: bool,
     wait: Option<Wait>,
@@ -165,6 +270,24 @@ struct Task {
     ending: bool,
     /// Its module went while it ran: forgotten when its stretch returns, whatever it did.
     gone: bool,
+    /// When it parked last, and how long it has been parked in all: what the window dispatch's
+    /// `[dispatch]` line leaves out of its time (`waited_ms`).
+    parked_at: Option<Instant>,
+    waited: Duration,
+}
+
+impl Task {
+    /// Whether `recognize` and `recognizeMany` wait in it.
+    fn waits(&self) -> bool {
+        match self.kind {
+            Kind::Handler { waits } => waits,
+            Kind::Test => true,
+        }
+    }
+
+    fn is_handler(&self) -> bool {
+        matches!(self.kind, Kind::Handler { .. })
+    }
 }
 
 /// What the blocking `recognize` cost, per module.
@@ -178,12 +301,12 @@ struct LegacyTally {
     held: BTreeMap<String, (u64, u128)>,
 }
 
-/// Every task of every module, and what the blocking calls held. Main thread only.
+/// Every handler of every module, and what the blocking calls held. Main thread only.
 #[derive(Default)]
 pub(crate) struct Tasks {
     table: RefCell<HashMap<TaskId, Task>>,
-    /// The tasks whose stretches are on the host's stack, innermost last, across every VM: what
-    /// `MAX_NESTED` counts.
+    /// The handlers whose stretches are on the host's stack, innermost last, across every VM:
+    /// what `MAX_NESTED` counts.
     running: RefCell<Vec<TaskId>>,
     next: Cell<TaskId>,
     legacy: RefCell<LegacyTally>,
@@ -196,17 +319,51 @@ impl Tasks {
         n
     }
 
-    /// Whether any task of module `idx` is left — none may be once it is dropped, or its old VM
-    /// stays in memory.
+    /// Whether any handler or task of module `idx` is left — none may be once it is dropped, or
+    /// its old VM stays in memory.
     #[cfg(test)]
     pub(crate) fn has_tasks_of(&self, idx: usize) -> bool {
         self.table.borrow().values().any(|t| t.owner.idx == idx)
     }
 
-    /// How many tasks there are, waiting or running.
+    /// How many handlers and tasks there are, waiting or running.
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.table.borrow().len()
+    }
+
+    /// The handler of module `idx`, running or parked: at most one, since the mailbox starts none
+    /// while it has one. A task of the tests' entry is no handler.
+    pub(crate) fn handler_of(&self, idx: usize) -> Option<TaskId> {
+        self.table.borrow().iter().find(|(_, t)| t.owner.idx == idx && t.is_handler()).map(|(id, _)| *id)
+    }
+
+    /// Whether a handler of any module is on the host's stack now: then no other handler starts
+    /// (`mailbox.rs`).
+    pub(crate) fn any_handler_running(&self) -> bool {
+        let table = self.table.borrow();
+        self.running.borrow().iter().any(|id| table.get(id).is_some_and(Task::is_handler))
+    }
+
+    /// How long the handler of module `idx` that runs now has been parked in all, in
+    /// milliseconds; 0 when none runs.
+    pub(crate) fn waited_ms(&self, idx: usize) -> u64 {
+        let table = self.table.borrow();
+        self.running
+            .borrow()
+            .iter()
+            .rev()
+            .filter_map(|id| table.get(id))
+            .find(|t| t.owner.idx == idx && t.is_handler())
+            .map_or(0, |t| t.waited.as_millis() as u64)
+    }
+
+    /// What the parked handler of module `idx` waits in — the kind of callback — and for how many
+    /// milliseconds so far; `None` when none is parked.
+    pub(crate) fn parked_of(&self, idx: usize) -> Option<(String, u128)> {
+        self.table.borrow().values().find(|t| t.owner.idx == idx && t.is_handler() && !t.running).map(|t| {
+            (t.ctx.what.to_string(), t.parked_at.map_or(0, |at| at.elapsed().as_millis()))
+        })
     }
 
     /// The summary at exit: per module, how often `recognize` and `recognizeMany` held the event
@@ -236,14 +393,14 @@ impl Tasks {
         self.legacy.borrow_mut().said.retain(|(m, _)| m != id);
     }
 
-    /// The innermost running task of the VM `owner`.
+    /// The innermost running handler of the VM `owner`.
     fn innermost(&self, owner: Owner) -> Option<TaskId> {
         let table = self.table.borrow();
         self.running.borrow().iter().rev().copied().find(|id| table.get(id).is_some_and(|t| t.owner == owner))
     }
 }
 
-/// The handles a VM's tasks need, held in its named registry from before any module code ran.
+/// The handles a VM's handlers need, held in its named registry from before any module code ran.
 struct Prims {
     status: Function,
     noop: Function,
@@ -302,9 +459,10 @@ fn number_of(v: &Value) -> Option<TaskId> {
 }
 
 /// The tests' entry to the machinery, and only theirs: `run`, `cancel` and `alive` for module
-/// `idx`, over the tasks `holder` keeps, as a table a test installs under a global of its own —
+/// `idx`, over the handlers `holder` keeps, as a table a test installs under a global of its own —
 /// never in the `host` table: no module can start a task. A task belongs to the VM that runs it,
-/// whatever identity the code that started it has.
+/// whatever identity the code that started it has, and waits in `recognize`: these are what the
+/// tests make wait. A task is no handler: it does not make its module busy.
 #[cfg(test)]
 pub(crate) fn table<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>) -> mlua::Result<Table> {
     prims(lua)?;
@@ -320,7 +478,7 @@ pub(crate) fn table<H: ReadHost>(lua: &Lua, idx: usize, holder: Rc<H>) -> mlua::
 
 /// `run(fn)`: starts `fn` in a coroutine of its own and runs it until it ends or first waits,
 /// then returns its number. Raises only for a mistake in the call; what `fn` raises is reported
-/// as a task's error, never raised here. Only the tests' entry (`table`) calls it for now.
+/// as a task's error, never raised here. Only the tests' entry (`table`) calls it.
 #[cfg_attr(not(test), allow(dead_code))]
 fn run<H: ReadHost>(h: &H, lua: &Lua, scope: usize, args: MultiValue) -> mlua::Result<TaskId> {
     let mut args = args.into_iter();
@@ -339,44 +497,106 @@ fn run<H: ReadHost>(h: &H, lua: &Lua, scope: usize, args: MultiValue) -> mlua::R
         ));
     }
     let owner = owner(h, lua, scope);
-    let tasks = h.tasks();
-    let id = tasks.next_id();
-    let depth = tasks.running.borrow().len();
-    if depth >= MAX_NESTED {
-        h.report_error(
-            owner.idx,
-            "task",
-            &format!(
-                "task.run: this task was not started: {MAX_NESTED} task stretches are on the event loop's own \
-                 stack already, one inside the other, and one more could overflow it and end the application. \
-                 Start it later — from a timer, or after a wait"
-            ),
-        );
+    let id = h.tasks().next_id();
+    if h.tasks().running.borrow().len() >= MAX_NESTED {
+        h.report_error(owner.idx, "task", &too_deep("task.run: this task"));
         return Ok(id);
     }
+    start_thread(h, id, lua, owner, f, MultiValue::new(), Kind::Test, Ctx::new("task", owner.idx), current_priority())?;
+    Ok(id)
+}
+
+/// The message for a handler not started because `MAX_NESTED` stretches are on the stack.
+fn too_deep(what: &str) -> String {
+    format!(
+        "{what} was not started: {MAX_NESTED} task stretches are on the event loop's own stack already, one \
+         inside the other, and one more could overflow it and end the application. Start it later — from a \
+         timer, or after a wait"
+    )
+}
+
+/// Makes `f`'s coroutine, files it as `id` and runs its first stretch with `args`.
+#[allow(clippy::too_many_arguments)]
+fn start_thread<H: ReadHost>(
+    h: &H,
+    id: TaskId,
+    lua: &Lua,
+    owner: Owner,
+    f: Function,
+    args: MultiValue,
+    kind: Kind,
+    ctx: Ctx,
+    prio: Priority,
+) -> mlua::Result<()> {
     let thread = lua.create_thread(f)?;
     let ptr = thread.to_pointer() as usize;
-    let key = lua.create_registry_value(thread.clone())?;
-    tasks.table.borrow_mut().insert(
+    h.tasks().table.borrow_mut().insert(
         id,
         Task {
             lua: lua.clone(),
-            thread: key,
+            thread: thread.clone(),
             ptr,
             owner,
-            prio: current_priority(),
+            kind,
+            ctx,
+            prio,
+            raised: false,
             running: true,
             wait: None,
             ending: false,
             gone: false,
+            parked_at: None,
+            waited: Duration::ZERO,
         },
     );
-    let outcome = stretch(tasks, id, || thread.resume::<MultiValue>(()));
+    let outcome = stretch(h.tasks(), id, || thread.resume::<MultiValue>(args));
     step(h, id, lua, &thread, outcome);
-    Ok(id)
+    Ok(())
 }
 
-/// Runs one stretch of task `id`: on the host's stack while it lasts, a Rust panic caught as an
+/// What became of a handler's first stretch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Ran {
+    /// It returned, raised (reported under its `Ctx`), was closed — or was never started.
+    Ended,
+    /// It waits; its module is busy until it ends.
+    Parked(TaskId),
+}
+
+/// Runs `f(args)` as module `idx`'s handler for one event, in the VM `lua`, under `prio` — the
+/// priority its waits ask with — until it ends or first waits. What it raises, before a wait or
+/// after one, is reported under `ctx`, never raised here. The mailbox calls this, and only for a
+/// module that has no handler: one handler per module at a time.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_handler<H: ReadHost>(
+    h: &H,
+    idx: usize,
+    lua: &Lua,
+    f: Function,
+    args: MultiValue,
+    prio: Priority,
+    ctx: Ctx,
+) -> Ran {
+    let owner = owner(h, lua, idx);
+    let tasks = h.tasks();
+    if tasks.running.borrow().len() >= MAX_NESTED {
+        h.report_error(ctx.report, &ctx.what, &too_deep("this callback"));
+        return Ran::Ended;
+    }
+    let id = tasks.next_id();
+    let report = (ctx.report, ctx.what.clone());
+    if let Err(e) = start_thread(h, id, lua, owner, f, args, Kind::Handler { waits: handlers_wait() }, ctx, prio) {
+        // Only running out of memory makes a coroutine fail to be made.
+        h.report_error(report.0, &report.1, &e.to_string());
+        return Ran::Ended;
+    }
+    match tasks.table.borrow().get(&id) {
+        Some(t) if !t.running => Ran::Parked(id),
+        _ => Ran::Ended,
+    }
+}
+
+/// Runs one stretch of handler `id`: on the host's stack while it lasts, a Rust panic caught as an
 /// error, as every callback's is.
 fn stretch(tasks: &Tasks, id: TaskId, go: impl FnOnce() -> mlua::Result<MultiValue>) -> Result<MultiValue, String> {
     if let Some(t) = tasks.table.borrow_mut().get_mut(&id) {
@@ -400,39 +620,50 @@ fn stretch(tasks: &Tasks, id: TaskId, go: impl FnOnce() -> mlua::Result<MultiVal
     outcome
 }
 
-/// What became of a stretch: the task ended (returned, raised, closed), parked on its wait, or
-/// yielded otherwise — then that yield raises where it was made, and the task goes on.
+/// What became of a stretch: the handler ended (returned, raised, closed), parked on its wait, or
+/// yielded otherwise — then that yield raises where it was made, and the handler goes on.
 fn step<H: ReadHost>(h: &H, id: TaskId, lua: &Lua, thread: &Thread, mut outcome: Result<MultiValue, String>) {
     let tasks = h.tasks();
     loop {
-        let (owner, gone, ending, prio) = match tasks.table.borrow().get(&id) {
-            Some(t) => (t.owner, t.gone, t.ending, t.prio),
-            None => return, // module code resumed it, and it is no task any more
+        let (gone, ending, prio) = match tasks.table.borrow().get(&id) {
+            Some(t) => (t.gone, t.ending, t.prio),
+            None => return, // module code resumed it, and it is no handler any more
         };
         if gone {
-            forget(h, id);
+            forget(h, id, false);
             return;
         }
         let values = match outcome {
             Err(e) => {
-                h.report_error(owner.idx, "task", &e);
-                forget(h, id);
+                let ctx = tasks.table.borrow().get(&id).map(|t| t.ctx.clone());
+                if let Some(ctx) = ctx {
+                    h.report_error(ctx.report, &ctx.what, &e);
+                }
+                forget(h, id, true);
                 return;
             }
             Ok(v) => v,
         };
+        // Back from its own resume, it cannot be resuming another coroutine: mlua's word for a
+        // finished one is sure here, and it saves asking Luau for every callback that returned.
+        if thread.status() == ThreadStatus::Finished {
+            forget(h, id, true);
+            return;
+        }
         match status(lua, thread).as_deref() {
             // It returned — or Luau could not say, and then it is let go without a reset.
             Some("dead") | None => {
-                forget(h, id);
+                forget(h, id, true);
                 return;
             }
             _ => {}
         }
         if parked_on_its_wait(tasks, id, lua, &values) {
-            let void = tasks.table.borrow().get(&id).is_some_and(|t| t.wait.as_ref().is_some_and(|w| w.ticket.is_none()));
+            let void = tasks.table.borrow().get(&id).is_some_and(|t| t.wait.as_ref().is_some_and(|w| matches!(w.on, On::Void)));
             if ending || void {
-                forget(h, id);
+                forget(h, id, false);
+            } else if let Some(t) = tasks.table.borrow_mut().get_mut(&id) {
+                t.parked_at = Some(Instant::now());
             }
             return;
         }
@@ -443,12 +674,12 @@ fn step<H: ReadHost>(h: &H, id: TaskId, lua: &Lua, thread: &Thread, mut outcome:
             end_wait(h, lua, w);
         }
         let _prio = enter_priority(prio);
-        outcome = stretch(tasks, id, || thread.resume_error::<MultiValue>(FOREIGN_YIELD));
+        outcome = stretch(tasks, id, || thread.resume_error::<MultiValue>(OWN_YIELD));
     }
 }
 
-/// Whether the task yielded the shim's `(WAIT, nonce)` with the nonce of the wait it registered in
-/// this stretch.
+/// Whether the handler yielded the shim's `(WAIT, nonce)` with the nonce of the wait it registered
+/// in this stretch.
 fn parked_on_its_wait(tasks: &Tasks, id: TaskId, lua: &Lua, values: &MultiValue) -> bool {
     let (Some(Value::Table(a)), Some(Value::Table(b))) = (values.front(), values.get(1)) else { return false };
     let Ok(p) = prims(lua) else { return false };
@@ -462,51 +693,61 @@ fn parked_on_its_wait(tasks: &Tasks, id: TaskId, lua: &Lua, values: &MultiValue)
 
 /// A wait given up: its read withdrawn, its nonce let go.
 fn end_wait<H: ReadHost>(h: &H, lua: &Lua, w: Wait) {
-    if let Some(t) = w.ticket {
+    if let On::Read(t) = w.on {
         reads::withdraw(h, t);
     }
     let _ = lua.remove_registry_value(w.nonce);
 }
 
-/// Forgets task `id`: out of the table, its wait withdrawn, its thread reset when that is safe,
-/// its registry entries let go. Nothing of it runs again.
-fn forget<H: ReadHost>(h: &H, id: TaskId) {
+/// Forgets handler `id`: out of the table, its wait withdrawn, its thread reset when that is safe —
+/// not for one that `ended` (returned or raised), whose stack is empty already. Nothing of it runs
+/// again.
+fn forget<H: ReadHost>(h: &H, id: TaskId, ended: bool) {
     let Some(t) = h.tasks().table.borrow_mut().remove(&id) else { return };
     if let Some(w) = t.wait {
         end_wait(h, &t.lua, w);
     }
-    if let Ok(thread) = t.lua.registry_value::<Thread>(&t.thread) {
-        if !t.running {
-            reset(&t.lua, &thread);
-        }
+    if !t.running && !ended {
+        reset(&t.lua, &t.thread);
     }
-    let _ = t.lua.remove_registry_value(t.thread);
 }
 
-/// Task `id`'s read was answered: it goes on with `value`, under its priority — unless it has
+/// Handler `id`'s read was answered: it goes on with `value`, under its priority — unless it has
 /// ended meanwhile, its module is no longer enabled or no longer runs that VM, or its coroutine
 /// is no longer stopped where the host left it (closed by module code). True when it went on.
 pub(crate) fn resume_wait<H: ReadHost>(h: &H, id: TaskId, ticket: TicketId, value: Value) -> bool {
+    resume_parked(h, id, |on| matches!(on, On::Read(t) if *t == ticket), value)
+}
+
+/// Resumes handler `id`, parked on a wait `this` names, with `value`: [`resume_wait`]'s rules.
+fn resume_parked<H: ReadHost>(h: &H, id: TaskId, this: impl Fn(&On) -> bool, value: Value) -> bool {
     let tasks = h.tasks();
     let found = {
         let table = tasks.table.borrow();
         match table.get(&id) {
-            Some(t) if !t.running && t.wait.as_ref().is_some_and(|w| w.ticket == Some(ticket)) => {
-                Some((t.lua.clone(), t.owner, t.prio, t.lua.registry_value::<Thread>(&t.thread)))
+            Some(t) if !t.running && t.wait.as_ref().is_some_and(|w| this(&w.on)) => {
+                Some((t.lua.clone(), t.owner, t.prio, t.thread.clone()))
             }
             _ => None,
         }
     };
-    let Some((lua, owner, prio, Ok(thread))) = found else { return false };
+    let Some((lua, owner, prio, thread)) = found else { return false };
     if !reads::deliverable_now(h, owner) || status(&lua, &thread).as_deref() != Some("suspended") {
-        forget(h, id);
+        forget(h, id, false);
         return false;
     }
-    let Some(w) = tasks.table.borrow_mut().get_mut(&id).and_then(|t| t.wait.take()) else { return false };
+    let Some(w) = tasks.table.borrow_mut().get_mut(&id).and_then(|t| {
+        if let Some(at) = t.parked_at.take() {
+            t.waited += at.elapsed();
+        }
+        t.wait.take()
+    }) else {
+        return false;
+    };
     let nonce = lua.registry_value::<Table>(&w.nonce);
     let _ = lua.remove_registry_value(w.nonce);
     let Ok(nonce) = nonce else {
-        forget(h, id);
+        forget(h, id, false);
         return false;
     };
     let _prio = enter_priority(prio);
@@ -515,10 +756,38 @@ pub(crate) fn resume_wait<H: ReadHost>(h: &H, id: TaskId, ticket: TicketId, valu
     true
 }
 
-/// Task `id`'s read could not be handed over (its reading could not be built): it ends.
+/// Somebody waits on an event that queued behind module `owner`'s parked handler — it came in the
+/// interactive lane (`mailbox.rs`): the read the handler waits for is made interactive
+/// (`Service::promote`), and so is every read it waits for after it (`raised`). A read of a poll
+/// would otherwise hold the key behind it as long as the polls' lane takes. A read being recognised
+/// already runs on as it started. The handler's own lane stays: what it arms after the read — a
+/// timer, a read with a callback — is in the lane it began in, so a poll stays a poll. True when a
+/// handler that was parked in the background lane was raised.
+pub(crate) fn promote<H: ReadHost>(h: &H, owner: Owner) -> bool {
+    let ticket = {
+        let mut table = h.tasks().table.borrow_mut();
+        let Some(t) = table
+            .values_mut()
+            .find(|t| t.owner == owner && t.is_handler() && !t.running && t.prio == Priority::Background && !t.raised)
+        else {
+            return false;
+        };
+        t.raised = true;
+        match t.wait.as_ref().map(|w| &w.on) {
+            Some(On::Read(ticket)) => Some(*ticket),
+            _ => None,
+        }
+    };
+    if let Some(ticket) = ticket {
+        h.ocr().promote(ticket);
+    }
+    true
+}
+
+/// Handler `id`'s read could not be handed over (its reading could not be built): it ends.
 pub(crate) fn end_waiting<H: ReadHost>(h: &H, id: TaskId) {
     if tasks_parked(h.tasks(), id) {
-        forget(h, id);
+        forget(h, id, false);
     }
 }
 
@@ -529,7 +798,7 @@ fn tasks_parked(tasks: &Tasks, id: TaskId) -> bool {
 /// `cancel(n)`: a parked task ends now and its read is withdrawn; a running one ends at its next
 /// wait. True when this call ended something or marked it to end; false for another VM's number,
 /// one that ended, one a cancel marked already, or anything that is no number. Never raises. Only
-/// the tests' entry calls it for now.
+/// the tests' entry calls it.
 #[cfg_attr(not(test), allow(dead_code))]
 fn cancel<H: ReadHost>(h: &H, lua: &Lua, scope: usize, n: &Value) -> bool {
     let Some(id) = number_of(n) else { return false };
@@ -537,7 +806,7 @@ fn cancel<H: ReadHost>(h: &H, lua: &Lua, scope: usize, n: &Value) -> bool {
     let state = {
         let table = h.tasks().table.borrow();
         match table.get(&id) {
-            Some(t) if t.owner == me => Some((t.running, t.gone, t.lua.clone(), t.lua.registry_value::<Thread>(&t.thread))),
+            Some(t) if t.owner == me => Some((t.running, t.gone, t.lua.clone(), t.thread.clone())),
             _ => None,
         }
     };
@@ -551,13 +820,13 @@ fn cancel<H: ReadHost>(h: &H, lua: &Lua, scope: usize, n: &Value) -> bool {
         return table.get_mut(&id).is_some_and(|t| !std::mem::replace(&mut t.ending, true));
     }
     // Closed by module code meanwhile: it had ended already.
-    let ended = thread.map_or(true, |th| status(&lua, &th).as_deref() != Some("suspended"));
-    forget(h, id);
+    let ended = status(&lua, &thread).as_deref() != Some("suspended");
+    forget(h, id, false);
     !ended
 }
 
 /// `alive(n)`: true from `run` until the task ends. False for another VM's number and
-/// for anything that is no number. Never raises. Only the tests' entry calls it for now.
+/// for anything that is no number. Never raises. Only the tests' entry calls it.
 #[cfg_attr(not(test), allow(dead_code))]
 fn alive<H: ReadHost>(h: &H, lua: &Lua, scope: usize, n: &Value) -> bool {
     let Some(id) = number_of(n) else { return false };
@@ -565,7 +834,7 @@ fn alive<H: ReadHost>(h: &H, lua: &Lua, scope: usize, n: &Value) -> bool {
     let state = {
         let table = h.tasks().table.borrow();
         match table.get(&id) {
-            Some(t) if t.owner == me => Some((t.running, t.gone, t.lua.clone(), t.lua.registry_value::<Thread>(&t.thread))),
+            Some(t) if t.owner == me => Some((t.running, t.gone, t.lua.clone(), t.thread.clone())),
             _ => None,
         }
     };
@@ -573,21 +842,21 @@ fn alive<H: ReadHost>(h: &H, lua: &Lua, scope: usize, n: &Value) -> bool {
     if running {
         return !gone;
     }
-    if thread.is_ok_and(|th| status(&lua, &th).as_deref() == Some("suspended")) {
+    if status(&lua, &thread).as_deref() == Some("suspended") {
         return true;
     }
-    forget(h, id); // module code closed it
+    forget(h, id, false); // module code closed it
     false
 }
 
-/// Drops every task of module `idx` — disabled, reloaded, removed: nothing of them runs again, and
-/// their reads are withdrawn. A task whose stretch is on the stack right now is forgotten when it
-/// returns, and its wait goes now.
+/// Drops every handler of module `idx` — disabled, reloaded, removed: nothing of them runs again,
+/// and their reads are withdrawn. A handler whose stretch is on the stack right now is forgotten
+/// when it returns, and its wait goes now. The module is free for its mailbox again.
 pub(crate) fn drop_owner<H: ReadHost>(h: &H, idx: usize) {
     drop_where(h, |i| i == idx);
 }
 
-/// `rollback_to(n)`'s share: every task of a module from index `n` on.
+/// `rollback_to(n)`'s share: every handler of a module from index `n` on.
 pub(crate) fn drop_from<H: ReadHost>(h: &H, n: usize) {
     drop_where(h, |i| i >= n);
 }
@@ -609,62 +878,72 @@ fn drop_where<H: ReadHost>(h: &H, which: impl Fn(usize) -> bool) {
                 end_wait(h, &lua, w);
             }
         } else {
-            forget(h, id);
+            forget(h, id, false);
         }
     }
 }
 
 /// The shim's `where_`: which of its three answers holds for the calling coroutine of `lua`.
+/// "handler": the innermost running handler of this VM calls, in its own coroutine, and is one
+/// whose `recognize` waits; "foreign": another coroutine of the VM calls inside such a handler;
+/// "none": no such handler runs — outside every callback, or in a handler that does not wait.
 fn where_now<H: ReadHost>(h: &H, lua: &Lua, scope: usize) -> &'static str {
     let tasks = h.tasks();
     let Some(id) = tasks.innermost(owner(h, lua, scope)) else { return "none" };
     let calling = lua.current_thread().to_pointer() as usize;
     match tasks.table.borrow().get(&id) {
-        Some(t) if t.ptr == calling => "task",
+        Some(t) if !t.waits() => "none",
+        Some(t) if t.ptr == calling => "handler",
         _ => "foreign",
     }
 }
 
-/// The shim's `start`: queues the read a wait asks for, for the innermost running task of this VM,
-/// which must be the one calling, in its own coroutine, with no wait in this stretch yet. Raises
-/// for a mistake in the call. In a module that is not enabled, or for a task cancelled while it
-/// ran, nothing is queued: the wait ends the task.
+/// The innermost running handler of the VM, if it calls in its own coroutine with no wait in this
+/// stretch yet — the one place a wait may be registered from — and, with `waiting`, only one whose
+/// `recognize` waits.
+fn in_place(tasks: &Tasks, me: Owner, calling: usize, waiting: bool) -> Option<TaskId> {
+    let id = tasks.innermost(me)?;
+    let table = tasks.table.borrow();
+    let t = table.get(&id)?;
+    // A handler whose module went while it ran (`gone`) is in its place too: it is `ending`, so
+    // its wait is a void one, and `step` forgets it there — it never goes on.
+    (t.ptr == calling && t.wait.is_none() && (!waiting || t.waits())).then_some(id)
+}
+
+/// The shim's `start`: queues the read a wait asks for, for the innermost running handler of this
+/// VM, which must be the one calling, in its own coroutine, with no wait in this stretch yet.
+/// Raises for a mistake in the call. In a module that is not enabled, or for a handler cancelled
+/// while it ran, nothing is queued: the wait ends the handler.
 fn start<H: ReadHost>(h: &H, lua: &Lua, scope: usize, name: &str, opts: Value, nonce: Table) -> mlua::Result<()> {
     let me = owner(h, lua, scope);
     let calling = lua.current_thread().to_pointer() as usize;
     let tasks = h.tasks();
-    let in_place = |tasks: &Tasks| -> Option<TaskId> {
-        let id = tasks.innermost(me)?;
-        let table = tasks.table.borrow();
-        let t = table.get(&id)?;
-        // A task whose module went while it ran (`gone`) is in its place too: it is `ending`, so
-        // its wait is a void one, and `step` forgets it there — it never goes on.
-        (t.ptr == calling && t.wait.is_none()).then_some(id)
-    };
-    let misplaced = || {
-        mlua::Error::external(format!(
-            "{name}: the host's wait was called from outside its place"
-        ))
-    };
-    let first = in_place(tasks).ok_or_else(misplaced)?;
-    // A task whose module went is not asked anything more: not even its options are read, which
-    // could raise, and a `pcall` around the wait would then run on in a module that is gone.
+    let misplaced = || mlua::Error::external(format!("{name}: the host's wait was called from outside its place"));
+    let first = in_place(tasks, me, calling, true).ok_or_else(misplaced)?;
+    // A handler whose module went is not asked anything more: not even its options are read,
+    // which could raise, and a `pcall` around the wait would then run on in a module that is gone.
     let gone = tasks.table.borrow().get(&first).is_some_and(|t| t.gone);
     let args = if gone { None } else { Some(reads::parse_wait(name, &opts, h.screen_size())?) };
     // Reading the options can run module code (a metamethod), which may have registered a wait
-    // or ended the task: everything is checked again, and the wait registered only now.
-    let id = in_place(tasks).ok_or_else(misplaced)?;
-    let (ending, prio) = tasks.table.borrow().get(&id).map(|t| (t.ending, t.prio)).unwrap_or((true, Priority::Background));
-    let ticket = match args {
+    // or ended the handler: everything is checked again, and the wait registered only now.
+    let id = in_place(tasks, me, calling, true).ok_or_else(misplaced)?;
+    // A raised handler's waits are interactive; its lane is not (`promote`).
+    let (ending, prio) = tasks
+        .table
+        .borrow()
+        .get(&id)
+        .map(|t| (t.ending, if t.raised { Priority::Interactive } else { t.prio }))
+        .unwrap_or((true, Priority::Background));
+    let on = match args {
         Some(args) if !ending && h.module_enabled(me.idx) => {
-            let many = args.list;
-            Some(reads::submit(h, lua, me.idx, args, prio, Waiter::Task { id, many })?)
+            let list = args.list;
+            On::Read(reads::submit(h, lua, me.idx, args, prio, Waiter::Handler { id, list })?)
         }
-        _ => None,
+        _ => On::Void,
     };
     let nonce = lua.create_registry_value(nonce)?;
     match tasks.table.borrow_mut().get_mut(&id) {
-        Some(t) => t.wait = Some(Wait { ticket, nonce }),
+        Some(t) => t.wait = Some(Wait { on, nonce }),
         None => {
             // Cannot happen: nothing ran between the check and here.
             let _ = lua.remove_registry_value(nonce);
@@ -673,7 +952,7 @@ fn start<H: ReadHost>(h: &H, lua: &Lua, scope: usize, name: &str, opts: Value, n
     Ok(())
 }
 
-/// The shim's `disown`: module code resumed a parked task's coroutine itself. The host forgets
+/// The shim's `disown`: module code resumed a parked handler's coroutine itself. The host forgets
 /// it — without a reset, since that code is running it — and withdraws its read.
 fn disown<H: ReadHost>(h: &H, lua: &Lua) {
     let calling = lua.current_thread().to_pointer() as usize;
@@ -683,7 +962,6 @@ fn disown<H: ReadHost>(h: &H, lua: &Lua) {
     if let Some(w) = t.wait {
         end_wait(h, &t.lua, w);
     }
-    let _ = t.lua.remove_registry_value(t.thread);
 }
 
 /// A blocking call: `recognize` or `recognizeMany` (`name`) where it could not wait (`why`, the
@@ -761,8 +1039,84 @@ pub(crate) fn waits<H: ReadHost>(lua: &Lua, scope: usize, holder: Rc<H>, legacy:
     Ok(t)
 }
 
+/// The tests' own wait point: `wait(name)` stops the handler that calls it, in its own coroutine,
+/// until a test answers it with [`test_release`] — host state, as the rule for wait points asks.
+/// Built like the shim's wait, and it parks any handler, one that does not wait at `recognize`
+/// too: it is how the tests make a module busy in a build whose handlers never wait.
+#[cfg(test)]
+pub(crate) fn test_wait<H: ReadHost>(lua: &Lua, scope: usize, holder: Rc<H>) -> mlua::Result<Function> {
+    const TEST_SHIM: &str = r#"
+        local start, disown, yield, rawequal, error, WAIT = ...
+        return function(name)
+          local nonce = {}
+          start(name, nonce)
+          local got, value = yield(WAIT, nonce)
+          if not rawequal(got, nonce) then
+            disown()
+            error("the test wait was resumed by the module's own code", 2)
+          end
+          return value
+        end
+    "#;
+    let p = prims(lua)?;
+    let prim: Table = lua.named_registry_value(PRIMS_KEY)?;
+    let h = holder.clone();
+    let start = lua.create_function(move |lua, (name, nonce): (String, Table)| {
+        let me = owner(&*h, lua, scope);
+        let calling = lua.current_thread().to_pointer() as usize;
+        let tasks = h.tasks();
+        let id = in_place(tasks, me, calling, false)
+            .ok_or_else(|| mlua::Error::external(format!("the test wait '{name}' was called outside a handler")))?;
+        let ending = tasks.table.borrow().get(&id).is_none_or(|t| t.ending);
+        let on = if !ending && h.module_enabled(me.idx) { On::Test(name) } else { On::Void };
+        let nonce = lua.create_registry_value(nonce)?;
+        if let Some(t) = tasks.table.borrow_mut().get_mut(&id) {
+            t.wait = Some(Wait { on, nonce });
+        }
+        Ok(())
+    })?;
+    let h = holder;
+    let disown = lua.create_function(move |lua, ()| {
+        disown(&*h, lua);
+        Ok(())
+    })?;
+    lua.load(TEST_SHIM).set_name("=test wait").call((
+        start,
+        disown,
+        prim.get::<Function>("yield")?,
+        prim.get::<Function>("rawequal")?,
+        prim.get::<Function>("error")?,
+        p.wait,
+    ))
+}
+
+/// Answers the tests' wait point `name`: the handler parked there goes on with `value`, by
+/// [`resume_wait`]'s rules. True when one went on.
+#[cfg(test)]
+pub(crate) fn test_release<H: ReadHost>(h: &H, name: &str, value: Value) -> bool {
+    let id = h
+        .tasks()
+        .table
+        .borrow()
+        .iter()
+        .find(|(_, t)| !t.running && t.wait.as_ref().is_some_and(|w| matches!(&w.on, On::Test(n) if n == name)))
+        .map(|(id, _)| *id);
+    let Some(id) = id else { return false };
+    resume_parked(h, id, |on| matches!(on, On::Test(n) if n == name), value)
+}
+
+/// Whether a handler is parked at the tests' wait point `name`.
+#[cfg(test)]
+pub(crate) fn test_waiting<H: ReadHost>(h: &H, name: &str) -> bool {
+    h.tasks()
+        .table
+        .borrow()
+        .values()
+        .any(|t| !t.running && t.wait.as_ref().is_some_and(|w| matches!(&w.on, On::Test(n) if n == name)))
+}
+
 impl crate::Shared {
-    /// Drops every task of module `idx` ([`drop_owner`]): beside `ocr_drop_owner`, wherever a
+    /// Drops every handler of module `idx` ([`drop_owner`]): beside `ocr_drop_owner`, wherever a
     /// module is disabled, reloaded or removed.
     pub(crate) fn task_drop_owner(&self, idx: usize) {
         drop_owner(self, idx);
@@ -840,5 +1194,16 @@ mod tests {
         for text in [&l, &summary] {
             assert!(!text.contains("task") && !text.contains("deprecated") && !text.contains("raise"), "{text}");
         }
+    }
+
+    /// The message a callback's own `coroutine.yield` raises is the one module-runtime-and-lifecycle.md
+    /// gives, word for word, and names neither a task nor a read: in this build no callback waits
+    /// for one, and later ones must not make it wrong.
+    #[test]
+    fn the_own_yield_message_is_the_documented_one() {
+        const LIFECYCLE: &str = include_str!("../../../docs/module-runtime-and-lifecycle.md");
+        assert!(LIFECYCLE.contains(OWN_YIELD), "module-runtime-and-lifecycle.md does not show it:\n{OWN_YIELD}");
+        assert!(!OWN_YIELD.contains("task") && !OWN_YIELD.contains("recognize"), "{OWN_YIELD}");
+        assert!(!RESUMED.contains("task"), "{RESUMED}");
     }
 }

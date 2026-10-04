@@ -205,7 +205,7 @@ function T.answer(r, reading)
   assert(r and not r.answered, "no read waiting to be answered")
   r.answered = true
   S.epoch += 1
-  r.cb(reading)
+  T.call("answer", r.cb, reading)
 end
 
 -- The last read asked for with `key`.
@@ -219,7 +219,8 @@ end
 -- Loads daw-hosts and the module as the host loads them, and hands back its two overlays: the
 -- header and the warning box. The module gets a host of its own whose `host.path` is its own
 -- folder, as the host scopes a module's identity; the runtime's pictures stay in the runtime's
--- (the harness's `host.path`), and everything else is the scripted host.
+-- (the harness's `host.path`), and everything else is the scripted host. Then the first tick,
+-- which runs each overlay's first evaluation, asked for as it bound (`host.timer.after(0)`).
 function T.avenger()
   local made = T.collect()
   T.modules("modules/vps-avenger/")
@@ -245,6 +246,7 @@ function T.avenger()
   end
   T.source("modules/vps-avenger/src/main.luau")(AH)
   assert(#made == 2, "two overlays: " .. #made)
+  T.runDue()
   return made[1], made[2]
 end
 
@@ -286,7 +288,7 @@ function T.pressAt(o, i)
   o:_syncNativeKeys()
   assert(S.holding["Return"], "Return is not captured on control " .. i)
   S.epoch += 1
-  S.captured["Return"]()
+  T.call("key", S.captured["Return"])
 end
 
 -- Right (dir 1) or Left on control `i`, a stepper.
@@ -296,7 +298,7 @@ function T.stepAt(o, i, dir)
   local key = dir > 0 and "Right" or "Left"
   assert(S.holding[key], key .. " is not captured on control " .. i)
   S.epoch += 1
-  S.captured[key]()
+  T.call("key", S.captured[key])
 end
 
 function T.clickAt(i)

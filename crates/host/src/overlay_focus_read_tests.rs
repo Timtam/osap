@@ -121,7 +121,7 @@ function T.answerList(i, by, newer)
     list[k] = reading
     byName[r.names[k]] = reading
   end
-  r.cb(list, byName)
+  T.call("answer", r.cb, list, byName)
 end
 
 -- What was said from entry `from` on.
@@ -146,7 +146,7 @@ end
 function T.ret()
   assert(S.holding["Return"], "Return is not captured, so it would not reach the overlay")
   S.epoch += 1
-  S.captured["Return"]()
+  T.call("key", S.captured["Return"])
 end
 "##;
 

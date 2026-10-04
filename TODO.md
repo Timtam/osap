@@ -6849,21 +6849,135 @@ they always were, with one log line per module that says how long the first held
 - [ ] **NVDA check of step 3, before it is committed** — nothing should sound different, because
       the announcement and both OCR clicks were rewritten onto the mark: Tab through an overlay
       with an OCR value (sforzando's read-outs), a press on an OCR button, an OCREdit (Komplete
-      Kontrol's "Save as").
-- [ ] **The rest, as a mailbox per module** (replacing steps 4 to 10 of the task plan): a design
-      and its adversarial review first; the key scope and the menu flag per module, on Windows and
-      on the Mac (`host.keys.scope` and `menuOpen` stop being one switch for the whole
-      application, docs/api/keys.md); every callback run as a handler of its module, without
-      waiting yet, the machinery renamed from tasks to handlers; priority inheritance and the hang
-      answer in the read service (every open read answered `"failed"` once the recogniser has not
-      answered for `HANG`, 5 s — if the maintainer says yes); the runtime for handlers (the mark
-      taken before the hooks), with which the scripted test host lets a hook's `recognize` wait
-      inside a handler, and `a_recognize_in_a_text_hook_fails_the_scenario` turns round; then
-      handlers that wait, in one push to main with the merge of `read` and `recognizeMany` into
+      Kontrol's "Save as"). sforzando's part passed (2026-10-04); Komplete Kontrol's "Save as" is
+      still to be tried — its scan at start takes long.
+- [x] **Step K, the key scope and the menu flag per module** (the mailbox plan's first step,
+      b0-final.md): `host.keys.scope` and `menuOpen` are the calling module's own (the VM's:
+      a code dependency's count for the module that depends on it), kept by the host
+      (crates/host/src/captures.rs) and handed to the Windows hook and the Mac tap beside the
+      captures, which carry their module now. One decision for both, `capture_decision` in
+      backend/mod.rs: the earliest capture whose module is scoped to the window in front, or to
+      every window, takes the key; a menu flag counts for its module's window, and only while
+      that module holds a capture. The hook queues the module, whether the key is the keyboard's
+      auto-repeat (Windows: a bit per key, cleared by its key-up and with what the hook forgets;
+      Mac: the event's autorepeat field) and the window in front; `on_key` runs that module's own
+      capture and drops the key with a line when it is gone or the scope moved. A disable, a
+      reload and a rolled-back hot-load drop the scope and the flag after the arbiter's
+      re-election. `passedThrough` is per module. On a Mac a scope the frontmost application
+      does not name is the window the tap last saw in front, no longer every window. Fixes the
+      late `_deactivate` that set back another module's scope and flag. Tested with two modules'
+      VMs over the stub backend, one of them busy in a handler (key_scope_tests.rs).
+- [ ] **NVDA check of step K, before it is committed** — Kontakt with a plug-in menu: Tab and
+      Enter reach the menu; Melodyne as always; switching between two windows with overlays of
+      different modules, Kontakt and Melodyne, and Tab, Space and the arrows in each.
+- [ ] **Step K never ran on a Mac** (type-checked only): the tap deciding per module, and still
+      cheap enough — no `the system disabled the event tap` line while Tab, Space and the arrows
+      go through an overlay; a scope the frontmost application does not name, pinned to the window
+      the tap last saw (`key scope: the frontmost application … so the scope is the window the
+      event tap last saw in front`); the autorepeat field marking a held arrow's repeats; Return
+      and Escape in Kontakt's menu still in the runtime's `[menu]` lines (`passedThrough` per
+      module). The Windows NVDA list above, in the Mac session. And a plug-in window opened in a
+      DAW that is busy loading it: after the log's `key scope: … the window the event tap last saw
+      in front` line, Tab must reach the overlay. The tap's window is not updated while an
+      application comes to the front without answering, so that fallback can pin the window that
+      was in front before; the next real answer then moves the tap away from the pin, and every key
+      of the overlay goes to the application until the overlay comes to the front again. If that
+      happens: a fallback that heals — the frontmost application's remembered window, the one the
+      overlay matched on — is the maintainer's call (b0-final.md chose the tap's window).
+- [ ] **The Mac event tap writes log lines inside its callback** (found reviewing K; older than
+      K): `report_gate_pass` formats and writes a line there, at most once every 3 s per reason,
+      and the first suppression once per session — while the callback's own comment says a file
+      write there is the delay that gets the tap switched off. Hand both to the run-loop observer,
+      as `report_disabled` is (an atomic slot for the key, the mask and the reason).
+- [x] **Step B1a, every callback a handler of its module** (b0-final.md): each event a module
+      hears — hotkey, captured key, controller event, timer, window trigger, the report of the
+      window in front, focus change, the answer of a read, an image search or a snapshot, a
+      setting's `onChange` from the dialog or another module's `set` — goes through its mailbox
+      (crates/host/src/mailbox.rs) and runs as a coroutine of the host (task.rs, the machinery
+      renamed to handlers), one at a time per module; the synchronous places stay plain calls.
+      Nothing waits yet: `recognize` takes the blocking call in a handler too, so in the
+      application only a setting ever waits, for one tick. The rules for a busy module are built
+      and tested through a wait point only the tests have: events queued in order and run in a
+      tick phase of their own with a 15 ms budget, taking turns; a focus change and an axis folded
+      into the one queued last, a held key's repeats folded, 256 inputs at most; a key or hotkey
+      to its registration, or the same module's new one of the same key while its scope allows;
+      an answer in the mailbox still `pending` and judged `newer` when it runs; a queued `after`
+      collected once and cancellable, `every` skipped; a disable keeping a setting's `onChange`;
+      the input epoch turned once on arrival, the initial report's eagerly; a trigger made after
+      an activation arrived not reached by it; `[dispatch]` without the time parked;
+      `coroutine.running()` not nil in a callback, and a callback's own `coroutine.yield` raising
+      at the yield with the message in module-runtime-and-lifecycle.md. The scripted test host
+      drives the real mailbox (`T.call`), its Lua copy of the task rules gone.
+- [ ] **NVDA check of step B1a, before it is committed** — nothing may sound different: Tab
+      through Kontakt with a CSS library, through Melodyne and through ON:EAR; one hotkey of each;
+      a setting changed in a module's Settings dialog.
+- [ ] **Step B1a never ran on a Mac** (type-checked only): every callback a handler there too —
+      no `the system disabled the event tap` line while Tab and the arrows go through an overlay,
+      and no `[pump]` line naming `queued module events`. The cost of one event as a handler is
+      printed (`HANDLER COST:`) by the release tests of the Windows CI and, since the review of
+      2026-10-04, of the macOS job on Apple Silicon; the Intel Mac runner runs no tests — measure
+      it there (b0-final.md asks for it: a test binary built for x86_64 and run there, or a line
+      of `ocr-bench`, which all three runners run), report only, a limit after both are known.
+- [x] **Step B2, the read service for handlers that wait** (b0-final.md). A read a handler waits
+      for becomes interactive when an event in the interactive lane queues behind it — a key, a
+      hotkey, a controller event, a window or focus change, or a timer or an answer one of those
+      asked for (`mailbox::enqueue` → `task::promote` → `Scheduler::promote`) — and the
+      handler goes on in that lane; a job being recognised runs on as it started (ocr.md). The
+      hang answer: once the recogniser has answered no region for `HANG`, the delivery's sweep
+      (`Service::hang_sweep`, `Scheduler::cancel_all`) answers every read still out `"failed"`
+      with the existing reason, once per hang, a callback's and a waiting handler's alike; a late
+      answer finds nobody, `pending` is false again, new reads stay refused until the recogniser
+      answers. The switch "Slow every text read by 2 seconds, for testing" in the Application
+      settings tab (appcfg.rs, `persist: false`: never stored, no environment variable) holds
+      every answer for 2 s on the loop's side (ocr/lua.rs, `hand_over`) without holding the loop.
+      Tested on held recognitions and a stepped clock, never timed (sched.rs, service.rs,
+      task_tests.rs, appcfg.rs). Nothing changes in normal use: no handler waits yet.
+- [ ] **NVDA check of step B2, before it is committed** — the switch in the Application settings
+      tab: NVDA reads its label and its state; on, Tab onto a control with an OCR value, say in
+      sforzando: the value comes about 2 s later, and other modules answer at once meanwhile;
+      restart the application: the switch is off.
+- [ ] **Step B2 never ran on a Mac** (type-checked only): the reads asked while Vision's first
+      request hangs at start now end `"failed"` after 5 s (`ocr: the N read(s) waiting for the
+      text recogniser were answered "failed": …`) rather than wait for it; the switch read by
+      VoiceOver, label and state, and off after a restart.
+- [x] **A promoted handler's timers** (found building B2; settled in the review of
+      2026-10-04): a handler raised because a key queued behind its poll's read keeps its lane —
+      the read it waits for and every read it waits for after it are interactive (`raised`, the
+      second read b0-design.md raises it for), but a `host.timer.after` or a read with a callback
+      it arms afterwards is in the lane it began in. A poll chained through `after` stays a poll
+      (task_tests.rs, the read with a callback after the key).
+- [x] **Step B3, the overlay runtime for handlers** (b0-final.md; runtime 0.3.0). A sentence takes
+      its mark before its control's `text`, `current` or `verticalName` and asks it after each
+      (`[read] '<label>' not spoken after its <hook>: <why>`; an OCR button's click is not made
+      then). The hooks asked on every scan or tick — `when`, an `identify` asked at every
+      evaluation, `present`, the menu tests — run in ONE coroutine of the runtime's own per
+      scan (`noWait`, `scanPass`), only around the search loops and the menu tests' asking, never
+      around what is said; the overlay's origin is resolved before each, outside it. A stored
+      `identify` reached inside one is not asked there, not counted, not kept for the epoch, and
+      asked on the module's next turn through `host.timer.after(0)`. A binding's first
+      evaluation runs on the next tick. Only a stepper's `text` is read before a press (ON:EAR's
+      tiles call `freshGrid` themselves). `identify` and `present` guarded; `_activate` resolves
+      the origin guarded. Tests in the scripted host (overlay_handler_tests.rs, and ON:EAR's tile
+      in overlay_scale_tests.rs); the scenarios that bind now run the first tick before they
+      look. Heard: Enter on ON:EAR's "Search" no longer reads first.
+- [ ] **NVDA check of step B3, before it is committed** — ON:EAR: Enter on "Search" (the
+      click comes at once), the tiles, "Grid down" twice; in REAPER with Kontakt in front, reload
+      all modules (Ctrl+Alt+Shift+Win+F5): the overlay speaks again; Tab through Melodyne and
+      through Kontakt with a CSS library: as before.
+- [ ] **Step B3 never ran on a Mac with a plug-in**: an overlay whose plug-in is in front at
+      load — sforzando in REAPER, Kontakt 7 in Logic — comes up on the first tick after its
+      binding rather than inside it, which the scripted host holds to; nothing else of B3 differs
+      between the platforms.
+- [ ] **The rest, as a mailbox per module** (replacing steps 4 to 10 of the task plan; designed
+      and reviewed in b0-final.md): handlers that wait — with which the scripted
+      test host lets a hook's `recognize` wait inside a handler, and
+      `a_recognize_in_a_text_hook_fails_the_scenario` turns round — in one push to main with
+      the merge of `read` and `recognizeMany` into
       `host.ocr.recognize(what, opts?, cb?)` — in that push the blocking call's log line, the
       summary at exit, the three messages (task.rs) and `pending`'s text in ocr.md and index.md
       stop naming `host.ocr.read`, which is gone then, and no test notices if they do not;
-      Melodyne's polls, the example, the tools and sforzando after it; the waits of `read` moved
+      gamepad.md then says that a controller button's release is never dropped at the limit of 256
+      (`PadKind::Release`), as its press may be; Melodyne's polls, the example, the tools and sforzando after it; the waits of `read` moved
       off the loop and the input barrier removed (step 11); and the places that still cannot wait
       raising last (step 12).
 - [ ] **The note to the external developer porting his game menu reader** goes with that push —
@@ -6876,18 +6990,64 @@ they always were, with one log line per module that says how long the first held
       application version — and the note says so: his changed module needs that release, or it
       reads with `local readText = host.ocr.read or host.ocr.recognize` (the same arguments),
       which works on both. Step 12 waits for the note.
+- [x] **The review of K, B1a, B2 and B3** (2026-10-04, three reviews; kb-final.md). The overlays
+      of one module share its key scope and menu flag: the one that comes to the front pins the
+      scope, only the last to leave sets it back, and the flag is then what the ones in front say
+      — Komplete Kontrol's standalone overlay, back before its Preferences overlay left, had its
+      keys captured in every window. An overlay releases its keys before it unpins and pins before
+      it captures. A hotkey for a busy module notes the window the hook or the tap compares keys
+      with (`key_front`), not the Mac's accessibility question; its line says it waited only when
+      it did. A held key's second hold keeps a repeat of its own; a controller button's release is
+      never dropped at the limit; a queued event is pushed in the borrow that counted it; the
+      budget's `[pump]` line comes once every 10 s with a count. A menu test that yields fails
+      alone, and the tick goes on. An origin that raises as an overlay comes to the front is
+      unknown for that epoch, so the activation is not stopped half way by the same raise. Windows
+      says when `scope(true)` finds no window in front. Every
+      non-test source file is searched for a module callback called outside its mailbox. Docs:
+      keys.md, overlay.md's "Where a hook runs" (the `menuItem` and `onDone` row, the arbiter's
+      call, `recognize` without "without a callback"), settings.md, timer.md, module-manager.md,
+      building-an-overlay.md's anchors.
+- [ ] **The HTML probe's page callbacks, when it is merged** (found reviewing B1a): its
+      `onReady`, `onMessage` and `onClose` (webview_lua.rs) call the module's callback themselves.
+      Through the mailbox, as `Event::Page` — `onMessage` an input — with `open` checking the
+      module and the page's build. The source test in lib.rs that looks for a module's callback
+      called outside its mailbox (`…_only_at_the_synchronous_places`) fails until they are.
 
 Follow-ups this work found and did not take on:
 
+- [ ] **The host's own `open` and `discard` of a busy module's events, run** (found reviewing
+      B1a): the arms for a controller event, a hotkey, an image search and a snapshot are checked
+      in the source and through the helpers they call (`hotkey_target`, `key_target`,
+      `open_answer`, `fate`), but no test runs `Shared`'s own arm against a busy module, and the
+      test holder has a copy of the controller's. The setting's is one function both run since the
+      review (`open_on_change`). Make each other arm such a function, with a busy-module test per
+      arm, before B1b, when they first run for real.
+- [ ] **A module disabled at load evaluates its overlays only at the next window or focus event
+      after it is enabled** (found reviewing B3): the first evaluation of a binding is a one-shot
+      `host.timer.after(0)`, which a disabled module does not get. Not heard: a module is enabled
+      in the manager's window, and coming back to the plug-in is the event. Registering the
+      runtime's trigger with `initial = true` would evaluate every overlay twice at every load;
+      an `initial` trigger that only evaluates an overlay never evaluated would not.
+
+- [ ] **A control that is a child and on the focus chain is asked about twice** (found building
+      B3): `attachEmbedded`'s pattern search walks `host.window.controls()` and then the focus
+      chain, so a focused plug-in control is met twice per evaluation. With a verdict kept that
+      costs nothing; while `identify` answers nil, its count goes up by two, and the eighth "could
+      not tell" comes after four evaluations. Asking each control id once per evaluation would
+      keep the count to what the docs say.
 - [ ] **The synchronous `host.screen` captures** (the maintainer's decision 3, the next work), and
       with them a `read` of a snapshot that was taken on the event loop. Perhaps later
       `snapshotAsync` as a wait, which would let Avenger's preset step be written in a line.
-- [ ] **The older shapes of `recognize` at the merge** (the maintainer's call): `recognize()`,
-      `{ lang = L }`, `{ region = R }` whose corners are valid only when read loosely,
-      `{ region = R, lang = L }`, and keys it does not know. `read` and `recognizeMany` go at the
-      merge without grace; whether these go then too, or are logged for a while, is open, and the
-      note to the external developer names whichever go. `{ region = R }` with whole-number
-      corners or a window region is the new form's entry and stays.
+      A condition from step B3: where such a wait cannot wait — in the runtime's coroutine
+      for the hooks asked on every scan, in a coroutine of the module's own, where Luau cannot
+      stop — it captures on the event loop as today, for good, and never raises: Melodyne's
+      `when` reads pixels (screen-frame-sharing-design.md, section 6).
+- [ ] **The older shapes of `recognize` go at the merge** (the maintainer's decision of
+      2026-10-04): `recognize()`, `{ lang = L }`, `{ region = R }` whose corners are valid only
+      when read loosely, `{ region = R, lang = L }`, and keys it does not know — with `read` and
+      `recognizeMany`, without grace, each with a message that says how to write it; the note to
+      the external developer names them. `{ region = R }` with whole-number corners or a window
+      region is the new form's entry and stays.
 - [ ] **A capture that hangs on Windows.** The read service's hang clock runs only while a
       recognition runs; on the Mac `SCK_TIMEOUT` bounds a capture, but the GDI capture has no
       bound. Once a module waits for its reads, a capture that never returns leaves it deaf. A

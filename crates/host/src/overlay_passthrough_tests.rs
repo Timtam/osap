@@ -47,7 +47,7 @@ end
 function T.shiftTab()
   assert(S.holding["Shift+Tab"], "Shift+Tab is not captured, so it would not reach the overlay")
   S.epoch += 1
-  S.captured["Shift+Tab"]()
+  T.call("key", S.captured["Shift+Tab"])
 end
 
 -- The host answers read `i` (1-based, in the order asked) with `status` and, for "text", the
@@ -70,7 +70,7 @@ function T.answer(i, status, rows, err)
       lines[k] = { text = t, x = w.x, y = w.y, w = w.w, h = w.h, words = { w } }
     end
   end
-  r.cb({
+  T.call("answer", r.cb, {
     x = x1, y = y1, w = x2 - x1, h = y2 - y1, status = status, newer = newer,
     text = status == "text" and table.concat(rows, "\n") or "", lines = lines, words = words,
     lang = status == "stale" and "" or "en-US", error = err,
