@@ -923,6 +923,7 @@ pub(super) fn ask(cap: &CapturedImage) -> Option<Asked> {
 /// could not be started or has gone ([`ALIVE`]), or when [`QUEUE_MAX`] regions already wait (a
 /// recogniser that stopped answering; said once). Copies the pixels.
 pub(super) fn ask_with(w: u32, h: u32, rgba: &[u8], crop: Tighten, qos: Qos) -> Option<Asked> {
+    crate::loop_guard::off_loop("the neural recogniser");
     // Windows has one priority for every region, as it always had.
     #[cfg(not(target_os = "macos"))]
     let _ = qos;

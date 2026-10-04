@@ -1,0 +1,458 @@
+//! The overlay runtime's building blocks for an answer that comes later — `O:here()`,
+//! `O:stillHere(mark, opts)` and `O:toScreenRect(r, { whole = true })` — and what a control's hook
+//! that raises comes to, run for real against the scripted host of `overlay_menu_tests.rs`, with the
+//! focus-read helpers of `overlay_focus_read_tests.rs`.
+//!
+//! Written for step 3 of the plan that takes text recognition off the event loop (2026-10-04). A
+//! read's callback — and, once a callback can wait, its code after the wait — is about the moment
+//! it was asked in.
+//! The runtime's own announcement has always checked, before it spoke, that the overlay had not
+//! moved on since; an OCR button its click before it clicked. Those checks are now one mark, which
+//! a module's own code can take and check too, with the reasons in the words the `[read]` lines
+//! have always used. Nothing a user hears changes: the runtime's announcements and clicks are made
+//! on exactly the conditions they were — `overlay_focus_read_tests.rs` holds them to it, unchanged.
+//!
+//! And a hook that raises — a control's `text`, a tab control's `current` or `verticalName` — is
+//! logged once per control and hook, and has no value: before, a stepper's watch compared one
+//! error message with the next. The scripted host fails a scenario that leaves such a line, or that
+//! asked it for anything it does not have (`finish` in `overlay_menu_tests.rs`), which is where a
+//! `recognize` that cannot wait in a hook is found.
+
+use super::overlay_focus_read_tests::FR;
+use super::overlay_menu_tests::run_with;
+
+/// A few more helpers, after the focus-read ones.
+const MK: &str = r##"
+local S = T.S
+
+-- A mark's answer as one string, for messages: "true", or "false: <why>".
+function T.still(o, mark, opts)
+  local ok, why = o:stillHere(mark, opts)
+  return ok and "true" or ("false: " .. tostring(why))
+end
+
+-- A key of the overlay's own on the stepper: Left (-1) or Right (+1), as the captured key delivers it.
+function T.arrow(dir)
+  local spec = dir < 0 and "Left" or "Right"
+  assert(S.holding[spec], spec .. " is not captured, so it would not reach the overlay")
+  S.epoch += 1
+  S.captured[spec]()
+end
+
+-- Time passes by `ms`, 100 ms at a time, with every timer that comes due run, as the host runs them.
+function T.wait(ms)
+  local stop = S.now + ms
+  while S.now < stop do
+    S.now += 100
+    T.runDue()
+  end
+end
+"##;
+
+fn run(scenario: &str) {
+    run_with("windows", &format!("{FR}\n{MK}"), scenario)
+}
+
+fn run_mac(scenario: &str) {
+    run_with("macos", &format!("{FR}\n{MK}"), scenario)
+}
+
+// ---------------------------------------------------------------------------------------------
+// O:here and O:stillHere.
+// ---------------------------------------------------------------------------------------------
+
+/// A mark holds until something it noted moves on, and says what, in the words of the `[read]`
+/// lines: the focus — the focus elsewhere, or another control at its place — a key of the overlay's
+/// own, an announcement. Each is asked only when its option is given; with none, only the place.
+#[test]
+fn a_mark_holds_until_what_it_noted_moves_on_and_says_what() {
+    run(r##"
+        local S = T.S
+        local o = T.fields(function(o)
+          o:addCustomButton({ label = "Quiet", hotkey = "Alt+Q", hotkeyKeepsFocus = true, onActivate = function() end })
+        end)
+        local all = { focus = true, keys = true, said = true, menus = true }
+        local m = o:here()
+        assert(T.still(o, m) == "true" and T.still(o, m, all) == "true", "nothing has moved on")
+        assert(select("#", o:stillHere(m)) == 1, "true, and nothing after it")
+
+        o.focus = 2
+        assert(T.still(o, m, { focus = true }) == "false: the focus has moved on", T.still(o, m, { focus = true }))
+        assert(T.still(o, m, { keys = true, said = true, menus = true }) == "true", "only the focus moved")
+        o.focus = 1
+        local preset = o.controls[1]
+        o.controls[1] = o.controls[2]
+        assert(T.still(o, m, { focus = true }) == "false: the focus has moved on", "another control at its place")
+        o.controls[1] = preset
+        assert(T.still(o, m, all) == "true")
+
+        -- A key of the overlay's own that moves nothing and says nothing.
+        S.hotkeyFns["Alt+Q"]()
+        assert(o.focus == 1 and #S.speech == 0, "the key moved nothing and said nothing")
+        assert(T.still(o, m, all) == "false: a later key reached the overlay", T.still(o, m, all))
+        assert(T.still(o, m, { focus = true, said = true, menus = true }) == "true")
+
+        -- An announcement with no key of the overlay's own: the module's code moving the focus there
+        -- and back.
+        m = o:here()
+        o:focusNext(); o:focusPrev()
+        assert(o.focus == 1 and #S.speech == 1, "Init said, Preset's read asked")
+        assert(T.still(o, m, all) == "false: a later announcement was made", T.still(o, m, all))
+        assert(T.still(o, m, { focus = true, keys = true, menus = true }) == "true")
+    "##);
+}
+
+/// The place: the overlay no longer active, out of the front and back again on the same window,
+/// on another window. Always asked, before anything else — and `place = false` leaves exactly these
+/// three out, for an action that stays right while another window of the application is in front.
+#[test]
+fn the_place_is_always_asked_first_unless_place_is_false() {
+    run(r#"
+        local S = T.S
+        local o = T.fields(function(o)
+          o:addCustomButton({ label = "Quiet", hotkey = "Alt+Q", hotkeyKeepsFocus = true, onActivate = function() end })
+        end)
+        local m = o:here()
+        o.active = false
+        assert(T.still(o, m) == "false: the overlay is no longer active", T.still(o, m))
+        assert(T.still(o, m, { place = false }) == "true")
+        assert(T.still(o, m, { place = false, focus = true, keys = true, said = true, menus = true }) == "true")
+        o.active = true
+
+        o._lastActiveId = S.origin.id
+        o:_deactivate()
+        o:_activate()
+        assert(o.active and o.focus == 1, "back on the same window, on the same control")
+        assert(T.still(o, m) == "false: the overlay left the front and came back since", T.still(o, m))
+        assert(T.still(o, m, { place = false, focus = true, keys = true }) == "true")
+
+        m = o:here()
+        local was = S.origin
+        S.origin = { id = 8, class = was.class, app = was.app, client = was.client, bounds = was.bounds }
+        assert(T.still(o, m) == "false: the overlay is on another window now", T.still(o, m))
+        assert(T.still(o, m, { place = false }) == "true")
+        S.origin = was
+        assert(T.still(o, m) == "true", "the same handle again")
+
+        -- First the place, then the others, in the order of the [read] lines.
+        S.hotkeyFns["Alt+Q"]()
+        o.focus = 2
+        o.active = false
+        assert(T.still(o, m, { focus = true, keys = true }) == "false: the overlay is no longer active")
+        assert(T.still(o, m, { place = false, focus = true, keys = true }) == "false: the focus has moved on")
+        assert(T.still(o, m, { place = false, keys = true }) == "false: a later key reached the overlay")
+    "#);
+}
+
+/// `menus`: a menu open over the overlay now, and one that opened since and closed again — after
+/// which what was read before it is from before a choice made in it. A menu is not a place: the
+/// overlay holds it, and only `menus` asks.
+#[test]
+fn menus_asks_for_a_menu_open_now_and_one_opened_since() {
+    run(r#"
+        local S = T.S
+        local o = T.O.new("Synth")
+        o:addCustomButton({ label = "Init", onActivate = function() end })
+        o:_watchMenus({ { name = "seen", cheap = true, test = function(_, answer) answer(S.menuUp) end } })
+        T.front(o)
+        T.tick(1)
+        local m = o:here()
+        S.menuUp = true
+        T.tick(1)
+        assert(o:menuOpen(), "the test sees the menu")
+        assert(T.still(o, m, { menus = true }) == "false: a menu is open over the overlay", T.still(o, m, { menus = true }))
+        assert(T.still(o, m, { focus = true, keys = true, said = true }) == "true", "only menus asks")
+        S.menuUp = false
+        T.tick(2)
+        assert(not o:menuOpen(), "closed again")
+        assert(T.still(o, m, { menus = true }) == "false: a menu opened over the overlay since", T.still(o, m, { menus = true }))
+        assert(T.still(o, o:here(), { menus = true }) == "true", "a mark taken now")
+    "#);
+}
+
+/// The same on a Mac: nothing in a mark is the platform's.
+#[test]
+fn on_a_mac_a_mark_is_the_same() {
+    run_mac(r#"
+        local o = T.fields()
+        local m = o:here()
+        assert(T.still(o, m, { focus = true, keys = true, said = true, menus = true }) == "true")
+        T.tab()
+        assert(T.still(o, m, { keys = true }) == "false: a later key reached the overlay")
+    "#);
+}
+
+/// Anything but a mark of this overlay, options that are not a table, or an option it does not
+/// know raises, naming the caller's line: a typo in an option would otherwise check nothing at all,
+/// and a mark of another overlay compares counters that have nothing to do with this one.
+#[test]
+fn still_here_raises_for_anything_but_its_own_mark_and_options() {
+    run(r#"
+        local o = T.fields()
+        local other = T.O.new("Other")
+        -- Not a tail call in `f`, so the raise's level is the scenario's line.
+        local function raised(f)
+          local ok, err = pcall(f)
+          assert(not ok, "it did not raise")
+          assert(string.find(err, '^%[string "scenario"%]:%d+: '), "the caller's line: " .. err)
+          return err
+        end
+        local err = raised(function() local r = o:stillHere({}); return r end)
+        assert(string.find(err, "overlay 'Synth': stillHere takes a mark from O:here(), got table", 1, true), err)
+        err = raised(function() local r = o:stillHere(nil); return r end)
+        assert(string.find(err, "got nil", 1, true), err)
+        err = raised(function() local r = o:stillHere(other:here()); return r end)
+        assert(string.find(err, "overlay 'Synth': stillHere was handed a mark of overlay 'Other'", 1, true), err)
+        err = raised(function() local r = o:stillHere(o:here(), { key = true }); return r end)
+        assert(string.find(err, "stillHere has no option 'key' (it has focus, keys, said, menus and place)", 1, true), err)
+        err = raised(function() local r = o:stillHere(o:here(), true); return r end)
+        assert(string.find(err, "stillHere's options are a table, got boolean", 1, true), err)
+    "#);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The runtime's own checks are the mark's, and decide what they did.
+// ---------------------------------------------------------------------------------------------
+
+/// An OCR button's click is the control's, not the focus's: a hotkey that keeps the focus where it
+/// is presses it, and it clicks after its sentence all the same. Its control no longer at its index
+/// when the answer comes takes the click along, and says why.
+#[test]
+fn an_ocr_buttons_click_goes_by_its_control_not_by_the_focus() {
+    run(r#"
+        local S = T.S
+        local o = T.fields(function(o)
+          o:addOCRButton({ label = "Bank", region = { 300, 20, 400, 36 }, hotkey = "Alt+B", hotkeyKeepsFocus = true })
+        end)
+        assert(o.focus == 1 and S.hotkeyFns["Alt+B"], "the focus on Preset, Bank's hotkey held")
+        S.hotkeyFns["Alt+B"]()
+        assert(o.focus == 1 and #S.reads == 1 and #S.clicks == 0, T.dump())
+        T.answerList(1, { value = { status = "text", text = "Bank A" } })
+        assert(T.last().text == "Bank, button, Bank A", T.last().text)
+        assert(#S.clicks == 1 and S.clicks[1][1] == 450 and S.clicks[1][2] == 78, "clicked, the focus elsewhere")
+
+        S.hotkeyFns["Alt+B"]()
+        o.controls[3] = o.controls[2]
+        T.answerList(2, { value = { status = "text", text = "Bank A" } })
+        assert(#S.clicks == 1, "no click for a control no longer at its place")
+        assert(T.count("[read] 'Bank': not clicking — the control is not in the overlay any more") == 1, T.dump())
+        assert(T.count("not spoken: the focus has moved on") == 1, "nor its sentence: " .. T.dump())
+    "#);
+}
+
+// ---------------------------------------------------------------------------------------------
+// O:toScreenRect(r, { whole = true }).
+// ---------------------------------------------------------------------------------------------
+
+/// `whole = true` cuts the corners toward zero — the pixels the overlay's own focus read takes —
+/// so `host.ocr.read` takes them as they are; an overlay with a fractional frame places fractions
+/// otherwise. Toward zero left of and above the primary display too. Without `whole` the answer is
+/// the plain sum it always was.
+#[test]
+fn whole_cuts_the_corners_toward_zero_as_the_focus_read_does() {
+    run(r#"
+        local S = T.S
+        local o = T.O.new("Synth")
+        o:frame(function() return 0.5, -0.75 end)
+        o:addOCRButton({ label = "Preset", region = { 34, 7, 214, 22 }, readOnly = true })
+        o:addCustomButton({ label = "Init", onActivate = function() end })
+        T.front(o)
+        local r = o:toScreenRect({ 34, 7, 214, 22 })
+        assert(r[1] == 134.5 and r[2] == 56.25 and r[3] == 314.5 and r[4] == 71.25, T.region(r))
+        local w = o:toScreenRect({ 34, 7, 214, 22 }, { whole = true })
+        assert(T.region(w) == "134,56,314,71", T.region(w))
+
+        T.tab(); T.tab()
+        assert(o.focus == 1 and #S.reads == 1, T.dump())
+        assert(T.region(S.reads[1].regions[1]) == T.region(w), "the focus read's corners: " .. T.region(S.reads[1].regions[1]))
+        T.host.ocr.read(w, function() end) -- the scripted read checks corners as the host does
+        assert(#S.reads == 2)
+
+        local was = S.origin
+        S.origin = { id = was.id, class = was.class, app = was.app,
+          client = { x = -1000, y = -400, w = 800, h = 600 }, bounds = was.bounds }
+        w = o:toScreenRect({ 34, 7, 214, 22 }, { whole = true })
+        assert(T.region(w) == "-965,-393,-785,-378", T.region(w))
+        assert(o:toScreenRect({ 34, 7, 214, 22 }, { whole = false })[1] == -965.5, "only true is whole")
+        S.origin = was
+    "#);
+}
+
+/// Nothing left once cut — under one across or down, or corners turned around — is nil and
+/// "empty on screen", where the plain sum answers the corners as they are. No origin, or a scale
+/// with no factor, is nil and its own reason, as without `whole`. A scaled overlay places whole
+/// numbers already, and `whole` changes nothing there.
+#[test]
+fn whole_is_nil_when_nothing_is_left_and_keeps_the_other_reasons() {
+    run(r#"
+        local S = T.S
+        local o = T.O.new("Synth")
+        o:frame(function() return 0.5, 0 end)
+        o:addCustomButton({ label = "Init", onActivate = function() end })
+        T.front(o)
+        local r, why = o:toScreenRect({ 10, 10, 10.4, 20 }, { whole = true })
+        assert(r == nil and why == "empty on screen", tostring(why))
+        r, why = o:toScreenRect({ 20, 10, 10, 20 }, { whole = true })
+        assert(r == nil and why == "empty on screen", tostring(why))
+        assert(T.region(o:toScreenRect({ 20, 10, 10, 20 })) == "120.5,60,110.5,70", "the plain sum, turned around as asked")
+
+        o.active, o.activeCtx = false, false
+        r, why = o:toScreenRect({ 34, 7, 214, 22 }, { whole = true })
+        assert(r == nil and why == "the overlay has no origin now", tostring(why))
+
+        local factor = nil
+        local s = T.O.new("Scaled")
+        s:scale(function() return factor end)
+        s:addCustomButton({ label = "Init", onActivate = function() end })
+        T.front(s)
+        r, why = s:toScreenRect({ 34, 7, 214, 22 }, { whole = true })
+        assert(r == nil and why == "its scale function answered nil", tostring(why))
+        factor = 1.5
+        local plain, whole = s:toScreenRect({ 34, 7, 214, 22 }), s:toScreenRect({ 34, 7, 214, 22 }, { whole = true })
+        assert(T.region(plain) == T.region(whole) and T.region(whole) == "151,61,421,83", T.region(whole))
+    "#);
+}
+
+// ---------------------------------------------------------------------------------------------
+// A hook that raises.
+// ---------------------------------------------------------------------------------------------
+
+/// A `text` that raises: the sentence without a value, as before, and one line in the log however
+/// often the control is announced — and the read before an activation is the same hook, the same
+/// one line.
+#[test]
+fn a_text_that_raises_is_logged_once_and_has_no_value() {
+    run(r#"
+        local S = T.S
+        S.hooksMayRaise = true
+        local pressed = 0
+        local o = T.fields(function(o)
+          o:addStaticText({ label = "Battery", text = function() error("no battery") end })
+          o:addCustomButton({ label = "Charge", text = function() error("no charger") end,
+            onActivate = function() pressed += 1 end })
+        end)
+        T.tab(); T.tab()
+        assert(o.focus == 3 and T.last().text == "Battery", T.last().text)
+        T.tab()
+        assert(o.focus == 4 and T.last().text == "Charge, button", T.last().text)
+        T.tab(); T.tab(); T.tab(); T.tab()
+        assert(o.focus == 4 and T.last().text == "Charge, button", T.last().text)
+        T.ret()
+        assert(pressed == 1, "the activation went on")
+        assert(T.count("[overlay] 'Battery': its text raised: ") == 1, T.dump())
+        assert(T.count("[overlay] 'Charge': its text raised: ") == 1, T.dump())
+        assert(T.count("no battery") == 1 and T.count("no charger") == 1, T.dump())
+    "#);
+}
+
+/// A tab control's `current` and `verticalName` that raise: the tab it knows, named as it is, and
+/// one line each. Answering, they are taken as they were.
+#[test]
+fn a_tab_controls_hooks_that_raise_are_logged_once_each() {
+    run(r#"
+        local S = T.S
+        S.hooksMayRaise = true
+        local o = T.O.new("Synth")
+        o:addTabControl({ label = "Tools", tabs = { { label = "Main" }, { label = "Pitch" } },
+          current = function() error("no tool bar") end,
+          verticalName = function() error("no variant") end })
+        o:addCustomButton({ label = "Init", onActivate = function() end })
+        T.front(o)
+        T.tab(); T.tab(); T.tab(); T.tab()
+        assert(o.focus == 1 and T.last().text == "Main tab selected, tab control", T.last().text)
+        assert(T.count("[overlay] 'Tools': its current raised: ") == 1, T.dump())
+        assert(T.count("[overlay] 'Tools': its verticalName raised: ") == 1, T.dump())
+
+        o.active = false
+        local p = T.O.new("Answering")
+        p:addTabControl({ label = "Tools", tabs = { { label = "Main" }, { label = "Pitch" } },
+          current = function() return 2 end,
+          verticalName = function(_, n) return n == 2 and "Pitch, formant" or nil end })
+        p:addCustomButton({ label = "Init", onActivate = function() end })
+        T.front(p)
+        T.tab(); T.tab()
+        assert(p.focus == 1 and T.last().text == "Pitch, formant tab selected, tab control", T.last().text)
+    "#);
+}
+
+/// A stepper's `text` that raises, with another message each time: the watch after a step has no
+/// reading — nil, "cannot read right now" — and gives up at the control's `settle`, where it used to
+/// compare one error message with the next and announce the change between them at the first look.
+/// The value is then said as it is, without the hook's part. One line for the hook.
+#[test]
+fn a_steppers_watch_does_not_compare_error_messages() {
+    run(r#"
+        local S = T.S
+        S.hooksMayRaise = true
+        local calls, steps = 0, 0
+        local o = T.O.new("Synth")
+        o:addStepper({ label = "Tone", settle = 300,
+          text = function() calls += 1; error("unreadable " .. calls) end,
+          onStep = function() steps += 1 end })
+        o:addCustomButton({ label = "Init", onActivate = function() end })
+        T.front(o)
+        T.tab(); T.tab()
+        assert(o.focus == 1 and T.last().text == "Tone, slider", T.last().text)
+        local said = #S.speech
+        T.arrow(1)
+        assert(steps == 1, "the step was made")
+        T.wait(200)
+        assert(#S.speech == said, "no announcement at the first looks: " .. T.said(said))
+        T.wait(300)
+        assert(T.count("[watch] Synth: gave up after") == 1 and T.count("[watch] Synth: changed") == 0, T.dump())
+        assert(T.count(" — nil -> nil") == 1, "no reading, not an error's text: " .. T.dump())
+        assert(#S.speech == said + 1 and T.last().text == "Tone, slider", T.said(said))
+        assert(T.count("[overlay] 'Tone': its text raised: ") == 1, T.dump())
+    "#);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The scripted host's own end: what it lacks, and a hook that raised, fail a scenario.
+// ---------------------------------------------------------------------------------------------
+
+/// A member the scripted host does not have fails the scenario at its end, even when a `pcall`
+/// swallowed the raise — the runtime calls every hook of a module in one.
+#[test]
+#[should_panic(expected = "the scripted host was asked for what it does not have: host.ocr.nothing")]
+fn a_member_the_host_lacks_fails_the_scenario_even_inside_a_pcall() {
+    run(r#"
+        local ok = pcall(function() return T.host.ocr.nothing end)
+        assert(not ok, "it raised")
+    "#);
+}
+
+/// A `recognize` in a `text` raises in this host, which plays the end of the blocking call where
+/// nothing can wait; the runtime logs the hook, and the scenario fails at its end with that line,
+/// rather than passing on a value that went missing without a word.
+#[test]
+#[should_panic(expected = "a hook raised: [overlay] 'Battery': its text raised: ")]
+fn a_recognize_in_a_text_hook_fails_the_scenario() {
+    run(r#"
+        local o = T.fields(function(o)
+          o:addStaticText({ label = "Battery",
+            text = function() return T.host.ocr.recognize({ region = { 0, 0, 10, 10 } }).text end })
+        end)
+        T.tab(); T.tab()
+        assert(o.focus == 3 and T.last().text == "Battery", T.last().text)
+        assert(T.count("host.ocr.recognize cannot wait for the text recogniser here") == 1, T.dump())
+    "#);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The runtime's version.
+// ---------------------------------------------------------------------------------------------
+
+/// The runtime is 0.2.0, so a module that depends on `"com.platform.overlay >= 0.2"` — as one that
+/// takes a mark has to — loads against it, and against nothing older.
+#[test]
+fn the_runtime_is_0_2_so_a_module_that_asks_for_it_loads() {
+    let m = module_manifest::ModuleManifest::parse(include_str!("../../../modules/overlay-runtime/module.toml"))
+        .expect("the runtime's manifest parses");
+    assert_eq!(m.id, "com.platform.overlay");
+    assert_eq!(m.version, "0.2.0");
+    let spec = "com.platform.overlay >= 0.2";
+    let req = module_manifest::dep_constraint(spec).unwrap();
+    let id = module_manifest::dep_id(spec);
+    assert!(crate::check_dep_version("com.example.x", id, req, &m.version).is_ok());
+    assert!(crate::check_dep_version("com.example.x", id, req, "0.1.0").is_err());
+}

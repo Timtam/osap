@@ -42,7 +42,7 @@ use std::path::PathBuf;
 use mlua::{Function, Lua, Table};
 
 use super::overlay_host_panel_tests::{HP, WINDOW_PRELUDE};
-use super::overlay_menu_tests::{HARNESS, RUNTIME};
+use super::overlay_menu_tests::{finish, harness, RUNTIME};
 
 /// The helpers, added on top of the host-panel ones.
 const AV: &str = r##"
@@ -54,7 +54,8 @@ S.marked = {}
 
 -- The arbiter with the rule a module with a dialog layer needs: of a slot's matching claims, the
 -- most specific is active, and the one it replaces is deactivated first. (The harness's own
--- activates every matching claim, which two overlays on one slot cannot live with.)
+-- activates every matching claim, which two overlays on one slot cannot live with.) Called back
+-- through `Function::call`, as the host calls them (T.hostCall).
 local claims = {}
 local function settle(slot)
   local best
@@ -64,12 +65,12 @@ local function settle(slot)
   for i, c in ipairs(claims) do
     if c.slot == slot and c.active and i ~= best then
       c.active = false
-      c.off()
+      T.hostCall(c.off)
     end
   end
   if best and not claims[best].active then
     claims[best].active = true
-    claims[best].on()
+    T.hostCall(claims[best].on)
   end
 end
 rawset(T.host, "arbiter", T.strict("host.arbiter", {
@@ -236,9 +237,10 @@ function T.avenger()
     return nil
   end
   local included = {}
+  -- An included file's top level runs through `Function::call`, as the host runs it (T.hostCall).
   AH.include = function(rel)
     local key = "modules/vps-avenger/" .. rel
-    if included[key] == nil then included[key] = { T.source(key)(AH) } end
+    if included[key] == nil then included[key] = { T.hostCall(T.source(key), AH) } end
     return included[key][1]
   end
   T.source("modules/vps-avenger/src/main.luau")(AH)
@@ -451,7 +453,7 @@ end
 /// and the ones above; the host plays `os`.
 fn run_on(os: &str, scenario: &str) {
     let lua = Lua::new();
-    let t: Table = lua.load(HARNESS).set_name("harness").eval().expect("the harness loads");
+    let t: Table = harness(&lua);
     let host: Table = t.get("host").unwrap();
     let os_table: Table = host.raw_get("os").unwrap();
     os_table.raw_set("current", os).unwrap();
@@ -490,6 +492,7 @@ fn run_on(os: &str, scenario: &str) {
     if let Err(e) = lua.load(scenario).set_name("scenario").exec() {
         panic!("{e}");
     }
+    finish(&lua);
 }
 
 fn run(scenario: &str) {

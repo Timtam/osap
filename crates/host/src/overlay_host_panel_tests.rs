@@ -30,7 +30,7 @@ use std::path::PathBuf;
 
 use mlua::{Function, Lua, Table};
 
-use super::overlay_menu_tests::{HARNESS, RUNTIME};
+use super::overlay_menu_tests::{finish, harness, RUNTIME};
 
 pub(crate) const WINDOW_PRELUDE: &str = include_str!("window_prelude.luau");
 
@@ -215,7 +215,7 @@ function T.region(r) return table.concat({ r[1], r[2], r[3], r[4] }, ",") end
 /// the host plays `os`.
 fn run_on(os: &str, scenario: &str) {
     let lua = Lua::new();
-    let t: Table = lua.load(HARNESS).set_name("harness").eval().expect("the harness loads");
+    let t: Table = harness(&lua);
     let host: Table = t.get("host").unwrap();
     let os_table: Table = host.raw_get("os").unwrap();
     os_table.raw_set("current", os).unwrap();
@@ -252,6 +252,7 @@ fn run_on(os: &str, scenario: &str) {
     if let Err(e) = lua.load(scenario).set_name("scenario").exec() {
         panic!("{e}");
     }
+    finish(&lua);
 }
 
 fn run(scenario: &str) {

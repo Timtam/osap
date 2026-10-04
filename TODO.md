@@ -4140,9 +4140,11 @@ What only a person, a Mac or a measurement can settle:
       Vision's observations, `languages()` and `resolveLanguage("de")`.
 - [ ] **Not built yet from the design:** the capture-probe `read` line and its CI assertion
       (informational on Windows first; the probe reads a snapshot with `read` since 2026-09-26,
-      but not the live screen); a log nudge for a module polling `recognize` from a timer; the
-      await form (`host.task`); `expect`. Snapshots on the `screen-capture` thread are built
-      (2026-09-26, "Snapshots taken off the event loop, and change waits").
+      but not the live screen); `expect`. Snapshots on the `screen-capture` thread are built
+      (2026-09-26, "Snapshots taken off the event loop, and change waits"); the log line for a
+      `recognize` that held the event loop is built; the await form is to be a mailbox per module
+      instead (not built yet), with no task API for modules (2026-10-04, "Text recognition off
+      the event loop").
 - [x] **At the merge with the cells step: one strict region reader.**
       `crates/host/src/region_lua.rs` is the one reader, used by the cells calls and by `read`;
       the rule for corners is `region::corners` in the pure `region.rs`, which the macOS check
@@ -6793,6 +6795,136 @@ overlay runtime's focus reads off the event loop. Not now: anything that makes I
         the announcement of a move), `:1585` and `:1633` (calibration diagnostics): polls and
         helpers whose callers want the answer at once; each would be restructured around a
         callback.
+
+## Text recognition off the event loop: steps 1 to 3, and a mailbox per module (2026-10-04)
+
+The maintainer's decisions of 2026-10-03 and -04: no text recognition may burden the event loop.
+Steps 1 to 3 were built around an explicit await form for modules, `host.task.run(fn)`. Then the
+maintainer chose a mailbox per module instead ("way B"): every module does one thing after
+another on the main thread, and a `recognize` without a callback is to wait holding only its own
+module. So no task API for modules ships at all; it was trimmed out before main ("step S"). What
+steps 1 to 3 built stays: the coroutine machinery inside the host (crates/host/src/task.rs,
+task_shim.luau), which every callback is to run in and which only the tests reach today
+(`task::table`, built in test builds alone); `reading.time` and `reading.inputEpoch` and
+`host.ocr.pending(key)` (ocr/lua.rs, docs/api/ocr.md); the loop guard (loop_guard.rs) and its CI
+line; and the overlay runtime's building blocks (modules/overlay-runtime, version 0.2.0;
+docs/api/overlay.md). Until handlers wait, `recognize` and `recognizeMany` are the blocking calls
+they always were, with one log line per module that says how long the first held the loop.
+
+- [x] **The machinery** — tasks are coroutines the host resumes in the delivery of text readings;
+      owned by the VM that runs them, with the priority of the dispatch that started them; dropped
+      on disable (after the arbiter's re-election), reload (a second pass after the purge's
+      onDeactivate, which also ends the old bug of a timer it armed firing into the old VM) and
+      rollback; 16 task stretches on the event loop's stack at once at most (tested in a debug
+      build on half the main thread's 1 MiB); module code that resumes, closes or yields a task
+      through to the host handled as task.rs says, in the real host and in the scripted test host
+      alike, whose scenarios also fail on an error a task ended with. No module can start a task:
+      the host table has no entry for it, and the tests reach the machinery through `task::table`
+      (the global `task` in task_tests.rs, `T.task` in the scripted host).
+- [x] **The two waits** over the read service, with `key`, `lang` as a list, `skipped` and
+      `"stale"`; where they cannot wait — in the application everywhere, as no module starts a
+      task — the old blocking call, with one log line per module that says how long it held the
+      event loop, and a summary per module at exit. The three messages for the places that cannot
+      wait are written and tested — they name the callback form — and the scripted test host
+      raises them already; the application raises none.
+- [x] **`reading.time`, `reading.inputEpoch`, `host.ocr.pending(key)`.**
+- [x] **The loop guard** — a debug build panics, a release build logs
+      `[loop] text recognition on the event loop`, for a recognition on the loop outside the one
+      exception, the legacy call; CI fails on the line after the capture probe, on both systems.
+- [ ] **Never run on a Mac** (for the next Mac session; macOS was type-checked only): the guard's
+      places in `backend/macos/ocr.rs` (`capture_for_read`, `recognise_shot`, `frames_for_round`,
+      `shot_of`, `warm_up_recognise`, `run_vision`) and `paddle_ocr::ask_with`, and that nothing
+      but the legacy call reaches them from the main thread — the macOS CI job's capture-probe log
+      says so first; the `inputEpoch` and `time` a Mac read carries; a wait end to end on a Mac
+      (with the handlers that wait).
+- [x] **Step 3, the runtime's building blocks** (runtime 0.2.0): `O:here()` and
+      `O:stillHere(mark, opts)` with `focus`, `keys`, `said`, `menus` and `place = false`, the
+      reasons in the words of the `[read]` lines; `O:toScreenRect(r, { whole = true })`; a control's
+      `text`, `current` or `verticalName` that raises is logged once per control and hook and has
+      no value (a stepper's watch no longer compares error messages). `speakControl`, the OCR
+      button's click and the OCREdit's click check through the same mark, on the same conditions as
+      before. The scripted test host records every member it lacks (`S.missing`) and fails a
+      scenario that leaves one, or a hook's raise line, at its end
+      (crates/host/src/overlay_runtime_marks_tests.rs).
+- [ ] **NVDA check of step 3, before it is committed** — nothing should sound different, because
+      the announcement and both OCR clicks were rewritten onto the mark: Tab through an overlay
+      with an OCR value (sforzando's read-outs), a press on an OCR button, an OCREdit (Komplete
+      Kontrol's "Save as").
+- [ ] **The rest, as a mailbox per module** (replacing steps 4 to 10 of the task plan): a design
+      and its adversarial review first; the key scope and the menu flag per module, on Windows and
+      on the Mac (`host.keys.scope` and `menuOpen` stop being one switch for the whole
+      application, docs/api/keys.md); every callback run as a handler of its module, without
+      waiting yet, the machinery renamed from tasks to handlers; priority inheritance and the hang
+      answer in the read service (every open read answered `"failed"` once the recogniser has not
+      answered for `HANG`, 5 s — if the maintainer says yes); the runtime for handlers (the mark
+      taken before the hooks), with which the scripted test host lets a hook's `recognize` wait
+      inside a handler, and `a_recognize_in_a_text_hook_fails_the_scenario` turns round; then
+      handlers that wait, in one push to main with the merge of `read` and `recognizeMany` into
+      `host.ocr.recognize(what, opts?, cb?)` — in that push the blocking call's log line, the
+      summary at exit, the three messages (task.rs) and `pending`'s text in ocr.md and index.md
+      stop naming `host.ocr.read`, which is gone then, and no test notices if they do not;
+      Melodyne's polls, the example, the tools and sforzando after it; the waits of `read` moved
+      off the loop and the input barrier removed (step 11); and the places that still cannot wait
+      raising last (step 12).
+- [ ] **The note to the external developer porting his game menu reader** goes with that push —
+      the handlers that wait and the merge — not before: there is no task API for him to move to.
+      It says what changes for him: `host.ocr.read(` becomes `host.ocr.recognize(` with the same
+      callback, and `recognizeMany(` becomes `recognize(` with a list. The maintainer decided that
+      `read` and `recognizeMany` are removed at the merge, with no grace period. So no one spelling
+      works on both sides of it — before it `recognize` takes one argument, reads the whole
+      primary display and never calls a callback; after it `read` is nil; and a manifest names no
+      application version — and the note says so: his changed module needs that release, or it
+      reads with `local readText = host.ocr.read or host.ocr.recognize` (the same arguments),
+      which works on both. Step 12 waits for the note.
+
+Follow-ups this work found and did not take on:
+
+- [ ] **The synchronous `host.screen` captures** (the maintainer's decision 3, the next work), and
+      with them a `read` of a snapshot that was taken on the event loop. Perhaps later
+      `snapshotAsync` as a wait, which would let Avenger's preset step be written in a line.
+- [ ] **The older shapes of `recognize` at the merge** (the maintainer's call): `recognize()`,
+      `{ lang = L }`, `{ region = R }` whose corners are valid only when read loosely,
+      `{ region = R, lang = L }`, and keys it does not know. `read` and `recognizeMany` go at the
+      merge without grace; whether these go then too, or are logged for a while, is open, and the
+      note to the external developer names whichever go. `{ region = R }` with whole-number
+      corners or a window region is the new form's entry and stays.
+- [ ] **A capture that hangs on Windows.** The read service's hang clock runs only while a
+      recognition runs; on the Mac `SCK_TIMEOUT` bounds a capture, but the GDI capture has no
+      bound. Once a module waits for its reads, a capture that never returns leaves it deaf. A
+      remaining risk of the mailbox plan.
+- [ ] **UIA on a thread of its own** (a multithreaded apartment, as Microsoft's UI Automation
+      threading notes recommend), its calls as waits. Measure first.
+- [ ] **Luau's interrupt against a module that never ends.** Decide first whether there may be
+      a limit at all.
+- [ ] **A real thread per module** ("way A"), only if measurements after the mailbox and the
+      `host.screen` waits ask for it.
+- [ ] **An OCR stepper waits for a whole recognition before its step.** Photograph the value
+      before the step instead of recognising it.
+- [ ] **Three existing timers decide what is said** (the review's F12): ON:EAR's look after a tile
+      click (18 times 80 ms, then "nothing at that position"), Avenger's `NAME_WITHIN` (2 s) and the
+      runtime watch's deadline. They are no recognition on the loop and not part of this work, and
+      not new named exceptions.
+- [ ] **A read or a timer that a disabled module asks for** — from an `onChange` in the settings
+      dialog — still arrives after a quick enable. For tasks this is closed (a wait in a disabled
+      module ends the task), and a disable now drops what its own `onDeactivate` asked for.
+- [ ] **Kontakt's 250 ms** before its file-menu read, to be replaced by the menu tests' word.
+      Needs Mac data first.
+- [ ] **A host form for "English where installed, otherwise the user's language".**
+- [ ] **`LADDER_BUDGET`**, to be judged again now that it no longer protects the event loop.
+- [ ] **Whether `ocr-warm-up` is still needed.** Measure first.
+- [ ] **`host.window.focus` and `inputEpoch`** (a review of steps 1 to 3): `focus` turns over
+      `host.epoch` only, and `inputEpoch` turns over when the window has come forward and the loop
+      has heard of it — so a reading taken right after a `focus` can carry the value from before
+      it, which docs/api/timer.md now says. Turning it over in `focus` itself (before the act, as
+      `host.input.*` does) would re-read what Kontakt and Melodyne cache against it once more after
+      a focus, so it is the maintainer's call, not this build's. `host.input.post` turning over
+      neither counter is deliberate (docs/api/input.md, for Melodyne's variant presses) and stays.
+- [ ] **A reload's second pass drops only timers, text reads, snapshots and tasks** (a review of
+      steps 1 to 3): what the old VM's `onDeactivate` registers during the reload — a hotkey, a
+      captured key, an `onChange`, a controller listener, an image search, an arbiter claim —
+      survives the purge, keeps the old VM in memory, and some of it can call into it. The fix is
+      the whole of `purge_module`'s registration purge in one helper, called before and after the
+      `onDeactivate` calls; docs/module-runtime-and-lifecycle.md says what is dropped twice today.
 
 ## Dev tools
 

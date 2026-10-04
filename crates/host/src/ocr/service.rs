@@ -94,6 +94,19 @@ pub struct Done {
     /// the event loop logs it once per module and tag.
     pub lang_error: Option<(LangReq, String)>,
     pub timings: Timings,
+    /// When the job's picture was taken and what `host.inputEpoch()` stood at then — a reading's
+    /// `time` and `inputEpoch`. `None` when there was no picture: the capture failed.
+    pub picture: Option<Picture>,
+}
+
+/// The moment a read's picture stands for: when its capture came back, or a snapshot's own
+/// moment, with the input epoch as it stood once the capture was back. Read after the capture,
+/// so input the host drove while it was being taken counts as before it: the epoch may say
+/// "perhaps with the input" too often, never too seldom.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Picture {
+    pub at: Instant,
+    pub input_epoch: u64,
 }
 
 /// Where a job's time went, in milliseconds.
@@ -115,8 +128,9 @@ impl Timings {
 
 /// The pixels a job holds between its two stages.
 pub enum Pic<S> {
-    /// What the capture stage took, in the platform's shape.
-    Shot(S),
+    /// What the capture stage took, in the platform's shape, and `host.inputEpoch()` as the
+    /// capture thread read it once the capture was back (see [`Picture`]).
+    Shot(S, u64),
     /// A snapshot the module handed the read: turned into the platform's shape by
     /// `OcrWorker::shot_of` on the recognise thread, with nothing captured.
     Frame(Arc<Frame>),
@@ -378,6 +392,24 @@ impl<S: Send + 'static> Service<S> {
         gone
     }
 
+    /// Takes one ticket off its job — the wait of a task that was cancelled or ended. A job
+    /// nobody else waits for is dropped; one being recognised runs to its end; one another call
+    /// joined stays for it (`Scheduler::withdraw`).
+    pub fn withdraw(&self, ticket: TicketId) -> bool {
+        let mut st = locked(&self.inner.state);
+        let found = st.sched.withdraw(ticket);
+        self.inner.preempt.store(st.sched.interactive_waiting(), Ordering::Relaxed);
+        drop(st);
+        if found {
+            self.inner.barrier_cv.notify_all();
+            // A dropped job may have freed pictures from the budget a background capture waits
+            // on, or taken away the job the recogniser was about to start.
+            self.inner.capture_cv.notify_one();
+            self.inner.recognise_cv.notify_one();
+        }
+        found
+    }
+
     /// Waits until module `idx` has no picture left to be taken — of a text read, a plain
     /// snapshot, or the first of a change wait without `from` — for at most `bound`. True when it
     /// has none; false when the wait ran out. Its pictures go first meanwhile: the module is
@@ -575,7 +607,8 @@ fn capture_for_read<S: Send + 'static>(inner: &Inner<S>, worker: &OcrWorker<S>, 
     let regions: Vec<(i32, i32, i32, i32)> = spec.regions.iter().map(Rect::tuple).collect();
     let (pixels, bytes) = if worker.present {
         match logging::contain(|| (worker.capture)(&regions, spec.source)) {
-            Ok((shot, bytes)) => (Ok(Pic::Shot(shot)), bytes),
+            // The epoch as it stands now the picture exists, as a snapshot round reads it.
+            Ok((shot, bytes)) => (Ok(Pic::Shot(shot, inner.input_epoch.load(Ordering::SeqCst))), bytes),
             Err(report) => {
                 contained("a screen capture", &report);
                 (Err(CAPTURE_PANICKED.to_string()), 0)
@@ -767,7 +800,8 @@ fn recognise_loop<S: Send + 'static>(inner: Arc<Inner<S>>, worker: OcrWorker<S>,
             before_recognition: ms(job.captured_at, began),
             recognition: ms(began, finished),
         };
-        if done.send(Done { tickets, readings, lang_error, timings }).is_err() {
+        let picture = picture_of(&job.pixels, job.captured_at);
+        if done.send(Done { tickets, readings, lang_error, timings, picture }).is_err() {
             return; // the event loop is gone
         }
     }
@@ -803,7 +837,7 @@ fn recognise_job<S>(
     // not on the event loop that queued the read.
     let from_snapshot;
     let pixels = match pic {
-        Pic::Shot(s) => s,
+        Pic::Shot(s, _) => s,
         Pic::Frame(f) => {
             from_snapshot = (worker.shot_of)(f, &tuples);
             &from_snapshot
@@ -843,6 +877,16 @@ fn recognise_job<S>(
         })
         .collect();
     (readings, None)
+}
+
+/// The moment a job's readings stand for: its capture's, with the epoch read after it, or the
+/// snapshot's own moment and epoch for a read of one; none when the capture failed.
+fn picture_of<S>(pixels: &Pixels<S>, captured_at: Instant) -> Option<Picture> {
+    match pixels {
+        Ok(Pic::Shot(_, input_epoch)) => Some(Picture { at: captured_at, input_epoch: *input_epoch }),
+        Ok(Pic::Frame(f)) => Some(Picture { at: f.taken, input_epoch: f.input_epoch }),
+        Err(_) => None,
+    }
 }
 
 /// A backend answer as the pipeline takes it.
@@ -964,8 +1008,14 @@ mod tests {
         for r in regions.iter().filter(|r| matches!(r.0, 556 | 557 | 5001)) {
             locked(&ORDER).push(r.0);
         }
+        if regions.iter().any(|r| r.0 == 5585) {
+            locked(&WITHDRAWN_TAKEN).push(5585);
+        }
         (regions.to_vec(), 16)
     }
+
+    /// The withdrawal test's read, should it ever be photographed.
+    static WITHDRAWN_TAKEN: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 
     fn line_of(text: String, word_x: i32) -> OcrText {
         let word = OcrWord { text: text.clone(), x: word_x, y: 0, w: 10, h: 10 };
@@ -1495,6 +1545,66 @@ mod tests {
             SnapOutcome::Picture { frame, .. } => assert_eq!(frame.input_epoch, 17),
             _ => panic!("no picture"),
         }
+        stop.shutdown(Duration::from_secs(2));
+    }
+
+    /// A read's picture carries the input epoch as it stood once its capture was back: a bump
+    /// after the picture is not in it, and one while the picture is being taken — held here, not
+    /// timed — is. Its moment is the capture's; none when the capture failed.
+    #[test]
+    fn a_reads_picture_carries_the_epoch_read_after_its_capture() {
+        crate::quiet_expected_panics();
+        let (s, stop) = Service::spawn(worker());
+        s.note_input_epoch(4);
+        let before = Instant::now();
+        s.submit(spec(24), ticket(1, None));
+        let done = collect(&s, 1);
+        let after = Instant::now();
+        s.note_input_epoch(5);
+        let p = done[0].picture.expect("a picture");
+        assert_eq!(p.input_epoch, 4, "the bump came after the picture");
+        assert!(before <= p.at && p.at <= after);
+
+        hold(5583);
+        s.submit(spec(5583), ticket(2, None));
+        s.note_input_epoch(6);
+        release(5583);
+        assert_eq!(collect(&s, 1)[0].picture.map(|p| p.input_epoch), Some(6), "a bump while it was taken counts");
+
+        s.submit(spec(667), ticket(3, None));
+        assert_eq!(collect(&s, 1)[0].picture, None, "no picture when the capture failed");
+        stop.shutdown(Duration::from_secs(2));
+    }
+
+    /// A read of a snapshot stands for the snapshot's own moment and epoch, not the read's.
+    #[test]
+    fn a_read_of_a_snapshot_carries_the_snapshots_moment() {
+        let (s, stop) = Service::spawn(worker());
+        let mut frame = fake_frames(&[(0, 0, 100, 100)], CaptureSource::Standard, false).pop().unwrap().unwrap();
+        frame.input_epoch = 9;
+        let taken = frame.taken;
+        s.note_input_epoch(12);
+        s.submit_on_frame(spec(10), ticket(1, None), Arc::new(frame));
+        assert_eq!(collect(&s, 1)[0].picture, Some(Picture { at: taken, input_epoch: 9 }));
+        stop.shutdown(Duration::from_secs(2));
+    }
+
+    /// One ticket withdrawn before its picture is taken is never photographed; another call's
+    /// read beside it is answered.
+    #[test]
+    fn a_withdrawn_read_is_not_photographed() {
+        let (s, stop) = Service::spawn(worker());
+        hold(5584);
+        s.submit(spec(5584), ticket(1, None)); // holds the capture thread
+        s.submit(spec(5585), ticket(2, None));
+        assert!(s.withdraw(2));
+        assert!(!s.withdraw(2), "once");
+        release(5584);
+        let done = collect(&s, 1);
+        assert_eq!(done[0].tickets[0].id, 1);
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(s.drain().is_empty(), "nothing for the withdrawn ticket");
+        assert!(locked(&WITHDRAWN_TAKEN).is_empty(), "the withdrawn read was photographed");
         stop.shutdown(Duration::from_secs(2));
     }
 

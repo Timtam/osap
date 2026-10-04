@@ -479,6 +479,23 @@ impl<S: Clone + PartialEq, P> Scheduler<S, P> {
         gone
     }
 
+    /// Ticket `id` taken off its job: a task waiting for it was cancelled, or ended. Its job goes
+    /// with it when nobody else waits for it; one being recognised runs to its end, and its answer
+    /// is simply not handed to this ticket; one another call joined stays for that call. `false`
+    /// when no job holds the ticket — answered already, or never queued.
+    pub fn withdraw(&mut self, id: TicketId) -> bool {
+        let mut found = false;
+        for job in &mut self.jobs {
+            let before = job.tickets.len();
+            job.tickets.retain(|t| t.id != id);
+            found |= job.tickets.len() != before;
+        }
+        if found {
+            self.tickets_removed();
+        }
+        found
+    }
+
     /// Whether module `idx` has no picture still to be taken — what the input barrier waits for.
     pub fn barrier_clear(&self, idx: usize) -> bool {
         !self.jobs.iter().any(|j| {
@@ -734,6 +751,34 @@ mod tests {
         assert_eq!(s.cancel_owner(A.idx), vec![4]);
         assert_eq!(s.stage(started.id), Some(Stage::Recognising));
         assert!(s.finished(started.id).is_empty());
+        assert!(s.is_empty());
+    }
+
+    /// One ticket withdrawn — a cancelled task's wait: its own job goes, a job another call joined
+    /// stays for that call, a recognition in progress runs to its end without it, and a ticket no
+    /// job holds is `false`.
+    #[test]
+    fn withdrawing_a_ticket_keeps_what_others_wait_for() {
+        let now = Instant::now();
+        let mut s = Sched::new();
+        s.submit("shared", bg(1, A, None), now);
+        s.submit("shared", fg(2, B, None), now);
+        s.submit("mine", bg(3, A, None), now);
+        assert!(s.withdraw(3));
+        assert_eq!(s.len(), 1, "a job nobody waits for is dropped");
+        assert!(s.withdraw(2));
+        assert!(!s.interactive_waiting(), "the interactive ticket took the job's priority with it");
+        assert!(!s.withdraw(2), "withdrawn already");
+        assert!(!s.withdraw(99), "never queued");
+        let (_, tickets) = run(&mut s, now).unwrap();
+        assert_eq!(tickets, vec![1]);
+        s.submit("x", bg(4, A, None), now);
+        let (id, _) = s.take_capture(false, now).unwrap();
+        assert!(s.captured(id, 0, 0, now));
+        let started = s.next_recognise(now).unwrap();
+        assert!(s.withdraw(4));
+        assert_eq!(s.stage(started.id), Some(Stage::Recognising), "a recognition runs to its end");
+        assert!(s.finished(started.id).is_empty(), "and answers nobody");
         assert!(s.is_empty());
     }
 

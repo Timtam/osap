@@ -16,6 +16,8 @@ All control coordinates are **origin-relative**: the origin is the client-area t
 
 A control is spoken as `"label, type[, value]"`, and **every kind is a focus stop**: static text is Tab-reachable and read aloud, it simply has no activation.
 
+A control's hooks are the module's code, and the runtime calls them guarded. A `text` — and a tab control's `current` and `verticalName` — that raises gives **no value**: the control is announced as if the hook had answered `nil`, the read before a step or an activation is `nil`, and a stepper's watch takes it as nothing read ([`O:watch`](#o-watch)). It is logged once per control and hook, however often the control is announced: `[overlay] '<label>': its text raised: <message>` (`its current raised`, `its verticalName raised`). A `when` that raises hides that one control, logged once as ``<overlay>: '<label>' — its `when` failed (<message>); hiding just this control``.
+
 ```luau
 local O = host.require("com.platform.overlay")
 ```
@@ -324,11 +326,13 @@ A coordinate is a point, and a Retina display draws two pixels per point, so the
 
 ## O\:toScreen(x, y, opts?) / O\:toScreenRect(r, opts?) {#o-toscreen}
 
-**Signature:** `O:toScreen(x: number, y: number, opts: { rawOrigin: boolean? }?) -> (number, number) | (nil, string)` · `O:toScreenRect(r: {number, number, number, number}, opts: { rawOrigin: boolean? }?) -> {number, number, number, number} | (nil, string)`
+**Signature:** `O:toScreen(x: number, y: number, opts: { rawOrigin: boolean? }?) -> (number, number) | (nil, string)` · `O:toScreenRect(r: {number, number, number, number}, opts: { rawOrigin: boolean?, whole: boolean? }?) -> {number, number, number, number} | (nil, string)`
 
 Where an authored point, or an authored rectangle `{x1, y1, x2, y2}`, lands on screen now: what an `at` or a `region` of the overlay would click or read, through the same origin, frame and [scale](#o-scale), for a module's own code — a custom button's `onActivate`, a stepper's `onStep`, a `text` function that reads by OCR. `opts.rawOrigin = true` places it as a `rawOrigin` control would: in the origin's own pixels.
 
 Returns `nil` and a reason when the overlay is not active (no origin), and when its scale has no factor now; a caller tests the first value. It raises what the overlay's [frame](#o-frame) function raises: the factor is asked guarded, the frame is not. In an overlay without a scale it is the plain sum, `origin + frame + authored`, unrounded — whole numbers in, whole numbers out. It clicks and reads nothing itself, and costs one origin resolution (memoised per [epoch](timer.md#host-epoch) for an embedded overlay) plus the frame's and the factor's functions.
+
+`opts.whole = true` makes the rectangle one that [`host.ocr.read`](ocr.md#host-ocr-read) and [`host.screen.snapshotAsync`](screen.md#host-screen-snapshotasync) take as it is: whole numbers, not empty. Each corner is cut toward zero — `134.5` becomes `134`, `-965.5` becomes `-965` — which is the pixels the overlay's own read of a `region` covers; and when nothing is left once cut — corners turned around, or less than one across or down — the answer is `nil, "empty on screen"`. An overlay with a fractional frame places fractions otherwise, and `read` refuses them at the call. In a scaled overlay the corners are whole numbers already, and `whole` changes nothing but the empty case. Any value but `true` leaves the corners as placed. [`host.ocr.recognize`](ocr.md#host-ocr-recognize) reads loose corners and needs none of this. `whole` came with version 0.2 of the runtime: a module that uses it depends on `"com.platform.overlay >= 0.2"`.
 
 ```luau
 -- A stepper that turns a knob by dragging it a few authored units, at whatever zoom it is drawn.
@@ -342,6 +346,15 @@ end,
 text = function(o)
   local r = o:toScreenRect({ 34, 7, 214, 22 })
   return r and host.ocr.recognize({ region = r }).text or nil
+end,
+
+-- The same region read off the event loop, with the corners `read` takes.
+onActivate = function(o)
+  local r = o:toScreenRect({ 34, 7, 214, 22 }, { whole = true })
+  if not r then return end   -- no origin, no factor, or nothing of it on screen
+  host.ocr.read(r, function(reading)
+    if reading.status == "text" then host.speech.output(reading.text, { interrupt = true }) end
+  end)
 end,
 ```
 
@@ -433,7 +446,7 @@ Use it where `addSlider` cannot serve. That one finds its thumb by matching an i
 - `onActivate` — optional, and what a **press** means. Without it, Space and Return are still captured on a stepper (it is not an inert control) and then do nothing at all, which is a promise without an action. ON:EAR's two use it for "double-click to put this back to its default", which is one keystroke instead of twenty.
 - `settle` — how long to wait **at most** for the value to change before announcing it anyway, in milliseconds, default 600. Not how long to wait: see [`O:watch`](#o-watch). A step that goes through a menu — [`O:chooseMenuItem`](#o-choosemenuitem), whose item is clicked only once the menu is seen — needs a longer one. It is read after each `onStep` returns, from the returned control's `settle` field, so an `onStep` that knows nothing will change — a zoom already at its last step — sets it short on the control before it returns, and the value is said at once.
 
-What is announced afterwards always comes from reading `text` again, never from what the step intended. A control that reports its own intention rather than the application's state is the failure this project keeps returning to.
+What is announced afterwards always comes from reading `text` again, never from what the step intended. A control that reports its own intention rather than the application's state is the failure this project keeps returning to. A `text` that raises reads as nothing: the watch waits until `settle` and the value is said without it (see the top of this page).
 
 `hotkey` and `hotkeyKeepsFocus` are taken as by every constructor (see [`O:group`](#o-group)); the hotkey activates the stepper as Return does.
 
@@ -529,6 +542,68 @@ self:watch({
   onGiveUp = say,   -- it did not move, and that is worth saying too
 })
 ```
+
+## O\:here() / O\:stillHere(mark, opts?) {#o-here}
+
+**Signature:** `O:here() -> Mark` · `O:stillHere(mark: Mark, opts: { focus: boolean?, keys: boolean?, said: boolean?, menus: boolean?, place: boolean? }?) -> true | (false, string)`
+
+Whether the overlay is still where it was, for an answer that comes later and acts on what it learned — a [`host.ocr.read`](ocr.md#host-ocr-read) callback, a timer. `here` notes where the overlay is now, as a mark; `stillHere` says whether that still holds: `true`, or `false` and why. They are the checks the runtime makes itself before it says a value read off the screen and before an OCR button clicks ([`O:addOCRButton`](#o-addocrbutton)), with the reasons in the same words as its `[read]` lines.
+
+A mark notes the stay in front (every time the overlay comes to the front is a new one), the window — its origin's handle, [`O:hwnd()`](#o-origin) — the focus and the control on it, and how many keys of the overlay's own, announcements and menu openings it has seen. It is opaque: its fields are the runtime's. A mark taken while the overlay is not active never holds, except with `place = false`. `stillHere` asks, in this order, and answers the first that no longer holds:
+
+| What | Asked | Why, when it no longer holds |
+|---|---|---|
+| The overlay is active | always, unless `place = false` | `the overlay is no longer active` |
+| The same stay: it has not left the front since, not even to come back to the same window | always, unless `place = false` | `the overlay left the front and came back since` |
+| The same window: the same handle | always, unless `place = false` | `the overlay is on another window now` |
+| The same focus, and the same control on it | `focus = true` | `the focus has moved on` |
+| No key of the overlay's own since | `keys = true` | `a later key reached the overlay` |
+| No announcement of the overlay's since | `said = true` | `a later announcement was made` |
+| No menu open over the overlay now ([`O:menuOpen()`](#o-menuopen)) | `menus = true` | `a menu is open over the overlay` |
+| No menu opened over it since, not even one closed again | `menus = true` | `a menu opened over the overlay since` |
+
+- **A key of the overlay's own** is one that reached it — Tab, Shift+Tab, Return, Space, an arrow it holds, the tab keys, a control's or a tab's hotkey — whatever it did, nothing included. A key that went to the plug-in is not one, nor is a calibration key.
+- **An announcement** is the overlay saying a control as a whole — the focus arriving on it, the overlay's arrival, a control said again once a press settled (a toggle, a stepper, an OCR control's activation) — whether or not it was said in the end. What the overlay says about an action — `"<label>, activated"`, a tab switched with Left or Right — is not one.
+- **A menu** is one the overlay's [menu tests](#o-menutests) see; without menu tests none ever opens.
+- **`place = false`** leaves the first three out, for an action that stays right while another window of the same application is in front and the overlay may not be active (see macOS below). The code then checks its target itself. The other options are asked as given.
+
+No timer and no [epoch](timer.md#host-epoch) decides anything here: each count changes only when its event happens. What a mark does not see: typing that went to the plug-in, the plug-in redrawing, and a window moved or resized, which is the same window. Coordinates worked out before the wait are worked out again after it ([`O:toScreen`](#o-toscreen)).
+
+`stillHere` raises, naming the caller's line, when `mark` is not one from `O:here()`, when it is a mark of another overlay, when `opts` is not a table, and for an option it does not have — a misspelled option would otherwise check nothing at all. It never raises otherwise. Both run where they are called, on the main thread: `here` costs a small table and one origin resolution (memoised per epoch for an embedded overlay), `stillHere` a few comparisons and, unless `place = false`, one more origin resolution. Neither touches the screen.
+
+They came with version 0.2 of the runtime: a module that calls them says so, `dependencies = ["com.platform.overlay >= 0.2"]`, and an older runtime then fails its load instead of its first call.
+
+```luau
+-- Return on "Bank" reads the bank's name and clicks it, but only while the overlay is where the
+-- key was pressed, no other key of its own came since, and the window has not moved — the words
+-- are where the picture saw them. Needs "ocr", "input" and "log" in the manifest.
+local BANK = { 300, 20, 400, 36 }
+local function samePlace(a, b) return a and b and a[1] == b[1] and a[2] == b[2] end
+ov:addCustomButton({
+  label = "Bank",
+  onActivate = function(o)
+    local mark = o:here()
+    local r = o:toScreenRect(BANK, { whole = true })
+    if not r then return end
+    host.ocr.read(r, function(reading)
+      local still, why = o:stillHere(mark, { keys = true })
+      if not still then return host.log.info("Bank: not clicking, " .. why) end
+      if not samePlace(o:toScreenRect(BANK, { whole = true }), r) then return end -- it moved
+      if reading.status ~= "text" then return end
+      local w = reading.words[1]
+      host.input.click(w.x + 2, w.y + math.floor(w.h / 2))
+    end)
+  end,
+})
+```
+
+### Windows
+
+The window is the origin's window handle: the plug-in's own child window in a DAW, its window standalone.
+
+### macOS
+
+The window is the origin's `id`: on a DAW's plug-in panel, the plug-in window's. A plug-in's menu can be a window of its own that comes to the front, and the overlay may not be active while it is; an action that belongs to the press before it — a click into that menu — asks `{ keys = true, place = false }` and checks its target itself, for instance that the same application is in front ([`host.window.foreground()`](window.md#host-window-foreground)).
 
 ## O\:addOCRButton(opts) {#o-addocrbutton}
 

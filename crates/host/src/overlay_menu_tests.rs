@@ -47,7 +47,7 @@
 //! `host.ocr.read`, answered when a scenario says so, for the Tab pass-through's scenarios in
 //! `overlay_passthrough_tests.rs`, which run through `run_with` with helpers of their own.
 
-use mlua::{Function, Lua, Table};
+use mlua::{Function, Lua, Table, Value};
 
 pub(crate) const RUNTIME: &str = include_str!("../../../modules/overlay-runtime/src/main.luau");
 
@@ -144,12 +144,24 @@ local S = {
   focusSteps = 0,   -- host.element.focusStep calls
   reads = {},       -- { region, regions, names, list, key, cb, asked, answered } per host.ocr.read
   readRaises = nil, -- a message host.ocr.read raises with, when set
+  -- Every member asked of a strict table that it does not have, in order: a scenario fails at its
+  -- end while this is not empty (`finish`), so a raise the runtime's own pcall swallowed — a hook's,
+  -- a menu test's — is found all the same.
+  missing = {},
+  -- A scenario about a hook that raises sets this; otherwise a `[overlay] '…': its <hook> raised:`
+  -- line fails it at its end (`finish`), since that is where a `recognize` that cannot wait shows.
+  hooksMayRaise = false,
+  -- A scenario about a task that raises sets this; otherwise an error a task ended with — the
+  -- `[task]` line and the dialog of the real host — fails it at its end (`finish`).
+  tasksMayRaise = false,
 }
 T.S = S
 
 local function strict(name, t)
   return setmetatable(t, { __index = function(_, k)
-    error(("the scripted host has no %s.%s"):format(name, tostring(k)), 2)
+    local what = ("%s.%s"):format(name, tostring(k))
+    S.missing[#S.missing + 1] = what
+    error(("the scripted host has no %s"):format(what), 2)
   end })
 end
 T.strict = strict
@@ -431,7 +443,9 @@ T.host = strict("host", {
   }),
   resource = strict("host.resource", { exists = function(p) return S.exists[p] == true end }),
   -- An arbiter with the one rule these scenarios need: a claim that matches is activated, one that
-  -- stops matching is deactivated. One claimant per slot, so nothing is outranked.
+  -- stops matching is deactivated. One claimant per slot, so nothing is outranked. The host calls
+  -- onActivate and onDeactivate through `Function::call`, where nothing can wait, and so does
+  -- this one (T.hostCall).
   arbiter = strict("host.arbiter", {
     register = function(_, _, on, off)
       local id = nextId()
@@ -442,10 +456,10 @@ T.host = strict("host", {
       local c = S.claims[id]
       if m and not c.matching then
         c.matching = true
-        c.on()
+        T.hostCall(c.on)
       elseif not m and c.matching then
         c.matching = false
-        c.off()
+        T.hostCall(c.off)
       end
     end,
     winner = function()
@@ -460,6 +474,7 @@ S.claims = {}
 -- `host.calibrating` is a plain value, which the strict table would refuse while it is nil.
 setmetatable(T.host, { __index = function(_, k)
   if k == "calibrating" then return S.calibrating end
+  S.missing[#S.missing + 1] = "host." .. tostring(k)
   error(("the scripted host has no host.%s"):format(tostring(k)), 2)
 end })
 
@@ -715,8 +730,219 @@ end
 
 function T.dump() return table.concat(S.logs, "\n") end
 
+-- Tasks, around the host's own waits: `shim` is task_shim.luau, which the loader (`harness`)
+-- hands in, so a scenario meets the real rules of where a task can wait. No module can start a
+-- task, so `T.task` — `run`, `cancel`, `alive` — is the tests' entry, as `task::table` is the
+-- real host's, and never part of `T.host`: a runtime that asked the host table for a task
+-- entry would be told the scripted host has none. Its `start`, `where_`,
+-- `legacy` and `disown` are this host's, and play the real host's rules (task.rs). A wait is
+-- kept in S.waits until T.answer hands it its reading. Where a task cannot wait — and outside
+-- every task — recognize raises the message the host is to raise once the blocking call is gone
+-- (`message(name, why)`): this host plays that end already, so nothing a scenario runs can hold
+-- the loop unseen. A task's own coroutine.yield raises where it was made
+-- (`resumeError`, mlua's `Thread::resume_error`, with `foreignYield`), as in the real host, so a
+-- pcall around it goes on. What a task raises is kept in S.taskErrors, as the host reports it,
+-- and fails the scenario at its end unless it sets S.tasksMayRaise.
+function T.installTasks(shim, message, resumed, resumeError, foreignYield)
+  local tasks, running, nextTask = {}, {}, 0
+  local WAIT = {}
+  S.waits = {}
+  S.taskErrors = {}
+  local function innermost() return running[#running] end
+  local function where_()
+    local id = innermost()
+    if id == nil then return "none" end
+    return coroutine.running() == tasks[id].co and "task" or "foreign"
+  end
+  local function start(name, opts, nonce)
+    local id = innermost()
+    local t = id and tasks[id]
+    if not t or coroutine.running() ~= t.co or t.wait then
+      error(name .. ": the host's wait was called from outside its place", 0)
+    end
+    t.wait = { task = id, name = name, opts = opts, nonce = nonce, asked = S.now, answered = false }
+    S.waits[#S.waits + 1] = t.wait
+  end
+  local function legacy(name, _, why) return false, message(name, why) end
+  -- Module code resumed a waiting task's coroutine itself: it is no task any more. Forgotten,
+  -- not reset, its wait withdrawn — T.answer then finds nothing to resume.
+  local function disown()
+    local co = coroutine.running()
+    for id, t in pairs(tasks) do
+      if t.co == co and not t.running then
+        if t.wait then t.wait.withdrawn = true end
+        tasks[id] = nil
+        return
+      end
+    end
+  end
+  local function stretch(id, go, ...)
+    local t = tasks[id]
+    running[#running + 1] = id
+    t.running = true
+    local out = table.pack(go(t.co, ...))
+    t.running = false
+    running[#running] = nil
+    return out
+  end
+  -- What became of a stretch: ended, raised, or stopped at its wait. A wait of a cancelled task
+  -- ends it. Any other yield raises where it was made, and the task goes on from there.
+  local function step(id, out)
+    while true do
+      local t = tasks[id]
+      if t == nil then return end -- module code resumed it, and it is no task any more
+      local ok, a, b = out[1], out[2], out[3]
+      if not ok then
+        S.taskErrors[#S.taskErrors + 1] = tostring(a)
+        tasks[id] = nil
+        return
+      elseif coroutine.status(t.co) == "dead" then
+        tasks[id] = nil
+        return
+      elseif rawequal(a, WAIT) and t.wait and rawequal(t.wait.nonce, b) then
+        if t.ending then
+          t.wait.withdrawn = true
+          tasks[id] = nil
+        end
+        return
+      end
+      if t.wait then -- a wait registered by calling `start` itself: withdrawn
+        t.wait.withdrawn = true
+        t.wait = nil
+      end
+      out = stretch(id, resumeError, foreignYield)
+    end
+  end
+  local function resume(id, ...)
+    step(id, stretch(id, coroutine.resume, ...))
+  end
+  local waits = shim(start, where_, legacy, disown, coroutine.yield, coroutine.isyieldable,
+    rawequal, error, WAIT, resumed)
+  rawset(T.host.ocr, "recognize", waits.recognize)
+  rawset(T.host.ocr, "recognizeMany", waits.recognizeMany)
+  T.task = strict("task", {
+    run = function(fn, ...)
+      assert(type(fn) == "function" and select("#", ...) == 0, "task.run takes one function")
+      nextTask += 1
+      local id = nextTask
+      tasks[id] = { co = coroutine.create(fn) }
+      resume(id)
+      return id
+    end,
+    -- A waiting task ends now; a running one at its next wait. False for one that ended, and
+    -- for a running one a cancel marked already.
+    cancel = function(id)
+      local t = tasks[id]
+      if t == nil then return false end
+      if not t.running then
+        if t.wait then t.wait.withdrawn = true end
+        tasks[id] = nil
+        return true
+      end
+      if t.ending then return false end
+      t.ending = true
+      return true
+    end,
+    -- A task module code closed has ended, as in the real host.
+    alive = function(id)
+      local t = tasks[id]
+      if t == nil then return false end
+      if not t.running and coroutine.status(t.co) ~= "suspended" then
+        tasks[id] = nil
+        return false
+      end
+      return true
+    end,
+  })
+  -- A wait is answered: its task goes on with `reading`, as the host's delivery resumes it, the
+  -- epoch turned over first. Nothing for a task that ended meanwhile, or for a wait withdrawn.
+  function T.answer(w, reading)
+    assert(not w.answered, "a wait answered twice")
+    w.answered = true
+    local t = tasks[w.task]
+    if t == nil or t.wait ~= w or t.running or coroutine.status(t.co) ~= "suspended" then
+      if t ~= nil and t.wait == w then tasks[w.task] = nil end -- closed by module code
+      return
+    end
+    t.wait = nil
+    S.epoch += 1
+    resume(w.task, w.nonce, reading)
+  end
+end
+
 return T
 "##;
+
+/// The host's own wait shim, which the scripted host's tasks are built around.
+const TASK_SHIM: &str = include_str!("task_shim.luau");
+
+/// The scripted host and its helpers, as the table `T`, with what only Rust can give it:
+/// `T.hostCall(f, …)`, a plain `Function::call` as the host makes when it calls Lua back — an
+/// arbiter's onActivate and onDeactivate, an onChange, an included file's top level, none of
+/// which can wait — and the tests' `T.task` with `host.ocr.recognize` and `recognizeMany` built around
+/// the host's own shim (`T.installTasks`), whose stray yields raise through mlua's
+/// `Thread::resume_error` as the host's do (`resumeError(co, msg)`, answering as
+/// `coroutine.resume` does).
+pub(crate) fn harness(lua: &Lua) -> Table {
+    let t: Table = lua.load(HARNESS).set_name("harness").eval().expect("the harness loads");
+    let host_call = lua
+        .create_function(|_, (f, args): (Function, mlua::MultiValue)| f.call::<mlua::MultiValue>(args))
+        .unwrap();
+    t.set("hostCall", host_call).unwrap();
+    let resume_error = lua
+        .create_function(|lua, (co, msg): (mlua::Thread, String)| {
+            let mut out = mlua::MultiValue::new();
+            match co.resume_error::<mlua::MultiValue>(msg) {
+                Ok(values) => {
+                    out.push_back(Value::Boolean(true));
+                    out.extend(values);
+                }
+                Err(e) => {
+                    out.push_back(Value::Boolean(false));
+                    out.push_back(Value::String(lua.create_string(e.to_string())?));
+                }
+            }
+            Ok(out)
+        })
+        .unwrap();
+    let shim: Function = lua.load(TASK_SHIM).set_name(crate::task::SHIM_NAME).eval().expect("the shim compiles");
+    let message = lua
+        .create_function(|_, (name, why): (String, String)| {
+            Ok(crate::task::wait_message(&name, crate::task::Case::of(&why)))
+        })
+        .unwrap();
+    t.get::<Function>("installTasks")
+        .unwrap()
+        .call::<()>((shim, message, crate::task::RESUMED, resume_error, crate::task::FOREIGN_YIELD))
+        .expect("the tasks install");
+    t
+}
+
+/// What every scenario ends on, whichever loader ran it: nothing was asked of the scripted host
+/// that it does not have — a raise that a `pcall` of the runtime swallowed included (`S.missing`) —
+/// no control's hook raised (`[overlay] '…': its text raised: …`) unless the scenario is about
+/// one (`S.hooksMayRaise`), and no task ended with an error unless the scenario is about that
+/// (`S.tasksMayRaise`). A `recognize` in a hook that cannot wait raises there in this host, which
+/// plays the end of the blocking call, so this is where such a hook is found rather than as a value
+/// that went missing without a word.
+pub(crate) fn finish(lua: &Lua) {
+    let check = r#"
+        local S = T.S
+        assert(#S.missing == 0, "the scripted host was asked for what it does not have: "
+          .. table.concat(S.missing, ", "))
+        if not S.hooksMayRaise then
+          for _, l in ipairs(S.logs) do
+            assert(not string.find(l, "^%[overlay%] '.-': its %a+ raised: "), "a hook raised: " .. l)
+          end
+        end
+        if not S.tasksMayRaise then
+          assert(#S.taskErrors == 0, "a task raised: " .. table.concat(S.taskErrors, " | "))
+        end
+    "#;
+    if let Err(e) = lua.load(check).set_name("the end of the scenario").exec() {
+        panic!("{e}");
+    }
+}
 
 /// A fresh VM with the scripted host and the runtime loaded into it; the scenario runs with the
 /// harness as the global `T` (and the runtime as `T.O`). The host plays Windows.
@@ -739,7 +965,7 @@ fn run_on(os: &str, scenario: &str) {
 /// helpers a sibling test file adds to the harness (`overlay_passthrough_tests.rs`).
 pub(crate) fn run_with(os: &str, prelude: &str, scenario: &str) {
     let lua = Lua::new();
-    let t: Table = lua.load(HARNESS).set_name("harness").eval().expect("the harness loads");
+    let t = harness(&lua);
     let host: Table = t.get("host").unwrap();
     let os_table: Table = host.raw_get("os").unwrap();
     os_table.raw_set("current", os).unwrap();
@@ -757,6 +983,7 @@ pub(crate) fn run_with(os: &str, prelude: &str, scenario: &str) {
     if let Err(e) = lua.load(scenario).set_name("scenario").exec() {
         panic!("{e}");
     }
+    finish(&lua);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2885,5 +3112,104 @@ fn an_identify_that_keeps_answering_nil_is_taken_as_no_after_eight() {
         assert(not o.active)
         assert(T.count("identify could not tell yet") == 1, T.dump())
         assert(T.count("identify could not tell 8 times in a row") == 1, T.dump())
+    "#);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tasks in the scripted host: the host's own shim, and the end of the blocking call played.
+// ---------------------------------------------------------------------------------------------
+
+/// The arbiter's onActivate is Lua the host calls back, where nothing can wait — in this host as
+/// in the real one, since its setMatching calls through `T.hostCall`. A `recognize` there, in an
+/// onActivate a task's own setMatching ran, raises the second message; outside every task, the
+/// first. In the task itself it waits, and `T.answer` hands it its reading.
+#[test]
+fn recognize_in_an_onactivate_a_task_ran_cannot_wait() {
+    run(r#"
+        local S = T.S
+        local id = T.host.arbiter.register("slot", 0, function()
+          ok, err = pcall(T.host.ocr.recognize, { region = { 0, 0, 10, 10 } })
+        end, function() end)
+        T.task.run(function() T.host.arbiter.setMatching("slot", id, true) end)
+        assert(ok == false, "it waited")
+        assert(string.find(err, "host.ocr.recognize cannot wait here: this is inside a function that cannot be suspended", 1, true), err)
+        local ok2, err2 = pcall(T.host.ocr.recognizeMany, { regions = { { 0, 0, 10, 10 } } })
+        assert(ok2 == false and string.find(err2, "host.ocr.recognizeMany cannot wait for the text recogniser here", 1, true), err2)
+        local t = T.task.run(function() got = T.host.ocr.recognize({ region = { 0, 0, 10, 10 } }).text end)
+        assert(got == nil and #S.waits == 1 and T.task.alive(t))
+        T.answer(S.waits[1], { status = "text", text = "seen" })
+        assert(got == "seen" and not T.task.alive(t) and #S.taskErrors == 0)
+    "#);
+}
+
+/// A task's own `coroutine.yield` raises where it was made, as in the real host: a `pcall` around
+/// it catches it and the task goes on — to a wait of its own, here; without one the task ends with
+/// that error, and the end of the scenario would fail on it unless the scenario expects it.
+#[test]
+fn a_tasks_own_yield_raises_at_the_yield_in_the_scripted_host() {
+    run(r#"
+        local S = T.S
+        local a = T.task.run(function()
+          okY, errY = pcall(coroutine.yield, "anything")
+          after = true
+          got = T.host.ocr.recognize({ region = { 0, 0, 10, 10 } }).text
+        end)
+        assert(okY == false and string.find(tostring(errY), "coroutine.yield cannot wait here", 1, true), tostring(errY))
+        assert(after == true and #S.waits == 1 and T.task.alive(a), "it went on to its wait")
+        T.answer(S.waits[1], { status = "text", text = "seen" })
+        assert(got == "seen" and not T.task.alive(a))
+        assert(#S.taskErrors == 0, table.concat(S.taskErrors, " | "))
+        S.tasksMayRaise = true
+        local b = T.task.run(function() coroutine.yield() end)
+        assert(not T.task.alive(b) and #S.taskErrors == 1, table.concat(S.taskErrors, " | "))
+        assert(string.find(S.taskErrors[1], "coroutine.yield cannot wait here", 1, true), S.taskErrors[1])
+    "#);
+}
+
+/// Module code that resumes a waiting task's coroutine itself takes it from the host, as in the
+/// real host: the wait raises in the coroutine the module now runs, the task is forgotten and its
+/// wait withdrawn, and the answer that comes later resumes nothing. One the module closes has
+/// ended.
+#[test]
+fn module_code_resuming_or_closing_a_task_takes_it_from_the_scripted_host() {
+    run(r#"
+        local S = T.S
+        local id = T.task.run(function()
+          co = coroutine.running()
+          ok, err = pcall(T.host.ocr.recognize, { region = { 0, 0, 10, 10 } })
+          finished = true
+        end)
+        assert(#S.waits == 1 and T.task.alive(id))
+        assert(coroutine.resume(co, "not the host"))
+        assert(ok == false and string.find(tostring(err), "the task was resumed by the module's own code", 1, true), tostring(err))
+        assert(finished == true and not T.task.alive(id) and S.waits[1].withdrawn)
+        T.answer(S.waits[1], { status = "text", text = "late" })
+        local c = T.task.run(function()
+          co2 = coroutine.running()
+          T.host.ocr.recognize({ region = { 0, 0, 10, 10 } })
+          resumed = true
+        end)
+        assert(coroutine.close(co2))
+        assert(not T.task.alive(c), "a closed task has ended")
+        T.answer(S.waits[2], { status = "text", text = "late" })
+        assert(resumed == nil)
+    "#);
+}
+
+/// A second cancel of a running task ends nothing the first did not, in this host as in the real
+/// one: `true` once, then `false`; the task ends at its next wait.
+#[test]
+fn a_second_cancel_of_a_running_task_is_false_in_the_scripted_host() {
+    run(r#"
+        local S = T.S
+        local t
+        t = T.task.run(function()
+          T.host.ocr.recognize({ region = { 0, 0, 10, 10 } })
+          first, second = T.task.cancel(t), T.task.cancel(t)
+          T.host.ocr.recognize({ region = { 0, 0, 10, 10 } })
+          reached = true
+        end)
+        T.answer(S.waits[#S.waits], { status = "text", text = "x" })
+        assert(first == true and second == false and reached == nil and not T.task.alive(t))
     "#);
 }

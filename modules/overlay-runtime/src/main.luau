@@ -1034,10 +1034,130 @@ function Overlay:toScreen(x, y, opts)
   return sx, sy
 end
 
+-- Corners as host.ocr.read takes them, from corners as host.ocr.recognize took them: each cut
+-- toward zero, which is what that call's loose reading did, so a focus read covers exactly the
+-- pixels it always covered — an unscaled overlay's fractional frame included. nil when nothing is
+-- left: corners turned around, or under one across or down.
+local function readCorners(r)
+  local function cut(v) return v < 0 and math.ceil(v) or math.floor(v) end
+  local x1, y1, x2, y2 = cut(r[1]), cut(r[2]), cut(r[3]), cut(r[4])
+  if x2 <= x1 or y2 <= y1 then return nil end
+  return { x1, y1, x2, y2 }
+end
+
 -- Authored rectangle {x1, y1, x2, y2} on screen, likewise: what a `region` would read.
+--
+-- `opts.whole = true` gives the corners host.ocr.read and host.screen.snapshotAsync take, which
+-- are whole numbers and not empty: cut toward zero, the pixels the overlay's own focus read takes
+-- (readCorners), and nil with "empty on screen" when nothing is left. A scaled overlay places whole
+-- numbers already; an unscaled one with a fractional frame does not, and a read would refuse its
+-- corners at the call.
 function Overlay:toScreenRect(r, opts)
   if not self:origin() then return nil, "the overlay has no origin now" end
-  return placeRect(self, (opts and opts.rawOrigin) and { rawOrigin = true } or nil, r)
+  local placed, why = placeRect(self, (opts and opts.rawOrigin) and { rawOrigin = true } or nil, r)
+  if not placed or not (opts and opts.whole == true) then return placed, why end
+  local whole = readCorners(placed)
+  if not whole then return nil, "empty on screen" end
+  return whole
+end
+
+-- ── Where the overlay is: a mark, and whether it still holds ─────────────────────────────────
+-- An answer that comes later — a read's callback, a timer — is about the moment it was asked in,
+-- and the overlay may have moved on since: left the front, gone to another window, the focus
+-- elsewhere, a key of its own pressed, another announcement begun, a menu opened.
+-- The announcement of a read value has always checked all of that before it spoke, and an OCR
+-- button's click before it clicked; a module's own code that reads and then acts needs the same
+-- checks, and wrote them by hand from the runtime's private counters, or did without. So the
+-- runtime keeps them in one place: `O:here()` notes where the overlay is, and `O:stillHere(mark,
+-- opts)` says whether that still holds — true, or false and why, in the words the `[read]` lines
+-- have always used, so a module's log line and the runtime's say the same thing the same way.
+--
+-- A mark is the overlay's own counters, read at the call, nothing else: no timer, no epoch. Each
+-- thing it remembers changes only when that thing happens.
+
+-- The metatable that tells a mark from any other table.
+local Mark = {}
+
+-- A mark of overlay `self` for control `index`. The runtime's own announcements announce a control
+-- that need not be the focused one — a control's hotkey that keeps the focus where it is — so the
+-- control is the one at `index`, and the focus is noted beside it; O:here() takes the focused one.
+local function markAt(self, index)
+  return setmetatable({
+    overlay = self,
+    stay = self._stay,
+    hwnd = self:hwnd(),
+    at = self.focus,
+    index = index,
+    control = self.controls[index],
+    keys = self._keys,
+    said = self._said,
+    menuOpens = self._menuOpens,
+  }, Mark)
+end
+
+-- Whether mark `m` still holds — true, or false and the first reason in this order. `place = false`
+-- leaves the first three out. `control` is the runtime's own: the control the mark was taken on
+-- still at its index, whatever has the focus, which an OCR button's click asks (a hotkey can press
+-- one the focus is not on).
+local function stillHereAt(self, m, opts)
+  if not (opts and opts.place == false) then
+    if not self.active then return false, "the overlay is no longer active" end
+    if self._stay ~= m.stay then return false, "the overlay left the front and came back since" end
+    if self:hwnd() ~= m.hwnd then return false, "the overlay is on another window now" end
+  end
+  if not opts then return true end
+  if opts.control and self.controls[m.index] ~= m.control then
+    return false, "the control is not in the overlay any more"
+  end
+  if opts.focus and (self.focus ~= m.at or self.controls[m.index] ~= m.control) then
+    return false, "the focus has moved on"
+  end
+  if opts.keys and self._keys ~= m.keys then return false, "a later key reached the overlay" end
+  if opts.said and self._said ~= m.said then return false, "a later announcement was made" end
+  if opts.menus then
+    if self:menuOpen() then return false, "a menu is open over the overlay" end
+    if self._menuOpens ~= m.menuOpens then return false, "a menu opened over the overlay since" end
+  end
+  return true
+end
+
+-- Where the overlay is now, as a mark for O:stillHere: in front or not, which stay in front, the
+-- window, the focus and the control on it, and how many keys of its own, announcements and menu
+-- openings it has seen. A table lookup or two and one origin resolution (O:hwnd).
+function Overlay:here()
+  return markAt(self, self.focus)
+end
+
+local STILL_HERE_OPTS = { focus = true, keys = true, said = true, menus = true, place = true }
+
+-- Whether what `mark` noted still holds: true, or false and why. Always asked, unless `place =
+-- false`: the overlay still active, in the same stay in front, on the same window. And with
+-- `focus = true` the same focus on the same control, `keys = true` no key of the overlay's own
+-- since, `said = true` no announcement since, `menus = true` no menu open over it and none opened
+-- since. A mark from another overlay, anything but a mark, or an option it does not know raises:
+-- a typo in an option would otherwise check nothing, silently.
+function Overlay:stillHere(mark, opts)
+  if getmetatable(mark) ~= Mark then
+    error(("overlay '%s': stillHere takes a mark from O:here(), got %s")
+      :format(tostring(self.label), type(mark)), 2)
+  end
+  if mark.overlay ~= self then
+    error(("overlay '%s': stillHere was handed a mark of overlay '%s'")
+      :format(tostring(self.label), tostring(mark.overlay.label)), 2)
+  end
+  if opts ~= nil then
+    if type(opts) ~= "table" then
+      error(("overlay '%s': stillHere's options are a table, got %s")
+        :format(tostring(self.label), type(opts)), 2)
+    end
+    for k in pairs(opts) do
+      if not STILL_HERE_OPTS[k] then
+        error(("overlay '%s': stillHere has no option '%s' (it has focus, keys, said, menus and place)")
+          :format(tostring(self.label), tostring(k)), 2)
+      end
+    end
+  end
+  return stillHereAt(self, mark, opts)
 end
 
 -- The overlay's (first) tab control and its index in `controls`, or nil if none.
@@ -1786,19 +1906,9 @@ end
 -- One `host.ocr.read` key per overlay for what its announcements read — a control's value
 -- region and its `ocrLabel` — so that a later announcement's read replaces one that has not
 -- started recognising yet. Numbered like the pass-through's keys (readUnnamedStop, below), and
--- reserved with them: a module does not use keys that begin "com.platform.overlay ".
+-- reserved with them: a module does not use keys that begin "com.platform.overlay ". The corners
+-- these reads take are cut by readCorners, beside O:toScreenRect.
 local focusReadKeys = 0
-
--- Corners as host.ocr.read takes them, from corners as host.ocr.recognize took them: each cut
--- toward zero, which is what that call's loose reading did, so a focus read covers exactly the
--- pixels it always covered — an unscaled overlay's fractional frame included. nil when nothing is
--- left: corners turned around, or under one across or down.
-local function readCorners(r)
-  local function cut(v) return v < 0 and math.ceil(v) or math.floor(v) end
-  local x1, y1, x2, y2 = cut(r[1]), cut(r[2]), cut(r[3]), cut(r[4])
-  if x2 <= x1 or y2 <= y1 then return nil end
-  return { x1, y1, x2, y2 }
-end
 
 -- Text a reading says, as one phrase: its rows joined with a space. host.ocr.read joins rows with
 -- a line break, and a read-out of two lines is still one value to say.
@@ -1824,6 +1934,30 @@ local READ_NOTE = {
   none = "the recogniser read nothing",
   stale = "not recognised",
 }
+
+-- What control `c`'s hook `hook` — its `text`, a tab control's `current` or `verticalName` —
+-- answers now, called with the overlay and `...`: its value, or nil when it raised.
+--
+-- Guarded, as every hook here is, and no longer silently. A raise was swallowed where the sentence
+-- is built, and before a step or an activation it came back as the VALUE — the error's own text —
+-- so a stepper's watch compared one error message with the next and announced on a difference
+-- between two messages. Now a raise is no value, which the watch takes as "cannot read right now",
+-- and is logged once per control and hook: a hook that fails on every announcement does not bury
+-- the log it is trying to explain itself in. That is also where a hook whose host call raises — a
+-- region that is neither form, say — shows up, rather than as a value that went missing without a
+-- word.
+local function hookValue(self, c, hook, ...)
+  local f = c[hook]
+  if f == nil then return nil end
+  local ok, v = pcall(f, self, ...)
+  if ok then return v end
+  c._hookRaised = c._hookRaised or {}
+  if not c._hookRaised[hook] then
+    c._hookRaised[hook] = true
+    host.log.info(string.format("[overlay] '%s': its %s raised: %s", tostring(c.label), hook, tostring(v)))
+  end
+  return nil
+end
 
 -- `queued` says this announcement was not asked for by a keypress, so it must not cut off
 -- whatever is already being said.
@@ -1856,13 +1990,13 @@ local function speakControl(self, index, moveMouse, withHint, queued, andThen)
   -- controls are the ones Tab then steps into (see isFocusable's `when` gating).
   if c.kind == "tabcontrol" then
     if c.current then
-      local ok, n = pcall(c.current, self)
-      if ok and type(n) == "number" and c.tabs[n] then c._current = n end
+      local n = hookValue(self, c, "current")
+      if type(n) == "number" and c.tabs[n] then c._current = n end
     end
     local tab = c.tabs[c._current]
     if c.verticalName then
-      local ok, name = pcall(c.verticalName, self, c._current)
-      if ok and type(name) == "string" and name ~= "" then
+      local name = hookValue(self, c, "verticalName", c._current)
+      if type(name) == "string" and name ~= "" then
         tab = { label = name, hotkeyLabel = tab and tab.hotkeyLabel, hotkey = tab and tab.hotkey }
       end
     end
@@ -1896,8 +2030,8 @@ local function speakControl(self, index, moveMouse, withHint, queued, andThen)
   -- as it always was: whatever the read takes, it describes this moment.
   local rest = {}
   if c.text then
-    local ok, v = pcall(c.text, self)
-    if ok and v ~= nil and v ~= "" then rest[#rest + 1] = tostring(v) end
+    local v = hookValue(self, c, "text")
+    if v ~= nil and v ~= "" then rest[#rest + 1] = tostring(v) end
   end
   -- A `readOnly` OCR control is NOT a button, and must not say it is.
   --
@@ -1967,8 +2101,11 @@ local function speakControl(self, index, moveMouse, withHint, queued, andThen)
   -- control's state read out while the second one is focused, which would be a plain lie
   -- about what is in front of the user.
   local needsValue = c.kind == "gtoggle" or c.kind == "slider" or c.kind == "gbutton"
-  local at = self.focus
-  local pinned = self:hwnd()
+  -- Where the overlay is as the sentence is asked for, which every late part of it is checked
+  -- against (O:stillHere): the stay, the window, the focus and this control, the keys of its own,
+  -- the announcements — this one counted above — and the menus.
+  local mark = markAt(self, index)
+  local at, pinned = mark.at, mark.hwnd
   -- The sentence, once its name and its value are known, and then an image-read value.
   local function say(name, value)
     local parts = { name }
@@ -2013,9 +2150,10 @@ local function speakControl(self, index, moveMouse, withHint, queued, andThen)
   -- counts them), no other announcement since (counted above); and no menu open over the overlay,
   -- nor one opened since the read was asked and closed again (_menuChange counts them) — a menu
   -- the plug-in put up itself, or a choice made in it, after which the value read is the one
-  -- from before. The overlay's own `opensMenu` press puts its menu up only after its sentence
-  -- (activate). Nothing waits on a timer: an answer is taken when it comes, or dropped as no
-  -- longer true.
+  -- from before. All but the first are the mark's (stillHereAt, with every option), the checks a
+  -- module's own late answer asks through O:stillHere. The overlay's own `opensMenu` press puts
+  -- its menu up only after its sentence (activate). Nothing waits on a timer: an answer is taken
+  -- when it comes, or dropped as no longer true.
   --
   -- What the read says, reading by reading: see valueWords. The language is the user's, as for
   -- every host.ocr.read without `lang`; host.ocr.recognize without one used the platform's own
@@ -2038,7 +2176,6 @@ local function speakControl(self, index, moveMouse, withHint, queued, andThen)
     host.log.info(string.format("[read] '%s' not read: its region is empty on screen (%s,%s to %s,%s)",
       tostring(c.label or ""), tostring(region[1]), tostring(region[2]), tostring(region[3]), tostring(region[4])))
   end
-  local said, keys, stay, opens = self._said, self._keys, self._stay, self._menuOpens
   -- After the sentence: an OCREdit drops the caret into the real edit control on focus, so the
   -- user can type to change the value right away. Read first (clean), then click — once the read
   -- is answered, so its picture is from before the click whatever the capture costs — and only
@@ -2047,8 +2184,7 @@ local function speakControl(self, index, moveMouse, withHint, queued, andThen)
   -- a focus read, so navigating away doesn't re-click. Then the activation's continuation.
   local function finish()
     if region and c.kind == "ocredit" and moveMouse then
-      if self.active and self._stay == stay and self:hwnd() == pinned and self.focus == at
-        and self.controls[index] == c and self._keys == keys then
+      if stillHereAt(self, mark, { focus = true, keys = true }) then
         local cx, cy = rectCentre(self, c, ar)
         if cx then host.input.click(cx, cy) end
       else
@@ -2078,22 +2214,9 @@ local function speakControl(self, index, moveMouse, withHint, queued, andThen)
         why = "a later announcement's read replaced it before it was recognised"
       elseif (lr and lr.newer) or (vr and vr.newer) then
         why = "a later announcement asked for another read"
-      elseif not self.active then
-        why = "the overlay is no longer active"
-      elseif self._stay ~= stay then
-        why = "the overlay left the front and came back since"
-      elseif self:hwnd() ~= pinned then
-        why = "the overlay is on another window now"
-      elseif self.focus ~= at or self.controls[index] ~= c then
-        why = "the focus has moved on"
-      elseif self._keys ~= keys then
-        why = "a later key reached the overlay"
-      elseif self._said ~= said then
-        why = "a later announcement was made"
-      elseif self:menuOpen() then
-        why = "a menu is open over the overlay"
-      elseif self._menuOpens ~= opens then
-        why = "a menu opened over the overlay since"
+      else
+        local fine, because = stillHereAt(self, mark, { focus = true, keys = true, said = true, menus = true })
+        if not fine then why = because end
       end
       local outcome = why and ("; not spoken: " .. why) or "; spoken"
       -- One line per region read: the name's first, when there is a value line to carry the outcome.
@@ -2157,7 +2280,7 @@ local function announceWhenChanged(self, index, c, was)
     if self.active and self.focus == index then speakControl(self, index, false, true) end
   end
   self:watch({
-    read = function() return c.text and select(2, pcall(c.text, self)) or nil end,
+    read = function() return c.text and hookValue(self, c, "text") or nil end,
     was = was,
     within = c.settle or 600,
     onDone = say,
@@ -2706,7 +2829,7 @@ function Overlay:activate(index)
     -- control that had simply done its job quietly. Reported as "the overlay crashed", which
     -- from the keyboard is exactly what it looks like.
     -- Read BEFORE the action, because afterwards is too late to know what it was.
-    local was = c.text and select(2, pcall(c.text, self)) or nil
+    local was = c.text and hookValue(self, c, "text") or nil
     local ok, err = pcall(c.onActivate, self) -- the overlay, so a header control can reach it
     if not ok then
       host.log.info(string.format("%s: '%s' failed while activating: %s",
@@ -2735,22 +2858,13 @@ function Overlay:activate(index)
     -- a click landing after that, a menu opening over the control they went to, is the mistake
     -- pressing again cannot undo. A click not made is logged.
     local clicks = c.kind == "ocredit" or not c.readOnly
-    local pinned, stay, keys = self:hwnd(), self._stay, self._keys
+    -- Where the overlay is as the key is pressed. Not the focus: a hotkey can press an OCR button
+    -- the focus is not on, and its click is the control's, wherever the focus went.
+    local mark = markAt(self, i)
     speakControl(self, i, false, nil, nil, function(placed)
       if not clicks then return end
-      local why = nil
-      if not self.active then
-        why = "the overlay is no longer active"
-      elseif self._stay ~= stay then
-        why = "the overlay left the front and came back since"
-      elseif self:hwnd() ~= pinned then
-        why = "the overlay is on another window now"
-      elseif self.controls[i] ~= c then
-        why = "the control is not in the overlay any more"
-      elseif self._keys ~= keys then
-        why = "a later key reached the overlay"
-      end
-      if why then
+      local fine, why = stillHereAt(self, mark, { control = true, keys = true })
+      if not fine then
         host.log.info(string.format("[read] '%s': not clicking — %s", tostring(c.label), why))
         return
       end
@@ -3495,7 +3609,7 @@ function Overlay:adjust(dir)
     sliderStep(self, c, dir)
   elseif c.kind == "stepper" and c.onStep then
     local i = self.focus
-    local was = c.text and select(2, pcall(c.text, self)) or nil
+    local was = c.text and hookValue(self, c, "text") or nil
     local ok, err = pcall(c.onStep, dir, self)
     if not ok then
       host.log.info(string.format("%s: '%s' failed while stepping: %s",

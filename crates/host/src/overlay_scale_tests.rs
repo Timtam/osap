@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 use mlua::{Function, Lua, Table};
 
-use super::overlay_menu_tests::{HARNESS, RUNTIME};
+use super::overlay_menu_tests::{finish, harness, RUNTIME};
 
 /// The helpers, added to the harness's `T`: input, OCR and pixels that record where they were
 /// asked, and a window that owns every point unless a scenario says otherwise.
@@ -141,7 +141,7 @@ end
 /// a file of this repository the way the host compiles a module's code.
 fn run_on(os: &str, scenario: &str) {
     let lua = Lua::new();
-    let t: Table = lua.load(HARNESS).set_name("harness").eval().expect("the harness loads");
+    let t: Table = harness(&lua);
     let host: Table = t.get("host").unwrap();
     let os_table: Table = host.raw_get("os").unwrap();
     os_table.raw_set("current", os).unwrap();
@@ -170,6 +170,7 @@ fn run_on(os: &str, scenario: &str) {
     if let Err(e) = lua.load(scenario).set_name("scenario").exec() {
         panic!("{e}");
     }
+    finish(&lua);
 }
 
 fn run(scenario: &str) {

@@ -201,6 +201,8 @@ jobs:
             Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
             Write-Host "---- capture probe, $($run.Name) ----"
             if (-not (Test-Path $log)) { Write-Host "::warning::capture probe ($($run.Name)): no log at all"; continue }
+            # Kept for the next step, which is not informational: the next run writes over $log.
+            Copy-Item $log (Join-Path $env:RUNNER_TEMP "capture-probe-$($run.Name).log") -Force
             Get-Content $log | Select-String -Pattern 'CAPTURE PROBE|\[capture\]|\[pump\]' | ForEach-Object { $_.Line }
             if (-not (Select-String -Path $log -Pattern 'still alive after capturing' -Quiet)) {
               Write-Host "::warning::capture probe ($($run.Name)): it never said it was still alive after capturing"
@@ -231,6 +233,28 @@ jobs:
               Write-Host "::warning::capture probe (duplication): no read was answered through desktop duplication; every one fell back to the standard way"
             }
           }
+
+      # No text recognition on the event loop (crates/host/src/loop_guard.rs): a release build
+      # writes this line the first time a capture for a read or a recognition runs on the loop's
+      # thread outside the one call still allowed to, the blocking `recognize`. Not
+      # informational, unlike the probe above: the line is a bug in the host whatever the runner
+      # can capture. Both runs' logs, kept by the step above; a run without one has said so there.
+      - name: Nothing recognised text on the event loop
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $found = $false
+          foreach ($name in @('standard', 'duplication')) {
+            $log = Join-Path $env:RUNNER_TEMP "capture-probe-$name.log"
+            if (-not (Test-Path $log)) { Write-Host "::warning::no capture-probe log of the $name run to look at"; continue }
+            $hit = Select-String -Path $log -Pattern '\[loop\] text recognition on the event loop' | Select-Object -First 1
+            if ($hit) {
+              Write-Host "::error::text recognition ran on the event loop ($name run): $($hit.Line)"
+              $found = $true
+            }
+          }
+          if ($found) { exit 1 }
+          Write-Host "nothing recognised text on the event loop"
 
       # The documentation ships inside the artifact and works offline from the folder, so a
       # tester with no internet still has it. `package.ps1` packages without it rather than

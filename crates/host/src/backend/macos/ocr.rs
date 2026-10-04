@@ -1247,6 +1247,7 @@ pub fn frames_for_round(
     _src: CaptureSource,
     poll: bool,
 ) -> Vec<Result<crate::backend::frame::Frame, String>> {
+    crate::loop_guard::off_loop("a snapshot round");
     regions.iter().map(|&(x, y, w, h)| super::capture::frame(x, y, w, h, poll)).collect()
 }
 
@@ -1256,6 +1257,7 @@ pub fn frames_for_round(
 /// fails in its own slot when it is cut out (`render`). A snapshot without a backing image — none
 /// is made without one on this platform — answers every region with the reason.
 pub fn shot_of(frame: &crate::backend::frame::Frame, _regions: &[(i32, i32, i32, i32)]) -> Shot {
+    crate::loop_guard::off_loop("a snapshot's pixels for a text read");
     match &frame.native {
         Some(n) => Shot::Shared { big: n.image.clone(), scale: n.scale, origin: (n.on.x, n.on.y) },
         None => Shot::Failed("this snapshot kept no picture at the display's resolution to read text from".to_string()),
@@ -1265,6 +1267,7 @@ pub fn shot_of(frame: &crate::backend::frame::Frame, _regions: &[(i32, i32, i32,
 /// The capture stage of `host.ocr.read`. The source is ignored here, as everywhere on this
 /// platform.
 pub fn capture_for_read(regions: &[(i32, i32, i32, i32)], _src: CaptureSource) -> (Shot, usize) {
+    crate::loop_guard::off_loop("a capture for a text read");
     objc2::rc::autoreleasepool(|_| {
         let rects: Vec<Rect> = regions.iter().copied().map(Rect::from_tuple).collect();
         let bytes_of = |img: &CGImage| CGImage::width(Some(img)) * CGImage::height(Some(img)) * 4;
@@ -1304,6 +1307,7 @@ pub fn recognise_shot(
     regions: &[(i32, i32, i32, i32)],
     ctx: &Recognise,
 ) -> Vec<Result<OcrText, String>> {
+    crate::loop_guard::off_loop("the recognise stage of a text read");
     let ladder =
         Ladder { fast_ok: ctx.fast_ok, preempt: ctx.preempt, on_event_loop: false, shape: Ladder::shape_now() };
     let debug = crate::appcfg::ocr_debug();
@@ -1454,6 +1458,7 @@ pub(crate) static VISION_WARM: cost::Latch = cost::Latch::new();
 /// hang clock (`ocr/service.rs`): should the first warm-up never end, reads are refused with the
 /// reason after `policy::HANG`, as behind any recognition that does not answer.
 pub fn warm_up_recognise(lang: Option<&str>) {
+    crate::loop_guard::off_loop("the recogniser's warm-up");
     let waited = FIRST_WARM_UP.wait();
     warm_up_here(lang, Some(waited.as_secs_f64() * 1000.0));
 }
@@ -1867,6 +1872,7 @@ fn run_vision(
     stage: Stage,
     map: &dyn Fn(CGRect) -> (i32, i32, i32, i32),
 ) -> Option<VisionRead> {
+    crate::loop_guard::off_loop("a Vision pass");
     let inside = InVision::enter();
     // Whether the neural recogniser ran at some moment of this pass: running at either end, or a
     // run of it begun in between. Three atomic reads.

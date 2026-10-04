@@ -27,8 +27,8 @@
 
 use super::overlay_menu_tests::run_with;
 
-/// The helpers, added to the harness's `T`.
-const FR: &str = r##"
+/// The helpers, added to the harness's `T`; also the start of `overlay_runtime_marks_tests.rs`'s.
+pub(crate) const FR: &str = r##"
 local S = T.S
 S.clicks = {}
 S.moves = {}

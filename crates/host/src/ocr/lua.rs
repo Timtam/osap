@@ -13,8 +13,17 @@
 //! module is disabled, reloaded or unloaded first, as a one-shot timer is — a click in a
 //! callback that ran minutes later, over whatever window was in front then, would be worse than
 //! none.
+//!
+//! **Two kinds of waiter.** A read asked by `host.ocr.read` waits with its callback; one asked by
+//! `host.ocr.recognize` or `recognizeMany` inside a task waits with that task (`task.rs`), which
+//! the delivery resumes with the reading instead of calling a callback. Both go through the same
+//! queue, the same limits and the same delivery, in one order.
+//!
+//! The functions that do the work are generic over [`ReadHost`] — the host's `Shared`, or the
+//! tests' holder of a real service over a fake recogniser — so the tasks' rules can be tested
+//! against a real Luau VM without the speech engines a `Shared` opens.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, Ref, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
@@ -25,13 +34,70 @@ use crate::backend::frame::Frame;
 use crate::backend::CaptureSource;
 use crate::image_search::vm_owner;
 use crate::region::Region;
+use crate::task::{TaskId, Tasks};
 use crate::{call_guarded, capture_source, logging, region_lua, Shared};
 
 use super::lang::{self, LangReq};
 use super::policy::{self, MAX_CALL_PIXELS, MAX_REGIONS};
 use super::sched::{Owner, Ticket, TicketId, TOO_MANY};
-use super::service::{Done, Spec};
+use super::service::{Done, Picture, Service, Spec};
 use super::types::{current_priority, enter_priority, Priority, Reading, Rect, Status};
+
+/// What the read path needs of whatever holds it: the host's `Shared`, or the tests' holder.
+pub(crate) trait ReadHost: 'static {
+    /// The pixels the service's capture stage hands its recognise stage.
+    type Shot: Send + 'static;
+    fn ocr(&self) -> &Service<Self::Shot>;
+    fn ocr_state(&self) -> &OcrState;
+    fn tasks(&self) -> &Tasks;
+    /// module_idx → the generation of the VM it runs now (`image_search::register_vm`).
+    fn vm_gens(&self) -> Ref<'_, HashMap<usize, u64>>;
+    fn module_enabled(&self, idx: usize) -> bool;
+    /// The module's id, for a log line; "?" when there is none.
+    fn module_id(&self, idx: usize) -> String;
+    /// Turns `host.epoch()` over: a delivery is a fresh look at the screen.
+    fn bump_epoch(&self);
+    /// A module's callback or task failed: the log line and the dialog.
+    fn report_error(&self, idx: usize, context: &str, message: &str);
+    /// Which picture a read of `first` from `lua`'s module sees (`capture_source::read_source`).
+    fn read_source(&self, lua: &Lua, first: (i32, i32, i32, i32)) -> CaptureSource;
+    /// The primary screen's size: what loosely read corners default to.
+    fn screen_size(&self) -> (i32, i32);
+}
+
+impl ReadHost for Shared {
+    type Shot = crate::backend::OcrShot;
+    fn ocr(&self) -> &Service<Self::Shot> {
+        &self.ocr
+    }
+    fn ocr_state(&self) -> &OcrState {
+        &self.ocr_state
+    }
+    fn tasks(&self) -> &Tasks {
+        &self.tasks
+    }
+    fn vm_gens(&self) -> Ref<'_, HashMap<usize, u64>> {
+        self.vm_gens.borrow()
+    }
+    fn module_enabled(&self, idx: usize) -> bool {
+        self.enabled.borrow().get(idx).copied().unwrap_or(false)
+    }
+    fn module_id(&self, idx: usize) -> String {
+        self.ids.borrow().get(idx).cloned().unwrap_or_else(|| "?".to_string())
+    }
+    fn bump_epoch(&self) {
+        Shared::bump_epoch(self);
+    }
+    fn report_error(&self, idx: usize, context: &str, message: &str) {
+        self.report_callback_error(idx, context, message);
+    }
+    fn read_source(&self, lua: &Lua, first: (i32, i32, i32, i32)) -> CaptureSource {
+        capture_source::read_source(lua, &*self.backend, first)
+    }
+    fn screen_size(&self) -> (i32, i32) {
+        self.backend.screen_size()
+    }
+}
 
 /// A snapshot a read was handed: compared by identity, shown by its rectangle.
 #[derive(Clone)]
@@ -83,9 +149,10 @@ fn region(v: &Value, what: &str) -> mlua::Result<Region> {
 /// must not raise with the game at full screen and work in a smaller window — so window regions
 /// are counted after the corners, in the order given, and one that would take the call past
 /// the limit is `Err`: its reading fails with the reason, and it is not counted. So is a window
-/// region whose client area is empty.
+/// region whose client area is empty. `fname` names the call in a mistake.
 fn resolve_all(
     regions: Vec<(Option<String>, Region)>,
+    fname: &str,
 ) -> mlua::Result<Vec<(Option<String>, Result<Rect, String>)>> {
     let rect = |r: crate::region::ScreenRect| Rect::new(r.x, r.y, r.w, r.h);
     // Saturating: each rectangle fits the coordinate range, but three of the largest do not
@@ -98,7 +165,9 @@ fn resolve_all(
         })
         .fold(0, i64::saturating_add);
     if corners > MAX_CALL_PIXELS {
-        return Err(bad(format!("{corners} pixels in one call; at most {MAX_CALL_PIXELS}")));
+        return Err(mlua::Error::external(format!(
+            "{fname}: {corners} pixels in one call; at most {MAX_CALL_PIXELS}"
+        )));
     }
     let mut left = MAX_CALL_PIXELS - corners;
     Ok(regions
@@ -245,7 +314,7 @@ pub(crate) fn parse_read(what: &Value, opts: &Value) -> mlua::Result<ReadArgs> {
             regions.len()
         )));
     }
-    let entries = resolve_all(regions)?;
+    let entries = resolve_all(regions, "host.ocr.read")?;
     let mut seen = HashSet::new();
     for (name, _) in &entries {
         if let Some(n) = name {
@@ -292,6 +361,60 @@ pub(crate) fn parse_read(what: &Value, opts: &Value) -> mlua::Result<ReadArgs> {
     Ok(ReadArgs { entries, list: is_list, lang, key, snapshot })
 }
 
+/// The arguments of `host.ocr.recognize(opts?)` or `host.ocr.recognizeMany(opts)` inside a task,
+/// as a read: `name` is the call, which says which of the two it is. What these calls always
+/// took, read as they always read it — loose corners through the one reader, the whole primary
+/// screen (`screen`) without a region, a window region resolved now, a `snapshot` raising, any
+/// other key ignored, `regions` ending at its first `nil` — and what `read` takes besides: `lang`
+/// as a tag or a list, and `key`. The limits of `read` hold: more than `MAX_REGIONS` regions, or
+/// corners of more than `MAX_CALL_PIXELS` together, raise. Only mistakes raise.
+pub(crate) fn parse_wait(name: &str, opts: &Value, screen: (i32, i32)) -> mlua::Result<ReadArgs> {
+    let many = name.ends_with("Many");
+    let raise = |msg: String| mlua::Error::external(format!("{name}: {msg}"));
+    let t = match opts {
+        Value::Table(t) => Some(t),
+        Value::Nil if !many => None,
+        other => {
+            return Err(raise(format!(
+                "the options are a table{}, got {}",
+                if many { " with `regions`" } else { " or nil" },
+                crate::json::luau_type(other)
+            )))
+        }
+    };
+    if let Some(t) = t {
+        crate::refuse_snapshot(t, name)?;
+    }
+    let get = |k: &str| -> mlua::Result<Value> { t.map_or(Ok(Value::Nil), |t| t.get::<Value>(k)) };
+    let loose = |v: &Value, what: &str| region_lua::read_loose(v, what, screen).map_err(raise);
+    let mut regions = Vec::new();
+    if many {
+        let list = match get("regions")? {
+            Value::Table(l) => l,
+            other => {
+                return Err(raise(format!("opts.regions must be a list of regions, got {}", crate::json::luau_type(&other))))
+            }
+        };
+        for (i, r) in list.sequence_values::<Value>().enumerate() {
+            regions.push((None, loose(&r?, &format!("opts.regions[{}]", i + 1))?));
+        }
+    } else {
+        regions.push((None, loose(&get("region")?, "opts.region")?));
+    }
+    if regions.len() > MAX_REGIONS {
+        return Err(raise(format!("{} regions in one call; at most {MAX_REGIONS}", regions.len())));
+    }
+    let entries = resolve_all(regions, name)?;
+    let lang = lang_request(&get("lang")?, name)?;
+    let key = match get("key")? {
+        Value::Nil => None,
+        Value::String(s) if !s.to_str()?.is_empty() => Some(s.to_str()?.to_string()),
+        Value::String(_) => return Err(raise("`key` is empty".to_string())),
+        other => return Err(raise(format!("`key` must be a string, got {}", crate::json::luau_type(&other)))),
+    };
+    Ok(ReadArgs { entries, list: many, lang, key, snapshot: None })
+}
+
 /// The regions of a read of a snapshot, cut to the part of it the recogniser can read
 /// (`Frame::ocr_rect`): a region reads what of it the snapshot holds, and one of which it holds
 /// nothing is not read — its reading fails with the reason, as a window region with no rectangle
@@ -310,8 +433,48 @@ pub(crate) fn clip_to_snapshot(
         .collect()
 }
 
-/// One reading as the table a callback receives.
-pub(crate) fn reading_table(lua: &Lua, r: &Reading, name: Option<&str>, newer: bool) -> mlua::Result<Table> {
+/// When a reading's picture was taken, in `host.now()`'s milliseconds, and `host.inputEpoch()`
+/// then: a reading's `time` and `inputEpoch`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Seen {
+    pub time: i64,
+    pub input_epoch: u64,
+}
+
+impl Seen {
+    pub(crate) fn of(p: Picture) -> Seen {
+        Seen {
+            time: p.at.saturating_duration_since(crate::clock_origin()).as_millis() as i64,
+            input_epoch: p.input_epoch,
+        }
+    }
+}
+
+/// What each reading of a delivery says about its picture: the job's, for a reading of the screen —
+/// `"text"`, `"blank"` or `"none"` — and nothing for any other. A `"failed"` one may have had no
+/// picture of its region at all (a capture that failed for that region, a window region without
+/// a rectangle) and an answer decided without the threads (refused, evicted) never had one; a
+/// `"stale"` one was never read. So the moment is there exactly when the screen was read.
+fn seen_of(picture: Option<Picture>, unresolved: &[Option<String>], readings: &[Reading]) -> Vec<Option<Seen>> {
+    readings
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let screen = matches!(r.status, Status::Text | Status::Blank | Status::None);
+            let read = unresolved.get(i).is_none_or(Option::is_none) && screen;
+            picture.filter(|_| read).map(Seen::of)
+        })
+        .collect()
+}
+
+/// One reading as the table a callback receives; `time` and `inputEpoch` from `seen`.
+pub(crate) fn reading_table(
+    lua: &Lua,
+    r: &Reading,
+    name: Option<&str>,
+    newer: bool,
+    seen: Option<Seen>,
+) -> mlua::Result<Table> {
     let word_table = |w: &super::types::Word| -> mlua::Result<Table> {
         let t = lua.create_table()?;
         t.set("text", w.text.as_str())?;
@@ -360,6 +523,10 @@ pub(crate) fn reading_table(lua: &Lua, r: &Reading, name: Option<&str>, newer: b
     if let Some(e) = &r.error {
         t.set("error", e.as_str())?;
     }
+    if let Some(s) = seen.filter(|_| r.status != Status::Stale) {
+        t.set("time", s.time)?;
+        t.set("inputEpoch", s.input_epoch as i64)?;
+    }
     Ok(t)
 }
 
@@ -373,12 +540,13 @@ pub(crate) fn callback_args(
     names: &[Option<String>],
     list: bool,
     newer: bool,
+    seen: &[Option<Seen>],
 ) -> mlua::Result<mlua::MultiValue> {
     let array = lua.create_table_with_capacity(readings.len(), 0)?;
     let by_name = lua.create_table()?;
     for (i, r) in readings.iter().enumerate() {
         let name = names.get(i).and_then(|n| n.as_deref());
-        let t = reading_table(lua, r, name, newer)?;
+        let t = reading_table(lua, r, name, newer, seen.get(i).copied().flatten())?;
         if let Some(n) = name {
             by_name.set(n, t.clone())?;
         }
@@ -391,13 +559,49 @@ pub(crate) fn callback_args(
     }
 }
 
+/// What a task's wait returns: for `recognize` the one reading, for `recognizeMany` a plain list
+/// in the order of the regions — the reading `read` would hand a callback, with no names and no
+/// `byName` — and on each `skipped`, which is `status == "blank"`, the field these two calls always
+/// had.
+pub(crate) fn task_value(
+    lua: &Lua,
+    readings: &[Reading],
+    many: bool,
+    newer: bool,
+    seen: &[Option<Seen>],
+) -> mlua::Result<Value> {
+    let one = |i: usize, r: &Reading| -> mlua::Result<Table> {
+        let t = reading_table(lua, r, None, newer, seen.get(i).copied().flatten())?;
+        t.set("skipped", r.status == Status::Blank)?;
+        Ok(t)
+    };
+    if many {
+        let list = lua.create_table_with_capacity(readings.len(), 0)?;
+        for (i, r) in readings.iter().enumerate() {
+            list.raw_push(one(i, r)?)?;
+        }
+        return Ok(Value::Table(list));
+    }
+    match readings.first() {
+        Some(r) => Ok(Value::Table(one(0, r)?)),
+        None => Err(mlua::Error::external("a read of one region was answered with none")),
+    }
+}
+
+/// Who waits for a read: `host.ocr.read`'s callback, or a task stopped in `recognize` (`many`
+/// false) or `recognizeMany` (true), resumed with [`task_value`].
+pub(crate) enum Waiter {
+    Callback(RegistryKey),
+    Task { id: TaskId, many: bool },
+}
+
 /// A read waiting for its answer. Main thread only.
 pub(crate) struct PendingOcr {
     /// Its own ticket: tickets are handed out in order, so a larger one with the same key is a
     /// newer read.
     ticket: TicketId,
     lua: Lua,
-    cb: RegistryKey,
+    waiter: Waiter,
     /// The identity the call was made under, named in an error report.
     scope: usize,
     owner: Owner,
@@ -573,268 +777,377 @@ pub(crate) fn owner_of(lua: &Lua, gens: &HashMap<usize, u64>, scope: usize) -> O
     }
 }
 
-impl Shared {
-    /// `host.ocr.read(what, opts?, cb)`, called from the VM `lua` under the identity `scope`.
-    pub(crate) fn ocr_read(&self, lua: &Lua, scope: usize, what: Value, opts: Value, cb: Value) -> mlua::Result<()> {
-        // `read(what, cb)`: the options are optional, the callback is not.
-        let (opts, cb) = match (opts, cb) {
-            (Value::Function(f), Value::Nil) => (Value::Nil, Value::Function(f)),
-            other => other,
-        };
-        let cb: Function = match cb {
-            Value::Function(f) => f,
-            other => return Err(bad(format!("the callback (last argument) must be a function, got {}", other.type_name()))),
-        };
-        let mut args = parse_read(&what, &opts)?;
-        // On a snapshot: each region cut to what of it the snapshot holds, before anything else
-        // looks at them — a region it holds nothing of is answered like an unresolved one.
-        let frame = args.snapshot.take().map(|s| s.0);
-        if let Some(f) = &frame {
-            args.entries = clip_to_snapshot(std::mem::take(&mut args.entries), f);
-        }
-        let owner = owner_of(lua, &self.vm_gens.borrow(), scope);
-        let prio = current_priority();
-        let rects: Vec<Rect> = args.entries.iter().map(|(_, r)| r.clone().unwrap_or_default()).collect();
-        let unresolved: Vec<Option<String>> = args.entries.iter().map(|(_, r)| r.clone().err()).collect();
-        let nothing_to_read = unresolved.iter().all(Option::is_some);
+/// `host.ocr.read(what, opts?, cb)`, called from the VM `lua` under the identity `scope`.
+pub(crate) fn read<H: ReadHost>(h: &H, lua: &Lua, scope: usize, what: Value, opts: Value, cb: Value) -> mlua::Result<()> {
+    // `read(what, cb)`: the options are optional, the callback is not.
+    let (opts, cb) = match (opts, cb) {
+        (Value::Function(f), Value::Nil) => (Value::Nil, Value::Function(f)),
+        other => other,
+    };
+    let cb: Function = match cb {
+        Value::Function(f) => f,
+        other => return Err(bad(format!("the callback (last argument) must be a function, got {}", other.type_name()))),
+    };
+    let args = parse_read(&what, &opts)?;
+    let cb = lua.create_registry_value(cb)?;
+    submit(h, lua, scope, args, current_priority(), Waiter::Callback(cb))?;
+    Ok(())
+}
 
-        let st = &self.ocr_state;
-        let id = st.next_ticket.get() + 1;
-        st.next_ticket.set(id);
-        st.pending.borrow_mut().insert(
-            id,
-            PendingOcr {
-                ticket: id,
-                lua: lua.clone(),
-                cb: lua.create_registry_value(cb)?,
-                scope,
-                owner,
-                prio,
-                names: args.entries.iter().map(|(n, _)| n.clone()).collect(),
-                rects: rects.clone(),
-                unresolved,
-                list: args.list,
-                key: args.key.clone(),
-            },
-        );
-        if nothing_to_read {
-            // Every region is a window region with no rectangle this time. Answered on the next
-            // tick like any read, but without the queue: no ticket against the module's limit or
-            // the application's, no picture, no language to resolve, no capture source chosen —
-            // the cells calls answer the same case without a capture too. With a key it is still
-            // the newest read: the module's waiting reads with that key are stale, and one already
-            // recognising is delivered `newer`, as for any later read.
-            let stale = match args.key.as_deref() {
-                Some(k) => self.ocr.supersede(owner, k),
-                None => Vec::new(),
-            };
-            note_newest(&mut st.key_seq.borrow_mut(), owner, args.key.as_deref(), id, true);
-            let mut ready = st.ready.borrow_mut();
-            ready.extend(stale.into_iter().map(|s| (s, Status::Stale, None)));
-            // `with_unresolved` gives each reading its own reason on delivery.
-            ready.push((id, Status::Failed, None));
-            return Ok(());
-        }
-        let ticket = Ticket { id, owner, key: args.key.clone(), prio };
-        let out = match frame {
-            // Nothing to photograph and no source to choose: the snapshot is the picture, and a
-            // read of it makes no first-read comparison.
-            Some(f) => self.ocr.submit_on_frame(
-                Spec { regions: rects, lang: args.lang, source: CaptureSource::Standard },
-                ticket,
-                f,
-            ),
-            None => {
-                let first = rects.iter().find(|r| !r.is_empty()).copied().unwrap_or_default();
-                let source = capture_source::read_source(lua, &*self.backend, first.tuple());
-                self.ocr.submit(Spec { regions: rects, lang: args.lang, source }, ticket)
-            }
-        };
-        // After the queue answered, and only when it took the read. Nothing is delivered before
-        // the next tick, so no answer can be judged against a key recorded too late.
-        note_newest(&mut st.key_seq.borrow_mut(), owner, args.key.as_deref(), id, out.refused.is_none());
-        let crowded = out.refused.clone().or_else(|| (!out.evicted.is_empty()).then(|| TOO_MANY.to_string()));
-        {
-            let mut ready = st.ready.borrow_mut();
-            for s in out.stale {
-                ready.push((s, Status::Stale, None));
-            }
-            for e in out.evicted {
-                ready.push((e, Status::Failed, Some(TOO_MANY.to_string())));
-            }
-            if let Some(why) = out.refused {
-                ready.push((id, Status::Failed, Some(why)));
-            }
-        }
-        if let Some(why) = crowded {
-            self.ocr_note_crowding(owner.idx, &why);
-        }
-        Ok(())
+/// Queues a read whose arguments passed, for `waiter`, at `prio`, and returns its ticket. Shared
+/// by `read` and by a task's wait (`task.rs`). What is decided without the threads — a read with
+/// nothing to photograph, one refused, those it made stale or evicted — is answered on the next
+/// tick, never from inside the call.
+pub(crate) fn submit<H: ReadHost>(
+    h: &H,
+    lua: &Lua,
+    scope: usize,
+    mut args: ReadArgs,
+    prio: Priority,
+    waiter: Waiter,
+) -> mlua::Result<TicketId> {
+    // On a snapshot: each region cut to what of it the snapshot holds, before anything else
+    // looks at them — a region it holds nothing of is answered like an unresolved one.
+    let frame = args.snapshot.take().map(|s| s.0);
+    if let Some(f) = &frame {
+        args.entries = clip_to_snapshot(std::mem::take(&mut args.entries), f);
     }
+    let owner = owner_of(lua, &h.vm_gens(), scope);
+    let rects: Vec<Rect> = args.entries.iter().map(|(_, r)| r.clone().unwrap_or_default()).collect();
+    let unresolved: Vec<Option<String>> = args.entries.iter().map(|(_, r)| r.clone().err()).collect();
+    let nothing_to_read = unresolved.iter().all(Option::is_some);
 
-    /// One line per module per `SLOW_LOG_EVERY` when its reads are evicted or refused.
-    fn ocr_note_crowding(&self, idx: usize, why: &str) {
-        let now = Instant::now();
-        let mut logged = self.ocr_state.slow_logged.borrow_mut();
-        let key = usize::MAX - idx; // a slot of its own beside the slow-job one
-        if logged.get(&key).is_some_and(|t| now.duration_since(*t) < policy::SLOW_LOG_EVERY) {
-            return;
-        }
-        logged.insert(key, now);
-        let id = self.ids.borrow().get(idx).cloned().unwrap_or_default();
-        logging::line(
-            "ocr",
-            &format!("[{id}] a read was refused or evicted: {why} (said at most every 10 s)"),
-        );
+    let st = h.ocr_state();
+    let id = st.next_ticket.get() + 1;
+    st.next_ticket.set(id);
+    st.pending.borrow_mut().insert(
+        id,
+        PendingOcr {
+            ticket: id,
+            lua: lua.clone(),
+            waiter,
+            scope,
+            owner,
+            prio,
+            names: args.entries.iter().map(|(n, _)| n.clone()).collect(),
+            rects: rects.clone(),
+            unresolved,
+            list: args.list,
+            key: args.key.clone(),
+        },
+    );
+    if nothing_to_read {
+        // Every region is a window region with no rectangle this time (or there is none, a
+        // `recognizeMany` of an empty list). Answered on the next tick like any read, but without
+        // the queue: no ticket against the module's limit or the application's, no picture, no
+        // language to resolve, no capture source chosen — the cells calls answer the same case
+        // without a capture too. With a key it is still the newest read: the module's waiting
+        // reads with that key are stale, and one already recognising is delivered `newer`, as for
+        // any later read.
+        let stale = match args.key.as_deref() {
+            Some(k) => h.ocr().supersede(owner, k),
+            None => Vec::new(),
+        };
+        note_newest(&mut st.key_seq.borrow_mut(), owner, args.key.as_deref(), id, true);
+        let mut ready = st.ready.borrow_mut();
+        ready.extend(stale.into_iter().map(|s| (s, Status::Stale, None)));
+        // `with_unresolved` gives each reading its own reason on delivery.
+        ready.push((id, Status::Failed, None));
+        return Ok(id);
     }
-
-    /// Delivers what the threads finished and what was decided without them. Driven by the
-    /// loop tick, after the image results.
-    pub(crate) fn fire_ocr_results(&self) {
-        let st = &self.ocr_state;
-        let ready = std::mem::take(&mut *st.ready.borrow_mut());
-        let done: Vec<Done> = self.ocr.drain();
-        if ready.is_empty() && done.is_empty() {
-            return;
+    let ticket = Ticket { id, owner, key: args.key.clone(), prio };
+    let out = match frame {
+        // Nothing to photograph and no source to choose: the snapshot is the picture, and a
+        // read of it makes no first-read comparison.
+        Some(f) => h.ocr().submit_on_frame(
+            Spec { regions: rects, lang: args.lang, source: CaptureSource::Standard },
+            ticket,
+            f,
+        ),
+        None => {
+            let first = rects.iter().find(|r| !r.is_empty()).copied().unwrap_or_default();
+            let source = h.read_source(lua, first.tuple());
+            h.ocr().submit(Spec { regions: rects, lang: args.lang, source }, ticket)
         }
-        // Every delivery collected first, with nothing borrowed while a callback runs: a callback
-        // may read again, disable a module or reload one.
-        let mut deliveries: Vec<(PendingOcr, Vec<Reading>)> = Vec::new();
-        {
-            let mut pending = st.pending.borrow_mut();
-            for (ticket, status, error) in ready {
-                if let Some(p) = pending.remove(&ticket) {
-                    let readings = p.rects.iter().map(|r| Reading::outcome(*r, status, error.clone())).collect();
-                    deliveries.push((p, readings));
-                }
-            }
-            for d in &done {
-                for t in &d.tickets {
-                    if let Some(p) = pending.remove(&t.id) {
-                        deliveries.push((p, d.readings.clone()));
-                    }
-                }
+    };
+    // After the queue answered, and only when it took the read. Nothing is delivered before
+    // the next tick, so no answer can be judged against a key recorded too late.
+    note_newest(&mut st.key_seq.borrow_mut(), owner, args.key.as_deref(), id, out.refused.is_none());
+    let crowded = out.refused.clone().or_else(|| (!out.evicted.is_empty()).then(|| TOO_MANY.to_string()));
+    {
+        let mut ready = st.ready.borrow_mut();
+        for s in out.stale {
+            ready.push((s, Status::Stale, None));
+        }
+        for e in out.evicted {
+            ready.push((e, Status::Failed, Some(TOO_MANY.to_string())));
+        }
+        if let Some(why) = out.refused {
+            ready.push((id, Status::Failed, Some(why)));
+        }
+    }
+    if let Some(why) = crowded {
+        note_crowding(h, owner.idx, &why);
+    }
+    Ok(id)
+}
+
+/// One line per module per `SLOW_LOG_EVERY` when its reads are evicted or refused.
+fn note_crowding<H: ReadHost>(h: &H, idx: usize, why: &str) {
+    let now = Instant::now();
+    let mut logged = h.ocr_state().slow_logged.borrow_mut();
+    let key = usize::MAX - idx; // a slot of its own beside the slow-job one
+    if logged.get(&key).is_some_and(|t| now.duration_since(*t) < policy::SLOW_LOG_EVERY) {
+        return;
+    }
+    logged.insert(key, now);
+    logging::line(
+        "ocr",
+        &format!("[{}] a read was refused or evicted: {why} (said at most every 10 s)", h.module_id(idx)),
+    );
+}
+
+/// How many callbacks a delivery called and how many tasks it resumed. The callbacks are the
+/// `[pump]` line's share of text recognition; the tasks, which only the tests start, are counted
+/// for them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Delivered {
+    pub callbacks: u32,
+    pub tasks: u32,
+}
+
+/// Delivers what the threads finished and what was decided without them: each callback called,
+/// each task waiting for one resumed, in one order — first what was decided without the threads,
+/// in the order it was decided, then the finished jobs, in the order they finished. Driven by the
+/// loop tick, after the image results.
+pub(crate) fn fire<H: ReadHost>(h: &H) -> Delivered {
+    let st = h.ocr_state();
+    let ready = std::mem::take(&mut *st.ready.borrow_mut());
+    let done: Vec<Done> = h.ocr().drain();
+    let mut out = Delivered::default();
+    if ready.is_empty() && done.is_empty() {
+        return out;
+    }
+    // Every delivery collected first, with nothing borrowed while a callback or a task runs: it
+    // may read again, disable a module or reload one.
+    let mut deliveries: Vec<(PendingOcr, Vec<Reading>, Option<Picture>)> = Vec::new();
+    {
+        let mut pending = st.pending.borrow_mut();
+        for (ticket, status, error) in ready {
+            if let Some(p) = pending.remove(&ticket) {
+                let readings = p.rects.iter().map(|r| Reading::outcome(*r, status, error.clone())).collect();
+                deliveries.push((p, readings, None));
             }
         }
         for d in &done {
-            self.ocr_log_job(d);
-            if d.lang_error.is_some() {
-                // Perhaps it was installed since the list was read.
-                self.ocr.reread_languages();
-            }
-        }
-        if deliveries.is_empty() {
-            return;
-        }
-        // One epoch for the drain: every answer in it is a fresh look at the screen.
-        self.bump_epoch();
-        for (p, readings) in deliveries {
-            let readings = with_unresolved(readings, &p.unresolved);
-            let alive = deliverable(p.owner, &self.vm_gens.borrow(), &self.enabled.borrow());
-            if alive {
-                let newer = delivered_newer(&st.key_seq.borrow(), p.owner, p.key.as_deref(), p.ticket, &readings);
-                if let Err(e) = self.ocr_call(&p, &readings, newer) {
-                    self.report_callback_error(p.scope, "ocr.read", &e);
-                }
-            }
-            // After the callback, which may have read again with the same key.
-            st.settled(p.owner, p.key.as_deref());
-            let _ = p.lua.remove_registry_value(p.cb);
-        }
-    }
-
-    fn ocr_call(&self, p: &PendingOcr, readings: &[Reading], newer: bool) -> Result<(), String> {
-        let f: Function = p.lua.registry_value(&p.cb).map_err(|e| e.to_string())?;
-        let _prio = enter_priority(p.prio);
-        let args = callback_args(&p.lua, readings, &p.names, p.list, newer).map_err(|e| e.to_string())?;
-        call_guarded(&f, args)
-    }
-
-    /// A slow job's line, and a language that could not be met, once per module and request.
-    fn ocr_log_job(&self, d: &Done) {
-        let st = &self.ocr_state;
-        let owners: Vec<usize> = {
-            let mut o: Vec<usize> = d.tickets.iter().map(|t| t.owner.idx).collect();
-            o.sort_unstable();
-            o.dedup();
-            o
-        };
-        let ids = self.ids.borrow();
-        let name = |idx: usize| ids.get(idx).cloned().unwrap_or_else(|| "?".to_string());
-        if let Some((req, why)) = &d.lang_error {
-            for idx in &owners {
-                if st.once(format!("lang\u{1}{idx}\u{1}{req:?}")) {
-                    logging::line("ocr", &format!("[{}] {why}", name(*idx)));
+            for t in &d.tickets {
+                if let Some(p) = pending.remove(&t.id) {
+                    deliveries.push((p, d.readings.clone(), d.picture));
                 }
             }
         }
-        if d.timings.total() >= policy::SLOW_JOB.as_millis() as u64 {
-            let now = Instant::now();
-            let lang = d.readings.iter().map(|r| r.lang.as_str()).find(|l| !l.is_empty()).unwrap_or("-");
-            // Worked out for the first line written, not for a job whose lines are all held back.
-            let mut regions: Option<String> = None;
-            for idx in &owners {
-                let mut logged = st.slow_logged.borrow_mut();
-                if logged.get(idx).is_some_and(|t| now.duration_since(*t) < policy::SLOW_LOG_EVERY) {
-                    continue;
+    }
+    for d in &done {
+        log_job(h, d);
+        if d.lang_error.is_some() {
+            // Perhaps it was installed since the list was read.
+            h.ocr().reread_languages();
+        }
+    }
+    if deliveries.is_empty() {
+        return out;
+    }
+    // One epoch for the drain: every answer in it is a fresh look at the screen.
+    h.bump_epoch();
+    for (p, readings, picture) in deliveries {
+        let readings = with_unresolved(readings, &p.unresolved);
+        let seen = seen_of(picture, &p.unresolved, &readings);
+        let newer = delivered_newer(&st.key_seq.borrow(), p.owner, p.key.as_deref(), p.ticket, &readings);
+        match &p.waiter {
+            Waiter::Callback(cb) => {
+                if deliverable_now(h, p.owner) {
+                    out.callbacks += 1;
+                    if let Err(e) = call_back(&p, cb, &readings, newer, &seen) {
+                        h.report_error(p.scope, "ocr.read", &e);
+                    }
                 }
-                logged.insert(*idx, now);
-                logging::line(
-                    "ocr",
-                    &format!(
-                        "{} region(s) for [{}] ({}) waited {} ms for the capture, which took {}, then {} ms \
-                         for the recogniser, which took {} ms ({lang})",
-                        d.readings.len(),
-                        name(*idx),
-                        regions.get_or_insert_with(|| {
-                            regions_text(&d.readings.iter().map(|r| r.rect).collect::<Vec<Rect>>())
-                        }),
-                        d.timings.before_capture,
-                        d.timings.capture,
-                        d.timings.before_recognition,
-                        d.timings.recognition
-                    ),
-                );
+            }
+            // The task checks for itself whether it may still go on (`task::resume_wait`).
+            Waiter::Task { id, many } => match task_value(&p.lua, &readings, *many, newer, &seen) {
+                Ok(v) => {
+                    if crate::task::resume_wait(h, *id, p.ticket, v) {
+                        out.tasks += 1;
+                    }
+                }
+                Err(e) => {
+                    h.report_error(p.owner.idx, "task", &e.to_string());
+                    crate::task::end_waiting(h, *id);
+                }
+            },
+        }
+        // After the callback or the task's next stretch, which may have read again with the same
+        // key.
+        st.settled(p.owner, p.key.as_deref());
+        if let Waiter::Callback(cb) = p.waiter {
+            let _ = p.lua.remove_registry_value(cb);
+        }
+    }
+    out
+}
+
+/// Whether an answer for `owner` may be handed over now ([`deliverable`], asked of `h`).
+pub(crate) fn deliverable_now<H: ReadHost>(h: &H, owner: Owner) -> bool {
+    h.vm_gens().get(&owner.idx) == Some(&owner.gen) && h.module_enabled(owner.idx)
+}
+
+fn call_back(p: &PendingOcr, cb: &RegistryKey, readings: &[Reading], newer: bool, seen: &[Option<Seen>]) -> Result<(), String> {
+    let f: Function = p.lua.registry_value(cb).map_err(|e| e.to_string())?;
+    let _prio = enter_priority(p.prio);
+    let args = callback_args(&p.lua, readings, &p.names, p.list, newer, seen).map_err(|e| e.to_string())?;
+    call_guarded(&f, args)
+}
+
+/// A slow job's line, and a language that could not be met, once per module and request.
+fn log_job<H: ReadHost>(h: &H, d: &Done) {
+    let st = h.ocr_state();
+    let owners: Vec<usize> = {
+        let mut o: Vec<usize> = d.tickets.iter().map(|t| t.owner.idx).collect();
+        o.sort_unstable();
+        o.dedup();
+        o
+    };
+    if let Some((req, why)) = &d.lang_error {
+        for idx in &owners {
+            if st.once(format!("lang\u{1}{idx}\u{1}{req:?}")) {
+                logging::line("ocr", &format!("[{}] {why}", h.module_id(*idx)));
             }
         }
     }
+    if d.timings.total() >= policy::SLOW_JOB.as_millis() as u64 {
+        let now = Instant::now();
+        let lang = d.readings.iter().map(|r| r.lang.as_str()).find(|l| !l.is_empty()).unwrap_or("-");
+        // Worked out for the first line written, not for a job whose lines are all held back.
+        let mut regions: Option<String> = None;
+        for idx in &owners {
+            let mut logged = st.slow_logged.borrow_mut();
+            if logged.get(idx).is_some_and(|t| now.duration_since(*t) < policy::SLOW_LOG_EVERY) {
+                continue;
+            }
+            logged.insert(*idx, now);
+            logging::line(
+                "ocr",
+                &format!(
+                    "{} region(s) for [{}] ({}) waited {} ms for the capture, which took {}, then {} ms \
+                     for the recogniser, which took {} ms ({lang})",
+                    d.readings.len(),
+                    h.module_id(*idx),
+                    regions.get_or_insert_with(|| {
+                        regions_text(&d.readings.iter().map(|r| r.rect).collect::<Vec<Rect>>())
+                    }),
+                    d.timings.before_capture,
+                    d.timings.capture,
+                    d.timings.before_recognition,
+                    d.timings.recognition
+                ),
+            );
+        }
+    }
+}
 
-    /// Drops every read of module `idx`: disabled (`forget_keys` false), or reloaded and unloaded
-    /// (true, which also forgets which key it last asked with, all at once). Nothing of it is
-    /// called back. With `false` too, each key's record goes with the last read waiting with it
-    /// (`forget_settled`), so a module switched off keeps none of its reads' keys either.
+/// Drops every read of module `idx`: disabled (`forget_keys` false), or reloaded and unloaded
+/// (true, which also forgets which key it last asked with, all at once). Nothing of it is
+/// called back, and no task of it is resumed — its tasks themselves go in `task::drop_owner`,
+/// which every caller of this calls beside it. With `false` too, each key's record goes with the
+/// last read waiting with it (`forget_settled`), so a module switched off keeps none of its
+/// reads' keys either.
+pub(crate) fn drop_owner<H: ReadHost>(h: &H, idx: usize, forget_keys: bool) {
+    h.ocr().cancel_owner(idx);
+    let st = h.ocr_state();
+    let gone: Vec<PendingOcr> = {
+        let mut pending = st.pending.borrow_mut();
+        let ids: Vec<TicketId> =
+            pending.iter().filter(|(_, p)| p.owner.idx == idx).map(|(id, _)| *id).collect();
+        ids.into_iter().filter_map(|id| pending.remove(&id)).collect()
+    };
+    {
+        let pending = st.pending.borrow();
+        st.ready.borrow_mut().retain(|(t, ..)| pending.contains_key(t));
+    }
+    for p in gone {
+        st.settled(p.owner, p.key.as_deref());
+        if let Waiter::Callback(cb) = p.waiter {
+            let _ = p.lua.remove_registry_value(cb);
+        }
+    }
+    if forget_keys {
+        st.key_seq.borrow_mut().retain(|(i, ..), _| *i != idx);
+    }
+}
+
+/// `rollback_to(n)`'s share: every module from index `n` on.
+pub(crate) fn drop_from<H: ReadHost>(h: &H, n: usize) {
+    let mut owners: Vec<usize> =
+        h.ocr_state().pending.borrow().values().map(|p| p.owner.idx).filter(|i| *i >= n).collect();
+    owners.extend(h.ocr_state().key_seq.borrow().keys().map(|k| k.0).filter(|i| *i >= n));
+    owners.sort_unstable();
+    owners.dedup();
+    for idx in owners {
+        drop_owner(h, idx, true);
+    }
+}
+
+/// Withdraws one read — the wait of a task that was cancelled or ended: no longer delivered, and
+/// off its job (`Service::withdraw`), which goes unless another call waits for it or it is being
+/// recognised. Nothing happens for a ticket that is not waiting.
+pub(crate) fn withdraw<H: ReadHost>(h: &H, ticket: TicketId) {
+    let st = h.ocr_state();
+    let Some(p) = st.pending.borrow_mut().remove(&ticket) else { return };
+    st.ready.borrow_mut().retain(|(t, ..)| *t != ticket);
+    h.ocr().withdraw(ticket);
+    st.settled(p.owner, p.key.as_deref());
+    if let Waiter::Callback(cb) = p.waiter {
+        let _ = p.lua.remove_registry_value(cb);
+    }
+}
+
+/// `host.ocr.pending(key)`: whether a read of the calling module's VM with `key` waits for its
+/// answer — asked with `read`, or a task stopped in `recognize`. False in its own callback and in
+/// the task it resumes (the read is answered by then), and after a disable (its reads are dropped).
+/// A key that is not a non-empty string raises.
+pub(crate) fn pending<H: ReadHost>(h: &H, lua: &Lua, scope: usize, key: Value) -> mlua::Result<bool> {
+    let key = match key {
+        Value::String(s) if !s.to_str()?.is_empty() => s.to_str()?.to_string(),
+        Value::String(_) => return Err(mlua::Error::external("host.ocr.pending: the key is empty")),
+        other => {
+            return Err(mlua::Error::external(format!(
+                "host.ocr.pending: the key must be a non-empty string, got {}",
+                crate::json::luau_type(&other)
+            )))
+        }
+    };
+    let owner = owner_of(lua, &h.vm_gens(), scope);
+    Ok(h.ocr_state().waiting_with(owner, &key))
+}
+
+impl Shared {
+    /// `host.ocr.read(what, opts?, cb)`, called from the VM `lua` under the identity `scope`.
+    pub(crate) fn ocr_read(&self, lua: &Lua, scope: usize, what: Value, opts: Value, cb: Value) -> mlua::Result<()> {
+        read(self, lua, scope, what, opts, cb)
+    }
+
+    /// Delivers what the threads finished and what was decided without them ([`fire`]).
+    pub(crate) fn fire_ocr_results(&self) -> Delivered {
+        fire(self)
+    }
+
+    /// Drops every read of module `idx` ([`drop_owner`]).
     pub(crate) fn ocr_drop_owner(&self, idx: usize, forget_keys: bool) {
-        self.ocr.cancel_owner(idx);
-        let st = &self.ocr_state;
-        let gone: Vec<PendingOcr> = {
-            let mut pending = st.pending.borrow_mut();
-            let ids: Vec<TicketId> =
-                pending.iter().filter(|(_, p)| p.owner.idx == idx).map(|(id, _)| *id).collect();
-            ids.into_iter().filter_map(|id| pending.remove(&id)).collect()
-        };
-        {
-            let pending = st.pending.borrow();
-            st.ready.borrow_mut().retain(|(t, ..)| pending.contains_key(t));
-        }
-        for p in gone {
-            st.settled(p.owner, p.key.as_deref());
-            let _ = p.lua.remove_registry_value(p.cb);
-        }
-        if forget_keys {
-            st.key_seq.borrow_mut().retain(|(i, ..), _| *i != idx);
-        }
+        drop_owner(self, idx, forget_keys);
     }
 
-    /// `rollback_to(n)`'s share: every module from index `n` on.
+    /// `rollback_to(n)`'s share ([`drop_from`]).
     pub(crate) fn ocr_drop_from(&self, n: usize) {
-        let mut owners: Vec<usize> =
-            self.ocr_state.pending.borrow().values().map(|p| p.owner.idx).filter(|i| *i >= n).collect();
-        owners.extend(self.ocr_state.key_seq.borrow().keys().map(|k| k.0).filter(|i| *i >= n));
-        owners.sort_unstable();
-        owners.dedup();
-        for idx in owners {
-            self.ocr_drop_owner(idx, true);
-        }
+        drop_from(self, n);
     }
 
     /// The input barrier: before `host.input.*` or `host.window.focus` acts for the module that
@@ -1210,7 +1523,7 @@ mod tests {
             Reading::outcome(Rect::new(10, 0, 10, 10), Status::Blank, None),
         ];
         let names = vec![Some("item".to_string()), None];
-        let args = callback_args(&lua, &readings, &names, true, false).unwrap();
+        let args = callback_args(&lua, &readings, &names, true, false, &[]).unwrap();
         let f: Function = lua
             .load(
                 r#"return function(list, byName)
@@ -1227,7 +1540,7 @@ mod tests {
             .unwrap();
         assert!(f.call::<bool>(args).unwrap());
         // A single region: one reading, no second argument.
-        let args = callback_args(&lua, &readings[..1], &[None], false, true).unwrap();
+        let args = callback_args(&lua, &readings[..1], &[None], false, true, &[]).unwrap();
         assert_eq!(args.len(), 1);
         let f: Function = lua
             .load(r#"return function(r, extra) return r.status == "none" and r.newer == true and extra == nil end"#)
@@ -1244,7 +1557,7 @@ mod tests {
             super::super::types::EngineOut::Fallback { text: "7".into(), content: Rect::new(2, 2, 6, 10) },
             "en-US",
         );
-        let t = reading_table(&lua, &r, Some("value"), true).unwrap();
+        let t = reading_table(&lua, &r, Some("value"), true, Some(Seen { time: 1234, input_epoch: 7 })).unwrap();
         lua.globals().set("r", t).unwrap();
         let ok: bool = lua
             .load(
@@ -1253,18 +1566,124 @@ mod tests {
                   and r.x == 10 and r.w == 100 and r.lang == "en-US" and r.error == nil
                   and #r.words == 1 and r.words[1].approx == true and r.words[1].x == 12
                   and #r.lines == 1 and r.lines[1].text == "7" and #r.lines[1].words == 1
+                  and r.time == 1234 and r.inputEpoch == 7
                 "#,
             )
             .eval()
             .unwrap();
         assert!(ok);
         let failed = Reading::failed(Rect::new(0, 0, 1, 1), "screen capture failed");
-        let t = reading_table(&lua, &failed, None, false).unwrap();
+        let t = reading_table(&lua, &failed, None, false, None).unwrap();
         lua.globals().set("f", t).unwrap();
         let ok: bool = lua
-            .load(r#"return f.name == nil and f.status == "failed" and f.text == "" and #f.words == 0 and f.error == "screen capture failed" and f.approx == nil"#)
+            .load(r#"return f.name == nil and f.status == "failed" and f.text == "" and #f.words == 0 and f.error == "screen capture failed" and f.approx == nil and f.time == nil and f.inputEpoch == nil"#)
             .eval()
             .unwrap();
         assert!(ok);
+        // A stale reading never says when, whatever it is handed: it was never recognised.
+        let stale = Reading::outcome(Rect::new(0, 0, 1, 1), Status::Stale, None);
+        let t = reading_table(&lua, &stale, None, true, Some(Seen { time: 1, input_epoch: 1 })).unwrap();
+        lua.globals().set("s", t).unwrap();
+        assert!(lua.load("return s.time == nil and s.inputEpoch == nil and #s.words == 0").eval::<bool>().unwrap());
+    }
+
+    /// Which readings of a delivery say when their picture was taken: those of a job with a
+    /// picture that read the screen — `"text"`, `"blank"`, `"none"` — and no other: not a window
+    /// region that was never read, not a region whose own capture failed inside a picture that
+    /// was taken, not a stale one; and none of an answer decided without the threads.
+    #[test]
+    fn a_reading_says_when_only_for_a_picture_it_was_read_from() {
+        let picture = Some(Picture { at: Instant::now(), input_epoch: 3 });
+        let readings = vec![
+            Reading::outcome(Rect::new(0, 0, 10, 10), Status::Text, None),
+            Reading::outcome(Rect::default(), Status::Failed, Some("the window's client area is empty (0x0)".into())),
+            Reading::outcome(Rect::new(20, 0, 10, 10), Status::Stale, None),
+            Reading::outcome(Rect::new(30, 0, 10, 10), Status::Failed, Some("screen capture failed".into())),
+            Reading::outcome(Rect::new(40, 0, 10, 10), Status::Blank, None),
+            Reading::outcome(Rect::new(50, 0, 10, 10), Status::None, None),
+        ];
+        let unresolved = vec![None, Some("the window's client area is empty (0x0)".to_string()), None, None, None, None];
+        let seen = seen_of(picture, &unresolved, &readings);
+        assert_eq!(seen[0].map(|s| s.input_epoch), Some(3));
+        assert_eq!((seen[1], seen[2], seen[3]), (None, None, None));
+        assert!(seen[4].is_some() && seen[5].is_some(), "blank and none read the screen");
+        assert!(seen_of(None, &unresolved, &readings).iter().all(Option::is_none), "refused: no picture");
+    }
+
+    /// A task's wait returns the reading `read` would hand a callback, with `skipped`: one for
+    /// `recognize`, and for `recognizeMany` a plain list in the order of the regions.
+    #[test]
+    fn a_tasks_wait_returns_the_reading_with_skipped() {
+        let lua = Lua::new();
+        let readings = vec![
+            Reading::outcome(Rect::new(0, 0, 10, 10), Status::Blank, None),
+            Reading::outcome(Rect::new(10, 0, 10, 10), Status::None, None),
+        ];
+        let one = task_value(&lua, &readings[..1], false, false, &[]).unwrap();
+        let many = task_value(&lua, &readings, true, true, &[]).unwrap();
+        lua.globals().set("one", one).unwrap();
+        lua.globals().set("many", many).unwrap();
+        assert!(lua
+            .load(
+                r#"return one.status == "blank" and one.skipped == true and one.newer == false and one.name == nil
+                  and #many == 2 and many[1].skipped == true and many[2].skipped == false and many[2].x == 10
+                  and many[2].newer == true and many.byName == nil"#
+            )
+            .eval::<bool>()
+            .unwrap());
+        assert!(task_value(&lua, &[], false, false, &[]).is_err(), "recognize has one region");
+        let empty = task_value(&lua, &[], true, false, &[]).unwrap();
+        assert!(matches!(empty, Value::Table(t) if t.raw_len() == 0), "recognizeMany of no regions: an empty list");
+    }
+
+    /// `recognize` and `recognizeMany` in a task read their options as these calls always did,
+    /// and take `read`'s `lang` list and `key` besides; their mistakes raise, under their names.
+    #[test]
+    fn a_waits_options_are_read_as_the_calls_always_read_them() {
+        let lua = Lua::new();
+        let v = |src: &str| -> Value { lua.load(src).eval().unwrap() };
+        let screen = (1920, 1080);
+        let a = parse_wait("host.ocr.recognize", &v("return nil"), screen).unwrap();
+        assert_eq!(a.entries, vec![(None, Ok(Rect::new(0, 0, 1920, 1080)))], "no region: the whole primary screen");
+        assert!(!a.list && a.key.is_none() && a.lang == LangReq::Default);
+        let a = parse_wait(
+            "host.ocr.recognize",
+            &v("return { region = { x1 = 10.9, y1 = 20 }, colour = 3, key = 'k', lang = { 'de', 'en' } }"),
+            screen,
+        )
+        .unwrap();
+        assert_eq!(a.entries[0].1, Ok(Rect::new(10, 20, 1910, 1060)), "loose corners, unknown keys ignored");
+        assert_eq!((a.key.as_deref(), a.lang), (Some("k"), LangReq::Tags(vec!["de".into(), "en".into()])));
+        let a = parse_wait(
+            "host.ocr.recognizeMany",
+            &v("return { regions = { { 0, 0, 10, 10 }, { window = { client = { x = 0, y = 0, w = 0, h = 0 } }, fraction = { 0, 0, 1, 1 } }, nil, { 5, 5, 6, 6 } } }"),
+            screen,
+        )
+        .unwrap();
+        assert!(a.list);
+        assert_eq!(a.entries.len(), 2, "the list ends at its first nil");
+        assert_eq!(a.entries[1].1, Err("the window's client area is empty (0x0)".to_string()));
+        let fails = |name: &str, src: &str, needle: &str| {
+            let e = parse_wait(name, &v(src), screen).expect_err(src).to_string();
+            assert!(e.contains(needle), "{src}: {e}");
+        };
+        fails("host.ocr.recognize", "return { snapshot = 1 }", "host.ocr.recognize: takes no snapshot; host.ocr.read does");
+        fails("host.ocr.recognize", "return { region = { x = 1 } }", "host.ocr.recognize: opts.region is neither");
+        fails("host.ocr.recognize", "return { lang = 'english' }", "host.ocr.recognize: ");
+        fails("host.ocr.recognize", "return { key = '' }", "host.ocr.recognize: `key` is empty");
+        fails("host.ocr.recognize", "return { key = 5 }", "host.ocr.recognize: `key` must be a string, got number");
+        fails("host.ocr.recognize", "return 'here'", "host.ocr.recognize: the options are a table or nil, got string");
+        fails("host.ocr.recognizeMany", "return nil", "host.ocr.recognizeMany: the options are a table with `regions`");
+        fails("host.ocr.recognizeMany", "return {}", "host.ocr.recognizeMany: opts.regions must be a list of regions, got nil");
+        fails(
+            "host.ocr.recognizeMany",
+            "local t = {} for i = 1, 65 do t[i] = { 0, 0, 1, 1 } end return { regions = t }",
+            "host.ocr.recognizeMany: 65 regions in one call; at most 64",
+        );
+        fails(
+            "host.ocr.recognizeMany",
+            "return { regions = { { 0, 0, 8000, 4000 }, { 0, 0, 8000, 4000 } } }",
+            "host.ocr.recognizeMany: 64000000 pixels in one call",
+        );
     }
 }

@@ -121,6 +121,25 @@ ov:bind(binding, { menus = { O.menuTests.newWindow } })
 
 `menuItem` is the item's offset from the menu's corner; in a calibrating run the menu is photographed with a crosshair on it, which is where that offset is measured from.
 
+### Acting on what was read
+
+Text read off the screen with [`host.ocr.read`](api/ocr.md#host-ocr-read) comes back later, in its callback, and by then the user may have moved on: another control, another key, another window. Before acting on the answer, ask whether the overlay is still where it was: [`o:here()`](api/overlay.md#o-here) when the key is pressed, [`o:stillHere(mark, opts)`](api/overlay.md#o-here) when the answer comes. It is the check the overlay makes itself before it says a value or clicks an OCR button, and it answers why not in the same words.
+
+```luau
+ov:addCustomButton({ label = "Bank", onActivate = function(o)
+  local mark = o:here()
+  local r = o:toScreenRect({ 300, 20, 400, 36 }, { whole = true })   -- the corners `read` takes
+  if not r then return end
+  host.ocr.read(r, function(reading)
+    if reading.status == "text" and o:stillHere(mark, { keys = true }) then
+      host.speech.output(reading.text, { interrupt = true })
+    end
+  end)
+end })
+```
+
+`here`, `stillHere` and `whole` came with version 0.2 of the overlay runtime, so a module that uses them says so in its manifest: `dependencies = ["com.platform.overlay >= 0.2"]`.
+
 ### Finding the coordinates — the calibrator
 
 Do not derive coordinates from another tool's numbers, and do not trust a value because *something* about it looks right. A cautionary tale from this repo: a set of toggles was calibrated by sampling colours, the colours matched, and the positions were taken to be right — they were 16 px off, on the caption row *under* the buttons. Three of five sampled near-black there and reported "off" forever, and the overlay had shipped like that.
@@ -169,7 +188,7 @@ ov:attachEmbedded({
 })
 ```
 
-That read runs on the event loop, which is fine once per control on Windows. On the DAW's panel it is asked once per stay in *every* plugin window of every DAW, and on a Mac a read that finds nothing can hold the event loop for a quarter of a second — so sforzando reads there with `host.ocr.read`, off the loop, answering `nil` until the answer lands; [`O:attachEmbedded`](api/overlay#o-attachembedded) shows how.
+That read runs on the event loop and holds it while it reads, once per control on Windows; the log says how long a module's first one held it ([`host.ocr.recognize`](api/ocr.md#host-ocr-recognize)). On the DAW's panel it is asked once per stay in *every* plugin window of every DAW, and on a Mac a read that finds nothing can hold the event loop for a quarter of a second — so sforzando reads there with `host.ocr.read`, off the loop, answering `nil` until the answer lands; [`O:attachEmbedded`](api/overlay#o-attachembedded) shows how.
 
 **Never name a DAW.** `hosts = daw.all` is every DAW [daw-hosts](daw-hosts.md) knows, and a DAW added there is one your plugin is recognised in, with no change to your module. So nothing in a plugin module may depend on which DAW it is in: not the DAW's executable or bundle, not its window titles — Logic titles a plug-in window "Inst 1", by its channel strip — not its chrome, not where in its window it draws a plugin. If you find yourself needing one of those, it belongs in the DAW's entry, where every plugin gets it.
 

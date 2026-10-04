@@ -631,6 +631,7 @@ fn pixels_with(
 /// the image worker's reads wait for desktop duplication — up to 250 ms — with the path each
 /// frame came from. `poll` means nothing here.
 fn frames_on_capture_thread(regions: &[(i32, i32, i32, i32)], src: CaptureSource, _poll: bool) -> Vec<Result<Frame, String>> {
+    crate::loop_guard::off_loop("a snapshot round");
     frames_all(regions, src, Caller::Worker)
 }
 
@@ -638,6 +639,7 @@ fn frames_on_capture_thread(regions: &[(i32, i32, i32, i32)], src: CaptureSource
 /// the capture stage would have handed them over. A region not inside it — which the binding has
 /// already cut to it, so only an empty one — fails in its own slot.
 fn ocr_shot_of(frame: &Frame, regions: &[(i32, i32, i32, i32)]) -> OcrShot {
+    crate::loop_guard::off_loop("a snapshot's pixels for a text read");
     regions
         .iter()
         .map(|&r| frame.crop_image(Rect::from_tuple(r)).ok_or_else(|| CAPTURE_FAILED.to_string()))
@@ -647,6 +649,7 @@ fn ocr_shot_of(frame: &Frame, regions: &[(i32, i32, i32, i32)]) -> OcrShot {
 /// The capture stage of `host.ocr.read` (`OcrWorker::capture`), on its own thread: every region
 /// of one read from one moment, and roughly how many bytes that is.
 fn ocr_capture(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> (OcrShot, usize) {
+    crate::loop_guard::off_loop("a capture for a text read");
     let shot = capture_for_read(regions, src);
     let bytes = shot.iter().map(|r| r.as_ref().map_or(0, |c| c.rgba.len())).sum();
     (shot, bytes)
@@ -701,6 +704,7 @@ fn ocr_recognise(
     _regions: &[(i32, i32, i32, i32)],
     ctx: &Recognise,
 ) -> Vec<Result<OcrText, String>> {
+    crate::loop_guard::off_loop("the recognise stage of a text read");
     ctx.each(shot.iter(), |piece| match piece {
         Ok(img) => recognize_image(img, ctx.lang),
         Err(e) => Err(e.clone()),
@@ -3289,6 +3293,7 @@ fn crop(src: &CapturedImage, x: i32, y: i32, w: i32, h: i32) -> Option<CapturedI
 /// one per region — measured at ~17 ms against 4-6 ms for the recognition itself, so the
 /// capture was two thirds of a two-region read.
 fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, String> {
+        crate::loop_guard::off_loop("Windows.Media.Ocr");
         let debug = crate::appcfg::ocr_debug();
         if debug {
             save_debug(cap, "ocr-debug-raw.png");
@@ -3422,6 +3427,52 @@ fn recognize_image(cap: &CapturedImage, lang: Option<&str>) -> Result<OcrText, S
 /// blank guard. Crate-internal; the bench is its only caller.
 pub(super) fn bench_system_read(cap: &CapturedImage) -> Result<OcrText, String> {
     recognize_image(cap, None)
+}
+
+/// Every Windows function that photographs for a read or recognises asks the loop guard first,
+/// so on the event loop's thread — outside the legacy call — a debug build panics before it does
+/// anything: nothing is captured and no recogniser is asked here. (The guard's rules are tested
+/// in loop_guard.rs; this holds that the guard is where it has to be.)
+#[cfg(all(test, debug_assertions))]
+mod loop_guard_tests {
+    use super::*;
+
+    #[test]
+    fn every_capture_for_a_read_and_every_recognition_asks_the_guard_first() {
+        crate::quiet_expected_panics();
+        let t = std::thread::spawn(|| {
+            crate::loop_guard::mark_loop_thread();
+            let cap = || CapturedImage { w: 4, h: 4, rgba: vec![0; 64] };
+            let frame = || Frame::from_image(Rect::new(0, 0, 4, 4), cap(), std::time::Instant::now(), FrameVia::Gdi, None);
+            let ctx = Recognise { lang: None, fast_ok: false, preempt: None, stop: None, region_done: None };
+            type Call<'a> = (&'static str, Box<dyn Fn() + 'a>);
+            let calls: Vec<Call<'_>> = vec![
+                ("recognize_image", Box::new(move || drop(recognize_image(&cap(), None)))),
+                ("ocr_capture", Box::new(|| drop(ocr_capture(&[(0, 0, 4, 4)], CaptureSource::Standard)))),
+                ("ocr_recognise", Box::new(move || drop(ocr_recognise(&vec![Ok(cap())], &[(0, 0, 4, 4)], &ctx)))),
+                ("frames_on_capture_thread", Box::new(|| drop(frames_on_capture_thread(&[(0, 0, 4, 4)], CaptureSource::Standard, false)))),
+                ("ocr_shot_of", Box::new(move || {
+                    if let Some(f) = frame() {
+                        drop(ocr_shot_of(&f, &[(0, 0, 4, 4)]));
+                    }
+                })),
+                ("paddle_ocr::ask", Box::new(move || drop(super::super::paddle_ocr::ask(&cap())))),
+            ];
+            let mut quiet = Vec::new();
+            for (name, call) in calls {
+                let raised = std::panic::catch_unwind(std::panic::AssertUnwindSafe(call));
+                let guarded = raised.as_ref().err().and_then(|p| p.downcast_ref::<String>()).is_some_and(|m| {
+                    m.starts_with("[loop] text recognition on the event loop: ")
+                });
+                if !guarded {
+                    quiet.push(name);
+                }
+            }
+            quiet
+        });
+        let quiet = t.join().unwrap();
+        assert!(quiet.is_empty(), "these ran on the event loop without asking the guard: {quiet:?}");
+    }
 }
 
 /// The `[env]` processor line, asked of this machine: it names something, and counts its cores.

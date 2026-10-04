@@ -37,6 +37,19 @@ mod overlay_menu_item_tests;
 /// scale, its clicks, its menus and its warning box.
 #[cfg(test)]
 mod overlay_avenger_tests;
+/// The overlay runtime's marks (O:here, O:stillHere), O:toScreenRect's `whole`, and a control's
+/// hook that raises, against the same scripted host.
+#[cfg(test)]
+mod overlay_runtime_marks_tests;
+/// Tasks and their two waits against a real Luau VM and a real read service over a fake
+/// recogniser.
+#[cfg(test)]
+mod task_tests;
+/// Tasks: a function that stops at `host.ocr.recognize` while the event loop goes on — no
+/// module's API, the machinery its callbacks are to run in; see the file.
+mod task;
+/// The guard that keeps text recognition off the event loop — see the file.
+mod loop_guard;
 mod gui;
 mod image_search;
 /// One running copy per user: the lock, and the request a second start sends — see the file.
@@ -81,7 +94,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
-use mlua::{Function, Lua, LuaSerdeExt, RegistryKey, Table};
+use mlua::{FromLua, Function, Lua, LuaSerdeExt, RegistryKey, Table};
 
 use backend::{Backend, ControlInfo, HostEvents, MouseButton, WinInfo};
 use image_search::{ImageResult, ImageTask, PendingImage};
@@ -300,6 +313,9 @@ struct Shared {
     /// ...and what the event loop keeps for them: the callbacks waiting, the answers decided
     /// without the threads, the newest read per key (ocr/lua.rs).
     ocr_state: ocr::lua::OcrState,
+    /// The tasks, running and waiting, of every module — only the tests start any — and what
+    /// the blocking `recognize` and `recognizeMany` held the event loop for (task.rs).
+    tasks: task::Tasks,
     /// module_idx → the generation of the VM it runs now (see `image_search::VmOwner`). A map,
     /// not a fifth parallel vector: `populate_vm` overwrites the entry for its index, so a
     /// rollback has nothing here to keep aligned.
@@ -762,10 +778,12 @@ impl Shared {
     /// Forgets the log's counts of module `idx`'s errors (and of its image searches ended past
     /// their limit), so their next occurrence is written in full: on disable/enable, on a reload,
     /// and when a failed hot-load is rolled back. Keyed by the module's id, as `error_repeats`
-    /// is, so it is asked while `ids` still holds it.
+    /// is, so it is asked while `ids` still holds it. Its line for a `recognize` that held the
+    /// event loop is written again too (`Tasks::forget_legacy_said`).
     fn forget_error_repeats(&self, idx: usize) {
         if let Some(id) = self.ids.borrow().get(idx) {
             self.error_repeats.borrow_mut().forget_prefix(&format!("{id}\u{1}"));
+            self.tasks.forget_legacy_said(id);
         }
     }
 
@@ -1130,9 +1148,10 @@ impl Shared {
         // The VM that asked is going; the one built in its place asks for itself.
         self.initial_pending.borrow_mut().retain(|(i, _)| *i != idx);
         self.purge_pending_images(idx);
-        // Its reads are dropped, not answered: the callbacks belong to the VM that is going.
+        // Its reads and tasks are dropped, not answered: they belong to the VM that is going.
         self.ocr_drop_owner(idx, true);
         self.snap_drop_owner(idx);
+        self.task_drop_owner(idx);
         self.drop_pad_listeners(|i| i == idx);
         let mut to_resolve: Vec<String> = Vec::new();
         let mut deactivations: Vec<Function> = Vec::new();
@@ -1169,6 +1188,14 @@ impl Shared {
         for slot in to_resolve {
             self.arbiter_resolve(&slot);
         }
+        // A second time, after the onDeactivate above: it runs in the VM that is going, and what it
+        // started — a timer, a read, a snapshot, a task that waits — would otherwise outlive the
+        // purge and come back into the old VM, or keep it in memory. A timer it armed used to fire
+        // into the old VM after a reload.
+        self.timers.retain(|i| i != idx);
+        self.ocr_drop_owner(idx, true);
+        self.snap_drop_owner(idx);
+        self.task_drop_owner(idx);
         let id = self.ids.borrow().get(idx).cloned();
         if let Some(id) = id {
             self.exports.borrow_mut().remove(&id);
@@ -1219,13 +1246,6 @@ impl Shared {
         self.refresh_hotkeys();
         self.refresh_captured();
         self.refresh_gamepad();
-        // A disabled module's text reads are dropped, as its one-shot timers are: a callback
-        // that clicked or spoke minutes later, over whatever is in front then, is worse than
-        // none. Enabled again, its polls simply read afresh.
-        if !enabled {
-            self.ocr_drop_owner(idx, false);
-            self.snap_drop_owner(idx);
-        }
         // A disabled module must not stay the active overlay (and an enabled one
         // may now win): re-elect every arbiter slot it participates in.
         let slots: Vec<String> = self
@@ -1237,6 +1257,16 @@ impl Shared {
             .collect();
         for slot in slots {
             self.arbiter_resolve(&slot);
+        }
+        // A disabled module's text reads, snapshots and tasks are dropped, as its one-shot timers
+        // are: a callback that clicked or spoke minutes later, over whatever is in front then, is
+        // worse than none. Enabled again, its polls simply read afresh. After the re-election, so
+        // that what an onDeactivate it ran started goes too — a read answered after a quick
+        // re-enable would otherwise still be delivered, the generation being the same.
+        if !enabled {
+            self.ocr_drop_owner(idx, false);
+            self.snap_drop_owner(idx);
+            self.task_drop_owner(idx);
         }
         // Searches answered while it was off are asked again, so their callbacks still come.
         if enabled {
@@ -1285,6 +1315,7 @@ impl Shared {
         self.initial_pending.borrow_mut().retain(|(idx, _)| *idx < n);
         self.ocr_drop_from(n);
         self.snap_drop_from(n);
+        self.task_drop_from(n);
         self.drop_pad_listeners(|idx| idx >= n);
         {
             // Drop arbiter claims owned by the rolled-back modules; clear a now-
@@ -3874,6 +3905,10 @@ impl Manager {
         // Fixes the origin of `host.now()` — and of every gamepad event's `time` — before
         // anything can read it. See `clock_origin`.
         clock_origin();
+        // This thread loads the modules and then runs the event loop — the window's tick and the
+        // headless loop alike — so it is the loop no recogniser may run on, outside the one call
+        // still allowed to, the blocking `recognize` (loop_guard.rs).
+        loop_guard::mark_loop_thread();
         let backend = backend::platform();
         // `host.ocr.read`'s threads, first: the recognise thread publishes the language list
         // as its first act, and the speech engines below can take seconds to open, so a module
@@ -3957,6 +3992,7 @@ impl Manager {
             snap_state: snapshot::SnapState::default(),
             ocr,
             ocr_state: ocr::lua::OcrState::default(),
+            tasks: task::Tasks::default(),
             vm_gens: RefCell::new(HashMap::new()),
             template_cache: RefCell::new(HashMap::new()),
             template_seq: Cell::new(0),
@@ -4258,7 +4294,9 @@ impl Manager {
                         shared.fire_image_results();
                         let images_ms = t.elapsed().as_millis();
                         let t = std::time::Instant::now();
-                        shared.fire_ocr_results();
+                        // The callbacks counted, for the line below: one slow callback is told
+                        // from many quick ones by the count.
+                        let ocr_n = shared.fire_ocr_results();
                         let ocr_ms = t.elapsed().as_millis();
                         let t = std::time::Instant::now();
                         shared.fire_snapshot_results();
@@ -4298,9 +4336,10 @@ impl Manager {
                                      {focus_ms} + gamepad {pad_ms} + everything else \
                                      {other_ms}, which is mostly key and hotkey dispatch; \
                                      timers {timers_ms}, image results {images_ms}, text \
-                                     recognition results {ocr_ms}, snapshot results \
+                                     recognition results {ocr_ms} ({} callback(s)), snapshot results \
                                      {snapshots_ms}, initial window report {initial_ms}) — \
-                                     {hazard}"
+                                     {hazard}",
+                                    ocr_n.callbacks
                                 ),
                             );
                         }
@@ -4495,6 +4534,9 @@ pub fn run(dirs: &[String]) -> Result<()> {
             }
         }
         let ran = manager.run();
+        // What `recognize` and `recognizeMany` held the event loop for, per module, once: the
+        // whole session's cost, beside the first line that said it as it happened.
+        manager.shared.log_legacy_summary();
         // The window loop has ended, so a second start from here on is told this copy is
         // quitting, and waits for the lock instead of handing its request to a window that
         // will never open. Here, before the manager — hotkeys, hooks, modules — is dropped at
@@ -6698,165 +6740,34 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         lua.create_function(move |_, v: mlua::Value| sh.ocr_resolve_value(&v))?,
     )?;
 
-    // host.ocr.recognize({ region, lang }) -> { text, words = {{text,x,y,w,h}, ...}, skipped }
+    // host.ocr.pending(key) -> boolean — whether a read of this module with `key`, asked with
+    // `read` (or by a task waiting in `recognize`, which only the tests start), is still waiting
+    // for its answer (ocr/lua.rs).
     let sh = shared.clone();
     ocr.set(
-        "recognize",
-        lua.create_function(move |lua, opts: Option<Table>| {
-            if let Some(o) = &opts {
-                refuse_snapshot(o, "host.ocr.recognize")?;
-            }
-            // The failed shape, for what is routine rather than a mistake: a language nothing
-            // here reads, a window region with nothing to read, no picture under
-            // `fallback = "none"`.
-            let failed = |why: &str| -> mlua::Result<Table> {
-                let t = lua.create_table()?;
-                t.set("text", "")?;
-                t.set("words", lua.create_table()?)?;
-                t.set("skipped", false)?;
-                t.set("error", why)?;
-                Ok(t)
-            };
-            // Both arguments are read before either is answered, so a mistake in `lang` raises
-            // whether or not the window has anything to read.
-            let region = opts_region(&*sh.backend, opts.as_ref(), "host.ocr.recognize")?;
-            let lang: Option<String> = opts.as_ref().and_then(|o| o.get::<String>("lang").ok());
-            // Through the resolver, so "de" reads German on both platforms: the tag the engine
-            // lists, or this call's failed shape when nothing here reads the language.
-            let lang = match lang {
-                Some(tag) => match sh.ocr_legacy_lang(&tag, "host.ocr.recognize")? {
-                    Ok(resolved) => Some(resolved),
-                    Err(why) => return failed(&why),
-                },
-                None => None,
-            };
-            let (rx, ry, rw, rh) = match region {
-                Ok(r) => (r.x, r.y, r.w, r.h),
-                Err(why) => return failed(&why),
-            };
-            let src = capture_source::read_source(lua, &*sh.backend, (rx, ry, rw, rh));
-            let res = match sh.backend.ocr(rx, ry, rw, rh, lang.as_deref(), src) {
-                Ok(r) => r,
-                // `recognizeMany`'s shape, for a picture a `fallback = "none"` module could not
-                // get: routine there, and a raised error would put a dialog in front of the
-                // game. See capture_source::answers_instead_of_raising.
-                Err(e) if capture_source::answers_instead_of_raising(src, &e) => return failed(&e),
-                Err(e) => return Err(mlua::Error::external(e)),
-            };
-            let t = lua.create_table()?;
-            t.set("text", res.text)?;
-            let words = lua.create_table()?;
-            for wd in res.words {
-                let w = lua.create_table()?;
-                w.set("text", wd.text)?;
-                w.set("x", rx + wd.x)?;
-                w.set("y", ry + wd.y)?;
-                w.set("w", wd.w)?;
-                w.set("h", wd.h)?;
-                words.push(w)?;
-            }
-            t.set("words", words)?;
-            // Whether the engine was asked at all. A blank region answers empty either way,
-            // and a module that wants to know which — the probe does — has nothing else to
-            // look at from Lua.
-            t.set("skipped", res.skipped)?;
-            Ok(t)
-        })?,
+        "pending",
+        lua.create_function(move |lua, key: mlua::Value| ocr::lua::pending(&*sh, lua, idx, key))?,
     )?;
-    // host.ocr.recognizeMany{ regions = { Region, … }, lang? } -> { { text, words, skipped }, … }
-    //
-    // The same recognitions, ONE screen touch. Measured on this machine: recognising a 67x13
-    // read-out costs 4-6 ms and cropping it 0.5, while the capture underneath is a fixed ~17 ms
-    // compositor frame whatever its size — so two adjacent read-outs read one after the other
-    // spent two thirds of their time photographing the screen twice. Melodyne's selection
-    // watcher did exactly that, eight times a second, and measured 44 ms a tick against 27 for
-    // one region.
-    //
-    // The regions are NOT merged into one recognition, and that distinction is the whole reason
-    // this is a new call rather than a wider rectangle: the fallback to the neural recogniser
-    // fires per region, only when that region came back empty, and a merged strip is never
-    // empty — so a note name Windows.Media.Ocr dropped stayed dropped while the cents beside it
-    // came through. Every region is still recognised on its own, with its own fallback, and its
-    // word boxes are still relative to itself.
-    //
-    // A region that failed comes back as `{ text = "", error = "…" }` rather than as a hole in
-    // the sequence: a caller indexing results[2] must never get the third region's answer.
+
+    // host.ocr.recognize(opts?) and host.ocr.recognizeMany(opts) — the two waits of a task
+    // (task.rs, task_shim.luau). Inside a task they ask the read service and only the task waits.
+    // No module can start a task, so in the application they are always where they cannot wait,
+    // and so the blocking calls below, as they always were, with a log line once per module that
+    // says how long the first held the event loop.
     let sh = shared.clone();
-    ocr.set(
-        "recognizeMany",
-        lua.create_function(move |lua, opts: Table| {
-            const F: &str = "host.ocr.recognizeMany";
-            refuse_snapshot(&opts, F)?;
-            let regions: Table = opts.get("regions")?;
-            let lang: Option<String> = opts.get::<String>("lang").ok();
-            // Each region through the one reader: corners as this call always read them, or
-            // a window region resolved now. One whose window has nothing to read fails in its
-            // own place with the reason; the others are read. The list ends at the first nil.
-            let mut slots: Vec<Result<(i32, i32, i32, i32), String>> = Vec::new();
-            for (i, r) in regions.sequence_values::<mlua::Value>().enumerate() {
-                let r = r?;
-                slots.push(region_arg(&*sh.backend, &r, F, &format!("opts.regions[{}]", i + 1))?.map(|s| (s.x, s.y, s.w, s.h)));
-            }
-            let failed = |why: &str| -> mlua::Result<Table> {
-                let t = lua.create_table()?;
-                t.set("text", "")?;
-                t.set("words", lua.create_table()?)?;
-                // Present so every entry has the same shape; false because a failed read is
-                // not the blank guard answering, and `error` says what it was.
-                t.set("skipped", false)?;
-                t.set("error", why)?;
-                Ok(t)
-            };
-            // Through the resolver, as in `recognize`; a language nothing here reads fails every
-            // region with the reason, in the shape a failed region always had.
-            let lang = match lang {
-                Some(tag) => match sh.ocr_legacy_lang(&tag, "host.ocr.recognizeMany")? {
-                    Ok(resolved) => Some(resolved),
-                    Err(why) => {
-                        let out = lua.create_table()?;
-                        for _ in &slots {
-                            out.push(failed(&why)?)?;
-                        }
-                        return Ok(out);
-                    }
-                },
-                None => None,
-            };
-            let rects: Vec<(i32, i32, i32, i32)> = slots.iter().filter_map(|s| s.as_ref().ok().copied()).collect();
-            let results = if rects.is_empty() {
-                Vec::new()
+    let legacy = lua.create_function(move |lua, (name, opts, why): (String, mlua::Value, String)| {
+        let answer = task::legacy(&*sh, lua, idx, &name, &why, || {
+            if name == "host.ocr.recognizeMany" {
+                legacy_recognize_many(lua, &sh, opts)
             } else {
-                let src = capture_source::read_source(lua, &*sh.backend, rects[0]);
-                sh.backend.ocr_regions(&rects, lang.as_deref(), src)
-            };
-            let out = lua.create_table()?;
-            for answer in align_many(&slots, results) {
-                let (r, (rx, ry)) = match answer {
-                    Ok(a) => a,
-                    Err(why) => {
-                        out.push(failed(&why)?)?;
-                        continue;
-                    }
-                };
-                let t = lua.create_table()?;
-                t.set("text", r.text)?;
-                let words = lua.create_table()?;
-                for wd in r.words {
-                    let w = lua.create_table()?;
-                    w.set("text", wd.text)?;
-                    w.set("x", rx + wd.x)?;
-                    w.set("y", ry + wd.y)?;
-                    w.set("w", wd.w)?;
-                    w.set("h", wd.h)?;
-                    words.push(w)?;
-                }
-                t.set("words", words)?;
-                t.set("skipped", r.skipped)?;
-                out.push(t)?;
+                legacy_recognize(lua, &sh, opts)
             }
-            Ok(out)
-        })?,
-    )?;
+        })?;
+        Ok((true, answer))
+    })?;
+    let waits = task::waits(lua, idx, shared.clone(), legacy)?;
+    ocr.set("recognize", waits.get::<Function>("recognize")?)?;
+    ocr.set("recognizeMany", waits.get::<Function>("recognizeMany")?)?;
     host.set("ocr", ocr)?;
 
     // host.epoch() -> number — a counter that changes whenever the world may have: an
@@ -8329,6 +8240,164 @@ fn refuse_snapshot(opts: &Table, fname: &str) -> mlua::Result<()> {
     }
 }
 
+/// `host.ocr.recognize(opts?)` where it cannot wait (`task::legacy`): the blocking call, exactly
+/// as it always was — the region read loosely, the language through the resolver, the capture
+/// and the recognition on the event loop, which waits until it returns.
+fn legacy_recognize(lua: &Lua, sh: &Shared, opts: mlua::Value) -> mlua::Result<Table> {
+    let opts = Option::<Table>::from_lua(opts, lua)?;
+    if let Some(o) = &opts {
+        refuse_snapshot(o, "host.ocr.recognize")?;
+    }
+    // The failed shape, for what is routine rather than a mistake: a language nothing
+    // here reads, a window region with nothing to read, no picture under
+    // `fallback = "none"`.
+    let failed = |why: &str| -> mlua::Result<Table> {
+        let t = lua.create_table()?;
+        t.set("text", "")?;
+        t.set("words", lua.create_table()?)?;
+        t.set("skipped", false)?;
+        t.set("error", why)?;
+        Ok(t)
+    };
+    // Both arguments are read before either is answered, so a mistake in `lang` raises
+    // whether or not the window has anything to read.
+    let region = opts_region(&*sh.backend, opts.as_ref(), "host.ocr.recognize")?;
+    let lang: Option<String> = opts.as_ref().and_then(|o| o.get::<String>("lang").ok());
+    // Through the resolver, so "de" reads German on both platforms: the tag the engine
+    // lists, or this call's failed shape when nothing here reads the language.
+    let lang = match lang {
+        Some(tag) => match sh.ocr_legacy_lang(&tag, "host.ocr.recognize")? {
+            Ok(resolved) => Some(resolved),
+            Err(why) => return failed(&why),
+        },
+        None => None,
+    };
+    let (rx, ry, rw, rh) = match region {
+        Ok(r) => (r.x, r.y, r.w, r.h),
+        Err(why) => return failed(&why),
+    };
+    let src = capture_source::read_source(lua, &*sh.backend, (rx, ry, rw, rh));
+    let res = match sh.backend.ocr(rx, ry, rw, rh, lang.as_deref(), src) {
+        Ok(r) => r,
+        // `recognizeMany`'s shape, for a picture a `fallback = "none"` module could not
+        // get: routine there, and a raised error would put a dialog in front of the
+        // game. See capture_source::answers_instead_of_raising.
+        Err(e) if capture_source::answers_instead_of_raising(src, &e) => return failed(&e),
+        Err(e) => return Err(mlua::Error::external(e)),
+    };
+    let t = lua.create_table()?;
+    t.set("text", res.text)?;
+    let words = lua.create_table()?;
+    for wd in res.words {
+        let w = lua.create_table()?;
+        w.set("text", wd.text)?;
+        w.set("x", rx + wd.x)?;
+        w.set("y", ry + wd.y)?;
+        w.set("w", wd.w)?;
+        w.set("h", wd.h)?;
+        words.push(w)?;
+    }
+    t.set("words", words)?;
+    // Whether the engine was asked at all. A blank region answers empty either way,
+    // and a module that wants to know which — the probe does — has nothing else to
+    // look at from Lua.
+    t.set("skipped", res.skipped)?;
+    Ok(t)
+}
+
+/// `host.ocr.recognizeMany(opts)` where it cannot wait (`task::legacy`): the blocking call,
+/// exactly as it always was.
+///
+/// The same recognitions, ONE screen touch. Measured on this machine: recognising a 67x13
+/// read-out costs 4-6 ms and cropping it 0.5, while the capture underneath is a fixed ~17 ms
+/// compositor frame whatever its size — so two adjacent read-outs read one after the other
+/// spent two thirds of their time photographing the screen twice. Melodyne's selection
+/// watcher did exactly that, eight times a second, and measured 44 ms a tick against 27 for
+/// one region.
+///
+/// The regions are NOT merged into one recognition, and that distinction is the whole reason
+/// this is a new call rather than a wider rectangle: the fallback to the neural recogniser
+/// fires per region, only when that region came back empty, and a merged strip is never
+/// empty — so a note name Windows.Media.Ocr dropped stayed dropped while the cents beside it
+/// came through. Every region is still recognised on its own, with its own fallback, and its
+/// word boxes are still relative to itself.
+///
+/// A region that failed comes back as `{ text = "", error = "…" }` rather than as a hole in
+/// the sequence: a caller indexing results[2] must never get the third region's answer.
+fn legacy_recognize_many(lua: &Lua, sh: &Shared, opts: mlua::Value) -> mlua::Result<Table> {
+    let opts = Table::from_lua(opts, lua)?;
+    const F: &str = "host.ocr.recognizeMany";
+    refuse_snapshot(&opts, F)?;
+    let regions: Table = opts.get("regions")?;
+    let lang: Option<String> = opts.get::<String>("lang").ok();
+    // Each region through the one reader: corners as this call always read them, or
+    // a window region resolved now. One whose window has nothing to read fails in its
+    // own place with the reason; the others are read. The list ends at the first nil.
+    let mut slots: Vec<Result<(i32, i32, i32, i32), String>> = Vec::new();
+    for (i, r) in regions.sequence_values::<mlua::Value>().enumerate() {
+        let r = r?;
+        slots.push(region_arg(&*sh.backend, &r, F, &format!("opts.regions[{}]", i + 1))?.map(|s| (s.x, s.y, s.w, s.h)));
+    }
+    let failed = |why: &str| -> mlua::Result<Table> {
+        let t = lua.create_table()?;
+        t.set("text", "")?;
+        t.set("words", lua.create_table()?)?;
+        // Present so every entry has the same shape; false because a failed read is
+        // not the blank guard answering, and `error` says what it was.
+        t.set("skipped", false)?;
+        t.set("error", why)?;
+        Ok(t)
+    };
+    // Through the resolver, as in `recognize`; a language nothing here reads fails every
+    // region with the reason, in the shape a failed region always had.
+    let lang = match lang {
+        Some(tag) => match sh.ocr_legacy_lang(&tag, "host.ocr.recognizeMany")? {
+            Ok(resolved) => Some(resolved),
+            Err(why) => {
+                let out = lua.create_table()?;
+                for _ in &slots {
+                    out.push(failed(&why)?)?;
+                }
+                return Ok(out);
+            }
+        },
+        None => None,
+    };
+    let rects: Vec<(i32, i32, i32, i32)> = slots.iter().filter_map(|s| s.as_ref().ok().copied()).collect();
+    let results = if rects.is_empty() {
+        Vec::new()
+    } else {
+        let src = capture_source::read_source(lua, &*sh.backend, rects[0]);
+        sh.backend.ocr_regions(&rects, lang.as_deref(), src)
+    };
+    let out = lua.create_table()?;
+    for answer in align_many(&slots, results) {
+        let (r, (rx, ry)) = match answer {
+            Ok(a) => a,
+            Err(why) => {
+                out.push(failed(&why)?)?;
+                continue;
+            }
+        };
+        let t = lua.create_table()?;
+        t.set("text", r.text)?;
+        let words = lua.create_table()?;
+        for wd in r.words {
+            let w = lua.create_table()?;
+            w.set("text", wd.text)?;
+            w.set("x", rx + wd.x)?;
+            w.set("y", ry + wd.y)?;
+            w.set("w", wd.w)?;
+            w.set("h", wd.h)?;
+            words.push(w)?;
+        }
+        t.set("words", words)?;
+        t.set("skipped", r.skipped)?;
+        out.push(t)?;
+    }
+    Ok(out)
+}
+
 /// `nil, reason`: the answer of the cells calls when they could not look — two values always,
 /// as those calls have returned from the start. The reason is the backend's, in the words the
 /// log uses (see "Failure reasons" in docs/api/screen.md).
@@ -9019,13 +9088,25 @@ mod ocr_wiring_tests {
         t.set("snapshot", 1).unwrap();
         let e = refuse_snapshot(&t, "host.ocr.recognize").unwrap_err().to_string();
         assert!(e.contains("host.ocr.recognize: takes no snapshot; host.ocr.read does"), "{e}");
+        // The blocking calls where they cannot wait...
+        let one = body(LIB, "fn legacy_recognize(");
+        let first = one.find("refuse_snapshot(o, \"host.ocr.recognize\")?;").expect("recognize");
+        assert!(first < one.find("opts_region(").unwrap(), "recognize reads its region before refusing");
+        let many = body(LIB, "fn legacy_recognize_many(");
+        let first = many.find("refuse_snapshot(&opts, F)?;").expect("recognizeMany");
+        assert!(first < many.find("opts.get(\"regions\")").unwrap());
+        // ...and both in a task.
+        let wait = body(OCR_LUA, "pub(crate) fn parse_wait(");
+        let first = wait.find("crate::refuse_snapshot(t, name)?;").expect("a wait refuses a snapshot");
+        assert!(first < wait.find("get(\"region\")").unwrap() && first < wait.find("get(\"regions\")").unwrap());
+        // Both names reach the two through the shim, with the legacy call beside them.
         let api = body(LIB, "fn install_host_api(");
         let ocr = bindings(api, "ocr");
         let text = |name: &str| ocr.iter().find(|b| b.0 == name).unwrap_or_else(|| panic!("host.ocr.{name}")).1;
-        let first = text("recognize").find("refuse_snapshot(o, \"host.ocr.recognize\")?;").expect("recognize");
-        assert!(first < text("recognize").find("opts_region(").unwrap(), "recognize reads its region before refusing");
-        let first = text("recognizeMany").find("refuse_snapshot(&opts, F)?;").expect("recognizeMany");
-        assert!(first < text("recognizeMany").find("opts.get(\"regions\")").unwrap());
+        assert!(text("recognize").contains("waits.get::<Function>(\"recognize\")"));
+        assert!(text("recognizeMany").contains("waits.get::<Function>(\"recognizeMany\")"));
+        assert!(api.contains("legacy_recognize_many(lua, &sh, opts)") && api.contains("legacy_recognize(lua, &sh, opts)"));
+        assert!(api.contains("task::legacy(&*sh, lua, idx, &name, &why, ||"), "the legacy calls are not logged and counted");
     }
 
     /// Somebody waiting: every dispatch a person causes runs in the interactive lane, and an
@@ -9092,10 +9173,17 @@ mod ocr_wiring_tests {
             assert!(text(name).contains("read_cells_opts("), "host.screen.{name}");
         }
         assert!(body(LIB, "fn read_cells_opts(").contains("region_lua::read(&region_value"));
-        let ocr = bindings(api, "ocr");
-        let ocr_text = |name: &str| ocr.iter().find(|b| b.0 == name).unwrap_or_else(|| panic!("host.ocr.{name}")).1;
+        // `recognize` and `recognizeMany`: the blocking calls where they cannot wait, and a task's
+        // wait, which reads its regions loosely through the same reader.
+        let ocr_text = |name: &str| match name {
+            "recognize" => body(LIB, "fn legacy_recognize("),
+            _ => body(LIB, "fn legacy_recognize_many("),
+        };
         assert!(ocr_text("recognize").contains("opts_region(&*sh.backend"));
         assert!(ocr_text("recognizeMany").contains("region_arg(&*sh.backend"));
+        let wait = body(OCR_LUA, "pub(crate) fn parse_wait(");
+        assert!(wait.contains("region_lua::read_loose(v, what, screen)"), "a task's wait reads its regions another way");
+        assert!(wait.contains("format!(\"opts.regions[{}]\", i + 1)") && wait.contains("\"opts.region\""));
         assert!(body(LIB, "fn region_arg(").contains("region_arg_on("));
         assert!(body(LIB, "fn region_arg_on(").contains("region_lua::read_loose("));
         for f in ["fn image_search(", "fn image_search_multi(", "fn image_search_async(", "fn image_search_each(", "fn image_search_all("] {
@@ -9349,12 +9437,60 @@ mod ocr_wiring_tests {
         assert!(body(LIB, "fn apply_enabled(").contains("self.ocr_drop_owner(idx, false);"));
         assert!(body(LIB, "fn purge_module(").contains("self.ocr_drop_owner(idx, true);"));
         assert!(body(LIB, "fn rollback_to(").contains("self.ocr_drop_from(n);"));
-        let api = body(LIB, "fn install_host_api(");
-        let ocr = bindings(api, "ocr");
-        for name in ["recognize", "recognizeMany"] {
-            let text = ocr.iter().find(|b| b.0 == name).unwrap_or_else(|| panic!("host.ocr.{name}")).1;
-            assert!(text.contains("sh.ocr_legacy_lang(&tag, \"host.ocr."), "host.ocr.{name} skips the resolver");
+        for f in ["fn legacy_recognize(", "fn legacy_recognize_many("] {
+            assert!(body(LIB, f).contains("sh.ocr_legacy_lang(&tag, \"host.ocr."), "`{f}` skips the resolver");
         }
+    }
+
+    /// A module's tasks go with it as its reads do: disabled, reloaded, rolled back. On a disable,
+    /// after the arbiter's re-election, so that what an onDeactivate started goes too; on a
+    /// reload, a second time after the onDeactivate the purge runs — timers, reads, snapshots and
+    /// tasks — so nothing it started reaches the old VM or keeps it in memory.
+    #[test]
+    fn a_modules_tasks_go_with_it_and_after_its_deactivation() {
+        let enable = body(LIB, "fn apply_enabled(");
+        let resolve = enable.find("self.arbiter_resolve(&slot);").expect("the re-election");
+        for drop in ["self.ocr_drop_owner(idx, false);", "self.snap_drop_owner(idx);", "self.task_drop_owner(idx);"] {
+            assert!(enable.find(drop).is_some_and(|at| at > resolve), "`{drop}` before the re-election");
+        }
+        let purge = body(LIB, "fn purge_module(");
+        let deactivated = purge.find("for f in deactivations {").expect("the onDeactivate calls");
+        let second = &purge[deactivated..];
+        for drop in [
+            "self.timers.retain(|i| i != idx);",
+            "self.ocr_drop_owner(idx, true);",
+            "self.snap_drop_owner(idx);",
+            "self.task_drop_owner(idx);",
+        ] {
+            assert!(second.contains(drop), "`{drop}` is not done again after the onDeactivate");
+            assert!(purge[..deactivated].contains(drop), "`{drop}` is not done before it either");
+        }
+        assert!(body(LIB, "fn rollback_to(").contains("self.task_drop_from(n);"));
+        // The loop is the thread that builds the manager, and the summary is written at exit.
+        assert!(body(LIB, "pub fn new() -> Result<Self>").contains("loop_guard::mark_loop_thread();"));
+        assert!(body(LIB, "pub fn run(dirs: &[String]) -> Result<()> {").contains("manager.shared.log_legacy_summary();"));
+        // The overrun line counts the deliveries' callbacks, and names no task: no module starts one.
+        assert!(LIB.contains(concat!("let ocr_n = shared.fire_ocr", "_results();")));
+        assert!(LIB.contains(concat!("({} callback(s)), snapshot results ", "\\")));
+        assert!(!LIB.contains(concat!("ocr_n", ".tasks")) && !LIB.contains(concat!("ta", "sk(s)")));
+        // Every VM is a plain `Lua::new()`, whose option to catch Rust panics is on: mlua then leaves
+        // Luau's own `pcall`, inside which a task waits. With it off, mlua puts in a `pcall` that
+        // cannot yield, and `pcall(host.ocr.recognize, …)` in a task would stop waiting.
+        for options in [concat!("LuaOp", "tions"), concat!("catch_rust", "_panics"), concat!("Lua::new", "_with")] {
+            assert!(!LIB.contains(options), "a VM built with options of its own: `{options}`");
+        }
+    }
+
+    /// No module can start a task: the host table has no entry for the machinery, whose only
+    /// entry is the tests' (`task::table`, built in test builds alone).
+    #[test]
+    fn no_module_can_start_a_task() {
+        let api = body(LIB, "fn install_host_api(");
+        assert!(!api.contains(concat!("host.set(\"ta", "sk\"")), "the host table has a task entry");
+        assert!(!api.contains(concat!("task::ta", "ble(")), "a module's host table is given the tests' entry");
+        let task_rs = include_str!("task.rs");
+        let entry = task_rs.find("pub(crate) fn table<H: ReadHost>(").expect("the tests' entry");
+        assert!(task_rs[..entry].trim_end().ends_with("#[cfg(test)]"), "the tests' entry is built outside the tests");
     }
 }
 
@@ -9463,7 +9599,9 @@ mod uptime_wiring_tests {
         assert!(err.contains("self.error_repeats.borrow_mut().note(&key, Instant::now())"), "{err}");
         assert!(err.contains("logging::Said::Counted => {}"));
         assert!(err.contains("logging::Said::Summary { count, over }"));
-        // Forgotten on toggle, on a reload, and for a rolled-back hot-load.
+        // Forgotten on toggle, on a reload, and for a rolled-back hot-load — with the line of a
+        // `recognize` that held the event loop.
+        assert!(body(LIB, "fn forget_error_repeats(").contains("self.tasks.forget_legacy_said(id);"));
         assert!(body(LIB, "fn apply_enabled(").contains("self.forget_error_repeats(idx);"));
         assert!(body(LIB, "fn purge_module(").contains("self.forget_error_repeats(idx);"));
         let rollback = body(LIB, "fn rollback_to(");
@@ -9497,8 +9635,9 @@ mod uptime_wiring_tests {
         assert!(body(IMAGES, "fn worker_loop(").contains("batch.retain(|t| !set.remove(&t.id));"));
         assert!(body(IMAGES, "pub(crate) fn purge_pending_images(").contains("self.ended_images.borrow_mut()"));
         // OCR keys: forgotten when their last read is answered or dropped.
-        assert!(body(OCR_LUA, "pub(crate) fn fire_ocr_results(&self)").contains("st.settled(p.owner, p.key.as_deref());"));
-        assert!(body(OCR_LUA, "pub(crate) fn ocr_drop_owner(").contains("st.settled(p.owner, p.key.as_deref());"));
+        assert!(body(OCR_LUA, "pub(crate) fn fire<H: ReadHost>(h: &H)").contains("st.settled(p.owner, p.key.as_deref());"));
+        assert!(body(OCR_LUA, "pub(crate) fn drop_owner<H: ReadHost>(").contains("st.settled(p.owner, p.key.as_deref());"));
+        assert!(body(OCR_LUA, "pub(crate) fn withdraw<H: ReadHost>(").contains("st.settled(p.owner, p.key.as_deref());"));
         // The keyboard watch's windows push the system events.
         let watch = body(HOOK_WATCH, "unsafe extern \"system\" fn watch_wndproc(");
         assert!(watch.contains("system(system_events::from_wts(wparam as u32));"));

@@ -819,6 +819,25 @@ jobs:
           echo "----- what served the captures -----"
           grep "screen capture paths\|screen captures are coming from\|ScreenCaptureKit refused\|first screen capture\|first capture for reading text\|CAPTURE PROBE:" automation-platform.log || true
 
+      # No text recognition on the event loop (crates/host/src/loop_guard.rs): a release build
+      # writes this line the first time a capture for a read or a recognition runs on the loop's
+      # thread outside the one call still allowed to, the blocking `recognize`. A real run of
+      # the capture probe's reads on a Mac, the one place CI sees the macOS guard at work. After the
+      # probe whatever became of it: its log is what is read, and a probe that failed has said so.
+      - name: Nothing recognised text on the event loop
+        if: ${{ !cancelled() }}
+        run: |
+          log=dist/AutomationPlatform/automation-platform.log
+          if [ ! -f "$log" ]; then
+            echo "::warning::no capture-probe log to look at"
+            exit 0
+          fi
+          if grep -q "\[loop\] text recognition on the event loop" "$log"; then
+            echo "::error::text recognition ran on the event loop: $(grep -m1 '\[loop\] text recognition on the event loop' "$log")"
+            exit 1
+          fi
+          echo "nothing recognised text on the event loop"
+
   # What Apple Vision's text recognition costs, measured by the download itself:
   # `automation-platform ocr-bench` reads fixed pictures it carries (crates/host/src/ocr/bench.rs,
   # docs/building-on-macos.md), and the real plug-in captures the package carries beside the
@@ -1313,6 +1332,11 @@ jobs:
           fi
           if grep -q "ScreenCaptureKit did not answer" automation-platform.log; then
             echo "::error::ScreenCaptureKit did not answer while the pump thread waited, on the newer macOS"
+            exit 1
+          fi
+          # The loop guard's line (crates/host/src/loop_guard.rs), as in the build job.
+          if grep -q "\[loop\] text recognition on the event loop" automation-platform.log; then
+            echo "::error::text recognition ran on the event loop on the newer macOS: $(grep -m1 '\[loop\] text recognition on the event loop' automation-platform.log)"
             exit 1
           fi
           echo "----- what served the captures -----"

@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 163 entries.
+Every call the platform offers a module, in one place. 165 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -94,6 +94,7 @@ Controls a module defines over a plug-in window, walked with Tab and spoken alou
 | [`O:frame(fn)`](overlay#o-frame) | Shifts the overlay's whole coordinate frame |
 | [`O:gate(fn) / O:landmark(image)`](overlay#o-gate) | `gate(fn)` sets an extra activation condition ANDed onto the context match |
 | [`O:group(pred, build)`](overlay#o-group) | Adds everything `build` adds under a shared condition: `pred` is ANDed onto each control's own `when`, and groups nest. |
+| [`O:here() / O:stillHere(mark, opts?)`](overlay#o-here) | Whether the overlay is still where it was, for an answer that comes later and acts on what it learned |
 | [`O:menuOpen()`](overlay#o-menuopen) | Whether a menu counts as open over the overlay now: one of its menu tests' word is that one is. |
 | [`O:onActivate(fn) / O:onDeactivate(fn)`](overlay#o-onactivate) | Hooks the module runs each time the overlay comes to the front and each time it leaves it. |
 | [`O:origin() / O:hwnd()`](overlay#o-origin) | The active context's coordinate window — the plugin control when embedded, the window when standalone — and its handle. |
@@ -157,6 +158,7 @@ Recognising text in a screen region.
 | | |
 |---|---|
 | [`host.ocr.languages()`](ocr#host-ocr-languages) | The languages the platform's recogniser reads, the one a read without `lang` uses first. |
+| [`host.ocr.pending(key)`](ocr#host-ocr-pending) | Whether a read of this module with `key` is still out: asked with `read`, and not answered yet. |
 | [`host.ocr.read(what, opts?, cb)`](ocr#host-ocr-read) | Photographs one region or several at the moment of the call, recognises them off the event loop, and calls `cb` with the answer. |
 | [`host.ocr.recognize(opts?)`](ocr#host-ocr-recognize) | Recognizes text inside a screen region and returns the full text plus per-word bounding boxes |
 | [`host.ocr.recognizeMany(opts)`](ocr#host-ocr-recognizemany) | Recognizes several regions in one call, from one capture where the platform can, so that values which have to agree come from the same instant |

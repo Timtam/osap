@@ -1,6 +1,9 @@
 id = "com.platform.overlay"
 name = "Overlay runtime"
-version = "0.1.0"
+# 0.2.0 brought O:here, O:stillHere and O:toScreenRect's `whole`: a module that uses them
+# depends on "com.platform.overlay >= 0.2", so an older runtime fails the module's load
+# rather than its first call of one.
+version = "0.2.0"
 # Loaded into the VM of every module that depends on it, so its functions
 # (O.new, O.container, the Overlay methods) are reachable via host.require.
 code_module = true

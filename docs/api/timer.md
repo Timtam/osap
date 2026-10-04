@@ -209,6 +209,10 @@ A counter that turns over only when something **acted** on the screen: input thi
 
 `host.epoch` also moves when a one-shot timer comes due and on the user's own keystrokes, which is right for "re-resolve where the plug-in is" and far too eager for "what does this pixel say". A screen read costs a fixed compositor frame, so a property that only an action can change should be cached against this one instead.
 
+A picture carries the value of its own moment: a [snapshot](./screen.md#host-screen-snapshot)'s `inputEpoch`, and a text reading's from [`host.ocr.read`](./ocr.md#host-ocr-read). In the read's callback, `r.inputEpoch ~= host.inputEpoch()` says that something acted on the screen since the picture was taken.
+
+Two of the host's own acts do not turn it over themselves. [`host.input.post`](./input.md#host-input-post) never does, nor `host.epoch` ([why](./input.md#host-input-post)). [`host.window.focus`](./window.md#host-window-focus) turns over `host.epoch` only; this counter turns over when the window has come forward and the event loop has heard of it, a turn of the loop later at the earliest. So a picture taken right after a `post` or a `focus` can carry the value from before it: a module that must know whether its picture came after one of these compares `host.now()` noted after the act with the reading's `time` instead.
+
 ```luau
 -- Re-read only when something could actually have moved it.
 if cachedAt ~= host.inputEpoch() then

@@ -52,6 +52,8 @@ The callback gets one **reading** for a single region or entry, and `(list, byNa
 | `words` | Every row's words in reading order: `{ text, x, y, w, h, approx }` each, in screen coordinates. `approx` is `true` for a box the host shared out by the text's length rather than one an engine located, and absent otherwise. |
 | `lang` | The language the read resolved to, as the platform names it (`"de-DE"`), on every reading of a call that was recognised — `"failed"` ones included: a region the recogniser failed on, and a window region that was not read while the call's other regions were. `""` when nothing was recognised: the capture failed, no language asked for is available, the read was refused or pushed out (too many reads waiting, the recogniser not answering), the recogniser failed inside the application, or no region of the call could be read; and on a `"stale"` reading. |
 | `error` | Why, when `status` is `"failed"`. |
+| `time` | [`host.now()`](./timer.md#host-now) when the picture was taken: when its capture came back, and for a read of a snapshot the snapshot's own `time`. One value for every region of the call. Present exactly when the screen was read — `status` is `"text"`, `"blank"` or `"none"` — and absent on every `"failed"` and `"stale"` reading, whether or not a picture of the call's other regions was taken. |
+| `inputEpoch` | [`host.inputEpoch()`](./timer.md#host-inputepoch) as it stood when the picture was taken, and for a read of a snapshot the snapshot's own. It is read once the capture is back, so input the host drove while the picture was being taken counts as before it: for what turns the counter over, it may say "perhaps with that input" too often, never too seldom. Two acts do not turn it over themselves — `host.input.post`, and `host.window.focus` until the window has come forward — see [`host.inputEpoch`](./timer.md#host-inputepoch). Absent as `time` is. |
 
 What the statuses mean:
 
@@ -191,6 +193,42 @@ The first pass costs more. The warm-up over six dark bars that the application m
 
 **Saving the images.** With **Save the images OCR was given** on (Application settings), a small region's capture is written beside the application as `ocr-debug-raw-<x>,<y>,<w>x<h>-<hash>.bmp` — the region in points as it was asked for, and eight hexadecimal digits of a hash of its pixels — once for each region and content, at most 8 a region, 64 regions and 32 MiB a session, with a log line for each file and one when a limit is reached. A read the second recogniser answered alone, and one in which it and Vision disagree, is written the same way as `ocr-shadow-<case>-<x>,<y>,<w>x<h>-<hash>.bmp`, under limits of its own of the same size — so 64 MiB a session at most between the two — and often holds the same pixels as that read's `ocr-debug-raw` file: the second name is what says the case without trace logging; `<case>` is `paddle-alone` (the ladder read nothing and the second recogniser text, which answered — every such answer, so that each can be looked at for a digit gained or an invention), `paddle-late` (the same, its text too late to answer), `ladder-alone`, `both-differ`, `paddle-differs`, `paddle-nothing`, `fast-paddle-wrong` (the fast pass and the second recogniser read the same, and the ladder something else), `split-fast`, `split-paddle`, `split-other` or `split-silent` (the two read differently, and the ladder read the fast pass's text, the recogniser's, another or nothing), and `fast-none-paddle`, `fast-none-other` or `fast-none-silent` (the fast pass read nothing, the recogniser text). What Vision was handed keeps one name each, overwritten by the next read: `ocr-debug.bmp` (a small region's crop, enlarged and framed, or a larger region as captured), `ocr-debug-retry.bmp` (the whole region) and `ocr-debug-big.bmp` (the crop at twice the enlargement). Each file is written on the thread that read, uncompressed: four bytes a pixel of the capture, so about 45 KB for a 123x23 point region on a Retina display, and up to 1.3 MB for one of 400x200.
 
+## host.ocr.pending(key) {#host-ocr-pending}
+
+Whether a read of this module with `key` is still out: asked with [`read`](#host-ocr-read), and not answered yet.
+
+**Signature:** `host.ocr.pending(key: string) -> boolean`
+
+- `true` from the call that asked until the answer is handed over. `false` inside the read's own callback — the answer has been handed over by then — and after the module was disabled, reloaded or removed, which drops its reads.
+- Asks about the module's own reads only: another module's reads with the same key are not counted.
+- Raises when `key` is not a non-empty string (`host.ocr.pending: the key must be a non-empty string, got nil`).
+- Costs a look through the reads the application has waiting, every module's: microseconds.
+
+It is "one read at a time" without a flag: a flag set before a read stays set when a disable drops the read and its callback never comes, while a dropped read is simply not pending.
+
+```luau
+-- A poll with one read out at a time, across a disable too.
+-- Needs "ocr", "timer" and "speech" in the manifest.
+local last = nil
+host.timer.every(120, function()
+  if host.ocr.pending("level") then return end -- the last one has not answered yet
+  host.ocr.read({ 300, 200, 360, 216 }, { key = "level" }, function(r)
+    if r.status == "text" and r.text ~= last then
+      last = r.text
+      host.speech.output(r.text, { interrupt = true })
+    end
+  end)
+end)
+```
+
+### Windows
+
+No difference between the platforms.
+
+### macOS
+
+No difference between the platforms.
+
 ## host.ocr.languages() {#host-ocr-languages}
 
 The languages the platform's recogniser reads, the one a read without `lang` uses first.
@@ -257,6 +295,12 @@ It reads the screen at the call and takes no snapshot: a `snapshot` key raises (
 
 Synchronous: the capture and the recognition run on the event loop and block speech, hotkey and key callbacks, timers and, on macOS, the event tap until the call returns — the capture a fixed ~17 ms on Windows through the standard path, the recognition 4–6 ms for a small read-out and far more for a large region. On Windows, in a module that reads through [desktop duplication](./screen.md#which-picture-a-read-sees) the capture goes through duplication and may wait for it (at most 60 ms), and until duplication has answered once the call also makes the first-read comparison. The call has no overall time limit; the platform sections say what each recogniser bounds.
 
+**The log says how long it held the loop.** A module's first call of `recognize` or `recognizeMany` that answers rather than raises — and its first again after the module is reloaded, or disabled and enabled again — writes one line, with the time that call held the event loop:
+
+`[com.example.game] host.ocr.recognize held the event loop 37 ms; host.ocr.read with a callback does not hold it`
+
+When the application quits, one line per module that called them says how often and for how long in all, the calls that raised included: `[com.example.game] host.ocr.recognize and recognizeMany held the event loop 12 time(s), 840 ms in all`. A `pcall` around the call hides neither.
+
 The returned table always has:
 - `text` — the full recognized string for the region.
 - `words` — an array; each entry is `{ text, x, y, w, h }` where `x`/`y` are the word's top-left in **absolute screen coordinates** (the region origin `x1,y1` is added back to the per-word offset), and `w`/`h` are the box size.
@@ -320,7 +364,7 @@ Recognizes several regions in one call, from one capture where the platform can,
 
 **Signature:** `host.ocr.recognizeMany(opts: { regions: Region[], lang?: string }) -> { { text: string, words: {…}, skipped: boolean, error?: string } }[]`
 
-Returns one entry per region, in the order given, each shaped like `host.ocr.recognize`'s result — word boxes in absolute screen coordinates (each region's own top-left is added to what the engine reported inside it), and `skipped` set per region. A region that could not be read comes back as `{ text = "", words = {}, skipped = false, error = "…" }` rather than as a hole, so `results[2]` is always the second region's answer. Each region is either form of the [region form](./screen.md#region-form), read as `recognize` reads its `region`: corners loosely, with the region form's defaults inside the table, and a window region resolved at the call — one whose window has an empty client area comes back as that region's `error` entry (`the window's client area is empty (0x0)`) while the others are read. A `regions` entry that is neither form raises, naming it (`host.ocr.recognizeMany: opts.regions[2] is neither …`), a missing `regions` raises, and the list ends at the first `nil`, so the regions after a hole are silently not read. One `lang` applies to every region, through the same matching as `recognize`'s; a `lang` no recogniser here reads gives every entry that language `error`, and one that is not a well-formed tag raises. Synchronous, like `recognize`: every region is recognised before the call returns, the capture and all the recognitions on the event loop.
+Returns one entry per region, in the order given, each shaped like `host.ocr.recognize`'s result — word boxes in absolute screen coordinates (each region's own top-left is added to what the engine reported inside it), and `skipped` set per region. A region that could not be read comes back as `{ text = "", words = {}, skipped = false, error = "…" }` rather than as a hole, so `results[2]` is always the second region's answer. Each region is either form of the [region form](./screen.md#region-form), read as `recognize` reads its `region`: corners loosely, with the region form's defaults inside the table, and a window region resolved at the call — one whose window has an empty client area comes back as that region's `error` entry (`the window's client area is empty (0x0)`) while the others are read. A `regions` entry that is neither form raises, naming it (`host.ocr.recognizeMany: opts.regions[2] is neither …`), a missing `regions` raises, and the list ends at the first `nil`, so the regions after a hole are silently not read. One `lang` applies to every region, through the same matching as `recognize`'s; a `lang` no recogniser here reads gives every entry that language `error`, and one that is not a well-formed tag raises. Synchronous, like `recognize`: every region is recognised before the call returns, the capture and all the recognitions on the event loop. It is counted and logged with `recognize` (see [the log line](#host-ocr-recognize)).
 
 **Why:** recognition is cheap and the capture is not. Measured on the reference machine, a 67×13 read-out recognizes in 4–6 ms while the capture underneath costs a fixed ~17 ms compositor frame whatever its size — so two adjacent read-outs, read one after the other, spend two thirds of their time photographing the screen twice. A watcher polling two boxes at 120 ms measured 44 ms per tick with two calls and 27 ms with one.
 

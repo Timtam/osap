@@ -191,7 +191,8 @@ impl Timers {
 /// A token as `cancel` receives it: a whole number, or nothing. Anything else — `nil`, a
 /// string, a fraction — is no token of ours, and cancelling it is simply false, never an
 /// error: a module that cancels "whatever poll is running" should not have to test for nil.
-fn token_of(v: &Value) -> Option<i64> {
+/// A task's `cancel` and `alive` (task.rs) read a task's number the same way.
+pub(crate) fn token_of(v: &Value) -> Option<i64> {
     match v {
         Value::Integer(i) => Some(*i),
         Value::Number(n) if n.fract() == 0.0 && n.abs() < 9.0e15 => Some(*n as i64),
