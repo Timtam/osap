@@ -137,9 +137,14 @@ end
 -- the variant stepper — both come before the watcher that reads it.
 local READOUT_HOLD_MS = 500
 local holdUntil = 0
+-- When the strip's latest change was asked for: the tool switch, or the last press of a variant's
+-- run (the hold's own estimate of it). The first answer to a read asked after it becomes the
+-- baseline unsaid — see the watcher. nil once that answer has come.
+local rebaseFrom = nil
 local function holdReadouts(ms)
   if not host.now then return end -- no clock, no window; better than a hold that never lifts
   holdUntil = host.now() + (ms or READOUT_HOLD_MS)
+  rebaseFrom = holdUntil - READOUT_HOLD_MS
 end
 
 -- Assigned further down, once the field reader it needs exists. The tool bar is declared before
@@ -698,10 +703,11 @@ ov:addOCRButton({
 --
 -- It is not free: one OCR plus the screen capture under it, and a capture costs a fixed
 -- compositor frame (~17 ms, measured) whatever its size. So the watcher reports its own cost
--- every so often — the interval is a number to be chosen from evidence, and going faster still
--- is a trade against the pump that should be made with the figure in view rather than by feel.
+-- every so often — how long its reads take from asking to the answer, on the recogniser that
+-- Tab's own reads share — and the interval is a number to be chosen from evidence; going faster
+-- still is a trade that should be made with the figure in view rather than by feel.
 local WATCH_MS = 120
-local watchTicks, watchCost = 0, 0
+local watchReads, watchCost = 0, 0
 
 -- ONE CACHE PER FIELD, because a change in one box is not news about the other.
 --
@@ -715,7 +721,9 @@ local watchTicks, watchCost = 0, 0
 -- Still ONE utterance per tick, both changed boxes in it. Two utterances for one event would be
 -- two interruptions, which is what the single combined cache was avoiding when it caused this.
 local lastLeft, lastRight = "", ""
-local haveBaseline = false
+-- Where the overlay was when the values above became the baseline: a mark of O:here(), or nil
+-- before the first read of a stay. See the watcher at the bottom of this file.
+local baseline = nil
 
 -- Whitespace off both ends, so a stray space from the recogniser does not read as a change.
 local function trimmed(v)
@@ -747,17 +755,16 @@ end
 --
 -- So the fallback is PER REGION, and merging regions disables it. The saving was real and it
 -- cost the feature.
-local function readSelection(o)
+--
+-- The regions, one per box, in screen coordinates: nil while the overlay has no origin.
+local function selectionRegions(o)
   local origin = o:origin()
   if not (origin and origin.client) then return nil end
-  local function field(region)
-    local r = host.ocr.recognize({
-      region = {
-        origin.client.x + region[1], origin.client.y + region[2],
-        origin.client.x + region[3], origin.client.y + region[4],
-      },
-    })
-    return (r and r.text) or ""
+  local function box(region)
+    return {
+      origin.client.x + region[1], origin.client.y + region[2],
+      origin.client.x + region[3], origin.client.y + region[4],
+    }
   end
   -- The left box always; the right one only when it is DRAWN, and this time the condition is a
   -- measurement rather than a table of tool names.
@@ -776,25 +783,45 @@ local function readSelection(o)
   -- An earlier version of this file skipped the read too, and was wrong for a different reason:
   -- it asked which TOOL was selected and looked the answer up in a list. Skipping because we
   -- LOOKED and the box is not drawn is the same saving without the claim.
-  local wantRight = boxDrawn(o, "right")
-  if not wantRight then
-    local note = field(NOTE_REGION)
-    return note .. "|", note, ""
-  end
+  if not boxDrawn(o, "right") then return { box(NOTE_REGION) } end
   -- BOTH boxes, one screen touch. A list of regions in one host.ocr.recognize is photographed
   -- together and each region recognised out of that one picture — which is the whole cost here:
   -- the recognition measured 4-6 ms against a capture's fixed ~17. Two separate calls put this
   -- tick at 44 ms; this puts it at 27, and the two regions stay two regions, so the per-region
   -- fallback that once rescued a dropped note name is untouched.
-  local rs = host.ocr.recognize({
-    { origin.client.x + NOTE_REGION[1], origin.client.y + NOTE_REGION[2],
-      origin.client.x + NOTE_REGION[3], origin.client.y + NOTE_REGION[4] },
-    { origin.client.x + PITCH_REGION[1], origin.client.y + PITCH_REGION[2],
-      origin.client.x + PITCH_REGION[3], origin.client.y + PITCH_REGION[4] },
-  })
-  local note = (rs[1] and rs[1].text) or ""
-  local pitch = (rs[2] and rs[2].text) or ""
+  return { box(NOTE_REGION), box(PITCH_REGION) }
+end
+
+-- One box as the watcher compares it: the text on ONE line, or nil when the box could not be
+-- read this time.
+--
+-- Nil is not "". A read that failed — the recogniser not answering, too many reads waiting — or
+-- went stale says nothing about the box, and taking it for an empty one would make the read-outs
+-- look silent, which switches the note-area measurement and its sentences on. One line, because
+-- a reading's `text` joins its rows with "\n" and `trimmed` leaves the inside of a value alone: a
+-- value the recogniser happened to split over two rows would read as a change made of a line
+-- break.
+local function field(r)
+  if r == nil or r.status == "failed" or r.status == "stale" then return nil end
+  return (r.text:gsub("%s+", " "))
+end
+
+-- What one read of those regions says: both boxes joined, for the change detector, and each
+-- box on its own; nil when either could not be read.
+local function selectionOf(list)
+  local note = field(list[1])
+  local pitch = ""
+  if list[2] ~= nil then pitch = field(list[2]) end
+  if note == nil or pitch == nil then return nil end
   return note .. "|" .. pitch, note, pitch
+end
+
+-- Both boxes read now, the handler waiting for them: for the reading after a tool switch, which
+-- is written to the log. The watcher at the bottom of this file asks with a callback instead.
+local function readSelection(o)
+  local regions = selectionRegions(o)
+  if not regions then return nil end
+  return selectionOf((host.ocr.recognize(regions)))
 end
 
 -- One reading per tool switch, written down and not spoken. See the tool bar's `onSelect`.
@@ -974,28 +1001,39 @@ local FRACTIONS = {
 --
 -- Read at most once per input epoch: it changes when the document changes, not while somebody
 -- is nudging notes.
+--
+-- With a callback, as the read-out watcher reads: this is asked from the note-area timer, and a
+-- timer that waited for it held Melodyne's own keys until it answered. So the beats are handed
+-- to `k` — at once while this input epoch's reading is known, and otherwise when the read
+-- answers, as a callback of its own — and nil when no time signature was read. The memo is
+-- written when the reading comes, under the epoch the question was asked in: a read that never
+-- answers (the module disabled meanwhile) leaves the epoch unread rather than read as nothing,
+-- and one that failed is asked again by the next move, since a recogniser that did not answer
+-- has said nothing about the time signature.
 local TIMESIG_REGION = { 622, 12, 668, 34 }
+local TIMESIG_KEY = "time signature"
 local sigMemo = { gen = -1, beats = nil }
-local function beatsPerBar(o)
+local function withBeatsPerBar(o, k)
   local gen = host.inputEpoch and host.inputEpoch() or (host.epoch and host.epoch() or 0)
-  if sigMemo.gen ~= gen then
-    sigMemo.gen = gen
-    sigMemo.beats = nil
-    local origin = o:origin()
-    if origin and origin.client then
-      local r = host.ocr.recognize({
-        region = {
-          origin.client.x + TIMESIG_REGION[1], origin.client.y + TIMESIG_REGION[2],
-          origin.client.x + TIMESIG_REGION[3], origin.client.y + TIMESIG_REGION[4],
-        },
-      })
-      local top = trimmed(r and r.text):match("^(%d+)%s*[/l|]%s*%d+$")
-      local n = tonumber(top)
-      -- A bar of one to sixteen beats, or we did not read a time signature.
-      if n and n >= 1 and n <= 16 then sigMemo.beats = n end
-    end
+  if sigMemo.gen == gen then return k(sigMemo.beats) end
+  local origin = o:origin()
+  if not (origin and origin.client) then
+    sigMemo.gen, sigMemo.beats = gen, nil
+    return k(nil)
   end
-  return sigMemo.beats
+  host.ocr.recognize({
+    region = {
+      origin.client.x + TIMESIG_REGION[1], origin.client.y + TIMESIG_REGION[2],
+      origin.client.x + TIMESIG_REGION[3], origin.client.y + TIMESIG_REGION[4],
+    },
+  }, { key = TIMESIG_KEY }, function(r)
+    local text = field(r)
+    if text == nil then return k(nil) end
+    local n = tonumber(trimmed(text):match("^(%d+)%s*[/l|]%s*%d+$"))
+    -- A bar of one to sixteen beats, or we did not read a time signature.
+    sigMemo.gen, sigMemo.beats = gen, (n and n >= 1 and n <= 16) and n or nil
+    k(sigMemo.beats)
+  end)
 end
 
 -- The STEP the user is actually making, learned from what he has been making.
@@ -1216,6 +1254,10 @@ local function measureNoteArea(o)
     lastArea, lastAreaMin, lastAreaSize, lastArrival = nil, nil, nil, nil
     return
   end
+  -- No frame while the time signature is being read for a move: that move is said when the read
+  -- answers, and the next frame is compared with the one it was measured on — as when this tick
+  -- waited for the read. One read out at a time, across a disable too, without a flag.
+  if host.ocr.pending(TIMESIG_KEY) then return end
   if host.keys.nativeMenuOpen and host.keys.nativeMenuOpen() then return end
   if not (host.screen and host.screen.profile) then return end
   local origin = o:origin()
@@ -1529,36 +1571,48 @@ local function measureNoteArea(o)
       -- evenly spaced.
       local barW = barWidthAt(lines, math.floor(arrivalX or 1))
       local dir = moved > 0 and "right" or "left"
-      local beats = beatsPerBar(o)
-      local n, unit = stepsFor(math.abs(moved), barW, beats)
-      if n then
-        if host.calibrating then
-          host.log.info(("[melodyne] spoke %d %s(s): %d px, bar %s px, time signature %s")
-            :format(n, unit, math.abs(moved), tostring(barW), tostring(beats)))
+      -- Said once the time signature is known: at once when this input epoch has read it, and
+      -- otherwise when its read answers. Then the sentence is about a moment that has passed, so
+      -- it is said only about the Melodyne it was measured in — the overlay still in front, on
+      -- the same window, in the same stay — with no menu drawn over it, and while the read-outs
+      -- are still silent: a tool switched to one that has a number meanwhile is announced by the
+      -- read-out watcher, and this would talk over it.
+      local mark = o:here()
+      withBeatsPerBar(o, function(beats)
+        if not o:stillHere(mark) then return end
+        if host.keys.nativeMenuOpen and host.keys.nativeMenuOpen() then return end
+        if not readOutsSilent then return end
+        local n, unit = stepsFor(math.abs(moved), barW, beats)
+        if n then
+          if host.calibrating then
+            host.log.info(("[melodyne] spoke %d %s(s): %d px, bar %s px, time signature %s")
+              :format(n, unit, math.abs(moved), tostring(barW), tostring(beats)))
+          end
+          local word = n == 1 and ("one " .. unit) or (n .. " " .. unit .. "s")
+          host.speech.output(dir .. ", " .. word, { interrupt = true })
+        elseif barW and barW > 0 then
+          local ratio = math.abs(moved) / barW
+          local pct = math.floor(ratio * 100 + 0.5)
+          local named = asFraction(ratio)
+          -- Both numbers, because the user heard the percentage SHRINK while the pixel step held
+          -- steady at 33 to 35 — one grid step per press, six presses running. The bars are not
+          -- equally wide (99 to 131 measured across one view), so the same distance is a smaller
+          -- fraction of a wider bar, and the fraction moved while the edit did not. Whether that
+          -- is Melodyne slowing down or my line detector calling two different things a bar is
+          -- exactly what these two numbers side by side will show.
+          if host.calibrating then
+            host.log.info(("[melodyne] spoke %s: %d px against a bar of %d px (ratio %.3f) at x%d")
+              :format(named or (pct .. "%"), math.abs(moved), barW, ratio,
+                math.floor(arrivalX or 1) + NOTE_AREA[1] - 1))
+          end
+          host.speech.output(
+            named and (dir .. ", " .. named) or ("%s, %d%% of a bar"):format(dir, pct),
+            { interrupt = true })
+        else
+          -- Nothing to scale by at all: the direction is still true, and a pixel count is not.
+          host.speech.output(dir, { interrupt = true })
         end
-        local word = n == 1 and ("one " .. unit) or (n .. " " .. unit .. "s")
-        host.speech.output(dir .. ", " .. word, { interrupt = true })
-      elseif barW and barW > 0 then
-        local ratio = math.abs(moved) / barW
-        local pct = math.floor(ratio * 100 + 0.5)
-        local named = asFraction(ratio)
-        -- Both numbers, because the user heard the percentage SHRINK while the pixel step held
-        -- steady at 33 to 35 — one grid step per press, six presses running. The bars are not
-        -- equally wide (99 to 131 measured across one view), so the same distance is a smaller
-        -- fraction of a wider bar, and the fraction moved while the edit did not. Whether that
-        -- is Melodyne slowing down or my line detector calling two different things a bar is
-        -- exactly what these two numbers side by side will show.
-        if host.calibrating then
-          host.log.info(("[melodyne] spoke %s: %d px against a bar of %d px (ratio %.3f) at x%d")
-            :format(named or (pct .. "%"), math.abs(moved), barW, ratio,
-              math.floor(arrivalX or 1) + NOTE_AREA[1] - 1))
-        end
-        host.speech.output(named and (dir .. ", " .. named) or ("%s, %d%% of a bar"):format(dir, pct),
-          { interrupt = true })
-      else
-        -- Nothing to scale by at all: the direction is still true, and a pixel count is not.
-        host.speech.output(dir, { interrupt = true })
-      end
+      end)
     else
       -- The coarse pass had runs but nothing it would say: no ink arrival at its threshold, or a
       -- move under two pixels. That is exactly where a nudge lives, so ask the fine pass rather
@@ -1668,6 +1722,11 @@ host.timer.every(NOTE_AREA_MS, function()
   measureNoteArea(ov)
 end)
 
+-- The watcher's reads go under one key, and one is out at a time: a tick asks only once the
+-- last one has answered (host.ocr.pending), which holds across a disable too, where the answer is
+-- dropped and a flag set before the read would stay set.
+local WATCH_KEY = "selection"
+
 host.timer.every(WATCH_MS, function()
   -- Not while a menu is up. A menu is drawn OVER the tool strip, so the read-out region stops
   -- showing the read-outs and starts showing menu entries -- the watcher then reports a
@@ -1686,65 +1745,104 @@ host.timer.every(WATCH_MS, function()
     -- Coming back is therefore SILENT about the selection: the read that re-establishes the
     -- baseline does not announce it, and the arrival announcement is the overlay's own. Two
     -- sentences at once, one of them unasked for, is worse than one.
-    haveBaseline = false
+    baseline = nil
     lastLeft, lastRight = "", ""
     return
   end
-  local began = host.now and host.now() or nil
-  local combined, note, pitch = readSelection(ov)
-  if began then
-    watchTicks = watchTicks + 1
-    watchCost = watchCost + (host.now() - began)
-    if watchTicks >= 100 then
-      host.log.info(("[melodyne] selection watch: %d ticks at %d ms, %.1f ms each on average")
-        :format(watchTicks, WATCH_MS, watchCost / watchTicks))
-      watchTicks, watchCost = 0, 0
+  if host.ocr.pending(WATCH_KEY) then return end
+  local regions = selectionRegions(ov)
+  if not regions then return end
+  -- WITH A CALLBACK, and that is the point of it. This tick used to wait for its read, and a
+  -- handler that waits keeps its module waiting with it: every key of this overlay's own — Tab,
+  -- Alt+F, the arrows on the tool bar — queued behind a poll that asks eight times a second, for
+  -- 25-74 ms of every 120 and for 2 s with the slow-reads switch on. Asked with a callback, the
+  -- tick ends at once, the keys run, and the answer is a handler of its own when it comes.
+  --
+  -- That answer is about the moment it was asked in, so it is checked against that moment: the
+  -- mark says whether the overlay is still in front, on the same window and in the same stay,
+  -- and the time of the question decides the tool-switch hold.
+  local mark = ov:here()
+  local asked = host.now and host.now() or nil
+  host.ocr.recognize(regions, { key = WATCH_KEY }, function(list)
+    if asked then
+      watchReads = watchReads + 1
+      watchCost = watchCost + (host.now() - asked)
+      if watchReads >= 100 then
+        host.log.info((
+          "[melodyne] selection watch: %d reads, asked every %d ms at most, %.1f ms each on"
+          .. " average from asking to the answer"
+        ):format(watchReads, WATCH_MS, watchCost / watchReads))
+        watchReads, watchCost = 0, 0
+      end
     end
-  end
-  if combined == nil then return end
-  local left, right = trimmed(note), trimmed(pitch)
-  -- An EMPTY READ IS NOT AN EMPTY FIELD, and this distinction is load-bearing.
-  --
-  -- The recogniser drops out on these small low-contrast boxes now and then: the log has "0 ct"
-  -- and "" alternating within the same second with nothing on screen moving. Treating that as
-  -- "the field went empty" and then as "it came back" would announce the same unchanged value
-  -- over and over — precisely the noise these caches exist to remove. So "" means "no reading
-  -- this tick": nothing is announced, and nothing is forgotten either.
-  readOutsSilent = not speakable(left) and not speakable(right)
-  local changedLeft = left ~= "" and left ~= lastLeft
-  local changedRight = right ~= "" and right ~= lastRight
-  if left ~= "" then lastLeft = left end
-  if right ~= "" then lastRight = right end
-  if not haveBaseline then
-    -- The first read after arriving establishes the baseline rather than announcing it: the
-    -- overlay already says what is focused, and a second sentence on top of that is noise.
-    haveBaseline = true
-    return
-  end
-  if not (changedLeft or changedRight) then return end
-  local holding = host.now ~= nil and host.now() < holdUntil
-  -- One line per change, kept permanently: it is what turned "only the cents are announced"
-  -- from three indistinguishable guesses into one reading. Written even while the announcement
-  -- is being held back, because a tool switch is exactly when the boxes reveal what that tool
-  -- puts in them — the held ticks are the evidence, not the noise.
-  --
-  -- Named left and right rather than note and deviation, because that is all we actually know:
-  -- the left box holds a note name under the pitch tools and a level in decibels under
-  -- Amplitude, and what the right one holds away from pitch is the open question this line
-  -- exists to answer. Calling a field by the value one tool puts in it is the mistake that
-  -- produced the gate this replaced.
-  host.log.info(("[melodyne] selection: tool=%s left=%q right=%q%s")
-    :format(toolForLog(), left, right, holding and "  (held: the tool was just changed)" or ""))
-  if holding then return end
-  local parts = {}
-  -- Only what changed, and a DASH is not spoken. Melodyne draws "-" in a box with nothing to
-  -- report, so it is a real reading and belongs in the cache — but "minus" is not a thing a
-  -- person needs to hear when they have just deselected a note.
-  if changedLeft and speakable(left) then parts[#parts + 1] = left end
-  if changedRight and speakable(right) then parts[#parts + 1] = right end
-  if #parts > 0 then
-    host.speech.output(table.concat(parts, ", "), { interrupt = true })
-  end
+    local combined, note, pitch = selectionOf(list)
+    if combined == nil then return end
+    -- Gone since, or another window, or the same window in another stay: what the boxes said
+    -- then is not news about now, and it is no baseline either.
+    if not ov:stillHere(mark) then return end
+    -- A menu opened over the strip while the read was out: the picture may be the menu's.
+    if host.keys.nativeMenuOpen and host.keys.nativeMenuOpen() then return end
+    local left, right = trimmed(note), trimmed(pitch)
+    -- An EMPTY READ IS NOT AN EMPTY FIELD, and this distinction is load-bearing.
+    --
+    -- The recogniser drops out on these small low-contrast boxes now and then: the log has "0 ct"
+    -- and "" alternating within the same second with nothing on screen moving. Treating that as
+    -- "the field went empty" and then as "it came back" would announce the same unchanged value
+    -- over and over — precisely the noise these caches exist to remove. So "" means "no reading
+    -- this tick": nothing is announced, and nothing is forgotten either.
+    readOutsSilent = not speakable(left) and not speakable(right)
+    local changedLeft = left ~= "" and left ~= lastLeft
+    local changedRight = right ~= "" and right ~= lastRight
+    if left ~= "" then lastLeft = left end
+    if right ~= "" then lastRight = right end
+    -- The first answer to a read asked after the strip's latest change is the new tool's values: a
+    -- baseline, said nothing. The hold alone does not make one when a read takes longer than the
+    -- hold — 2 s with the slow-reads switch on: the read asked before the switch is answered after
+    -- the hold and held, but its values are the OLD tool's, and the next read, asked after the
+    -- hold, would say the new tool's values as a change. With reads faster than the hold this
+    -- answer comes during it and is held anyway.
+    local rebase = rebaseFrom ~= nil and asked ~= nil and asked > rebaseFrom
+    if rebase then rebaseFrom = nil end
+    if not (baseline and ov:stillHere(baseline)) then
+      -- The first read of a stay establishes the baseline rather than announcing it: the
+      -- overlay already says what is focused, and a second sentence on top of that is noise.
+      --
+      -- A mark rather than a flag, so the stay it belongs to is part of it: an excursion to
+      -- another window that came and went between two ticks, which the forgetting above never
+      -- saw, still starts a new baseline here instead of being measured against the old one.
+      baseline = mark
+      lastLeft, lastRight = left, right
+      return
+    end
+    if not (changedLeft or changedRight) then return end
+    -- Held when the question was asked before the hold lifted — during it, or just before the
+    -- tool switch that set it — even if the answer comes after: the picture is of the moment it
+    -- was asked in, not of the moment it arrived.
+    local holding = asked ~= nil and asked < holdUntil
+    -- One line per change, kept permanently: it is what turned "only the cents are announced"
+    -- from three indistinguishable guesses into one reading. Written even while the announcement
+    -- is being held back, because a tool switch is exactly when the boxes reveal what that tool
+    -- puts in them — the held ticks are the evidence, not the noise.
+    --
+    -- Named left and right rather than note and deviation, because that is all we actually know:
+    -- the left box holds a note name under the pitch tools and a level in decibels under
+    -- Amplitude, and what the right one holds away from pitch is the open question this line
+    -- exists to answer. Calling a field by the value one tool puts in it is the mistake that
+    -- produced the gate this replaced.
+    host.log.info(("[melodyne] selection: tool=%s left=%q right=%q%s")
+      :format(toolForLog(), left, right, holding and "  (held: the tool was just changed)"
+        or rebase and "  (held: the first reading since the tool was changed)" or ""))
+    if holding or rebase then return end
+    local parts = {}
+    -- Only what changed, and a DASH is not spoken. Melodyne draws "-" in a box with nothing to
+    -- report, so it is a real reading and belongs in the cache — but "minus" is not a thing a
+    -- person needs to hear when they have just deselected a note.
+    if changedLeft and speakable(left) then parts[#parts + 1] = left end
+    if changedRight and speakable(right) then parts[#parts + 1] = right end
+    if #parts > 0 then
+      host.speech.output(table.concat(parts, ", "), { interrupt = true })
+    end
+  end)
 end)
 
 -- `menus`: Melodyne has a native menu bar, and while one of its menus is open the keys have to

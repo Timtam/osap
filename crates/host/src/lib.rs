@@ -46,6 +46,10 @@ mod overlay_runtime_marks_tests;
 /// tick, and identify and present guarded — against the same scripted host.
 #[cfg(test)]
 mod overlay_handler_tests;
+/// Melodyne's module loaded against the same scripted host: its read-out watcher and its note
+/// area's time signature, read with a callback, and what their answers may still say.
+#[cfg(test)]
+mod overlay_melodyne_tests;
 /// Tasks and their two waits against a real Luau VM and a real read service over a fake
 /// recogniser.
 #[cfg(test)]

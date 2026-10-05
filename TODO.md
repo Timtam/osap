@@ -4083,9 +4083,11 @@ docs/api/ocr.md). Languages go through `fluent-langneg` on both platforms, for `
 recogniser still starts beside `Windows.Media.Ocr` for every small region, exactly as before.
 What only a person, a Mac or a measurement can settle:
 
-- [ ] **Migrate the Melodyne selection watcher** to `host.ocr.recognize` with a callback and `key = "selection"` (B4),
-      re-checking `ov.active` and `nativeMenuOpen` inside the callback. Needs an NVDA test: the
-      same announcements, and the pump overrun lines gone.
+- [x] **Migrate the Melodyne selection watcher** to `host.ocr.recognize` with a callback and
+      `key = "selection"` (B4, 2026-10-05): one read out at a time (`host.ocr.pending`), its answer
+      checked against the mark taken when it was asked (`O:stillHere`) and `nativeMenuOpen`, and the
+      tool switch's hold against the time it was asked. Its NVDA check is the step's own ("NVDA
+      check of step B4", below).
 - [ ] **Migrate the overlay runtime's `speakControl`**: the name spoken at once, the OCR value
       appended when it arrives, and the callback returning on `newer` (the focus moved) or on a
       changed pinned window. Only an `ocrLabel` control waits for its read before speaking. The
@@ -6789,12 +6791,12 @@ overlay runtime's focus reads off the event loop. Not now: anything that makes I
         loop they need the runtime to read a region for them with the focus read, or an
         asynchronous provider — a decision about the runtime's API. (ik-on-ear's virtual speaker
         was one too; a plain read of a fixed region, it is a read-only OCR button now.)
-      - `modules/ik-on-ear/src/browsers.luau:749` (`relearnGrid`), `modules/melodyne/src/main.luau:
-        754` and `:789` (`readSelection`, the read-out watcher's poll, eight times a second,
-        comparing each reading with the last), `:988` (`beatsPerBar`, once per input epoch, inside
-        the announcement of a move), `:1585` and `:1633` (calibration diagnostics): polls and
-        helpers whose callers want the answer at once; each would be restructured around a
-        callback.
+      - `modules/ik-on-ear/src/browsers.luau:749` (`relearnGrid`), and in
+        `modules/melodyne/src/main.luau` the reading after a tool switch (`reportFieldsAfterSwitch`,
+        through `readSelection`) and the calibration diagnostics (the transport in
+        `measureNoteArea`): helpers whose callers want the answer at once; each would be
+        restructured around a callback. Melodyne's read-out watcher and its time signature
+        (`withBeatsPerBar`) read with a callback since B4.
 
 ## Text recognition off the event loop: steps 1 to 3, and a mailbox per module (2026-10-04)
 
@@ -7005,10 +7007,16 @@ kind of place that says how long the first held the loop.
       answers at once, ON:EAR says nothing after), no click after a switch (ON:EAR's tile, Kontakt's
       menu with `another application came to the front during the menu read` in the log,
       Avenger's preset step) and nothing said after one (ON:EAR's Grid down, `Grid down says
-      nothing` in the log), daw-hosts' hotkey at once during a read, Alt+F in Melodyne after
-      Alt+Tab away and back, two modules in one FX chain, a native menu in Melodyne while its poll
-      waits, a held arrow; then a quarter of an hour on a release build with no `[guard] …
-      stopped` line, bringing the `[cpu]` lines, the poll lines and every `could not wait here`.
+      nothing` in the log), daw-hosts' hotkey at once during a read, a held arrow. Melodyne waits
+      only where a read of its own waits since B4 — Tab onto "Position" (2 to 4 s with the switch)
+      or a tool switch (about 4 s) — so the steps that need it busy start there (b1b-done.md,
+      section 6): Tab onto "Position", then Alt+Tab away and back and Alt+F and Tab, which arrive
+      once "Position" is said; Tab onto "Position" and at once a native menu, whose arrows and
+      Escape go to the menu. Two modules in one FX chain are Avenger and Kontakt — Melodyne's
+      overlay is for the standalone Melodyne only: a preset step in Avenger and at once to Kontakt
+      and Tab there, which may be dropped with `pressed while the module was busy, was dropped` in
+      the log. Then a quarter of an hour on a release build with no `[guard] … stopped` line,
+      bringing the `[cpu]` lines, the poll lines and every `could not wait here`.
 - [ ] **Step B1b+M never ran on a Mac** (type-checked only): Kontakt's Alt+V, load and save read
       the file menu in English and click the right entry, and with the switch a Cmd+Tab away
       during the read clicks nothing and sends no Escape; Avenger's preset steps and "Preset info";
@@ -7016,11 +7024,39 @@ kind of place that says how long the first held the loop.
       during a read; no `the system disabled the event tap` line while a module waits, no
       `[guard] … stopped`, no `could not wait here` but the example's; and the reads asked while
       Vision's first request hangs at start end `"failed"` after 5 s.
-- [ ] **The rest, as a mailbox per module** (b0-final.md): B4, Melodyne's polls with a callback,
-      so its own keys no longer wait behind them; B5, the example (`examples/ocr`) reading in a
-      callback, the tools, and CI failing on `could not wait here` from then on; step 11, the
-      waits of a read moved off the loop and the input barrier removed; and step 12, the places
-      that still cannot wait raising, once B5 is in and that CI line has stayed green since.
+- [x] **Step B4, Melodyne's polls with a callback** (b0-final.md, B4; 2026-10-05). The read-out
+      watcher and the note area's time signature read with `host.ocr.recognize` and a callback, so
+      a tick ends at once and Melodyne's own keys no longer wait behind a poll that asks eight
+      times a second (2 s a read with the slow-reads switch on). One read out at a time under a key
+      (`host.ocr.pending`). An answer is about the moment it was asked in: dropped, and no baseline,
+      when the overlay has left, gone to another window or come back in another stay since
+      (`O:stillHere`), or a menu is open; the tool switch's hold is decided by the time of the
+      question, and the first answer to a read asked after the switch (after a variant's last
+      press) is the new tool's baseline, said nothing — with reads slower than the hold, the read
+      asked before the switch is held but holds the old tool's values, and the next one used to be
+      said as a change (found reviewing B4). Each box's text on one line, and a box that failed or
+      went stale is no reading rather than an empty box. A move in the note area is said when the
+      time signature answers, with no frame taken meanwhile; the memo is written by the answer, so
+      a read that failed or never answered is asked again. Melodyne 0.1.2, on
+      `com.platform.overlay >= 0.2`; scenarios in overlay_melodyne_tests.rs.
+- [ ] **NVDA check of step B4, before it is committed**: the same sentences as before — a note
+      walked with the arrows and its cents changed, a move in the note area said under a tool with
+      no read-out (under Time, "right, one beat" or "right, one step"), a tool switch whose name
+      the read-outs do not talk over; with "Slow every text read by 2 seconds", Tab, the arrows and
+      Alt+F in Melodyne answer at once while its watcher's read is out — not right after a tool
+      switch (below), and not Tab onto "Position", which reads its value — the watcher's sentences
+      come about 2 s late, and a tool switch is followed by no sentence about the new tool's
+      read-outs.
+- [ ] **Melodyne's reading after a tool switch still waits** (found building B4):
+      `reportFieldsAfterSwitch` reads both boxes and the wide field in its `host.timer.after`
+      handler, for the log only, so Melodyne's keys wait behind those two reads after every tool
+      switch — about 4 s with the slow-reads switch on, and when keys waited the log's `a timer
+      waited` line names its place. B4 left it as the plan has it (log only); with a callback it
+      would hold nothing.
+- [ ] **The rest, as a mailbox per module** (b0-final.md): B5, the example (`examples/ocr`)
+      reading in a callback, the tools, and CI failing on `could not wait here` from then on; step
+      11, the waits of a read moved off the loop and the input barrier removed; and step 12, the
+      places that still cannot wait raising, once B5 is in and that CI line has stayed green since.
 - [x] **The review of K, B1a, B2 and B3** (2026-10-04, three reviews; kb-final.md). The overlays
       of one module share its key scope and menu flag: the one that comes to the front pins the
       scope, only the last to leave sets it back, and the flag is then what the ones in front say
