@@ -34,11 +34,6 @@ pub const AGING: Duration = Duration::from_millis(500);
 /// small regions at a quarter of a second each are not a hang.
 pub const HANG: Duration = Duration::from_secs(5);
 
-/// How much later than it came the "Slow every text read by 2 seconds, for testing" switch
-/// (appcfg.rs) hands each read's answer to its module, on the event loop's side, without holding
-/// the loop.
-pub const SLOW_READS_HOLD: Duration = Duration::from_secs(2);
-
 /// One capture of the regions' bounding box instead of one per region, when the box is no
 /// larger than this...
 pub const BBOX_MAX: i64 = 8_000_000;

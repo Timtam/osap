@@ -20,7 +20,24 @@
 //! the same key, under the same rule ([`key_target`]). The scope is asked of its own registration
 //! too, which b0-final.md's rule 4 hands the key to whenever it is still there: a key pressed in
 //! one window does not run on a capture its module has pinned to another since — the rule the hook
-//! decided it by. A hotkey, which no scope pins, goes to its own registration unasked.
+//! decided it by. A hotkey, which no scope pins, goes to its own registration unasked. Another
+//! module's registration gets such a key only once its own module has let go of it (below).
+//!
+//! **What the module let go of goes where it would have gone.** A key or a hotkey press that
+//! waited in its busy module's mailbox, and whose registration the module released meanwhile
+//! without making it again, was kept at the press for nothing: it goes where it would have gone
+//! had the module never captured it. First to the next module that captures it in the window it
+//! was pressed in — the earliest capture of the combination whose module is scoped to that window
+//! or to everywhere, the hook's own rule ([`offered_to`]) — through that module's mailbox, as a
+//! key the hook took for it, under that module's rules. With none, it is passed on to the program
+//! in front, as it was pressed, while the window it was pressed in is still in front and nothing
+//! has reached the program since that it would have come before ([`pass_on`], with
+//! [`crate::backend::pass_on_strokes`] deciding). The maintainer's decisions of 2026-10-05: the
+//! program, and, asked again the same day, another module's capture first. Otherwise it is
+//! dropped, and the log says why. The modules that let go of a key travel with it and are never
+//! offered it again, so it goes to one place, and on at most once per module. A key the module's
+//! scope has since pinned to another window, or a hotkey another module holds now, is dropped as
+//! before.
 //!
 //! Kept in a file of its own, with the bindings generic over [`KeyHost`], so the rules can be run
 //! against real Luau VMs and the stub backend without building the whole host
@@ -33,7 +50,7 @@ use std::time::{Duration, Instant};
 
 use mlua::{Function, Lua, MultiValue, RegistryKey, Table, Value};
 
-use crate::backend::{self, Backend, Captured, KeyOs, OwnerKeys};
+use crate::backend::{self, Backend, Captured, KeyOs, NotPassed, OwnerKeys, Pressed};
 use crate::logging;
 use crate::mailbox::{self, Event, MailHost, Opened};
 use crate::task::Ctx;
@@ -81,6 +98,10 @@ pub(crate) struct Captures {
     dropped_said: RefCell<HashMap<usize, Instant>>,
     /// module → when its last key that went to its new registration was said.
     moved_said: RefCell<HashMap<usize, Instant>>,
+    /// module → when its last key passed on to the program in front was said.
+    passed_said: RefCell<HashMap<usize, Instant>>,
+    /// module → when its last key that went on to another module's capture was said.
+    offered_said: RefCell<HashMap<usize, Instant>>,
 }
 
 impl Captures {
@@ -158,6 +179,8 @@ impl Captures {
     pub(crate) fn forget_owner(&self, owner: usize) -> bool {
         self.dropped_said.borrow_mut().remove(&owner);
         self.moved_said.borrow_mut().remove(&owner);
+        self.passed_said.borrow_mut().remove(&owner);
+        self.offered_said.borrow_mut().remove(&owner);
         self.owners.borrow_mut().remove(&owner).is_some()
     }
 
@@ -165,6 +188,8 @@ impl Captures {
     pub(crate) fn forget_owners_from(&self, n: usize) -> bool {
         self.dropped_said.borrow_mut().retain(|i, _| *i < n);
         self.moved_said.borrow_mut().retain(|i, _| *i < n);
+        self.passed_said.borrow_mut().retain(|i, _| *i < n);
+        self.offered_said.borrow_mut().retain(|i, _| *i < n);
         let mut owners = self.owners.borrow_mut();
         let before = owners.len();
         owners.retain(|i, _| *i < n);
@@ -234,6 +259,23 @@ impl Captures {
     pub(crate) fn say_moved(&self, owner: usize, now: Instant) -> bool {
         once_per_quiet(&mut self.moved_said.borrow_mut(), owner, now)
     }
+
+    /// Whether module `owner`'s key or hotkey passed on to the program in front is to be said at
+    /// `now`: the first of [`DROPPED_QUIET`], per module, on a clock of its own.
+    pub(crate) fn say_passed(&self, owner: usize, now: Instant) -> bool {
+        once_per_quiet(&mut self.passed_said.borrow_mut(), owner, now)
+    }
+
+    /// Whether module `owner`'s key or hotkey that went on to another module's capture is to be
+    /// said at `now`: the first of [`DROPPED_QUIET`], per module, on a clock of its own.
+    pub(crate) fn say_offered(&self, owner: usize, now: Instant) -> bool {
+        once_per_quiet(&mut self.offered_said.borrow_mut(), owner, now)
+    }
+
+    /// Module `owner`'s capture of `(vk, mask)`: its token and the VM it was made from.
+    fn reg_for(&self, owner: usize, vk: u32, mask: u8) -> Option<(i64, Lua)> {
+        self.regs.borrow().iter().find(|r| r.owner == owner && r.vk == vk && r.mask == mask).map(|r| (r.token, r.lua.clone()))
+    }
 }
 
 fn once_per_quiet(said: &mut HashMap<usize, Instant>, owner: usize, now: Instant) -> bool {
@@ -256,6 +298,9 @@ pub(crate) trait KeyHost: 'static {
     fn key_module_enabled(&self, idx: usize) -> bool;
     /// The module's id, for the log.
     fn key_module_id(&self, idx: usize) -> String;
+    /// Whether a hotkey of this application holds the combination `(vk, mask)` at the system now,
+    /// enabled module or not: one that would take a key passed on to the program ([`pass_on`]).
+    fn key_hotkey_holds(&self, vk: u32, mask: u8) -> bool;
     /// The captures changed, or which modules are on: the backend gets the set and the owners
     /// again. The host's own also writes the trace line.
     fn refresh_captured(&self) {
@@ -309,7 +354,8 @@ pub(crate) enum Target<T = i64> {
 /// goes to: the capture `token`, while it is there — on arrival, with no token yet, the module's
 /// capture of the combination — and otherwise the module's new capture of the same combination.
 /// Only while the module is on and its scope is everywhere or `front`. Never another module's: the
-/// key was decided for this one, by this one's scope.
+/// key was decided for this one, by this one's scope; a key it let go of while the key waited goes
+/// on to another module only by [`pass_on_released`], as the hook would have sent it there.
 ///
 /// HEAD looked the key up afresh in every module's registrations, earliest first, which handed a
 /// key to another module whenever an activation earlier in the same turn of the loop had
@@ -357,14 +403,15 @@ pub(crate) enum Arrived {
     Dropped(Gone),
 }
 
-/// A key-down the hook or the tap took for module `owner` in window `front` arrives: handed to the
-/// module's mailbox for its capture of the key ([`key_target`]), or dropped and said — at most once
-/// every ten seconds per module, and not for a disabled module.
-pub(crate) fn arrive<H: KeyHost + MailHost>(h: &H, vk: u32, mods: u8, owner: usize, repeat: bool, front: isize) -> Arrived {
-    match key_target(h, owner, vk, mods, front, None) {
+/// A key-down the hook or the tap took for module `owner` arrives, `pressed` in the window
+/// `pressed.front`: handed to the module's mailbox for its capture of the key ([`key_target`]), or
+/// dropped and said — at most once every ten seconds per module, and not for a disabled module.
+pub(crate) fn arrive<H: KeyHost + MailHost>(h: &H, vk: u32, mods: u8, owner: usize, repeat: bool, pressed: Pressed) -> Arrived {
+    match key_target(h, owner, vk, mods, pressed.front, None) {
         Target::Same(token) | Target::Moved(token) => match reg_of(h, token) {
             Some((lua, _)) => {
-                Arrived::Delivered(mailbox::deliver(h, owner, &lua, Event::Key { owner, token, vk, mods, repeat, front }))
+                let ev = Event::Key { owner, token, vk, mods, repeat, pressed, let_go: Vec::new() };
+                Arrived::Delivered(mailbox::deliver(h, owner, &lua, ev))
             }
             None => Arrived::Dropped(Gone::Released),
         },
@@ -379,9 +426,22 @@ pub(crate) fn arrive<H: KeyHost + MailHost>(h: &H, vk: u32, mods: u8, owner: usi
 }
 
 /// A key as it runs (`Event::Key`): its capture, or the module's new capture of it, with the
-/// `mods` table the callback gets — or nothing, said once every ten seconds per module.
-pub(crate) fn open_key<H: KeyHost + ?Sized>(h: &H, owner: usize, token: i64, vk: u32, mods: u8, front: isize) -> Opened {
-    let target = key_target(h, owner, vk, mods, front, Some(token));
+/// `mods` table the callback gets — or nothing, said once every ten seconds per module. A key whose
+/// capture the module released meanwhile, and did not make again, goes on where it would have gone
+/// had the module never captured it: to the next module that captures it in the window it was
+/// pressed in, or to the program in front ([`pass_on_released`]); `repeat` and `let_go` go with it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn open_key<H: KeyHost + MailHost>(
+    h: &H,
+    owner: usize,
+    token: i64,
+    vk: u32,
+    mods: u8,
+    repeat: bool,
+    pressed: Pressed,
+    let_go: Vec<usize>,
+) -> Opened {
+    let target = key_target(h, owner, vk, mods, pressed.front, Some(token));
     let spec = || backend::spec_name_for(KeyOs::CURRENT, vk, mods);
     let token = match target {
         Target::Same(t) => t,
@@ -392,6 +452,12 @@ pub(crate) fn open_key<H: KeyHost + ?Sized>(h: &H, owner: usize, token: i64, vk:
                 logging::line("keys", &moved_line(&h.key_module_id(owner), &spec(), true));
             }
             t
+        }
+        // Here too, only a key that waited: the hook kept it from the program for a capture the
+        // module has let go of since.
+        Target::Gone(Gone::Released) => {
+            pass_on_released(h, owner, &spec(), Some((vk, mods)), (repeat, pressed), let_go);
+            return Opened::Gone;
         }
         Target::Gone(gone) => {
             if gone != Gone::Disabled && h.captures().say_dropped(owner, Instant::now()) {
@@ -406,6 +472,173 @@ pub(crate) fn open_key<H: KeyHost + ?Sized>(h: &H, owner: usize, token: i64, vk:
         Err(_) => MultiValue::new(),
     };
     Opened::Run { f, args, ctx: Ctx::new("key", owner) }
+}
+
+/// What became of a key or a hotkey press that waited in its busy module's mailbox, whose
+/// registration the module released meanwhile and did not make again ([`pass_on_released`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PassedOn {
+    /// Handed to the mailbox of the next module that captures it in the window it was pressed in,
+    /// named by its id ([`offered_to`]); what that module does with it is that module's.
+    Offered(String),
+    /// Sent to the program in front, as it was pressed.
+    Sent,
+    /// Not sent, for this reason.
+    NotSent(NotPassed),
+    /// The backend could not send it, for this reason; nothing it sent is left down.
+    Failed(String),
+    /// A hotkey whose combination only the system read (`HotkeyReg::binding` is `None`): there is
+    /// no key to send.
+    NoKey,
+}
+
+/// Passes key `vk`, pressed with the roles in `mask` as `pressed` says, on to the program in front
+/// — the key a busy module's registration took at the press, and so kept from that program, and
+/// that the module no longer holds as its mailbox delivers it: the same key with the same
+/// modifiers, while the window it was pressed in is still in front, the key itself is not held
+/// down, no modifier and no screen reader's key is held that the press was made without, and no
+/// key-down has reached the program since the press ([`backend::pass_on_strokes`]); and not while
+/// a hotkey of this application holds the combination, which the system would hand the key to
+/// instead ([`NotPassed::HotkeyHolds`], asked after the others). Sent by the backend, marked so
+/// that the hook or the tap lets it through and no capture takes it again
+/// ([`Backend::pass_on_key`]).
+pub(crate) fn pass_on<H: KeyHost + ?Sized>(h: &H, vk: u32, mask: u8, pressed: Pressed) -> PassedOn {
+    let b = h.key_backend();
+    match backend::pass_on_strokes(mask, pressed, b.keyboard_now(vk, mask, pressed.phys)) {
+        Ok(_) if h.key_hotkey_holds(vk, mask) => PassedOn::NotSent(NotPassed::HotkeyHolds),
+        Ok(strokes) => match b.pass_on_key(vk, mask, pressed.phys, &strokes) {
+            Ok(()) => PassedOn::Sent,
+            Err(e) => PassedOn::Failed(e),
+        },
+        Err(why) => PassedOn::NotSent(why),
+    }
+}
+
+/// The module a key of `(vk, mask)` pressed in window `front` goes on to once the modules in
+/// `let_go` have let go of it: of the captures in `set`, in registration order, the earliest of a
+/// module not in `let_go` that is scoped to `front` or to everywhere — the rule the hook takes a
+/// key by ([`backend::in_scope`], [`backend::capture_decision`]), so the module the hook would have
+/// taken it for had those never captured it. A menu is not asked: none was open there at the
+/// press, or the hook would not have taken the key, and a key that waited is not looked at for one
+/// since. `None`: no other module captures it there. `set` and `owners` are the enabled modules',
+/// as the hook is handed them ([`Captures::set`], [`Captures::owner_entries`]).
+pub(crate) fn offered_to(
+    set: &[Captured],
+    owners: &[OwnerKeys],
+    vk: u32,
+    mask: u8,
+    front: isize,
+    let_go: &[usize],
+) -> Option<usize> {
+    set.iter()
+        .filter(|c| c.vk == vk && c.mask == mask && !let_go.contains(&(c.owner as usize)))
+        .find(|c| backend::in_scope(owners, c.owner, front))
+        .map(|c| c.owner as usize)
+}
+
+/// A key or a hotkey press, written `spec`, that waited in module `owner`'s mailbox and whose
+/// registration the module released meanwhile without making it again — `key` is its `(vk, mask)`,
+/// `None` for a hotkey only the system read; `held` its repeat flag and its press; `let_go` the
+/// modules that let go of it before it came to `owner`. It goes where it would have gone had the
+/// modules that let go of it never captured it: to the next module that captures it in the window
+/// it was pressed in ([`offered_to`]), through that module's mailbox as a key the hook took for it,
+/// with `owner` added to `let_go` so that it never comes back to a module that let it go and
+/// moves on at most once per module; with none, to the program in front ([`pass_on`]). Said at most
+/// once every ten seconds per module: that it went to another module and that it was passed on,
+/// each on a clock of its own, and why it went nowhere on the clock of the dropped keys.
+pub(crate) fn pass_on_released<H: KeyHost + MailHost>(
+    h: &H,
+    owner: usize,
+    spec: &str,
+    key: Option<(u32, u8)>,
+    held: (bool, Pressed),
+    mut let_go: Vec<usize>,
+) -> PassedOn {
+    let (repeat, pressed) = held;
+    let say = |outcome: &PassedOn| {
+        let (caps, now) = (h.captures(), Instant::now());
+        let due = match outcome {
+            PassedOn::Offered(_) => caps.say_offered(owner, now),
+            PassedOn::Sent => caps.say_passed(owner, now),
+            _ => caps.say_dropped(owner, now),
+        };
+        if due {
+            logging::line("keys", &released_line(&h.key_module_id(owner), spec, outcome));
+        }
+    };
+    let Some((vk, mask)) = key else {
+        say(&PassedOn::NoKey);
+        return PassedOn::NoKey;
+    };
+    let_go.push(owner);
+    let caps = h.captures();
+    let enabled = |i| h.key_module_enabled(i);
+    let next = offered_to(&caps.set(enabled), &caps.owner_entries(enabled), vk, mask, pressed.front, &let_go)
+        .and_then(|to| caps.reg_for(to, vk, mask).map(|(token, lua)| (to, token, lua)));
+    if let Some((to, token, lua)) = next {
+        // Said before it is handed over: the module it goes to may run it at once.
+        let outcome = PassedOn::Offered(h.key_module_id(to));
+        say(&outcome);
+        mailbox::deliver(h, to, &lua, Event::Key { owner: to, token, vk, mods: mask, repeat, pressed, let_go });
+        return outcome;
+    }
+    let outcome = pass_on(h, vk, mask, pressed);
+    say(&outcome);
+    outcome
+}
+
+/// The line for a key or hotkey that waited in its busy module's mailbox and whose registration was
+/// released meanwhile: gone on to another module's capture, passed on to the program in front, or
+/// dropped and why.
+pub(crate) fn released_line(module: &str, spec: &str, outcome: &PassedOn) -> String {
+    let why = match outcome {
+        PassedOn::Offered(to) => {
+            return format!(
+                "[{module}] {spec}, pressed while the module was busy, went to {to}, the next module that captures it \
+                 in the window it was pressed in: its registration was released meanwhile"
+            )
+        }
+        PassedOn::Sent => {
+            return format!(
+                "[{module}] {spec}, pressed while the module was busy, was passed on to the program in front: its \
+                 registration was released meanwhile"
+            )
+        }
+        PassedOn::NotSent(NotPassed::Tap) => {
+            return format!(
+                "[{module}] {spec}, pressed while the module was busy, was not run: its registration was released \
+                 meanwhile, and the program in front had it already, as a modifier tap is never kept from it"
+            )
+        }
+        PassedOn::NotSent(NotPassed::OtherWindow) => "the window it was pressed in is no longer in front".to_string(),
+        PassedOn::NotSent(NotPassed::NoWindow) => "no window was known to be in front when it was pressed".to_string(),
+        PassedOn::NotSent(NotPassed::KeyHeld) => "the key is still held down".to_string(),
+        PassedOn::NotSent(NotPassed::OtherModifiers(m)) => {
+            format!("{} is held down now, which the press was made without", modifier_words(*m))
+        }
+        PassedOn::NotSent(NotPassed::FrontUnknown) => "nobody could say which window is in front now".to_string(),
+        PassedOn::NotSent(NotPassed::ReaderModifier) => {
+            "the screen reader's key is held down now, which the press was made without".to_string()
+        }
+        PassedOn::NotSent(NotPassed::Overtaken) => "a key typed after it has reached the program first".to_string(),
+        PassedOn::NotSent(NotPassed::HotkeyHolds) => {
+            "a hotkey holds its combination now, which would take it instead of the program".to_string()
+        }
+        PassedOn::Failed(e) => format!("passing it on to the program in front failed: {e}"),
+        PassedOn::NoKey => "its combination is one only the system could read, so it cannot be sent again".to_string(),
+    };
+    format!(
+        "[{module}] {spec}, pressed while the module was busy, was dropped: its registration was released meanwhile, \
+         and {why}"
+    )
+}
+
+/// The modifier roles in `mask` as this platform writes them, joined with `+`: `Ctrl+Shift`, or on a
+/// Mac `Shift+Cmd`.
+fn modifier_words(mask: u8) -> String {
+    let words: Vec<&str> =
+        backend::role_words(KeyOs::CURRENT).iter().filter(|w| mask & w.role != 0).map(|w| w.short).collect();
+    words.join("+")
 }
 
 /// The table a captured key's callback gets: one field per modifier role — on a Mac `ctrl` is
@@ -438,7 +671,9 @@ pub(crate) fn dropped_line(module: &str, spec: &str, gone: Gone) -> String {
     )
 }
 
-/// The line for a key or hotkey that waited in its busy module's mailbox and was not run.
+/// The line for a key or hotkey that waited in its busy module's mailbox and was not run: its
+/// module's scope moved to another window, or another module holds the hotkey now. One whose
+/// registration was released is [`released_line`]'s.
 pub(crate) fn busy_dropped_line(module: &str, spec: &str, gone: Gone) -> String {
     format!("[{module}] {spec}, pressed while the module was busy, was dropped: {} meanwhile", registration_words(gone))
 }
@@ -560,6 +795,47 @@ mod tests {
         assert_eq!(line, "captured set: vk 0x09/m0[m1,m2@0x1a2b+menu] vk 0x20/m1[m2@0x1a2b+menu]");
     }
 
+    /// Where a key goes on once modules let go of it: the earliest capture of the combination, in
+    /// registration order, of a module that did not let go of it and is scoped to the window of the
+    /// press or to everywhere — none when there is no such capture. The same module the hook takes
+    /// the key for with the modules that let go of it taken out and no menu open
+    /// ([`backend::capture_decision`]), for every window and every set of modules let go.
+    #[test]
+    fn a_key_let_go_of_goes_on_to_the_earliest_capture_in_scope_of_another_module() {
+        const W1: isize = 0x111;
+        const W2: isize = 0x222;
+        let cap = |owner, vk, mask| Captured { vk, mask, owner };
+        let own = |owner, scope, menu| OwnerKeys { owner, scope, menu };
+        // Module 1 pinned to W1, 2 to W2, 3 everywhere, 4 never scoped; 4 captures Space only.
+        let set = [cap(1, 0x09, 0), cap(2, 0x09, 0), cap(3, 0x09, 0), cap(4, 0x20, 0), cap(2, 0x09, backend::MASK_SHIFT)];
+        let owners = [own(1, W1, false), own(2, W2, false), own(3, 0, false)];
+        assert_eq!(offered_to(&set, &owners, 0x09, 0, W2, &[1]), Some(2), "2 is scoped to W2, before 3");
+        assert_eq!(offered_to(&set, &owners, 0x09, 0, W1, &[1]), Some(3), "2 is pinned to W2; 3 is everywhere");
+        assert_eq!(offered_to(&set, &owners, 0x09, 0, W2, &[1, 2]), Some(3));
+        assert_eq!(offered_to(&set, &owners, 0x09, 0, W2, &[1, 2, 3]), None, "nobody else: the program's");
+        assert_eq!(offered_to(&set, &owners, 0x09, 0, W1, &[3]), Some(1), "a module that did not let go of it");
+        assert_eq!(offered_to(&set, &owners, 0x09, backend::MASK_SHIFT, W1, &[1]), None, "Shift+Tab is 2's, in W2");
+        assert_eq!(offered_to(&set, &owners, 0x20, 0, W1, &[4]), None, "a key nobody else captures");
+        assert_eq!(offered_to(&set, &owners, 0x20, 0, 0, &[]), Some(4), "no window known: an unscoped module's");
+        // A menu flag is not asked: none was open at the press, or the hook would not have taken it.
+        let menu = [own(1, W1, false), own(2, W2, true), own(3, 0, false)];
+        assert_eq!(offered_to(&set, &menu, 0x09, 0, W2, &[1]), Some(2));
+        // The hook's rule, for every window and every set of modules let go.
+        for front in [0, W1, W2, 0x333] {
+            for gone in 0u32..16 {
+                let let_go: Vec<usize> = (1..=4).filter(|i| gone & (1 << (i - 1)) != 0).collect();
+                let kept: Vec<Captured> = set.iter().copied().filter(|c| !let_go.contains(&(c.owner as usize))).collect();
+                for (vk, mask) in [(0x09, 0), (0x20, 0), (0x09, backend::MASK_SHIFT)] {
+                    let hook = match backend::capture_decision(&kept, &owners, vk, mask, front, || false) {
+                        Some(backend::Capture::Take { owner }) => Some(owner as usize),
+                        _ => None,
+                    };
+                    assert_eq!(offered_to(&set, &owners, vk, mask, front, &let_go), hook, "{front:#x} {let_go:?} {vk:#x}/{mask}");
+                }
+            }
+        }
+    }
+
     /// A module's dropped keys are said once per ten seconds, each module on its own clock, and
     /// afresh once its entry is forgotten.
     #[test]
@@ -572,6 +848,17 @@ mod tests {
         assert!(c.say_dropped(1, t0 + Duration::from_secs(10)));
         c.forget_owner(1);
         assert!(c.say_dropped(1, t0 + Duration::from_secs(11)), "forgotten with the module");
+        // A key gone on to another module and a key passed on to the program: a clock each.
+        let t1 = t0 + Duration::from_secs(30);
+        assert!(c.say_offered(1, t1));
+        assert!(!c.say_offered(1, t1 + Duration::from_secs(9)));
+        assert!(c.say_passed(1, t1 + Duration::from_secs(9)), "not the offered keys' clock");
+        assert!(c.say_dropped(1, t1 + Duration::from_secs(9)), "nor the dropped keys'");
+        c.forget_owner(1);
+        assert!(c.say_offered(1, t1 + Duration::from_secs(9)), "forgotten with the module");
+        c.say_offered(7, t1);
+        c.forget_owners_from(5);
+        assert!(c.say_offered(7, t1 + Duration::from_secs(1)), "and with a rolled-back hot-load");
         let l = dropped_line("kontakt", "Tab", Gone::ScopeMoved);
         assert_eq!(
             l,

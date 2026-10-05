@@ -63,7 +63,7 @@ use objc2_core_graphics::{
 };
 
 use super::{key_age, keys, queue, watch};
-use crate::backend::{capture_decision, menu_flag_owners, Capture, Captured, OwnerKeys, PassWhy, Taken, MASK_TAP};
+use crate::backend::{capture_decision, menu_flag_owners, Capture, Captured, OwnerKeys, PassWhy, Pressed, Taken, MASK_TAP};
 use crate::logging;
 
 /// What the tap asks to see.
@@ -155,6 +155,20 @@ static FOREGROUND: AtomicIsize = AtomicIsize::new(0);
 
 /// Keycode + 1 of the modifier held with nothing pressed since, 0 when none is.
 static TAP_ARMED: AtomicU32 = AtomicU32::new(0);
+
+/// How many key-downs this tap has let go on towards the program, wrapping: every `KeyDown` it
+/// returns, captured by nobody — typed, let through for a menu, a held key's repeats, posted by
+/// another program or by `host.input` — and never one it swallowed for a capture, nor one posted to
+/// pass a key on (`input::pass_on`). A modifier is a `FlagsChanged`, never counted. Each taken key
+/// carries the count of its press (`crate::backend::Pressed::seq`), and a key passed on later is
+/// sent only while the count has not moved since: else a key typed after it has reached the program
+/// first (`crate::backend::NotPassed::Overtaken`). One relaxed add per key-down.
+static LET_THROUGH: AtomicU32 = AtomicU32::new(0);
+
+/// The count of key-downs let through so far ([`LET_THROUGH`]).
+pub fn let_through() -> u32 {
+    LET_THROUGH.load(Ordering::Relaxed)
+}
 
 /// Which entries of `MODIFIERS` are physically down, one bit each.
 ///
@@ -797,9 +811,27 @@ unsafe extern "C-unwind" fn tap_callback(
 
     // SAFETY: the tap owns the event for the duration of the call and we only read it.
     let ev: &CGEvent = unsafe { event.as_ref() };
+    // A key this application posted to pass a key on to the program in front (`input::pass_on`):
+    // through, before anything is recorded or matched. No capture takes it again, its modifier
+    // events are no press, hold or tap of the user's, and it is not counted as let through. Only
+    // its key-down ends a pending modifier tap, as the key would have: the program has had a key
+    // between that modifier's press and its release. One field read.
+    if CGEvent::integer_value_field(Some(ev), CGEventField::EventSourceUserData) == keys::PASS_ON_MARK {
+        if etype == CGEventType::KeyDown {
+            TAP_ARMED.store(0, Ordering::Relaxed);
+        }
+        return pass;
+    }
+    // Every key-down returned from here on goes towards the program: counted on its way.
+    let through = || {
+        if etype == CGEventType::KeyDown {
+            LET_THROUGH.fetch_add(1, Ordering::Relaxed);
+        }
+        pass
+    };
     let raw = CGEvent::integer_value_field(Some(ev), CGEventField::KeyboardEventKeycode);
     if !(0..128).contains(&raw) {
-        return pass; // not a keyboard event we can name; nothing to match against
+        return through(); // not a keyboard event we can name; nothing to match against
     }
     let keycode = raw as u16;
     let flags = CGEvent::flags(Some(ev));
@@ -833,11 +865,11 @@ unsafe extern "C-unwind" fn tap_callback(
     let mask = mask_of(flags);
     let Some(vk) = keys::keycode_to_vk_for(keycode, mask) else {
         logging::trace("macos", || format!("tap: keycode {keycode} has no Win32 equivalent"));
-        return pass;
+        return through();
     };
     let front = FOREGROUND.load(Ordering::Relaxed);
     let Some(decided) = decide(vk, mask, front, true) else {
-        return pass; // the pump was mid-replacement; said by `decide`
+        return through(); // the pump was mid-replacement; said by `decide`
     };
     let owner = match decided {
         None => {
@@ -849,7 +881,7 @@ unsafe extern "C-unwind" fn tap_callback(
             logging::trace("macos", || {
                 format!("tap: saw vk {vk:#04x} mask {mask}, nothing had claimed it")
             });
-            return pass;
+            return through();
         }
         Some(Capture::Pass { why, .. }) => {
             // Said out loud, not traced, because this is the one event that explains a whole
@@ -863,14 +895,17 @@ unsafe extern "C-unwind" fn tap_callback(
             // holds for as long as a menu is open or a window is not frontmost, and one line per
             // keystroke would bury the log it is meant to explain.
             report_gate_pass(vk, mask, pass_words(why));
-            return pass;
+            return through();
         }
         Some(Capture::Take { owner }) => owner,
     };
     // Read only for a key that is taken: the system's own word for the keyboard's auto-repeat
-    // of a key held down, handed to the host with the key. One field read, no call out.
+    // of a key held down, handed to the host with the key. One field read, no call out. With it
+    // the press as it was: the window, the count of keys let through so far, and the keycode
+    // itself — the keypad's Enter is not Return, though both are VK_RETURN to the host.
     let repeat = CGEvent::integer_value_field(Some(ev), CGEventField::KeyboardEventAutorepeat) != 0;
-    queue::push_key(Taken { vk, mask, owner, repeat, front });
+    let pressed = Pressed { front, seq: LET_THROUGH.load(Ordering::Relaxed), phys: Some(keycode) };
+    queue::push_key(Taken { vk, mask, owner, repeat, pressed });
     note_suppressed(keycode);
 
     // The first suppression of a run, said out loud once.
@@ -948,7 +983,8 @@ fn modifier_changed(keycode: u16, flags: CGEventFlags) {
     let front = FOREGROUND.load(Ordering::Relaxed);
     match decide(modifier.vk, MASK_TAP, front, false) {
         Some(Some(Capture::Take { owner })) => {
-            queue::push_key(Taken { vk: modifier.vk, mask: MASK_TAP, owner, repeat: false, front });
+            let pressed = Pressed { front, seq: LET_THROUGH.load(Ordering::Relaxed), phys: None };
+            queue::push_key(Taken { vk: modifier.vk, mask: MASK_TAP, owner, repeat: false, pressed });
             logging::trace("macos", || format!("tap: modifier tap vk {:#04x} for module {owner}", modifier.vk));
         }
         Some(Some(Capture::Pass { why, .. })) => {
@@ -1140,6 +1176,15 @@ fn take_suppressed(keycode: u16) -> bool {
     let bit = 1u64 << (keycode % 64);
     let bank = if keycode < 64 { &SUPPRESSED_LO } else { &SUPPRESSED_HI };
     bank.fetch_and(!bit, Ordering::Relaxed) & bit != 0
+}
+
+/// Whether the tap swallowed `keycode`'s key-down and has not seen its key-up yet: the key is held
+/// down, for passing a key on to the program in front (`input::keyboard_now`), asked without
+/// changing the record.
+pub(super) fn held_back(keycode: u16) -> bool {
+    let bit = 1u64 << (keycode % 64);
+    let bank = if keycode < 64 { &SUPPRESSED_LO } else { &SUPPRESSED_HI };
+    bank.load(Ordering::Relaxed) & bit != 0
 }
 
 /// Every event tap on this login session, once, at startup.

@@ -18,7 +18,7 @@ use super::hotkey_hook::{self, Down, Mods, OsPress, Route, NO_ID};
 use super::{
     capture_decision, menu_flag_owners, scope_of, Backend, Capture, CaptureFn, CaptureSource,
     CapturedImage, Captured, ControlInfo, DumpNode, HostEvents, MouseButton, OcrLine, OcrShot,
-    OcrText, OcrThread, OcrWord, OcrWorker, OwnerKeys, Recognise, Taken, WinInfo, CAPTURE_FAILED,
+    OcrText, OcrThread, OcrWord, OcrWorker, OwnerKeys, Pressed, Recognise, Taken, WinInfo, CAPTURE_FAILED,
     DUPLICATION_UNANSWERED,
 };
 use crate::ocr::plan::{self, Plan};
@@ -43,7 +43,7 @@ use windows_sys::Win32::System::Threading::{
 use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, FILTERKEYS, HWINEVENTHOOK};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, RegisterHotKey, SendInput, UnregisterHotKey, INPUT, INPUT_KEYBOARD,
-    INPUT_MOUSE,
+    INPUT_MOUSE, KEYEVENTF_EXTENDEDKEY, MAPVK_VK_TO_VSC_EX,
     KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
     MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
     MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
@@ -54,7 +54,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::MapVirtualKeyW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumChildWindows,
     EnumWindows, GetAncestor, GetClassNameW, GetClientRect, GetCursorPos,
-    GetForegroundWindow, GetMessageW, SystemParametersInfoW, FKF_FILTERKEYSON, LLKHF_INJECTED,
+    GetForegroundWindow, GetMessageW, SystemParametersInfoW, FKF_FILTERKEYSON, LLKHF_EXTENDED, LLKHF_INJECTED,
     SPI_GETFILTERKEYS, SPI_GETKEYBOARDDELAY,
     GetGUIThreadInfo, GetSystemMetrics, GetWindowRect,
     MsgWaitForMultipleObjects, PeekMessageW, PM_REMOVE, QS_ALLINPUT, WM_QUIT,
@@ -146,6 +146,12 @@ impl HeldBits {
         self.0[word].fetch_and(!bit, Ordering::Relaxed);
     }
 
+    /// Whether `vk` is marked held.
+    fn is_held(&self, vk: u32) -> bool {
+        let (word, bit) = Self::at(vk);
+        self.0[word].load(Ordering::Relaxed) & bit != 0
+    }
+
     fn clear(&self) {
         for w in &self.0 {
             w.store(0, Ordering::Relaxed);
@@ -155,11 +161,34 @@ impl HeldBits {
 
 /// The keys whose last taken key-down is still held — see [`HeldBits`].
 static CAPTURED_HELD: HeldBits = HeldBits::new();
+/// The keys whose key-down the hook kept from the system — a captured key it took, a hotkey's key
+/// it fired or swallowed as a repeat — with no key-up seen since: held down, although
+/// `GetAsyncKeyState`, which a swallowed key-down never sets, says otherwise. What
+/// `keyboard_now` asks besides the system, so that a key is not passed on to the program while the
+/// user still holds it. Cleared by any key-up of the key, and forgotten with the rest of what the
+/// hook recorded as held ([`forget_keys_held_out_of_sight`]).
+static KEPT_BACK: HeldBits = HeldBits::new();
+
+/// What `dwExtraInfo` carries on every key event this application sends to pass a key on to the
+/// program in front (`pass_on_key`). The hook lets an event carrying it through untouched, before
+/// anything else: no capture takes it, and it is no press, hold or tap of the user's. "PASS".
+const PASS_ON_MARK: usize = 0x5041_5353;
+/// How many key-downs the hook has let go on towards the program, wrapping: every key-down that is
+/// not a modifier's and that it does not swallow — typed keys no capture took, keys let through for
+/// a menu or a screen reader, a held key's repeats, keys another program or this one's `host.input`
+/// sent — and never one marked [`PASS_ON_MARK`], nor the hotkeys' masking key ([`VK_MASK_KEY`]),
+/// which means nothing to anyone. Each captured key and each hotkey press carries the count of its
+/// press (`crate::backend::Pressed::seq`), and a key passed on later is sent only while the count has
+/// not moved since: else a key typed after it has reached the program first
+/// (`crate::backend::NotPassed::Overtaken`). One relaxed add per key-down.
+static LET_THROUGH: AtomicU32 = AtomicU32::new(0);
 /// Hotkey presses, drained by the pump: ids the message-only window proc received as
 /// `WM_HOTKEY` on the pump's thread, and ids the keyboard hook matched itself on its own (see
 /// `hotkey_hook`), each with the way it came, so that the pump can tell the two deliveries of
-/// one press apart. Drained in place rather than taken, so its capacity stays.
-static HOTKEY_QUEUE: Mutex<Vec<(i32, Route)>> = Mutex::new(Vec::new());
+/// one press apart, and the count of key-downs let through when it came ([`LET_THROUGH`]: as the
+/// hook matched it, or as `WM_HOTKEY` reached the window). Drained in place rather than taken, so
+/// its capacity stays.
+static HOTKEY_QUEUE: Mutex<Vec<(i32, Route, u32)>> = Mutex::new(Vec::new());
 /// The end of a stall the host's guard ended in a stop (`drop_queued_input`): a `RegisterHotKey`
 /// press stamped at or before this tick is dropped when the next pump drains it — its `WM_HOTKEY`
 /// was posted to the stalled thread and reaches [`HOTKEY_QUEUE`] only after the stall. The tick in
@@ -1698,6 +1727,60 @@ impl Backend for WindowsBackend {
         unsafe { GetForegroundWindow() as isize }
     }
 
+    /// `GetAsyncKeyState` for the key and the modifiers, the hook's own record for a key whose
+    /// key-down it kept from the system ([`KEPT_BACK`]), which the system cannot report, a screen
+    /// reader's key as the hook tells it — its own record or the key down, as for a captured key —
+    /// and the hook's count of keys let through ([`LET_THROUGH`]). The key by its virtual key: both
+    /// Enters are `VK_RETURN` to the system, held or not.
+    fn keyboard_now(&self, vk: u32, _mask: u8, _phys: Option<u16>) -> super::KeyboardNow {
+        // SAFETY: reads which window is in front and the asynchronous key state.
+        unsafe {
+            let down = |k: i32| (GetAsyncKeyState(k) as u16 & 0x8000) != 0;
+            let mut mods = 0;
+            for (role, held) in [
+                (super::MASK_SHIFT, down(VK_SHIFT as i32)),
+                (super::MASK_CTRL, down(VK_CONTROL as i32)),
+                (super::MASK_ALT, down(VK_MENU as i32)),
+                (super::MASK_WIN, down(VK_LWIN as i32) || down(VK_RWIN as i32)),
+            ] {
+                if held {
+                    mods |= role;
+                }
+            }
+            super::KeyboardNow {
+                front: Some(GetForegroundWindow() as isize),
+                key_held: down(vk as i32) || KEPT_BACK.is_held(vk),
+                mods,
+                reader_mod: SCREEN_READER_MOD_DOWN.load(Ordering::Relaxed) || down(0x2D) || down(0x60) || down(0x14),
+                let_through: LET_THROUGH.load(Ordering::Relaxed),
+            }
+        }
+    }
+
+    /// One `SendInput` of every event, marked with [`PASS_ON_MARK`] — see [`pass_on_inputs`].
+    fn pass_on_key(&self, vk: u32, _mask: u8, phys: Option<u16>, strokes: &[super::Stroke]) -> Result<(), String> {
+        // SAFETY: MapVirtualKeyW only translates a code.
+        let scan_ex = |k: u16| unsafe { MapVirtualKeyW(u32::from(k), MAPVK_VK_TO_VSC_EX) };
+        let sent = send_marked(&pass_on_inputs(vk, phys, strokes, scan_ex));
+        if sent == strokes.len() {
+            return Ok(());
+        }
+        // Taken in part — a program holding the input, or a window of a higher integrity level in
+        // front, which Windows does not say: what that part pressed is released, so that nothing
+        // stays down.
+        let release = super::left_down(strokes, sent);
+        let released = send_marked(&pass_on_inputs(vk, phys, &release, scan_ex));
+        Err(format!(
+            "SendInput took {sent} of its {} key events{}",
+            strokes.len(),
+            if release.is_empty() {
+                String::new()
+            } else {
+                format!(", and {released} of the {} that release what those pressed", release.len())
+            }
+        ))
+    }
+
     fn modifiers_down(&self) -> bool {
         unsafe {
             let down = |k: u16| (GetAsyncKeyState(k as i32) as u16 & 0x8000) != 0;
@@ -1773,9 +1856,9 @@ impl Backend for WindowsBackend {
     fn drop_queued_input(&self) -> crate::backend::DroppedInput {
         let keys: Vec<(u32, u8, u32)> =
             std::mem::take(&mut *locked(&KEY_QUEUE)).into_iter().map(|k| (k.vk, k.mask, k.owner)).collect();
-        let pending: Vec<(i32, Route)> = locked(&HOTKEY_QUEUE).drain(..).collect();
+        let pending: Vec<(i32, Route, u32)> = locked(&HOTKEY_QUEUE).drain(..).collect();
         let mut hotkeys = Vec::new();
-        for (id, route) in pending {
+        for (id, route, _) in pending {
             if settle_hotkey(id, route) {
                 hotkeys.push(id);
             }
@@ -1939,21 +2022,21 @@ impl Backend for WindowsBackend {
             }
             events.on_system(system);
         }
-        let hotkeys: Vec<(i32, Route)> = locked(&HOTKEY_QUEUE).drain(..).collect();
+        let hotkeys: Vec<(i32, Route, u32)> = locked(&HOTKEY_QUEUE).drain(..).collect();
         // After a stop: a `RegisterHotKey` press made during the stall it ended reaches the queue
         // only now, and is dropped by its stamp, as the rest of the stall's presses were. Once, on
         // the first pump after the stop: posted messages are retrieved before the timer that
         // drives this pump, so they are all here by now.
         let drop_until = DROP_OS_UNTIL.swap(0, Ordering::AcqRel);
         let mut late = Vec::new();
-        for (id, route) in hotkeys {
+        for (id, route, seq) in hotkeys {
             let stalled = drop_until & DROP_ARMED != 0
                 && matches!(route, Route::Os { time } if super::tick_not_after(time, drop_until as u32));
             if settle_hotkey(id, route) {
                 if stalled {
                     late.push(id);
                 } else {
-                    events.on_hotkey(id);
+                    events.on_hotkey(id, seq);
                 }
             }
         }
@@ -1971,7 +2054,7 @@ impl Backend for WindowsBackend {
         }
         let pending_keys: Vec<Taken> = std::mem::take(&mut *locked(&KEY_QUEUE));
         for k in pending_keys {
-            events.on_key(k.vk, k.mask, k.owner, k.repeat, k.front);
+            events.on_key(k.vk, k.mask, k.owner, k.repeat, k.pressed);
         }
         report_capture_passes();
         // Game controllers, from the hub their own thread feeds (never a thread-local: that
@@ -2109,7 +2192,7 @@ unsafe extern "system" fn hotkey_wndproc(
         // Stamped, so the pump can tell a press the keyboard hook already dispatched from a new
         // one: `GetMessageTime` is on the same tick clock as the hook's key events.
         let time = GetMessageTime() as u32;
-        locked(&HOTKEY_QUEUE).push((wparam as i32, Route::Os { time }));
+        locked(&HOTKEY_QUEUE).push((wparam as i32, Route::Os { time }, LET_THROUGH.load(Ordering::Relaxed)));
         return 0;
     }
     DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -2456,17 +2539,22 @@ fn forget_seen_keys() {
 /// through to the screen reader until that modifier next went up in front of a window the hook
 /// sees), a **pending modifier tap** (else a tap could fire at a release that ends a
 /// combination) and the **captured keys held down** (else the next deliberate press of one
-/// would read as the keyboard's auto-repeat, [`CAPTURED_HELD`]). Returns how long ago the screen
-/// reader's modifier was seen going down, when it was recorded as held, for the watch's log line.
+/// would read as the keyboard's auto-repeat, [`CAPTURED_HELD`], and a key its busy module let go
+/// of would not be passed on to the program until that key next went up, [`KEPT_BACK`]).
+/// Returns how long ago the screen reader's modifier was seen going down, when it was recorded as
+/// held, for the watch's log line.
 ///
 /// Any thread: a handful of atomics. The watch calls it on those events; the hook's thread after
 /// a re-install that found the old hook gone. The cost of forgetting too much is one keystroke
 /// made while a screen reader's modifier was held across such a moment, which is then taken by
-/// a capture of it instead of going to the screen reader, and the repeat of a captured key held
-/// across it, which reads as a new press.
+/// a capture of it instead of going to the screen reader, the repeat of a captured key held
+/// across it, which reads as a new press, and a key passed on to the program while it is still
+/// held across it — `GetAsyncKeyState` is asked as well, and says so for every key whose key-down
+/// reached the system.
 pub(super) fn forget_keys_held_out_of_sight() -> Option<u32> {
     TAP_ARMED.store(0, Ordering::Relaxed);
     CAPTURED_HELD.clear();
+    KEPT_BACK.clear();
     if SCREEN_READER_MOD_DOWN.swap(false, Ordering::Relaxed) {
         // SAFETY: reads the tick clock.
         let now = unsafe { GetTickCount() };
@@ -2495,6 +2583,18 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
         let now = GetTickCount();
         hook_watch_thread::note_hook_call(now);
         let kb = &*(lparam as *const KBDLLHOOKSTRUCT);
+        // A key this application sends to pass a key on to the program in front (`pass_on_key`):
+        // through, before anything is recorded or matched. No capture takes it again, it is no
+        // press, hold or modifier tap of the user's, and it is not counted as let through
+        // (`LET_THROUGH`). Only the key's own key-down ends a pending modifier tap, as the key
+        // would have: the program has had a key between that modifier's press and its release.
+        if kb.dwExtraInfo == PASS_ON_MARK {
+            let msg = wparam as u32;
+            if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && modifier_generic(kb.vkCode).is_none() {
+                TAP_ARMED.store(0, Ordering::Relaxed);
+            }
+            return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+        }
         let vk = kb.vkCode;
         let msg = wparam as u32;
         let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
@@ -2567,13 +2667,7 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
             // one as meaningful), and the other three were left unarmed — which made
             // `host.keys.capture("Ctrl tap", …)` a registration that parses, returns a token
             // and can never fire. Silence is the worst of the three possible answers.
-            let generic = match vk {
-                0x10 | 0xA0 | 0xA1 => Some(0x10u32), // Shift
-                0x11 | 0xA2 | 0xA3 => Some(0x11),    // Ctrl
-                0x12 | 0xA4 | 0xA5 => Some(0x12),    // Alt
-                0x5B | 0x5C => Some(0x5B),           // Win
-                _ => None,
-            };
+            let generic = modifier_generic(vk);
             if is_down && generic.is_none() {
                 // Any ordinary key ends a pending tap: "pressed and released with nothing in
                 // between" is the whole definition, and this is the "in between". CapsLock
@@ -2613,7 +2707,8 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                         }
                     };
                     if let Some((owner, front)) = taken {
-                        locked(&KEY_QUEUE).push(Taken { vk: generic, mask: tap, owner, repeat: false, front });
+                        let pressed = Pressed { front, seq: LET_THROUGH.load(Ordering::Relaxed), phys: None };
+                        locked(&KEY_QUEUE).push(Taken { vk: generic, mask: tap, owner, repeat: false, pressed });
                         wake_pump();
                     }
                 }
@@ -2642,6 +2737,7 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
             // not the keyboard's auto-repeat (`CAPTURED_HELD`). Every key-up passes here.
             if is_up {
                 CAPTURED_HELD.up(vk);
+                KEPT_BACK.up(vk);
             }
             // The hotkeys' record of which keys are held (`hotkey_hook::Table`) is kept for every
             // key that is not a modifier, whatever happens to it below: the captured keys'
@@ -2708,6 +2804,7 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                     if hotkeys_filed && is_down {
                         note_captured_down(kb, vk, mask, late, true);
                     }
+                    count_let_through(is_down, generic, vk);
                     return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
                 }
                 // Intercept a captured nav key only while an overlay should own it (ReaHotkey's
@@ -2753,7 +2850,10 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                 if let Some(Capture::Take { owner }) = decided {
                     if is_down {
                         let repeat = CAPTURED_HELD.taken_down(vk);
-                        locked(&KEY_QUEUE).push(Taken { vk, mask, owner, repeat, front: foreground });
+                        // The press as it was: the window, the count of keys let through so far,
+                        // and the key it was pressed on — the keypad's Enter is VK_RETURN too.
+                        let pressed = Pressed { front: foreground, seq: LET_THROUGH.load(Ordering::Relaxed), phys: physical_key(kb) };
+                        locked(&KEY_QUEUE).push(Taken { vk, mask, owner, repeat, pressed });
                         wake_pump();
                         if hotkeys_filed {
                             note_captured_down(kb, vk, mask, late, false);
@@ -2762,6 +2862,9 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
                     // Suppress the matched combination — the key-up only when its key-down was
                     // suppressed too (see `swallow_captured`).
                     if swallow_captured(is_down, || down(vk as u16)) {
+                        if is_down {
+                            KEPT_BACK.taken_down(vk);
+                        }
                         return 1;
                     }
                 }
@@ -2772,11 +2875,43 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
             // could see it. Never a modifier: a hotkey's key is an ordinary key. A key-up has
             // been recorded above and always goes through.
             if hotkeys_filed && is_down && hook_hotkey(kb, vk, mask, late) {
+                KEPT_BACK.taken_down(vk);
                 return 1;
             }
+            // Neither a capture nor a hotkey took it: it goes on towards the program.
+            count_let_through(is_down, generic, vk);
         }
     }
     CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+}
+
+/// The generic virtual key of a modifier key, as `key_spec` names it — either side of Shift, Ctrl
+/// and Alt, and either Windows key — and `None` for every other key.
+fn modifier_generic(vk: u32) -> Option<u32> {
+    match vk {
+        0x10 | 0xA0 | 0xA1 => Some(0x10), // Shift
+        0x11 | 0xA2 | 0xA3 => Some(0x11), // Ctrl
+        0x12 | 0xA4 | 0xA5 => Some(0x12), // Alt
+        0x5B | 0x5C => Some(0x5B),        // Win
+        _ => None,
+    }
+}
+
+/// A key event the hook lets go on towards the program, counted in [`LET_THROUGH`] when it is a
+/// key-down of a key that is not a modifier (`generic`, [`modifier_generic`]) and not the
+/// hotkeys' masking key. One relaxed add.
+fn count_let_through(is_down: bool, generic: Option<u32>, vk: u32) {
+    if is_down && generic.is_none() && vk != u32::from(VK_MASK_KEY) {
+        LET_THROUGH.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// The physical key of a key event, as `MapVirtualKeyW` with `MAPVK_VK_TO_VSC_EX` writes one: its
+/// scan code, with 0xE000 for an extended key. `None` for an event that carried no scan code — one
+/// another program sent by virtual key alone.
+fn physical_key(kb: &KBDLLHOOKSTRUCT) -> Option<u16> {
+    let scan = (kb.scanCode & 0xFF) as u16;
+    (scan != 0).then_some(if kb.flags & LLKHF_EXTENDED != 0 { 0xE000 | scan } else { scan })
 }
 
 /// A key-down the captured keys' branch took, or let through for a screen reader, entered in
@@ -2795,7 +2930,7 @@ fn note_captured_down(kb: &KBDLLHOOKSTRUCT, vk: u32, mask: u8, late: u32, passed
         }
     };
     if expected != NO_ID {
-        locked(&HOTKEY_QUEUE).push((expected, Route::Passed { time: kb.time, late }));
+        locked(&HOTKEY_QUEUE).push((expected, Route::Passed { time: kb.time, late }, LET_THROUGH.load(Ordering::Relaxed)));
     }
 }
 
@@ -2855,7 +2990,7 @@ unsafe fn hook_hotkey(kb: &KBDLLHOOKSTRUCT, vk: u32, mask: u8, late: u32) -> boo
     // No lock is held from here on: the masking key below comes back through this hook.
     match act {
         Act::Fire(id) => {
-            locked(&HOTKEY_QUEUE).push((id, Route::Hook { time: kb.time, late }));
+            locked(&HOTKEY_QUEUE).push((id, Route::Hook { time: kb.time, late }, LET_THROUGH.load(Ordering::Relaxed)));
             if hotkey_hook::needs_mask_key(mask) {
                 send_mask_key();
             }
@@ -2866,7 +3001,7 @@ unsafe fn hook_hotkey(kb: &KBDLLHOOKSTRUCT, vk: u32, mask: u8, late: u32) -> boo
         Act::Pass(id) => {
             // Not a dispatch: a note for the pump that the WM_HOTKEY coming for this press is
             // expected, and needs no explaining. No wake either — the WM_HOTKEY wakes it.
-            locked(&HOTKEY_QUEUE).push((id, Route::Passed { time: kb.time, late }));
+            locked(&HOTKEY_QUEUE).push((id, Route::Passed { time: kb.time, late }, LET_THROUGH.load(Ordering::Relaxed)));
             false
         }
         Act::Nothing => false,
@@ -3405,6 +3540,69 @@ unsafe fn send_mouse_event(flags: u32, data: i32) {
     SendInput(1, &input, std::mem::size_of::<INPUT>() as i32);
 }
 
+/// The key a modifier role is pressed on when a key is passed on: the left one of its pair, as a
+/// hand on a keyboard would be likeliest to.
+fn pass_on_modifier_vk(role: u8) -> u16 {
+    match role {
+        super::MASK_CTRL => 0xA2,  // VK_LCONTROL
+        super::MASK_ALT => 0xA4,   // VK_LMENU
+        super::MASK_SHIFT => 0xA0, // VK_LSHIFT
+        _ => 0x5B,                 // VK_LWIN
+    }
+}
+
+/// The key events of a key passed on, as `(virtual key, scan code, flags)` for `SendInput`:
+/// each stroke's key — `vk` itself, or the left key of a modifier — with its scan code, the
+/// extended-key flag where the key has one (the arrows, Insert, Delete, Home, End, Page Up and
+/// Down, the Windows key, the numeric keypad's Enter: what an application reading the scan code or
+/// the flag tells them by), and `KEYEVENTF_KEYUP` for a key going up. The key's own scan code is
+/// `phys`, the one it was pressed on, where the hook had one — so the keypad's Enter goes as the
+/// keypad's Enter, and a keypad arrow as the keypad's; otherwise, and for a modifier, `scan_ex`'s:
+/// `MapVirtualKeyW` with `MAPVK_VK_TO_VSC_EX`, whose high byte is 0xE0 or 0xE1 for an extended key,
+/// as `phys`'s is. Pure, so the tests hand it a table.
+fn pass_on_inputs(vk: u32, phys: Option<u16>, strokes: &[super::Stroke], scan_ex: impl Fn(u16) -> u32) -> Vec<(u16, u16, u32)> {
+    strokes
+        .iter()
+        .map(|s| {
+            let (key, down, scan) = match *s {
+                super::Stroke::Modifier { role, down } => {
+                    let key = pass_on_modifier_vk(role);
+                    (key, down, scan_ex(key))
+                }
+                super::Stroke::Key { down } => (vk as u16, down, phys.map_or_else(|| scan_ex(vk as u16), u32::from)),
+            };
+            let mut flags = if down { 0 } else { KEYEVENTF_KEYUP };
+            if matches!(scan >> 8, 0xE0 | 0xE1) {
+                flags |= KEYEVENTF_EXTENDEDKEY;
+            }
+            (key, (scan & 0xFF) as u16, flags)
+        })
+        .collect()
+}
+
+/// Sends `events` — `(virtual key, scan code, flags)` each — in one `SendInput`, every one marked
+/// with [`PASS_ON_MARK`] so that the hook lets it through untouched: how many Windows took.
+fn send_marked(events: &[(u16, u16, u32)]) -> usize {
+    if events.is_empty() {
+        return 0;
+    }
+    let inputs: Vec<INPUT> = events
+        .iter()
+        .map(|&(vk, scan, flags)| {
+            // SAFETY: an all-zero INPUT is a valid one; the keyboard fields are set below.
+            let mut input: INPUT = unsafe { std::mem::zeroed() };
+            input.r#type = INPUT_KEYBOARD;
+            input.Anonymous.ki.wVk = vk;
+            input.Anonymous.ki.wScan = scan;
+            input.Anonymous.ki.dwFlags = flags;
+            input.Anonymous.ki.dwExtraInfo = PASS_ON_MARK;
+            input
+        })
+        .collect();
+    // SAFETY: `inputs` holds `inputs.len()` initialised INPUTs for the length of the call.
+    unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) as usize }
+}
+
 unsafe fn send_key_event(vk: u16, scan: u16, flags: u32) {
     let mut input: INPUT = std::mem::zeroed();
     input.r#type = INPUT_KEYBOARD;
@@ -3659,8 +3857,10 @@ mod hook_carry_over_tests {
             st.set = captured.clone();
             st.owners = owners.clone();
         }
-        // Tab held down, taken: its next key-down would be a repeat.
+        // Tab held down, taken: its next key-down would be a repeat, and it is held although the
+        // system does not know it.
         assert!(!CAPTURED_HELD.taken_down(0x09));
+        KEPT_BACK.taken_down(0x09);
         {
             let mut t = locked(&HOOK_HOTKEYS);
             // Alt+V granted (MOD_ALT is 0x1), and pressed: the hook fired it and swallows its
@@ -3687,6 +3887,7 @@ mod hook_carry_over_tests {
         assert_eq!(forget_keys_held_out_of_sight(), None, "nothing left to forget");
         assert_eq!(TAP_ARMED.load(Ordering::Relaxed), 0);
         assert!(!CAPTURED_HELD.taken_down(0x09), "Tab's key-up may have gone by unseen: a new press");
+        assert!(!KEPT_BACK.is_held(0x09), "and no longer held as far as the hook knows");
         assert_eq!(HOOK_MODS.with(|m| m.get()), {
             let mut mods = Mods::default();
             mods.on_key(0xA4, true);
@@ -3796,6 +3997,135 @@ mod hook_carry_over_tests {
         held.clear();
         assert!(!held.taken_down(0x109));
         assert!(held.taken_down(0x09), "0x109 shares Tab's bit");
+        // Asked without marking: what `keyboard_now` reads of the keys kept from the system.
+        held.clear();
+        assert!(!held.is_held(0x09));
+        held.taken_down(0x09);
+        assert!(held.is_held(0x09) && !held.is_held(0x20));
+        assert!(held.is_held(0x09), "asking marks nothing and clears nothing");
+        held.up(0x09);
+        assert!(!held.is_held(0x09));
+    }
+
+    /// A key passed on, as `SendInput` takes it: the left key of each modifier the press had and
+    /// nobody holds, the key itself, each with its scan code and the extended-key flag where the
+    /// key has one, `KEYEVENTF_KEYUP` for a key going up — in the order the strokes say. The key on
+    /// the scan code it was pressed on, where the hook had one: the keypad's Enter extended, a
+    /// keypad arrow with Num Lock off not.
+    #[test]
+    fn a_key_passed_on_is_sent_with_its_scan_codes_and_extended_flags() {
+        use crate::backend::{pass_on_strokes, KeyboardNow, Pressed, Stroke, MASK_CTRL, MASK_SHIFT, MASK_WIN};
+        // MapVirtualKeyW(_, MAPVK_VK_TO_VSC_EX) on a US keyboard.
+        let table = |k: u16| match k {
+            0x09 => 0x0F,   // Tab
+            0x0D => 0x1C,   // Enter
+            0x25 => 0xE04B, // Left
+            0xA2 => 0x1D,   // left Ctrl
+            0xA0 => 0x2A,   // left Shift
+            0xA4 => 0x38,   // left Alt
+            0x5B => 0xE05B, // left Windows key
+            _ => 0,
+        };
+        let now = KeyboardNow { front: Some(1), ..KeyboardNow::default() };
+        let at = Pressed { front: 1, ..Pressed::default() };
+        let up = KEYEVENTF_KEYUP;
+        let ext = KEYEVENTF_EXTENDEDKEY;
+        let s = pass_on_strokes(MASK_CTRL | MASK_SHIFT, at, now).unwrap();
+        assert_eq!(
+            pass_on_inputs(0x25, None, &s, table),
+            vec![(0xA2, 0x1D, 0), (0xA0, 0x2A, 0), (0x25, 0x4B, ext), (0x25, 0x4B, ext | up), (0xA0, 0x2A, up), (0xA2, 0x1D, up)]
+        );
+        let s = pass_on_strokes(0, at, now).unwrap();
+        assert_eq!(pass_on_inputs(0x09, None, &s, table), vec![(0x09, 0x0F, 0), (0x09, 0x0F, up)]);
+        let s = pass_on_strokes(MASK_WIN, at, now).unwrap();
+        assert_eq!(pass_on_inputs(0x09, None, &s, table), vec![(0x5B, 0x5B, ext), (0x09, 0x0F, 0), (0x09, 0x0F, up), (0x5B, 0x5B, ext | up)]);
+        // The releases of a part sent are keys going up, the same way.
+        assert_eq!(pass_on_inputs(0x09, None, &[Stroke::Modifier { role: crate::backend::MASK_ALT, down: false }], table), vec![(0xA4, 0x38, up)]);
+        // Pressed on the keypad: its Enter is extended, unlike the main one; its 4 with Num Lock off
+        // is VK_LEFT on a scan code that is not. The modifiers around them stay the mapped ones.
+        let s = pass_on_strokes(0, at, now).unwrap();
+        assert_eq!(pass_on_inputs(0x0D, Some(0xE01C), &s, table), vec![(0x0D, 0x1C, ext), (0x0D, 0x1C, ext | up)]);
+        assert_eq!(pass_on_inputs(0x0D, None, &s, table), vec![(0x0D, 0x1C, 0), (0x0D, 0x1C, up)], "the main Enter");
+        let s = pass_on_strokes(MASK_SHIFT, at, now).unwrap();
+        assert_eq!(
+            pass_on_inputs(0x25, Some(0x4B), &s, table),
+            vec![(0xA0, 0x2A, 0), (0x25, 0x4B, 0), (0x25, 0x4B, up), (0xA0, 0x2A, up)]
+        );
+    }
+
+    /// The physical key the hook reads off a key event: the scan code, 0xE000 with it for an
+    /// extended key, nothing for an event sent by virtual key alone; and which keys are modifiers.
+    #[test]
+    fn the_hook_reads_the_physical_key_and_tells_the_modifiers() {
+        // SAFETY: an all-zero KBDLLHOOKSTRUCT is a valid one.
+        let mut kb: KBDLLHOOKSTRUCT = unsafe { std::mem::zeroed() };
+        kb.vkCode = 0x0D;
+        kb.scanCode = 0x1C;
+        assert_eq!(physical_key(&kb), Some(0x1C), "the main Enter");
+        kb.flags = LLKHF_EXTENDED;
+        assert_eq!(physical_key(&kb), Some(0xE01C), "the keypad's");
+        kb.flags = LLKHF_INJECTED;
+        kb.scanCode = 0;
+        assert_eq!(physical_key(&kb), None, "sent by virtual key alone");
+        for vk in [0x10, 0xA0, 0xA1, 0x11, 0xA2, 0xA3, 0x12, 0xA4, 0xA5, 0x5B, 0x5C] {
+            assert!(modifier_generic(vk).is_some(), "{vk:#x}");
+        }
+        for vk in [0x09, 0x0D, 0x14, 0x2D, 0x60, 0x25, 0x56, u32::from(VK_MASK_KEY)] {
+            assert_eq!(modifier_generic(vk), None, "{vk:#x}");
+        }
+    }
+
+    /// The mark, where it has to be: every event `send_marked` sends carries it, and the hook lets
+    /// an event carrying it through before it records, matches or counts anything — the screen
+    /// reader's modifier, the modifiers as it saw them, a tap, the held keys, a capture, a hotkey —
+    /// ending only a pending modifier tap, for its key's key-down. The count of keys let through:
+    /// taken with each captured key and hotkey press, moved on only where the hook lets a key-down
+    /// go on — past the screen reader's rule, and at the end.
+    #[test]
+    fn the_keys_passed_on_are_marked_and_the_hook_lets_them_through_first() {
+        const SRC: &str = include_str!("windows.rs");
+        let body = |sig: &str| {
+            let at = SRC.find(sig).unwrap_or_else(|| panic!("{sig}"));
+            let end = SRC[at..].find("\n}\n").unwrap();
+            &SRC[at..at + end]
+        };
+        let send = body("fn send_marked(");
+        assert!(send.contains("input.Anonymous.ki.dwExtraInfo = PASS_ON_MARK;"));
+        assert_eq!(send.matches("SendInput(").count(), 1, "one SendInput for the whole sequence");
+        let hook = body("unsafe extern \"system\" fn ll_keyboard_proc(");
+        let mark = hook.find("if kb.dwExtraInfo == PASS_ON_MARK {").expect("the hook asks for the mark");
+        for later in ["let vk = kb.vkCode;", "HOOK_MODS.with", "SCREEN_READER_MOD_DOWN.store", "CAPTURED_HELD.up", "capture_decision(", "hook_hotkey(", "count_let_through("] {
+            assert!(mark < hook.find(later).unwrap_or_else(|| panic!("{later}")), "{later} comes before the mark is asked");
+        }
+        let marked = &hook[mark..mark + hook[mark..].find("\n        }\n").unwrap()];
+        assert!(marked.contains(
+            "if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && modifier_generic(kb.vkCode).is_none() {\n                TAP_ARMED.store(0, Ordering::Relaxed);\n            }\n            return CallNextHookEx("
+        ));
+        assert!(!marked.contains("LET_THROUGH") && !marked.contains("count_let_through"), "a key passed on is not counted");
+        // Counted where a key-down goes on: past the screen reader's rule, and after the hotkeys.
+        assert_eq!(hook.matches("count_let_through(is_down, generic, vk);").count(), 2);
+        assert!(hook.contains("count_let_through(is_down, generic, vk);\n                    return CallNextHookEx("));
+        assert!(hook.contains("                return 1;\n            }\n            // Neither a capture nor a hotkey took it: it goes on towards the program.\n            count_let_through(is_down, generic, vk);\n        }\n    }\n    CallNextHookEx("));
+        // Taken with each press: a captured key, a tap, a hotkey however it came.
+        assert_eq!(hook.matches("seq: LET_THROUGH.load(Ordering::Relaxed)").count(), 2, "the captured key and the tap");
+        assert!(hook.contains("phys: physical_key(kb) };\n                        locked(&KEY_QUEUE).push(Taken { vk, mask, owner, repeat, pressed });"));
+        let code = &SRC[..SRC.find("mod hook_carry_over_tests {").unwrap()];
+        assert_eq!(code.matches("locked(&HOTKEY_QUEUE).push((").count(), 4);
+        assert_eq!(code.matches("}, LET_THROUGH.load(Ordering::Relaxed)));").count(), 4, "every hotkey press with its count");
+        let pass = body("    fn pass_on_key(&self, vk: u32, _mask: u8, phys: Option<u16>, strokes: &[super::Stroke])");
+        assert!(pass.contains("super::left_down(strokes, sent)"), "a part sent has what it pressed released");
+        assert!(pass.contains("pass_on_inputs(vk, phys, strokes, scan_ex)"));
+        // The record of keys kept from the system: marked where the hook swallows a captured
+        // key-down and a hotkey's, cleared by every key-up, and asked by `keyboard_now` — with the
+        // screen reader's key as the hook tells it, and the count.
+        assert!(hook.contains("if is_up {\n                CAPTURED_HELD.up(vk);\n                KEPT_BACK.up(vk);"));
+        assert!(hook.contains("if swallow_captured(is_down, || down(vk as u16)) {\n                        if is_down {\n                            KEPT_BACK.taken_down(vk);"));
+        assert!(hook.contains("hook_hotkey(kb, vk, mask, late) {\n                KEPT_BACK.taken_down(vk);\n                return 1;"));
+        let now = body("    fn keyboard_now(&self, vk: u32, _mask: u8, _phys: Option<u16>)");
+        assert!(now.contains("down(vk as i32) || KEPT_BACK.is_held(vk)"));
+        assert!(now.contains("reader_mod: SCREEN_READER_MOD_DOWN.load(Ordering::Relaxed) || down(0x2D) || down(0x60) || down(0x14),"));
+        assert!(hook.contains("let screen_reader_held = recorded || down(0x2D) || down(0x60) || down(0x14);"), "the same keys as the hook's own rule");
+        assert!(now.contains("let_through: LET_THROUGH.load(Ordering::Relaxed),"));
     }
 }
 

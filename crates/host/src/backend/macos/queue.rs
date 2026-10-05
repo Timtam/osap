@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 use crate::backend::{HostEvents, Taken};
 
 thread_local! {
-    static HOTKEYS: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
+    /// Hotkey presses, each with the count of key-downs the tap had let through when Carbon
+    /// handed it over (`tap::let_through`).
+    static HOTKEYS: RefCell<Vec<(i32, u32)>> = const { RefCell::new(Vec::new()) };
     /// Foreground changes, as the window id at the time. Resolved to a `WinInfo` in
     /// `drain` rather than in the callback: reading a window's geometry and its owner's
     /// name is an accessibility round-trip into another process, and that is not something
@@ -27,8 +29,13 @@ thread_local! {
     static RECHECKS: RefCell<Vec<Instant>> = RefCell::new(Vec::new());
 }
 
+/// A hotkey press, as Carbon hands it over: with the count of key-downs the tap has let through by
+/// the time Carbon's event reaches this thread (`tap::let_through`). The tap, at the HID level,
+/// sees the hotkey's own key-down before Carbon matches it, so that key is in the count; a key typed
+/// after it is not, unless it passed the tap before Carbon's event came — the Mac session confirms
+/// the first (TODO.md, "The pass-on never ran on a Mac").
 pub fn push_hotkey(id: i32) {
-    HOTKEYS.with(|q| q.borrow_mut().push(id));
+    HOTKEYS.with(|q| q.borrow_mut().push((id, super::tap::let_through())));
 }
 
 pub fn push_activated(window: isize) {
@@ -58,7 +65,7 @@ pub fn push_key(key: Taken) {
 /// drained yet (`Backend::drop_queued_input`).
 pub fn drop_pending() -> crate::backend::DroppedInput {
     let keys = KEYS.with(|q| std::mem::take(&mut *q.borrow_mut())).into_iter().map(|k| (k.vk, k.mask, k.owner)).collect();
-    let hotkeys = HOTKEYS.with(|q| std::mem::take(&mut *q.borrow_mut()));
+    let hotkeys = HOTKEYS.with(|q| std::mem::take(&mut *q.borrow_mut())).into_iter().map(|(id, _)| id).collect();
     crate::backend::DroppedInput { keys, hotkeys }
 }
 
@@ -131,8 +138,8 @@ fn arm_recheck_ladder() {
 pub fn drain(events: &mut dyn HostEvents) {
     super::system::drain(events);
 
-    for id in HOTKEYS.with(|q| std::mem::take(&mut *q.borrow_mut())) {
-        events.on_hotkey(id);
+    for (id, seq) in HOTKEYS.with(|q| std::mem::take(&mut *q.borrow_mut())) {
+        events.on_hotkey(id, seq);
     }
 
     let activated = ACTIVATED.with(|q| std::mem::take(&mut *q.borrow_mut()));
@@ -147,7 +154,7 @@ pub fn drain(events: &mut dyn HostEvents) {
     }
 
     for k in KEYS.with(|q| std::mem::take(&mut *q.borrow_mut())) {
-        events.on_key(k.vk, k.mask, k.owner, k.repeat, k.front);
+        events.on_key(k.vk, k.mask, k.owner, k.repeat, k.pressed);
     }
 
     crate::backend::gamepad::drain_into(events);

@@ -563,6 +563,59 @@ pub fn translate_modifier_state(mask: u8) -> u32 {
     (mask_to_carbon(mask) >> 8) & 0xFF
 }
 
+/// What the event-source user data field (`kCGEventSourceUserData`) carries on every event this
+/// application posts to pass a key on to the program in front (`input::pass_on`). The tap lets an
+/// event carrying it through before anything else: no capture takes it, and it is no press, hold or
+/// modifier tap of the user's. "PASS".
+// Read by the tap and the input path, which are macOS-only; the events are tested anywhere.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const PASS_ON_MARK: i64 = 0x5041_5353;
+
+/// One event of a key passed on, as the Mac posts it: a modifier's key as a `FlagsChanged` event,
+/// the key itself as a key-down or key-up, each carrying the Quartz flags of the modifier roles
+/// held from that event on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PassOnEvent {
+    pub keycode: u16,
+    /// A modifier's key, posted as `FlagsChanged`, not as a key-down or key-up.
+    pub modifier: bool,
+    pub down: bool,
+    /// `kCGEventFlagMask*` of the roles held once this event is in.
+    pub flags: u64,
+}
+
+/// The events that send `strokes` ([`crate::backend::pass_on_strokes`]) of the key with keycode
+/// `code`, pressed with the roles in `mask`: a modifier on the left key of its role (Command 0x37,
+/// Option 0x3A, Shift 0x38, Control 0x3B), and every event with the flags of the roles held from
+/// it on — the press's own roles the user holds, which the strokes leave alone, and the ones the
+/// strokes pressed and have not released yet. The key's own two events carry exactly the press's
+/// roles: the modifiers travel as flags on the event as well as keys of their own, as Quartz
+/// documents, so an application that reads only the flags hears the same combination. Pure.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn pass_on_events(code: u16, mask: u8, strokes: &[crate::backend::Stroke]) -> Vec<PassOnEvent> {
+    use crate::backend::Stroke;
+    let pressed = strokes.iter().fold(0u8, |acc, s| match *s {
+        Stroke::Modifier { role, down: true } => acc | role,
+        _ => acc,
+    });
+    let mut held = mask & !pressed & !crate::backend::MASK_TAP;
+    strokes
+        .iter()
+        .map(|s| match *s {
+            Stroke::Modifier { role, down } => {
+                if down {
+                    held |= role;
+                } else {
+                    held &= !role;
+                }
+                let keycode = MODIFIER_KEYS.iter().find(|m| m.mask == role).map_or(0, |m| m.keycodes[0]);
+                PassOnEvent { keycode, modifier: true, down, flags: mask_to_cg_flags(held) }
+            }
+            Stroke::Key { down } => PassOnEvent { keycode: code, modifier: false, down, flags: mask_to_cg_flags(held) },
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,6 +689,52 @@ mod tests {
             let vk = key_to_vk(&format!("F{n}")).unwrap();
             assert_eq!(vk_to_keycode(vk), None, "F{n} should have no macOS keycode");
         }
+    }
+
+    /// A key passed on, as the Mac posts it: Command+Shift+Tab with nothing held is Command's and
+    /// Shift's left keys going down as `FlagsChanged` with the flags growing, Tab down and up with
+    /// both flags, and the two going up with the flags shrinking; with Shift held, Shift is no
+    /// event of its own and in every event's flags.
+    #[test]
+    fn a_key_passed_on_carries_its_modifiers_as_keys_and_as_flags() {
+        use crate::backend::{pass_on_strokes, KeyboardNow, Pressed};
+        let tab = 0x30;
+        let ev = |keycode, modifier, down, flags| PassOnEvent { keycode, modifier, down, flags };
+        let now = |mods| KeyboardNow { front: Some(1), mods, ..KeyboardNow::default() };
+        let w1 = Pressed { front: 1, ..Pressed::default() };
+        let cmd_shift = MASK_CTRL | MASK_SHIFT;
+        let both = CG_FLAG_COMMAND | CG_FLAG_SHIFT;
+        let s = pass_on_strokes(cmd_shift, w1, now(0)).unwrap();
+        assert_eq!(
+            pass_on_events(tab, cmd_shift, &s),
+            vec![
+                ev(0x37, true, true, CG_FLAG_COMMAND),
+                ev(0x38, true, true, both),
+                ev(tab, false, true, both),
+                ev(tab, false, false, both),
+                ev(0x38, true, false, CG_FLAG_COMMAND),
+                ev(0x37, true, false, 0),
+            ]
+        );
+        let s = pass_on_strokes(cmd_shift, w1, now(MASK_SHIFT)).unwrap();
+        assert_eq!(
+            pass_on_events(tab, cmd_shift, &s),
+            vec![
+                ev(0x37, true, true, both),
+                ev(tab, false, true, both),
+                ev(tab, false, false, both),
+                ev(0x37, true, false, CG_FLAG_SHIFT),
+            ]
+        );
+        // A bare key: two events, no flags. Control (the Win role) on its own left key.
+        let s = pass_on_strokes(0, w1, now(0)).unwrap();
+        assert_eq!(pass_on_events(tab, 0, &s), vec![ev(tab, false, true, 0), ev(tab, false, false, 0)]);
+        let s = pass_on_strokes(MASK_WIN, w1, now(0)).unwrap();
+        assert_eq!(pass_on_events(tab, MASK_WIN, &s)[0], ev(0x3B, true, true, CG_FLAG_CONTROL));
+        assert_eq!(pass_on_events(tab, MASK_WIN, &s)[3], ev(0x3B, true, false, 0));
+        // Option, for completeness: every role has its key.
+        let s = pass_on_strokes(MASK_ALT, w1, now(0)).unwrap();
+        assert_eq!(pass_on_events(tab, MASK_ALT, &s)[0], ev(0x3A, true, true, CG_FLAG_ALTERNATE));
     }
 
     /// The four modifiers a "<modifier> tap" spec resolves to are keys as well, and the tap

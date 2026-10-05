@@ -38,7 +38,9 @@
 //! hotkey's id, the listener's token, the timer's token, the read's ticket, the setting's
 //! registration — and is delivered to that, as it is when it runs; a key or a hotkey whose
 //! registration was made again meanwhile goes to the module's new registration of the same key,
-//! never to another module's (`captures.rs`).
+//! never to another module's. One whose registration the module let go of goes where it would
+//! have gone had the module never captured it: to the next module that captures it in the window
+//! it was pressed in, through that module's mailbox, or to the program in front (`captures.rs`).
 //!
 //! **A wait point is answered only by a host thread or by state the host keeps**, never by an
 //! event delivered to the waiting module, which waits here behind it (`task.rs`).
@@ -101,10 +103,15 @@ pub(crate) enum Event {
     /// read), written `spec`; `front` the window in front when it arrived, noted only when the
     /// module was busy then — so `Some` exactly for a press that was queued. It decides whether the
     /// module's new registration of the same combination may take the press (`hotkey_target`).
-    Hotkey { id: i32, owner: usize, front: Option<isize>, binding: Option<(u32, u8)>, spec: String },
-    /// A captured key the hook took for module `owner` in window `front`, for the capture
-    /// `token`; `repeat` is the keyboard's auto-repeat of a held key.
-    Key { owner: usize, token: i64, vk: u32, mods: u8, repeat: bool, front: isize },
+    /// `seq`, the count of key-downs let through when it came in (`backend::Pressed::seq`), decides
+    /// with `front` whether a queued press whose registration went may go to the program in front.
+    Hotkey { id: i32, owner: usize, front: Option<isize>, seq: u32, binding: Option<(u32, u8)>, spec: String },
+    /// A captured key the hook took for module `owner`, for the capture `token`, `pressed` as
+    /// `backend::Pressed` says — the window in front then, the count of keys let through, the
+    /// physical key; `repeat` is the keyboard's auto-repeat of a held key. `let_go`: the modules
+    /// that let go of it before it came to `owner`, in that order — empty for a key from the hook;
+    /// none of them is offered it again (`captures::pass_on_released`).
+    Key { owner: usize, token: i64, vk: u32, mods: u8, repeat: bool, pressed: crate::backend::Pressed, let_go: Vec<usize> },
     Pad { token: i64, kind: PadKind, event: Box<PadEvent>, delivery: Delivery },
     /// The window that came to the front; `upto`, the newest trigger number when it arrived: a
     /// trigger made after that, by an earlier queued handler, does not get it.

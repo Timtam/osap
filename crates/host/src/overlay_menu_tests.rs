@@ -858,9 +858,6 @@ impl ReadHost for Scripted {
     fn read_source(&self, _: &Lua, _: (i32, i32, i32, i32)) -> CaptureSource {
         CaptureSource::Standard
     }
-    fn slow_reads(&self) -> bool {
-        false
-    }
 }
 
 /// The scripted host's events are the tests' own (`Event::Call`).

@@ -5684,7 +5684,7 @@ impl HostEvents for Dispatcher<'_> {
         self.shared.dispatch_gamepad(events);
     }
 
-    fn on_hotkey(&mut self, id: i32) {
+    fn on_hotkey(&mut self, id: i32, seq: u32) {
         // Somebody is waiting for what this dispatch does: a read or a timer it asks for goes
         // in the interactive lane (ocr/types.rs, `enter_priority`).
         let _prio = ocr::types::enter_priority(ocr::types::Priority::Interactive);
@@ -5724,11 +5724,11 @@ impl HostEvents for Dispatcher<'_> {
             // compares keys with (`key_front`), never `resolve_key_scope`: on a Mac that asks the
             // frontmost application, on the tap's thread, and notes a pin nobody made.
             let front = mailbox::busy(self.shared, owner).then(|| self.shared.backend.key_front());
-            mailbox::deliver(self.shared, owner, &lua, Event::Hotkey { id, owner, front, binding, spec });
+            mailbox::deliver(self.shared, owner, &lua, Event::Hotkey { id, owner, front, seq, binding, spec });
         }
     }
 
-    fn on_key(&mut self, vk: u32, mods: u8, owner: u32, repeat: bool, front: isize) {
+    fn on_key(&mut self, vk: u32, mods: u8, owner: u32, repeat: bool, pressed: backend::Pressed) {
         // Somebody is waiting for what this dispatch does: a read or a timer it asks for goes
         // in the interactive lane (ocr/types.rs, `enter_priority`).
         let _prio = ocr::types::enter_priority(ocr::types::Priority::Interactive);
@@ -5744,14 +5744,15 @@ impl HostEvents for Dispatcher<'_> {
             logging::line(
                 "keys",
                 &format!(
-                    "dispatch vk 0x{vk:02X}/m{mods} to {id}, pressed in window {front:#x}{}",
+                    "dispatch vk 0x{vk:02X}/m{mods} to {id}, pressed in window {:#x}{}",
+                    pressed.front,
                     if repeat { ", a repeat" } else { "" }
                 ),
             );
         }
         // To the module the hook took it for, and to that module's own capture of it — never to
         // another module's — through its mailbox (captures.rs, `arrive`).
-        captures::arrive(self.shared, vk, mods, owner, repeat, front);
+        captures::arrive(self.shared, vk, mods, owner, repeat, pressed);
     }
 
     fn on_window_activate(&mut self, win: WinInfo) {
@@ -5813,6 +5814,16 @@ impl HostEvents for Dispatcher<'_> {
     }
 }
 
+/// Whether a hotkey holds the combination `(vk, mask)` at the system now: a module's registration
+/// that holds it (`live`, enabled module or not — the system matches what is registered), or the
+/// application's own reload key, counted as held whether the system granted it or not. What a key
+/// passed on to the program in front would be taken by instead (`captures::pass_on`). A
+/// registration whose combination only the system read (`binding` `None`) cannot be compared, and
+/// holds nothing here. The host's `KeyHost` and the key-scope tests' holder both ask this.
+pub(crate) fn hotkey_holds(regs: &HashMap<i32, HotkeyReg>, vk: u32, mask: u8) -> bool {
+    backend::key_spec(RELOAD_HOTKEY_SPEC) == Some((vk, mask)) || regs.values().any(|r| r.live && r.binding == Some((vk, mask)))
+}
+
 /// The hotkey registration a press of hotkey `id`, for module `owner`, goes to as it runs: `id`
 /// while it is registered for that module, holds its combination at the OS (`live`) and the
 /// module is on; and otherwise — the registration released and made again meanwhile, by an
@@ -5852,16 +5863,21 @@ fn hotkey_target(
 }
 
 /// A hotkey as it runs (`Event::Hotkey`): its registration in `regs`, or the module's new one of
-/// the same combination ([`hotkey_target`]) — said, as a captured key's is — or nothing. The host's
-/// own `open` and the key-scope tests' holder both run this, so the tests run the host's rule and
-/// not a copy of it.
+/// the same combination ([`hotkey_target`]) — said, as a captured key's is — or nothing; a press
+/// that waited while its module was busy, for a registration released since and not made again,
+/// goes where it would have gone had the module never registered it, as a captured key does: to
+/// the next module that captures the combination in the window in front when it arrived, as that
+/// module's key, or else to the program in front — while that window still is, and no key-down has
+/// reached the program since it came in (`seq`). The host's own `open` and the key-scope tests'
+/// holder both run this, so the tests run the host's rule and not a copy of it.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn open_hotkey_in<H: captures::KeyHost + ?Sized>(
+pub(crate) fn open_hotkey_in<H: captures::KeyHost + mailbox::MailHost>(
     h: &H,
     regs: &RefCell<HashMap<i32, HotkeyReg>>,
     id: i32,
     owner: usize,
     front: Option<isize>,
+    seq: u32,
     binding: Option<(u32, u8)>,
     spec: &str,
 ) -> Opened {
@@ -5885,6 +5901,17 @@ pub(crate) fn open_hotkey_in<H: captures::KeyHost + ?Sized>(
             }
             new
         }
+        // A press that waited in its busy module's mailbox for a registration the module released
+        // since, and did not make again: kept at the press for nothing, so it goes now where it
+        // would have gone — to the next module's capture of the combination in the window in front
+        // when it arrived, or to the program in front while that window still is
+        // (`captures::pass_on_released`). No physical key: the system matched the press. Not a
+        // repeat, and no module let go of it before this one.
+        captures::Target::Gone(captures::Gone::Released) if queued => {
+            let pressed = backend::Pressed { front: front.unwrap_or(0), seq, phys: None };
+            captures::pass_on_released(h, owner, spec, binding, (false, pressed), Vec::new());
+            return Opened::Gone;
+        }
         captures::Target::Gone(gone) => {
             if gone != captures::Gone::Disabled && h.captures().say_dropped(owner, Instant::now()) {
                 let line = if queued {
@@ -5906,8 +5933,8 @@ pub(crate) fn open_hotkey_in<H: captures::KeyHost + ?Sized>(
 
 impl Shared {
     /// A hotkey as it runs (`Event::Hotkey`), by [`open_hotkey_in`].
-    fn open_hotkey(&self, id: i32, owner: usize, front: Option<isize>, binding: Option<(u32, u8)>, spec: &str) -> Opened {
-        open_hotkey_in(self, &self.hotkeys, id, owner, front, binding, spec)
+    fn open_hotkey(&self, id: i32, owner: usize, front: Option<isize>, seq: u32, binding: Option<(u32, u8)>, spec: &str) -> Opened {
+        open_hotkey_in(self, &self.hotkeys, id, owner, front, seq, binding, spec)
     }
 
     /// The tick's phase for the events that waited in busy modules' mailboxes
@@ -5950,8 +5977,10 @@ impl mailbox::MailHost for Shared {
 
     fn open(&self, idx: usize, lua: &Lua, ev: Event) -> Opened {
         match ev {
-            Event::Hotkey { id, owner, front, binding, spec } => self.open_hotkey(id, owner, front, binding, &spec),
-            Event::Key { owner, token, vk, mods, front, .. } => captures::open_key(self, owner, token, vk, mods, front),
+            Event::Hotkey { id, owner, front, seq, binding, spec } => self.open_hotkey(id, owner, front, seq, binding, &spec),
+            Event::Key { owner, token, vk, mods, repeat, pressed, let_go } => {
+                captures::open_key(self, owner, token, vk, mods, repeat, pressed, let_go)
+            }
             Event::Pad { token, event, delivery, .. } => self.open_pad(token, &event, &delivery),
             Event::Activate { win, upto } => self.window_opened(idx, "window trigger", activate_call(lua, &win, Some(upto))),
             Event::Initial { win, reprime } => {
@@ -6286,6 +6315,9 @@ impl captures::KeyHost for Shared {
     }
     fn key_module_id(&self, idx: usize) -> String {
         self.ids.borrow().get(idx).cloned().unwrap_or_else(|| "?".to_string())
+    }
+    fn key_hotkey_holds(&self, vk: u32, mask: u8) -> bool {
+        hotkey_holds(&self.hotkeys.borrow(), vk, mask)
     }
     fn refresh_captured(&self) {
         Shared::refresh_captured(self);
@@ -10491,7 +10523,7 @@ mod ocr_wiring_tests {
         let forget = rollback.find("self.captures.forget_owners_from(n);").expect("the scopes and flags");
         assert!(forget > resolve && rollback[forget..].contains("self.refresh_captured();"));
         let on_key = body(LIB, "fn on_key(&mut self");
-        assert!(on_key.contains("captures::arrive(self.shared, vk, mods, owner, repeat, front);"), "{on_key}");
+        assert!(on_key.contains("captures::arrive(self.shared, vk, mods, owner, repeat, pressed);"), "{on_key}");
         assert!(body(LIB, "fn install_host_api(").contains("install_key_captures(lua, &keys, idx, shared.clone())?;"));
     }
 
@@ -10517,7 +10549,7 @@ mod ocr_wiring_tests {
         assert!(body(GAMEPAD, "fn deliver_pad_events(").contains("mailbox::deliver(self, idx, &lua, Event::Pad"));
         assert!(body(IMAGES, "pub(crate) fn fire_image_results(").matches("mailbox::deliver(self, owner, &lua, Event::Image").count() == 2);
         assert!(body(SNAP, "pub(crate) fn fire_snapshot_results(").contains("mailbox::deliver(self, idx, &lua, Event::Snapshot"));
-        assert!(body(OCR_LUA, "pub(crate) fn fire_at<H: MailHost>(h: &H, now: Instant)").contains("mailbox::deliver(h, idx, &lua, Event::Read"));
+        assert!(body(OCR_LUA, "pub(crate) fn fire<H: MailHost>(h: &H)").contains("mailbox::deliver(h, idx, &lua, Event::Read"));
         assert!(body(TIMERS, "pub(crate) fn fire_due(").contains("deliver(Due::Once { token, idx, lua });"));
         // The one place a module's own onChange runs inside its own set: the caller's VM.
         let set = bindings(body(LIB, "fn install_host_api("), "settings_api").into_iter().find(|b| b.0 == "set").expect("set").1;
@@ -11017,7 +11049,8 @@ mod ocr_wiring_tests {
         let on = body(LIB, "fn on_hotkey(&mut self");
         assert!(on.contains("mailbox::busy(self.shared, owner).then(|| self.shared.backend.key_front())"), "{on}");
         assert!(!on.contains(concat!("backend.resolve_key", "_scope()")), "{on}");
-        assert!(body(LIB, "fn open_hotkey(").contains("open_hotkey_in(self, &self.hotkeys, id, owner, front, binding, spec)"));
+        assert!(body(LIB, "fn open_hotkey(").contains("open_hotkey_in(self, &self.hotkeys, id, owner, front, seq, binding, spec)"));
+        assert!(on.contains("Event::Hotkey { id, owner, front, seq, binding, spec }"), "the press's count goes with it");
         let open = body(LIB, "pub(crate) fn open_hotkey_in<");
         assert!(open.contains("let queued = front.is_some();"));
         assert!(open.contains("captures::moved_line(&h.key_module_id(owner), spec, queued)"));
@@ -11058,17 +11091,14 @@ mod ocr_wiring_tests {
     /// The read service's share of the handlers, checked where it is written — `Shared` is no
     /// test's holder: the delivery sweeps a hang before it drains, and only while a read is out;
     /// an event queued in the interactive lane raises the module's parked handler, before folding;
-    /// `Shared` hands the delivery the application's slow-reads switch; and a reading that could not
-    /// be built goes through `handover_failed`, a stop when its VM ran out of memory.
+    /// and a reading that could not be built goes through `handover_failed`, a stop when its VM ran
+    /// out of memory.
     #[test]
-    fn the_hang_answer_the_promotion_and_the_slow_switch_are_wired() {
-        let fire = body(OCR_LUA, "pub(crate) fn fire_at<H: MailHost>(h: &H, now: Instant)");
+    fn the_hang_answer_and_the_promotion_are_wired() {
+        let fire = body(OCR_LUA, "pub(crate) fn fire<H: MailHost>(h: &H)");
         let sweep = fire.find("h.ocr().hang_sweep()").expect("the hang answer");
         assert!(sweep > fire.find("if !st.pending.borrow().is_empty()").unwrap());
         assert!(sweep < fire.find("h.ocr().drain()").unwrap());
-        assert!(fire.contains("hand_over(st, h.slow_reads(), now, came)"));
-        assert!(body(OCR_LUA, "pub(crate) fn fire<H: MailHost>(h: &H)").contains("fire_at(h, Instant::now())"));
-        assert!(body(OCR_LUA, "impl ReadHost for Shared").contains("crate::appcfg::slow_reads()"));
         // A reading that could not be built is a stop when the VM ran out of memory, for a waiting
         // handler and for a callback alike.
         assert!(fire.contains("handover_failed(h, &p.lua, p.owner.idx, &e);"));
@@ -11221,7 +11251,7 @@ mod uptime_wiring_tests {
         assert!(body(IMAGES, "fn worker_loop(").contains("batch.retain(|t| !set.remove(&t.id));"));
         assert!(body(IMAGES, "pub(crate) fn purge_pending_images(").contains("self.ended_images.borrow_mut()"));
         // OCR keys: forgotten when their last read is answered or dropped.
-        assert!(body(OCR_LUA, "pub(crate) fn fire_at<H: MailHost>(h: &H, now: Instant)").contains("st.settled(p.owner, p.key.as_deref());"));
+        assert!(body(OCR_LUA, "pub(crate) fn fire<H: MailHost>(h: &H)").contains("st.settled(p.owner, p.key.as_deref());"));
         assert!(body(OCR_LUA, "pub(crate) fn open_read<H: ReadHost>(").contains("st.settled(p.owner, p.key.as_deref());"));
         assert!(body(OCR_LUA, "pub(crate) fn discard_read<H: ReadHost>(").contains("st.settled(r.p.owner, r.p.key.as_deref());"));
         assert!(body(OCR_LUA, "pub(crate) fn drop_owner<H: ReadHost>(").contains("st.settled(p.owner, p.key.as_deref());"));

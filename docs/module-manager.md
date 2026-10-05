@@ -397,16 +397,6 @@ On every system:
 
 - **Detailed (trace) logging** — takes effect immediately.
 - **Save the images OCR was given** — takes effect immediately.
-- **Slow every text read by 2 seconds, for testing** — takes effect immediately, and is off
-  again after a restart: it is never stored. Every text read's answer reaches its module 2
-  seconds after it came, while everything else goes on, for trying with a screen reader what
-  happens while a read is still out — switching windows, pressing keys, another module's
-  hotkey. A module may drop an answer that comes this late, or say it differently (see
-  "Slow reads, for testing" under [`host.ocr.recognize`](api/ocr.md#host-ocr-recognize)). It slows
-  every read the host hands over, to a callback and to a handler that waits for it alike — a
-  module whose handler waits is busy 2 seconds longer, and its keys wait with it. A read made on
-  the event loop where the call cannot wait ([Where it waits](api/ocr.md#where-it-waits)) is not
-  slowed.
 - **Calibration keys in overlays** — reload modules to apply.
 - **Load modules not meant for this system** (their `supported_os` excludes it) — restart to
   apply.
@@ -444,9 +434,7 @@ it.
 Every label says **when its setting takes effect** — immediately, after reloading modules, or
 after a restart — because a setting that appears to do nothing is worse than one that admits
 it needs a restart. Under each checkbox is a sentence saying what the setting is for.
-Changes are written to `settings.toml` beside the application, so they survive a restart —
-all but the slow-reads switch, which is for one test session and must not stay on by being
-forgotten: every overlay would be late in normal use, with only the log to say why.
+Changes are written to `settings.toml` beside the application, so they survive a restart.
 
 These were environment variables, and a variable is the wrong shape for them: it has to be
 decided before the process starts, cannot be changed while it runs, is invisible to anybody

@@ -52,6 +52,27 @@ thread_local! {
     /// like it came from the hardware, which is what the plugins this platform drives are
     /// written to react to.
     static SOURCE: RefCell<Option<CFRetained<CGEventSource>>> = RefCell::new(None);
+    /// The event source a key passed on to the program in front is posted from (`pass_on`): a
+    /// private state table, so that what it posts never enters the HID system's. That table is
+    /// what `keyboard_now` reads as the keys and modifiers the user holds; posted from `SOURCE`, a
+    /// Command passed on, or the key itself, could still read as held when the next key's turn
+    /// comes in the same delivery, and refuse it for a hand that is not there — and a real key
+    /// typed between a posted Command's press and its release could take it on. Every event
+    /// passed on carries its flags explicitly, so the program loses nothing by it.
+    static PASS_SOURCE: RefCell<Option<CFRetained<CGEventSource>>> = RefCell::new(None);
+}
+
+/// The pass-on's own event source ([`PASS_SOURCE`]), created on first use; `None` if the system
+/// would not create one, and then nothing is passed on — the shared source would bring back what
+/// this one exists to keep out.
+fn pass_source() -> Option<CFRetained<CGEventSource>> {
+    PASS_SOURCE.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = CGEventSource::new(CGEventSourceStateID::Private);
+        }
+        slot.as_ref().cloned()
+    })
 }
 
 /// The shared event source, created on first use.
@@ -465,6 +486,62 @@ pub fn key_send(combo: &str) -> Result<(), String> {
     crate::logging::trace("macos", || {
         format!("key_send '{combo}' -> keycode {code} flags {:#x}", flags.0)
     });
+    Ok(())
+}
+
+/// The keyboard now, for passing key `vk`, pressed with `mask` on keycode `phys`, on to the
+/// program in front: the window in front asked afresh of the frontmost application
+/// (`ax::foreground_window_id`, one accessibility round trip, asked only for a key about to be
+/// passed on) — not the tap's idea of it, which a window opening in an application already in front
+/// need not change, so a dialog that opened meanwhile would get the key; `None` when the
+/// application did not answer. The key — `phys`, or looked up for `mask` where it is not known —
+/// held down as the HID system reports it, the hardware's state below every tap, or as the tap's own
+/// record of a key-down it swallowed has it; the modifier roles the HID system reports held; no
+/// screen reader's key (VoiceOver's are Control and Option, roles like any other); and the tap's
+/// count of key-downs let through. A key with no keycode is not held; `pass_on` then says it has
+/// none.
+pub fn keyboard_now(vk: u32, mask: u8, phys: Option<u16>) -> crate::backend::KeyboardNow {
+    let hid = CGEventSourceStateID::HIDSystemState;
+    let key_held = phys
+        .or_else(|| keys::vk_to_keycode_for(vk, mask))
+        .is_some_and(|code| CGEventSource::key_state(hid, code) || super::tap::held_back(code));
+    crate::backend::KeyboardNow {
+        front: super::ax::foreground_window_id(),
+        key_held,
+        mods: keys::mask_of_cg_flags(CGEventSource::flags_state(hid).0),
+        reader_mod: false,
+        let_through: super::tap::let_through(),
+    }
+}
+
+/// Posts `strokes` of key `vk`, pressed with `mask` on keycode `phys`, to the program in front
+/// (`keys::pass_on_events`): a modifier's key as a `FlagsChanged` event, the key's own down and
+/// up — on `phys` where it is known, so that the keypad's Enter is not sent as Return — each with
+/// the flags of the roles held from it on, and each marked with [`keys::PASS_ON_MARK`] in its
+/// event-source user data, which the tap lets through untouched. At the HID level, as `post` does
+/// everything, but from a private event source ([`PASS_SOURCE`]). Every event is built before the
+/// first is posted, so one that cannot be built posts nothing and leaves nothing down.
+pub fn pass_on(vk: u32, mask: u8, phys: Option<u16>, strokes: &[crate::backend::Stroke]) -> Result<(), String> {
+    let code = phys
+        .or_else(|| keys::vk_to_keycode_for(vk, mask))
+        .ok_or_else(|| format!("VK {vk:#04x}: {}", keys::why_no_keycode(vk)))?;
+    let src = pass_source().ok_or_else(|| "CGEventSourceCreate(Private) returned NULL".to_string())?;
+    let mut built = Vec::with_capacity(strokes.len());
+    for e in keys::pass_on_events(code, mask, strokes) {
+        let Some(event) = CGEvent::new_keyboard_event(Some(&*src), e.keycode, e.down) else {
+            return Err(format!("CGEventCreateKeyboardEvent returned NULL for keycode {}", e.keycode));
+        };
+        if e.modifier {
+            CGEvent::set_type(Some(&event), CGEventType::FlagsChanged);
+        }
+        CGEvent::set_flags(Some(&event), CGEventFlags(e.flags));
+        CGEvent::set_integer_value_field(Some(&event), CGEventField::EventSourceUserData, keys::PASS_ON_MARK);
+        built.push(event);
+    }
+    for event in &built {
+        post(event);
+    }
+    crate::logging::trace("macos", || format!("pass_on vk {vk:#04x} mask {mask}: {} event(s)", built.len()));
     Ok(())
 }
 

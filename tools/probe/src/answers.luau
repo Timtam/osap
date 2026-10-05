@@ -578,8 +578,7 @@ function M.ocrBatchingSteps(line, win)
   --
   -- Each read WAITS for its answer, here in the step's handler, so a time is from asking to the
   -- answer: it includes the turn of the loop that hands the answer over, and three strips asked
-  -- one after another carry three such turns against the band's one. With the slow-reads switch
-  -- on, every answer is held 2 s more, and the comparison says nothing: run it with the switch off.
+  -- one after another carry three such turns against the band's one.
   local ROUNDS = 3
   local oneMs, manyMs = math.huge, math.huge
   local oneWords, manyWords, failed = 0, 0, 0
@@ -618,8 +617,7 @@ function M.ocrBatchingSteps(line, win)
     line(
       "  ocr batching: one %dx%d region took %d ms from asking to the answer and read %d word(s); "
         .. "the same band as three strips, asked one after another, took %d ms and read %d word(s); "
-        .. "best of %d round(s)%s (each time includes the turn of the loop that hands the answer "
-        .. "over; with the slow-reads switch on it is 2 s more a read, and this comparison says nothing)",
+        .. "best of %d round(s)%s (each time includes the turn of the loop that hands the answer over)",
       band[3] - band[1], band[4] - band[2], oneMs, oneWords,
       manyMs, manyWords, ROUNDS,
       failed > 0 and string.format(" (%d strip(s) failed or timed out)", failed) or ""

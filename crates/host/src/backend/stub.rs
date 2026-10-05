@@ -4,13 +4,14 @@
 //! Also the backend of the tests that run module VMs against the host's key bindings: it keeps
 //! the captures and the owners it is handed, as a hook would, so a test can decide a key by them
 //! with [`super::capture_decision`], and it answers `resolve_key_scope` with the window a test
-//! put in front.
+//! put in front. A key passed on to the program in front (`pass_on_key`) is recorded, and sent
+//! nowhere: refused, as `key_send` is, unless a test lets it through.
 
 use std::cell::{Cell, RefCell};
 
 use super::{
     Backend, CaptureFn, CaptureSource, CapturedImage, Captured, ControlInfo, DumpNode, HostEvents,
-    MouseButton, OcrText, OwnerKeys, WinInfo, CAPTURE_FAILED,
+    KeyboardNow, MouseButton, OcrText, OwnerKeys, Stroke, WinInfo, CAPTURE_FAILED,
 };
 
 #[derive(Default)]
@@ -19,6 +20,19 @@ pub struct StubBackend {
     front: Cell<isize>,
     /// The captures and the owners as the host last handed them over.
     keys: RefCell<(Vec<Captured>, Vec<OwnerKeys>)>,
+    /// The keys a test holds down, and the modifier roles, for `keyboard_now`.
+    held: RefCell<(Vec<u32>, u8)>,
+    /// Whether a test holds a screen reader's key, for `keyboard_now`.
+    reader: Cell<bool>,
+    /// The count of key-downs let through to the program, as a test moves it on, for
+    /// `keyboard_now`.
+    let_through: Cell<u32>,
+    /// Every key passed on, as `(vk, mask, strokes)`, in order.
+    passed: RefCell<Vec<(u32, u8, Vec<Stroke>)>>,
+    /// The physical key each of them was sent on, in the same order.
+    passed_phys: RefCell<Vec<Option<u16>>>,
+    /// Whether a key passed on is taken: no by default, as there is no input to send it to.
+    sends: Cell<bool>,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -32,6 +46,43 @@ impl StubBackend {
     /// a key by.
     pub(crate) fn keys(&self) -> (Vec<Captured>, Vec<OwnerKeys>) {
         self.keys.borrow().clone()
+    }
+
+    /// Holds the keys `vks` and the modifier roles `mods` down, for `keyboard_now`.
+    pub(crate) fn hold(&self, vks: &[u32], mods: u8) {
+        *self.held.borrow_mut() = (vks.to_vec(), mods);
+    }
+
+    /// Holds a screen reader's key down (`true`), or lets it go, for `keyboard_now`.
+    pub(crate) fn hold_reader(&self, held: bool) {
+        self.reader.set(held);
+    }
+
+    /// The count of key-downs let through to the program now, for `keyboard_now`: what a hook
+    /// would have counted by the time a key is taken (`Pressed::seq`), and as a key typed later
+    /// moves it on.
+    pub(crate) fn let_through(&self) -> u32 {
+        self.let_through.get()
+    }
+
+    /// A key-down typed and let through to the program: the count moves on by one.
+    pub(crate) fn type_through(&self) {
+        self.let_through.set(self.let_through.get().wrapping_add(1));
+    }
+
+    /// The physical keys the keys passed on since the last call were sent on, in order.
+    pub(crate) fn take_passed_phys(&self) -> Vec<Option<u16>> {
+        std::mem::take(&mut *self.passed_phys.borrow_mut())
+    }
+
+    /// Takes a key passed on (`true`), or refuses it as `key_send` does.
+    pub(crate) fn set_sends(&self, sends: bool) {
+        self.sends.set(sends);
+    }
+
+    /// The keys passed on since the last call, as `(vk, mask, strokes)`, in order.
+    pub(crate) fn take_passed(&self) -> Vec<(u32, u8, Vec<Stroke>)> {
+        std::mem::take(&mut *self.passed.borrow_mut())
     }
 }
 
@@ -197,6 +248,25 @@ impl Backend for StubBackend {
     }
     fn key_front(&self) -> isize {
         self.front.get()
+    }
+    fn keyboard_now(&self, vk: u32, _mask: u8, _phys: Option<u16>) -> KeyboardNow {
+        let held = self.held.borrow();
+        KeyboardNow {
+            front: Some(self.front.get()),
+            key_held: held.0.contains(&vk),
+            mods: held.1,
+            reader_mod: self.reader.get(),
+            let_through: self.let_through.get(),
+        }
+    }
+    fn pass_on_key(&self, vk: u32, mask: u8, phys: Option<u16>, strokes: &[Stroke]) -> Result<(), String> {
+        self.passed.borrow_mut().push((vk, mask, strokes.to_vec()));
+        self.passed_phys.borrow_mut().push(phys);
+        if self.sends.get() {
+            Ok(())
+        } else {
+            Err("input is not implemented on this platform yet".to_string())
+        }
     }
     fn modifiers_down(&self) -> bool {
         false

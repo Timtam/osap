@@ -99,9 +99,6 @@ impl ReadHost for Host {
     fn read_source(&self, _: &Lua, _: (i32, i32, i32, i32)) -> CaptureSource {
         CaptureSource::Standard
     }
-    fn slow_reads(&self) -> bool {
-        false
-    }
 }
 
 fn kind_of(ev: &Event) -> &'static str {

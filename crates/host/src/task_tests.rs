@@ -166,8 +166,6 @@ struct Host {
     raise: Cell<bool>,
     /// (module, the shim's word for where) of every legacy call.
     legacy: RefCell<Vec<(usize, String)>>,
-    /// The "Slow every text read" switch, as this holder's own.
-    slow: Cell<bool>,
     /// This thread is the loop's while the holder lives.
     _loop: crate::loop_guard::TestLoop,
 }
@@ -206,9 +204,6 @@ impl ReadHost for Host {
     }
     fn read_source(&self, _: &Lua, _: (i32, i32, i32, i32)) -> CaptureSource {
         CaptureSource::Standard
-    }
-    fn slow_reads(&self) -> bool {
-        self.slow.get()
     }
 }
 
@@ -262,7 +257,6 @@ fn holder((ocr, stop): (Service<Fake>, ShutdownHandle)) -> Rc<Host> {
         errors: RefCell::new(Vec::new()),
         raise: Cell::new(false),
         legacy: RefCell::new(Vec::new()),
-        slow: Cell::new(false),
         _loop: crate::loop_guard::mark_for_a_test(),
     })
 }
@@ -1496,7 +1490,7 @@ fn pending_says_whether_a_read_or_a_wait_with_the_key_is_out() {
     }
 }
 
-// ── A read a key waits behind, the hang answer, the slow-reads switch ────────────────────────
+// ── A read a key waits behind, and the hang answer ───────────────────────────────────────────
 
 /// Turns of the loop — the readings only — until `cond` holds in `lua`, 10 s at most.
 fn fire_until(h: &Host, lua: &Lua, cond: &str) {
@@ -1682,84 +1676,6 @@ fn a_hang_resumes_every_waiting_handler_once_with_failed() {
         assert!(yes(lua, "return second == 'failed'"), "answered on the next turn");
     }
     release(9851);
-    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
-    assert_eq!(h.tasks.len(), 0);
-}
-
-/// The slow-reads switch: an answer is handed over 2 s after it came, on a clock the test steps,
-/// to a callback and to a task's wait alike; the read is still out for `pending` meanwhile; the
-/// loop goes on — no turn is held, and a timer of the same module runs while the answer is held;
-/// a disable meanwhile drops it; switched off, everything held is handed over at once, in the
-/// order it came.
-#[test]
-fn the_slow_reads_switch_hands_answers_over_two_seconds_late() {
-    let h = host();
-    let lua = vm(&h, 1);
-    h.slow.set(true);
-    let got = || lua.load("return table.concat(got, ' | ')").eval::<String>().unwrap();
-    // Turns of the loop at `now` until `n` answers are held; none of them holds the loop.
-    let held = |n: usize, now: Instant| {
-        let until = Instant::now() + Duration::from_secs(10);
-        while h.state.held() < n {
-            assert!(Instant::now() < until, "never held");
-            let turn = Instant::now();
-            reads::fire_at(&*h, now);
-            assert!(turn.elapsed() < Duration::from_millis(500), "a turn of the loop waited");
-            std::thread::sleep(Duration::from_millis(2));
-        }
-    };
-    run(
-        &lua,
-        r#"
-        got = {}
-        host.ocr.recognize({ 9331, 5, 9361, 15 }, { key = "k" }, function(r)
-          got[#got + 1] = "read " .. r.text
-          inCallback = host.ocr.pending("k")
-        end)
-        task.run(function()
-          local r = host.ocr.recognize({ region = { 9332, 5, 9362, 15 } })
-          got[#got + 1] = "waited " .. r.text
-        end)
-        "#,
-    );
-    let t0 = Instant::now();
-    held(2, t0);
-    assert!(yes(&lua, "return #got == 0 and host.ocr.pending('k') == true"), "{}", got());
-    run(&lua, "host.timer.after(0, function() got[#got + 1] = 'timer' end)");
-    fire_timers(&h, Instant::now());
-    assert_eq!(got(), "timer", "the module goes on while its answers are held");
-    reads::fire_at(&*h, t0 + Duration::from_millis(1999));
-    assert_eq!(got(), "timer");
-    reads::fire_at(&*h, t0 + Duration::from_secs(2));
-    assert_eq!(got(), "timer | read 9331,5 | waited 9332,5");
-    assert!(yes(&lua, "return inCallback == false"));
-    assert!(!h.state.has_pending());
-
-    // A disable while it is held drops it.
-    run(&lua, "got = {}; host.ocr.recognize({ 9333, 5, 9363, 15 }, function() got[#got + 1] = 'dropped' end)");
-    let t1 = Instant::now();
-    held(1, t1);
-    disable(&h, 1);
-    assert_eq!(h.state.held(), 0);
-    assert!(!h.state.has_pending(), "nothing is left to turn the loop for");
-    reads::fire_at(&*h, t1 + Duration::from_secs(3));
-    enable(&h, 1);
-    assert_eq!(got(), "");
-
-    // Off: everything held is handed over on the next turn, in the order it came.
-    run(
-        &lua,
-        r#"
-        host.ocr.recognize({ 9334, 5, 9364, 15 }, function(r) got[#got + 1] = r.text end)
-        host.ocr.recognize({ 9335, 5, 9365, 15 }, function(r) got[#got + 1] = r.text end)
-        "#,
-    );
-    let t2 = Instant::now();
-    held(2, t2);
-    h.slow.set(false);
-    reads::fire_at(&*h, t2);
-    assert_eq!(got(), "9334,5 | 9335,5");
-    assert_eq!(h.state.held(), 0);
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
     assert_eq!(h.tasks.len(), 0);
 }

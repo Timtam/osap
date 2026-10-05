@@ -1121,6 +1121,28 @@ pub trait Backend {
     /// moment the frontmost application is most likely to be slow, and that question pins nothing
     /// here.
     fn key_front(&self) -> isize;
+    /// The keyboard now, for passing key `vk`, pressed with the roles in `mask` on the physical key
+    /// `phys` ([`Pressed::phys`]), on to the program in front ([`pass_on_strokes`]) — see
+    /// [`KeyboardNow`]: the window in front, whether the key is held down — down as far as the
+    /// system knows, or its key-down kept from the system by the hook or the tap with no key-up
+    /// seen since — the modifier roles held down, whether a screen reader's own key is held, and how
+    /// many key-downs the hook or the tap has let through to the program so far. Windows:
+    /// `GetForegroundWindow`, `GetAsyncKeyState` and the hook's own record; asks nobody but the
+    /// system, microseconds. macOS: the window in front asked afresh of the frontmost application —
+    /// one accessibility round trip, the tap's own idea of it can be stale — the HID system's key
+    /// and modifier state, and the tap's own record; the key is `phys`, or looked up for `mask`, as
+    /// a letter typed with Command is.
+    fn keyboard_now(&self, vk: u32, mask: u8, phys: Option<u16>) -> KeyboardNow;
+    /// Sends `strokes` — key `vk`, pressed with the roles in `mask` on the physical key `phys`
+    /// ([`Pressed::phys`]: that key, where known, so that the numeric keypad's Enter is that Enter
+    /// again), and the modifiers [`pass_on_strokes`] chose — to the program in front, each event
+    /// marked so that the hook or the tap lets it through untouched: no capture takes it, and it
+    /// does not count as a press, a hold or a modifier tap of the user's, nor as a key let through.
+    /// Windows: one `SendInput`, whose events go in one after another with no other input between
+    /// them; one it takes only a part of has what that part left down released, and is an `Err`.
+    /// macOS: `CGEventPost` at the HID level from an event source of its own, every event built
+    /// before the first is posted. `Err` says what failed; nothing is left down.
+    fn pass_on_key(&self, vk: u32, mask: u8, phys: Option<u16>, strokes: &[Stroke]) -> Result<(), String>;
     /// Are any of Ctrl / Alt / Shift / Win held down right now? A hotkey callback runs
     /// WHILE its own combination is still pressed, so anything it synthesises afterwards
     /// arrives with those modifiers attached — see the note in the overlay runtime.
@@ -1182,15 +1204,18 @@ pub struct DroppedInput {
 
 /// Sink for OS events, implemented by the host to bridge into Luau callbacks.
 pub trait HostEvents {
-    fn on_hotkey(&mut self, id: i32);
+    /// Hotkey `id` was pressed; `seq` is how many key-downs the hook or the tap had let through to
+    /// the program when it came in ([`Pressed::seq`]): as the hook matched it, or as the system
+    /// delivered it.
+    fn on_hotkey(&mut self, id: i32, seq: u32);
     fn on_window_activate(&mut self, win: WinInfo);
     /// The keyboard focus moved (possibly within the same top-level window).
     fn on_focus_change(&mut self);
     /// A captured key fired; `mods` is the pressed modifier bitmask (MASK_*). `owner` is the
     /// module the hook or the tap took it for ([`capture_decision`]), `repeat` whether it is the
-    /// keyboard's auto-repeat of a key held down, and `front` the window that was in front when
-    /// it was pressed ([`Taken`]).
-    fn on_key(&mut self, vk: u32, mods: u8, owner: u32, repeat: bool, front: isize);
+    /// keyboard's auto-repeat of a key held down, and `pressed` where and how it was pressed
+    /// ([`Taken`]).
+    fn on_key(&mut self, vk: u32, mods: u8, owner: u32, repeat: bool, pressed: Pressed);
     /// What the game-controller sources saw since the last drain, in order — see
     /// [`gamepad::drain_into`]. A default body, so a sink that does not care about pads
     /// (a test's) need not say so.
@@ -1360,6 +1385,14 @@ pub fn scope_of(owners: &[OwnerKeys], owner: u32) -> isize {
     owners.iter().find(|e| e.owner == owner).map_or(0, |e| e.scope)
 }
 
+/// Whether module `owner`'s captures count in window `front`: it is scoped to that window or to
+/// everywhere. The rule [`capture_decision`] takes a key by, and the host offers a key a busy
+/// module let go of by (`captures::offered_to`).
+pub fn in_scope(owners: &[OwnerKeys], owner: u32, front: isize) -> bool {
+    let s = scope_of(owners, owner);
+    s == 0 || s == front
+}
+
 /// The modules whose menu flag counts for the window `front`: each says a menu is open, is
 /// scoped to that window or to everywhere, and holds a capture in `set` right now. A module
 /// that captures nothing cannot open a window's keys to a menu: its flag may be one it set
@@ -1410,8 +1443,7 @@ pub fn capture_decision(
     let mut taker = None;
     for c in set.iter().filter(|c| c.vk == vk && c.mask == mask) {
         any = true;
-        let s = scope_of(owners, c.owner);
-        if s == 0 || s == front {
+        if in_scope(owners, c.owner, front) {
             taker = Some(c.owner);
             break;
         }
@@ -1433,14 +1465,33 @@ pub fn capture_decision(
 
 /// A captured key-down the hook or the tap took, as it queues it for the pump: the combination,
 /// the module it was taken for, whether it is the keyboard's auto-repeat of a key held down, and
-/// the window that was in front when it was pressed.
+/// where and how it was pressed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Taken {
     pub vk: u32,
     pub mask: u8,
     pub owner: u32,
     pub repeat: bool,
+    pub pressed: Pressed,
+}
+
+/// A press as the hook or the tap saw it, kept with the key: what decides, when its module's
+/// mailbox delivers it, whether a key its module let go of meanwhile may still go to the program
+/// in front, and how ([`pass_on_strokes`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pressed {
+    /// The window that was in front when it was pressed, as the hook or the tap compares every
+    /// key with it ([`Backend::key_front`]); 0 when none was known.
     pub front: isize,
+    /// How many key-downs the hook or the tap had let through to the program by then
+    /// ([`KeyboardNow::let_through`]): a key let through after it, which reached the program
+    /// before it, moves the count on.
+    pub seq: u32,
+    /// The physical key, where the platform names one apart from the virtual key: Windows the scan
+    /// code, with 0xE000 for an extended key (as `MapVirtualKeyW` with `MAPVK_VK_TO_VSC_EX` writes
+    /// it), macOS the keycode. `None` for a hotkey, whose press the system matched, and for a key
+    /// whose event carried no scan code.
+    pub phys: Option<u16>,
 }
 
 /// How many keys one module's record of keys let through for a menu holds until it is read
@@ -1463,6 +1514,154 @@ pub fn take_menu_passes(record: &mut Vec<(u32, u32, u8)>, owner: u32) -> Vec<(u3
     let mine = record.iter().filter(|p| p.0 == owner).map(|p| (p.1, p.2)).collect();
     record.retain(|p| p.0 != owner);
     mine
+}
+
+/// The keyboard as the backend reads it at the moment a key that a module's registration kept
+/// from the program in front is to go to that program after all (`captures::pass_on`): the module
+/// no longer holds the key by the time its busy mailbox delivers it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KeyboardNow {
+    /// The window in front, in the numbers [`Pressed::front`] is written in; `Some(0)` when no
+    /// window is, `None` when nobody could say (a Mac's frontmost application that did not answer).
+    pub front: Option<isize>,
+    /// Whether the key itself is held down: down as far as the system knows, or its key-down kept
+    /// from the system by the hook or the tap with no key-up seen since.
+    pub key_held: bool,
+    /// The modifier roles held down ([`MASK_SHIFT`], [`MASK_CTRL`], [`MASK_ALT`], [`MASK_WIN`]).
+    pub mods: u8,
+    /// Whether a screen reader's own key is held down — Insert, the numeric keypad's 0 or Caps
+    /// Lock, as the hook tells them (Windows; never on a Mac): a key sent now would reach the
+    /// screen reader as one of its commands. No press is kept from the program with one held.
+    pub reader_mod: bool,
+    /// How many key-downs the hook or the tap has let through to the program so far, counted from
+    /// any number and wrapping: every key-down that is not a modifier's and that goes on towards
+    /// the program — typed keys no capture took, keys let through for a menu or a screen reader,
+    /// a held key's repeats, keys another program or this one's `host.input` sent — and never one
+    /// a capture or a hotkey took, nor one passed on ([`Backend::pass_on_key`]).
+    pub let_through: u32,
+}
+
+/// One event of a key passed on to the program in front, in the order it is sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stroke {
+    /// The key of modifier role `role` ([`MASK_CTRL`] and the others) goes down or up: one the
+    /// press was made with and nobody holds now.
+    Modifier { role: u8, down: bool },
+    /// The key itself goes down or up.
+    Key { down: bool },
+}
+
+/// Why a key a module's registration kept from the program in front is not passed on to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotPassed {
+    /// Another window is in front than the one it was pressed in.
+    OtherWindow,
+    /// No window was known to be in front when it was pressed, so nothing can say the one in
+    /// front now is that window.
+    NoWindow,
+    /// The key itself is held down: a key-down and a key-up sent now would end a press the user is
+    /// still making.
+    KeyHeld,
+    /// Modifier roles are held now that the press was made without: sent now, it would arrive as
+    /// another combination.
+    OtherModifiers(u8),
+    /// A modifier tap, which the hook and the tap never keep from the program: it had it at the
+    /// press.
+    Tap,
+    /// Nobody could say which window is in front now (a Mac's frontmost application that did not
+    /// answer), so nothing can say it is the one it was pressed in.
+    FrontUnknown,
+    /// A screen reader's own key is held now ([`KeyboardNow::reader_mod`]): sent now, it would
+    /// reach the screen reader as one of its commands, not the program.
+    ReaderModifier,
+    /// A key-down the hook or the tap let through after the press has reached the program first
+    /// ([`Pressed::seq`]): sent now, it would arrive after a key typed after it, and act on what
+    /// that key changed — a Delete on the line a Down moved to.
+    Overtaken,
+    /// A hotkey of this application holds the key's combination now: the system would hand the
+    /// key sent to that hotkey, not to the program (decided by the host, `captures::pass_on`).
+    HotkeyHolds,
+}
+
+/// The order a key passed on presses the modifiers it presses, `key_send`'s: Ctrl, Alt, Shift,
+/// Win. They are released in the reverse order.
+const PASS_ON_ROLES: [u8; 4] = [MASK_CTRL, MASK_ALT, MASK_SHIFT, MASK_WIN];
+
+/// The four role bits of a mask, without [`MASK_TAP`].
+const ROLE_BITS: u8 = MASK_SHIFT | MASK_CTRL | MASK_ALT | MASK_WIN;
+
+/// The key events that pass a key on to the program in front as it was pressed — the same key
+/// with the same modifiers — or why it is not passed on. `mask` is the press's, `pressed` where
+/// and when it was pressed, `now` the keyboard as it is.
+///
+/// Passed on only while the window it was pressed in is still in front, the key itself is not
+/// held, no modifier is held that the press was made without, no screen reader's key is held, and
+/// no key-down has reached the program since the press ([`Pressed::seq`]): sent, it arrives where
+/// it would have, had nothing captured it — after the keys typed before it, before any typed after
+/// it. A modifier the press had that nobody holds now goes down before the key and up after it, in
+/// [`PASS_ON_ROLES`]'s order and back; one the user holds is left alone, so a held modifier is
+/// never released under the user's finger and none is left down. The key goes down and up, once: a
+/// held key's repeats, folded into one while it waited, are one more such event and pass on as one
+/// more press. A tap is never passed on. The checks go in the order of [`NotPassed`]'s reasons as
+/// written here, and the first that fails is the one given. Pure, so it is tested on every
+/// platform; the backend reads `now` and sends the events.
+pub fn pass_on_strokes(mask: u8, pressed: Pressed, now: KeyboardNow) -> Result<Vec<Stroke>, NotPassed> {
+    if mask & MASK_TAP != 0 {
+        return Err(NotPassed::Tap);
+    }
+    if pressed.front == 0 {
+        return Err(NotPassed::NoWindow);
+    }
+    match now.front {
+        None => return Err(NotPassed::FrontUnknown),
+        Some(front) if front != pressed.front => return Err(NotPassed::OtherWindow),
+        Some(_) => {}
+    }
+    if now.key_held {
+        return Err(NotPassed::KeyHeld);
+    }
+    let roles = mask & ROLE_BITS;
+    let extra = now.mods & ROLE_BITS & !roles;
+    if extra != 0 {
+        return Err(NotPassed::OtherModifiers(extra));
+    }
+    if now.reader_mod {
+        return Err(NotPassed::ReaderModifier);
+    }
+    if now.let_through != pressed.seq {
+        return Err(NotPassed::Overtaken);
+    }
+    let pressed: Vec<u8> = PASS_ON_ROLES.iter().copied().filter(|r| roles & r != 0 && now.mods & r == 0).collect();
+    let mut out = Vec::with_capacity(pressed.len() * 2 + 2);
+    out.extend(pressed.iter().map(|&role| Stroke::Modifier { role, down: true }));
+    out.push(Stroke::Key { down: true });
+    out.push(Stroke::Key { down: false });
+    out.extend(pressed.iter().rev().map(|&role| Stroke::Modifier { role, down: false }));
+    Ok(out)
+}
+
+/// What the first `sent` of `strokes` left down, as the key-ups that release it: the key first,
+/// then the modifiers in the reverse of the order they went down. For a sequence the system took
+/// only a part of (Windows' `SendInput` says how many events it inserted), so that nothing stays
+/// down. Pure.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn left_down(strokes: &[Stroke], sent: usize) -> Vec<Stroke> {
+    let sent = &strokes[..sent.min(strokes.len())];
+    let mut key_down = false;
+    let mut mods: Vec<u8> = Vec::new();
+    for s in sent {
+        match *s {
+            Stroke::Key { down } => key_down = down,
+            Stroke::Modifier { role, down: true } => mods.push(role),
+            Stroke::Modifier { role, down: false } => mods.retain(|r| *r != role),
+        }
+    }
+    let mut out = Vec::new();
+    if key_down {
+        out.push(Stroke::Key { down: false });
+    }
+    out.extend(mods.iter().rev().map(|&role| Stroke::Modifier { role, down: false }));
+    out
 }
 
 /// Where a Mac's `host.keys.scope(true)` pins a module's captures, and why.
@@ -3068,5 +3267,208 @@ mod capture_decision_tests {
         assert_eq!(key_scope_window(Some(0), W2), (W2, ScopeFrom::TapFront), "it answered with no window");
         assert_eq!(key_scope_window(None, 0), (0, ScopeFrom::Nowhere));
         assert_eq!(key_scope_window(Some(0), 0), (0, ScopeFrom::Nowhere));
+    }
+}
+
+/// Passing on a key a module no longer holds when its busy mailbox delivers it: the decision and
+/// the key events, as the Windows hook's and the Mac tap's backends send them.
+#[cfg(test)]
+mod pass_on_tests {
+    use super::*;
+
+    const W1: isize = 0x1001;
+    const W2: isize = 0x2002;
+
+    /// Pressed in `front`, with 7 key-downs let through before it.
+    fn at(front: isize) -> Pressed {
+        Pressed { front, seq: 7, phys: None }
+    }
+
+    /// The keyboard with `front` in front, the key `key_held` or not, `mods` held, no screen
+    /// reader's key, and the count where [`at`] left it: nothing typed since the press.
+    fn now(front: isize, key_held: bool, mods: u8) -> KeyboardNow {
+        KeyboardNow { front: Some(front), key_held, mods, reader_mod: false, let_through: 7 }
+    }
+
+    fn m(role: u8, down: bool) -> Stroke {
+        Stroke::Modifier { role, down }
+    }
+
+    const DOWN: Stroke = Stroke::Key { down: true };
+    const UP: Stroke = Stroke::Key { down: false };
+
+    /// A bare key in the window it was pressed in, with nothing held: its key-down and its key-up,
+    /// and nothing else.
+    #[test]
+    fn a_bare_key_is_its_down_and_its_up() {
+        assert_eq!(pass_on_strokes(0, at(W1), now(W1, false, 0)), Ok(vec![DOWN, UP]));
+    }
+
+    /// The modifiers the press had and nobody holds now go down before the key, Ctrl, Alt, Shift,
+    /// Win, and up after it in the reverse order; one the user holds is left alone, neither pressed
+    /// nor released — a held modifier is never let go under the user's finger.
+    #[test]
+    fn the_press_s_modifiers_nobody_holds_go_down_around_it_and_held_ones_are_left_alone() {
+        let all = MASK_SHIFT | MASK_CTRL | MASK_ALT | MASK_WIN;
+        assert_eq!(
+            pass_on_strokes(all, at(W1), now(W1, false, 0)),
+            Ok(vec![
+                m(MASK_CTRL, true),
+                m(MASK_ALT, true),
+                m(MASK_SHIFT, true),
+                m(MASK_WIN, true),
+                DOWN,
+                UP,
+                m(MASK_WIN, false),
+                m(MASK_SHIFT, false),
+                m(MASK_ALT, false),
+                m(MASK_CTRL, false),
+            ])
+        );
+        // Shift+Tab with Shift still held: the key alone.
+        assert_eq!(pass_on_strokes(MASK_SHIFT, at(W1), now(W1, false, MASK_SHIFT)), Ok(vec![DOWN, UP]));
+        // Ctrl+Alt+V with Alt held: Ctrl around the key, Alt untouched.
+        assert_eq!(
+            pass_on_strokes(MASK_CTRL | MASK_ALT, at(W1), now(W1, false, MASK_ALT)),
+            Ok(vec![m(MASK_CTRL, true), DOWN, UP, m(MASK_CTRL, false)])
+        );
+    }
+
+    /// Every sequence leaves nothing down: each modifier it presses it releases, after the key's
+    /// own key-up; and the key goes down and up once, in that order.
+    #[test]
+    fn no_sequence_leaves_a_modifier_down() {
+        for mask in 0..=ROLE_BITS {
+            for held in 0..=ROLE_BITS {
+                let Ok(s) = pass_on_strokes(mask, at(W1), now(W1, false, held)) else {
+                    assert!(held & !mask != 0, "refused only for a modifier the press was made without");
+                    continue;
+                };
+                assert!(left_down(&s, s.len()).is_empty(), "mask {mask} held {held}: {s:?}");
+                let up = s.iter().position(|x| *x == UP).unwrap();
+                assert_eq!(s.iter().position(|x| *x == DOWN), Some(up - 1), "{s:?}");
+                assert_eq!(s.iter().filter(|x| matches!(x, Stroke::Key { .. })).count(), 2, "{s:?}");
+                assert!(s[up + 1..].iter().all(|x| matches!(x, Stroke::Modifier { down: false, .. })));
+                assert!(held & !mask == 0, "mask {mask} held {held}");
+            }
+        }
+    }
+
+    /// Not passed on: another window in front, none known at the press, nobody able to say which
+    /// is in front now, the key itself held, a modifier held that the press was made without, a
+    /// screen reader's key held, a key let through since the press — and a tap, which was never
+    /// kept. Each check in its order: the first that fails is the reason.
+    #[test]
+    fn what_is_not_passed_on_and_why() {
+        assert_eq!(pass_on_strokes(0, at(W1), now(W2, false, 0)), Err(NotPassed::OtherWindow));
+        assert_eq!(pass_on_strokes(0, at(W1), now(0, false, 0)), Err(NotPassed::OtherWindow), "nothing in front now");
+        assert_eq!(pass_on_strokes(0, at(0), now(0, false, 0)), Err(NotPassed::NoWindow), "unknown at the press");
+        let unknown = KeyboardNow { front: None, ..now(W1, false, 0) };
+        assert_eq!(pass_on_strokes(0, at(W1), unknown), Err(NotPassed::FrontUnknown), "nobody could say now");
+        assert_eq!(pass_on_strokes(0, at(W1), now(W1, true, 0)), Err(NotPassed::KeyHeld));
+        assert_eq!(pass_on_strokes(MASK_SHIFT, at(W1), now(W1, true, MASK_SHIFT)), Err(NotPassed::KeyHeld));
+        assert_eq!(pass_on_strokes(0, at(W1), now(W1, false, MASK_CTRL)), Err(NotPassed::OtherModifiers(MASK_CTRL)));
+        assert_eq!(
+            pass_on_strokes(MASK_SHIFT, at(W1), now(W1, false, MASK_SHIFT | MASK_ALT | MASK_WIN)),
+            Err(NotPassed::OtherModifiers(MASK_ALT | MASK_WIN))
+        );
+        let reader = KeyboardNow { reader_mod: true, ..now(W1, false, 0) };
+        assert_eq!(pass_on_strokes(0, at(W1), reader), Err(NotPassed::ReaderModifier));
+        // A Down typed after the press reached the program first: one more let through. Any
+        // difference counts.
+        for count in [8, 6, 0, u32::MAX] {
+            let typed = KeyboardNow { let_through: count, ..now(W1, false, 0) };
+            assert_eq!(pass_on_strokes(0, at(W1), typed), Err(NotPassed::Overtaken), "{count}");
+        }
+        // The count wraps round: one more past the top is still one more.
+        let top = Pressed { seq: u32::MAX, ..at(W1) };
+        let wrapped = KeyboardNow { let_through: u32::MAX.wrapping_add(1), ..now(W1, false, 0) };
+        assert_eq!(pass_on_strokes(0, top, wrapped), Err(NotPassed::Overtaken), "past the wrap");
+        let same = KeyboardNow { let_through: u32::MAX, ..now(W1, false, 0) };
+        assert_eq!(pass_on_strokes(0, top, same), Ok(vec![DOWN, UP]), "at the top, nothing typed since");
+        assert_eq!(pass_on_strokes(MASK_TAP, at(W1), now(W1, false, 0)), Err(NotPassed::Tap));
+        assert_eq!(pass_on_strokes(MASK_TAP | MASK_ALT, at(W1), now(W1, false, 0)), Err(NotPassed::Tap));
+        // The window first: a key pressed elsewhere is not passed on whatever is held.
+        assert_eq!(pass_on_strokes(0, at(W1), now(W2, true, MASK_CTRL)), Err(NotPassed::OtherWindow));
+        // Held before overtaken: a key still held, whose repeats reach the program once its
+        // capture is gone, says it is held.
+        let held = KeyboardNow { let_through: 9, ..now(W1, true, 0) };
+        assert_eq!(pass_on_strokes(0, at(W1), held), Err(NotPassed::KeyHeld));
+        // The physical key decides nothing here: the backend sends it.
+        let numpad_enter = Pressed { phys: Some(0xE01C), ..at(W1) };
+        assert_eq!(pass_on_strokes(0, numpad_enter, now(W1, false, 0)), Ok(vec![DOWN, UP]));
+    }
+
+    /// A sequence the system took only a part of: what that part left down, released key first,
+    /// then the modifiers in the reverse order; nothing for none of it, or all of it.
+    #[test]
+    fn a_part_sent_has_what_it_left_down_released() {
+        let s = pass_on_strokes(MASK_CTRL | MASK_SHIFT, at(W1), now(W1, false, 0)).unwrap();
+        assert_eq!(s, vec![m(MASK_CTRL, true), m(MASK_SHIFT, true), DOWN, UP, m(MASK_SHIFT, false), m(MASK_CTRL, false)]);
+        assert_eq!(left_down(&s, 0), vec![]);
+        assert_eq!(left_down(&s, 1), vec![m(MASK_CTRL, false)]);
+        assert_eq!(left_down(&s, 2), vec![m(MASK_SHIFT, false), m(MASK_CTRL, false)]);
+        assert_eq!(left_down(&s, 3), vec![UP, m(MASK_SHIFT, false), m(MASK_CTRL, false)]);
+        assert_eq!(left_down(&s, 4), vec![m(MASK_SHIFT, false), m(MASK_CTRL, false)]);
+        assert_eq!(left_down(&s, 5), vec![m(MASK_CTRL, false)]);
+        assert_eq!(left_down(&s, 6), vec![]);
+        assert_eq!(left_down(&s, 99), vec![], "more than there are");
+    }
+
+    /// The Mac's half, held where it is written, since no test here runs the tap: the tap lets an
+    /// event carrying the mark through before it records, matches or counts anything — a
+    /// modifier's change, a key-up's swallowed key-down, a capture — ending only a pending
+    /// modifier tap, for a key-down; every other key-down it returns is counted, and a key it
+    /// takes carries the count and its keycode. Every event `input::pass_on` posts carries the
+    /// mark, from the pass-on's own source, built before the first is posted, on the keycode it
+    /// was pressed on; `keyboard_now` asks the window in front afresh, and the tap's record beside
+    /// the HID system, for that keycode.
+    #[test]
+    fn the_mac_tap_lets_the_keys_passed_on_through_first() {
+        const TAP: &str = include_str!("macos/tap.rs");
+        const INPUT: &str = include_str!("macos/input.rs");
+        const QUEUE: &str = include_str!("macos/queue.rs");
+        let body = |src: &'static str, sig: &str| {
+            let at = src.find(sig).unwrap_or_else(|| panic!("{sig}"));
+            let end = src[at..].find("\n}\n").unwrap();
+            &src[at..at + end]
+        };
+        let cb = body(TAP, "unsafe extern \"C-unwind\" fn tap_callback(");
+        let marked = concat!(
+            "if CGEvent::integer_value_field(Some(ev), CGEventField::EventSourceUserData) == keys::PASS_ON_MARK {\n",
+            "        if etype == CGEventType::KeyDown {\n",
+            "            TAP_ARMED.store(0, Ordering::Relaxed);\n",
+            "        }\n",
+            "        return pass;\n",
+            "    }\n",
+        );
+        let mark = cb.find(marked).expect("the tap asks for the mark, and ends only a pending tap for it");
+        for later in ["modifier_changed(keycode, flags)", "take_suppressed(keycode)", "note_lateness(", "decide(vk, mask, front, true)", "LET_THROUGH.fetch_add("] {
+            assert!(mark < cb.find(later).unwrap_or_else(|| panic!("{later}")), "{later} comes before the mark is asked");
+        }
+        // Every key-down returned past the mark is counted; none is returned bare after it.
+        let rest = &cb[mark + marked.len()..];
+        let key_down = rest.find("if etype != CGEventType::KeyDown {").unwrap();
+        assert_eq!(rest[key_down..].matches("return pass;").count(), 1, "only the check itself, for what is no key-down");
+        assert!(rest[key_down..].starts_with("if etype != CGEventType::KeyDown {\n        return pass;\n    }"));
+        assert_eq!(rest[key_down..].matches("return through();").count(), 4);
+        assert!(rest.contains("        return through(); // not a keyboard event we can name"));
+        assert!(rest.contains("let pressed = Pressed { front, seq: LET_THROUGH.load(Ordering::Relaxed), phys: Some(keycode) };"));
+        let pass = body(INPUT, "pub fn pass_on(");
+        assert!(pass.contains("let code = phys\n        .or_else(|| keys::vk_to_keycode_for(vk, mask))"));
+        assert!(pass.contains("let src = pass_source()"));
+        assert_eq!(pass.matches("source()").count(), pass.matches("pass_source()").count(), "never the shared source");
+        assert!(body(INPUT, "fn pass_source(").contains("CGEventSource::new(CGEventSourceStateID::Private)"));
+        let set = pass.find("CGEventField::EventSourceUserData, keys::PASS_ON_MARK").expect("every event marked");
+        let posted = pass.find("for event in &built {").expect("posted after all are built");
+        assert!(set < posted);
+        assert!(pass[posted..].contains("post(event);"));
+        let now = body(INPUT, "pub fn keyboard_now(");
+        assert!(now.contains("let key_held = phys\n        .or_else(|| keys::vk_to_keycode_for(vk, mask))"));
+        assert!(now.contains("super::tap::held_back(code)"));
+        assert!(now.contains("front: super::ax::foreground_window_id(),"), "asked afresh, not the tap's idea");
+        assert!(now.contains("let_through: super::tap::let_through(),"));
+        // A hotkey press carries the count the tap had when Carbon handed it over.
+        assert!(body(QUEUE, "pub fn push_hotkey(").contains("push((id, super::tap::let_through()))"));
     }
 }

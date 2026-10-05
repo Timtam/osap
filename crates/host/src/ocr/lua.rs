@@ -32,17 +32,12 @@
 //! being recognised, or queued behind that — `"failed"` with the reason, once, both kinds of
 //! waiter alike; a late answer finds nobody, and `host.ocr.pending` is false again.
 //!
-//! **The slow-reads switch** ("Slow every text read by 2 seconds, for testing", appcfg.rs) holds
-//! every answer here, on the event loop's side, for `policy::SLOW_READS_HOLD` before it is handed
-//! over — nothing waits, nothing is slowed but the handing over, and the read stays out for
-//! `pending` meanwhile — so a tester can try what happens while a read is still out.
-//!
 //! The functions that do the work are generic over [`ReadHost`] — the host's `Shared`, or the
 //! tests' holder of a real service over a fake recogniser — so the handlers' rules can be tested
 //! against a real Luau VM without the speech engines a `Shared` opens.
 
 use std::cell::{Cell, Ref, RefCell};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -80,10 +75,6 @@ pub(crate) trait ReadHost: 'static {
     fn report_error(&self, idx: usize, context: &str, message: &str);
     /// Which picture a read of `first` from `lua`'s module sees (`capture_source::read_source`).
     fn read_source(&self, lua: &Lua, first: (i32, i32, i32, i32)) -> CaptureSource;
-    /// Whether the "Slow every text read by 2 seconds, for testing" switch is on: the
-    /// application's own setting for `Shared`, the test's own for a test's holder — never the
-    /// process-wide one, which the tests beside it would see.
-    fn slow_reads(&self) -> bool;
 }
 
 impl ReadHost for Shared {
@@ -114,9 +105,6 @@ impl ReadHost for Shared {
     }
     fn read_source(&self, lua: &Lua, first: (i32, i32, i32, i32)) -> CaptureSource {
         capture_source::read_source(lua, &*self.backend, first)
-    }
-    fn slow_reads(&self) -> bool {
-        crate::appcfg::slow_reads()
     }
 }
 
@@ -602,22 +590,10 @@ pub(crate) struct OcrState {
     /// How many answers wait in mailboxes, by module VM and key: still out for `host.ocr.pending`
     /// until they run (`note_queued`).
     queued: RefCell<HashMap<QueuedKey, u32>>,
-    /// Answers the slow-reads switch holds, in the order they came, each with when it is handed
-    /// over. Their reads stay in `pending` until then.
-    held: RefCell<VecDeque<(Instant, Came)>>,
-    /// The switch's line was written for this stretch of it being on.
-    slow_said: Cell<bool>,
 }
 
 /// (module index, VM generation, key) of an answer waiting in its module's mailbox.
 type QueuedKey = (usize, u64, Option<String>);
-
-/// An answer as it came to the event loop: decided without the threads — stale, evicted, refused,
-/// or ended by the hang answer — or a finished job's.
-pub(crate) enum Came {
-    Decided { ticket: TicketId, status: Status, error: Option<String> },
-    Job(Done),
-}
 
 impl OcrState {
     /// Whether any read is waiting — a reason for the headless loop to run.
@@ -625,27 +601,6 @@ impl OcrState {
         !self.pending.borrow().is_empty()
             || !self.ready.borrow().is_empty()
             || !self.queued.borrow().is_empty()
-            || !self.held.borrow().is_empty()
-    }
-
-    /// How many answers the slow-reads switch holds now.
-    #[cfg(test)]
-    pub(crate) fn held(&self) -> usize {
-        self.held.borrow().len()
-    }
-
-    /// Held answers for reads that are not out any more — their module was disabled, reloaded or
-    /// removed, their handler ended — go now, rather than when they come due: they would hand
-    /// over nothing, and would keep the headless loop turning until then.
-    fn prune_held(&self) {
-        let pending = self.pending.borrow();
-        self.held.borrow_mut().retain_mut(|(_, came)| match came {
-            Came::Decided { ticket, .. } => pending.contains_key(ticket),
-            Came::Job(d) => {
-                d.tickets.retain(|t| pending.contains_key(&t.id));
-                !d.tickets.is_empty()
-            }
-        });
     }
 
     fn once(&self, key: String) -> bool {
@@ -935,11 +890,6 @@ pub(crate) struct Delivered {
 /// that has answered nothing for `HANG` ends every read still out (`Service::hang_sweep`). Driven
 /// by the loop tick, after the image results.
 pub(crate) fn fire<H: MailHost>(h: &H) -> Delivered {
-    fire_at(h, Instant::now())
-}
-
-/// [`fire`] at `now`, which the slow-reads switch counts its hold from: the tests step it.
-pub(crate) fn fire_at<H: MailHost>(h: &H, now: Instant) -> Delivered {
     let st = h.ocr_state();
     // Only while a read is out: with none, there is nothing to end, and the service's lock is
     // not taken every tick for nothing.
@@ -958,13 +908,7 @@ pub(crate) fn fire_at<H: MailHost>(h: &H, now: Instant) -> Delivered {
             h.ocr().reread_languages();
         }
     }
-    let came: Vec<Came> = ready
-        .into_iter()
-        .map(|(ticket, status, error)| Came::Decided { ticket, status, error })
-        .chain(done.into_iter().map(Came::Job))
-        .collect();
-    let handed = hand_over(st, h.slow_reads(), now, came);
-    if handed.is_empty() {
+    if ready.is_empty() && done.is_empty() {
         return out;
     }
     // Every delivery collected first, with nothing borrowed while a callback or a handler runs: it
@@ -972,20 +916,16 @@ pub(crate) fn fire_at<H: MailHost>(h: &H, now: Instant) -> Delivered {
     let mut deliveries: Vec<(PendingOcr, Vec<Reading>, Option<Picture>)> = Vec::new();
     {
         let mut pending = st.pending.borrow_mut();
-        for c in handed {
-            match c {
-                Came::Decided { ticket, status, error } => {
-                    if let Some(p) = pending.remove(&ticket) {
-                        let readings = p.rects.iter().map(|r| Reading::outcome(*r, status, error.clone())).collect();
-                        deliveries.push((p, readings, None));
-                    }
-                }
-                Came::Job(d) => {
-                    for t in &d.tickets {
-                        if let Some(p) = pending.remove(&t.id) {
-                            deliveries.push((p, d.readings.clone(), d.picture));
-                        }
-                    }
+        for (ticket, status, error) in ready {
+            if let Some(p) = pending.remove(&ticket) {
+                let readings = p.rects.iter().map(|r| Reading::outcome(*r, status, error.clone())).collect();
+                deliveries.push((p, readings, None));
+            }
+        }
+        for d in &done {
+            for t in &d.tickets {
+                if let Some(p) = pending.remove(&t.id) {
+                    deliveries.push((p, d.readings.clone(), d.picture));
                 }
             }
         }
@@ -1028,35 +968,6 @@ pub(crate) fn fire_at<H: MailHost>(h: &H, now: Instant) -> Delivered {
         }
     }
     out
-}
-
-/// What of the answers that `came` now, and of those held before, is handed over at `now`, in the
-/// order they came. With the slow-reads switch on, each is held until `SLOW_READS_HOLD` after it
-/// came; nothing waits for it — the loop turns on, and a later turn hands it over. With the switch
-/// off, everything held goes now, before what came on this turn.
-fn hand_over(st: &OcrState, slow: bool, now: Instant, came: Vec<Came>) -> Vec<Came> {
-    let mut held = st.held.borrow_mut();
-    if !slow {
-        st.slow_said.set(false);
-        if held.is_empty() {
-            return came;
-        }
-        let mut out: Vec<Came> = held.drain(..).map(|(_, c)| c).collect();
-        out.extend(came);
-        return out;
-    }
-    if !came.is_empty() && !st.slow_said.replace(true) {
-        logging::line(
-            "ocr",
-            &format!(
-                "text reads are handed over {} s late (the \"Slow every text read\" test switch is on)",
-                policy::SLOW_READS_HOLD.as_secs()
-            ),
-        );
-    }
-    held.extend(came.into_iter().map(|c| (now + policy::SLOW_READS_HOLD, c)));
-    let due = held.iter().take_while(|(at, _)| *at <= now).count();
-    held.drain(..due).map(|(_, c)| c).collect()
 }
 
 /// Counts a callback's answer as still out while it waits in its module's mailbox (`mailbox.rs`,
@@ -1182,7 +1093,6 @@ pub(crate) fn drop_owner<H: ReadHost>(h: &H, idx: usize, forget_keys: bool) {
         let pending = st.pending.borrow();
         st.ready.borrow_mut().retain(|(t, ..)| pending.contains_key(t));
     }
-    st.prune_held();
     for p in gone {
         st.settled(p.owner, p.key.as_deref());
         if let Waiter::Callback(cb) = p.waiter {
@@ -1213,7 +1123,6 @@ pub(crate) fn withdraw<H: ReadHost>(h: &H, ticket: TicketId) {
     let st = h.ocr_state();
     let Some(p) = st.pending.borrow_mut().remove(&ticket) else { return };
     st.ready.borrow_mut().retain(|(t, ..)| *t != ticket);
-    st.prune_held();
     h.ocr().withdraw(ticket);
     st.settled(p.owner, p.key.as_deref());
     if let Waiter::Callback(cb) = p.waiter {
@@ -1223,9 +1132,9 @@ pub(crate) fn withdraw<H: ReadHost>(h: &H, ticket: TicketId) {
 
 /// `host.ocr.pending(key)`: whether a read of the calling module's VM with `key` waits for its
 /// answer — asked with a callback, or a handler stopped in `recognize` — or its answer waits in the
-/// module's mailbox, or is held by the slow-reads switch. False in its own callback and in the
-/// handler it resumes (the read is answered by then), after a disable (its reads are dropped), and
-/// after the hang answer ended it. A key that is not a non-empty string raises.
+/// module's mailbox. False in its own callback and in the handler it resumes (the read is answered
+/// by then), after a disable (its reads are dropped), and after the hang answer ended it. A key
+/// that is not a non-empty string raises.
 pub(crate) fn pending<H: ReadHost>(h: &H, lua: &Lua, scope: usize, key: Value) -> mlua::Result<bool> {
     let key = match key {
         Value::String(s) if !s.to_str()?.is_empty() => s.to_str()?.to_string(),

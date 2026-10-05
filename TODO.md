@@ -6931,19 +6931,11 @@ kind of place that says how long the first held the loop.
       (`Service::hang_sweep`, `Scheduler::cancel_all`) answers every read still out `"failed"`
       with the existing reason, once per hang, a callback's and a waiting handler's alike; a late
       answer finds nobody, `pending` is false again, new reads stay refused until the recogniser
-      answers. The switch "Slow every text read by 2 seconds, for testing" in the Application
-      settings tab (appcfg.rs, `persist: false`: never stored, no environment variable) holds
-      every answer for 2 s on the loop's side (ocr/lua.rs, `hand_over`) without holding the loop.
-      Tested on held recognitions and a stepped clock, never timed (sched.rs, service.rs,
-      task_tests.rs, appcfg.rs). Nothing changes in normal use: no handler waits yet.
-- [ ] **NVDA check of step B2, before it is committed** — the switch in the Application settings
-      tab: NVDA reads its label and its state; on, Tab onto a control with an OCR value, say in
-      sforzando: the value comes about 2 s later, and other modules answer at once meanwhile;
-      restart the application: the switch is off.
+      answers. Tested on held recognitions, never timed (sched.rs, service.rs, task_tests.rs).
+      Nothing changes in normal use: no handler waits yet.
 - [ ] **Step B2 never ran on a Mac** (type-checked only): the reads asked while Vision's first
       request hangs at start now end `"failed"` after 5 s (`ocr: the N read(s) waiting for the
-      text recogniser were answered "failed": …`) rather than wait for it; the switch read by
-      VoiceOver, label and state, and off after a restart.
+      text recogniser were answered "failed": …`) rather than wait for it.
 - [x] **A promoted handler's timers** (found building B2; settled in the review of
       2026-10-04): a handler raised because a key queued behind its poll's read keeps its lane —
       the read it waits for and every read it waits for after it are interactive (`raised`, the
@@ -7001,25 +6993,24 @@ kind of place that says how long the first held the loop.
       their read; the scripted host's waits answered at once (`T.answerWaits`) check the call as
       the host does and are refused where the host could not wait; the probe's batching times are
       named from asking to the answer.
-- [ ] **NVDA check of step B1b+M, before it is committed** — b1b-final.md section 6: without the
-      switch, Melodyne, ON:EAR, Kontakt (Ctrl+L, Ctrl+S, Ctrl+R), Avenger and sforzando as before;
-      with "Slow every text read by 2 seconds", a window switch during ON:EAR's read (Kontakt
-      answers at once, ON:EAR says nothing after), no click after a switch (ON:EAR's tile, Kontakt's
-      menu with `another application came to the front during the menu read` in the log,
-      Avenger's preset step) and nothing said after one (ON:EAR's Grid down, `Grid down says
-      nothing` in the log), daw-hosts' hotkey at once during a read, a held arrow. Melodyne waits
-      only where a read of its own waits since B4 — Tab onto "Position" (2 to 4 s with the switch)
-      or a tool switch (about 4 s) — so the steps that need it busy start there (b1b-done.md,
-      section 6): Tab onto "Position", then Alt+Tab away and back and Alt+F and Tab, which arrive
-      once "Position" is said; Tab onto "Position" and at once a native menu, whose arrows and
-      Escape go to the menu. Two modules in one FX chain are Avenger and Kontakt — Melodyne's
-      overlay is for the standalone Melodyne only: a preset step in Avenger and at once to Kontakt
-      and Tab there, which may be dropped with `pressed while the module was busy, was dropped` in
-      the log. Then a quarter of an hour on a release build with no `[guard] … stopped` line,
-      bringing the `[cpu]` lines, the poll lines and every `could not wait here`.
+- [ ] **NVDA check of step B1b+M, before it is committed** — b1b-final.md section 6, at the reads'
+      own speed: Melodyne, Kontakt (Ctrl+L, Ctrl+S, Ctrl+R) and sforzando as before — Kontakt works
+      (the maintainer, 2026-10-05); ON:EAR and Avenger once a device and the plug-in are at hand
+      again. The steps that needed a read slowed on purpose — a window switch, a key or another
+      module's hotkey while a read is out — are the automated tests' (task_tests.rs,
+      key_scope_tests.rs, mailbox_tests.rs, the scripted host's scenarios, on held reads); by hand
+      only where a read is slow by itself. Two modules in one FX chain are Avenger and Kontakt —
+      Melodyne's overlay is for the standalone Melodyne only: a preset step in Avenger and at once
+      to Kontakt and Tab there; when Avenger's capture took that Tab and let it go meanwhile,
+      Kontakt's capture gets it, as if Avenger had never captured it (`went to com.platform.kontakt,
+      the next module that captures it in the window it was pressed in` in the log; the maintainer's
+      answer of 2026-10-05 to pk-final.md's question a), and only with no module capturing Tab there
+      does it go to the DAW (`was passed on to the program in front`). Then a quarter of an hour on
+      a release build with no `[guard] … stopped` line, bringing the `[cpu]` lines, the poll lines
+      and every `could not wait here`.
 - [ ] **Step B1b+M never ran on a Mac** (type-checked only): Kontakt's Alt+V, load and save read
-      the file menu in English and click the right entry, and with the switch a Cmd+Tab away
-      during the read clicks nothing and sends no Escape; Avenger's preset steps and "Preset info";
+      the file menu in English and click the right entry, and a Cmd+Tab away during a read slow
+      enough to try it clicks nothing and sends no Escape; Avenger's preset steps and "Preset info";
       sforzando recognised on the Intel Air, freshly loaded too; keys pressed in another window
       during a read; no `the system disabled the event tap` line while a module waits, no
       `[guard] … stopped`, no `could not wait here` but the example's; and the reads asked while
@@ -7027,32 +7018,109 @@ kind of place that says how long the first held the loop.
 - [x] **Step B4, Melodyne's polls with a callback** (b0-final.md, B4; 2026-10-05). The read-out
       watcher and the note area's time signature read with `host.ocr.recognize` and a callback, so
       a tick ends at once and Melodyne's own keys no longer wait behind a poll that asks eight
-      times a second (2 s a read with the slow-reads switch on). One read out at a time under a key
-      (`host.ocr.pending`). An answer is about the moment it was asked in: dropped, and no baseline,
-      when the overlay has left, gone to another window or come back in another stay since
-      (`O:stillHere`), or a menu is open; the tool switch's hold is decided by the time of the
-      question, and the first answer to a read asked after the switch (after a variant's last
-      press) is the new tool's baseline, said nothing — with reads slower than the hold, the read
-      asked before the switch is held but holds the old tool's values, and the next one used to be
-      said as a change (found reviewing B4). Each box's text on one line, and a box that failed or
-      went stale is no reading rather than an empty box. A move in the note area is said when the
-      time signature answers, with no frame taken meanwhile; the memo is written by the answer, so
-      a read that failed or never answered is asked again. Melodyne 0.1.2, on
-      `com.platform.overlay >= 0.2`; scenarios in overlay_melodyne_tests.rs.
+      times a second. One read out at a time under a key (`host.ocr.pending`). An answer is about
+      the moment it was asked in: dropped, and no baseline, when the overlay has left, gone to
+      another window or come back in another stay since (`O:stillHere`), or a menu is open; the tool
+      switch's hold is decided by the time of the question, and the first answer to a read asked
+      after the switch (after a variant's last press) is the new tool's baseline, said nothing —
+      with reads slower than the hold, the read asked before the switch is held but holds the old
+      tool's values, and the next one used to be said as a change (found reviewing B4). Each box's
+      text on one line, and a box that failed or went stale is no reading rather than an empty box.
+      A move in the note area is said when the time signature answers, with no frame taken
+      meanwhile; the memo is written by the answer, so a read that failed or never answered is asked
+      again. Melodyne 0.1.2, on `com.platform.overlay >= 0.2`; scenarios in
+      overlay_melodyne_tests.rs.
 - [ ] **NVDA check of step B4, before it is committed**: the same sentences as before — a note
       walked with the arrows and its cents changed, a move in the note area said under a tool with
       no read-out (under Time, "right, one beat" or "right, one step"), a tool switch whose name
-      the read-outs do not talk over; with "Slow every text read by 2 seconds", Tab, the arrows and
-      Alt+F in Melodyne answer at once while its watcher's read is out — not right after a tool
-      switch (below), and not Tab onto "Position", which reads its value — the watcher's sentences
-      come about 2 s late, and a tool switch is followed by no sentence about the new tool's
-      read-outs.
+      the read-outs do not talk over and after which no sentence about the new tool's read-outs
+      comes; Tab, the arrows and Alt+F answer as before. An answer that comes after the tool
+      switch's hold, and the keys that no longer wait behind the watcher, are the tests'
+      (overlay_melodyne_tests.rs).
 - [ ] **Melodyne's reading after a tool switch still waits** (found building B4):
       `reportFieldsAfterSwitch` reads both boxes and the wide field in its `host.timer.after`
       handler, for the log only, so Melodyne's keys wait behind those two reads after every tool
-      switch — about 4 s with the slow-reads switch on, and when keys waited the log's `a timer
-      waited` line names its place. B4 left it as the plan has it (log only); with a callback it
+      switch, for as long as two reads take, and when keys waited the log's `a timer waited` line
+      names its place. B4 left it as the plan has it (log only); with a callback it
       would hold nothing.
+- [x] **The slow-reads switch removed; a key a busy module let go of goes to the next module or to
+      the program** (the maintainer's decisions of 2026-10-05; pk-built.md). The Application tab's
+      "Slow every text read by 2 seconds, for testing" is gone, and with it what only it used: the
+      switch that is never stored (`Switch::persist`, `persists`), the delivery's hold (`hand_over`,
+      `held`, `fire_at`) and its docs — settings should change what a user can tell, and nobody
+      delays their own feedback; slow reads stay the automated tests' (held reads,
+      `task::test_wait`). A key or a hotkey press that waited in its busy module's mailbox, whose
+      registration the module released meanwhile and did not make again, was kept from the program
+      in front for nothing: it is sent to that program as it was pressed — the same key, a modifier
+      the press had and nobody holds now pressed around it, one the user holds left alone, none left
+      down, a held key's folded repeats once more — while the window it was pressed in is still in
+      front, the key itself is not held, no modifier and no screen reader's key is held that the
+      press was made without, and no key-down has reached the program since the press
+      (`backend::pass_on_strokes`, pure); and not while a hotkey of the application holds the
+      combination, which the system would hand it to (`captures::pass_on`). Otherwise dropped, with
+      the reason in the line (`captures::released_line`). Sent marked, so the hook or the tap lets
+      it through first and no capture takes it again: Windows one `SendInput` with `dwExtraInfo`
+      set, the scan code and extended flag the press had, a part taken released at once
+      (`left_down`); macOS `CGEventPost` from a private event source with `kCGEventSourceUserData`
+      set, on the press's keycode, the modifiers as `FlagsChanged` events and as flags
+      (`keys::pass_on_events`). Held is the system's word or the hook's or tap's record of a
+      key-down it swallowed (`KEPT_BACK`, the tap's suppressed bits). The order: the hook and the
+      tap count every key-down they let go on (`LET_THROUGH`), marked ones and modifiers not, each
+      captured key and hotkey press carries the count of its press (`Pressed::seq`), and a key is
+      sent only while the count has not moved — else it would follow a key typed after it, a Delete
+      on the line a Down moved to (the review of 2026-10-05, pk-review.md F1; a refusal the decision
+      did not name, read from its "as if the module had never captured it"). The Mac asks the window
+      in front afresh for it (F2). Asked again the same day (pk-final.md, question a), the
+      maintainer put another module first: such a key or hotkey press goes to the next module that
+      captures the combination in the window it was pressed in — the earliest capture of an enabled
+      module scoped to that window or to everywhere, the hook's own rule (`captures::offered_to`,
+      pure; `backend::in_scope`, shared with `capture_decision`) — through that module's mailbox as
+      its own key, under its rules, and only with none to the program; the modules that let go of it
+      travel with it (`Event::Key::let_go`) and never get it again, so it is at one place at a time
+      and moves on at most once per module. F1 and F5 stay as built. A key whose capture went before
+      it reached its free module is dropped as before. Tests: backend/mod.rs, windows.rs,
+      macos/keys.rs, captures.rs (`offered_to` against `capture_decision` for every window and every
+      set let go), key_scope_tests.rs (a busy module's keys and a hotkey, released before delivery,
+      over the stub backend that records what it would send; two modules in one window, the first
+      busy and letting go, the second free or busy or letting go as well); docs: keys.md, hotkey.md,
+      module-runtime-and-lifecycle.md, ocr.md, module-manager.md.
+- [ ] **NVDA check of this, before it is committed** — the Application tab: no "Slow every text
+      read" switch any more, and its first sentence "Settings for the application itself. Each takes
+      effect when its label says, and is remembered."; Kontakt and Melodyne as before. A key passed
+      on needs a module busy while its overlay lets the key go, which cannot be set up by hand; when
+      the log has `was passed on to the program in front`, the program had the key — NVDA said what
+      it did with it — and a `was dropped: its registration was released meanwhile, and …` line
+      names why one was not: `a key typed after it has reached the program first` when anything was
+      typed between the press and its turn, `the screen reader's key is held down now` with Insert
+      or Caps Lock held, `a hotkey holds its combination now`. A `went to …, the next module that
+      captures it in the window it was pressed in` line says that another module, which captures the
+      key there, had it instead (Avenger and Kontakt in one FX chain, in the check of B1b+M above),
+      and no `was passed on` line follows for that key. Bring any of them.
+- [ ] **The pass-on never ran on a Mac** (type-checked only): a key passed on arrives as pressed —
+      Command+key as Command+key, with no modifier left down after it (a letter typed next is a
+      letter, not a shortcut); the tap lets the posted events through (no capture fires for them, no
+      `tap: captured` trace, no modifier tap from the posted `FlagsChanged` events, and the mark in
+      `kCGEventSourceUserData` survives `CGEventPost` to the tap); a program takes the
+      `FlagsChanged` events `CGEventCreateKeyboardEvent` plus `CGEventSetType` makes — if not, the
+      flags on the key's own events alone, as `key_send` sends; and the HID system's key state
+      (`CGEventSourceKeyState`) reports a key the tap swallowed as down while it is held. Posted
+      from a private event source: two keys passed on one after the other (a held arrow's press and
+      its repeat; Cmd+V and then Tab) both arrive, with no `the key is still held down` or `Cmd is
+      held down now` line, and a letter typed while one is posted stays a letter; and the program
+      still reads the posted modifiers. The window in front is asked afresh: a window that opened in
+      front between the press and its turn — a dialog of the same application — gets nothing, the
+      key is dropped (`no longer in front`). The order: a key typed between the press and its turn
+      drops it (`a key typed after it has reached the program first`), nothing typed lets it go; a
+      hotkey press passed on after its registration went is passed on, not dropped as overtaken —
+      the tap counts the hotkey's own key-down before Carbon hands the press over (queue.rs,
+      `push_hotkey`). A key whose combination a registered hotkey holds is not sent (`a hotkey holds
+      its combination now`). The keypad's Enter: held, it is not passed on, and passed on it arrives
+      as the keypad's Enter, not Return. Two modules in one window: a key a busy module let go of,
+      which the other module captures there, goes to that module and is not posted (`went to …, the
+      next module that captures it in the window it was pressed in`, no `was passed on` line) — the
+      window the tap noted at the press is what decides, as for every capture. Provoked only where a
+      module is busy while its overlay lets a key go: the log line is the evidence, or a probe step
+      written for it.
 - [ ] **The rest, as a mailbox per module** (b0-final.md): B5, the example (`examples/ocr`)
       reading in a callback, the tools, and CI failing on `could not wait here` from then on; step
       11, the waits of a read moved off the loop and the input barrier removed; and step 12, the

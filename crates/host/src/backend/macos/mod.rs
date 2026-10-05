@@ -424,6 +424,14 @@ impl Backend for MacBackend {
         tap::foreground()
     }
 
+    fn keyboard_now(&self, vk: u32, mask: u8, phys: Option<u16>) -> crate::backend::KeyboardNow {
+        input::keyboard_now(vk, mask, phys)
+    }
+
+    fn pass_on_key(&self, vk: u32, mask: u8, phys: Option<u16>, strokes: &[crate::backend::Stroke]) -> Result<(), String> {
+        input::pass_on(vk, mask, phys, strokes)
+    }
+
     fn modifiers_down(&self) -> bool {
         input::modifiers_down()
     }

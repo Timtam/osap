@@ -5,8 +5,8 @@
 //! Written for step B4 of the plan that gives every module a mailbox (b0-final.md; built
 //! 2026-10-05): Melodyne's two polls read with a callback. Since every handler waits, a poll that waited for
 //! its read kept Melodyne's own keys waiting behind it — the read-out watcher asks eight times a
-//! second, and with the slow-reads switch on every one of its reads took 2 s. Now the tick ends at
-//! once and the answer is a handler of its own. What the user hears is meant to be the same, so
+//! second, and every one of its reads held them for as long as it took. Now the tick ends at once
+//! and the answer is a handler of its own. What the user hears is meant to be the same, so
 //! the scenarios hold the module to its sentences and to the checks an answer that comes later
 //! needs: the watcher says a box that changed and not one that did not; one read is out at a time;
 //! an answer from before the overlay left and came back is dropped and is no baseline; one that
@@ -430,7 +430,7 @@ fn an_answer_while_a_menu_is_open_is_dropped() {
 /// A tool switch holds the read-outs for half a second. An answer to a read asked just before the
 /// switch is held although it comes after the hold has lifted: the picture is of the moment it was
 /// asked in. It is logged as held. The first answer to a read asked after the switch is the new
-/// tool's values — here, as with the slow-reads switch on, asked only after the hold — and becomes
+/// tool's values — here, as with reads slower than the hold, asked only after the hold — and becomes
 /// the baseline unsaid, where it used to be said as a change; a change after it is said.
 #[test]
 fn an_answer_asked_before_the_hold_lifted_is_held_and_the_next_is_the_new_tools_baseline() {

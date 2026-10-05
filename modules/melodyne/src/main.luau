@@ -1755,8 +1755,9 @@ host.timer.every(WATCH_MS, function()
   -- WITH A CALLBACK, and that is the point of it. This tick used to wait for its read, and a
   -- handler that waits keeps its module waiting with it: every key of this overlay's own — Tab,
   -- Alt+F, the arrows on the tool bar — queued behind a poll that asks eight times a second, for
-  -- 25-74 ms of every 120 and for 2 s with the slow-reads switch on. Asked with a callback, the
-  -- tick ends at once, the keys run, and the answer is a handler of its own when it comes.
+  -- 25-74 ms of every 120, and for as long as a read takes when one is slow. Asked with a
+  -- callback, the tick ends at once, the keys run, and the answer is a handler of its own when it
+  -- comes.
   --
   -- That answer is about the moment it was asked in, so it is checked against that moment: the
   -- mark says whether the overlay is still in front, on the same window and in the same stay,
@@ -1797,10 +1798,9 @@ host.timer.every(WATCH_MS, function()
     if right ~= "" then lastRight = right end
     -- The first answer to a read asked after the strip's latest change is the new tool's values: a
     -- baseline, said nothing. The hold alone does not make one when a read takes longer than the
-    -- hold — 2 s with the slow-reads switch on: the read asked before the switch is answered after
-    -- the hold and held, but its values are the OLD tool's, and the next read, asked after the
-    -- hold, would say the new tool's values as a change. With reads faster than the hold this
-    -- answer comes during it and is held anyway.
+    -- hold: the read asked before the switch is answered after the hold and held, but its values
+    -- are the OLD tool's, and the next read, asked after the hold, would say the new tool's values
+    -- as a change. With reads faster than the hold this answer comes during it and is held anyway.
     local rebase = rebaseFrom ~= nil and asked ~= nil and asked > rebaseFrom
     if rebase then rebaseFrom = nil end
     if not (baseline and ov:stillHere(baseline)) then
