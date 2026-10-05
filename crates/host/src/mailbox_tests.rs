@@ -8,8 +8,9 @@
 //! helper — `ocr::lua::open_read`, the timers', the prelude's calls — so the rules met here are the
 //! host's.
 //!
-//! **Busy** is a module whose handler waits at the tests' own wait point (`task::test_wait`),
-//! answered by `task::test_release`: in this build no handler waits anywhere else.
+//! **Busy** is a module whose handler waits: at a read, `host.ocr.recognize` without a callback,
+//! or at the tests' own wait point (`task::test_wait`), answered by `task::test_release` — a wait
+//! no read stands behind, so a test decides when it ends.
 
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::{BTreeSet, HashMap};
@@ -17,7 +18,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use mlua::{Function, Lua, MultiValue, RegistryKey, Table, Value};
+use mlua::{Function, Lua, MultiValue, Table, Value};
 
 use crate::backend::gamepad::{Axis, Button, Family, PadEvent, PadEventKind};
 use crate::backend::{CaptureSource, WinInfo};
@@ -46,8 +47,16 @@ struct Host {
     /// `onChange` registrations, as the host keeps them (`Event::Setting`, opened by the host's own
     /// `open_on_change`).
     settings: RefCell<crate::OnChangeMap>,
-    /// Controller listeners by token (`Event::Pad`): called with the delivered value.
-    pads: RefCell<HashMap<i64, (Lua, RegistryKey)>>,
+    /// Controller listeners, as the host keeps them (`Event::Pad`, opened by the host's own
+    /// `open_pad_in`).
+    pads: crate::gamepad_api::Pads,
+    /// Image searches waiting or held, as the host keeps them (`Event::Image`, opened by the host's
+    /// own `open_image_in`).
+    images: RefCell<HashMap<u64, crate::image_search::PendingImage>>,
+    /// Snapshot requests' keys, and the bytes their pictures hold (`Event::Snapshot`, opened by the
+    /// host's own `open_snapshot_in`).
+    snaps: crate::snapshot::SnapState,
+    snap_bytes: Rc<Cell<usize>>,
     /// Every event that was discarded, and why.
     discarded: RefCell<Vec<(usize, &'static str, Why)>>,
     /// The modules the host's guard stopped (`stops.rs`), as the host's `Stops` answers.
@@ -89,9 +98,6 @@ impl ReadHost for Host {
     }
     fn read_source(&self, _: &Lua, _: (i32, i32, i32, i32)) -> CaptureSource {
         CaptureSource::Standard
-    }
-    fn screen_size(&self) -> (i32, i32) {
-        (1920, 1080)
     }
     fn slow_reads(&self) -> bool {
         false
@@ -149,17 +155,15 @@ impl MailHost for Host {
             Event::Setting { reg, key, new, old, setting_of } => {
                 crate::open_on_change(&self.settings, setting_of, reg, &key, &new, old.as_ref())
             }
-            Event::Pad { token, delivery, .. } => {
-                let found = self.pads.borrow().get(&token).and_then(|(l, k)| l.registry_value::<Function>(k).ok());
-                match found {
-                    Some(f) => Opened::Run {
-                        f,
-                        args: MultiValue::from_vec(vec![Value::Number(f64::from(delivery.value.unwrap_or(0.0)))]),
-                        ctx: Ctx::new("gamepad", idx),
-                    },
-                    None => Opened::Gone,
-                }
+            Event::Pad { token, event, delivery, .. } => {
+                crate::gamepad_api::open_pad_in(&self.pads, token, &event, &delivery, &|i, w, m| self.report_error(i, w, m))
             }
+            Event::Image { p, outcome, ended } => {
+                crate::image_search::open_image_in(&self.images, &self.enabled, &self.gens, *p, outcome, ended)
+            }
+            Event::Snapshot { p, answer } => crate::snapshot::open_snapshot_in(&self.snaps, *p, answer, &self.snap_bytes, &|i, w, m| {
+                self.report_error(i, w, m)
+            }),
             Event::Call { f, args, what, .. } => mailbox::open_call(idx, f, args, what),
             _ => Opened::Gone,
         }
@@ -169,6 +173,8 @@ impl MailHost for Host {
         match ev {
             Event::Read(r) => reads::discard_read(self, *r),
             Event::After { token } => self.timers.drop_queued(token),
+            Event::Image { p, ended, .. } => crate::image_search::discard_image_in(&self.images, *p, ended, why == Why::Disabled),
+            Event::Snapshot { p, .. } => crate::snapshot::drop_answer(&self.snaps, *p),
             _ => {}
         }
     }
@@ -188,7 +194,10 @@ fn host() -> Rc<Host> {
         epoch: Cell::new(0),
         errors: RefCell::new(Vec::new()),
         settings: RefCell::new(HashMap::new()),
-        pads: RefCell::new(HashMap::new()),
+        pads: crate::gamepad_api::Pads::default(),
+        images: RefCell::new(HashMap::new()),
+        snaps: crate::snapshot::SnapState::default(),
+        snap_bytes: Rc::new(Cell::new(0)),
         discarded: RefCell::new(Vec::new()),
         stopped: RefCell::new(BTreeSet::new()),
         _loop: crate::loop_guard::mark_for_a_test(),
@@ -203,9 +212,10 @@ fn now_ms() -> i64 {
     crate::clock_origin().elapsed().as_millis() as i64
 }
 
-/// A fresh VM for module `idx` — a new generation of it, enabled — with the host's read, timer and
-/// window bindings over `h`, the window prelude, the tests' wait point as the global `wait`, and
-/// `heard`, a list the callbacks write to. `host.log.info` writes to the global `logs`.
+/// A fresh VM for module `idx` — a new generation of it, enabled — with the host's
+/// `host.ocr.recognize`, timer and window bindings over `h`, the window prelude, the tests' wait
+/// point as the global `wait`, and `heard`, a list the callbacks write to. `host.log.info` writes
+/// to the global `logs`. Where `recognize` cannot wait, it raises the message it is to raise there.
 fn vm(h: &Rc<Host>, idx: usize) -> Lua {
     vm_in(h, idx, Lua::new())
 }
@@ -226,12 +236,17 @@ fn vm_in(h: &Rc<Host>, idx: usize, lua: Lua) -> Lua {
     host.set("timer", timers::table(&lua, idx, h.clone(), |h| &h.timers, |_| Instant::now()).unwrap()).unwrap();
     let ocr = lua.create_table().unwrap();
     let hh = h.clone();
-    ocr.set(
-        "read",
-        lua.create_function(move |lua, (what, opts, cb): (Value, Value, Value)| reads::read(&*hh, lua, idx, what, opts, cb))
-            .unwrap(),
-    )
-    .unwrap();
+    let submit = lua
+        .create_function(move |lua, (what, opts, cb): (Value, Value, Value)| reads::read(&*hh, lua, idx, what, opts, cb))
+        .unwrap();
+    let legacy = lua
+        .create_function(|lua, (_what, _opts, why): (Value, Value, String)| {
+            let message = lua.create_string(task::wait_message(task::Case::of(&why)))?;
+            Ok((false, Value::String(message)))
+        })
+        .unwrap();
+    let waits = task::waits(&lua, idx, h.clone(), legacy, submit).unwrap();
+    ocr.set("recognize", waits.get::<Function>("recognize").unwrap()).unwrap();
     let hh = h.clone();
     ocr.set("pending", lua.create_function(move |lua, key: Value| reads::pending(&*hh, lua, idx, key)).unwrap()).unwrap();
     host.set("ocr", ocr).unwrap();
@@ -472,9 +487,9 @@ fn the_limit_drops_inputs_only() {
         "a window event waits too"
     );
     let f: Function = a.load("return function() heard[#heard + 1] = 'button' end").eval().unwrap();
-    h.pads.borrow_mut().insert(7, (a.clone(), a.create_registry_value(f).unwrap()));
+    let token = h.pads.listen_for_test(1, &a, f, crate::gamepad_api::Kind::Down);
     let button = |kind: PadKind, ev: PadEventKind| Event::Pad {
-        token: 7,
+        token,
         kind,
         event: Box::new(PadEvent {
             pad: 0,
@@ -485,7 +500,7 @@ fn the_limit_drops_inputs_only() {
             held: BTreeSet::new(),
             report: 0,
         }),
-        delivery: Delivery { token: 7, event: 0, value: None, partner: false },
+        delivery: Delivery { token, event: 0, value: None, partner: false },
     };
     assert_eq!(
         mailbox::deliver(&*h, 1, &a, button(PadKind::Button, PadEventKind::Down(Button::South))),
@@ -529,10 +544,10 @@ fn focus_and_axes_fold_into_the_last_one_only() {
 
     // Axes.
     run(&a, "heard = {}");
-    let f: Function = a.load("return function(v) heard[#heard + 1] = 'x=' .. v end").eval().unwrap();
-    h.pads.borrow_mut().insert(1, (a.clone(), a.create_registry_value(f).unwrap()));
+    let f: Function = a.load("return function(e) heard[#heard + 1] = 'x=' .. e.value end").eval().unwrap();
+    let token = h.pads.listen_for_test(1, &a, f, crate::gamepad_api::Kind::Axis);
     let axis = |axis: Axis, v: f32| Event::Pad {
-        token: 1,
+        token,
         kind: PadKind::Axis(axis),
         event: Box::new(PadEvent {
             pad: 0,
@@ -543,7 +558,7 @@ fn focus_and_axes_fold_into_the_last_one_only() {
             held: BTreeSet::new(),
             report: 0,
         }),
-        delivery: Delivery { token: 1, event: 0, value: Some(v), partner: false },
+        delivery: Delivery { token, event: 0, value: Some(v), partner: false },
     };
     assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
     assert_eq!(mailbox::deliver(&*h, 1, &a, axis(Axis::LeftX, 0.25)), Delivered::Queued);
@@ -554,6 +569,246 @@ fn focus_and_axes_fold_into_the_last_one_only() {
     assert!(task::test_release(&*h, "w", Value::Nil));
     mailbox::run_queued(&*h);
     assert_eq!(heard(&a), "x=0.5 | button | x=0.75 | x=1");
+}
+
+// ── Every handler waits ──────────────────────────────────────────────────────────────────────
+
+/// Every kind of event a module hears runs as a handler that waits at `host.ocr.recognize` without
+/// a callback — a timer, a window trigger, a focus change, a setting's `onChange`, a controller
+/// press, the answers of an image search, of a snapshot and of a read with a callback — and goes on
+/// with the reading once it comes. One module each, so each waits on its own and none holds another.
+#[test]
+fn every_kind_of_handler_waits_at_a_read() {
+    let h = host();
+    let read = |kind: &str, x: i32| format!("heard[#heard + 1] = '{kind} ' .. host.ocr.recognize({{ {x}, 5, {x} + 30, 15 }}).text");
+    let f = |lua: &Lua, body: String| -> Function { lua.load(format!("return function() {body} end")).eval().unwrap() };
+    let mut modules: Vec<(Lua, &str)> = Vec::new();
+    // A read's answer, to its callback: first, since the turns of the loop that deliver it would
+    // answer the others' reads too.
+    let answer = vm(&h, 8);
+    run(&answer, &format!("host.ocr.recognize({{ 9868, 5, 9898, 15 }}, function() {} end)", read("answer", 9869)));
+    fire_until(&h, || h.tasks.handler_of(8).is_some());
+    // A timer.
+    let a = vm(&h, 1);
+    run(&a, &format!("host.timer.after(0, function() {} end)", read("timer", 9861)));
+    fire_timers(&h, Instant::now() + Duration::from_millis(5));
+    modules.push((a, "timer 9861,5"));
+    // A window trigger.
+    let a = vm(&h, 2);
+    run(&a, &format!("host.window.onTrigger({{ title = 'Synth' }}, function() {} end)", read("trigger", 9862)));
+    let upto = crate::trigger_seq(&a);
+    assert_eq!(mailbox::deliver(&*h, 2, &a, Event::Activate { win: Box::new(window("Synth")), upto }), Delivered::Parked);
+    modules.push((a, "trigger 9862,5"));
+    // A focus change.
+    let a = vm(&h, 3);
+    run(&a, &format!("host.window.onFocus(function() {} end)", read("focus", 9863)));
+    assert_eq!(mailbox::deliver(&*h, 3, &a, Event::Focus), Delivered::Parked);
+    modules.push((a, "focus 9863,5"));
+    // A setting's onChange, from the dialog: in the queued phase.
+    let a = vm(&h, 4);
+    let cb = f(&a, read("setting", 9864));
+    h.settings.borrow_mut().entry((4, "lang".to_string())).or_default().push((4, a.clone(), a.create_registry_value(cb).unwrap(), 41));
+    let setting = Event::Setting { setting_of: 4, reg: 41, key: "lang".into(), new: crate::settings::Value::Str("de".into()), old: None };
+    assert_eq!(mailbox::deliver_later(&*h, 4, &a, setting), Delivered::Queued);
+    assert_eq!(mailbox::run_queued(&*h).parked, 1);
+    modules.push((a, "setting 9864,5"));
+    // A controller press.
+    let a = vm(&h, 5);
+    let token = h.pads.listen_for_test(5, &a, f(&a, read("pad", 9865)), crate::gamepad_api::Kind::Down);
+    let press = Event::Pad {
+        token,
+        kind: PadKind::Button,
+        event: Box::new(PadEvent {
+            pad: 0,
+            kind: PadEventKind::Down(Button::South),
+            at: Instant::now(),
+            synthetic: false,
+            family: Family::Xbox,
+            held: BTreeSet::new(),
+            report: 0,
+        }),
+        delivery: Delivery { token, event: 0, value: None, partner: false },
+    };
+    assert_eq!(mailbox::deliver(&*h, 5, &a, press), Delivered::Parked);
+    modules.push((a, "pad 9865,5"));
+    // An image search's answer.
+    let a = vm(&h, 6);
+    let p = crate::image_search::test_pending(&a, &h.gens.borrow(), 61, 6, f(&a, read("image", 9866)));
+    let ev = Event::Image { p: Box::new(p), outcome: crate::image_search::test_found_nothing(), ended: false };
+    assert_eq!(mailbox::deliver(&*h, 6, &a, ev), Delivered::Parked);
+    modules.push((a, "image 9866,5"));
+    // A snapshot's answer.
+    let a = vm(&h, 7);
+    let owner = reads::owner_of(&a, &h.gens.borrow(), 7);
+    let p = crate::snapshot::test_request(&h.snaps, &a, owner, None, f(&a, read("snapshot", 9867)));
+    let ev = Event::Snapshot { p: Box::new(p), answer: crate::snapshot::test_failed("screen capture failed") };
+    assert_eq!(mailbox::deliver(&*h, 7, &a, ev), Delivered::Parked);
+    modules.push((a, "snapshot 9867,5"));
+    modules.push((answer, "answer 9869,5"));
+
+    for (i, (lua, _)) in modules.iter().enumerate() {
+        assert!(h.tasks.handler_of(i + 1).is_some(), "module {} waits", i + 1);
+        assert_eq!(heard(lua), "", "module {} went on before its reading came", i + 1);
+    }
+    fire_until(&h, || modules.iter().all(|(lua, _)| !heard(lua).is_empty()));
+    for (lua, said) in &modules {
+        assert_eq!(heard(lua), *said);
+    }
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
+    assert_eq!(h.tasks.len(), 0);
+}
+
+/// A timer's handler that waited for a read while keys queued behind it — a poll that holds its
+/// module's keys — is said once per module and place in a session, the module's own line past a
+/// `pcall` around the call; a key's handler that waits is not a poll, and a timer's that nothing
+/// waited behind says nothing.
+#[test]
+fn a_poll_that_waited_with_keys_behind_it_is_said_once_per_place() {
+    let h = host();
+    let a = vm(&h, 1);
+    let poll = "local ok, r = pcall(host.ocr.recognize, { 9871, 5, 9901, 15 })";
+    for _ in 0..2 {
+        assert_eq!(call(&h, &a, 1, poll, false), Delivered::Parked);
+        say(&h, &a, 1, "Tab", true);
+        say(&h, &a, 1, "Tab", true);
+        fire_until(&h, || h.tasks.handler_of(1).is_none());
+        mailbox::run_queued(&*h);
+    }
+    assert!(h.tasks.timer_said("m1", "mod.luau:1"), "the module's line, not pcall's [C]");
+    assert_eq!(h.tasks.timer_lines(), 1, "once per module and place");
+    // Nothing behind it, or a key's handler: no line.
+    assert_eq!(call(&h, &a, 1, "\nhost.ocr.recognize({ 9872, 5, 9902, 15 })", false), Delivered::Parked);
+    fire_until(&h, || h.tasks.handler_of(1).is_none());
+    assert_eq!(call(&h, &a, 1, "\n\nhost.ocr.recognize({ 9873, 5, 9903, 15 })", true), Delivered::Parked);
+    say(&h, &a, 1, "Tab", true);
+    fire_until(&h, || h.tasks.handler_of(1).is_none());
+    mailbox::run_queued(&*h);
+    assert_eq!(h.tasks.timer_lines(), 1);
+    assert_eq!(heard(&a), "Tab | Tab | Tab | Tab | Tab");
+}
+
+/// A module one handler has kept busy for 30 s with keys waiting behind it is said once for that
+/// handler: what it waits in, for how long, where, and how many keys wait.
+#[test]
+fn a_module_busy_long_with_keys_behind_it_is_said_once() {
+    let h = host();
+    let a = vm(&h, 1);
+    assert_eq!(call(&h, &a, 1, "host.ocr.recognize({ 9881, 5, 9911, 15 })", false), Delivered::Parked);
+    assert!(mailbox::say_long_waits(&*h, Instant::now() + Duration::from_secs(31)).is_empty(), "no key waits yet");
+    say(&h, &a, 1, "Tab", true);
+    assert!(mailbox::say_long_waits(&*h, Instant::now()).is_empty(), "not 30 s yet");
+    let said = mailbox::say_long_waits(&*h, Instant::now() + Duration::from_secs(31));
+    assert_eq!(said, [mailbox::busy_line("m1", 31, "timer", "mod.luau:1", 1)]);
+    assert_eq!(said[0], "[m1] has been busy for 31 s in a timer handler, waiting at mod.luau:1; 1 key(s) wait behind it");
+    assert!(mailbox::say_long_waits(&*h, Instant::now() + Duration::from_secs(62)).is_empty(), "once per handler");
+    fire_until(&h, || h.tasks.handler_of(1).is_none());
+    mailbox::run_queued(&*h);
+    assert_eq!(heard(&a), "Tab");
+}
+
+/// What a module's mailbox held when it is taken away — a disable, a stop — is said by name for
+/// its inputs: what a stop says it dropped of the keys that waited for the module.
+#[test]
+fn a_mailbox_taken_away_names_the_inputs_it_held() {
+    let h = host();
+    let a = vm(&h, 1);
+    assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
+    say(&h, &a, 1, "a key", true);
+    say(&h, &a, 1, "a timer", false);
+    say(&h, &a, 1, "another key", true);
+    assert_eq!(mailbox::drop_owner(&*h, 1, Why::Disabled), ["key", "key"]);
+    task::drop_owner(&*h, 1);
+    assert!(h.mail.is_empty());
+}
+
+// ── The host's own arms, against a busy module ───────────────────────────────────────────────
+
+/// A controller press that waited in a busy module's mailbox runs its listener through the host's
+/// own arm (`open_pad_in`), with the event's table, once the module is free; one whose listener the
+/// module took away meanwhile runs nothing.
+#[test]
+fn a_busy_modules_controller_press_reaches_its_listener_or_nothing_once_it_went() {
+    let h = host();
+    let a = vm(&h, 1);
+    let f: Function = a.load("return function(e) heard[#heard + 1] = e.type .. ' ' .. e.pad end").eval().unwrap();
+    let kept = h.pads.listen_for_test(1, &a, f.clone(), crate::gamepad_api::Kind::Down);
+    let gone = h.pads.listen_for_test(1, &a, f, crate::gamepad_api::Kind::Down);
+    let press = |token: i64| Event::Pad {
+        token,
+        kind: PadKind::Button,
+        event: Box::new(PadEvent {
+            pad: 2,
+            kind: PadEventKind::Down(Button::South),
+            at: Instant::now(),
+            synthetic: false,
+            family: Family::Xbox,
+            held: BTreeSet::new(),
+            report: 0,
+        }),
+        delivery: Delivery { token, event: 0, value: None, partner: false },
+    };
+    assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
+    assert_eq!(mailbox::deliver(&*h, 1, &a, press(kept)), Delivered::Queued);
+    assert_eq!(mailbox::deliver(&*h, 1, &a, press(gone)), Delivered::Queued);
+    h.pads.forget_for_test(gone);
+    assert!(task::test_release(&*h, "w", Value::Nil));
+    mailbox::run_queued(&*h);
+    assert_eq!(heard(&a), "down 2", "the kept listener's press, and nothing for the one that went");
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
+}
+
+/// An image search's answer that waited in a busy module's mailbox runs its callback through the
+/// host's own arm (`open_image_in`) once the module is free; one whose module was disabled while
+/// it waited is held, to be searched again when the module is on again, and runs nothing now.
+#[test]
+fn a_busy_modules_image_answer_runs_once_it_is_free_and_is_held_when_it_was_disabled() {
+    let h = host();
+    let a = vm(&h, 1);
+    let cb: Function = a.load("return function(hit) heard[#heard + 1] = 'searched ' .. tostring(hit) end").eval().unwrap();
+    let answer = |p| Event::Image { p: Box::new(p), outcome: crate::image_search::test_found_nothing(), ended: false };
+    let p = crate::image_search::test_pending(&a, &h.gens.borrow(), 41, 1, cb.clone());
+    assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
+    assert_eq!(mailbox::deliver(&*h, 1, &a, answer(p)), Delivered::Queued);
+    assert!(task::test_release(&*h, "w", Value::Nil));
+    mailbox::run_queued(&*h);
+    assert_eq!(heard(&a), "searched nil");
+    // Disabled while it waits: held, not run, not let go.
+    let p = crate::image_search::test_pending(&a, &h.gens.borrow(), 42, 1, cb);
+    assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
+    assert_eq!(mailbox::deliver(&*h, 1, &a, answer(p)), Delivered::Queued);
+    h.enabled.borrow_mut()[1] = false;
+    mailbox::drop_owner(&*h, 1, Why::Disabled);
+    task::drop_owner(&*h, 1);
+    assert!(crate::image_search::test_held(&h.images, 42), "held for the module's next turn on");
+    assert_eq!(heard(&a), "searched nil");
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
+}
+
+/// A snapshot's answer that waited in a busy module's mailbox runs its callback through the host's
+/// own arm (`open_snapshot_in`) once the module is free — superseded when a newer request with its
+/// key was made before it ran, as by a key queued ahead of it.
+#[test]
+fn a_busy_modules_snapshot_answer_runs_once_it_is_free_and_is_judged_when_it_runs() {
+    let h = host();
+    let a = vm(&h, 1);
+    let owner = reads::owner_of(&a, &h.gens.borrow(), 1);
+    let cb: Function = a.load("return function(snap, why) heard[#heard + 1] = tostring(snap) .. ': ' .. why end").eval().unwrap();
+    let answer = |p| Event::Snapshot { p: Box::new(p), answer: crate::snapshot::test_failed("screen capture failed") };
+    let p = crate::snapshot::test_request(&h.snaps, &a, owner, Some("k"), cb.clone());
+    assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
+    assert_eq!(mailbox::deliver(&*h, 1, &a, answer(p)), Delivered::Queued);
+    assert!(task::test_release(&*h, "w", Value::Nil));
+    mailbox::run_queued(&*h);
+    assert_eq!(heard(&a), "nil: screen capture failed");
+    // A newer request with the key made while the answer waited: superseded when it runs.
+    let older = crate::snapshot::test_request(&h.snaps, &a, owner, Some("k"), cb.clone());
+    assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
+    assert_eq!(mailbox::deliver(&*h, 1, &a, answer(older)), Delivered::Queued);
+    let _newer = crate::snapshot::test_request(&h.snaps, &a, owner, Some("k"), cb);
+    assert!(task::test_release(&*h, "w", Value::Nil));
+    mailbox::run_queued(&*h);
+    assert_eq!(heard(&a), format!("nil: screen capture failed | nil: {}", crate::snapshot::SUPERSEDED));
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
 }
 
 // ── Teardown while a module waits ────────────────────────────────────────────────────────────
@@ -667,7 +922,7 @@ fn an_answer_in_the_mailbox_is_still_out_and_judged_when_it_runs() {
         &a,
         r#"
         answers = {}
-        host.ocr.read({ 9601, 5, 9631, 15 }, { key = "k" }, function(r)
+        host.ocr.recognize({ 9601, 5, 9631, 15 }, { key = "k" }, function(r)
           answers[#answers + 1] = { text = r.text, newer = r.newer, pending = host.ocr.pending("k") }
         end)
         "#,
@@ -680,7 +935,7 @@ fn an_answer_in_the_mailbox_is_still_out_and_judged_when_it_runs() {
         1,
         r#"
         keySaw = host.ocr.pending("k")
-        host.ocr.read({ 9602, 5, 9632, 15 }, { key = "k" }, function(r)
+        host.ocr.recognize({ 9602, 5, 9632, 15 }, { key = "k" }, function(r)
           answers[#answers + 1] = { text = r.text, newer = r.newer, pending = host.ocr.pending("k") }
         end)
         "#,
@@ -708,7 +963,7 @@ fn an_answer_in_the_mailbox_is_still_out_and_judged_when_it_runs() {
 fn an_answer_in_the_mailbox_of_a_disabled_module_is_dropped() {
     let h = host();
     let a = vm(&h, 1);
-    run(&a, r#"host.ocr.read({ 9611, 5, 9641, 15 }, { key = "k" }, function() called = true end)"#);
+    run(&a, r#"host.ocr.recognize({ 9611, 5, 9641, 15 }, { key = "k" }, function() called = true end)"#);
     assert_eq!(call(&h, &a, 1, "wait('w')", false), Delivered::Parked);
     fire_until(&h, || h.mail.len(1) == 1);
     assert!(h.state.has_pending(), "waiting in the mailbox");
@@ -719,6 +974,25 @@ fn an_answer_in_the_mailbox_of_a_disabled_module_is_dropped() {
     h.enabled.borrow_mut()[1] = true;
     mailbox::run_queued(&*h);
     assert!(yes(&a, "return called == nil and host.ocr.pending('k') == false"));
+}
+
+/// `pending(key)` in a handler that waited for a read: `true` while the answer of a read with that
+/// key and a callback waits in the module's mailbox behind it — so a handler that waits until it
+/// turns `false` waits for good (docs/api/ocr.md, "Where it waits").
+#[test]
+fn pending_is_true_in_a_waiting_handler_while_its_keys_answer_waits_behind_it() {
+    let h = host();
+    let a = vm(&h, 1);
+    // Asked first, so answered first: into the mailbox, as the module waits by then.
+    run(&a, r#"host.ocr.recognize({ 9621, 5, 9651, 15 }, { key = "k" }, function() called = host.ocr.pending("k") end)"#);
+    let waits = r#"local r = host.ocr.recognize({ 9622, 5, 9652, 15 }); got, sawPending = r.text, host.ocr.pending("k")"#;
+    assert_eq!(call(&h, &a, 1, waits, false), Delivered::Parked);
+    fire_until(&h, || yes(&a, "return got ~= nil"));
+    assert!(yes(&a, "return got == '9622,5' and sawPending == true"), "the answer behind it is still out");
+    assert_eq!(h.mail.len(1), 1, "the callback's answer waited behind the handler");
+    mailbox::run_queued(&*h);
+    assert!(yes(&a, "return called == false and host.ocr.pending('k') == false"));
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
 }
 
 // ── Timers ───────────────────────────────────────────────────────────────────────────────────
@@ -974,6 +1248,74 @@ fn a_handler_that_yields_in_a_loop_is_stopped() {
     assert_eq!(got.borrow().len(), 1);
     assert!(h.errors.borrow().is_empty(), "the stop is not the module's error: {:?}", h.errors.borrow());
     assert!(h.tasks.handler_of(1).is_none());
+    crate::vm_guard::clear_exit_hook();
+}
+
+/// A guard VM for module `idx` with `mib` MiB, over clocks a test steps: the watchdog's clocks
+/// read `now` (nanoseconds).
+fn guarded(h: &Rc<Host>, idx: usize, mib: u32, now: &std::sync::Arc<AtomicU64>) -> (Lua, std::sync::Arc<crate::vm_guard::Guard>) {
+    struct Fake(std::sync::Arc<AtomicU64>);
+    impl crate::vm_guard::Clocks for Fake {
+        fn wall_ns(&self) -> u64 {
+            self.0.load(Ordering::SeqCst)
+        }
+        fn loop_cpu(&self) -> Option<Duration> {
+            Some(Duration::from_nanos(self.0.load(Ordering::SeqCst)))
+        }
+    }
+    let guard = crate::vm_guard::Guard::with(crate::vm_guard::Budgets::APP, Box::new(Fake(now.clone())));
+    let lua = crate::vm_guard::new_vm(&guard);
+    let id = format!("m{idx}");
+    crate::vm_guard::describe_for_test(&lua, idx, &id, &[(id.as_str(), mib)]);
+    crate::vm_guard::loaded(&lua);
+    (vm_in(h, idx, lua), guard)
+}
+
+/// A handler that waits for three readings, each 2.5 s of both clocks away, is not stopped: the
+/// waiting counts on no clock, and each stretch after a wait is an entry of its own.
+#[test]
+fn a_handler_that_waits_three_times_is_not_stopped() {
+    let h = host();
+    let now = std::sync::Arc::new(AtomicU64::new(0));
+    let (a, guard) = guarded(&h, 1, 256, &now);
+    let got: Rc<RefCell<Vec<crate::vm_guard::Trip>>> = Rc::new(RefCell::new(Vec::new()));
+    let g = got.clone();
+    crate::vm_guard::set_exit_hook(Rc::new(move |t| g.borrow_mut().extend(t)));
+    let code = "for i = 1, 3 do heard[#heard + 1] = host.ocr.recognize({ 9890 + i, 5, 9920 + i, 15 }).text end";
+    assert_eq!(call(&h, &a, 1, code, false), Delivered::Parked);
+    for n in 1..=3 {
+        now.fetch_add(2_500_000_000, Ordering::SeqCst);
+        assert!(guard.poll().armed.is_none(), "armed while the handler waited ({n})");
+        let before = heard(&a);
+        fire_until(&h, || heard(&a) != before);
+    }
+    assert!(!crate::vm_guard::stopped(&a), "a handler that waited was stopped");
+    assert_eq!(heard(&a), "9891,5 | 9892,5 | 9893,5");
+    assert!(got.borrow().is_empty() && h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
+    crate::vm_guard::clear_exit_hook();
+}
+
+/// A reading that could not be built in its module's VM — for a handler that waited, or for a
+/// read's callback — because the VM ran out of memory doing it is a stop, which reports itself: no
+/// module error beside it. Any other failure is the module's error. (The delivery and the callback's
+/// opening both go through this, `ocr::lua::handover_failed`; lib.rs's wiring test holds them to it.)
+#[test]
+fn a_memory_error_building_a_reading_is_a_stop_not_a_modules_error() {
+    let h = host();
+    let now = std::sync::Arc::new(AtomicU64::new(0));
+    let (a, _guard) = guarded(&h, 1, 8, &now);
+    let got: Rc<RefCell<Vec<crate::vm_guard::Trip>>> = Rc::new(RefCell::new(Vec::new()));
+    let g = got.clone();
+    crate::vm_guard::set_exit_hook(Rc::new(move |t| g.borrow_mut().extend(t)));
+    reads::handover_failed(&*h, &a, 1, &mlua::Error::runtime("a table could not be made"));
+    assert!(!crate::vm_guard::stopped(&a) && got.borrow().is_empty());
+    assert_eq!(h.errors.borrow().len(), 1, "any other failure is the module's error");
+    reads::handover_failed(&*h, &a, 1, &mlua::Error::MemoryError("not enough memory".into()));
+    assert!(crate::vm_guard::stopped(&a));
+    let trips = got.borrow();
+    assert_eq!(trips.len(), 1);
+    assert_eq!((trips[0].what.as_str(), trips[0].kind), ("ocr.recognize", crate::vm_guard::EntryKind::Handler));
+    assert_eq!(h.errors.borrow().len(), 1, "the stop reports itself: no module error beside it");
     crate::vm_guard::clear_exit_hook();
 }
 

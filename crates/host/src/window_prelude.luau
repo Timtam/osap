@@ -236,9 +236,9 @@ end
 -- then calls `_dispatchInitial` with the window in front. A real activation dispatched first
 -- un-primes it, so the same foreground is never reported twice.
 --
--- `onTrigger(matcher, cb)` is the same as `onTrigger(matcher, nil, cb)`: `host.ocr.read` lets
--- its options be left out, and the two-argument form used to raise "attempt to index function
--- value" from in here. Everything a registration can get wrong raises HERE, at the caller's
+-- `onTrigger(matcher, cb)` is the same as `onTrigger(matcher, nil, cb)`: `host.ocr.recognize`
+-- lets its options be left out before a callback, and the two-argument form used to raise
+-- "attempt to index function value" from in here. Everything a registration can get wrong raises HERE, at the caller's
 -- line, and not from the first dispatch — a callback that is not a function used to be stored
 -- and fail only when the window came forward, as an error in some later event.
 function W.onTrigger(matcher, opts, cb)

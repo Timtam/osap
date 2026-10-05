@@ -691,29 +691,61 @@ impl Shared {
         }
     }
 
-    /// A controller event as it runs (`Event::Pad`): its listener, looked up by token now — gone
-    /// when the listener was removed meanwhile — with the event's table; `age` counts to now.
+    /// A controller event as it runs (`Event::Pad`), by [`open_pad_in`]; a table that could not be
+    /// built is reported as the listener's error.
     pub(crate) fn open_pad(&self, token: i64, ev: &PadEvent, d: &Delivery) -> Opened {
-        let found = {
-            let ls = self.pads.listeners.borrow();
-            ls.iter().find(|l| l.token == token).and_then(|l| {
-                let chord = l.filter.chord.as_ref().map(|c| c.buttons().to_vec());
-                l.lua.registry_value::<Function>(&l.cb).ok().map(|f| (l.module_idx, l.lua.clone(), f, chord))
-            })
-        };
-        let Some((idx, lua, f, chord)) = found else { return Opened::Gone };
-        let now = Instant::now();
-        let table = match &chord {
-            Some(set) => chord_table(&lua, ev, set, now),
-            None => event_table(&lua, ev, d.value, d.partner, now),
-        };
-        match table {
-            Ok(t) => Opened::Run { f, args: MultiValue::from_vec(vec![Value::Table(t)]), ctx: Ctx::new("gamepad", idx) },
-            Err(e) => {
-                self.report_callback_error(idx, "gamepad", &e.to_string());
-                Opened::Gone
-            }
+        open_pad_in(&self.pads, token, ev, d, &|idx, what, e| self.report_callback_error(idx, what, e))
+    }
+}
+
+/// A controller event as it runs (`Event::Pad`): its listener in `pads`, looked up by token now —
+/// gone when the listener was removed meanwhile — with the event's table; `age` counts to now. A
+/// table that could not be built goes to `report` (module, kind of callback, message). The host's
+/// own `open` and the mailbox tests' holder both run this, so the tests run the host's rule and
+/// not a copy of it.
+pub(crate) fn open_pad_in(pads: &Pads, token: i64, ev: &PadEvent, d: &Delivery, report: &dyn Fn(usize, &str, &str)) -> Opened {
+    let found = {
+        let ls = pads.listeners.borrow();
+        ls.iter().find(|l| l.token == token).and_then(|l| {
+            let chord = l.filter.chord.as_ref().map(|c| c.buttons().to_vec());
+            l.lua.registry_value::<Function>(&l.cb).ok().map(|f| (l.module_idx, l.lua.clone(), f, chord))
+        })
+    };
+    let Some((idx, lua, f, chord)) = found else { return Opened::Gone };
+    let now = Instant::now();
+    let table = match &chord {
+        Some(set) => chord_table(&lua, ev, set, now),
+        None => event_table(&lua, ev, d.value, d.partner, now),
+    };
+    match table {
+        Ok(t) => Opened::Run { f, args: MultiValue::from_vec(vec![Value::Table(t)]), ctx: Ctx::new("gamepad", idx) },
+        Err(e) => {
+            report(idx, "gamepad", &e.to_string());
+            Opened::Gone
         }
+    }
+}
+
+#[cfg(test)]
+impl Pads {
+    /// A listener of module `module_idx` for `kind`, whose callback is `cb` in `lua`, as
+    /// `host.gamepad.on` files it: its token. For the tests' holders, which have no `Shared`.
+    pub(crate) fn listen_for_test(&self, module_idx: usize, lua: &Lua, cb: Function, kind: Kind) -> i64 {
+        let token = self.next_token.get() + 1;
+        self.next_token.set(token);
+        self.listeners.borrow_mut().push(PadListener {
+            token,
+            module_idx,
+            lua: lua.clone(),
+            cb: lua.create_registry_value(cb).expect("the callback is kept"),
+            filter: PadFilter::new(kind),
+        });
+        token
+    }
+
+    /// Listener `token` goes, as `host.gamepad.off` takes it away.
+    pub(crate) fn forget_for_test(&self, token: i64) {
+        self.listeners.borrow_mut().retain(|l| l.token != token);
     }
 }
 

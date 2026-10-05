@@ -120,7 +120,7 @@ local function snapshotLines()
   end
 
   local t5 = now()
-  local oko, oerr = pcall(host.ocr.read, SNAP_REGION, { snapshot = snap }, function(r)
+  local oko, oerr = pcall(host.ocr.recognize, SNAP_REGION, { snapshot = snap }, function(r)
     answered = answered + 1
     report("read of the snapshot answered after %d ms: %s, %d word(s)%s",
       now() - t5, r.status, #r.words, r.error and (", " .. r.error) or "")
@@ -153,11 +153,15 @@ host.timer.after(1500, function()
   local ok, px = pcall(host.screen.pixel, 10, 10)
   report("pixel(10,10) %s in %d ms: %s", ok and "returned" or "THREW", now() - t0, describe(px))
 
+  -- Without a callback, in this timer's handler: the handler waits for the reading, and the
+  -- time is the wait. A capture that failed is a reading with status "failed", not a raise.
   local t1 = now()
   local ok2, res = pcall(host.ocr.recognize, { region = { 0, 0, 200, 60 } })
-  if ok2 and type(res) == "table" then
+  if ok2 and type(res) == "table" and res.status ~= "failed" then
     report("recognize 200x60 returned in %d ms: %d word(s), skipped=%s",
       now() - t1, #(res.words or {}), tostring(res.skipped))
+  elseif ok2 and type(res) == "table" then
+    report("recognize 200x60 answered a failed reading in %d ms: %s", now() - t1, tostring(res.error))
   else
     report("recognize 200x60 THREW in %d ms: %s", now() - t1, tostring(res))
   end
@@ -185,8 +189,11 @@ host.timer.after(1500, function()
       report("late pixel(10,10) %s in %d ms: %s", ok4 and "returned" or "THREW", now() - t3, describe(px3))
       local t4 = now()
       local ok5, res2 = pcall(host.ocr.recognize, { region = { 0, 0, 200, 60 } })
-      report("late recognize 200x60 %s in %d ms",
-        (ok5 and type(res2) == "table") and "returned" or "THREW", now() - t4)
+      local how = "THREW"
+      if ok5 and type(res2) == "table" then
+        how = res2.status == "failed" and ("answered a failed reading (" .. tostring(res2.error) .. ")") or "returned"
+      end
+      report("late recognize 200x60 %s in %d ms", how, now() - t4)
       -- One more turn of the loop, so the observation line counting these reads is written.
       host.timer.after(500, function()
         pcall(host.screen.pixel, 600, 400)

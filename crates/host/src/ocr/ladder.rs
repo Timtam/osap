@@ -47,7 +47,7 @@ pub enum PaddleUse {
     /// fast rung — answers when it reads anything; otherwise the recogniser's text, waited for
     /// within the budget, unless Vision refused the first pass. Not asked after all (the exit has
     /// begun, its queue is full, its thread has gone): today's ladder, the fast rung included. On
-    /// `host.ocr.read`'s recognise thread
+    /// `host.ocr.recognize`'s recognise thread
     /// one pass of the fast level is made once the answer is picked, for the shadow's counts only
     /// (`ocr/shadow.rs`), so that it changes nothing of the answer or the budget.
     Merge,

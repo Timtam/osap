@@ -113,7 +113,7 @@ the script refuses one that does (`otool -L`) before it packages anything — af
 warm-up, and says once in its log whether the recogniser is ready or why it is not. From then on
 it reads every small region beside Vision and answers where Vision's accurate ladder read nothing,
 by Windows' rule, and on an Intel Mac it checks the fast level's first pass as well (see
-[`host.ocr.read`'s macOS section](api/ocr.md#macos)). The library
+[`host.ocr.recognize`'s macOS section](api/ocr.md#macos)). The library
 is built for macOS 13.3 and later, and the application does not open it on an older macOS; there,
 where either file is missing, or where the library does not load, Vision reads alone, as in a
 package without it. Every process that loaded it — the application at its quit, and each process

@@ -184,7 +184,7 @@ fn lock_even_if_poisoned<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// waiting for work, is in no call of ONNX Runtime's and is not counted.
 ///
 /// And once that wait has begun it is CLOSED: `start` refuses, so nothing enters ONNX Runtime
-/// after the exit stopped waiting. The recognise thread of `host.ocr.read` can still be working
+/// after the exit stopped waiting. The recognise thread of `host.ocr.recognize` can still be working
 /// through a job of many regions then — the exit waits for it only a second — and without this
 /// each small region it reached would start a recognition nobody waits for.
 pub(super) struct InFlight {

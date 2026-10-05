@@ -193,9 +193,9 @@ fn a_text_reached_through_a_tab_waits_in_the_handler_not_in_the_scan() {
     "#);
 }
 
-/// The same with a read: in a task of the tests' entry, whose `recognize` waits, a `text` reached
-/// through focusNext waits as a handler does — the case is "handler", not "a coroutine the module
-/// made" — and the reading is said once it comes.
+/// The same with a read: in a key's handler, a `text` reached through focusNext waits as the
+/// handler — the case is "handler", not "a coroutine the module made" — and the reading is said
+/// once it comes.
 #[test]
 fn a_recognize_in_a_text_reached_through_focus_next_waits_as_the_handler() {
     run(r#"
@@ -205,11 +205,10 @@ fn a_recognize_in_a_text_reached_through_focus_next_waits_as_the_handler() {
             text = function() return T.host.ocr.recognize({ region = { 9701, 5, 9731, 15 } }).text end })
         end)
         o.focus = 2
-        local t = T.task.run(function() o:focusNext() end)
-        assert(T.task.alive(t), "it waits: " .. T.dump())
+        assert(T.call("key", function() o:focusNext() end) == "Parked", "it waits: " .. T.dump())
         assert(o.focus == 3)
         T.settle()
-        assert(not T.task.alive(t) and #S.taskErrors == 0, table.concat(S.taskErrors, " | "))
+        assert(#S.taskErrors == 0, table.concat(S.taskErrors, " | "))
         assert(T.last().text == "Reading, 9701,5", T.last().text)
     "#);
 }
@@ -226,8 +225,7 @@ fn a_recognize_in_a_when_is_in_a_coroutine_the_module_made() {
             when = function() return T.host.ocr.recognize({ region = { 9702, 5, 9732, 15 } }).text == "x" end })
         end)
         o.focus = 2
-        local t = T.task.run(function() o:focusNext() end)
-        assert(not T.task.alive(t), "nothing waited")
+        assert(T.call("key", function() o:focusNext() end) == "Ran", "nothing waited")
         assert(o.focus == 1, "Peek hidden, the ring wrapped: " .. o.focus)
         assert(T.count("Synth: 'Peek' — its `when` failed (") == 1, T.dump())
         assert(T.count("host.ocr.recognize cannot wait in a coroutine the module made") == 1, T.dump())

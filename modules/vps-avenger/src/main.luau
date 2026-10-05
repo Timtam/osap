@@ -135,10 +135,12 @@ end
 -- when the read failed or disagrees with it (presets.luau, "THE NEIGHBOUR RULE"): the watch, and
 -- what it waits for, are the same with it and without it.
 --
--- The readings after the click are made off the event loop (host.ocr.read), one out at a time:
--- the watch looks every 100 ms and is handed the last answer that belongs to this press. The one
--- before the click is made on the loop, because it has to be the name before the click and a read
+-- The readings after the click are made with a callback (host.ocr.recognize), one out at a time:
+-- the watch looks every 100 ms and is handed the last answer that belongs to this press. The press
+-- waits for the one before the click, because it has to be the name before the click and a read
 -- that answers later cannot be: one read per press, as the Preset read-out makes one per focus.
+-- Only this module waits for it; the user can bring another window to the front meanwhile, so the
+-- press looks again after the read (O:stillHere) and clicks nothing in a place it has left.
 -- When that read gets nothing — small text at 50 % — the name before is the last one this module
 -- read, and with none at all, nothing is taken for a change: the watch runs to its bound and says
 -- the last name it read, without saying it is new. The first reading after the click is taken
@@ -163,11 +165,11 @@ local function tidy(text)
   return (string.gsub(t, " $", ""))
 end
 
--- The name as read now, on the event loop, or nil.
+-- The name as read now — the press's handler waits for the reading — or nil.
 local function nameNow(o)
   local r = o:toScreenRect(G.NAME_REGION)
   if not r then return nil end
-  local ok, res = pcall(host.ocr.recognize, { region = r, lang = H.lang() })
+  local ok, res = pcall(host.ocr.recognize, r, { lang = H.lang() })
   local t = ok and res and tidy(res.text) or ""
   if t == "" then return nil end
   names.last = t
@@ -181,7 +183,7 @@ local function nameAfter(o, gen)
     local r = o:toScreenRect(G.NAME_REGION)
     if r then
       names.reading = true
-      local ok = pcall(host.ocr.read, r, { lang = H.lang(), key = "vps-avenger name" }, function(res)
+      local ok = pcall(host.ocr.recognize, r, { lang = H.lang(), key = "vps-avenger name" }, function(res)
         names.reading = false
         if gen ~= names.gen or res.status ~= "text" then return end
         local t = tidy(res.text)
@@ -209,11 +211,25 @@ local function settled(gen)
   if names.pending == gen then names.pending = nil end
 end
 
+-- The name before a press's click, read while the press waits — and whether the overlay is still
+-- where the press was made: `false` and nothing more when it is not, said in the log.
+local function nameBefore(o, label)
+  local mark = o:here()
+  local read = nameNow(o)
+  local fine, why = o:stillHere(mark)
+  if not fine then
+    host.log.info(string.format("[avenger] '%s': not going on after the name was read — %s", label, tostring(why)))
+    return false
+  end
+  return true, read
+end
+
 local function presetStep(ov, label, at, dir)
   ov:addCustomButton({
     label = label,
     onActivate = function(o)
-      local read = nameNow(o)
+      local here, read = nameBefore(o, label)
+      if not here then return end
       local was = read or names.last
       if not clickAt(o, label, at) then return end
       -- The name read before the click places the preset the step starts from; worked out once
@@ -259,7 +275,7 @@ end
 
 -- ── Preset info ──────────────────────────────────────────────────────────────
 -- Only with the preset database: the project's Info. Pressed, it reads the name as a step does
--- before its click — on the event loop, one read per press — and says what the database has on
+-- before its click — the press waits for it, one read per press — and says what the database has on
 -- it (presets.luau, DB.info): its expansion, category, oscillator tabs and macro names, each part
 -- marked as the database's. A button rather than a read-out: the whole of it is a long sentence
 -- nobody wants on every Tab past it.
@@ -267,7 +283,8 @@ local function presetInfo(ov)
   ov:addCustomButton({
     label = "Preset info",
     onActivate = function(o)
-      local read = nameNow(o)
+      local here, read = nameBefore(o, "Preset info")
+      if not here then return end
       local ok, said = pcall(DB.info, read)
       if not ok then
         host.log.info("[avenger] 'Preset info' failed: " .. tostring(said))

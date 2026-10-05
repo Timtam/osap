@@ -1,4 +1,4 @@
-//! Every limit and timing of `host.ocr.read`, and of the snapshots and change waits taken on its
+//! Every limit and timing of `host.ocr.recognize`, and of the snapshots and change waits taken on its
 //! capture thread, in one place, so the documentation, the tests and the code quote the same
 //! numbers. Std only; borrowed by `crates/macos-check`.
 

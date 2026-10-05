@@ -5,7 +5,7 @@
 //! Written for the maintainer's decisions of 2026-10-01. The reads were `host.ocr.recognize`, on the
 //! event loop, which on a Mac also carries the keyboard's event tap: an Intel MacBook Air spent 143
 //! to 786 ms in each of sforzando's focus reads, with every key waiting behind it. Now they are one
-//! `host.ocr.read` per announcement, under one key per overlay, and the announcement is ONE
+//! `host.ocr.recognize` per announcement, under one key per overlay, and the announcement is ONE
 //! sentence — name, what follows it, value — said when the answer comes, as it was said before,
 //! only without the loop waiting for it. It is said only while it is still about what is in front
 //! of the user: not superseded by a later announcement's read, the overlay still active, on the same
@@ -61,14 +61,13 @@ end)
 rawset(T.host.window, "ownsPoint", function() return true end)
 -- What a calibration shot asks besides: the origin's accessibility dump, and its pictures.
 rawset(T.host.element, "rawDump", function() return S.dump end)
--- Every read, with the options it was asked with, in the order things happened.
-local read = T.host.ocr.read
-rawset(T.host.ocr, "read", function(what, opts, cb)
-  if type(opts) == "function" then cb, opts = opts, nil end
+-- Every read with a callback, with the options it was asked with, in the order things happened.
+local read = T.submit
+T.submit = function(what, opts, cb)
   read(what, opts, cb)
   S.reads[#S.reads].opts = opts or {}
   S.order[#S.order + 1] = "read"
-end)
+end
 
 -- The corners of region `r` as one string, for messages.
 function T.region(r) return table.concat({ r[1], r[2], r[3], r[4] }, ",") end
@@ -162,7 +161,7 @@ fn run_mac(scenario: &str) {
 // The read is off the loop, and the sentence comes with the answer.
 // ---------------------------------------------------------------------------------------------
 
-/// Tab onto the read-out: one `host.ocr.read` under the overlay's own key, in the user's language,
+/// Tab onto the read-out: one `host.ocr.recognize` under the overlay's own key, in the user's language,
 /// of the region as placed; nothing is said until the answer comes, and then ONE sentence — the
 /// name, the type word, the key, the value — interrupting, as a key's announcement does, with one
 /// `[read]` line that says it was spoken.
@@ -385,8 +384,8 @@ fn blank_none_and_failed_say_what_an_empty_read_said() {
 }
 
 /// A region with nothing of it left on screen — corners turned around by a region function —
-/// is not asked about: host.ocr.read would refuse it, and host.ocr.recognize read it as nothing. It
-/// is said at once as an empty read was, and the log says why.
+/// is not asked about: host.ocr.recognize would refuse it. It is said at once as an empty read
+/// was, and the log says why.
 #[test]
 fn a_region_empty_on_screen_is_not_read_and_says_what_an_empty_read_said() {
     run(r#"
@@ -425,11 +424,11 @@ fn a_read_refused_at_the_call_is_said_at_once_without_a_value() {
         local S = T.S
         local o = T.fields()
         T.tab()
-        S.readRaises = "host.ocr.read: corners that cover more than 40 million pixels"
+        S.readRaises = "host.ocr.recognize: corners that cover more than 40 million pixels"
         T.tab()
         assert(#S.reads == 0)
         assert(T.last().text == "Preset, button, Alt+P, cannot be read now", T.last().text)
-        assert(T.count("[read] 'Preset' could not be read: host.ocr.read: corners that cover more than 40 million "
+        assert(T.count("[read] 'Preset' could not be read: host.ocr.recognize: corners that cover more than 40 million "
           .. "pixels") == 1, T.dump())
     "#);
 }
@@ -784,7 +783,7 @@ fn the_read_line_counts_estimated_words_apart_and_names_the_language() {
     "#);
 }
 
-/// A calibration shot reads nothing: no host.ocr.read, nothing said.
+/// A calibration shot reads nothing: no host.ocr.recognize, nothing said.
 #[test]
 fn a_calibration_shot_reads_nothing() {
     run(r#"

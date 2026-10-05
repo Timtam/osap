@@ -402,9 +402,11 @@ On every system:
   seconds after it came, while everything else goes on, for trying with a screen reader what
   happens while a read is still out — switching windows, pressing keys, another module's
   hotkey. A module may drop an answer that comes this late, or say it differently (see
-  [Slow reads, for testing](api/ocr.md#host-ocr-read)). In this release only
-  [`host.ocr.read`](api/ocr.md#host-ocr-read) is slowed: `host.ocr.recognize` and
-  `recognizeMany` read on the event loop and answer as soon as they have read.
+  "Slow reads, for testing" under [`host.ocr.recognize`](api/ocr.md#host-ocr-recognize)). It slows
+  every read the host hands over, to a callback and to a handler that waits for it alike — a
+  module whose handler waits is busy 2 seconds longer, and its keys wait with it. A read made on
+  the event loop where the call cannot wait ([Where it waits](api/ocr.md#where-it-waits)) is not
+  slowed.
 - **Calibration keys in overlays** — reload modules to apply.
 - **Load modules not meant for this system** (their `supported_os` excludes it) — restart to
   apply.

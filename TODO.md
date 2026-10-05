@@ -4083,7 +4083,7 @@ docs/api/ocr.md). Languages go through `fluent-langneg` on both platforms, for `
 recogniser still starts beside `Windows.Media.Ocr` for every small region, exactly as before.
 What only a person, a Mac or a measurement can settle:
 
-- [ ] **Migrate the Melodyne selection watcher** to `host.ocr.read` with `key = "selection"`,
+- [ ] **Migrate the Melodyne selection watcher** to `host.ocr.recognize` with a callback and `key = "selection"` (B4),
       re-checking `ov.active` and `nativeMenuOpen` inside the callback. Needs an NVDA test: the
       same announcements, and the pump overrun lines gone.
 - [ ] **Migrate the overlay runtime's `speakControl`**: the name spoken at once, the OCR value
@@ -4092,8 +4092,8 @@ What only a person, a Mac or a measurement can settle:
       input barrier is what keeps read-then-click right for the `opensMenu` buttons (sforzando,
       u-he, Soundiron, Impact Soundworks) and the Komplete Kontrol OCR edit field; an NVDA test
       with each of them is the gate.
-- [ ] **Kontakt's file-menu read** moves to `read` with the other two, but keeps building its own
-      rows (`ocrRows`) until `read`'s rows are compared with it on both platforms.
+- [ ] **Kontakt's file-menu read** waits in its timer's handler since B1b+M, and keeps building its
+      own rows (`ocrRows`) until the reading's rows are compared with it on both platforms.
 - [ ] **The language list at load:** in the first headless run the list was not known within the
       50 ms `languages()` waits, so a module asking in its top-level code got `{}` (it was known a
       moment later). Measure how long the recognise thread's first `AvailableRecognizerLanguages`
@@ -6808,8 +6808,10 @@ task_shim.luau), which every callback is to run in and which only the tests reac
 (`task::table`, built in test builds alone); `reading.time` and `reading.inputEpoch` and
 `host.ocr.pending(key)` (ocr/lua.rs, docs/api/ocr.md); the loop guard (loop_guard.rs) and its CI
 line; and the overlay runtime's building blocks (modules/overlay-runtime, version 0.2.0;
-docs/api/overlay.md). Until handlers wait, `recognize` and `recognizeMany` are the blocking calls
-they always were, with one log line per module that says how long the first held the loop.
+docs/api/overlay.md). Since step B1b+M every handler waits: `host.ocr.recognize(what, opts?, cb?)`
+is the one call — with a callback the former `read`, without one a wait that holds only its own
+module — and the blocking call is left only where it cannot wait, with one log line per module and
+kind of place that says how long the first held the loop.
 
 - [x] **The machinery** — tasks are coroutines the host resumes in the delivery of text readings;
       owned by the VM that runs them, with the priority of the dispatch that started them; dropped
@@ -6968,28 +6970,57 @@ they always were, with one log line per module that says how long the first held
       load — sforzando in REAPER, Kontakt 7 in Logic — comes up on the first tick after its
       binding rather than inside it, which the scripted host holds to; nothing else of B3 differs
       between the platforms.
-- [ ] **The rest, as a mailbox per module** (replacing steps 4 to 10 of the task plan; designed
-      and reviewed in b0-final.md): handlers that wait — with which the scripted
-      test host lets a hook's `recognize` wait inside a handler, and
-      `a_recognize_in_a_text_hook_fails_the_scenario` turns round — in one push to main with
-      the merge of `read` and `recognizeMany` into
-      `host.ocr.recognize(what, opts?, cb?)` — in that push the blocking call's log line, the
-      summary at exit, the three messages (task.rs) and `pending`'s text in ocr.md and index.md
-      stop naming `host.ocr.read`, which is gone then, and no test notices if they do not;
-      gamepad.md then says that a controller button's release is never dropped at the limit of 256
-      (`PadKind::Release`), as its press may be; Melodyne's polls, the example, the tools and sforzando after it; the waits of `read` moved
-      off the loop and the input barrier removed (step 11); and the places that still cannot wait
-      raising last (step 12).
-- [ ] **The note to the external developer porting his game menu reader** goes with that push —
-      the handlers that wait and the merge — not before: there is no task API for him to move to.
-      It says what changes for him: `host.ocr.read(` becomes `host.ocr.recognize(` with the same
-      callback, and `recognizeMany(` becomes `recognize(` with a list. The maintainer decided that
-      `read` and `recognizeMany` are removed at the merge, with no grace period. So no one spelling
-      works on both sides of it — before it `recognize` takes one argument, reads the whole
-      primary display and never calls a callback; after it `read` is nil; and a manifest names no
-      application version — and the note says so: his changed module needs that release, or it
-      reads with `local readText = host.ocr.read or host.ocr.recognize` (the same arguments),
-      which works on both. Step 12 waits for the note.
+- [x] **Step B1b+M, handlers wait and one call reads** (b1b-final.md, with the maintainer's
+      change of 2026-10-05). Every handler waits: the switch `HANDLERS_WAIT` is gone, and
+      `host.ocr.recognize(what, opts?, cb?)` is the one call — with a callback the former `read`
+      (`ocr::lua::read`), without one a wait in its handler (the shim's `start`, task.rs), a list
+      answering `(list, byName)` in both forms, an explicit `nil` callback raising. Where it cannot
+      wait, the blocking call (`legacy_read` in lib.rs) answers the same reading as a wait, with
+      `skipped`, through the same `normalise`, its language resolved as a read's; a `key` or a
+      `snapshot` there raises; one log line per module and kind of place, and the summary at exit.
+      `host.ocr.read` and `recognizeMany` are gone, and `recognize` checks its arguments as every
+      host function does. A poll that waited with keys behind it is said once per module and place, a
+      handler busy 30 s with keys behind it once (`[<module>] has been busy for …`), the inputs
+      dropped at the limit at the first and then at most every 10 s. The guard: a stop names the
+      keys that waited in the stopped module's mailbox (`… key(s) that waited for it were dropped
+      with the stop: …`, and "Dropped:" in the dialog); a memory error handing a reading over is the
+      stop's, not a module error (`handover_failed`). The tree: the overlay runtime (0.3.1),
+      kontakt, sforzando, vps-avenger, melodyne and ik-on-ear (each a patch version up), the tools;
+      a check after the wait in ON:EAR's tile, Avenger's preset step and info, and Kontakt's file
+      menu (the program in front, before the read and after it; Escape only to the same window);
+      `lang = "en"` for Kontakt's menu and sforzando's wordmark. Tests (task_tests.rs,
+      mailbox_tests.rs, key_scope_tests.rs, the scripted host's scenarios), docs (ocr.md rewritten;
+      the busy-module rules on the hotkey, keys, timer, window, settings, arbiter, gamepad and
+      screen pages and in module-runtime-and-lifecycle.md, "A handler waits"). After the review
+      (b1b-review.md): a read that failed is no verdict — sforzando's own control answers nil
+      ("could not tell yet") rather than a `false` kept for good, ON:EAR keeps its grid to be read
+      again, and Kontakt says "Menu could not be read" with the reason in the log; ON:EAR's Grid
+      down and up say nothing once another window came to the front during their quarter second or
+      their read; the scripted host's waits answered at once (`T.answerWaits`) check the call as
+      the host does and are refused where the host could not wait; the probe's batching times are
+      named from asking to the answer.
+- [ ] **NVDA check of step B1b+M, before it is committed** — b1b-final.md section 6: without the
+      switch, Melodyne, ON:EAR, Kontakt (Ctrl+L, Ctrl+S, Ctrl+R), Avenger and sforzando as before;
+      with "Slow every text read by 2 seconds", a window switch during ON:EAR's read (Kontakt
+      answers at once, ON:EAR says nothing after), no click after a switch (ON:EAR's tile, Kontakt's
+      menu with `another application came to the front during the menu read` in the log,
+      Avenger's preset step) and nothing said after one (ON:EAR's Grid down, `Grid down says
+      nothing` in the log), daw-hosts' hotkey at once during a read, Alt+F in Melodyne after
+      Alt+Tab away and back, two modules in one FX chain, a native menu in Melodyne while its poll
+      waits, a held arrow; then a quarter of an hour on a release build with no `[guard] …
+      stopped` line, bringing the `[cpu]` lines, the poll lines and every `could not wait here`.
+- [ ] **Step B1b+M never ran on a Mac** (type-checked only): Kontakt's Alt+V, load and save read
+      the file menu in English and click the right entry, and with the switch a Cmd+Tab away
+      during the read clicks nothing and sends no Escape; Avenger's preset steps and "Preset info";
+      sforzando recognised on the Intel Air, freshly loaded too; keys pressed in another window
+      during a read; no `the system disabled the event tap` line while a module waits, no
+      `[guard] … stopped`, no `could not wait here` but the example's; and the reads asked while
+      Vision's first request hangs at start end `"failed"` after 5 s.
+- [ ] **The rest, as a mailbox per module** (b0-final.md): B4, Melodyne's polls with a callback,
+      so its own keys no longer wait behind them; B5, the example (`examples/ocr`) reading in a
+      callback, the tools, and CI failing on `could not wait here` from then on; step 11, the
+      waits of a read moved off the loop and the input barrier removed; and step 12, the places
+      that still cannot wait raising, once B5 is in and that CI line has stayed green since.
 - [x] **The review of K, B1a, B2 and B3** (2026-10-04, three reviews; kb-final.md). The overlays
       of one module share its key scope and menu flag: the one that comes to the front pins the
       scope, only the last to leave sets it back, and the flag is then what the ones in front say
@@ -7011,17 +7042,20 @@ they always were, with one log line per module that says how long the first held
       `onReady`, `onMessage` and `onClose` (webview_lua.rs) call the module's callback themselves.
       Through the mailbox, as `Event::Page` — `onMessage` an input — with `open` checking the
       module and the page's build. The source test in lib.rs that looks for a module's callback
-      called outside its mailbox (`…_only_at_the_synchronous_places`) fails until they are.
+      called outside its mailbox (`…_only_at_the_synchronous_places`) fails until they are. With
+      it, docs/api/gui.md: its link to `#host-ocr-read` goes to `#host-ocr-recognize`, and the rules
+      for a busy module (b1b-plan.md, section 4) — a page's events wait while a handler of its
+      module waits for a reading, and run in order after it; a read in `onMessage` makes a waiting
+      poll read of the same module an interactive one. And the lane of a page message after the
+      user's activation, still open, can be heard then.
 
 Follow-ups this work found and did not take on:
 
-- [ ] **The host's own `open` and `discard` of a busy module's events, run** (found reviewing
-      B1a): the arms for a controller event, a hotkey, an image search and a snapshot are checked
-      in the source and through the helpers they call (`hotkey_target`, `key_target`,
-      `open_answer`, `fate`), but no test runs `Shared`'s own arm against a busy module, and the
-      test holder has a copy of the controller's. The setting's is one function both run since the
-      review (`open_on_change`). Make each other arm such a function, with a busy-module test per
-      arm, before B1b, when they first run for real.
+- [x] **The host's own `open` and `discard` of a busy module's events, run** (found reviewing
+      B1a; done in B1b+M): each arm is one function the host and the tests' holders both run —
+      `open_pad_in`, `open_hotkey_in`, `open_image_in` and `discard_image_in`, `open_snapshot_in`,
+      beside the setting's `open_on_change` — with a busy-module test per arm (mailbox_tests.rs,
+      key_scope_tests.rs).
 - [ ] **A module disabled at load evaluates its overlays only at the next window or focus event
       after it is enabled** (found reviewing B3): the first evaluation of a binding is a one-shot
       `host.timer.after(0)`, which a disabled module does not get. Not heard: a module is enabled
@@ -7042,16 +7076,28 @@ Follow-ups this work found and did not take on:
       for the hooks asked on every scan, in a coroutine of the module's own, where Luau cannot
       stop — it captures on the event loop as today, for good, and never raises: Melodyne's
       `when` reads pixels (screen-frame-sharing-design.md, section 6).
-- [ ] **The older shapes of `recognize` go at the merge** (the maintainer's decision of
-      2026-10-04): `recognize()`, `{ lang = L }`, `{ region = R }` whose corners are valid only
-      when read loosely, `{ region = R, lang = L }`, and keys it does not know — with `read` and
-      `recognizeMany`, without grace, each with a message that says how to write it; the note to
-      the external developer names them. `{ region = R }` with whole-number corners or a window
-      region is the new form's entry and stays.
 - [ ] **A capture that hangs on Windows.** The read service's hang clock runs only while a
       recognition runs; on the Mac `SCK_TIMEOUT` bounds a capture, but the GDI capture has no
-      bound. Once a module waits for its reads, a capture that never returns leaves it deaf. A
-      remaining risk of the mailbox plan.
+      bound. Since B1b+M a module waits for its reads, so a capture that never returns leaves it
+      deaf — its keys wait behind the handler, and after 30 s the `has been busy` line says so —
+      where it used to hold the whole application. Decide whether the hang clock covers the
+      capture too.
+- [ ] **A handler that reads again at once after `"failed"`** (B1b+M): during a hang a read asked
+      again fails at once and is handed over on the next turn, so a handler that reads in a loop
+      until it gets text turns once a tick and keeps its module busy for as long as the recogniser
+      does not answer. docs/api/ocr.md says to return or ask again from a timer; decide whether the
+      host should brake it too.
+- [ ] **`O:stillHere` does not ask which program is in front** (found reviewing B1b+M): while an
+      overlay holds its place over its own menu (`menus`, `opensMenu`), its origin is frozen, so a
+      mark taken before a wait does not see a window switch during it. No handler in the tree waits
+      over a held menu — Avenger never chooses a menu entry after a wait, and Kontakt checks the
+      program in front itself — but a module that does would click into the new window. A check of
+      the process in front in `stillHere` itself would close it.
+- [ ] **Kontakt's check of the program in front, measured** (B1b+M): `invokeMenuItem` compares
+      `host.window.active().app.pid` before the 250 ms, before the read and after it, taking a Qt
+      menu for the same process. That a Qt menu answers with Kontakt's process on Windows and on a
+      Mac, inside a DAW and standalone, is reasoned, not seen: the NVDA check above and the Mac
+      session show it when load, save and reset still click.
 - [ ] **UIA on a thread of its own** (a multithreaded apartment, as Microsoft's UI Automation
       threading notes recommend), its calls as waits. Measure first.
 - [ ] **Luau's interrupt against a module that never ends.** Decide first whether there may be
@@ -7069,7 +7115,14 @@ Follow-ups this work found and did not take on:
       module ends the task), and a disable now drops what its own `onDeactivate` asked for.
 - [ ] **Kontakt's 250 ms** before its file-menu read, to be replaced by the menu tests' word.
       Needs Mac data first.
-- [ ] **A host form for "English where installed, otherwise the user's language".**
+- [ ] **A host form for "English where installed, otherwise the user's language".** Until it
+      exists, Kontakt's header and file-menu reads and sforzando's wordmark (on the panel and on its
+      own control) ask for `lang = "en"`, and on a Windows with no English text recognition
+      installed every one of them is answered `"failed"`: Kontakt's load, save and reset say "Menu
+      could not be read", with the reason in the log, and sforzando on Windows is found by its UIA
+      pane alone. A list, `{ "en", (host.ocr.languages())[1] }`, would read there in the user's
+      language, but `languages()` can hold the event loop up to 50 ms in the first moments after the
+      start.
 - [ ] **`LADDER_BUDGET`**, to be judged again now that it no longer protects the event loop.
 - [ ] **Whether `ocr-warm-up` is still needed.** Measure first.
 - [ ] **`host.window.focus` and `inputEpoch`** (a review of steps 1 to 3): `focus` turns over

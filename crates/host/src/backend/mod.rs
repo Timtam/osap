@@ -403,16 +403,13 @@ pub type CaptureFn = fn(&[(i32, i32, i32, i32)], CaptureSource) -> Vec<Result<Ca
 /// large to allocate for, or a read the operating system refused. [`DUPLICATION_UNANSWERED`]
 /// starts with it too. These errors are what a module is told: the reason `pixel`, `profile`,
 /// the image searches, `save` and the cells calls return beside their `nil` or `false` — the
-/// vocabulary `docs/api/screen.md` lists under "Failure reasons". The OCR binding does not
-/// decide by it: only `DUPLICATION_UNANSWERED` answers with an `error` field under
-/// `fallback = "none"`, and every other failure still raises (see
-/// `capture_source::answers_instead_of_raising`).
+/// vocabulary `docs/api/screen.md` lists under "Failure reasons". A text read answers each of them
+/// as a reading with `status = "failed"` and this `error`, never a raise.
 pub const CAPTURE_FAILED: &str = "screen capture failed";
 
-/// The first words of the one capture error a `fallback = "none"` module is answered for
-/// rather than raised at: desktop duplication had no picture to give. Every other capture
-/// failure — a degenerate region, one too large to read — is a mistake in the call and still
-/// raises, whatever the module declared.
+/// The first words of the capture error a `fallback = "none"` module is told when desktop
+/// duplication had no picture to give — routine there, at every fullscreen switch and UAC prompt;
+/// with the default fallback the standard path answers instead.
 pub const DUPLICATION_UNANSWERED: &str = "screen capture failed: desktop duplication could not answer";
 
 /// Tells the Windows duplication engine a module that reads through it has just come to the
@@ -454,8 +451,8 @@ pub struct OcrWord {
 }
 
 /// One line as the engine returned it — Windows' `OcrLine`, one Vision observation — with its
-/// words in capture-region coordinates. What `host.ocr.read` groups into rows
-/// (`ocr::pipeline::rows`); the two legacy calls never look at it.
+/// words in capture-region coordinates. What `host.ocr.recognize` groups into rows
+/// (`ocr::pipeline::rows`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OcrLine {
     pub text: String,
@@ -471,8 +468,8 @@ pub struct OcrText {
     pub lines: Vec<OcrLine>,
     /// Set when Windows' fallback recogniser answered instead of the system one: the content
     /// crop it read, `(x, y, w, h)` in capture-region coordinates. `text` is its answer and
-    /// `words` and `lines` are empty, as the legacy calls have always returned it; `host.ocr.read`
-    /// shares the crop out among the text's tokens as approximate boxes.
+    /// `words` and `lines` are empty; `host.ocr.recognize` shares the crop out among the text's
+    /// tokens as approximate boxes.
     pub fallback: Option<(i32, i32, i32, i32)>,
     /// The blank guard answered instead of the engine: the region's content crop found no
     /// ink, so the recogniser was never asked, and the empty `text` and `words` are the
@@ -485,7 +482,7 @@ pub struct OcrText {
     pub skipped: bool,
 }
 
-/// What `host.ocr.read` says when the platform has no recogniser at all.
+/// What `host.ocr.recognize` says when the platform has no recogniser at all.
 pub const NO_RECOGNISER: &str = "no text recogniser on this platform";
 
 /// The pixels the OCR capture stage took for one read, handed to the recognise stage. `Send`,
@@ -517,7 +514,7 @@ pub enum OcrThread {
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct Recognise<'a> {
     /// The language as the platform lists it, already resolved (`ocr::lang`). `None` is the
-    /// engine's own default, which only the legacy calls use.
+    /// engine's own default, which only the legacy call uses, while the language list is not known.
     pub lang: Option<&'a str>,
     /// Whether the fast model reads `lang` too (macOS; its last rung is skipped when not).
     pub fast_ok: bool,
@@ -664,7 +661,7 @@ pub struct FocusStep {
 }
 
 /// The rectangle of the element a focus step landed on, in screen coordinates: the space
-/// `host.ocr.read` regions and `host.input.click` use on the platform — pixels on Windows,
+/// `host.ocr.recognize` regions and `host.input.click` use on the platform — pixels on Windows,
 /// points on macOS (which may carry a fraction there; the caller rounds).
 ///
 /// It exists so that a stop that publishes NO NAME can still be told apart: the one thing the
@@ -1041,7 +1038,7 @@ pub trait Backend {
             .collect()
     }
 
-    /// The functions `host.ocr.read`'s two threads call — see [`OcrWorker`]. Taken once, when
+    /// The functions `host.ocr.recognize`'s two threads call — see [`OcrWorker`]. Taken once, when
     /// the service starts. The default is a platform with no recogniser.
     fn ocr_worker(&self) -> OcrWorker {
         OcrWorker::none()

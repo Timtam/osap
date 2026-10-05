@@ -9,8 +9,8 @@
 //! smaller height are one row, ordered left to right, their text joined with a space.
 //!
 //! **Words always come with text.** When the Windows fallback recogniser answers (the lone
-//! digit the system engine refuses), it reads without locating. The legacy calls hand that
-//! back as text with no words; `read` gives each whitespace-separated token a box of its own,
+//! digit the system engine refuses), it reads without locating. The engine hands that back as
+//! text with no words; `normalise` gives each whitespace-separated token a box of its own,
 //! in proportion to its length, inside the content crop that recogniser read, and marks it
 //! `approx`. So `words` is non-empty exactly when `text` has something in it, on both
 //! platforms, whichever engine answered.
@@ -185,7 +185,7 @@ mod tests {
         EngineLine { text: text.to_string(), words }
     }
 
-    /// The text/words invariant `host.ocr.read` promises, for every reading.
+    /// The text/words invariant `host.ocr.recognize` promises, for every reading.
     fn holds(r: &Reading) {
         let has_text = r.text.chars().any(|c| !c.is_whitespace());
         assert_eq!(has_text, !r.words.is_empty(), "{r:?}");

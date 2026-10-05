@@ -54,11 +54,13 @@ rawset(T.host.window, "ownsPoint", function(id, x, y)
   if type(S.owns) == "function" then return S.owns(id, x, y) end
   return S.owns
 end)
-rawset(T.host.ocr, "recognize", function(opts)
-  local r = opts.region
+-- host.ocr.recognize without a callback, answered at once with what S.ocr says is written there:
+-- a region or an entry, checked as the host checks it (T.answerWaits).
+T.answerWaits(function(what)
+  local r = what.region or what
   S.recognized[#S.recognized + 1] = { r[1], r[2], r[3], r[4] }
   local text = S.ocr and S.ocr(r) or ""
-  return { text = text, words = {}, skipped = false }
+  return { text = text, words = {}, skipped = false, status = text == "" and "none" or "text" }
 end)
 rawset(T.host.screen, "pixel", function(x, y)
   S.pixels += 1
@@ -289,7 +291,7 @@ fn no_factor_places_nothing_and_says_so() {
 /// Regions scale corner by corner, may be functions of the overlay, and a function that answers
 /// nothing reads nothing. `ocrLabel` likewise; the name falls back to the label. The click of an
 /// OCR button is the middle of the region it read, made once its read is answered. The reads are
-/// host.ocr.read's, answered by T.deliver as the host answers them, on a later turn of the loop.
+/// host.ocr.recognize's, answered by T.deliver as the host answers them, on a later turn of the loop.
 #[test]
 fn regions_and_name_regions_scale_and_may_be_functions() {
     run(r##"
@@ -373,8 +375,8 @@ fn tabs_toggles_and_hover_points_scale_too() {
 
 /// An overlay that never calls O:scale is placed exactly as before: no rounding, a fractional
 /// frame included, and toScreen answers the plain sum. A region read with such a frame covers the
-/// pixels host.ocr.recognize covered: its corners cut toward zero, which that call's loose reading
-/// did, and which host.ocr.read, reading corners strictly, would otherwise refuse.
+/// pixels the read on the event loop covered: its corners cut toward zero, which that call's loose
+/// reading did, and which host.ocr.recognize, reading corners strictly, would otherwise refuse.
 #[test]
 fn an_overlay_without_a_scale_is_placed_exactly_as_before() {
     run(r##"
@@ -850,17 +852,142 @@ fn on_ear_a_tile_press_reads_no_text_first_and_clicks_on_a_fresh_grid() {
         end
         -- The grid has slid 20 down: the first tile's printed name sits 70 below its middle,
         -- at 314 + 20 + 70 = 404.
-        rawset(T.host.ocr, "recognize", function(opts)
-          local r = opts.region
+        T.answerWaits(function(what)
+          local r = what.region or what
           S.recognized[#S.recognized + 1] = { r[1], r[2], r[3], r[4] }
-          return { text = "HD600", skipped = false,
+          return { text = "HD600", skipped = false, status = "text",
             words = { { text = "HD600", x = 727, y = 398, w = 40, h = 12 } } }
         end)
-        phones:activate(tile)
+        -- As the host presses it: in the key's handler, where a read may wait.
+        T.call("key", function() phones:activate(tile) end)
         assert(texts == 0, "the tile's text is not read before the press: " .. texts)
         assert(#S.recognized == 1 and table.concat(S.recognized[1], ",") == "652,214,1616,801",
           "one read of the whole grid: " .. #S.recognized)
         assert(T.lastClick() == "747,334", "the tile where the grid sits now: " .. T.lastClick())
         assert(T.count("[on-ear] Headphone Browser: read the grid in") == 1, T.dump())
+    "##);
+}
+
+/// A tile's press waits for its read of the grid, and only its module waits: another window
+/// brought to the front meanwhile takes the press's click away — nothing is clicked in that window,
+/// and the log says why.
+#[test]
+fn on_ear_a_tile_press_clicks_nothing_once_another_window_came_to_the_front_during_its_read() {
+    run(r##"
+        local S = T.S
+        local made = T.collect()
+        T.module("modules/ik-on-ear/")
+        local phones
+        for _, o in ipairs(made) do
+          if o.label == "Headphone Browser" then phones = o end
+        end
+        S.origin = { id = 7, app = { pid = 4242 }, client = { x = 0, y = 0, w = 1920, h = 1009 },
+          bounds = { x = 0, y = 0, w = 1920, h = 1009 } }
+        T.front(phones)
+        local tile
+        for i, c in ipairs(phones.controls) do
+          if c.label == "Headphone 1" then tile = i end
+        end
+        local clicks = #S.clicks
+        T.answerWaits(function(what)
+          -- Another program comes to the front while the grid is being read.
+          S.origin = { id = 5000, app = { pid = 777 }, client = { x = 0, y = 0, w = 800, h = 600 },
+            bounds = { x = 0, y = 0, w = 800, h = 600 } }
+          return { text = "HD600", skipped = false, status = "text",
+            words = { { text = "HD600", x = 727, y = 398, w = 40, h = 12 } } }
+        end)
+        -- As the host presses it: in the key's handler, where a read may wait.
+        T.call("key", function() phones:activate(tile) end)
+        assert(#S.clicks == clicks, "a click in the other window: " .. T.lastClick())
+        assert(T.count("[on-ear] 'Headphone 1' not clicking after the grid was read — the overlay is on another "
+          .. "window now") == 1, T.dump())
+    "##);
+}
+
+/// "Grid down" says where the grid has arrived once it has read the grid, and that read waits with
+/// only its module waiting: another window brought to the front during the read, or in the quarter
+/// second before it, takes the sentence away — nothing is said in that window, and the log says
+/// why. A read that failed is no grid without names: the grid is read again at the next ask.
+#[test]
+fn on_ear_grid_down_says_nothing_once_another_window_came_to_the_front_and_reads_again_after_a_failed_read() {
+    run(r##"
+        local S = T.S
+        local made = T.collect()
+        T.module("modules/ik-on-ear/")
+        local phones
+        for _, o in ipairs(made) do
+          if o.label == "Headphone Browser" then phones = o end
+        end
+        local here = { id = 7, app = { pid = 4242 }, client = { x = 0, y = 0, w = 1920, h = 1009 },
+          bounds = { x = 0, y = 0, w = 1920, h = 1009 } }
+        local there = { id = 5000, app = { pid = 777 }, client = { x = 0, y = 0, w = 800, h = 600 },
+          bounds = { x = 0, y = 0, w = 800, h = 600 } }
+        -- The evaluations the bindings asked for as they loaded, done before the scenario puts
+        -- the overlay in front: the timers below are then the module's own.
+        T.runDue()
+        S.origin = here
+        T.front(phones)
+        local down, tile
+        for i, c in ipairs(phones.controls) do
+          if c.label == "Grid down" then down = i end
+          if c.label == "Headphone 1" then tile = i end
+        end
+        local reads, during, answer = 0, nil, nil
+        local GRID = { text = "HD600", skipped = false, status = "text",
+          words = { { text = "HD600", x = 727, y = 398, w = 40, h = 12 } } }
+        T.answerWaits(function()
+          reads += 1
+          if during then during() end
+          return answer or GRID
+        end)
+        local function press(i)
+          T.call("key", function() phones:activate(i) end)
+        end
+        -- The quarter second, and only the timers that came due in it: no tick of the runtime's,
+        -- whose evaluation would ask for a window this scenario does not script.
+        local function later(ms)
+          S.now += ms
+          T.runDue()
+        end
+
+        -- Nothing changes: the grid is read once, and where it arrived is said.
+        local spoken = #S.speech
+        press(down)
+        later(300)
+        assert(reads == 1 and #S.speech == spoken + 1, "read and said: " .. T.dump())
+
+        -- Another program comes to the front while the grid is read: nothing said.
+        during = function() S.origin = there end
+        spoken = #S.speech
+        press(down)
+        later(300)
+        assert(reads == 2 and #S.speech == spoken, "said in the other window: " .. tostring(S.speech[#S.speech].text))
+        assert(T.count("[on-ear] Headphone Browser: Grid down says nothing after reading where it arrived — the "
+          .. "overlay is on another window now") == 1, T.dump())
+
+        -- Another program in front before the quarter second is up: nothing read, nothing said.
+        during, S.origin = nil, here
+        T.front(phones)
+        press(down)
+        S.origin = there
+        spoken = #S.speech
+        later(300)
+        assert(reads == 2 and #S.speech == spoken, "read or said in the other window: " .. T.dump())
+        assert(T.count("[on-ear] Headphone Browser: Grid down says nothing after the scroll — the overlay is on "
+          .. "another window now") == 1, T.dump())
+
+        -- A read that failed: the grid stays to be read, so the next press of a tile reads it again.
+        S.origin = here
+        T.front(phones)
+        answer = { status = "failed", text = "", words = {}, skipped = false,
+          error = "the text recogniser has not answered a region for 5 s" }
+        press(down)
+        later(300)
+        assert(reads == 3, "read: " .. reads)
+        assert(T.count("[on-ear] Headphone Browser: the grid could not be read — the text recogniser has not "
+          .. "answered a region for 5 s") == 1, T.dump())
+        answer = nil
+        press(tile)
+        assert(reads == 4, "the grid read again before the tile's click: " .. reads)
     "##);
 }

@@ -183,13 +183,16 @@ function T.modules(root)
   rawset(E, "focusWithin", function() return S.focusWithin end)
   rawset(H.screen, "size", function() return { w = 2560, h = 1440 } end)
   rawset(H.screen, "imageSearchAsync", function() end)
-  -- A synchronous read: S.ocr(region) says what is written there (default: nothing).
+  -- A read that waits, answered at once: S.ocr(region) says what is written there (default:
+  -- nothing), or gives the whole reading as a table — a "failed" one. A read with a callback is
+  -- kept for the scenario to answer (T.submit).
   S.recognized = {}
-  rawset(H.ocr, "recognize", function(opts)
-    local r = opts.region
+  T.answerWaits(function(what)
+    local r = what.region or what
     S.recognized[#S.recognized + 1] = { r[1], r[2], r[3], r[4] }
-    local text = S.ocr and S.ocr(r) or ""
-    return { text = text, words = {}, skipped = false }
+    local said = S.ocr and S.ocr(r) or ""
+    if type(said) == "table" then return said end
+    return { text = said, words = {}, skipped = false, status = said == "" and "none" or "text" }
   end)
   -- daw-hosts' focus key: the callback the host would run on the press.
   S.hotkeyFns = {}
@@ -850,6 +853,44 @@ fn sforzando_still_binds_by_its_control_on_windows() {
     "##);
 }
 
+/// sforzando's wordmark read on its own control that read nothing — a read that failed, or one
+/// that saw no text — is "could not tell yet", not a "no" kept for that control: the next
+/// evaluation reads again, and finds it.
+#[test]
+fn sforzando_asks_its_own_control_again_after_a_read_that_read_nothing() {
+    run(r##"
+        local S = T.S
+        local made = T.collect()
+        T.modules("modules/sforzando/")
+        local plugin = { id = 70, class = "Plugin00A1B2C3", bounds = { x = 240, y = 90, w = 760, h = 560 },
+          client = { x = 240, y = 90, w = 760, h = 560 } }
+        S.front, S.controls, S.chain = T.FX, { T.LIST, plugin }, { plugin, T.FX }
+        local answer = { status = "failed", text = "", words = {}, skipped = false,
+          error = "the text recogniser has not answered a region for 5 s" }
+        local asked = 0
+        S.ocr = function(r)
+          assert(T.region(r) == "845,123,1002,160", "the wordmark: " .. T.region(r))
+          asked += 1
+          return answer
+        end
+        T.turn()
+        T.source("modules/sforzando/src/main.luau")(T.host)
+        local ov = made[1]
+        T.runDue()
+        assert(asked >= 1 and not ov.active, "a failed read is no verdict: " .. T.dump())
+        answer = ""
+        local before = asked
+        T.event()
+        assert(asked > before and not ov.active, "read again, and nothing read is no verdict either: " .. T.dump())
+        answer = "sforzando"
+        before = asked
+        T.event()
+        assert(asked > before and ov.active and ov:origin().id == 70, "read again, and found: " .. T.dump())
+        assert(T.count("identify=false") == 0, "kept as no: " .. T.dump())
+        assert(T.count("attachEmbedded: matched control [Plugin00A1B2C3] id=70, identify=true") == 1, T.dump())
+    "##);
+}
+
 /// Kontakt 7, with no title check, comes up in a REAPER floating window and in a Logic window
 /// titled "Inst 1": found by its own FILE button, with LIBRARY beside it, near where its geometry
 /// puts it in the DAW's panel, its corner taken from that button and the difference to the DAW's
@@ -1276,5 +1317,99 @@ fn an_embedded_binding_joining_a_bound_overlay_is_evaluated_on_the_next_tick() {
         assert(not o.active, "not inside the call: " .. T.dump())
         T.runDue()
         assert(o.active, "evaluated on the tick after it joined: " .. T.dump())
+    "##);
+}
+
+/// Kontakt's file menu is read in English — its rows' names — and the read waits, holding only
+/// Kontakt's module: so the program in front when the menu was opened must still be in front before
+/// the read and after it, or nothing is clicked; and the Escape that closes a menu without the entry
+/// goes only to the window that was in front before the read. Without a change, the row is clicked.
+#[test]
+fn kontakt_clicks_its_menu_row_only_while_its_program_stays_in_front() {
+    run(r##"
+        local S = T.S
+        T.modules("modules/kontakt/")
+        S.sent = {}
+        rawset(T.host.input, "send", function(key) S.sent[#S.sent + 1] = key end)
+        local A = T.host.include("src/actions.luau")
+        local cell = { uiaFileMenu = "Kontakt File Menu", geometry = { fileMenu = { 10, 10 } } }
+        local o = { origin = function() return { id = 7, client = { x = 100, y = 50, w = 800, h = 600 } } end }
+        local lang
+        -- The menu as Kontakt draws it, and what happens while it is read.
+        local function menu(rows, during)
+          T.answerWaits(function(_, opts)
+            lang = opts and opts.lang
+            if during then during() end
+            return { status = "text", text = "", words = rows }
+          end)
+        end
+        local LOAD = { { text = "Load...", x = 40, y = 70, w = 50, h = 10 } }
+        local function press(item)
+          local clicks = #S.clicks
+          A.invokeMenuItem(cell, o, item)
+          assert(#S.clicks == clicks + 1, "the menu button is clicked at once")
+          return clicks + 1
+        end
+        local function lastClick()
+          local c = S.clicks[#S.clicks]
+          return c and (c[1] .. "," .. c[2]) or "none"
+        end
+        local function otherProgram() T.at(T.OTHER) end
+        local function otherWindow() T.at(T.MAIN) end
+
+        -- Nothing changes: the row is clicked, read in English.
+        T.at(T.FX)
+        menu(LOAD)
+        local n = press("Load...")
+        T.run(300)
+        assert(#S.clicks == n + 1 and lastClick() == "50,75", "the row: " .. lastClick())
+        assert(lang == "en", tostring(lang))
+
+        -- Another program in front before the menu is read: nothing read, nothing clicked.
+        T.at(T.FX)
+        n = press("Load...")
+        otherProgram()
+        T.run(300)
+        assert(#S.clicks == n, "a click in the other program: " .. lastClick())
+        assert(T.count("Kontakt: another application came to the front during the menu read — nothing clicked") == 1, T.dump())
+
+        -- Another program in front while the menu is read: nothing clicked.
+        T.at(T.FX)
+        menu(LOAD, otherProgram)
+        n = press("Load...")
+        T.run(300)
+        assert(#S.clicks == n, "a click in the other program: " .. lastClick())
+        assert(T.count("Kontakt: another application came to the front during the menu read — nothing clicked") == 2, T.dump())
+
+        -- No such row, another window of the same program in front by then: no Escape into it.
+        T.at(T.FX)
+        menu({}, otherWindow)
+        press("Load...")
+        T.run(300)
+        assert(#S.sent == 0, "an Escape went to another window")
+        assert(T.count("Kontakt: another window came to the front during the menu read — no Escape sent") == 1, T.dump())
+        -- And with the same window in front, the Escape closes the menu.
+        T.at(T.FX)
+        menu({})
+        local spoken = #S.speech
+        press("Load...")
+        T.run(300)
+        assert(#S.sent == 1 and S.sent[1] == "Escape", "the Escape that closes the menu")
+        assert(S.speech[spoken + 1].text == "Menu item not found", tostring((S.speech[spoken + 1] or {}).text))
+
+        -- A read that failed is not a menu without the entry: it says the menu could not be read,
+        -- the log says why, and the menu is closed.
+        T.at(T.FX)
+        T.answerWaits(function()
+          return { status = "failed", text = "", words = {}, error = "no English text recognition is installed" }
+        end)
+        spoken = #S.speech
+        n = press("Load...")
+        T.run(300)
+        assert(#S.clicks == n, "a click after a failed read: " .. lastClick())
+        assert(#S.sent == 2 and S.sent[2] == "Escape", "the Escape that closes the menu")
+        assert(S.speech[spoken + 1].text == "Menu could not be read", tostring((S.speech[spoken + 1] or {}).text))
+        assert(T.count("Kontakt: the menu could not be read for 'Load...' — no English text recognition is installed") == 1,
+          T.dump())
     "##);
 }

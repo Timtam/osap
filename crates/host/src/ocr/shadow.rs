@@ -5,7 +5,7 @@
 //! does not find blank is handed to it the moment the content crop is known, and it answers where
 //! Vision's accurate ladder read nothing — Windows' rule (`ocr/merge.rs`); on an Intel Mac the fast
 //! level of Vision reads the crop first, and answers where the recogniser reads the same. On
-//! `host.ocr.read`'s recognise thread of a Mac without that check, the fast level makes one pass
+//! `host.ocr.recognize`'s recognise thread of a Mac without that check, the fast level makes one pass
 //! over the same rendered crop once the read has its answer, only to be counted here, so that it
 //! changes nothing of the answer or of the ladder's budget. Once the read has answered, the
 //! recogniser's answer is taken if it is there — one that has not answered by then is cancelled

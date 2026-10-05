@@ -453,9 +453,8 @@ pub(super) fn capture_screen(x: i32, y: i32, w: i32, h: i32) -> Option<CapturedI
 /// Standard is `capture_screen` per region, exactly as before this existed. Duplication sends
 /// every region in one request (one GPU sync for all of them) and, when it cannot answer,
 /// either reads the standard way or fails each region with the reason, as the module's
-/// `fallback` says. The error is a sentence that begins with [`CAPTURE_FAILED`]; the OCR
-/// binding answers instead of raising only for the one that begins with
-/// [`DUPLICATION_UNANSWERED`] (see `capture_source::answers_instead_of_raising`).
+/// `fallback` says. The error is a sentence that begins with [`CAPTURE_FAILED`] — for a request
+/// duplication did not answer, with [`DUPLICATION_UNANSWERED`].
 fn capture_all(
     regions: &[(i32, i32, i32, i32)],
     src: CaptureSource,
@@ -674,7 +673,7 @@ fn pixels_with(
     })
 }
 
-// ── host.ocr.read's two threads ─────────────────────────────────────────────────────────────
+// ── host.ocr.recognize's two threads ────────────────────────────────────────────────────────
 
 /// The snapshot rounds' capture (`OcrWorker::frames`), on the capture thread: `frames_all` as
 /// the image worker's reads wait for desktop duplication — up to 250 ms — with the path each
@@ -695,7 +694,7 @@ fn ocr_shot_of(frame: &Frame, regions: &[(i32, i32, i32, i32)]) -> OcrShot {
         .collect()
 }
 
-/// The capture stage of `host.ocr.read` (`OcrWorker::capture`), on its own thread: every region
+/// The capture stage of `host.ocr.recognize` (`OcrWorker::capture`), on its own thread: every region
 /// of one read from one moment, and roughly how many bytes that is.
 fn ocr_capture(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> (OcrShot, usize) {
     crate::loop_guard::off_loop("a capture for a text read");
@@ -705,7 +704,7 @@ fn ocr_capture(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> (OcrShot
 }
 
 /// The pixels for a read. Desktop duplication takes every region as a piece of one frame in one
-/// request, as `recognizeMany` does; the standard source photographs the bounding box when that
+/// request, as the blocking read of a list does; the standard source photographs the bounding box when that
 /// is not wasteful (`ocr::plan`) and each region on its own otherwise, or when the box came back
 /// clipped at a screen edge.
 fn capture_for_read(regions: &[(i32, i32, i32, i32)], src: CaptureSource) -> OcrShot {

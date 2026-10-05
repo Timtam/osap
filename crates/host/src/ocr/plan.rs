@@ -3,7 +3,7 @@
 //!
 //! The standard capture on Windows costs a fixed compositor frame (~17 ms measured) whatever
 //! its size, so two read-outs side by side are cheaper as one box than as two captures — the
-//! measurement `recognizeMany` was built on. But the box of two regions in opposite corners
+//! measurement the one-capture read of several regions was built on. But the box of two regions in opposite corners
 //! of a 4K screen is the whole screen, and copying 33 MB to read two words is the expensive
 //! way round. So the box is used only when it is not wasteful: at most `BBOX_WASTE` times the
 //! regions' own area (with a floor, so read-outs a few pixels apart always share one), and

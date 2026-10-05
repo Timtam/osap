@@ -236,11 +236,36 @@ end
 -- a state we cannot read reliably — the view toggle on a Mac, where the view probe is a pixel
 -- measured on Windows. `onDone(chosen)` runs after a click, with the entry that was clicked,
 -- so the caller can say what actually happened rather than what it asked for.
+--
+-- The read waits for its reading, and only this module waits: the user can bring another
+-- program to the front meanwhile, and a click — or the Escape that closes a menu without the
+-- entry — would then land in that program. So the program in front when the menu is opened is
+-- the one that must still be in front before the read and after it — Kontakt's own menu belongs
+-- to it — and the Escape goes only to the very window that was in front before the read.
+-- Otherwise nothing is clicked or sent, and the log says why. The overlay is not asked: whether
+-- it keeps its place while the plug-in's menu is up is not something this read can lean on.
 local function invokeMenuItem(cell, o, item, onDone)
   local items = type(item) == "table" and item or { item }
+  local opened = host.window.active()
+  local pid = opened and opened.app and opened.app.pid
+  -- The program in front now, and its window; `true` when nothing was in front at the opening to
+  -- compare with, as it was before reads waited.
+  local function frontIsOurs()
+    local w = host.window.active()
+    if pid == nil then return true, w end
+    return w ~= nil and w.app ~= nil and w.app.pid == pid, w
+  end
+  local function leftAlone()
+    host.log.info("Kontakt: another application came to the front during the menu read — nothing clicked")
+  end
   local ctrl, uia = openFileMenu(cell, o)
   if not ctrl then return end
   host.timer.after(250, function()
+    local ours, front = frontIsOurs()
+    if not ours then
+      leftAlone()
+      return
+    end
     -- By name first where the button was found by name — and when the ITEM is not, the menu
     -- is read instead of giving up. It used to return here either way, so a menu whose items
     -- publish no names (a Qt menu on a Mac need not) was left open with the keys handed to it
@@ -259,11 +284,22 @@ local function invokeMenuItem(cell, o, item, onDone)
     end
     local base = cell.geometry.fileMenu
     if not (ctrl.client and base) then return end
-    local bx, by = ctrl.client.x + base[1], ctrl.client.y + base[2]
+    -- Whole numbers, as a read takes them: an origin on a Mac may carry a fraction.
+    local bx, by = math.floor(ctrl.client.x + base[1]), math.floor(ctrl.client.y + base[2])
     -- Generously around where the menu drops from its button; the exact bounds do not
-    -- matter, only that the menu is inside them.
-    local seen = host.ocr.recognize({ region = { bx - 80, by + 14, bx + 170, by + 460 } })
-    local rows = ocrRows(seen and seen.words)
+    -- matter, only that the menu is inside them. In English, as Kontakt's menus are, whatever
+    -- the user's own language: the rows are matched by their English names.
+    local seen = host.ocr.recognize({ bx - 80, by + 14, bx + 170, by + 460 }, { lang = "en" })
+    local stillOurs, after = frontIsOurs()
+    if not stillOurs then
+      leftAlone()
+      return
+    end
+    -- A read that failed — the capture, a recogniser that hung, no English recogniser installed —
+    -- read no rows, and "not found" would say the menu lacks the entry. It says the menu could not
+    -- be read, and the log says why; the menu is closed as for an entry not found.
+    local failed = seen.status == "failed"
+    local rows = failed and {} or ocrRows(seen.words)
     local hit, chosen
     for _, it in ipairs(items) do
       local want = string.lower(string.gsub(it, "%.%.%.$", ""))
@@ -279,12 +315,24 @@ local function invokeMenuItem(cell, o, item, onDone)
       if hit then break end
     end
     if not hit then
-      host.log.info(string.format(
-        "Kontakt: no menu row starting with '%s' — read: %s",
-        table.concat(items, "' or '"), string.gsub(tostring(seen and seen.text or ""), "%s+", " ")
-      ))
-      host.speech.output("Menu item not found", { interrupt = true })
-      host.input.send("Escape")
+      if failed then
+        host.log.info(string.format("Kontakt: the menu could not be read for '%s' — %s",
+          table.concat(items, "' or '"), tostring(seen.error)))
+        host.speech.output("Menu could not be read", { interrupt = true })
+      else
+        host.log.info(string.format(
+          "Kontakt: no menu row starting with '%s' — read: %s",
+          table.concat(items, "' or '"), string.gsub(tostring(seen.text or ""), "%s+", " ")
+        ))
+        host.speech.output("Menu item not found", { interrupt = true })
+      end
+      -- Only into the window that was in front before the read: another window of the same
+      -- program in front now is not the menu's.
+      if pid == nil or (front and after and front.id == after.id) then
+        host.input.send("Escape")
+      else
+        host.log.info("Kontakt: another window came to the front during the menu read — no Escape sent")
+      end
       -- The by-name opening handed the keys to the menu; the Escape above closed it.
       if uia then host.keys.menuOpen(false) end
       return

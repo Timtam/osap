@@ -1,4 +1,4 @@
-//! Who is photographed and recognised next — the queue behind `host.ocr.read`, with no threads
+//! Who is photographed and recognised next — the queue behind `host.ocr.recognize`, with no threads
 //! and no clock of its own, so every rule can be tested by stepping it.
 //!
 //! A job goes through four stages: waiting for its capture, being captured, captured, and being

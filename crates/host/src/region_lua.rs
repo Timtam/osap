@@ -6,7 +6,7 @@
 //! ```
 //!
 //! **Two readings of corners, one of the window form.** `read` is the strict one, for the calls
-//! built with it — `host.screen.cells`, `matchCells`, `matchCellsAsync` and `host.ocr.read`: a
+//! built with it — `host.screen.cells`, `matchCells`, `matchCellsAsync` and `host.ocr.recognize`: a
 //! mistake in the call raises, at the call: a value that is not a table, a key the form does not
 //! take, named and positional corners mixed, a corner missing, a corner that is not a whole
 //! number or lies outside the screen's coordinate range, corners that are empty or turned
@@ -14,8 +14,8 @@
 //! no default there: `{}` raises like any other region with a corner missing.
 //!
 //! `read_loose` is for the older calls — `profile`, `template{ capture }`, the image searches and
-//! an `imageSearchEach` entry's `within`, `save`, `saveMarked`, `host.ocr.recognize` and each
-//! `recognizeMany` region. Their corners are read exactly as those calls always read them (a
+//! an `imageSearchEach` entry's `within`, `save` and `saveMarked`. Their corners are read exactly
+//! as those calls always read them (a
 //! corner missing or not a number takes its default, a fraction of a pixel is cut toward zero,
 //! other keys are ignored), because every module written against them relies on it. But the
 //! window form goes through `read`, strictly, as everywhere; and a table that is NEITHER form —

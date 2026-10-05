@@ -307,8 +307,23 @@ local function chooser(spec)
         gridDirty = true
         host.input.scroll(x, y, amount)
         if not host.timer then return end
+        -- Where the press was made. The grid's report reads the grid, and that read waits for its
+        -- reading with only this module waiting: the user can bring another window to the front
+        -- in the quarter second or during the read, and the sentence would be spoken there — or
+        -- the read would learn the names from that window's pixels. So the panel must still be
+        -- where the press was made before the report reads and before it speaks.
+        local mark = b:here()
+        local function gone(when)
+          local fine, why = b:stillHere(mark)
+          if fine then return false end
+          host.log.info(("[on-ear] %s: %s says nothing %s — %s"):format(spec.name, label, when, tostring(why)))
+          return true
+        end
         host.timer.after(250, function()
-          host.speech.output(after() or "no further", { interrupt = true })
+          if gone("after the scroll") then return end
+          local said = after()
+          if gone("after reading where it arrived") then return end
+          host.speech.output(said or "no further", { interrupt = true })
         end)
       end,
     })
@@ -416,7 +431,9 @@ local function chooser(spec)
       -- worked while everything lived in one file and `ov` was in scope; here it is a nil to
       -- call a method on. The window overlay is stood down whenever this one is up anyway, so
       -- the fallback was never the one being used.
-      local rect = b:toScreenRect({ 330, 186, 565, 214 })
+      -- Whole corners, as a read takes them: an unscaled panel with a fractional frame places
+      -- fractions.
+      local rect = b:toScreenRect({ 330, 186, 565, 214 }, { whole = true })
       if not rect then return nil end
       local got = host.ocr.recognize({ region = rect })
       local v = (got and got.text or ""):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
@@ -740,16 +757,24 @@ local function chooser(spec)
       return
     end
     local cols, rows = spec.tiles.cols, spec.tiles.rows
-    local rect = b:toScreenRect({ cols[1] - 95, rows[1] - 100, cols[#cols] + 95, rows[#rows] + 100 })
+    local rect = b:toScreenRect({ cols[1] - 95, rows[1] - 100, cols[#cols] + 95, rows[#rows] + 100 },
+      { whole = true })
     if not rect then
       gridDirty = true
       return
     end
     local started = host.now()
     local got = host.ocr.recognize({ region = rect })
+    -- A read that failed — the capture, a recogniser that hung, too many reads waiting — saw no
+    -- grid, which is not a grid without names: it stays to be read again at the next ask.
+    if got.status == "failed" then
+      gridDirty = true
+      host.log.info(("[on-ear] %s: the grid could not be read — %s"):format(spec.name, tostring(got.error)))
+      return
+    end
     -- Words that sit under a column, gathered with where they sat.
     local hits = {}
-    for _, wd in ipairs((got and got.words) or {}) do
+    for _, wd in ipairs(got.words or {}) do
       local wx, wy = wd.x + wd.w / 2, wd.y + wd.h / 2
       for c, cx in ipairs(cols) do
         local sx = b:toScreen(cx, rows[1])
@@ -859,8 +884,18 @@ local function chooser(spec)
         onActivate = function()
           -- Where the grid sits now, so the click below lands on THIS tile after a scroll or a
           -- refill. The overlay used to read the tile's `text` before every press, which did this
-          -- on the side; it reads nothing before a press now.
+          -- on the side; it reads nothing before a press now. Reading the grid waits for the
+          -- reading, and only this module waits: the user can bring another window to the front
+          -- meanwhile, and the click would land there. So the panel must still be where the press
+          -- was made.
+          local mark = b:here()
           freshGrid()
+          local fine, why = b:stillHere(mark)
+          if not fine then
+            host.log.info(("[on-ear] '%s %d' not clicking after the grid was read — %s")
+              :format(spec.tileLabel, n, tostring(why)))
+            return
+          end
           local ry = rowY(r)
           local x, y = b:toScreen(tx, ry)
           if not x then return end

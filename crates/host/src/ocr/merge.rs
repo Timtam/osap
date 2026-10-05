@@ -20,7 +20,7 @@
 //!    its words and lines with it, and the neural recognition is cancelled unread ([`pick`]).
 //! 5. When it read nothing, the read waits for the neural answer, as long as that recognition
 //!    takes ([`waits`]); its text, trimmed and never empty, is the answer, with no words and no lines
-//!    and the content crop as the answer's box (`OcrText::fallback`), which `host.ocr.read` shares
+//!    and the content crop as the answer's box (`OcrText::fallback`), which `host.ocr.recognize` shares
 //!    out among the text's tokens as approximate boxes. When it read nothing too, so does the read.
 //! 6. Nothing filters what it reads: no minimum score — none separates a right lone "0" from text
 //!    it invents on ink that is no text (`paddle_pre::decode`) — and no check of its shape. A

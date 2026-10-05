@@ -15,9 +15,10 @@ accessible plugin overlays as macOS-capable modules.
   namespaces their manifest declares. All of them run on one thread, each callback
   with a [time limit](module-runtime-and-lifecycle.md#limits) of 2 seconds of processor
   time or 10 seconds in all and each VM with a memory limit, past which its module is
-  stopped; the slow work of `host.ocr.read` and of the asynchronous
-  screen searches runs on threads of the host's own and answers in a callback
-  (see [Threads](module-runtime-and-lifecycle.md#threads)). A module can
+  stopped; the slow work of `host.ocr.recognize` and of the asynchronous
+  screen searches runs on threads of the host's own and answers in a callback,
+  or, for a text read, to a handler that waits for it while only its own module
+  waits (see [Threads](module-runtime-and-lifecycle.md#threads)). A module can
   **depend on** others: a `code_module` dependency's code runs inside the
   dependent's VM so its functions are reachable via `host.require` (the
   inheritance model); a plain data dependency exports only data.

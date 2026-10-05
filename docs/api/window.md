@@ -324,7 +324,7 @@ free until it ends.
 
 Brings the window with that handle to the front and gives it the keyboard. Returns whether
 the system accepted it. Like `host.input.*`, it first waits — up to 50 ms, and only while the
-calling module has a [`host.ocr.read`](./ocr.md#host-ocr-read) whose picture has not been
+calling module has a [`host.ocr.recognize`](./ocr.md#host-ocr-recognize) whose picture has not been
 taken — until that picture is taken, and puts that picture before every other read's, so a read
 asked for just before sees the screen as it was.
 
@@ -523,6 +523,8 @@ What it does **not** do:
 - **There is no handle.** `onTrigger` returns nothing, and a trigger cannot be removed; it stays until the module is reloaded. While the module is disabled it simply is not called. To stop work a trigger started, stop that work — a poll it armed is [cancelled by its token](./timer.md#host-timer-cancel).
 - **One failing callback stops the rest.** A module's triggers are called one after another in registration order, with no protection between them: an error in one skips the module's later triggers for that foreground change, or for that initial report. The error is logged every time and shown to the user once.
 
+**While its module is busy** — one of its handlers [waits](../module-runtime-and-lifecycle.md#a-handler-waits) for a read — an activation, and the `initial` report, wait behind that handler and are never dropped: each runs once the module is free, in the order its events came. So `win` can be a window that is no longer in front when the callback runs — the user went on while the module waited. A callback that acts on the window, a click or a key sent, compares it with [`host.window.active()`](#host-window-active) first. An activation goes only to the triggers that were registered when it came: one that a handler before it registered meanwhile does not get it.
+
 ```luau
 local REAPER = { app = { name = "reaper" } }
 -- Also called for a REAPER window that is already in front when the module loads or is
@@ -566,6 +568,8 @@ When watching first starts, one focus round is run for the application already i
 **Signature:** `host.window.onFocus(cb: () -> ()) -> ()`
 
 (prelude) Registers `cb` to fire whenever the keyboard focus moves — including within the same top-level window. Takes no arguments; the callback typically re-reads `host.window.active()` / `focusChain()`. Used to catch focus entering an embedded plugin without a foreground change. Like `onTrigger` it returns no handle, stays until the module is reloaded, and a callback that raises skips the module's later `onFocus` callbacks for that focus change. A `cb` that is not a function raises at once (`host.window.onFocus: the callback is a function, not a nil`), rather than when the focus next moves.
+
+**While its module is busy** — one of its handlers [waits](../module-runtime-and-lifecycle.md#a-handler-waits) for a read — focus changes are folded: however many come, one waits behind the events before it, and its callbacks ask the focus as it is when they run.
 
 ```luau
 host.window.onFocus(function()

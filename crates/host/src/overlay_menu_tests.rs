@@ -44,19 +44,22 @@
 //! be run (`T.poll`), which turns nothing over either.
 //!
 //! The same scripted host carries the plug-in's own focus ring (`host.element.focusStep`) and
-//! `host.ocr.read`, answered when a scenario says so, for the Tab pass-through's scenarios in
-//! `overlay_passthrough_tests.rs`, which run through `run_with` with helpers of their own.
+//! `host.ocr.recognize` with a callback (`T.submit`), answered when a scenario says so, for the Tab
+//! pass-through's scenarios in `overlay_passthrough_tests.rs`, which run through `run_with` with
+//! helpers of their own.
 //!
 //! **Every event through the real mailbox.** What the scripted host delivers — a captured key, a
 //! timer, the menu tick, a window or focus event, an answer — goes through the host's own
 //! mailbox (`mailbox.rs`) and runs as a handler of the scenario's module (`T.call`), one at a time,
 //! as in the real host; a key delivered while the module is busy waits, and the next `T.tick()`
-//! runs it in its queued phase. The module is made busy with the tests' own wait point,
-//! `T.waitPoint(name)`, answered by `T.release(name, value)`. `recognize` and `recognizeMany` are
-//! the host's own, built by task.rs over this host's holder (`Scripted`); where they cannot wait —
-//! in this build, anywhere but in a task of the tests' entry `T.task` — this host raises the
-//! message the host is to raise once the blocking call is gone, so nothing a scenario runs can
-//! hold the loop unseen.
+//! runs it in its queued phase. The module is made busy by a handler that waits: at the tests' own
+//! wait point, `T.waitPoint(name)`, answered by `T.release(name, value)`, or at a read.
+//! `host.ocr.recognize` is the host's own, built by task.rs over this host's holder (`Scripted`):
+//! with a callback it is this host's `T.submit`, which keeps the read for a scenario to answer;
+//! without one, where it waits — in a handler, or a task of the tests' entry `T.task` — it asks the
+//! real read service over the fake recogniser, answered by `T.settle()`; and where it cannot wait,
+//! this host raises the message the host is to raise once the blocking call is gone, so nothing a
+//! scenario runs can hold the loop unseen.
 
 use std::cell::{Cell, OnceCell, Ref, RefCell};
 use std::collections::HashMap;
@@ -163,12 +166,12 @@ local S = {
   every = nil,
   after = {},
   -- The Tab pass-through (overlay_passthrough_tests.rs): the plug-in's own focus ring as
-  -- host.element.focusStep walks it, and every host.ocr.read asked.
+  -- host.element.focusStep walks it, and every host.ocr.recognize with a callback asked.
   ring = nil,       -- { { name, bounds? }, … }: the stops focusStep steps through
   ringAt = 0,       -- the stop the plug-in's keyboard focus is on; 0 before the first step
   focusSteps = 0,   -- host.element.focusStep calls
-  reads = {},       -- { region, regions, names, list, key, cb, asked, answered } per host.ocr.read
-  readRaises = nil, -- a message host.ocr.read raises with, when set
+  reads = {},       -- { region, regions, names, list, key, cb, asked, answered } per read with a callback
+  readRaises = nil, -- a message a read with a callback raises with, when set
   -- Every member asked of a strict table that it does not have, in order: a scenario fails at its
   -- end while this is not empty (`finish`), so a raise the runtime's own pcall swallowed — a hook's,
   -- a menu test's — is found all the same.
@@ -300,53 +303,8 @@ T.host = strict("host", {
         bounds = b and { x = b.x, y = b.y, w = b.w, h = b.h } or nil }
     end,
   }),
-  -- host.ocr.read, asked and answered later (T.answer in overlay_passthrough_tests.rs, T.answerList
-  -- in overlay_focus_read_tests.rs). Its arguments are checked as the host checks them — corners
-  -- as whole numbers, not empty or turned around; a list of entries `{ name, region }` (or of
-  -- corners), names not used twice; only lang, key and snapshot; a key that is a non-empty string —
-  -- so a call the host would refuse is refused here too. A list is answered `(list, byName)`.
-  ocr = strict("host.ocr", {
-    read = function(what, opts, cb)
-      if type(opts) == "function" then cb, opts = opts, nil end
-      assert(type(what) == "table", "host.ocr.read: what is not a table")
-      local list = type(what[1]) == "table"
-      local entries = list and what or { what }
-      assert(#entries >= 1 and #entries <= 64, "host.ocr.read: 1 to 64 regions")
-      local regions, names, seen = {}, {}, {}
-      for i, e in ipairs(entries) do
-        local r = e
-        if list and e.region ~= nil then
-          for k in pairs(e) do
-            assert(k == "name" or k == "region", "host.ocr.read: an entry field other than name and region: " .. tostring(k))
-          end
-          r = e.region
-          if e.name ~= nil then
-            assert(type(e.name) == "string" and not seen[e.name], "host.ocr.read: a name used twice or not a string")
-            seen[e.name] = true
-            names[i] = e.name
-          end
-        end
-        assert(type(r) == "table" and #r == 4, "host.ocr.read: the scripted host reads corners { x1, y1, x2, y2 }")
-        for k = 1, 4 do
-          local v = r[k]
-          assert(type(v) == "number" and v == math.floor(v),
-            "host.ocr.read: corner " .. k .. " is not a whole number: " .. tostring(v))
-        end
-        assert(r[3] > r[1] and r[4] > r[2], "host.ocr.read: corners empty or turned around")
-        regions[i] = { r[1], r[2], r[3], r[4] }
-      end
-      for k in pairs(opts or {}) do
-        assert(k == "key" or k == "lang" or k == "snapshot",
-          "host.ocr.read: an option other than lang, key and snapshot: " .. tostring(k))
-      end
-      local key = opts and opts.key
-      assert(key == nil or (type(key) == "string" and key ~= ""), "host.ocr.read: key is not a non-empty string")
-      assert(type(cb) == "function", "host.ocr.read: cb is not a function")
-      if S.readRaises then error(S.readRaises, 0) end
-      S.reads[#S.reads + 1] = { region = regions[1], regions = regions, names = names, list = list, key = key,
-        cb = cb, asked = S.now, answered = false }
-    end,
-  }),
+  -- host.ocr.recognize, its table: the function itself is the host's own, set by `harness`.
+  ocr = strict("host.ocr", {}),
   window = strict("host.window", {
     -- The foreground window as the host reports it: read once per epoch and kept — a tick does
     -- not turn the epoch over, so a window that hid since then is still reported until something
@@ -633,6 +591,81 @@ function T.runDue()
   end
 end
 
+-- host.ocr.recognize with a callback, as this host plays it — the shim hands the call here, through
+-- whatever T.submit is when it is made — asked and answered later (T.answer in
+-- overlay_passthrough_tests.rs, T.answerList in overlay_focus_read_tests.rs). Its arguments are
+-- checked as the host checks them — corners as whole numbers, not empty or turned around; a list of
+-- entries `{ name, region }` (or of corners), names not used twice; only lang, key and snapshot; a
+-- key that is a non-empty string — so a call the host would refuse is refused here too. A list is
+-- answered `(list, byName)`.
+function T.submit(what, opts, cb)
+  local regions, names, list, key = T.checkRead(what, opts)
+  assert(type(cb) == "function", "host.ocr.recognize: cb is not a function")
+  if S.readRaises then error(S.readRaises, 0) end
+  S.reads[#S.reads + 1] = { region = regions[1], regions = regions, names = names, list = list, key = key,
+    cb = cb, asked = S.now, answered = false }
+end
+
+-- The checks of a read's arguments both forms make: the regions as corners, the names by index,
+-- whether `what` was a list, and the key.
+function T.checkRead(what, opts)
+  assert(type(what) == "table", "host.ocr.recognize: what is not a table")
+  local list = type(what[1]) == "table"
+  local entries = list and what or { what }
+  assert(#entries >= 1 and #entries <= 64, "host.ocr.recognize: 1 to 64 regions")
+  local regions, names, seen = {}, {}, {}
+  for i, e in ipairs(entries) do
+    local r = e
+    if e.region ~= nil then
+      for k in pairs(e) do
+        assert(k == "name" or k == "region", "host.ocr.recognize: an entry field other than name and region: " .. tostring(k))
+      end
+      r = e.region
+      if e.name ~= nil then
+        assert(type(e.name) == "string" and not seen[e.name], "host.ocr.recognize: a name used twice or not a string")
+        seen[e.name] = true
+        names[i] = e.name
+      end
+    end
+    assert(type(r) == "table" and #r == 4, "host.ocr.recognize: the scripted host reads corners { x1, y1, x2, y2 }")
+    for k = 1, 4 do
+      local v = r[k]
+      assert(type(v) == "number" and v == math.floor(v),
+        "host.ocr.recognize: corner " .. k .. " is not a whole number: " .. tostring(v))
+    end
+    assert(r[3] > r[1] and r[4] > r[2], "host.ocr.recognize: corners empty or turned around")
+    regions[i] = { r[1], r[2], r[3], r[4] }
+  end
+  for k in pairs(opts or {}) do
+    assert(k == "key" or k == "lang" or k == "snapshot",
+      "host.ocr.recognize: an option other than lang, key and snapshot: " .. tostring(k))
+  end
+  local key = opts and opts.key
+  assert(key == nil or (type(key) == "string" and key ~= ""), "host.ocr.recognize: key is not a non-empty string")
+  return regions, names, list, key
+end
+
+-- host.ocr.recognize as a scenario plays it: its form that waits answered at once by
+-- `answer(what, opts)`, its callback form — the last argument a function, or exactly two arguments
+-- of which the second is one — the host's own, which keeps the read for T.submit. The form that
+-- waits is checked as the host checks it — its arguments as T.submit's, and the place as the shim
+-- asks it (T.whereNow): where it could not wait, it raises the message for that place, as the real
+-- one does in this host, so a scenario that answers its waits at once still finds a read in a hook
+-- that must not wait.
+function T.answerWaits(answer)
+  local own = rawget(T.host.ocr, "recognize")
+  rawset(T.host.ocr, "recognize", function(...)
+    local n = select("#", ...)
+    local what, opts = ...
+    if n >= 3 or (n == 2 and type(opts) == "function") then return own(...) end
+    T.checkRead(what, opts)
+    local where = T.whereNow()
+    if where == "handler" and not coroutine.isyieldable() then where = "cannot-wait" end
+    if where ~= "handler" then error(T.waitMessage(where), 2) end
+    return answer(what, opts)
+  end)
+end
+
 -- One tick of the menu timer, 150 ms after the last, with any timer.after that came due first,
 -- and then — as the host's tick — the events that waited in the module's mailbox.
 function T.tick(n)
@@ -645,7 +678,8 @@ function T.tick(n)
 end
 
 -- For scenarios about something else than the focus read itself: the runtime's announcement
--- reads — host.ocr.read under a key "com.platform.overlay focus …" — are kept apart from the other
+-- reads — host.ocr.recognize with a callback, under a key "com.platform.overlay focus …" — are kept
+-- apart from the other
 -- reads, in S.focusReads, and answered at the end of every T.runDue, as the host answers a read
 -- on a later turn of the loop; T.deliver() answers them at once. Each region reads what
 -- S.ocr(region) says is written there ("none" when it says nothing), and a read with a later one
@@ -654,15 +688,14 @@ end
 -- focus read answer it by hand (overlay_focus_read_tests.rs).
 function T.autoFocusReads()
   S.focusReads = {}
-  local read = T.host.ocr.read
-  rawset(T.host.ocr, "read", function(what, opts, cb)
-    if type(opts) == "function" then cb, opts = opts, nil end
+  local read = T.submit
+  T.submit = function(what, opts, cb)
     read(what, opts, cb)
     local key = opts and opts.key
     if type(key) == "string" and string.find(key, "com.platform.overlay focus ", 1, true) == 1 then
       S.focusReads[#S.focusReads + 1] = table.remove(S.reads)
     end
-  end)
+  end
   local runDue = T.runDue
   T.runDue = function()
     runDue()
@@ -825,9 +858,6 @@ impl ReadHost for Scripted {
     fn read_source(&self, _: &Lua, _: (i32, i32, i32, i32)) -> CaptureSource {
         CaptureSource::Standard
     }
-    fn screen_size(&self) -> (i32, i32) {
-        (1920, 1080)
-    }
     fn slow_reads(&self) -> bool {
         false
     }
@@ -859,9 +889,9 @@ impl MailHost for Scripted {
 /// mailbox, run as a handler — "key", "hotkey", "timer", "window", "focus" or "answer" — which
 /// says what became of it (`Ran`, `Parked`, `Queued`, `Dropped`); `T.queued()`, the tick's queued
 /// phase; the tests' wait point `T.waitPoint(name)`, `T.release(name, value)` and
-/// `T.waiting(name)`; the tests' entry `T.task` and `T.settle()`, which hands the reads its tasks
-/// asked their readings; and `host.ocr.recognize` and `recognizeMany`, the host's own, raising
-/// where they cannot wait.
+/// `T.waiting(name)`; the tests' entry `T.task` and `T.settle()`, which hands the reads its
+/// handlers and tasks wait for their readings; and `host.ocr.recognize`, the host's own, with
+/// `T.submit` as its callback form, raising where it cannot wait.
 pub(crate) fn harness(lua: &Lua) -> Table {
     let t: Table = lua.load(HARNESS).set_name("harness").eval().expect("the harness loads");
     let host_call = lua
@@ -892,7 +922,7 @@ pub(crate) fn harness(lua: &Lua) -> Table {
                 "timer" => (false, "timer"),
                 "window" => (false, "window trigger"),
                 "focus" => (false, "focus change"),
-                "answer" => (false, "ocr.read"),
+                "answer" => (false, "ocr.recognize"),
                 other => return Err(mlua::Error::external(format!("T.call: no event of kind '{other}'"))),
             };
             Ok(format!("{:?}", mailbox::deliver(&*hh, IDX, lua, Event::Call { f, args, input, what })))
@@ -910,6 +940,12 @@ pub(crate) fn harness(lua: &Lua) -> Table {
     .unwrap();
     let hh = h.clone();
     t.set("waiting", lua.create_function(move |_, name: String| Ok(task::test_waiting(&*hh, &name))).unwrap()).unwrap();
+    t.set("whereNow", task::test_where(lua, IDX, h.clone()).unwrap()).unwrap();
+    t.set(
+        "waitMessage",
+        lua.create_function(|_, why: String| Ok(task::wait_message(task::Case::of(&why)))).unwrap(),
+    )
+    .unwrap();
     t.set("task", task::table(lua, IDX, h.clone()).unwrap()).unwrap();
     let hh = h.clone();
     t.set(
@@ -928,16 +964,21 @@ pub(crate) fn harness(lua: &Lua) -> Table {
     )
     .unwrap();
     let legacy = lua
-        .create_function(|lua, (name, _opts, why): (String, Value, String)| {
-            let message = task::wait_message(&name, task::Case::of(&why));
+        .create_function(|lua, (_what, _opts, why): (Value, Value, String)| {
+            let message = task::wait_message(task::Case::of(&why));
             Ok((false, Value::String(lua.create_string(message)?)))
         })
         .unwrap();
-    let waits = task::waits(lua, IDX, h, legacy).expect("the waits build");
+    // `T.submit` as it is when the call is made, so a scenario can stand in front of it.
+    let submit: Function = lua
+        .load("local T = ... return function(what, opts, cb) return T.submit(what, opts, cb) end")
+        .set_name("the scripted host's callback form")
+        .call(t.clone())
+        .unwrap();
+    let waits = task::waits(lua, IDX, h, legacy, submit).expect("the waits build");
     let host: Table = t.get("host").unwrap();
     let ocr: Table = host.raw_get("ocr").unwrap();
     ocr.raw_set("recognize", waits.get::<Function>("recognize").unwrap()).unwrap();
-    ocr.raw_set("recognizeMany", waits.get::<Function>("recognizeMany").unwrap()).unwrap();
     t
 }
 
@@ -945,9 +986,9 @@ pub(crate) fn harness(lua: &Lua) -> Table {
 /// that it does not have — a raise that a `pcall` of the runtime swallowed included (`S.missing`) —
 /// no control's hook raised (`[overlay] '…': its text raised: …`) unless the scenario is about
 /// one (`S.hooksMayRaise`), and no handler ended with an error — a key's, a timer's, the menu
-/// tick's — unless the scenario is about that (`S.tasksMayRaise`). A `recognize` in a hook that cannot wait raises there in this host, which
-/// plays the end of the blocking call, so this is where such a hook is found rather than as a value
-/// that went missing without a word.
+/// tick's — unless the scenario is about that (`S.tasksMayRaise`). A `recognize` without a callback
+/// in a hook that cannot wait raises there in this host, which plays the end of the blocking call,
+/// so this is where such a hook is found rather than as a value that went missing without a word.
 pub(crate) fn finish(lua: &Lua) {
     let check = r#"
         local S = T.S
@@ -3147,10 +3188,10 @@ fn an_identify_that_keeps_answering_nil_is_taken_as_no_after_eight() {
 // ---------------------------------------------------------------------------------------------
 
 /// The arbiter's onActivate is Lua the host calls back, where nothing can wait — in this host as
-/// in the real one, since its setMatching calls through `T.hostCall`. A `recognize` there, in an
-/// onActivate a task of the tests' entry ran, raises the second message; outside every task, the
-/// first — and in a handler too, in this build, whose handlers never wait. In the task itself it
-/// waits, and the read service's answer resumes it.
+/// in the real one, since its setMatching calls through `T.hostCall`. A `recognize` without a
+/// callback there, in an onActivate a task of the tests' entry ran, raises the message for a place
+/// that cannot wait; so does one outside every handler. In a handler — a key's — and in the task
+/// itself it waits, and the read service's answer resumes it.
 #[test]
 fn recognize_in_an_onactivate_a_task_ran_cannot_wait() {
     run(r#"
@@ -3160,15 +3201,50 @@ fn recognize_in_an_onactivate_a_task_ran_cannot_wait() {
         end, function() end)
         T.task.run(function() T.host.arbiter.setMatching("slot", id, true) end)
         assert(ok == false, "it waited")
-        assert(string.find(err, "host.ocr.recognize cannot wait here: this is inside a function that cannot be suspended", 1, true), err)
-        local ok2, err2 = pcall(T.host.ocr.recognizeMany, { regions = { { 0, 0, 10, 10 } } })
-        assert(ok2 == false and string.find(err2, "host.ocr.recognizeMany cannot wait for the text recogniser here", 1, true), err2)
-        T.call("key", function() ok3, err3 = pcall(T.host.ocr.recognize, { region = { 0, 0, 10, 10 } }) end)
-        assert(ok3 == false and string.find(err3, "host.ocr.recognize cannot wait for the text recogniser here", 1, true), err3)
+        assert(string.find(err, "host.ocr.recognize cannot wait here: this function runs inside one the host calls and waits for", 1, true), err)
+        local ok2, err2 = pcall(T.host.ocr.recognize, { { 0, 0, 10, 10 } })
+        assert(ok2 == false and string.find(err2, "host.ocr.recognize cannot wait here", 1, true), err2)
+        assert(T.call("key", function() ok3, got3 = pcall(T.host.ocr.recognize, { region = { 9702, 5, 9732, 15 } }) end) == "Parked")
         local t = T.task.run(function() got = T.host.ocr.recognize({ region = { 9701, 5, 9731, 15 } }).text end)
         assert(got == nil and T.task.alive(t))
         T.settle()
         assert(got == "9701,5" and not T.task.alive(t) and #S.taskErrors == 0)
+        assert(ok3 == true and got3.text == "9702,5", "the key's handler waited")
+    "#);
+}
+
+/// `T.answerWaits` answers a wait at once only where the host could wait: in a handler, in its own
+/// coroutine. Outside every handler, in a coroutine made inside one, and where Luau cannot stop the
+/// handler (a sort comparator) it raises the message for that place, as the real call does in this
+/// host; its arguments are checked as the host checks them, corners as whole numbers.
+#[test]
+fn answered_waits_are_refused_where_the_host_could_not_wait() {
+    run(r#"
+        local S = T.S
+        local answered = 0
+        T.answerWaits(function()
+          answered += 1
+          return { status = "none", text = "", words = {}, skipped = false }
+        end)
+        local R = { 0, 0, 10, 10 }
+        local ok, err = pcall(T.host.ocr.recognize, R)
+        assert(ok == false and string.find(err, "host.ocr.recognize cannot wait here", 1, true), tostring(err))
+        T.call("key", function()
+          inHandler = T.host.ocr.recognize(R)
+          local co = coroutine.create(function() return T.host.ocr.recognize(R) end)
+          okCo, errCo = coroutine.resume(co)
+          okSort, errSort = pcall(table.sort, { 2, 1 }, function(a, b)
+            T.host.ocr.recognize(R)
+            return a < b
+          end)
+          okFraction, errFraction = pcall(T.host.ocr.recognize, { 0, 0, 10.5, 10 })
+        end)
+        assert(inHandler and inHandler.status == "none" and answered == 1, "answered in the handler: " .. answered)
+        assert(okCo == false and string.find(errCo, "host.ocr.recognize cannot wait in a coroutine the module made", 1, true),
+          tostring(errCo))
+        assert(okSort == false and string.find(errSort, "host.ocr.recognize cannot wait here", 1, true), tostring(errSort))
+        assert(okFraction == false and string.find(errFraction, "is not a whole number", 1, true), tostring(errFraction))
+        assert(answered == 1, "answered where it could not wait: " .. answered)
     "#);
 }
 

@@ -194,7 +194,7 @@ pub struct Row {
     pub words: Vec<Word>,
 }
 
-/// One region's answer, the shape `host.ocr.read` hands a callback.
+/// One region's answer, the shape `host.ocr.recognize` hands a callback.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reading {
     /// The region as it was read, absolute.

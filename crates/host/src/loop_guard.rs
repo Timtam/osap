@@ -2,10 +2,9 @@
 //!
 //! The rule is the maintainer's: no text recognition may burden the event loop, which carries
 //! every hotkey, every captured key, speech, every module callback and, on a Mac, the keyboard's
-//! event tap. `host.ocr.read` recognises on threads of its own, and a handler waiting in
-//! `recognize` waits for those threads (task.rs; only the tests' wait yet); the one way left onto
-//! the loop is `recognize` and `recognizeMany` where they cannot wait, the legacy call, which
-//! blocks as it always did.
+//! event tap. `host.ocr.recognize` recognises on threads of its own, with a callback or in a
+//! handler waiting for those threads (task.rs); the one way left onto the loop is `recognize`
+//! where it cannot wait, the legacy call, which blocks as it always did.
 //!
 //! So every function that photographs for a read or recognises asks, first thing, whether it
 //! runs on the event loop (`off_loop`): the platform's `OcrWorker` functions, Windows'
@@ -65,7 +64,7 @@ fn violation_line(what: &str, n: u64) -> String {
     format!("text recognition on the event loop: {what} — this is a bug; please report it ({n} so far this session)")
 }
 
-/// The scope of one legacy call: `host.ocr.recognize` or `recognizeMany` where it could not wait,
+/// The scope of one legacy call: `host.ocr.recognize` where it could not wait,
 /// which recognises on the loop as it always did. Ends when dropped, unwinding included.
 #[must_use = "the exception ends when this is dropped"]
 pub struct Legacy {

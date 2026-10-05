@@ -1,5 +1,5 @@
-//! Tasks and their two waits, against a real Luau VM and the real read service over a fake
-//! recogniser: every rule of task.rs.
+//! Tasks and their wait, against a real Luau VM and the real read service over a fake recogniser:
+//! every rule of task.rs.
 //!
 //! No module can start a task — the host table has no entry for it — so these tests reach the
 //! machinery through its test-only entry, `task::table`, which each VM here has as the global
@@ -7,11 +7,11 @@
 //!
 //! The holder below stands where the host's `Shared` stands — the service, the reads waiting on
 //! the event loop, the tasks, the timers, which VM each module runs and whether it is enabled —
-//! and each test builds module VMs over it with the host's own bindings: `host.ocr.read`,
-//! `pending`, `recognize` and `recognizeMany` (ocr/lua.rs and the shim), and `host.timer`
-//! (timers.rs). Only the blocking legacy call is the holder's: it answers at once, or raises the
-//! message that is to be raised once the blocking call is gone (`Host::raise`). The tick is
-//! `fire`: due timers, then the readings, as the loop runs them.
+//! and each test builds module VMs over it with the host's own bindings: `host.ocr.recognize`, both
+//! forms, and `pending` (ocr/lua.rs and the shim), and `host.timer` (timers.rs). Only the blocking
+//! legacy call is the holder's: it reads its arguments as the host's does and answers at once, or
+//! raises the message that is to be raised once the blocking call is gone (`Host::raise`). The tick
+//! is `fire`: due timers, then the readings, as the loop runs them.
 //!
 //! The fake recogniser reads every region as "x,y" — its corner — and can be held: a capture of
 //! a region whose x a test `hold`s waits until it lets go, and so does a recognition of one whose
@@ -164,8 +164,8 @@ struct Host {
     /// The legacy call raises its message, as it is to once the blocking call is gone, instead of
     /// answering.
     raise: Cell<bool>,
-    /// (module, call, the shim's word for where) of every legacy call.
-    legacy: RefCell<Vec<(usize, String, String)>>,
+    /// (module, the shim's word for where) of every legacy call.
+    legacy: RefCell<Vec<(usize, String)>>,
     /// The "Slow every text read" switch, as this holder's own.
     slow: Cell<bool>,
     /// This thread is the loop's while the holder lives.
@@ -206,9 +206,6 @@ impl ReadHost for Host {
     }
     fn read_source(&self, _: &Lua, _: (i32, i32, i32, i32)) -> CaptureSource {
         CaptureSource::Standard
-    }
-    fn screen_size(&self) -> (i32, i32) {
-        (1920, 1080)
     }
     fn slow_reads(&self) -> bool {
         self.slow.get()
@@ -273,8 +270,8 @@ fn holder((ocr, stop): (Service<Fake>, ShutdownHandle)) -> Rc<Host> {
 /// VM generations, process-wide as the host's are.
 static NEXT_GEN: AtomicU64 = AtomicU64::new(1000);
 
-/// A fresh VM for module `idx` — a new generation of it, enabled — with the host's own read, wait
-/// and timer bindings over `h`, and for the tests: the machinery's test-only entry as the global
+/// A fresh VM for module `idx` — a new generation of it, enabled — with the host's own
+/// `host.ocr.recognize`, `pending` and timer bindings over `h`, and for the tests: the machinery's test-only entry as the global
 /// `task`, `hostCall(f, …)`, a plain `Function::call` as the host makes when it calls Lua back (an
 /// arbiter's onActivate, an onChange), and `boom()`, a host function that panics.
 fn vm(h: &Rc<Host>, idx: usize) -> Lua {
@@ -294,40 +291,39 @@ fn vm(h: &Rc<Host>, idx: usize) -> Lua {
     host.set("timer", timers::table(&lua, idx, h.clone(), |h| &h.timers, |_| Instant::now()).unwrap()).unwrap();
     let ocr = lua.create_table().unwrap();
     let hh = h.clone();
-    ocr.set(
-        "read",
-        lua.create_function(move |lua, (what, opts, cb): (Value, Value, Value)| reads::read(&*hh, lua, idx, what, opts, cb))
-            .unwrap(),
-    )
-    .unwrap();
-    let hh = h.clone();
     ocr.set("pending", lua.create_function(move |lua, key: Value| reads::pending(&*hh, lua, idx, key)).unwrap()).unwrap();
     let hh = h.clone();
+    let submit = lua
+        .create_function(move |lua, (what, opts, cb): (Value, Value, Value)| reads::read(&*hh, lua, idx, what, opts, cb))
+        .unwrap();
+    let hh = h.clone();
     let legacy = lua
-        .create_function(move |lua, (name, opts, why): (String, Value, String)| {
-            hh.legacy.borrow_mut().push((idx, name.clone(), why.clone()));
+        .create_function(move |lua, (what, opts, why): (Value, Value, String)| {
+            hh.legacy.borrow_mut().push((idx, why.clone()));
             if hh.raise.get() {
-                return Ok((false, Value::String(lua.create_string(task::wait_message(&name, Case::of(&why)))?)));
+                let message = lua.create_string(task::wait_message(Case::of(&why)))?;
+                return Ok(MultiValue::from_vec(vec![Value::Boolean(false), Value::String(message)]));
             }
-            // `{ mistake = true }`: a call the real one raises for, reading nothing.
-            let mistake = matches!(&opts, Value::Table(t) if t.raw_get::<bool>("mistake").unwrap_or(false));
-            let t = task::legacy(&*hh, lua, idx, &name, &why, || {
-                if mistake {
-                    return Err(mlua::Error::runtime(format!("{name}: opts.region is neither form")));
-                }
+            // Its arguments read as the host's blocking call reads them: a mistake raises, reading
+            // nothing; a `key` or a `snapshot` raises where it could not wait.
+            let args = reads::parse_read(&what, &opts)?;
+            if let Some(refused) = task::blocking_refusal(&args, &why) {
+                return Ok(MultiValue::from_vec(vec![Value::Boolean(false), Value::String(lua.create_string(refused)?)]));
+            }
+            let t = task::legacy(&*hh, lua, idx, &why, || {
                 // On the loop, inside the legacy call's scope: the one place the guard lets be.
                 crate::loop_guard::off_loop("the fake legacy call");
                 let t = lua.create_table()?;
                 t.set("text", "held the loop")?;
+                t.set("status", "text")?;
                 t.set("skipped", false)?;
                 Ok(t)
             })?;
-            Ok((true, Value::Table(t)))
+            Ok(MultiValue::from_vec(vec![Value::Boolean(true), Value::Table(t)]))
         })
         .unwrap();
-    let waits = task::waits(&lua, idx, h.clone(), legacy).unwrap();
+    let waits = task::waits(&lua, idx, h.clone(), legacy, submit).unwrap();
     ocr.set("recognize", waits.get::<Function>("recognize").unwrap()).unwrap();
-    ocr.set("recognizeMany", waits.get::<Function>("recognizeMany").unwrap()).unwrap();
     host.set("ocr", ocr).unwrap();
     lua.globals().set("host", host).unwrap();
     lua.globals()
@@ -450,8 +446,8 @@ fn the_first_stretch_runs_in_run_and_a_task_that_never_waits_ends_there() {
 }
 
 /// A task waits at `recognize` while the loop goes on — a timer fires meanwhile — and goes on in
-/// the delivery with the reading `read` would hand a callback, `time` and `inputEpoch` included.
-/// `recognizeMany` answers a list in the order of its regions.
+/// the delivery with the reading a callback would be handed, `time` and `inputEpoch` included; a
+/// list answers the list in the order of its regions, and the table by name.
 #[test]
 fn a_task_waits_at_recognize_while_the_loop_goes_on() {
     let h = host();
@@ -467,8 +463,8 @@ fn a_task_waits_at_recognize_while_the_loop_goes_on() {
           local r = host.ocr.recognize({ region = { 9001, 5, 9031, 15 } })
           order[#order + 1] = "answered " .. r.status .. " " .. r.text
           seen = { time = r.time, epoch = r.inputEpoch, skipped = r.skipped, newer = r.newer, lang = r.lang }
-          local m = host.ocr.recognizeMany({ regions = { { 9002, 5, 9032, 15 }, { 9003, 6, 9033, 16 } } })
-          order[#order + 1] = "many " .. #m .. " " .. m[1].text .. " " .. m[2].text
+          local m, byName = host.ocr.recognize({ { 9002, 5, 9032, 15 }, { name = "b", region = { 9003, 6, 9033, 16 } } })
+          order[#order + 1] = "many " .. #m .. " " .. m[1].text .. " " .. byName.b.text
         end)
         host.timer.after(0, function() order[#order + 1] = "timer" end)
         order[#order + 1] = "returned"
@@ -493,7 +489,7 @@ fn a_task_waits_at_recognize_while_the_loop_goes_on() {
     assert_eq!(h.tasks.len(), 0);
 }
 
-/// `pcall(host.ocr.recognize, opts)` in a task waits and answers `true, reading` — VPS Avenger's
+/// `pcall(host.ocr.recognize, region)` in a task waits and answers `true, reading` — VPS Avenger's
 /// form; and a code dependency's function, evaluated in the dependent's VM with its own `host`,
 /// waits in the dependent's task.
 #[test]
@@ -522,6 +518,63 @@ fn a_wait_inside_pcall_or_a_dependencys_function_waits() {
     assert!(yes(&lua, "return ok == true and r.text == '9011,5' and viaDep == '9012,5'"));
     assert!(yes(&lua, "return xok == true and inXpcall == '9013,5' and inPairs == '9014,5' and inLoop == '9015,5'"));
     assert!(h.legacy.borrow().is_empty(), "nothing went the blocking way");
+}
+
+// ── One call, two forms ──────────────────────────────────────────────────────────────────────
+
+/// `host.ocr.recognize` with a callback waits nowhere — not in a task either, where the call without
+/// one would — and takes its options left out (`recognize(what, cb)`). A list answers two values in
+/// both forms: the list in order and the table by name. An explicit `nil` as the third argument is
+/// almost always a callback that is missing, and raises at the caller's line.
+#[test]
+fn the_callback_form_waits_nowhere_and_a_list_answers_two_values_in_both_forms() {
+    let h = host();
+    let lua = vm(&h, 1);
+    run(
+        &lua,
+        "task.run(function()\n\
+           host.ocr.recognize({ 9801, 5, 9831, 15 }, function(r) cbText = r.text end)\n\
+           afterCallback = cbText == nil\n\
+           local list, byName = host.ocr.recognize({ { name = 'a', region = { 9802, 5, 9832, 15 } }, { 9803, 5, 9833, 15 } })\n\
+           waitedList = #list .. ' ' .. byName.a.text .. ' ' .. list[2].text\n\
+         end)\n\
+         host.ocr.recognize({ { name = 'b', region = { 9804, 5, 9834, 15 } } }, nil, function(list, byName)\n\
+           cbList = #list .. ' ' .. byName.b.text\n\
+         end)\n\
+         okNil, errNil = pcall(function()\n\
+           return host.ocr.recognize({ 9805, 5, 9835, 15 }, nil, nil)\n\
+         end)\n\
+         errNil = tostring(errNil)\n",
+    );
+    assert!(yes(&lua, "return afterCallback == true and waitedList == nil"), "the callback form returned at once, in the task");
+    let err: String = lua.globals().get("errNil").unwrap();
+    assert!(yes(&lua, "return okNil == false"));
+    assert!(err.contains(&format!("mod.luau:11: {}", task::NIL_CB)), "{err}");
+    settle(&h);
+    assert!(yes(&lua, "return cbText == '9801,5' and waitedList == '2 9802,5 9803,5' and cbList == '1 9804,5'"));
+    assert!(h.legacy.borrow().is_empty(), "nothing went the blocking way");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+}
+
+/// Where it cannot wait, the blocking call serves what the older call served — regions, names,
+/// `lang` — and raises, at the caller's line, the message for that place for a `key` or a
+/// `snapshot`, which it never served.
+#[test]
+fn the_blocking_call_raises_for_a_key_where_it_cannot_wait() {
+    let h = host();
+    let lua = vm(&h, 1);
+    run(
+        &lua,
+        "okKey, errKey = pcall(function()\n\
+           return host.ocr.recognize({ 9811, 5, 9841, 15 }, { key = 'k' })\n\
+         end)\n\
+         errKey = tostring(errKey)\n\
+         plain = host.ocr.recognize({ 9812, 5, 9842, 15 }, { lang = { 'de', 'en' } }).text\n",
+    );
+    let err: String = lua.globals().get("errKey").unwrap();
+    assert!(yes(&lua, "return okKey == false and plain == 'held the loop'"));
+    assert!(err.contains(&format!("mod.luau:2: {}", task::wait_message(Case::CannotWait))), "{err}");
+    assert_eq!(h.legacy.borrow().len(), 2);
 }
 
 // ── Where a task cannot wait ─────────────────────────────────────────────────────────────────
@@ -562,34 +615,34 @@ fn where_a_task_cannot_wait_the_blocking_call_runs_and_says_why() {
           and got.handler == "held the loop" and got.foreach == "held the loop" and got.foreachi == "held the loop"
           and got.own == "held the loop" and got.waited == "9021,5""#
     ));
-    let whys: Vec<String> = h.legacy.borrow().iter().map(|l| l.2.clone()).collect();
+    let whys: Vec<String> = h.legacy.borrow().iter().map(|l| l.1.clone()).collect();
     assert_eq!(whys[0], "none");
     assert!(whys[1..whys.len() - 1].iter().all(|w| w == "cannot-wait"), "{whys:?}");
     assert_eq!(whys.last().map(String::as_str), Some("foreign"));
-    for case in [Case::Outside, Case::CannotWait, Case::OwnCoroutine] {
+    for case in [Case::CannotWait, Case::OwnCoroutine] {
         assert!(h.tasks.legacy_said("m1", case), "{case:?} not said");
     }
     // Keyed by the module's id, and news again once forgotten — as a reload, a disable or enable
     // and a rolled-back hot-load forget it (`forget_error_repeats`).
-    assert!(!h.tasks.legacy_said("m2", Case::Outside));
+    assert!(!h.tasks.legacy_said("m2", Case::CannotWait));
     h.tasks.forget_legacy_said("m1");
-    assert!(!h.tasks.legacy_said("m1", Case::Outside));
+    assert!(!h.tasks.legacy_said("m1", Case::CannotWait));
     run(&lua, "host.ocr.recognize({ region = { 9022, 5, 9052, 15 } })");
-    assert!(h.tasks.legacy_said("m1", Case::Outside), "written again after it was forgotten");
+    assert!(h.tasks.legacy_said("m1", Case::CannotWait), "written again after it was forgotten");
     // Once per module and case; every call counted for the summary at exit.
     let summary = h.tasks.legacy_summary();
     assert_eq!(summary.len(), 1);
     let calls = h.legacy.borrow().len();
     assert!(calls >= 12, "every place called it: {calls}");
     assert!(
-        summary[0].starts_with(&format!("[m1] host.ocr.recognize and recognizeMany held the event loop {calls} time(s), ")),
+        summary[0].starts_with(&format!("[m1] host.ocr.recognize held the event loop {calls} time(s), ")),
         "{summary:?}"
     );
 }
 
-/// A first blocking call that raises — a mistake in its arguments, which reads nothing — writes no
-/// line, so the module's first call that answers still says how long it held the loop; both are
-/// counted for the summary. The raise's traceback names the shim `host.ocr`, not a task.
+/// A blocking call that raises for a mistake in its arguments reads nothing, writes no line and is
+/// not counted, so the module's first call that answers still says how long it held the loop. The
+/// raise's traceback names the shim `host.ocr`, not a task.
 #[test]
 fn a_blocking_call_that_raises_writes_no_line_and_the_next_one_does() {
     let h = host();
@@ -597,17 +650,17 @@ fn a_blocking_call_that_raises_writes_no_line_and_the_next_one_does() {
     run(&lua, "ok, err = pcall(host.ocr.recognize, { mistake = true }); err = tostring(err)");
     assert!(yes(&lua, "return ok == false"));
     let err: String = lua.globals().get("err").unwrap();
-    assert!(err.contains("opts.region is neither form") && err.contains("host.ocr:"), "{err}");
+    assert!(err.contains("host.ocr.recognize: the region") && err.contains("host.ocr:"), "{err}");
     assert!(!err.contains("task_shim"), "{err}");
-    assert!(!h.tasks.legacy_said("m1", Case::Outside), "a raise was logged as the first call");
+    assert!(!h.tasks.legacy_said("m1", Case::CannotWait), "a raise was logged as the first call");
     run(&lua, "host.ocr.recognize({ region = { 9025, 5, 9055, 15 } })");
-    assert!(h.tasks.legacy_said("m1", Case::Outside), "the first call that answered was not logged");
+    assert!(h.tasks.legacy_said("m1", Case::CannotWait), "the first call that answered was not logged");
     let summary = h.tasks.legacy_summary();
-    assert!(summary[0].starts_with("[m1] host.ocr.recognize and recognizeMany held the event loop 2 time(s), "), "{summary:?}");
+    assert!(summary[0].starts_with("[m1] host.ocr.recognize held the event loop 1 time(s), "), "{summary:?}");
 }
 
-/// Once the blocking call is gone, each of the three places raises its own message, and the raise
-/// names the module's own line — played here with the switch the scripted host plays it with.
+/// Once the blocking call is gone, each kind of place raises its own message, and the raise names
+/// the module's own line — played here with the switch the scripted host plays it with.
 #[test]
 fn where_it_cannot_wait_the_later_release_raises_naming_the_callers_line() {
     let h = host();
@@ -617,7 +670,7 @@ fn where_it_cannot_wait_the_later_release_raises_naming_the_callers_line() {
         &lua,
         "local R = { region = { 9031, 5, 9061, 15 } }\n\
          ok, outside = pcall(function()\n\
-           return host.ocr.recognizeMany({ regions = { R.region } })\n\
+           return host.ocr.recognize({ R.region })\n\
          end)\n\
          task.run(function()\n\
            local meta = setmetatable({}, { __index = function()\n\
@@ -632,9 +685,9 @@ fn where_it_cannot_wait_the_later_release_raises_naming_the_callers_line() {
     let get = |name: &str| lua.globals().get::<String>(name).unwrap();
     assert!(yes(&lua, "return ok == false and ok2 == false and ok3 == false"));
     for (name, line, message) in [
-        ("outside", 3, task::wait_message("host.ocr.recognizeMany", Case::Outside)),
-        ("inMeta", 7, task::wait_message("host.ocr.recognize", Case::CannotWait)),
-        ("inOwn", 11, task::wait_message("host.ocr.recognize", Case::OwnCoroutine)),
+        ("outside", 3, task::wait_message(Case::CannotWait)),
+        ("inMeta", 7, task::wait_message(Case::CannotWait)),
+        ("inOwn", 11, task::wait_message(Case::OwnCoroutine)),
     ] {
         let raised = get(name);
         assert!(raised.contains(&format!("mod.luau:{line}: {message}")), "{name}: {raised}");
@@ -903,10 +956,10 @@ fn module_code_resuming_or_closing_a_task_takes_it_from_the_host() {
     assert_eq!(h.tasks.len(), 0);
 }
 
-/// The shim's `start`, taken off the stack with `debug.info` while it reads its options, and
-/// called by module code: outside its place it raises and queues nothing; called inside the
-/// task's own wait, the task's own wait then raises, and the stray read is withdrawn when the
-/// task ends — no reading is left.
+/// The shim's `start`, taken off the stack with `debug.info` while it reads its arguments — a
+/// window region's window, whose `client` a metamethod answers — and called by module code:
+/// outside its place it raises and queues nothing; called inside the task's own wait, the task's
+/// own wait then raises, and the stray read is withdrawn when the task ends — no reading is left.
 #[test]
 fn start_called_by_module_code_raises_and_leaves_no_reading() {
     let h = host();
@@ -924,17 +977,18 @@ fn start_called_by_module_code_raises_and_leaves_no_reading() {
           end
         end
         local sneaky = setmetatable({}, { __index = function(_, k)
-          if k == "region" then
+          if k == "client" then
             stolen = stealStart()
-            nested = { pcall(stolen, "host.ocr.recognize", { region = { 9091, 5, 9121, 15 } }, {}) }
+            nested = { pcall(stolen, { 9091, 5, 9121, 15 }, nil, {}) }
+            return { x = 9093, y = 0, w = 30, h = 10 }
           end
           return nil
         end })
         task.run(function()
-          okWait, errWait = pcall(host.ocr.recognize, sneaky)
+          okWait, errWait = pcall(host.ocr.recognize, { window = sneaky, fraction = { 0, 0, 1, 1 } })
           errWait = tostring(errWait)
         end)
-        ok, err = pcall(stolen, "host.ocr.recognize", { region = { 9092, 5, 9122, 15 } }, {})
+        ok, err = pcall(stolen, { 9092, 5, 9122, 15 }, nil, {})
         err = tostring(err)
         "#,
     );
@@ -942,7 +996,7 @@ fn start_called_by_module_code_raises_and_leaves_no_reading() {
     assert!(yes(&lua, "return ok == false and okWait == false and nested[1] == true"));
     for name in ["err", "errWait"] {
         let e: String = lua.globals().get(name).unwrap();
-        assert!(e.contains("the host's wait was called from outside its place"), "{name}: {e}");
+        assert!(e.contains("host.ocr.recognize: the host's wait was called from outside its place"), "{name}: {e}");
     }
     assert!(!h.state.has_pending(), "a reading was left");
     assert_eq!(h.tasks.len(), 0);
@@ -1041,7 +1095,7 @@ fn a_task_keeps_the_priority_of_what_started_it() {
     assert_eq!(current_priority(), Priority::Background, "restored after each stretch");
 }
 
-/// With a `key`, the newest wins as for `read`: a wait whose read had not been recognised yet when
+/// With a `key`, the newest wins as for a read with a callback: a wait whose read had not been recognised yet when
 /// a newer one with its key was asked comes back `"stale"` — no words, no time, no input epoch —
 /// and the task goes on; one already being recognised comes back with `newer`.
 #[test]
@@ -1053,11 +1107,11 @@ fn a_superseded_wait_comes_back_stale_and_the_task_goes_on() {
         &lua,
         r#"
         task.run(function()
-          local r = host.ocr.recognize({ region = { 9121, 5, 9151, 15 }, key = "field" })
+          local r = host.ocr.recognize({ 9121, 5, 9151, 15 }, { key = "field" })
           first = { status = r.status, newer = r.newer, words = #r.words, time = r.time, epoch = r.inputEpoch }
         end)
         task.run(function()
-          second = host.ocr.recognize({ region = { 9122, 5, 9152, 15 }, key = "field" }).status
+          second = host.ocr.recognize({ 9122, 5, 9152, 15 }, { key = "field" }).status
         end)
         "#,
     );
@@ -1070,9 +1124,9 @@ fn a_superseded_wait_comes_back_stale_and_the_task_goes_on() {
     ));
 
     hold_recognition(9123);
-    run(&lua, r#"task.run(function() third = host.ocr.recognize({ region = { 9123, 5, 9153, 15 }, key = "row" }) end)"#);
+    run(&lua, r#"task.run(function() third = host.ocr.recognize({ 9123, 5, 9153, 15 }, { key = "row" }) end)"#);
     wait_recognising(9123);
-    run(&lua, r#"task.run(function() fourth = host.ocr.recognize({ region = { 9124, 5, 9154, 15 }, key = "row" }) end)"#);
+    run(&lua, r#"task.run(function() fourth = host.ocr.recognize({ 9124, 5, 9154, 15 }, { key = "row" }) end)"#);
     release(9123);
     settle(&h);
     assert!(yes(&lua, "return third.status == 'text' and third.newer == true and fourth.status == 'text' and fourth.newer == false"));
@@ -1104,12 +1158,12 @@ fn routine_failures_are_readings_and_mistakes_raise_at_the_wait() {
         r#"return failed.status == "failed" and failed.error == "the fake recogniser failed" and failed.skipped == false
           and failed.time == nil and failed.epoch == nil
           and empty.status == "failed" and empty.error == "the window's client area is empty (0x0)" and empty.time == nil
-          and okBad == false and string.find(bad, "host.ocr.recognize: opts.region is neither", 1, true) ~= nil"#
+          and okBad == false and string.find(bad, "host.ocr.recognize: the entry.region", 1, true) ~= nil"#
     ));
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
 }
 
-/// `read`'s limit holds for waits: a module's seventeenth wait pushes out its oldest one that has
+/// The limit of reads holds for waits: a module's seventeenth wait pushes out its oldest one that has
 /// no key and is not being recognised, and that task goes on with a `"failed"` reading on the next
 /// turn of the loop — never inside the call that pushed it out.
 #[test]
@@ -1139,8 +1193,9 @@ fn a_wait_pushed_out_by_the_limit_fails_on_the_next_turn() {
     assert!(yes(&lua, "for i = 2, 17 do if got[i] ~= 'text|nil' then return false end end return true"));
 }
 
-/// Nothing to read is still a wait: `recognizeMany` of an empty list answers an empty list, and
-/// empty corners a `"failed"` reading, on a later turn of the loop.
+/// Nothing to read is still a wait: a list of window regions whose windows have nothing to show is
+/// answered on a later turn of the loop, each reading `"failed"` with why. Empty corners and an
+/// empty list are mistakes in the call, and raise at the wait.
 #[test]
 fn an_empty_wait_is_answered_on_a_later_turn() {
     let h = host();
@@ -1148,10 +1203,13 @@ fn an_empty_wait_is_answered_on_a_later_turn() {
     run(
         &lua,
         r#"
+        local gone = { client = { x = 0, y = 0, w = 0, h = 0 } }
         task.run(function()
-          many = #host.ocr.recognizeMany({ regions = {} })
-          local e = host.ocr.recognize({ region = { 9205, 5, 9205, 15 } })
-          empty = { status = e.status, error = e.error, time = e.time }
+          local list = host.ocr.recognize({ { window = gone, fraction = { 0, 0, 1, 1 } }, { window = gone, fraction = { 0, 0, 0.5, 1 } } })
+          many = { n = #list, status = list[2].status, error = list[2].error, time = list[2].time }
+          okEmpty, emptyCorners = pcall(host.ocr.recognize, { 9205, 5, 9205, 15 })
+          okNone, noRegion = pcall(host.ocr.recognize, {})
+          emptyCorners, noRegion = tostring(emptyCorners), tostring(noRegion)
         end)
         "#,
     );
@@ -1159,8 +1217,10 @@ fn an_empty_wait_is_answered_on_a_later_turn() {
     settle(&h);
     assert!(yes(
         &lua,
-        r#"return many == 0 and empty.status == "failed" and empty.time == nil
-          and string.find(empty.error, "empty region: x2 must be greater than x1", 1, true) ~= nil"#
+        r#"return many.n == 2 and many.status == "failed" and many.time == nil
+          and many.error == "the window's client area is empty (0x0)"
+          and okEmpty == false and string.find(emptyCorners, "host.ocr.recognize: the region { 9205, 5, 9205, 15 } is empty or turned around", 1, true) ~= nil
+          and okNone == false and string.find(noRegion, "host.ocr.recognize: the region.x1 is missing", 1, true) ~= nil"#
     ));
 }
 
@@ -1396,9 +1456,9 @@ fn ten_thousand_tasks_that_never_wait() {
 
 // ── host.ocr.pending, and two tasks as a module's code would start them ──────────────────────
 
-/// `host.ocr.pending(key)`: true once a read or a task's wait with the key was asked, false in the
-/// read's own callback and in the task it resumes, and after a disable; a key that is not a
-/// non-empty string raises.
+/// `host.ocr.pending(key)`: true once a read with a callback or a task's wait with the key was
+/// asked, false in the read's own callback and in the task it resumes, and after a disable; a key
+/// that is not a non-empty string raises.
 #[test]
 fn pending_says_whether_a_read_or_a_wait_with_the_key_is_out() {
     let h = host();
@@ -1406,10 +1466,10 @@ fn pending_says_whether_a_read_or_a_wait_with_the_key_is_out() {
     run(
         &lua,
         r#"
-        host.ocr.read({ 9151, 5, 9181, 15 }, { key = "a" }, function() inCallback = host.ocr.pending("a") end)
+        host.ocr.recognize({ 9151, 5, 9181, 15 }, { key = "a" }, function() inCallback = host.ocr.pending("a") end)
         afterRead = host.ocr.pending("a")
         task.run(function()
-          host.ocr.recognize({ region = { 9152, 5, 9182, 15 }, key = "b" })
+          host.ocr.recognize({ 9152, 5, 9182, 15 }, { key = "b" })
           inTask = host.ocr.pending("b")
         end)
         afterWait = host.ocr.pending("b")
@@ -1420,7 +1480,7 @@ fn pending_says_whether_a_read_or_a_wait_with_the_key_is_out() {
     settle(&h);
     assert!(yes(&lua, "return inCallback == false and inTask == false and host.ocr.pending('a') == false"));
     hold(9153);
-    run(&lua, r#"task.run(function() host.ocr.recognize({ region = { 9153, 5, 9183, 15 }, key = "d" }) end)"#);
+    run(&lua, r#"task.run(function() host.ocr.recognize({ 9153, 5, 9183, 15 }, { key = "d" }) end)"#);
     assert!(yes(&lua, "return host.ocr.pending('d') == true"));
     disable(&h, 1);
     assert!(yes(&lua, "return host.ocr.pending('d') == false"), "after a disable");
@@ -1463,7 +1523,6 @@ fn event(h: &Host, lua: &Lua, f: &str, args: Vec<Value>, input: bool) -> mailbox
 /// person's for good. The key runs after it, in order. Without the key, every read is a poll's.
 #[test]
 fn a_key_queued_behind_a_polls_read_makes_the_read_interactive() {
-    let _wait = task::handlers_wait_here();
     let h = host();
     let lua = vm(&h, 1);
     run(
@@ -1473,7 +1532,7 @@ fn a_key_queued_behind_a_polls_read_makes_the_read_interactive() {
         function poll(x)
           heard[#heard + 1] = host.ocr.recognize({ region = { x, 79, x + 30, 89 } }).text
           heard[#heard + 1] = host.ocr.recognize({ region = { x + 1, 79, x + 31, 89 } }).text
-          host.ocr.read({ x + 2, 79, x + 32, 89 }, function(r) armed = r.text end)
+          host.ocr.recognize({ x + 2, 79, x + 32, 89 }, function(r) armed = r.text end)
         end
         function key() heard[#heard + 1] = "key" end
         "#,
@@ -1532,8 +1591,8 @@ fn a_hang_ends_every_read_still_out_with_the_reason() {
         local function note(what)
           return function(r) ended[#ended + 1] = { what = what, status = r.status, error = r.error } end
         end
-        host.ocr.read({ 9321, 5, 9351, 15 }, { key = "running" }, note("running"))
-        host.ocr.read({ 9322, 5, 9352, 15 }, { key = "queued" }, note("queued"))
+        host.ocr.recognize({ 9321, 5, 9351, 15 }, { key = "running" }, note("running"))
+        host.ocr.recognize({ 9322, 5, 9352, 15 }, { key = "queued" }, note("queued"))
         task.run(function() note("waited")(host.ocr.recognize({ region = { 9323, 5, 9353, 15 } })) end)
         "#,
     );
@@ -1555,7 +1614,7 @@ fn a_hang_ends_every_read_still_out_with_the_reason() {
         "{:?}",
         lua.load("local t = {} for _, e in ipairs(ended) do t[#t + 1] = e.what .. ' ' .. e.status .. ' ' .. tostring(e.error) end return table.concat(t, ' | ')").eval::<String>()
     );
-    run(&lua, r#"host.ocr.read({ 9324, 5, 9354, 15 }, function(r) late = r.status .. " " .. r.error end)"#);
+    run(&lua, r#"host.ocr.recognize({ 9324, 5, 9354, 15 }, function(r) late = r.status .. " " .. r.error end)"#);
     fire_until(&h, &lua, "return late ~= nil");
     assert!(yes(&lua, r#"return string.find(late, "failed the text recogniser has not answered a region for", 1, true) == 1"#));
 
@@ -1564,7 +1623,7 @@ fn a_hang_ends_every_read_still_out_with_the_reason() {
     // this one is answered the held one's late answer has come — and gone to nobody.
     let until = Instant::now() + Duration::from_secs(10);
     loop {
-        run(&lua, r#"again = nil; host.ocr.read({ 9325, 5, 9355, 15 }, function(r) again = r.status end)"#);
+        run(&lua, r#"again = nil; host.ocr.recognize({ 9325, 5, 9355, 15 }, function(r) again = r.status end)"#);
         fire_until(&h, &lua, "return again ~= nil");
         if yes(&lua, "return again == 'text'") {
             break;
@@ -1574,6 +1633,55 @@ fn a_hang_ends_every_read_still_out_with_the_reason() {
     }
     settle(&h);
     assert!(yes(&lua, "return #ended == 3"), "the hang's reads were answered once");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+    assert_eq!(h.tasks.len(), 0);
+}
+
+/// The hang answer for handlers of three modules that wait: each goes on once, with `"failed"` and
+/// the reason, in a delivery of its own; `pending` is false for their keys afterwards. A handler
+/// that reads again at once is refused — the recogniser still does not answer — and goes on with
+/// that `"failed"` on the next turn of the loop, not inside the one that resumed it.
+#[test]
+fn a_hang_resumes_every_waiting_handler_once_with_failed() {
+    let h = host_hanging_after(Duration::from_millis(100));
+    let modules: Vec<Lua> = (1..=3).map(|idx| vm(&h, idx)).collect();
+    hold_recognition(9851);
+    for (i, lua) in modules.iter().enumerate() {
+        let x = 9851 + i as i64;
+        run(
+            lua,
+            &format!(
+                "function poll()\n\
+                   local r = host.ocr.recognize({{ {x}, 5, {x} + 30, 15 }}, {{ key = 'k' }})\n\
+                   first = r.status .. ' ' .. tostring(r.error)\n\
+                   pendingAfter = host.ocr.pending('k')\n\
+                   local again = host.ocr.recognize({{ {x}, 25, {x} + 30, 35 }})\n\
+                   second = again.status\n\
+                 end"
+            ),
+        );
+        let f: Function = lua.globals().get("poll").unwrap();
+        let idx = i + 1;
+        let d = mailbox::deliver(&*h, idx, lua, Event::Call { f, args: MultiValue::new(), input: false, what: "timer" });
+        assert_eq!(d, mailbox::Delivered::Parked, "module {idx} waits");
+    }
+    wait_recognising(9851);
+    let until = Instant::now() + Duration::from_secs(10);
+    while !modules.iter().all(|l| yes(l, "return first ~= nil")) {
+        assert!(Instant::now() < until, "the hang never answered");
+        reads::fire(&*h);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    for lua in &modules {
+        assert!(yes(lua, "return string.find(first, 'failed the text recogniser has not answered a region for', 1, true) == 1"));
+        assert!(yes(lua, "return pendingAfter == false"));
+        assert!(yes(lua, "return second == nil"), "the read asked again is not answered inside the turn that resumed it");
+    }
+    reads::fire(&*h);
+    for lua in &modules {
+        assert!(yes(lua, "return second == 'failed'"), "answered on the next turn");
+    }
+    release(9851);
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
     assert_eq!(h.tasks.len(), 0);
 }
@@ -1604,7 +1712,7 @@ fn the_slow_reads_switch_hands_answers_over_two_seconds_late() {
         &lua,
         r#"
         got = {}
-        host.ocr.read({ 9331, 5, 9361, 15 }, { key = "k" }, function(r)
+        host.ocr.recognize({ 9331, 5, 9361, 15 }, { key = "k" }, function(r)
           got[#got + 1] = "read " .. r.text
           inCallback = host.ocr.pending("k")
         end)
@@ -1628,7 +1736,7 @@ fn the_slow_reads_switch_hands_answers_over_two_seconds_late() {
     assert!(!h.state.has_pending());
 
     // A disable while it is held drops it.
-    run(&lua, "got = {}; host.ocr.read({ 9333, 5, 9363, 15 }, function() got[#got + 1] = 'dropped' end)");
+    run(&lua, "got = {}; host.ocr.recognize({ 9333, 5, 9363, 15 }, function() got[#got + 1] = 'dropped' end)");
     let t1 = Instant::now();
     held(1, t1);
     disable(&h, 1);
@@ -1642,8 +1750,8 @@ fn the_slow_reads_switch_hands_answers_over_two_seconds_late() {
     run(
         &lua,
         r#"
-        host.ocr.read({ 9334, 5, 9364, 15 }, function(r) got[#got + 1] = r.text end)
-        host.ocr.read({ 9335, 5, 9365, 15 }, function(r) got[#got + 1] = r.text end)
+        host.ocr.recognize({ 9334, 5, 9364, 15 }, function(r) got[#got + 1] = r.text end)
+        host.ocr.recognize({ 9335, 5, 9365, 15 }, function(r) got[#got + 1] = r.text end)
         "#,
     );
     let t2 = Instant::now();
@@ -1683,8 +1791,7 @@ host.timer.every(120, function()
   local w = host.window.active()
   if not w then return end
   watching = task.run(function()
-    local r = host.ocr.recognizeMany({ regions = {
-      { window = w, fraction = NOTE }, { window = w, fraction = PITCH } } })
+    local r = host.ocr.recognize({ { window = w, fraction = NOTE }, { window = w, fraction = PITCH } })
     local front = host.window.active()
     if not (front and front.id == w.id) then return end -- another window is in front
     if r[1].status ~= "text" or r[2].status ~= "text" then return end

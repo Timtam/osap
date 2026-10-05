@@ -131,7 +131,7 @@ local function read(origin, a)
   local token = {}
   a.reading = token
   local client = { x = origin.client.x, y = origin.client.y }
-  local ok, err = pcall(host.ocr.read, rect, { lang = H.lang(), key = "vps-avenger dialog" }, function(r)
+  local ok, err = pcall(host.ocr.recognize, rect, { lang = H.lang(), key = "vps-avenger dialog" }, function(r)
     if armed ~= a or a.reading ~= token then return end
     a.reading = nil
     if r.status == "stale" then return end

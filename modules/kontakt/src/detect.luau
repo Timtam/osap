@@ -270,14 +270,14 @@ end
 --     focusable candidates" on three presses over 73 s, in REAPER's FX chain, while the
 --     standalone Kontakt 7 on the same Mac published its header half a minute after it
 --     started), its top row read as text: FILE with LIBRARY to its right, in a small region
---     around where FILE belongs — off the event loop (`host.ocr.read`), in English, whose words
---     these are. Measured on the Windows calibration shot of Kontakt 7, whose chrome Kontakt
---     draws itself: FILE's letters span x 164–188, y 15–23, a centre of (176, 19) — the button's
---     own — and LIBRARY's centre is 56 to its right (35 to 90 accepted). A word Vision boxes
---     is within a point or two of its ink (the probe's text-against-elements lines: 0 to 2
---     points on buttons). Until the read answers, the panel is not Kontakt's; an answer that
---     anchors asks every overlay to look again (`host.window.recheck`), because the answer is
---     not a focus change and nothing else would.
+--     around where FILE belongs — off the event loop (`host.ocr.recognize` with a callback), in
+--     English, whose words these are. Measured on the Windows calibration shot of Kontakt 7,
+--     whose chrome Kontakt draws itself: FILE's letters span x 164–188, y 15–23, a centre of
+--     (176, 19) — the button's own — and LIBRARY's centre is 56 to its right (35 to 90
+--     accepted). A word Vision boxes is within a point or two of its ink (the probe's
+--     text-against-elements lines: 0 to 2 points on buttons). Until the read answers, the panel
+--     is not Kontakt's; an answer that anchors asks every overlay to look again
+--     (`host.window.recheck`), because the answer is not a focus change and nothing else would.
 -- Kontakt 8 has no text fallback: its file-menu button is a wordmark, not a word.
 --
 -- WHERE Kontakt's corner is: FILE's centre minus the authored offset — Kontakt's own geometry,
@@ -434,7 +434,7 @@ local function onHostPanel(version, name, at, header, near)
         .. "%d,%d %dx%d instead",
       name, version, tostring(active.title), active.client.w, active.client.h, header[1], header[2],
       x1, y1, x2 - x1, y2 - y1)
-    host.ocr.read({ x1, y1, x2, y2 }, { lang = "en", key = "kontakt-header:" .. winKey }, function(r)
+    host.ocr.recognize({ x1, y1, x2, y2 }, { lang = "en", key = "kontakt-header:" .. winKey }, function(r)
       if reading == key then reading = nil end
       -- Superseded by a read of a later stay of the same window, or a stay that is over by now:
       -- the stay that is on reads for itself.

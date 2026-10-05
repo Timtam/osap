@@ -4,7 +4,7 @@
 //! focus-read helpers of `overlay_focus_read_tests.rs`.
 //!
 //! Written for step 3 of the plan that takes text recognition off the event loop (2026-10-04). A
-//! read's callback — and, once a callback can wait, its code after the wait — is about the moment
+//! read's callback — and a handler's code after it waited for a read — is about the moment
 //! it was asked in.
 //! The runtime's own announcement has always checked, before it spoke, that the overlay had not
 //! moved on since; an OCR button its click before it clicked. Those checks are now one mark, which
@@ -245,7 +245,7 @@ fn an_ocr_buttons_click_goes_by_its_control_not_by_the_focus() {
 // ---------------------------------------------------------------------------------------------
 
 /// `whole = true` cuts the corners toward zero — the pixels the overlay's own focus read takes —
-/// so `host.ocr.read` takes them as they are; an overlay with a fractional frame places fractions
+/// so `host.ocr.recognize` takes them as they are; an overlay with a fractional frame places fractions
 /// otherwise. Toward zero left of and above the primary display too. Without `whole` the answer is
 /// the plain sum it always was.
 #[test]
@@ -265,7 +265,7 @@ fn whole_cuts_the_corners_toward_zero_as_the_focus_read_does() {
         T.tab(); T.tab()
         assert(o.focus == 1 and #S.reads == 1, T.dump())
         assert(T.region(S.reads[1].regions[1]) == T.region(w), "the focus read's corners: " .. T.region(S.reads[1].regions[1]))
-        T.host.ocr.read(w, function() end) -- the scripted read checks corners as the host does
+        T.host.ocr.recognize(w, function() end) -- the scripted read checks corners as the host does
         assert(#S.reads == 2)
 
         local was = S.origin
@@ -421,20 +421,23 @@ fn a_member_the_host_lacks_fails_the_scenario_even_inside_a_pcall() {
     "#);
 }
 
-/// A `recognize` in a `text` raises in this host, which plays the end of the blocking call where
-/// nothing can wait; the runtime logs the hook, and the scenario fails at its end with that line,
-/// rather than passing on a value that went missing without a word.
+/// A `recognize` without a callback in a `text` waits in the handler of the key that asked for the
+/// sentence: the key's handler parks, nothing is said meanwhile, and once the reading comes the
+/// sentence is said with it — the mark taken before the hook still holds.
 #[test]
-#[should_panic(expected = "a hook raised: [overlay] 'Battery': its text raised: ")]
-fn a_recognize_in_a_text_hook_fails_the_scenario() {
+fn a_recognize_in_a_text_hook_waits_and_its_reading_is_said() {
     run(r#"
+        local S = T.S
         local o = T.fields(function(o)
           o:addStaticText({ label = "Battery",
-            text = function() return T.host.ocr.recognize({ region = { 0, 0, 10, 10 } }).text end })
+            text = function() return T.host.ocr.recognize({ region = { 9751, 5, 9781, 15 } }).text end })
         end)
-        T.tab(); T.tab()
-        assert(o.focus == 3 and T.last().text == "Battery", T.last().text)
-        assert(T.count("host.ocr.recognize cannot wait for the text recogniser here") == 1, T.dump())
+        T.tab()
+        local said = #S.speech
+        T.tab()
+        assert(o.focus == 3 and #S.speech == said, "nothing is said before the reading: " .. T.dump())
+        T.settle()
+        assert(T.last().text == "Battery, 9751,5", T.last().text)
     "#);
 }
 
@@ -442,15 +445,15 @@ fn a_recognize_in_a_text_hook_fails_the_scenario() {
 // The runtime's version.
 // ---------------------------------------------------------------------------------------------
 
-/// The runtime is 0.3.0 (handlers, step B3), so a module that depends on
-/// `"com.platform.overlay >= 0.2"` — as one that takes a mark has to — still loads against it, and
-/// against nothing older.
+/// The runtime is 0.3.1 (handlers, step B3; `host.ocr.recognize` with a callback), so a module
+/// that depends on `"com.platform.overlay >= 0.2"` — as one that takes a mark has to — still loads
+/// against it, and against nothing older.
 #[test]
 fn the_runtime_is_0_3_so_a_module_that_asks_for_0_2_loads() {
     let m = module_manifest::ModuleManifest::parse(include_str!("../../../modules/overlay-runtime/module.toml"))
         .expect("the runtime's manifest parses");
     assert_eq!(m.id, "com.platform.overlay");
-    assert_eq!(m.version, "0.3.0");
+    assert_eq!(m.version, "0.3.1");
     for spec in ["com.platform.overlay >= 0.2", "com.platform.overlay >= 0.3"] {
         let req = module_manifest::dep_constraint(spec).unwrap();
         let id = module_manifest::dep_id(spec);

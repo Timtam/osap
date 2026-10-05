@@ -6,7 +6,8 @@ name = "Overlay runtime"
 # is taken before its control's hooks, a binding is first evaluated on the next tick, nothing
 # but a stepper is read before a press, and the hooks asked on every scan run in a coroutine of
 # the runtime's own (docs/api/overlay.md, "Where a hook runs"). Nothing a module calls is new.
-version = "0.3.0"
+# 0.3.1 reads with host.ocr.recognize and a callback, as the application asks now.
+version = "0.3.1"
 # Loaded into the VM of every module that depends on it, so its functions
 # (O.new, O.container, the Overlay methods) are reachable via host.require.
 code_module = true

@@ -7,7 +7,7 @@
 //! belongs to, what a module may hold, what happens when a search panics — can be read, and
 //! tested, in one place.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -817,35 +817,14 @@ impl Shared {
         }
     }
 
-    /// An answer as it runs (`Event::Image`), its fate asked again: the callback's call for an
-    /// owner that is still the VM that asked and enabled; held again, to be searched afresh on
-    /// re-enable, for one disabled meanwhile — a search, not one ended with a reason; let go
-    /// otherwise.
+    /// An answer as it runs (`Event::Image`), by [`open_image_in`].
     pub(crate) fn open_image(&self, p: PendingImage, outcome: Outcome, ended: bool) -> Opened {
-        let verdict = fate(p.owner, p.gen, &self.enabled.borrow(), &self.vm_gens.borrow());
-        if verdict != Fate::Deliver {
-            self.discard_image(p, ended, verdict == Fate::Hold);
-            return Opened::Gone;
-        }
-        let f = p.lua.registry_value::<Function>(&p.cb);
-        let run = f.map(|f| {
-            let args = result_args(&p.lua, &p.task, &p.names, outcome);
-            Opened::Run { f, args, ctx: Ctx::new(p.task.binding(), p.scope) }
-        });
-        release([p]);
-        run.unwrap_or(Opened::Gone)
+        open_image_in(&self.pending_image, &self.enabled, &self.vm_gens, p, outcome, ended)
     }
 
-    /// An answer that will not run: put back held — to be searched again when its module is
-    /// enabled — when `hold` (its module was disabled) and it was a search; let go otherwise.
-    pub(crate) fn discard_image(&self, mut p: PendingImage, ended: bool, hold: bool) {
-        if hold && !ended {
-            p.held = true;
-            let id = p.task.id;
-            self.pending_image.borrow_mut().insert(id, p);
-        } else {
-            release([p]);
-        }
+    /// An answer that will not run, by [`discard_image_in`].
+    pub(crate) fn discard_image(&self, p: PendingImage, ended: bool, hold: bool) {
+        discard_image_in(&self.pending_image, p, ended, hold);
     }
 
     /// Drops every search still waiting for an answer on behalf of module `owner`'s VM, held
@@ -882,6 +861,70 @@ impl Shared {
             }
         }
     }
+}
+
+/// An answer as it runs (`Event::Image`), its fate asked again against `enabled` and `gens`: the
+/// callback's call for an owner that is still the VM that asked and enabled; held again in
+/// `pending`, to be searched afresh on re-enable, for one disabled meanwhile — a search, not one
+/// ended with a reason; let go otherwise. The host's own `open` and the mailbox tests' holder both
+/// run this, so the tests run the host's rule and not a copy of it.
+pub(crate) fn open_image_in(
+    pending: &RefCell<HashMap<u64, PendingImage>>,
+    enabled: &RefCell<Vec<bool>>,
+    gens: &RefCell<HashMap<usize, u64>>,
+    p: PendingImage,
+    outcome: Outcome,
+    ended: bool,
+) -> Opened {
+    let verdict = fate(p.owner, p.gen, &enabled.borrow(), &gens.borrow());
+    if verdict != Fate::Deliver {
+        discard_image_in(pending, p, ended, verdict == Fate::Hold);
+        return Opened::Gone;
+    }
+    let f = p.lua.registry_value::<Function>(&p.cb);
+    let run = f.map(|f| {
+        let args = result_args(&p.lua, &p.task, &p.names, outcome);
+        Opened::Run { f, args, ctx: Ctx::new(p.task.binding(), p.scope) }
+    });
+    release([p]);
+    run.unwrap_or(Opened::Gone)
+}
+
+/// An answer that will not run: put back held in `pending` — to be searched again when its module
+/// is enabled — when `hold` (its module was disabled) and it was a search; let go otherwise.
+pub(crate) fn discard_image_in(pending: &RefCell<HashMap<u64, PendingImage>>, mut p: PendingImage, ended: bool, hold: bool) {
+    if hold && !ended {
+        p.held = true;
+        let id = p.task.id;
+        pending.borrow_mut().insert(id, p);
+    } else {
+        release([p]);
+    }
+}
+
+/// A search `id` of the VM `lua` under the identity `scope`, answered to `cb`, as `imageSearchAsync`
+/// files it — one entry, the screen's 10x10 pixels at the origin: for the tests' holders, which
+/// have no `Shared`.
+#[cfg(test)]
+pub(crate) fn test_pending(lua: &Lua, gens: &HashMap<usize, u64>, id: u64, scope: usize, cb: Function) -> PendingImage {
+    let task = ImageTask {
+        id,
+        hay: Haystack::Screen { region: (0, 0, 10, 10), source: CaptureSource::Standard },
+        job: Job::Search { entries: Vec::new(), tol: 0, scales: vec![1.0], mode: Mode::First, unresolved: None },
+    };
+    pending(lua, gens, scope, cb, vec![None], task).expect("the entry is made")
+}
+
+/// A search's answer that found nothing.
+#[cfg(test)]
+pub(crate) fn test_found_nothing() -> Outcome {
+    Outcome::Search(Ok(vec![None]))
+}
+
+/// Whether search `id` is held in `pending`, waiting for its module to be enabled again.
+#[cfg(test)]
+pub(crate) fn test_held(pending: &RefCell<HashMap<u64, PendingImage>>, id: u64) -> bool {
+    pending.borrow().get(&id).is_some_and(|p| p.held)
 }
 
 /// What the callback is called with: a search's one value, or `(nil, reason)` when it could not

@@ -781,18 +781,16 @@ local function readSelection(o)
     local note = field(NOTE_REGION)
     return note .. "|", note, ""
   end
-  -- BOTH boxes, one screen touch. `recognizeMany` captures the rectangle that encloses them
-  -- once and recognises each region out of that single frame — which is the whole cost here:
+  -- BOTH boxes, one screen touch. A list of regions in one host.ocr.recognize is photographed
+  -- together and each region recognised out of that one picture — which is the whole cost here:
   -- the recognition measured 4-6 ms against a capture's fixed ~17. Two separate calls put this
   -- tick at 44 ms; this puts it at 27, and the two regions stay two regions, so the per-region
   -- fallback that once rescued a dropped note name is untouched.
-  local rs = host.ocr.recognizeMany({
-    regions = {
-      { origin.client.x + NOTE_REGION[1], origin.client.y + NOTE_REGION[2],
-        origin.client.x + NOTE_REGION[3], origin.client.y + NOTE_REGION[4] },
-      { origin.client.x + PITCH_REGION[1], origin.client.y + PITCH_REGION[2],
-        origin.client.x + PITCH_REGION[3], origin.client.y + PITCH_REGION[4] },
-    },
+  local rs = host.ocr.recognize({
+    { origin.client.x + NOTE_REGION[1], origin.client.y + NOTE_REGION[2],
+      origin.client.x + NOTE_REGION[3], origin.client.y + NOTE_REGION[4] },
+    { origin.client.x + PITCH_REGION[1], origin.client.y + PITCH_REGION[2],
+      origin.client.x + PITCH_REGION[3], origin.client.y + PITCH_REGION[4] },
   })
   local note = (rs[1] and rs[1].text) or ""
   local pitch = (rs[2] and rs[2].text) or ""

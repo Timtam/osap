@@ -78,14 +78,15 @@ pub(crate) mod bench;
 
 /// Which of the ladder's last rungs one recognition may climb, and the ladder's shape.
 ///
-/// The legacy calls climb all of them, as they always have. A `host.ocr.read` skips the fast
+/// The legacy call — `host.ocr.recognize` where it cannot wait — climbs all of them, as it always
+/// has. A read on the recognise thread skips the fast
 /// model for a language that model does not read, and a background read skips both rungs while
 /// an interactive one is waiting behind it — they are the rungs that cost the most on a read that
 /// will never resolve.
 struct Ladder<'a> {
     fast_ok: bool,
     preempt: Option<&'a AtomicBool>,
-    /// Climbed on the event loop — the legacy calls — rather than on `host.ocr.read`'s recognise
+    /// Climbed on the event loop — the legacy call — rather than on the read service's recognise
     /// thread. Only what the log says about a ladder given up depends on it.
     on_event_loop: bool,
     /// Which level reads first, what the neural recogniser does, whether the rest of the ladder
@@ -815,7 +816,7 @@ impl Rungs<'_, '_> {
 
     /// Whether this read makes a pass of the fast level only for the neural recogniser's counts
     /// (`ocr/shadow.rs`): on a Mac that does not check its fast level (`PaddleUse::Merge`), on
-    /// `host.ocr.read`'s recognise thread only — never on the event loop, which carries the keyboard
+    /// `host.ocr.recognize`'s recognise thread only — never on the event loop, which carries the keyboard
     /// tap — for a language that level reads, for a region it could be checked on (one line of ink,
     /// not too wide), and not while an interactive read waits behind this one. What an
     /// Apple-silicon Mac's check would read, measured before it has one.
@@ -899,7 +900,7 @@ impl Rungs<'_, '_> {
                     });
                     second
                 } else if exhausted && !ladder.on_event_loop {
-                    // Out of budget on `host.ocr.read`'s recognise thread: nothing waits on
+                    // Out of budget on `host.ocr.recognize`'s recognise thread: nothing waits on
                     // the event loop here, but every read queued behind this one does.
                     crate::logging::line(
                         "macos",
@@ -1143,7 +1144,7 @@ pub fn recognize_regions(
     })
 }
 
-// ── host.ocr.read's two threads ─────────────────────────────────────────────────────────────
+// ── host.ocr.recognize's two threads ───────────────────────────────────────────────────────
 
 /// The pixels the capture stage took for one read: one backing-resolution capture of the
 /// regions' bounding box, or one per region when the box would be wasteful or came back
@@ -1264,7 +1265,7 @@ pub fn shot_of(frame: &crate::backend::frame::Frame, _regions: &[(i32, i32, i32,
     }
 }
 
-/// The capture stage of `host.ocr.read`. The source is ignored here, as everywhere on this
+/// The capture stage of `host.ocr.recognize`. The source is ignored here, as everywhere on this
 /// platform.
 pub fn capture_for_read(regions: &[(i32, i32, i32, i32)], _src: CaptureSource) -> (Shot, usize) {
     crate::loop_guard::off_loop("a capture for a text read");
@@ -1405,7 +1406,7 @@ fn empty() -> OcrText {
 /// The first pass in a process costs what no later one does — the warm-up over six bars that this
 /// was until 2026-10 took 0.2–0.33 s on a Mac mini M1, 0.3–0.85 s on the CI's virtual Macs and
 /// 1.7–1.8 s on an Intel MacBook Air (2020); over a line of words it has not been timed on a Mac
-/// yet — and the legacy calls run synchronously on the pump thread, which is also the thread
+/// yet — and the legacy call, `host.ocr.recognize` where it cannot wait, runs synchronously on the pump thread, which is also the thread
 /// carrying speech, timers and the overlay's own polling. Paying it there means a frozen interface
 /// and a late announcement at exactly the moment a user first asked to read something. `docs/
 /// macos-port.md` names this as one of the three failures the port is shaped to avoid. Whether a
@@ -1451,7 +1452,7 @@ pub(crate) static VISION_WARM: cost::Latch = cost::Latch::new();
 
 /// The recognise thread's warm-up (`OcrWorker::warm_up`), once it has read the languages: one pass
 /// in `lang`, the language its reads are made in when they name none, so that the first
-/// `host.ocr.read` pays no first pass of any kind — made after the warm-up on a thread of its own
+/// `host.ocr.recognize` pays no first pass of any kind — made after the warm-up on a thread of its own
 /// has ended, not beside it. Its line then times a first pass on another thread of a warm
 /// process, and the first line a first pass in the process: whether a first pass is a cost per
 /// process or per thread, the question the logs of September 2026 left open. The wait is on the
@@ -1725,13 +1726,13 @@ fn note_cost(ms: f64, w: i32, h: i32, idle: cost::Before, beside: bool, answered
     }
 }
 
-/// A slow read — `SLOW_JOB` or more, the threshold `host.ocr.read`'s own line has — part by part:
+/// A slow read — `SLOW_JOB` or more, the threshold `host.ocr.recognize`'s own line has — part by part:
 /// who answered it, its capture, each Vision pass with its rung, its time, its words and whether
 /// another pass ran beside it, and its wait for the neural recogniser. At most one line per region
 /// every `SLOW_LOG_EVERY` on each thread, the limit
 /// that line has per module (this file knows no modules): a poll of three read-outs on a slow Mac
 /// is then three lines every ten seconds, not three a second, and two fields of one size each have
-/// their own. The time is from the start of this recognition: a `host.ocr.read`'s picture was
+/// their own. The time is from the start of this recognition: a `host.ocr.recognize`'s picture was
 /// taken before it (`Capture::Apart`), so there the threshold is the recognition's alone.
 fn note_slow(ms: f64, (x, y, w, h): (i32, i32, i32, i32), capture: Capture, passes: &[Pass], answered: Answered) {
     if ms < SLOW_JOB.as_secs_f64() * 1000.0 {
@@ -1850,7 +1851,7 @@ fn bigger_then_faster(
 }
 
 /// One pass's answer: the text (lines joined with "\n"), every word in reading order, and the
-/// lines themselves, which `host.ocr.read` groups into rows.
+/// lines themselves, which `host.ocr.recognize` groups into rows.
 type VisionRead = (String, Vec<OcrWord>, Vec<OcrLine>);
 
 /// A pass's answer made of its lines, as [`perform`] makes one: their texts joined with "\n", and

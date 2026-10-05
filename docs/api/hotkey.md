@@ -44,6 +44,8 @@ These are exactly the `check` reasons marked "raises" in its table. Nothing else
 
 The host records, logs and reports a registration by its [normalized](./keys.md#host-keys-normalize) spec, so the log names the chord it is on this platform: `Ctrl+Shift+Win+Alt+F6` appears as `Ctrl+Alt+Shift+Win+F6` on Windows, and `Cmd+Shift+F6` as `Shift+Cmd+F6` on a Mac. The dialogs use the same form on Windows. On a Mac they say the key in [`describe`](./keys.md#host-keys-describe)'s spoken words, `Shift+Command+F6`, because the spec's word for the Control key there, `Meta`, is not the key's name.
 
+**While its module is busy** — one of its handlers [waits](../module-runtime-and-lifecycle.md#a-handler-waits) for a read — a press waits behind that handler and runs once the module is free, in the order its events came. Up to 256 keys, hotkey presses and controller buttons wait; the next is dropped, with a `[keys]` line. The press runs on the registration it was made for, or, when the module registered the same combination again meanwhile, on the new one — unless the module has [scoped](./keys.md#host-keys-scope) its keys to a window other than the one in front at the press — and the log says so: `[com.example.game] Ctrl+Shift+F9, pressed while the module was busy, went to the module's current registration of it`. When the module no longer holds the combination, or another module holds it now, the press is dropped and said (`… pressed while the module was busy, was dropped: the hotkey went to another module meanwhile`); it never runs in another module. Another module's hotkeys are not held up: they run at once.
+
 ```luau
 -- Written once: Ctrl+Shift+F9 on Windows, Command+Shift+F9 on a Mac.
 local KEY = "Ctrl+Shift+F9"

@@ -1,6 +1,6 @@
 id = "com.platform.melodyne"
 name = "Melodyne overlay"
-version = "0.1.0"
+version = "0.1.1"
 license = "GPL-3.0-or-later"
 dependencies = ["com.platform.overlay"]
 # Windows only: the window is matched on its Win32 class (GNWindowDoc) and nothing else, and

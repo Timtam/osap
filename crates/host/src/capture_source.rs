@@ -338,18 +338,6 @@ pub(crate) fn prewarm_hook(lua: &Lua) -> mlua::Result<Option<Function>> {
     Ok(None)
 }
 
-/// Whether an OCR error in a VM with `src` answers with an `error` field instead of raising.
-///
-/// Only a missing PICTURE — duplication had none to give — and only for a module that chose
-/// `fallback = "none"`: there that is routine (every fullscreen toggle, every UAC prompt), and
-/// raising would put a module-error dialog in front of the game, which can itself cost the
-/// next read. A degenerate or oversized region is a mistake in the call, and a failed
-/// recognition is a failure; both still raise everywhere, as they always have.
-pub(crate) fn answers_instead_of_raising(src: CaptureSource, error: &str) -> bool {
-    matches!(src, CaptureSource::Duplication { or_standard: false })
-        && error.starts_with(backend::DUPLICATION_UNANSWERED)
-}
-
 /// The duplication part of the observation log line, or nothing when it did nothing. The
 /// time is every round trip to the capture thread, the unanswered ones included.
 pub(crate) fn duplication_clause((reads, us, unanswered): (u64, u64, u64)) -> String {
@@ -595,19 +583,10 @@ mod tests {
         assert_eq!(depth("orphan"), u32::MAX);
     }
 
+    /// The family stays one family: duplication's missing picture is a capture failure too, which
+    /// a text reading carries as `"failed"` with no language, whichever path read it.
     #[test]
-    fn only_a_missing_picture_under_fallback_none_answers_instead_of_raising() {
-        let missing = format!("{} — it is still opening", backend::DUPLICATION_UNANSWERED);
-        assert!(answers_instead_of_raising(DUP_ONLY, &missing));
-        assert!(!answers_instead_of_raising(DUP, &missing));
-        assert!(!answers_instead_of_raising(CaptureSource::Standard, &missing));
-        assert!(!answers_instead_of_raising(DUP_ONLY, "OCR failed: no language"));
-        // A region that could never be read is the caller's mistake and still raises, though
-        // its message is a capture failure too.
-        assert!(!answers_instead_of_raising(DUP_ONLY, backend::CAPTURE_FAILED));
-        let too_large = format!("{}: the region is larger than 40 million pixels", backend::CAPTURE_FAILED);
-        assert!(!answers_instead_of_raising(DUP_ONLY, &too_large));
-        // The family stays one family: the missing picture is still a capture failure.
+    fn a_missing_picture_is_a_capture_failure() {
         assert!(backend::DUPLICATION_UNANSWERED.starts_with(backend::CAPTURE_FAILED));
     }
 

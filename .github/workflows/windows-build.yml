@@ -256,6 +256,33 @@ jobs:
           if ($found) { exit 1 }
           Write-Host "nothing recognised text on the event loop"
 
+      # The guard (crates/host/src/vm_guard.rs, stops.rs): the capture probe's callbacks are
+      # short, and its reads wait in their timers' handlers, which counts on no clock — so a
+      # `[guard] [<module>] stopped` line is a bug, in the host or in the probe. A read that could
+      # not wait held the event loop instead (`could not wait here`, task.rs): the probe has none,
+      # and until step B5 makes this an error it is a warning. A reading the probe got "failed" is
+      # said: the runner may not have captured.
+      - name: No module was stopped, and every read waited
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $found = $false
+          foreach ($name in @('standard', 'duplication')) {
+            $log = Join-Path $env:RUNNER_TEMP "capture-probe-$name.log"
+            if (-not (Test-Path $log)) { Write-Host "::warning::no capture-probe log of the $name run to look at"; continue }
+            $stop = Select-String -Path $log -Pattern '\[guard\] \[[^\]]*\] stopped' | Select-Object -First 1
+            if ($stop) {
+              Write-Host "::error::the guard stopped a module ($name run): $($stop.Line)"
+              $found = $true
+            }
+            $held = Select-String -Path $log -Pattern 'could not wait here' | Select-Object -First 1
+            if ($held) { Write-Host "::warning::a text read could not wait and held the event loop ($name run): $($held.Line)" }
+            $failed = Select-String -Path $log -Pattern 'CAPTURE PROBE:.*answered a failed reading' | Select-Object -First 1
+            if ($failed) { Write-Host "::warning::the capture probe got a failed reading ($name run): $($failed.Line)" }
+          }
+          if ($found) { exit 1 }
+          Write-Host "no module was stopped"
+
       # The documentation ships inside the artifact and works offline from the folder, so a
       # tester with no internet still has it. `package.ps1` packages without it rather than
       # failing — a tester without docs still has a working application — but an artifact that

@@ -196,9 +196,9 @@ end
 -- there would keep the module busy all the time, and every key of the module would wait behind
 -- its own Tab's scan. So those run in a coroutine of the runtime's own, where a host wait cannot
 -- stop the handler: one coroutine for a whole pass over them — a scan for the next control, a
--- menu tick's questions — and each hook inline inside it. host.ocr.recognize finds itself "in a
--- coroutine the module made" there; a pixel, a snapshot, an image search or host.ocr.read, which
--- answers through a callback, is fine. A hook that yields there anyway is ended, with an error the
+-- menu tick's questions — and each hook inline inside it. host.ocr.recognize without a callback
+-- finds itself "in a coroutine the module made" there; with a callback, like a pixel, a snapshot
+-- or an image search, it is fine. A hook that yields there anyway is ended, with an error the
 -- caller's guard logs — a menu test's alone (see _menuAsk); a `when`'s ends the scan it was in.
 --
 -- The overlay's origin is resolved BEFORE a pass, outside it: a stored `identify` asked for a new
@@ -1119,10 +1119,10 @@ function Overlay:toScreen(x, y, opts)
   return sx, sy
 end
 
--- Corners as host.ocr.read takes them, from corners as host.ocr.recognize took them: each cut
--- toward zero, which is what that call's loose reading did, so a focus read covers exactly the
--- pixels it always covered — an unscaled overlay's fractional frame included. nil when nothing is
--- left: corners turned around, or under one across or down.
+-- Corners as host.ocr.recognize takes them — whole numbers, not empty — from corners as the
+-- overlay places them: each cut toward zero, as the older reading of a region cut them, so a focus
+-- read covers exactly the pixels it always covered — an unscaled overlay's fractional frame
+-- included. nil when nothing is left: corners turned around, or under one across or down.
 local function readCorners(r)
   local function cut(v) return v < 0 and math.ceil(v) or math.floor(v) end
   local x1, y1, x2, y2 = cut(r[1]), cut(r[2]), cut(r[3]), cut(r[4])
@@ -1132,7 +1132,7 @@ end
 
 -- Authored rectangle {x1, y1, x2, y2} on screen, likewise: what a `region` would read.
 --
--- `opts.whole = true` gives the corners host.ocr.read and host.screen.snapshotAsync take, which
+-- `opts.whole = true` gives the corners host.ocr.recognize and host.screen.snapshotAsync take, which
 -- are whole numbers and not empty: cut toward zero, the pixels the overlay's own focus read takes
 -- (readCorners), and nil with "empty on screen" when nothing is left. A scaled overlay places whole
 -- numbers already; an unscaled one with a fractional frame does not, and a read would refuse its
@@ -1990,15 +1990,15 @@ local function forLog(text)
   return shown
 end
 
--- One `host.ocr.read` key per overlay for what its announcements read — a control's value
+-- One `host.ocr.recognize` key per overlay for what its announcements read — a control's value
 -- region and its `ocrLabel` — so that a later announcement's read replaces one that has not
 -- started recognising yet. Numbered like the pass-through's keys (readUnnamedStop, below), and
 -- reserved with them: a module does not use keys that begin "com.platform.overlay ". The corners
 -- these reads take are cut by readCorners, beside O:toScreenRect.
 local focusReadKeys = 0
 
--- Text a reading says, as one phrase: its rows joined with a space. host.ocr.read joins rows with
--- a line break, and a read-out of two lines is still one value to say.
+-- Text a reading says, as one phrase: its rows joined with a space. host.ocr.recognize joins rows
+-- with a line break, and a read-out of two lines is still one value to say.
 local function oneLine(text)
   return (text:gsub("%s*[\r\n]+%s*", " "))
 end
@@ -2251,12 +2251,12 @@ local function speakControl(self, index, moveMouse, withHint, queued, andThen)
   end
   -- THE READ IS OFF THE EVENT LOOP, and the sentence waits for it.
   --
-  -- It was host.ocr.recognize, on the event loop, and on a Mac that loop also carries the
-  -- keyboard's event tap. An Intel MacBook Air (2020) spent 143 to 786 ms in each focus read of
-  -- sforzando, 1.5 s in the first, with every key, timer and hotkey of the application waiting
-  -- behind it, and a key reached the tap 854 ms late. Now the name and the value are read with
-  -- one host.ocr.read — one picture for both, so they agree — and the sentence is said when the
-  -- answer comes: as late as it was, but nothing waits for it. One sentence, as it always was,
+  -- It was a read on the event loop, and on a Mac that loop also carries the keyboard's event
+  -- tap. An Intel MacBook Air (2020) spent 143 to 786 ms in each focus read of sforzando, 1.5 s in
+  -- the first, with every key, timer and hotkey of the application waiting behind it, and a key
+  -- reached the tap 854 ms late. Now the name and the value are read with one
+  -- host.ocr.recognize with a callback — one picture for both, so they agree — and the sentence is
+  -- said when the answer comes: as late as it was, but nothing waits for it, not even the module. One sentence, as it always was,
   -- not the name now and the value later: two lines that fast Tabs can cross.
   --
   -- The answer is spoken only while it is still about what is in front of the user — the
@@ -2272,7 +2272,7 @@ local function speakControl(self, index, moveMouse, withHint, queued, andThen)
   -- when it comes, or dropped as no longer true.
   --
   -- What the read says, reading by reading: see valueWords. The language is the user's, as for
-  -- every host.ocr.read without `lang`; host.ocr.recognize without one used the platform's own
+  -- every read without `lang`; the read on the event loop without one used the platform's own
   -- default, which on Windows is the same language and on a Mac was Vision's (English).
   --
   -- The words the recogniser returned are logged per read, for the same reason as the gbutton
@@ -2284,7 +2284,7 @@ local function speakControl(self, index, moveMouse, withHint, queued, andThen)
   -- keystroke — a focus step or an activation — or arrival, never a timer tick, so one line per
   -- read is one line per key. The words counted are the ones the recogniser placed; words whose
   -- place the host estimated are counted apart (`approx`: on Windows the second recogniser's
-  -- answer, which is how a lone digit is read), as host.ocr.recognize's line told the two
+  -- answer, which is how a lone digit is read), as the read on the event loop told the two
   -- recognisers apart by "0 words". The language the read was made in closes the brackets.
   local labelAt = labelRegion and readCorners(labelRegion) or nil
   local valueAt = region and readCorners(region) or nil
@@ -2319,7 +2319,7 @@ local function speakControl(self, index, moveMouse, withHint, queued, andThen)
       self._focusReadKey = "com.platform.overlay focus " .. focusReadKeys
     end
     local t0 = host.now and host.now() or 0
-    local ok, err = pcall(host.ocr.read, entries, { key = self._focusReadKey }, function(_, byName)
+    local ok, err = pcall(host.ocr.recognize, entries, { key = self._focusReadKey }, function(_, byName)
       local ms = (host.now and host.now() or 0) - t0
       local lr, vr = byName.label, byName.value
       local name = c.label or ""
@@ -2559,7 +2559,7 @@ end
 -- How many rows of an unnamed stop's text are spoken. See readUnnamedStop.
 local UNNAMED_ROWS = 2
 
--- One `host.ocr.read` key per overlay, so a later step's read supersedes an earlier one that has
+-- One `host.ocr.recognize` key per overlay, so a later step's read supersedes an earlier one that has
 -- not been recognised yet. Numbered rather than made from the label, which two overlays of one
 -- module may share. Keys are the module's — this code runs in the VM of the module that owns
 -- the overlay, and a read's key supersedes that module's own reads with the same key — so each
@@ -2579,9 +2579,9 @@ local passThroughKeys = 0
 -- reads it by. So that rectangle is read, and its text is said after the screen reader's own
 -- announcement, or beside it.
 --
--- * Off the event loop (host.ocr.read): the Tab returns at once, and the screen reader starts
---   on the focus while the text is being recognised. The line is QUEUED (interrupt = false),
---   so it does not cut that announcement off. Whether it then waits for it is the speech
+-- * Off the event loop (host.ocr.recognize with a callback): the Tab returns at once, and the
+--   screen reader starts on the focus while the text is being recognised. The line is QUEUED
+--   (interrupt = false), so it does not cut that announcement off. Whether it then waits for it is the speech
 --   path's: a screen reader that takes the line queues it or not as it does; the Mac's own
 --   voice is a second voice beside VoiceOver, and can overlap it (overlay.md, per platform).
 -- * Cut to the plugin window's rectangle before it is read: an element can reach past the
@@ -2654,7 +2654,7 @@ local function readUnnamedStop(self, c, r, ctrl)
   end
   local seq, at, pinned, stay = c._seq, self.focus, ctrl.id, self._stay
   local t0 = host.now and host.now() or 0
-  local ok, err = pcall(host.ocr.read, { x1, y1, x2, y2 }, { key = self._passThroughKey }, function(reading)
+  local ok, err = pcall(host.ocr.recognize, { x1, y1, x2, y2 }, { key = self._passThroughKey }, function(reading)
     local ms = (host.now and host.now() or 0) - t0
     local function note(what)
       host.log.info(string.format("%s; read at %s in %d ms: %s", head, where, ms, what))

@@ -245,6 +245,11 @@ local function readRegion(line, what, rect, unexercised)
     line("     %s: OCR failed (%s)", what, tostring(res))
     return nil
   end
+  -- A capture or a recognition that failed is a reading that says so, not a raise.
+  if res.status == "failed" then
+    line("     %s: OCR failed (%s)", what, tostring(res.error))
+    return nil
+  end
   local words, texts = res.words or {}, {}
   if res.skipped == true then
     line(
@@ -570,6 +575,11 @@ function M.ocrBatchingSteps(line, win)
   -- machine where an ordinary Tab step was measured anywhere between 90 and 250 ms, and
   -- scheduling can only ever inflate a sample, never deflate it — so the floor is the honest
   -- estimator for "what does this cost when nothing is in the way".
+  --
+  -- Each read WAITS for its answer, here in the step's handler, so a time is from asking to the
+  -- answer: it includes the turn of the loop that hands the answer over, and three strips asked
+  -- one after another carry three such turns against the band's one. With the slow-reads switch
+  -- on, every answer is held 2 s more, and the comparison says nothing: run it with the switch off.
   local ROUNDS = 3
   local oneMs, manyMs = math.huge, math.huge
   local oneWords, manyWords, failed = 0, 0, 0
@@ -588,7 +598,7 @@ function M.ocrBatchingSteps(line, win)
       local t1 = host.now()
       local ok, res = pcall(function() return host.ocr.recognize({ region = strip }) end)
       roundMs = roundMs + (host.now() - t1)
-      if ok and res and res.words then
+      if ok and res and res.words and res.status ~= "failed" then
         roundWords = roundWords + #res.words
       else
         failed = failed + 1
@@ -606,8 +616,10 @@ function M.ocrBatchingSteps(line, win)
     -- the figure to compare against the cost of building it.
     local extra = floor((manyMs - oneMs) / 2)
     line(
-      "  ocr batching: one %dx%d region took %d ms and read %d word(s); the same band as three "
-        .. "strips took %d ms and read %d word(s); best of %d round(s)%s",
+      "  ocr batching: one %dx%d region took %d ms from asking to the answer and read %d word(s); "
+        .. "the same band as three strips, asked one after another, took %d ms and read %d word(s); "
+        .. "best of %d round(s)%s (each time includes the turn of the loop that hands the answer "
+        .. "over; with the slow-reads switch on it is 2 s more a read, and this comparison says nothing)",
       band[3] - band[1], band[4] - band[2], oneMs, oneWords,
       manyMs, manyWords, ROUNDS,
       failed > 0 and string.format(" (%d strip(s) failed or timed out)", failed) or ""

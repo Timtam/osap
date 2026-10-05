@@ -176,8 +176,9 @@ pub(crate) trait StopHost {
     /// stopped callback held it.
     fn drop_queued_input(&self) -> Dropped;
     /// The rest of disabling module `idx`, as the manager's checkbox does it: the arbiter's
-    /// re-election, its reads, snapshots, mailbox, handlers, key scope and menu flag.
-    fn after_disable(&self, idx: usize);
+    /// re-election, its reads, snapshots, mailbox, handlers, key scope and menu flag. The names of
+    /// the inputs that waited in its mailbox — its handler waited — and were dropped with it.
+    fn after_disable(&self, idx: usize) -> Vec<String>;
     /// One full collection of the VM with slot `serial`.
     fn collect_garbage(&self, serial: u64);
     /// A line of the log, in `category` (`guard`, `keys`).
@@ -285,7 +286,9 @@ fn ordered(mut on: Vec<Member>, trip: &Trip) -> Vec<Member> {
 
 /// The second step, at the end of the pump's turn: the rest of disabling each stopped module, a
 /// collection of the VM's garbage after a memory stop, then the dialog, the sentence and the
-/// manager's rows. A stop whose modules were all turned on again in between is only dropped.
+/// manager's rows. The inputs that waited in a stopped module's mailbox — it was waiting, and they
+/// queued behind it — are dropped with it, said in a line of their own and in the dialog. A stop
+/// whose modules were all turned on again in between is only dropped.
 pub(crate) fn settle<H: StopHost + ?Sized>(h: &H) {
     loop {
         let Some(ev) = h.stops().unsettled.borrow_mut().pop_front() else { break };
@@ -294,6 +297,7 @@ pub(crate) fn settle<H: StopHost + ?Sized>(h: &H) {
         if members.is_empty() {
             continue;
         }
+        let mut queued: Vec<String> = Vec::new();
         for m in &members {
             let waited = h.stops().deferred.borrow().contains(&m.idx);
             if waited {
@@ -302,12 +306,16 @@ pub(crate) fn settle<H: StopHost + ?Sized>(h: &H) {
                 }
                 h.stops().deferred.borrow_mut().retain(|i| *i != m.idx);
             }
-            h.after_disable(m.idx);
+            let names = h.after_disable(m.idx);
+            if !names.is_empty() {
+                h.log("keys", &queued_line(&m.id, &names));
+                queued.extend(names);
+            }
         }
         if let Cause::Memory { .. } = ev.trip.cause {
             h.collect_garbage(ev.trip.serial);
         }
-        h.dialog(format!("{}\u{1}stop\u{1}{}", ev.trip.vm.id, ev.seq), dialog_title(&ev), dialog_text(&ev));
+        h.dialog(format!("{}\u{1}stop\u{1}{}", ev.trip.vm.id, ev.seq), dialog_title(&ev), dialog_text(&ev, &queued));
         h.announce(&sentence(&ev));
         for m in &members {
             h.row_changed(m.idx, Some(row_note(&ev, m.idx)));
@@ -627,7 +635,8 @@ fn dropped_count(d: &Dropped) -> String {
 }
 
 /// The dialog's text: what the user and the module's author need, in the order they need it.
-pub(crate) fn dialog_text(ev: &StopEvent) -> String {
+/// `queued`: the inputs that waited in the stopped modules' mailboxes and were dropped with them.
+pub(crate) fn dialog_text(ev: &StopEvent, queued: &[String]) -> String {
     let t = &ev.trip;
     let mut s = format!("{}.\n\n", first_words(ev, Form::Full));
     match &t.cause {
@@ -682,6 +691,11 @@ pub(crate) fn dialog_text(ev: &StopEvent) -> String {
     }
     if !ev.dropped.is_empty() {
         s.push_str(&format!("Dropped: {}: {}.\n", dropped_count(&ev.dropped), ev.dropped.names.join(", ")));
+    }
+    if !queued.is_empty() {
+        let n = queued.len();
+        let keys = if n == 1 { "1 key that waited for it".to_string() } else { format!("{n} keys that waited for it") };
+        s.push_str(&format!("Dropped: {keys}: {}.\n", counted(queued).join(", ")));
     }
     s.push('\n');
     s.push_str(&closing(ev));
@@ -759,6 +773,12 @@ pub(crate) fn log_line(ev: &StopEvent) -> String {
         s.push_str(&format!("; frames: {}", t.frames.join(" | ")));
     }
     s
+}
+
+/// The `[keys]` line for the inputs that waited in stopped module `module`'s mailbox — it was
+/// waiting, and they queued behind it — and were dropped with the stop.
+pub(crate) fn queued_line(module: &str, names: &[String]) -> String {
+    format!("[{module}] {} key(s) that waited for it were dropped with the stop: {}", names.len(), counted(names).join(", "))
 }
 
 /// The `[keys]` line for the input a stop dropped.

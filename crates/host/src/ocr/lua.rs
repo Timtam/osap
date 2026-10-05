@@ -1,5 +1,5 @@
-//! The Luau side of `host.ocr.read`, `languages` and `resolveLanguage`: strict argument
-//! parsing, the pending callbacks, and delivery on the event loop.
+//! The Luau side of `host.ocr.recognize`, `pending`, `languages` and `resolveLanguage`: strict
+//! argument parsing, the reads waiting for their answers, and delivery on the event loop.
 //!
 //! **Only programming mistakes raise.** A wrong type, an unknown option, a malformed language
 //! tag, no region or more than 64, corners of too many pixels, a name used twice: those are
@@ -14,11 +14,12 @@
 //! callback that ran minutes later, over whatever window was in front then, would be worse than
 //! none.
 //!
-//! **Two kinds of waiter.** A read asked by `host.ocr.read` waits with its callback, which runs as
-//! a handler of its module, through its mailbox (`mailbox.rs`); one asked by `host.ocr.recognize`
-//! or `recognizeMany` in a handler that waits is that handler's wait (`task.rs`), which the
-//! delivery resumes with the reading — it is the busy handler itself, not an event for its
-//! mailbox. Both go through the same queue, the same limits and the same delivery, in one order.
+//! **Two kinds of waiter.** A read asked by `host.ocr.recognize` with a callback waits with its
+//! callback, which runs as a handler of its module, through its mailbox (`mailbox.rs`); one asked
+//! without a callback in a handler is that handler's wait (`task.rs`), which the delivery resumes
+//! with the reading — it is the busy handler itself, not an event for its mailbox. Both go through
+//! the same queue, the same limits and the same delivery, in one order, and both get the same
+//! values: one reading, or the list and the table by name.
 //!
 //! **An answer in a mailbox is still out.** A callback's answer that waits in its module's mailbox
 //! — behind a key pressed before it came — counts as waiting for `host.ocr.pending` until it runs,
@@ -79,8 +80,6 @@ pub(crate) trait ReadHost: 'static {
     fn report_error(&self, idx: usize, context: &str, message: &str);
     /// Which picture a read of `first` from `lua`'s module sees (`capture_source::read_source`).
     fn read_source(&self, lua: &Lua, first: (i32, i32, i32, i32)) -> CaptureSource;
-    /// The primary screen's size: what loosely read corners default to.
-    fn screen_size(&self) -> (i32, i32);
     /// Whether the "Slow every text read by 2 seconds, for testing" switch is on: the
     /// application's own setting for `Shared`, the test's own for a test's holder — never the
     /// process-wide one, which the tests beside it would see.
@@ -116,9 +115,6 @@ impl ReadHost for Shared {
     fn read_source(&self, lua: &Lua, first: (i32, i32, i32, i32)) -> CaptureSource {
         capture_source::read_source(lua, &*self.backend, first)
     }
-    fn screen_size(&self) -> (i32, i32) {
-        self.backend.screen_size()
-    }
     fn slow_reads(&self) -> bool {
         crate::appcfg::slow_reads()
     }
@@ -140,14 +136,14 @@ impl std::fmt::Debug for SnapArg {
     }
 }
 
-/// What a `host.ocr.read` call asked for, once its arguments passed.
+/// What a `host.ocr.recognize` call asked for, once its arguments passed.
 #[derive(Debug, PartialEq)]
 pub(crate) struct ReadArgs {
     /// Each region with its name, in the order given: its rectangle, or — a window region whose
     /// client area is empty at the call, or that would take the call past the pixel limit — why
     /// it has none, which its reading will carry.
     pub entries: Vec<(Option<String>, Result<Rect, String>)>,
-    /// A list was given (even of one): the callback gets `(list, byName)`.
+    /// A list was given (even of one): the reading comes as `(list, byName)`.
     pub list: bool,
     pub lang: LangReq,
     pub key: Option<String>,
@@ -156,7 +152,7 @@ pub(crate) struct ReadArgs {
 }
 
 fn bad(msg: impl std::fmt::Display) -> mlua::Error {
-    mlua::Error::external(format!("host.ocr.read: {msg}"))
+    mlua::Error::external(format!("host.ocr.recognize: {msg}"))
 }
 
 /// A region, read by the Region form's one strict reader (`region_lua.rs`, shared with the
@@ -302,7 +298,8 @@ pub(crate) fn lang_request(v: &Value, what: &str) -> mlua::Result<LangReq> {
     lang::validate(req).map_err(|e| mlua::Error::external(format!("{what}: {e}")))
 }
 
-/// Every argument of `host.ocr.read(what, opts?, cb)` but the callback, checked.
+/// Every argument of `host.ocr.recognize(what, opts?, cb?)` but the callback, checked: the same
+/// for both forms, the callback's and the one that waits.
 pub(crate) fn parse_read(what: &Value, opts: &Value) -> mlua::Result<ReadArgs> {
     let t = match what {
         Value::Table(t) => t,
@@ -339,7 +336,7 @@ pub(crate) fn parse_read(what: &Value, opts: &Value) -> mlua::Result<ReadArgs> {
             regions.len()
         )));
     }
-    let entries = resolve_all(regions, "host.ocr.read")?;
+    let entries = resolve_all(regions, "host.ocr.recognize")?;
     let mut seen = HashSet::new();
     for (name, _) in &entries {
         if let Some(n) = name {
@@ -360,14 +357,14 @@ pub(crate) fn parse_read(what: &Value, opts: &Value) -> mlua::Result<ReadArgs> {
                     _ => return Err(bad("options have only the fields `lang`, `key` and `snapshot`")),
                 };
                 match name.as_str() {
-                    "lang" => lang = lang_request(&v, "host.ocr.read")?,
+                    "lang" => lang = lang_request(&v, "host.ocr.recognize")?,
                     "key" => match v {
                         Value::String(s) if !s.to_str()?.is_empty() => key = Some(s.to_str()?.to_string()),
                         Value::String(_) => return Err(bad("`key` is empty")),
                         other => return Err(bad(format!("`key` must be a string, got {}", other.type_name()))),
                     },
                     // A Snapshot, not released: anything else raises, a Template handle included.
-                    "snapshot" => snapshot = crate::snapshot::from_value(&v, "host.ocr.read", "opts.snapshot")?.map(SnapArg),
+                    "snapshot" => snapshot = crate::snapshot::from_value(&v, "host.ocr.recognize", "opts.snapshot")?.map(SnapArg),
                     other => {
                         return Err(bad(format!(
                             "unknown option '{other}' — the options are `lang`, `key` and `snapshot`"
@@ -384,60 +381,6 @@ pub(crate) fn parse_read(what: &Value, opts: &Value) -> mlua::Result<ReadArgs> {
         }
     }
     Ok(ReadArgs { entries, list: is_list, lang, key, snapshot })
-}
-
-/// The arguments of `host.ocr.recognize(opts?)` or `host.ocr.recognizeMany(opts)` in a handler,
-/// as a read: `name` is the call, which says which of the two it is. What these calls always
-/// took, read as they always read it — loose corners through the one reader, the whole primary
-/// screen (`screen`) without a region, a window region resolved now, a `snapshot` raising, any
-/// other key ignored, `regions` ending at its first `nil` — and what `read` takes besides: `lang`
-/// as a tag or a list, and `key`. The limits of `read` hold: more than `MAX_REGIONS` regions, or
-/// corners of more than `MAX_CALL_PIXELS` together, raise. Only mistakes raise.
-pub(crate) fn parse_wait(name: &str, opts: &Value, screen: (i32, i32)) -> mlua::Result<ReadArgs> {
-    let many = name.ends_with("Many");
-    let raise = |msg: String| mlua::Error::external(format!("{name}: {msg}"));
-    let t = match opts {
-        Value::Table(t) => Some(t),
-        Value::Nil if !many => None,
-        other => {
-            return Err(raise(format!(
-                "the options are a table{}, got {}",
-                if many { " with `regions`" } else { " or nil" },
-                crate::json::luau_type(other)
-            )))
-        }
-    };
-    if let Some(t) = t {
-        crate::refuse_snapshot(t, name)?;
-    }
-    let get = |k: &str| -> mlua::Result<Value> { t.map_or(Ok(Value::Nil), |t| t.get::<Value>(k)) };
-    let loose = |v: &Value, what: &str| region_lua::read_loose(v, what, screen).map_err(raise);
-    let mut regions = Vec::new();
-    if many {
-        let list = match get("regions")? {
-            Value::Table(l) => l,
-            other => {
-                return Err(raise(format!("opts.regions must be a list of regions, got {}", crate::json::luau_type(&other))))
-            }
-        };
-        for (i, r) in list.sequence_values::<Value>().enumerate() {
-            regions.push((None, loose(&r?, &format!("opts.regions[{}]", i + 1))?));
-        }
-    } else {
-        regions.push((None, loose(&get("region")?, "opts.region")?));
-    }
-    if regions.len() > MAX_REGIONS {
-        return Err(raise(format!("{} regions in one call; at most {MAX_REGIONS}", regions.len())));
-    }
-    let entries = resolve_all(regions, name)?;
-    let lang = lang_request(&get("lang")?, name)?;
-    let key = match get("key")? {
-        Value::Nil => None,
-        Value::String(s) if !s.to_str()?.is_empty() => Some(s.to_str()?.to_string()),
-        Value::String(_) => return Err(raise("`key` is empty".to_string())),
-        other => return Err(raise(format!("`key` must be a string, got {}", crate::json::luau_type(&other)))),
-    };
-    Ok(ReadArgs { entries, list: many, lang, key, snapshot: None })
 }
 
 /// The regions of a read of a snapshot, cut to the part of it the recogniser can read
@@ -492,7 +435,8 @@ fn seen_of(picture: Option<Picture>, unresolved: &[Option<String>], readings: &[
         .collect()
 }
 
-/// One reading as the table a callback receives; `time` and `inputEpoch` from `seen`.
+/// One reading as the table a callback receives, and a wait returns; `time` and `inputEpoch` from
+/// `seen`; `skipped`, whether no recogniser was asked: `status == "blank"`.
 pub(crate) fn reading_table(
     lua: &Lua,
     r: &Reading,
@@ -521,6 +465,7 @@ pub(crate) fn reading_table(
     t.set("w", r.rect.w)?;
     t.set("h", r.rect.h)?;
     t.set("status", r.status.as_str())?;
+    t.set("skipped", r.status == Status::Blank)?;
     t.set("newer", newer)?;
     t.set("text", r.text.as_str())?;
     let lines = lua.create_table_with_capacity(r.rows.len(), 0)?;
@@ -555,8 +500,8 @@ pub(crate) fn reading_table(
     Ok(t)
 }
 
-/// What a callback is called with: one reading for a single region or entry, and for a list
-/// `(list, byName)` — `list` a plain array in the order asked, `byName` the named readings.
+/// What a callback is called with, and a wait returns: one reading for a single region or entry,
+/// and for a list `(list, byName)` — `list` a plain array in the order asked, `byName` the named readings.
 /// Two tables rather than one array with names beside the indices, so the list stays plain data
 /// that `host.json.encode` or an export passes on unchanged.
 pub(crate) fn callback_args(
@@ -584,37 +529,25 @@ pub(crate) fn callback_args(
     }
 }
 
-/// What a handler's wait returns: for `recognize` the one reading, for `recognizeMany` a plain
-/// list in the order of the regions — the reading `read` would hand a callback, with no names and
-/// no `byName` — and on each `skipped`, which is `status == "blank"`, the field these two calls
-/// always had.
-pub(crate) fn wait_value(
+/// What the blocking `recognize` returns where it could not wait (`lib.rs`, `legacy_read`): the
+/// same values a read hands its callback — one reading, or the list and the table by name — for
+/// the `readings` of `names`' regions, a window region that had no rectangle answered with why
+/// (`unresolved`), the screen read as `picture` says: when its capture began, and the input epoch.
+pub(crate) fn blocking_values(
     lua: &Lua,
-    readings: &[Reading],
-    many: bool,
-    newer: bool,
-    seen: &[Option<Seen>],
-) -> mlua::Result<Value> {
-    let one = |i: usize, r: &Reading| -> mlua::Result<Table> {
-        let t = reading_table(lua, r, None, newer, seen.get(i).copied().flatten())?;
-        t.set("skipped", r.status == Status::Blank)?;
-        Ok(t)
-    };
-    if many {
-        let list = lua.create_table_with_capacity(readings.len(), 0)?;
-        for (i, r) in readings.iter().enumerate() {
-            list.raw_push(one(i, r)?)?;
-        }
-        return Ok(Value::Table(list));
-    }
-    match readings.first() {
-        Some(r) => Ok(Value::Table(one(0, r)?)),
-        None => Err(mlua::Error::external("a read of one region was answered with none")),
-    }
+    readings: Vec<Reading>,
+    names: &[Option<String>],
+    unresolved: &[Option<String>],
+    list: bool,
+    picture: Picture,
+) -> mlua::Result<mlua::MultiValue> {
+    let readings = with_unresolved(readings, unresolved);
+    let seen = seen_of(Some(picture), unresolved, &readings);
+    callback_args(lua, &readings, names, list, false, &seen)
 }
 
-/// Who waits for a read: `host.ocr.read`'s callback, or a handler stopped in `recognize` (`list`
-/// false) or `recognizeMany` (true), resumed with [`wait_value`].
+/// Who waits for a read: the callback of `host.ocr.recognize`, or a handler stopped in it, resumed
+/// with [`callback_args`]'s values (`list`: a list was asked for).
 pub(crate) enum Waiter {
     Callback(RegistryKey),
     Handler { id: TaskId, list: bool },
@@ -649,7 +582,7 @@ pub(crate) struct PendingOcr {
     key: Option<String>,
 }
 
-/// Everything `host.ocr.read` keeps on the event loop.
+/// Everything `host.ocr.recognize` keeps on the event loop.
 #[derive(Default)]
 pub(crate) struct OcrState {
     pending: RefCell<HashMap<TicketId, PendingOcr>>,
@@ -845,19 +778,6 @@ fn with_unresolved(mut readings: Vec<Reading>, unresolved: &[Option<String>]) ->
     readings
 }
 
-/// What the `lang` of `recognize` / `recognizeMany` becomes, given the published list (`None`
-/// while it is not known yet): `Err` — a malformed tag, raised; `Ok(Ok(tag))` — the tag to hand
-/// the engine, which is the tag as written while the list is not known, as these two calls
-/// always did; `Ok(Err(why))` — nothing here reads it.
-pub(crate) fn legacy_lang(
-    tag: &str,
-    langs: Option<&lang::Languages>,
-) -> Result<Result<String, String>, String> {
-    lang::parse(tag)?;
-    let Some(langs) = langs else { return Ok(Ok(tag.to_string())) };
-    Ok(lang::resolve(&LangReq::Tags(vec![tag.to_string()]), langs))
-}
-
 /// The VM a binding runs in, as `register_vm` tagged it — or, for a state it never tagged, the
 /// binding's own index at that index's current generation (the image search's rule). Shared
 /// with `snapshotAsync`.
@@ -868,7 +788,8 @@ pub(crate) fn owner_of(lua: &Lua, gens: &HashMap<usize, u64>, scope: usize) -> O
     }
 }
 
-/// `host.ocr.read(what, opts?, cb)`, called from the VM `lua` under the identity `scope`.
+/// `host.ocr.recognize(what, opts?, cb)`, the callback form, called from the VM `lua` under the
+/// identity `scope`: the shim's `submit` (`task.rs`).
 pub(crate) fn read<H: ReadHost>(h: &H, lua: &Lua, scope: usize, what: Value, opts: Value, cb: Value) -> mlua::Result<()> {
     // `read(what, cb)`: the options are optional, the callback is not.
     let (opts, cb) = match (opts, cb) {
@@ -886,7 +807,7 @@ pub(crate) fn read<H: ReadHost>(h: &H, lua: &Lua, scope: usize, what: Value, opt
 }
 
 /// Queues a read whose arguments passed, for `waiter`, at `prio`, and returns its ticket. Shared
-/// by `read` and by a handler's wait (`task.rs`). What is decided without the threads — a read with
+/// by the callback form (`read`) and by a handler's wait (`task.rs`). What is decided without the threads — a read with
 /// nothing to photograph, one refused, those it made stale or evicted — is answered on the next
 /// tick, never from inside the call.
 pub(crate) fn submit<H: ReadHost>(
@@ -928,8 +849,8 @@ pub(crate) fn submit<H: ReadHost>(
         },
     );
     if nothing_to_read {
-        // Every region is a window region with no rectangle this time (or there is none, a
-        // `recognizeMany` of an empty list). Answered on the next tick like any read, but without
+        // Every region is a window region with no rectangle this time. Answered on the next tick
+        // like any read, but without
         // the queue: no ticket against the module's limit or the application's, no picture, no
         // language to resolve, no capture source chosen — the cells calls answer the same case
         // without a capture too. With a key it is still the newest read: the module's waiting
@@ -1090,14 +1011,14 @@ pub(crate) fn fire_at<H: MailHost>(h: &H, now: Instant) -> Delivered {
                 let readings = with_unresolved(readings, &p.unresolved);
                 let seen = seen_of(picture, &p.unresolved, &readings);
                 let newer = delivered_newer(&st.key_seq.borrow(), p.owner, p.key.as_deref(), p.ticket, &readings);
-                match wait_value(&p.lua, &readings, list, newer, &seen) {
-                    Ok(v) => {
-                        if crate::task::resume_wait(h, id, p.ticket, v) {
+                match callback_args(&p.lua, &readings, &p.names, list, newer, &seen) {
+                    Ok(values) => {
+                        if crate::task::resume_wait(h, id, p.ticket, values) {
                             out.tasks += 1;
                         }
                     }
                     Err(e) => {
-                        h.report_error(p.owner.idx, "ocr.recognize", &e.to_string());
+                        handover_failed(h, &p.lua, p.owner.idx, &e);
                         crate::task::end_waiting(h, id);
                     }
                 }
@@ -1161,11 +1082,20 @@ pub(crate) fn open_read<H: ReadHost>(h: &H, r: ReadAnswer) -> Opened {
     let _ = p.lua.remove_registry_value(cb);
     let run = f.and_then(|f| Ok((f, callback_args(&p.lua, &readings, &p.names, p.list, newer, &seen)?)));
     match run {
-        Ok((f, args)) => Opened::Run { f, args, ctx: Ctx::new("ocr.read", p.scope) },
+        Ok((f, args)) => Opened::Run { f, args, ctx: Ctx::new("ocr.recognize", p.scope) },
         Err(e) => {
-            h.report_error(p.scope, "ocr.read", &e.to_string());
+            handover_failed(h, &p.lua, p.scope, &e);
             Opened::Gone
         }
+    }
+}
+
+/// A reading that could not be built in its module's VM `lua`, for a waiting handler or a callback:
+/// a VM that ran out of memory doing it is stopped, and the stop reports itself (`stops.rs`), as
+/// any handler's memory error is; anything else is reported as the module's error, under `report`.
+pub(crate) fn handover_failed<H: ReadHost>(h: &H, lua: &Lua, report: usize, e: &mlua::Error) {
+    if !crate::vm_guard::note_failure(lua, crate::vm_guard::EntryKind::Handler, "ocr.recognize", e) {
+        h.report_error(report, "ocr.recognize", &e.to_string());
     }
 }
 
@@ -1292,7 +1222,7 @@ pub(crate) fn withdraw<H: ReadHost>(h: &H, ticket: TicketId) {
 }
 
 /// `host.ocr.pending(key)`: whether a read of the calling module's VM with `key` waits for its
-/// answer — asked with `read`, or a handler stopped in `recognize` — or its answer waits in the
+/// answer — asked with a callback, or a handler stopped in `recognize` — or its answer waits in the
 /// module's mailbox, or is held by the slow-reads switch. False in its own callback and in the
 /// handler it resumes (the read is answered by then), after a disable (its reads are dropped), and
 /// after the hang answer ended it. A key that is not a non-empty string raises.
@@ -1312,11 +1242,6 @@ pub(crate) fn pending<H: ReadHost>(h: &H, lua: &Lua, scope: usize, key: Value) -
 }
 
 impl Shared {
-    /// `host.ocr.read(what, opts?, cb)`, called from the VM `lua` under the identity `scope`.
-    pub(crate) fn ocr_read(&self, lua: &Lua, scope: usize, what: Value, opts: Value, cb: Value) -> mlua::Result<()> {
-        read(self, lua, scope, what, opts, cb)
-    }
-
     /// Delivers what the threads finished and what was decided without them ([`fire`]).
     pub(crate) fn fire_ocr_results(&self) -> Delivered {
         fire(self)
@@ -1396,22 +1321,30 @@ impl Shared {
         }
     }
 
-    /// The `lang` of `recognize` / `recognizeMany`: the platform's tag it resolves to, or the
-    /// `error` a result carries when nothing here reads it. A malformed tag raises. When the
-    /// list is not known yet, the tag goes to the engine as written, which is what these two
-    /// calls always did.
-    pub(crate) fn ocr_legacy_lang(&self, tag: &str, binding: &str) -> mlua::Result<Result<String, String>> {
-        // Malformed raises before the list is waited for, as it did.
-        lang::parse(tag).map_err(|e| mlua::Error::external(format!("{binding}: {e}")))?;
+    /// The language the blocking `recognize` hands the engine for `req`: what it resolves to in the
+    /// published list, as a read's does — `Ok(None)`, the engine's own default, only while the list
+    /// is not known yet and no tag was asked for, and the first tag as written while it is not known
+    /// and one was — or `Err` with why nothing here reads it, which every region is answered
+    /// `"failed"` with, said in the log once per request.
+    pub(crate) fn ocr_legacy_lang(&self, req: &LangReq) -> Result<Option<String>, String> {
         let langs = self.ocr_langs();
-        let resolved = legacy_lang(tag, langs.as_ref()).map_err(|e| mlua::Error::external(format!("{binding}: {e}")))?;
+        let resolved = legacy_lang(req, langs.as_ref());
         if let Err(why) = &resolved {
             self.ocr.reread_languages();
-            if self.ocr_state.once(format!("legacy-lang\u{1}{tag}")) {
-                logging::line("ocr", &format!("{binding}: {why}"));
+            if self.ocr_state.once(format!("legacy-lang\u{1}{req:?}")) {
+                logging::line("ocr", &format!("host.ocr.recognize: {why}"));
             }
         }
-        Ok(resolved)
+        resolved
+    }
+}
+
+/// [`Shared::ocr_legacy_lang`]'s rule, given the published list (`None` while it is not known).
+pub(crate) fn legacy_lang(req: &LangReq, langs: Option<&lang::Languages>) -> Result<Option<String>, String> {
+    match (langs, req) {
+        (Some(langs), _) => lang::resolve(req, langs).map(Some),
+        (None, LangReq::Default) => Ok(None),
+        (None, LangReq::Tags(tags)) => Ok(tags.first().cloned()),
     }
 }
 
@@ -1581,9 +1514,9 @@ mod tests {
         assert!(a.snapshot.is_some() && a.key.as_deref() == Some("menu"));
         assert!(parse(&lua, "return { 0, 0, 10, 10 }", "return nil").unwrap().snapshot.is_none());
         fails(&lua, "return { 0, 0, 1, 1 }", "return { snap = s }", "unknown option 'snap' — the options are `lang`, `key` and `snapshot`");
-        fails(&lua, "return { 0, 0, 1, 1 }", "return { snapshot = 5 }", "host.ocr.read: opts.snapshot must be a Snapshot, got 5");
+        fails(&lua, "return { 0, 0, 1, 1 }", "return { snapshot = 5 }", "host.ocr.recognize: opts.snapshot must be a Snapshot, got 5");
         lua.load("s:release()").exec().unwrap();
-        fails(&lua, "return { 0, 0, 1, 1 }", "return { snapshot = s }", "host.ocr.read: opts.snapshot: the snapshot was released");
+        fails(&lua, "return { 0, 0, 1, 1 }", "return { snapshot = s }", "host.ocr.recognize: opts.snapshot: the snapshot was released");
     }
 
     /// On a snapshot each region reads the part the snapshot holds; one it holds nothing of fails
@@ -1679,21 +1612,24 @@ mod tests {
         assert_eq!(seqs.len(), 1, "a read without a key is not recorded");
     }
 
-    /// `recognize` / `recognizeMany`: a malformed tag raises; while the list is not known the tag
-    /// goes to the engine as written; then it is resolved to the engine's spelling, or answered
-    /// as unavailable.
+    /// The blocking `recognize`'s language: resolved in the published list as a read's is, or
+    /// answered as unavailable; while the list is not known, the first tag as written, and the
+    /// engine's own default for none.
     #[test]
-    fn the_legacy_calls_lang_goes_through_the_resolver() {
+    fn the_blocking_calls_lang_goes_through_the_resolver() {
         let langs = lang::Languages {
             available: vec!["en-US".into(), "de-DE".into()],
             fast: vec![],
-            preferred: vec![],
+            preferred: vec!["de-DE".into()],
         };
-        assert!(legacy_lang("deutsch", Some(&langs)).is_err());
-        assert!(legacy_lang("deutsch", None).is_err(), "raised whether or not the list is known");
-        assert_eq!(legacy_lang("de", None), Ok(Ok("de".to_string())));
-        assert_eq!(legacy_lang("de", Some(&langs)), Ok(Ok("de-DE".to_string())));
-        let why = legacy_lang("ja", Some(&langs)).unwrap().unwrap_err();
+        let tags = |t: &[&str]| LangReq::Tags(t.iter().map(|s| s.to_string()).collect());
+        assert_eq!(legacy_lang(&tags(&["de"]), None), Ok(Some("de".to_string())));
+        assert_eq!(legacy_lang(&tags(&["ja", "de"]), None), Ok(Some("ja".to_string())), "the first, as written");
+        assert_eq!(legacy_lang(&LangReq::Default, None), Ok(None), "the engine's own default");
+        assert_eq!(legacy_lang(&tags(&["de"]), Some(&langs)), Ok(Some("de-DE".to_string())));
+        assert_eq!(legacy_lang(&tags(&["ja", "en"]), Some(&langs)), Ok(Some("en-US".to_string())), "the first that is there");
+        assert_eq!(legacy_lang(&LangReq::Default, Some(&langs)), Ok(Some("de-DE".to_string())), "the user's language");
+        let why = legacy_lang(&tags(&["ja"]), Some(&langs)).unwrap_err();
         assert!(why.starts_with("language: ja is not available here"), "{why}");
     }
 
@@ -1744,7 +1680,7 @@ mod tests {
         let ok: bool = lua
             .load(
                 r#"
-                return r.name == "value" and r.status == "text" and r.text == "7" and r.newer == true
+                return r.name == "value" and r.status == "text" and r.skipped == false and r.text == "7" and r.newer == true
                   and r.x == 10 and r.w == 100 and r.lang == "en-US" and r.error == nil
                   and #r.words == 1 and r.words[1].approx == true and r.words[1].x == 12
                   and #r.lines == 1 and r.lines[1].text == "7" and #r.lines[1].words == 1
@@ -1758,7 +1694,7 @@ mod tests {
         let t = reading_table(&lua, &failed, None, false, None).unwrap();
         lua.globals().set("f", t).unwrap();
         let ok: bool = lua
-            .load(r#"return f.name == nil and f.status == "failed" and f.text == "" and #f.words == 0 and f.error == "screen capture failed" and f.approx == nil and f.time == nil and f.inputEpoch == nil"#)
+            .load(r#"return f.name == nil and f.status == "failed" and f.skipped == false and f.text == "" and #f.words == 0 and f.error == "screen capture failed" and f.approx == nil and f.time == nil and f.inputEpoch == nil"#)
             .eval()
             .unwrap();
         assert!(ok);
@@ -1792,80 +1728,26 @@ mod tests {
         assert!(seen_of(None, &unresolved, &readings).iter().all(Option::is_none), "refused: no picture");
     }
 
-    /// A task's wait returns the reading `read` would hand a callback, with `skipped`: one for
-    /// `recognize`, and for `recognizeMany` a plain list in the order of the regions.
+    /// Every reading carries `skipped`, which is `status == "blank"` — the callback's and the
+    /// wait's alike, since both get [`callback_args`]'s values.
     #[test]
-    fn a_tasks_wait_returns_the_reading_with_skipped() {
+    fn every_reading_says_whether_it_was_skipped() {
         let lua = Lua::new();
         let readings = vec![
             Reading::outcome(Rect::new(0, 0, 10, 10), Status::Blank, None),
             Reading::outcome(Rect::new(10, 0, 10, 10), Status::None, None),
         ];
-        let one = wait_value(&lua, &readings[..1], false, false, &[]).unwrap();
-        let many = wait_value(&lua, &readings, true, true, &[]).unwrap();
-        lua.globals().set("one", one).unwrap();
-        lua.globals().set("many", many).unwrap();
+        let one = callback_args(&lua, &readings[..1], &[None], false, false, &[]).unwrap();
+        let many = callback_args(&lua, &readings, &[None, None], true, true, &[]).unwrap();
+        lua.globals().set("one", one.into_iter().next().unwrap()).unwrap();
+        lua.globals().set("many", many.into_iter().next().unwrap()).unwrap();
         assert!(lua
             .load(
                 r#"return one.status == "blank" and one.skipped == true and one.newer == false and one.name == nil
                   and #many == 2 and many[1].skipped == true and many[2].skipped == false and many[2].x == 10
-                  and many[2].newer == true and many.byName == nil"#
+                  and many[2].newer == true"#
             )
             .eval::<bool>()
             .unwrap());
-        assert!(wait_value(&lua, &[], false, false, &[]).is_err(), "recognize has one region");
-        let empty = wait_value(&lua, &[], true, false, &[]).unwrap();
-        assert!(matches!(empty, Value::Table(t) if t.raw_len() == 0), "recognizeMany of no regions: an empty list");
-    }
-
-    /// `recognize` and `recognizeMany` in a task read their options as these calls always did,
-    /// and take `read`'s `lang` list and `key` besides; their mistakes raise, under their names.
-    #[test]
-    fn a_waits_options_are_read_as_the_calls_always_read_them() {
-        let lua = Lua::new();
-        let v = |src: &str| -> Value { lua.load(src).eval().unwrap() };
-        let screen = (1920, 1080);
-        let a = parse_wait("host.ocr.recognize", &v("return nil"), screen).unwrap();
-        assert_eq!(a.entries, vec![(None, Ok(Rect::new(0, 0, 1920, 1080)))], "no region: the whole primary screen");
-        assert!(!a.list && a.key.is_none() && a.lang == LangReq::Default);
-        let a = parse_wait(
-            "host.ocr.recognize",
-            &v("return { region = { x1 = 10.9, y1 = 20 }, colour = 3, key = 'k', lang = { 'de', 'en' } }"),
-            screen,
-        )
-        .unwrap();
-        assert_eq!(a.entries[0].1, Ok(Rect::new(10, 20, 1910, 1060)), "loose corners, unknown keys ignored");
-        assert_eq!((a.key.as_deref(), a.lang), (Some("k"), LangReq::Tags(vec!["de".into(), "en".into()])));
-        let a = parse_wait(
-            "host.ocr.recognizeMany",
-            &v("return { regions = { { 0, 0, 10, 10 }, { window = { client = { x = 0, y = 0, w = 0, h = 0 } }, fraction = { 0, 0, 1, 1 } }, nil, { 5, 5, 6, 6 } } }"),
-            screen,
-        )
-        .unwrap();
-        assert!(a.list);
-        assert_eq!(a.entries.len(), 2, "the list ends at its first nil");
-        assert_eq!(a.entries[1].1, Err("the window's client area is empty (0x0)".to_string()));
-        let fails = |name: &str, src: &str, needle: &str| {
-            let e = parse_wait(name, &v(src), screen).expect_err(src).to_string();
-            assert!(e.contains(needle), "{src}: {e}");
-        };
-        fails("host.ocr.recognize", "return { snapshot = 1 }", "host.ocr.recognize: takes no snapshot; host.ocr.read does");
-        fails("host.ocr.recognize", "return { region = { x = 1 } }", "host.ocr.recognize: opts.region is neither");
-        fails("host.ocr.recognize", "return { lang = 'english' }", "host.ocr.recognize: ");
-        fails("host.ocr.recognize", "return { key = '' }", "host.ocr.recognize: `key` is empty");
-        fails("host.ocr.recognize", "return { key = 5 }", "host.ocr.recognize: `key` must be a string, got number");
-        fails("host.ocr.recognize", "return 'here'", "host.ocr.recognize: the options are a table or nil, got string");
-        fails("host.ocr.recognizeMany", "return nil", "host.ocr.recognizeMany: the options are a table with `regions`");
-        fails("host.ocr.recognizeMany", "return {}", "host.ocr.recognizeMany: opts.regions must be a list of regions, got nil");
-        fails(
-            "host.ocr.recognizeMany",
-            "local t = {} for i = 1, 65 do t[i] = { 0, 0, 1, 1 } end return { regions = t }",
-            "host.ocr.recognizeMany: 65 regions in one call; at most 64",
-        );
-        fails(
-            "host.ocr.recognizeMany",
-            "return { regions = { { 0, 0, 8000, 4000 }, { 0, 0, 8000, 4000 } } }",
-            "host.ocr.recognizeMany: 64000000 pixels in one call",
-        );
     }
 }

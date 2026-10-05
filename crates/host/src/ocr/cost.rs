@@ -45,7 +45,7 @@ pub enum Stage {
     /// The content crop again under request revision 2, after a first pass that read nothing,
     /// instead of the whole region: `ocr-bench`'s `rev3>rev2`.
     TightAgain,
-    /// The fast model over the content crop once the read's answer is picked, on `host.ocr.read`'s
+    /// The fast model over the content crop once the read's answer is picked, on `host.ocr.recognize`'s
     /// recognise thread of a Mac that does not check its fast level, for the neural recogniser's
     /// counts (`ocr/shadow.rs`): its reading is compared and never answers.
     FastCompared,
@@ -187,13 +187,15 @@ impl Answered {
 /// Where the picture of a slow read came from, for its line.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Capture {
-    /// Taken for this read, on this thread, in this many milliseconds: `host.ocr.recognize`.
+    /// Taken for this read, on this thread, in this many milliseconds: `host.ocr.recognize` of
+    /// one region where it cannot wait.
     Took(f64),
     /// One capture for all the regions of the call, taken before this region's clock started:
-    /// `host.ocr.recognizeMany`.
+    /// `host.ocr.recognize` of a list where it cannot wait.
     Shared,
     /// Taken apart from this thread before the recognition began — on the capture thread, or the
-    /// pixels of a snapshot the module holds: `host.ocr.read`, whose `[ocr]` line gives the
+    /// pixels of a snapshot the module holds: `host.ocr.recognize` with a callback or waiting in a
+    /// handler, whose `[ocr]` line gives the
     /// capture's time when the whole read was slow. Its slow-read threshold is then the
     /// recognition's alone.
     Apart,

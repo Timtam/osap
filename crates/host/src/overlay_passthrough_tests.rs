@@ -6,7 +6,7 @@
 //! screen reader announced a role and little else. The maintainer's decisions of that day, which
 //! these scenarios hold the runtime to: `host.element.focusStep` says where the element it
 //! landed on is (`bounds`); a stop whose name has no visible character is read in that rectangle
-//! with `host.ocr.read`, one key per overlay; the first two rows are spoken queued, not cutting
+//! with `host.ocr.recognize`, one key per overlay; the first two rows are spoken queued, not cutting
 //! off the screen reader's own announcement (`interrupt = false`), and only while the answer is
 //! still about the stop in front of the user — not superseded, the overlay active and not out of
 //! the front since, the pass-through focused and inside the plug-in, no later key on it; every
@@ -101,7 +101,7 @@ fn run_mac(scenario: &str) {
 // ---------------------------------------------------------------------------------------------
 
 /// The case the feature is for: Tab lands on a stop with no name, its rectangle is read with one
-/// `host.ocr.read`, nothing is said until the answer comes, and then its text is said QUEUED —
+/// `host.ocr.recognize`, nothing is said until the answer comes, and then its text is said QUEUED —
 /// behind the screen reader's announcement of the focus, not over it — with one line saying so.
 #[test]
 fn an_unnamed_stop_is_read_in_its_rectangle_and_its_text_is_queued() {
@@ -514,13 +514,13 @@ fn a_read_that_raises_is_logged_and_the_step_stands() {
     run(r#"
         local S = T.S
         local o = T.passThrough({ { name = "", bounds = T.UNNAMED }, { name = "SHOP" } })
-        S.readRaises = "host.ocr.read: 17 reads waiting"
+        S.readRaises = "host.ocr.recognize: 17 reads waiting"
         local said = #S.speech
         T.tab()
         assert(o.focus == 2 and o.controls[2]._net == 1, "the step stands")
         assert(#S.speech == said, T.said(said))
         assert(T.count("stop 1 of 2 (type 50000) has no name; its rectangle 300,200 120x24 could not be read: "
-          .. "host.ocr.read: 17 reads waiting") == 1, T.dump())
+          .. "host.ocr.recognize: 17 reads waiting") == 1, T.dump())
     "#);
 }
 

@@ -1,4 +1,4 @@
-//! The two threads behind `host.ocr.read`: one that photographs, one that recognises.
+//! The two threads behind `host.ocr.recognize`: one that photographs, one that recognises.
 //!
 //! **The picture is taken at the call.** A read is handed to the capture thread the moment a
 //! module asks, and that thread does nothing but capture, so a picture is never queued behind a
@@ -212,7 +212,7 @@ fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// `host.ocr.read`'s two threads, as the event loop holds them — and the capture thread's
+/// `host.ocr.recognize`'s two threads, as the event loop holds them — and the capture thread's
 /// snapshot lane.
 pub struct Service<S: Send + 'static> {
     inner: Arc<Inner<S>>,
@@ -789,7 +789,7 @@ fn recognise_loop<S: Send + 'static>(inner: Arc<Inner<S>>, worker: OcrWorker<S>,
     // the list missing because a recognition got there first.
     let mut langs = read_languages(&inner, &worker);
     // Then the recogniser's first pass on this thread, before any read's, in the language a read
-    // without `lang` is made in: on a Mac the first `host.ocr.read` of a session took 2.4 s on
+    // without `lang` is made in: on a Mac the first `host.ocr.recognize` of a session took 2.4 s on
     // this thread, minutes after the warm-up on a thread of its own (TODO.md). Contained like a
     // job — a panic here must not end the thread every read goes to — and on the hang clock like
     // one: reads asked meanwhile wait for it, and should it not come back (a report of macOS 27 has
@@ -958,8 +958,9 @@ fn picture_of<S>(pixels: &Pixels<S>, captured_at: Instant) -> Option<Picture> {
     }
 }
 
-/// A backend answer as the pipeline takes it.
-fn engine_out(answer: Result<OcrText, String>) -> EngineOut {
+/// A backend answer as the pipeline takes it — a read's, and the blocking `recognize`'s
+/// (`lib.rs`, `legacy_read`).
+pub(crate) fn engine_out(answer: Result<OcrText, String>) -> EngineOut {
     let t = match answer {
         Err(e) => return EngineOut::Failed(e),
         Ok(t) => t,

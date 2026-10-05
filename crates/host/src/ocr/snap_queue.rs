@@ -2,7 +2,7 @@
 //! requests are photographed next, in which captures, and what each is answered — with no thread
 //! and no clock of its own, so every rule can be tested by stepping it.
 //!
-//! **One capture thread.** The pictures of `host.ocr.read` and of `snapshotAsync` are the same
+//! **One capture thread.** The pictures of `host.ocr.recognize` and of `snapshotAsync` are the same
 //! act — a capture at the call, off the event loop — so they are taken by one thread, the one
 //! `ocr/service.rs` runs, and weighed against each other by one rule: the class of `sched.rs`
 //! (urgent, aged, interactive, background), then whichever has been due longer, and on a tie the

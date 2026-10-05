@@ -91,7 +91,7 @@ mod image_search;
 mod instance;
 mod json;
 pub mod logging;
-/// `host.ocr.read`: the capture and recognise threads, their queue, languages and the shape a
+/// `host.ocr.recognize`: the capture and recognise threads, their queue, languages and the shape a
 /// module is handed — see the folder.
 mod ocr;
 mod appcfg;
@@ -101,7 +101,7 @@ mod profile;
 /// The window-relative Region form, `{ window, fraction }`, resolved to pixels, and the rule for
 /// strict corners — see the file.
 mod region;
-/// The one strict reader of a Region argument, for the cells calls and `host.ocr.read`.
+/// The one strict reader of a Region argument, for the cells calls and `host.ocr.recognize`.
 mod region_lua;
 pub mod registry;
 mod settings;
@@ -129,7 +129,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
-use mlua::{FromLua, Function, IntoLuaMulti, Lua, LuaSerdeExt, RegistryKey, Table};
+use mlua::{Function, IntoLuaMulti, Lua, LuaSerdeExt, RegistryKey, Table};
 
 use backend::{Backend, ControlInfo, HostEvents, MouseButton, WinInfo};
 use image_search::{ImageResult, ImageTask, PendingImage};
@@ -343,13 +343,13 @@ struct Shared {
     /// `host.screen.snapshotAsync`'s callbacks waiting for the capture thread, and the answers
     /// decided without it (snapshot.rs).
     snap_state: snapshot::SnapState,
-    /// `host.ocr.read`: the capture and recognise threads (ocr/service.rs)...
+    /// `host.ocr.recognize`: the capture and recognise threads (ocr/service.rs)...
     ocr: ocr::service::Service<backend::OcrShot>,
     /// ...and what the event loop keeps for them: the callbacks waiting, the answers decided
     /// without the threads, the newest read per key (ocr/lua.rs).
     ocr_state: ocr::lua::OcrState,
-    /// The handlers, running and waiting, of every module, and what the blocking `recognize` and
-    /// `recognizeMany` held the event loop for (task.rs).
+    /// The handlers, running and waiting, of every module, and what the blocking `recognize`
+    /// held the event loop for where it could not wait (task.rs).
     tasks: task::Tasks,
     /// Each module's events that wait while it is busy (mailbox.rs).
     mail: mailbox::Mailboxes,
@@ -1346,8 +1346,9 @@ impl Shared {
 
     /// What enabling or disabling module `idx` does once its flag is flipped: everything held at
     /// the OS recomputed, its slots re-elected, and — disabled — its reads, mailbox, handlers, key
-    /// scope and menu flag dropped. The checkbox's, and a stop's second step (`stops::settle`).
-    fn after_toggle(&self, idx: usize, enabled: bool) {
+    /// scope and menu flag dropped. The checkbox's, and a stop's second step (`stops::settle`),
+    /// which says the inputs that waited in the module's mailbox and were dropped: their names.
+    fn after_toggle(&self, idx: usize, enabled: bool) -> Vec<String> {
         // Fresh error-dialog slate on toggle: drop this module's dedup keys so a
         // still-present fault re-surfaces (rather than staying log-only) next run.
         if let Some(id) = self.ids.borrow().get(idx).cloned() {
@@ -1382,12 +1383,13 @@ impl Shared {
         // worse than none. Enabled again, its polls simply read afresh. After the re-election, so
         // that what an onDeactivate it ran started goes too — a read answered after a quick
         // re-enable would otherwise still be delivered, the generation being the same.
+        let mut dropped = Vec::new();
         if !enabled {
             self.ocr_drop_owner(idx, false);
             self.snap_drop_owner(idx);
             // What waits in its mailbox, but a setting's `onChange`, which it still hears; and its
             // handler, which never goes on — not even after a quick enable.
-            mailbox::drop_owner(self, idx, mailbox::Why::Disabled);
+            dropped = mailbox::drop_owner(self, idx, mailbox::Why::Disabled);
             self.task_drop_owner(idx);
             // And its key scope and menu flag, which used to stay set — one switch for the
             // whole application then, left wherever the module last put it.
@@ -1406,6 +1408,7 @@ impl Shared {
             "manager",
             &format!("module {idx} {}", if enabled { "enabled" } else { "disabled" }),
         );
+        dropped
     }
 
     /// The line for an arbiter callback the guard did not let run, or that a stop ended.
@@ -1979,8 +1982,8 @@ impl stops::StopHost for Shared {
         stops::Dropped { keys: d.keys.len(), hotkeys: dropped.len(), names: stops::counted(&names) }
     }
 
-    fn after_disable(&self, idx: usize) {
-        self.after_toggle(idx, false);
+    fn after_disable(&self, idx: usize) -> Vec<String> {
+        self.after_toggle(idx, false)
     }
 
     fn collect_garbage(&self, serial: u64) {
@@ -4501,7 +4504,7 @@ struct ExcludedModule {
 /// Loads and runs many modules concurrently in one process.
 pub struct Manager {
     shared: Rc<Shared>,
-    /// Stops `host.ocr.read`'s two threads. Handed to `run` by [`Manager::ocr_shutdown`] before
+    /// Stops `host.ocr.recognize`'s two threads. Handed to `run` by [`Manager::ocr_shutdown`] before
     /// anything is loaded, because the manager itself is dropped inside `run`'s closure and the
     /// threads must not depend on that.
     ocr_shutdown: ocr::service::ShutdownHandle,
@@ -4525,7 +4528,7 @@ impl Manager {
         // still allowed to, the blocking `recognize` (loop_guard.rs).
         loop_guard::mark_loop_thread();
         let backend = backend::platform();
-        // `host.ocr.read`'s threads, first: the recognise thread publishes the language list
+        // `host.ocr.recognize`'s threads, first: the recognise thread publishes the language list
         // as its first act, and the speech engines below can take seconds to open, so a module
         // asking for the languages in its `activate` finds them there.
         let (ocr, ocr_shutdown) = ocr::service::Service::spawn(backend.ocr_worker());
@@ -4649,7 +4652,7 @@ impl Manager {
         })
     }
 
-    /// What stops `host.ocr.read`'s threads at exit — see the field.
+    /// What stops `host.ocr.recognize`'s threads at exit — see the field.
     pub fn ocr_shutdown(&self) -> ocr::service::ShutdownHandle {
         self.ocr_shutdown.clone()
     }
@@ -5212,7 +5215,7 @@ pub fn run(dirs: &[String]) -> Result<()> {
             }
         }
         let ran = manager.run();
-        // What `recognize` and `recognizeMany` held the event loop for, per module, once: the
+        // What `recognize` held the event loop for where it could not wait, per module, once: the
         // whole session's cost, beside the first line that said it as it happened.
         manager.shared.log_legacy_summary();
         // And what each module took of the event loop, from the guard's watchdog, which stops
@@ -5234,7 +5237,7 @@ pub fn run(dirs: &[String]) -> Result<()> {
     if let Some(p) = &instance {
         p.stop_serving();
     }
-    // `host.ocr.read`'s two threads, first: the capture thread may be inside a duplication read,
+    // `host.ocr.recognize`'s two threads, first: the capture thread may be inside a duplication read,
     // which the next step stops, and the recognise thread inside ONNX Runtime, which the steps
     // after it wait out. Bounded; a thread still busy after it is logged and left.
     if let Some(stop) = ocr_stop {
@@ -5844,48 +5847,63 @@ fn hotkey_target(
     }
 }
 
-impl Shared {
-    /// A hotkey as it runs (`Event::Hotkey`): its registration, or the module's new one of the
-    /// same combination ([`hotkey_target`]) — said, as a captured key's is — or nothing.
-    fn open_hotkey(&self, id: i32, owner: usize, front: Option<isize>, binding: Option<(u32, u8)>, spec: &str) -> Opened {
-        let target = hotkey_target(
-            &self.hotkeys.borrow(),
-            |i| self.module_on(i),
-            self.captures.scope_of(owner),
-            owner,
-            id,
-            binding,
-            front,
-        );
-        let module = || self.ids.borrow().get(owner).cloned().unwrap_or_else(|| "?".to_string());
-        // `front` is noted exactly for a press its busy module queued (`on_hotkey`); one with none
-        // ran at once, and its line does not say the module was busy.
-        let queued = front.is_some();
-        let id = match target {
-            captures::Target::Same(id) => id,
-            captures::Target::Moved(new) => {
-                if self.captures.say_moved(owner, Instant::now()) {
-                    logging::line("keys", &captures::moved_line(&module(), spec, queued));
-                }
-                new
+/// A hotkey as it runs (`Event::Hotkey`): its registration in `regs`, or the module's new one of
+/// the same combination ([`hotkey_target`]) — said, as a captured key's is — or nothing. The host's
+/// own `open` and the key-scope tests' holder both run this, so the tests run the host's rule and
+/// not a copy of it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn open_hotkey_in<H: captures::KeyHost + ?Sized>(
+    h: &H,
+    regs: &RefCell<HashMap<i32, HotkeyReg>>,
+    id: i32,
+    owner: usize,
+    front: Option<isize>,
+    binding: Option<(u32, u8)>,
+    spec: &str,
+) -> Opened {
+    let target = hotkey_target(
+        &regs.borrow(),
+        |i| h.key_module_enabled(i),
+        h.captures().scope_of(owner),
+        owner,
+        id,
+        binding,
+        front,
+    );
+    // `front` is noted exactly for a press its busy module queued (`on_hotkey`); one with none
+    // ran at once, and its line does not say the module was busy.
+    let queued = front.is_some();
+    let id = match target {
+        captures::Target::Same(id) => id,
+        captures::Target::Moved(new) => {
+            if h.captures().say_moved(owner, Instant::now()) {
+                logging::line("keys", &captures::moved_line(&h.key_module_id(owner), spec, queued));
             }
-            captures::Target::Gone(gone) => {
-                if gone != captures::Gone::Disabled && self.captures.say_dropped(owner, Instant::now()) {
-                    let line = if queued {
-                        captures::busy_dropped_line(&module(), spec, gone)
-                    } else {
-                        captures::hotkey_dropped_line(&module(), spec, gone)
-                    };
-                    logging::line("keys", &line);
-                }
-                return Opened::Gone;
-            }
-        };
-        let f = self.hotkeys.borrow().get(&id).and_then(|r| r.lua.registry_value::<Function>(&r.cb).ok());
-        match f {
-            Some(f) => Opened::Run { f, args: mlua::MultiValue::new(), ctx: task::Ctx::new("hotkey", owner) },
-            None => Opened::Gone,
+            new
         }
+        captures::Target::Gone(gone) => {
+            if gone != captures::Gone::Disabled && h.captures().say_dropped(owner, Instant::now()) {
+                let line = if queued {
+                    captures::busy_dropped_line(&h.key_module_id(owner), spec, gone)
+                } else {
+                    captures::hotkey_dropped_line(&h.key_module_id(owner), spec, gone)
+                };
+                logging::line("keys", &line);
+            }
+            return Opened::Gone;
+        }
+    };
+    let f = regs.borrow().get(&id).and_then(|r| r.lua.registry_value::<Function>(&r.cb).ok());
+    match f {
+        Some(f) => Opened::Run { f, args: mlua::MultiValue::new(), ctx: task::Ctx::new("hotkey", owner) },
+        None => Opened::Gone,
+    }
+}
+
+impl Shared {
+    /// A hotkey as it runs (`Event::Hotkey`), by [`open_hotkey_in`].
+    fn open_hotkey(&self, id: i32, owner: usize, front: Option<isize>, binding: Option<(u32, u8)>, spec: &str) -> Opened {
+        open_hotkey_in(self, &self.hotkeys, id, owner, front, binding, spec)
     }
 
     /// The tick's phase for the events that waited in busy modules' mailboxes
@@ -7288,7 +7306,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     screen.set("snapshot", snapshot::snapshot(lua, shared)?)?;
     screen.set("pixels", snapshot::pixels(lua, shared)?)?;
     // host.screen.snapshotAsync(opts, cb) — the picture taken on the `screen-capture` thread that
-    // host.ocr.read photographs on: at once, at a set time, or when the region changes.
+    // host.ocr.recognize photographs on: at once, at a set time, or when the region changes.
     screen.set("snapshotAsync", snapshot::snapshot_async(lua, shared, idx)?)?;
     let sh = shared.clone();
     screen.set(
@@ -7678,18 +7696,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     )?;
     host.set("screen", screen)?;
 
-    // host.ocr.read(what, opts?, cb) — the region(s) photographed at the call, recognised on a
-    // thread of its own, the answer delivered to `cb` on the event loop. Everything but the
-    // registration is in ocr/lua.rs; the rules are in ocr/service.rs and ocr/sched.rs.
     let ocr = lua.create_table()?;
-    let sh = shared.clone();
-    ocr.set(
-        "read",
-        lua.create_function(move |lua, (what, opts, cb): (mlua::Value, mlua::Value, mlua::Value)| {
-            host_call!("host.ocr.read");
-            sh.ocr_read(lua, idx, what, opts, cb)
-        })?,
-    )?;
     // host.ocr.languages() -> { string } — what the engine reads, the default first.
     let sh = shared.clone();
     ocr.set(
@@ -7703,8 +7710,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         lua.create_function(move |_, v: mlua::Value| { host_call!("host.ocr.resolveLanguage"); sh.ocr_resolve_value(&v) })?,
     )?;
 
-    // host.ocr.pending(key) -> boolean — whether a read of this module with `key`, asked with
-    // `read` (or by a task waiting in `recognize`, which only the tests start), is still waiting
+    // host.ocr.pending(key) -> boolean — whether a read of this module with `key` is still waiting
     // for its answer (ocr/lua.rs).
     let sh = shared.clone();
     ocr.set(
@@ -7712,29 +7718,33 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         lua.create_function(move |lua, key: mlua::Value| { host_call!("host.ocr.pending"); ocr::lua::pending(&*sh, lua, idx, key) })?,
     )?;
 
-    // host.ocr.recognize(opts?) and host.ocr.recognizeMany(opts) — the two waits of a task
-    // (task.rs, task_shim.luau). Inside a task they ask the read service and only the task waits.
-    // No module can start a task, so in the application they are always where they cannot wait,
-    // and so the blocking calls below, as they always were, with a log line once per module that
-    // says how long the first held the event loop.
+    // host.ocr.recognize(what, opts?, cb?) — the region(s) photographed at the call and recognised
+    // on threads of their own (ocr/lua.rs; the rules in ocr/service.rs and ocr/sched.rs). With a
+    // callback, the answer is handed to it on the event loop (`submit`); without one, the handler
+    // that called it waits for the answer and only its module is busy (task.rs, task_shim.luau);
+    // where it cannot wait, the blocking call below, with a log line once per module and case
+    // that says how long it held the event loop.
     let sh = shared.clone();
-    let legacy = lua.create_function(move |lua, (name, opts, why): (String, mlua::Value, String)| {
-        // The two calls this one function carries, named for the guard as the module wrote them.
-        static ONE: &str = "host.ocr.recognize";
-        static MANY: &str = "host.ocr.recognizeMany";
-        let _host_call = vm_guard::HostCall::enter(if name == MANY { &MANY } else { &ONE });
-        let answer = task::legacy(&*sh, lua, idx, &name, &why, || {
-            if name == "host.ocr.recognizeMany" {
-                legacy_recognize_many(lua, &sh, opts)
-            } else {
-                legacy_recognize(lua, &sh, opts)
-            }
-        })?;
-        Ok((true, answer))
+    let submit = lua.create_function(move |lua, (what, opts, cb): (mlua::Value, mlua::Value, mlua::Value)| {
+        host_call!("host.ocr.recognize");
+        ocr::lua::read(&*sh, lua, idx, what, opts, cb)
     })?;
-    let waits = task::waits(lua, idx, shared.clone(), legacy)?;
-    ocr.set("recognize", waits.get::<Function>("recognize")?)?;
-    ocr.set("recognizeMany", waits.get::<Function>("recognizeMany")?)?;
+    let sh = shared.clone();
+    let legacy = lua.create_function(move |lua, (what, opts, why): (mlua::Value, mlua::Value, String)| {
+        host_call!("host.ocr.recognize");
+        let args = ocr::lua::parse_read(&what, &opts)?;
+        // What the blocking call never served raises where it could not wait, as everything will
+        // there once the blocking call is gone.
+        if let Some(refused) = task::blocking_refusal(&args, &why) {
+            let message = lua.create_string(refused)?;
+            return Ok(mlua::MultiValue::from_vec(vec![mlua::Value::Boolean(false), mlua::Value::String(message)]));
+        }
+        let mut answer = task::legacy(&*sh, lua, idx, &why, || legacy_read(lua, &sh, args))?;
+        answer.push_front(mlua::Value::Boolean(true));
+        Ok(answer)
+    })?;
+    let recognize = task::waits(lua, idx, shared.clone(), legacy, submit)?;
+    ocr.set("recognize", recognize.get::<Function>("recognize")?)?;
     host.set("ocr", ocr)?;
 
     // host.epoch() -> number — a counter that changes whenever the world may have: an
@@ -8900,8 +8910,8 @@ fn button_from(opts: Option<&Table>) -> MouseButton {
 }
 
 /// A region argument of a call that reads its corners loosely — `profile`, the image searches,
-/// `save`, `saveMarked`, `template{ capture }`, `recognize`, each `recognizeMany` region — read
-/// by the Region form's one reader (`region_lua::read_loose`) and resolved now.
+/// `save`, `saveMarked`, `template{ capture }` — read by the Region form's one reader
+/// (`region_lua::read_loose`) and resolved now.
 ///
 /// A mistake in it raises, named `{fname}: {what} …`: a table that is neither corners nor the
 /// window form, a value that is not a table, a window form that is not exactly right. `nil` is
@@ -8941,11 +8951,10 @@ pub(crate) fn opts_region(
     region_arg(backend, &v, fname, "opts.region")
 }
 
-/// `recognizeMany`'s answers in the order of its regions. A region that did not resolve keeps
-/// its reason in its own place; the others take the backend's results in turn, each with its
-/// own origin for the word boxes; and one the backend left without a result fails with
-/// `screen capture failed` — never the next region's answer, since a caller indexes the list
-/// by region.
+/// The blocking `recognize`'s answers in the order of its regions. A region that did not resolve
+/// keeps its reason in its own place; the others take the backend's results in turn, each with its
+/// own origin; and one the backend left without a result fails with `screen capture failed` —
+/// never the next region's answer, since a caller indexes the list by region.
 fn align_many<T>(
     slots: &[std::result::Result<(i32, i32, i32, i32), String>],
     results: Vec<std::result::Result<T, String>>,
@@ -9024,7 +9033,7 @@ fn read_scales(opts: Option<&Table>) -> Vec<f32> {
 //
 // The options and the states are read with serde through mlua's deserializer, so a wrong key
 // or type is reported with its path (`states[3].cells`, 1-based like Luau); the region is read
-// by the Region form's one strict reader (`region_lua.rs`), which `host.ocr.read` shares.
+// by the Region form's one strict reader (`region_lua.rs`), which `host.ocr.recognize` shares.
 
 /// A value as a message names it: numbers as themselves, anything else by its type. Shared by
 /// every strict reader, the Region form's (`region_lua.rs`) among them.
@@ -9221,7 +9230,7 @@ fn read_cells_opts(lua: &Lua, fname: &str, opts: mlua::Value) -> mlua::Result<Ce
     let pred = cells::Predicate::parse(&o.predicate)
         .map_err(|e| predicate_error(fname, "opts.predicate", &o.predicate, &e))?;
     let spec = cells::CellSpec::new(o.cols.0 as u32, o.rows.0 as u32, pred).map_err(|m| err(format!("opts: {m}")))?;
-    // The Region form's one strict reader, shared with `host.ocr.read`: a mistake raises, an
+    // The Region form's one strict reader, shared with `host.ocr.recognize`: a mistake raises, an
     // empty client area is this call's `nil, reason`.
     let given = region_lua::read(&region_value, "opts.region").map_err(err)?;
     let mut rect = given.resolve().map_err(|u| u.to_string());
@@ -9336,173 +9345,58 @@ pub(crate) fn cells_match_table(
     Ok(t)
 }
 
-/// `recognize` and `recognizeMany` read the screen at the call and take no snapshot. Their other
-/// options are read loosely and an unknown key is ignored, but a `snapshot` raises: reading the
-/// live screen where the module asked for a picture it holds is the worse mistake of the two.
-fn refuse_snapshot(opts: &Table, fname: &str) -> mlua::Result<()> {
-    if opts.get::<mlua::Value>("snapshot")?.is_nil() {
-        Ok(())
-    } else {
-        Err(mlua::Error::external(format!("{fname}: takes no snapshot; host.ocr.read does")))
-    }
-}
-
-/// `host.ocr.recognize(opts?)` where it cannot wait (`task::legacy`): the blocking call, exactly
-/// as it always was — the region read loosely, the language through the resolver, the capture
-/// and the recognition on the event loop, which waits until it returns.
-fn legacy_recognize(lua: &Lua, sh: &Shared, opts: mlua::Value) -> mlua::Result<Table> {
-    let opts = Option::<Table>::from_lua(opts, lua)?;
-    if let Some(o) = &opts {
-        refuse_snapshot(o, "host.ocr.recognize")?;
-    }
-    // The failed shape, for what is routine rather than a mistake: a language nothing
-    // here reads, a window region with nothing to read, no picture under
-    // `fallback = "none"`.
-    let failed = |why: &str| -> mlua::Result<Table> {
-        let t = lua.create_table()?;
-        t.set("text", "")?;
-        t.set("words", lua.create_table()?)?;
-        t.set("skipped", false)?;
-        t.set("error", why)?;
-        Ok(t)
-    };
-    // Both arguments are read before either is answered, so a mistake in `lang` raises
-    // whether or not the window has anything to read.
-    let region = opts_region(&*sh.backend, opts.as_ref(), "host.ocr.recognize")?;
-    let lang: Option<String> = opts.as_ref().and_then(|o| o.get::<String>("lang").ok());
-    // Through the resolver, so "de" reads German on both platforms: the tag the engine
-    // lists, or this call's failed shape when nothing here reads the language.
-    let lang = match lang {
-        Some(tag) => match sh.ocr_legacy_lang(&tag, "host.ocr.recognize")? {
-            Ok(resolved) => Some(resolved),
-            Err(why) => return failed(&why),
-        },
-        None => None,
-    };
-    let (rx, ry, rw, rh) = match region {
-        Ok(r) => (r.x, r.y, r.w, r.h),
-        Err(why) => return failed(&why),
-    };
-    let src = capture_source::read_source(lua, &*sh.backend, (rx, ry, rw, rh));
-    let res = match sh.backend.ocr(rx, ry, rw, rh, lang.as_deref(), src) {
-        Ok(r) => r,
-        // `recognizeMany`'s shape, for a picture a `fallback = "none"` module could not
-        // get: routine there, and a raised error would put a dialog in front of the
-        // game. See capture_source::answers_instead_of_raising.
-        Err(e) if capture_source::answers_instead_of_raising(src, &e) => return failed(&e),
-        Err(e) => return Err(mlua::Error::external(e)),
-    };
-    let t = lua.create_table()?;
-    t.set("text", res.text)?;
-    let words = lua.create_table()?;
-    for wd in res.words {
-        let w = lua.create_table()?;
-        w.set("text", wd.text)?;
-        w.set("x", rx + wd.x)?;
-        w.set("y", ry + wd.y)?;
-        w.set("w", wd.w)?;
-        w.set("h", wd.h)?;
-        words.push(w)?;
-    }
-    t.set("words", words)?;
-    // Whether the engine was asked at all. A blank region answers empty either way,
-    // and a module that wants to know which — the probe does — has nothing else to
-    // look at from Lua.
-    t.set("skipped", res.skipped)?;
-    Ok(t)
-}
-
-/// `host.ocr.recognizeMany(opts)` where it cannot wait (`task::legacy`): the blocking call,
-/// exactly as it always was.
+/// `host.ocr.recognize` without a callback where it cannot wait (`task::legacy`): the blocking
+/// call — the regions photographed and recognised on the event loop, which waits until they are —
+/// answered with what a read hands its callback: one reading, or the list and the table by name.
+/// It serves what the old call served: regions, names, `lang`; the binding raises for `key` and
+/// `snapshot` before it gets here. Each region's answer goes through the pipeline a read's goes
+/// through (`engine_out`, `pipeline::normalise`), so a reading has one shape wherever it came
+/// from: a window region with nothing to read, a language nothing here reads and a capture that
+/// failed are readings with `status = "failed"`, never a raise. The language is resolved in the
+/// published list as a read's is (`Shared::ocr_legacy_lang`). `time` and `inputEpoch` are the
+/// moment before the capture: nothing drives input while the loop waits.
 ///
-/// The same recognitions, ONE screen touch. Measured on this machine: recognising a 67x13
-/// read-out costs 4-6 ms and cropping it 0.5, while the capture underneath is a fixed ~17 ms
-/// compositor frame whatever its size — so two adjacent read-outs read one after the other
-/// spent two thirds of their time photographing the screen twice. Melodyne's selection
-/// watcher did exactly that, eight times a second, and measured 44 ms a tick against 27 for
-/// one region.
-///
-/// The regions are NOT merged into one recognition, and that distinction is the whole reason
-/// this is a new call rather than a wider rectangle: the fallback to the neural recogniser
-/// fires per region, only when that region came back empty, and a merged strip is never
-/// empty — so a note name Windows.Media.Ocr dropped stayed dropped while the cents beside it
-/// came through. Every region is still recognised on its own, with its own fallback, and its
-/// word boxes are still relative to itself.
-///
-/// A region that failed comes back as `{ text = "", error = "…" }` rather than as a hole in
-/// the sequence: a caller indexing results[2] must never get the third region's answer.
-fn legacy_recognize_many(lua: &Lua, sh: &Shared, opts: mlua::Value) -> mlua::Result<Table> {
-    let opts = Table::from_lua(opts, lua)?;
-    const F: &str = "host.ocr.recognizeMany";
-    refuse_snapshot(&opts, F)?;
-    let regions: Table = opts.get("regions")?;
-    let lang: Option<String> = opts.get::<String>("lang").ok();
-    // Each region through the one reader: corners as this call always read them, or
-    // a window region resolved now. One whose window has nothing to read fails in its
-    // own place with the reason; the others are read. The list ends at the first nil.
-    let mut slots: Vec<Result<(i32, i32, i32, i32), String>> = Vec::new();
-    for (i, r) in regions.sequence_values::<mlua::Value>().enumerate() {
-        let r = r?;
-        slots.push(region_arg(&*sh.backend, &r, F, &format!("opts.regions[{}]", i + 1))?.map(|s| (s.x, s.y, s.w, s.h)));
-    }
-    let failed = |why: &str| -> mlua::Result<Table> {
-        let t = lua.create_table()?;
-        t.set("text", "")?;
-        t.set("words", lua.create_table()?)?;
-        // Present so every entry has the same shape; false because a failed read is
-        // not the blank guard answering, and `error` says what it was.
-        t.set("skipped", false)?;
-        t.set("error", why)?;
-        Ok(t)
-    };
-    // Through the resolver, as in `recognize`; a language nothing here reads fails every
-    // region with the reason, in the shape a failed region always had.
-    let lang = match lang {
-        Some(tag) => match sh.ocr_legacy_lang(&tag, "host.ocr.recognizeMany")? {
-            Ok(resolved) => Some(resolved),
-            Err(why) => {
-                let out = lua.create_table()?;
-                for _ in &slots {
-                    out.push(failed(&why)?)?;
+/// The regions of a list share ONE screen touch where the backend can (`Backend::ocr_regions`):
+/// recognising a 67x13 read-out costs 4-6 ms, while the capture under it is a fixed ~17 ms
+/// compositor frame whatever its size. They are NOT merged into one recognition: the fallback to
+/// the neural recogniser fires per region, only when that region came back empty, and a merged
+/// strip is never empty.
+fn legacy_read(lua: &Lua, sh: &Shared, args: ocr::lua::ReadArgs) -> mlua::Result<mlua::MultiValue> {
+    let names: Vec<Option<String>> = args.entries.iter().map(|(n, _)| n.clone()).collect();
+    let unresolved: Vec<Option<String>> = args.entries.iter().map(|(_, r)| r.clone().err()).collect();
+    let rects: Vec<ocr::types::Rect> = args.entries.iter().map(|(_, r)| r.clone().unwrap_or_default()).collect();
+    let picture = ocr::service::Picture { at: Instant::now(), input_epoch: sh.input_epoch.get() };
+    let readings: Vec<ocr::types::Reading> = match sh.ocr_legacy_lang(&args.lang) {
+        Err(why) => rects.iter().map(|r| ocr::types::Reading::failed(*r, why.clone())).collect(),
+        Ok(lang) => {
+            let slots: Vec<std::result::Result<(i32, i32, i32, i32), String>> =
+                args.entries.iter().map(|(_, r)| r.clone().map(|r| r.tuple())).collect();
+            let wanted: Vec<(i32, i32, i32, i32)> = slots.iter().filter_map(|s| s.as_ref().ok().copied()).collect();
+            let results = match wanted.as_slice() {
+                [] => Vec::new(),
+                [(x, y, w, h)] => {
+                    let src = capture_source::read_source(lua, &*sh.backend, (*x, *y, *w, *h));
+                    vec![sh.backend.ocr(*x, *y, *w, *h, lang.as_deref(), src)]
                 }
-                return Ok(out);
-            }
-        },
-        None => None,
-    };
-    let rects: Vec<(i32, i32, i32, i32)> = slots.iter().filter_map(|s| s.as_ref().ok().copied()).collect();
-    let results = if rects.is_empty() {
-        Vec::new()
-    } else {
-        let src = capture_source::read_source(lua, &*sh.backend, rects[0]);
-        sh.backend.ocr_regions(&rects, lang.as_deref(), src)
-    };
-    let out = lua.create_table()?;
-    for answer in align_many(&slots, results) {
-        let (r, (rx, ry)) = match answer {
-            Ok(a) => a,
-            Err(why) => {
-                out.push(failed(&why)?)?;
-                continue;
-            }
-        };
-        let t = lua.create_table()?;
-        t.set("text", r.text)?;
-        let words = lua.create_table()?;
-        for wd in r.words {
-            let w = lua.create_table()?;
-            w.set("text", wd.text)?;
-            w.set("x", rx + wd.x)?;
-            w.set("y", ry + wd.y)?;
-            w.set("w", wd.w)?;
-            w.set("h", wd.h)?;
-            words.push(w)?;
+                many => {
+                    let src = capture_source::read_source(lua, &*sh.backend, many[0]);
+                    sh.backend.ocr_regions(many, lang.as_deref(), src)
+                }
+            };
+            let tag = lang.unwrap_or_default();
+            align_many(&slots, results)
+                .into_iter()
+                .zip(&rects)
+                .map(|(answer, rect)| match answer {
+                    Ok((text, _)) => ocr::pipeline::normalise(*rect, ocr::service::engine_out(Ok(text)), &tag),
+                    // Nothing was recognised when the capture failed: no language, as a read's.
+                    Err(why) if why.starts_with(backend::CAPTURE_FAILED) => ocr::types::Reading::failed(*rect, why),
+                    Err(why) => ocr::pipeline::normalise(*rect, ocr::types::EngineOut::Failed(why), &tag),
+                })
+                .collect()
         }
-        t.set("words", words)?;
-        t.set("skipped", r.skipped)?;
-        out.push(t)?;
-    }
-    Ok(out)
+    };
+    ocr::lua::blocking_values(lua, readings, &names, &unresolved, args.list, picture)
 }
 
 /// `nil, reason`: the answer of the cells calls when they could not look — two values always,
@@ -10066,15 +9960,15 @@ mod focus_step_binding_tests {
     }
 }
 
-/// Where `host.ocr.read`'s rules meet the event loop: the input barrier, the interactive lane,
-/// dropping a module's reads, the legacy calls' language. None of these places can be reached by
+/// Where `host.ocr.recognize`'s rules meet the event loop: the input barrier, the interactive lane,
+/// dropping a module's reads, the legacy call's language. None of these places can be reached by
 /// a unit test — they are methods of `Shared`, whose speech engines a test must not open — and
 /// deleting any one of them left every other test green. So each is checked where it is written:
 /// a crude check on the source, which fails loudly when the code it looks for moves, rather than
 /// silently when the rule goes.
 #[cfg(test)]
 mod ocr_wiring_tests {
-    use super::{align_many, backend, one_value, pixel_coords, png_path_only, refuse_snapshot, region, region_arg_on, with_reason};
+    use super::{align_many, backend, one_value, pixel_coords, png_path_only, region, region_arg_on, with_reason};
     use mlua::Lua;
 
     const LIB: &str = include_str!("lib.rs");
@@ -10193,35 +10087,27 @@ mod ocr_wiring_tests {
         assert!(body(LIB, "fn bump_input_epoch(").contains("self.ocr.note_input_epoch(e);"));
     }
 
-    /// `recognize` and `recognizeMany` refuse a `snapshot` key before anything else, and only
-    /// that key: their other unknown keys are ignored as they always were.
+    /// `host.ocr` is `recognize`, `pending`, `languages` and `resolveLanguage`. `recognize` is the
+    /// shim's, with its callback form (`ocr::lua::read`) and its blocking call beside it; the
+    /// blocking call reads its arguments as the callback form does, raises where it cannot wait for
+    /// what it never served — `key` and `snapshot` — and is logged and counted.
     #[test]
-    fn recognize_refuses_a_snapshot_key() {
-        let lua = Lua::new();
-        let t: mlua::Table = lua.load("return { region = { 0, 0, 1, 1 }, colour = 3 }").eval().unwrap();
-        assert!(refuse_snapshot(&t, "host.ocr.recognize").is_ok());
-        t.set("snapshot", 1).unwrap();
-        let e = refuse_snapshot(&t, "host.ocr.recognize").unwrap_err().to_string();
-        assert!(e.contains("host.ocr.recognize: takes no snapshot; host.ocr.read does"), "{e}");
-        // The blocking calls where they cannot wait...
-        let one = body(LIB, "fn legacy_recognize(");
-        let first = one.find("refuse_snapshot(o, \"host.ocr.recognize\")?;").expect("recognize");
-        assert!(first < one.find("opts_region(").unwrap(), "recognize reads its region before refusing");
-        let many = body(LIB, "fn legacy_recognize_many(");
-        let first = many.find("refuse_snapshot(&opts, F)?;").expect("recognizeMany");
-        assert!(first < many.find("opts.get(\"regions\")").unwrap());
-        // ...and both in a task.
-        let wait = body(OCR_LUA, "pub(crate) fn parse_wait(");
-        let first = wait.find("crate::refuse_snapshot(t, name)?;").expect("a wait refuses a snapshot");
-        assert!(first < wait.find("get(\"region\")").unwrap() && first < wait.find("get(\"regions\")").unwrap());
-        // Both names reach the two through the shim, with the legacy call beside them.
+    fn recognize_is_the_shims_with_its_two_forms_beside_it() {
         let api = body(LIB, "fn install_host_api(");
         let ocr = bindings(api, "ocr");
+        let mut names: Vec<&str> = ocr.iter().map(|b| b.0).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["languages", "pending", "recognize", "resolveLanguage"]);
         let text = |name: &str| ocr.iter().find(|b| b.0 == name).unwrap_or_else(|| panic!("host.ocr.{name}")).1;
-        assert!(text("recognize").contains("waits.get::<Function>(\"recognize\")"));
-        assert!(text("recognizeMany").contains("waits.get::<Function>(\"recognizeMany\")"));
-        assert!(api.contains("legacy_recognize_many(lua, &sh, opts)") && api.contains("legacy_recognize(lua, &sh, opts)"));
-        assert!(api.contains("task::legacy(&*sh, lua, idx, &name, &why, ||"), "the legacy calls are not logged and counted");
+        assert!(text("recognize").contains("recognize.get::<Function>(\"recognize\")"));
+        assert!(api.contains("let recognize = task::waits(lua, idx, shared.clone(), legacy, submit)?;"));
+        assert!(api.contains("ocr::lua::read(&*sh, lua, idx, what, opts, cb)"), "the callback form");
+        let legacy = &api[api.find("let legacy = lua.create_function(").expect("the blocking call")..];
+        let parse = legacy.find("let args = ocr::lua::parse_read(&what, &opts)?;").expect("read as the callback form reads");
+        let refuse = legacy.find("if let Some(refused) = task::blocking_refusal(&args, &why) {").expect("key and snapshot raise");
+        let call = legacy.find("task::legacy(&*sh, lua, idx, &why, || legacy_read(lua, &sh, args))").expect("logged and counted");
+        assert!(parse < refuse && refuse < call);
+        assert!(body(LIB, "fn legacy_read(").contains("ocr::lua::blocking_values(lua, readings, &names, &unresolved, args.list, picture)"));
     }
 
     /// Somebody waiting: every dispatch a person causes runs in the interactive lane, and an
@@ -10288,17 +10174,9 @@ mod ocr_wiring_tests {
             assert!(text(name).contains("read_cells_opts("), "host.screen.{name}");
         }
         assert!(body(LIB, "fn read_cells_opts(").contains("region_lua::read(&region_value"));
-        // `recognize` and `recognizeMany`: the blocking calls where they cannot wait, and a task's
-        // wait, which reads its regions loosely through the same reader.
-        let ocr_text = |name: &str| match name {
-            "recognize" => body(LIB, "fn legacy_recognize("),
-            _ => body(LIB, "fn legacy_recognize_many("),
-        };
-        assert!(ocr_text("recognize").contains("opts_region(&*sh.backend"));
-        assert!(ocr_text("recognizeMany").contains("region_arg(&*sh.backend"));
-        let wait = body(OCR_LUA, "pub(crate) fn parse_wait(");
-        assert!(wait.contains("region_lua::read_loose(v, what, screen)"), "a task's wait reads its regions another way");
-        assert!(wait.contains("format!(\"opts.regions[{}]\", i + 1)") && wait.contains("\"opts.region\""));
+        // `recognize`, both its forms and its blocking call: the strict reader, under its name.
+        assert!(body(OCR_LUA, "fn region(").contains("region_lua::read(v, what).map_err(bad)"));
+        assert!(body(OCR_LUA, "fn bad(").contains("format!(\"host.ocr.recognize: {msg}\")"));
         assert!(body(LIB, "fn region_arg(").contains("region_arg_on("));
         assert!(body(LIB, "fn region_arg_on(").contains("region_lua::read_loose("));
         for f in ["fn image_search(", "fn image_search_multi(", "fn image_search_async(", "fn image_search_each(", "fn image_search_all("] {
@@ -10311,9 +10189,6 @@ mod ocr_wiring_tests {
         for name in ["profile", "save", "saveMarked"] {
             assert!(text(name).contains(&format!("\"host.screen.{name}\"")), "host.screen.{name} reads its region under another name");
         }
-        for name in ["recognize", "recognizeMany"] {
-            assert!(ocr_text(name).contains(&format!("\"host.ocr.{name}\"")), "host.ocr.{name} reads its region under another name");
-        }
         for (f, name) in [
             ("fn image_search(", "imageSearch"),
             ("fn image_search_multi(", "imageSearchMulti"),
@@ -10324,7 +10199,6 @@ mod ocr_wiring_tests {
             assert!(body(IMAGES, f).contains(&format!("\"host.screen.{name}\"")), "`{f}` reads its region under another name");
         }
         assert!(body(IMAGES, "fn image_search_each(").contains("format!(\"entries[{}].within\""));
-        assert!(ocr_text("recognizeMany").contains("format!(\"opts.regions[{}]\""));
         // Snapshots: `snapshot` and `crop` read the Region form strictly, `pixels` its points
         // through the one point reader, and every call given a snapshot reads its region through
         // the same loose reader with the snapshot's edges as the defaults.
@@ -10489,11 +10363,11 @@ mod ocr_wiring_tests {
         assert!(pixel.contains("pixel_coords(lua, &a, &b)"), "host.screen.pixel reads its numbers another way");
     }
 
-    /// `recognizeMany` answers each region in its own place: an unresolved window region keeps
-    /// its reason between readable ones, each result keeps its own region's origin, and a
-    /// region the backend gave no result for fails rather than taking the next one's.
+    /// The blocking `recognize` answers each region of a list in its own place: an unresolved window
+    /// region keeps its reason between readable ones, each result keeps its own region's origin,
+    /// and a region the backend gave no result for fails rather than taking the next one's.
     #[test]
-    fn recognize_many_answers_each_region_in_its_own_place() {
+    fn the_blocking_call_answers_each_region_in_its_own_place() {
         let slots = vec![
             Ok((10, 20, 5, 5)),
             Err("the window's client area is empty (0x0)".to_string()),
@@ -10546,15 +10420,13 @@ mod ocr_wiring_tests {
     }
 
     /// A module's reads are dropped, never delivered, when it is disabled, reloaded or rolled
-    /// back; and the two older calls send `lang` through the resolver.
+    /// back; and the blocking call sends `lang` through the resolver.
     #[test]
-    fn a_modules_reads_go_with_it_and_the_older_calls_resolve_their_language() {
+    fn a_modules_reads_go_with_it_and_the_blocking_call_resolves_its_language() {
         assert!(body(LIB, "fn after_toggle(").contains("self.ocr_drop_owner(idx, false);"));
         assert!(body(LIB, "fn purge_module(").contains("self.ocr_drop_owner(idx, true);"));
         assert!(body(LIB, "fn rollback_to(").contains("self.ocr_drop_from(n);"));
-        for f in ["fn legacy_recognize(", "fn legacy_recognize_many("] {
-            assert!(body(LIB, f).contains("sh.ocr_legacy_lang(&tag, \"host.ocr."), "`{f}` skips the resolver");
-        }
+        assert!(body(LIB, "fn legacy_read(").contains("sh.ocr_legacy_lang(&args.lang)"), "the blocking call skips the resolver");
     }
 
     /// A module's tasks go with it as its reads do: disabled, reloaded, rolled back. On a disable,
@@ -11141,10 +11013,11 @@ mod ocr_wiring_tests {
         let on = body(LIB, "fn on_hotkey(&mut self");
         assert!(on.contains("mailbox::busy(self.shared, owner).then(|| self.shared.backend.key_front())"), "{on}");
         assert!(!on.contains(concat!("backend.resolve_key", "_scope()")), "{on}");
-        let open = body(LIB, "fn open_hotkey(");
+        assert!(body(LIB, "fn open_hotkey(").contains("open_hotkey_in(self, &self.hotkeys, id, owner, front, binding, spec)"));
+        let open = body(LIB, "pub(crate) fn open_hotkey_in<");
         assert!(open.contains("let queued = front.is_some();"));
-        assert!(open.contains("captures::moved_line(&module(), spec, queued)"));
-        assert!(open.contains("captures::hotkey_dropped_line(&module(), spec, gone)"));
+        assert!(open.contains("captures::moved_line(&h.key_module_id(owner), spec, queued)"));
+        assert!(open.contains("captures::hotkey_dropped_line(&h.key_module_id(owner), spec, gone)"));
     }
 
     /// A module's mailbox goes with it as its handlers do: on a disable — keeping a setting's
@@ -11181,8 +11054,8 @@ mod ocr_wiring_tests {
     /// The read service's share of the handlers, checked where it is written — `Shared` is no
     /// test's holder: the delivery sweeps a hang before it drains, and only while a read is out;
     /// an event queued in the interactive lane raises the module's parked handler, before folding;
-    /// `Shared` hands the delivery the application's slow-reads switch; and the tests' way into
-    /// handlers that wait is built in test builds alone.
+    /// `Shared` hands the delivery the application's slow-reads switch; and a reading that could not
+    /// be built goes through `handover_failed`, a stop when its VM ran out of memory.
     #[test]
     fn the_hang_answer_the_promotion_and_the_slow_switch_are_wired() {
         let fire = body(OCR_LUA, "pub(crate) fn fire_at<H: MailHost>(h: &H, now: Instant)");
@@ -11192,13 +11065,14 @@ mod ocr_wiring_tests {
         assert!(fire.contains("hand_over(st, h.slow_reads(), now, came)"));
         assert!(body(OCR_LUA, "pub(crate) fn fire<H: MailHost>(h: &H)").contains("fire_at(h, Instant::now())"));
         assert!(body(OCR_LUA, "impl ReadHost for Shared").contains("crate::appcfg::slow_reads()"));
+        // A reading that could not be built is a stop when the VM ran out of memory, for a waiting
+        // handler and for a callback alike.
+        assert!(fire.contains("handover_failed(h, &p.lua, p.owner.idx, &e);"));
+        assert!(body(OCR_LUA, "pub(crate) fn open_read<").contains("handover_failed(h, &p.lua, p.scope, &e);"));
         let enqueue = body(MAILBOX, "fn enqueue<H: MailHost>(");
         let promote = enqueue.find("task::promote(h, owner);").expect("the promotion");
         assert!(enqueue[..promote].contains("if current_priority() == Priority::Interactive {"));
         assert!(promote < enqueue.find("fold(&mut b.queue, &mut ev)").unwrap());
-        let task_rs = include_str!("task.rs");
-        let wait_here = task_rs.find("pub(crate) fn handlers_wait_here()").expect("the tests' way in");
-        assert!(task_rs[..wait_here].trim_end().ends_with("#[cfg(test)]"), "built outside the tests");
     }
 }
 

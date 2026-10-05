@@ -34,7 +34,7 @@
 //! A miss is `nil` and one of three fixed reasons, never an error.
 //!
 //! **Taken off the event loop.** `snapshotAsync` hands the picture to the `screen-capture` thread
-//! `host.ocr.read` photographs on (`ocr/service.rs`, `ocr/snap_queue.rs`): at once, at a set time
+//! `host.ocr.recognize` photographs on (`ocr/service.rs`, `ocr/snap_queue.rs`): at once, at a set time
 //! (`at`), or as a change wait (`change`, `ocr/change.rs`) that photographs round after round until
 //! the watched part differs from a baseline. Its callback runs exactly once on the event loop —
 //! `cb(snap, nil, info)` or `cb(nil, reason, info)` — unless the module is disabled, reloaded or
@@ -1238,6 +1238,55 @@ pub(crate) fn drop_answer(st: &SnapState, p: PendingSnap) {
     release(p);
 }
 
+/// An answer as it runs (`Event::Snapshot`), by [`open_answer`]: its callback's call, or nothing
+/// when the call could not be built — that goes to `report` (module, kind of callback, message).
+/// The host's own `open` and the mailbox tests' holder both run this, so the tests run the host's
+/// rule and not a copy of it.
+pub(crate) fn open_snapshot_in(
+    st: &SnapState,
+    p: PendingSnap,
+    answer: Answer,
+    process: &Rc<Cell<usize>>,
+    report: &dyn Fn(usize, &str, &str),
+) -> Opened {
+    let scope = p.scope;
+    match open_answer(st, p, answer, process) {
+        Ok((f, args)) => Opened::Run { f, args, ctx: Ctx::new("screen.snapshotAsync", scope) },
+        Err(e) => {
+            report(scope, "screen.snapshotAsync", &e);
+            Opened::Gone
+        }
+    }
+}
+
+/// A request of `owner`'s VM `lua`, with `key`, answered to `cb`, as `snapshotAsync` files it — the
+/// newest with its key — and as the delivery takes it off the list: for the tests' holders, which
+/// have no `Shared`.
+#[cfg(test)]
+pub(crate) fn test_request(st: &SnapState, lua: &Lua, owner: Owner, key: Option<&str>, cb: Function) -> PendingSnap {
+    let p = PendingSnap {
+        id: st.next(),
+        lua: lua.clone(),
+        cb: lua.create_registry_value(cb).expect("the callback is kept"),
+        scope: owner.idx,
+        owner,
+        prio: Priority::Background,
+        key: key.map(str::to_string),
+        res: None,
+        change: false,
+        cancel: Arc::new(AtomicBool::new(false)),
+        asked: Instant::now(),
+    };
+    st.note_key(&p);
+    p
+}
+
+/// An answer without a picture, for `why`.
+#[cfg(test)]
+pub(crate) fn test_failed(why: &str) -> Answer {
+    Answer::Failed { why: why.to_string(), frames: 0, change: None, waited: Duration::ZERO }
+}
+
 /// A batch of answers as the tick and the mailboxes deliver it, every module free: each to a VM
 /// that `alive` says is still the one that asked and enabled ([`open_answer`]), the others
 /// dropped. `report` hears of a callback that raised.
@@ -1414,16 +1463,11 @@ impl Shared {
         }
     }
 
-    /// An answer as it runs ([`open_answer`]); a call that could not be built is reported.
+    /// An answer as it runs ([`open_snapshot_in`]).
     pub(crate) fn open_snapshot(&self, p: PendingSnap, answer: Answer) -> Opened {
-        let scope = p.scope;
-        match open_answer(&self.snap_state, p, answer, &self.snap_bytes) {
-            Ok((f, args)) => Opened::Run { f, args, ctx: Ctx::new("screen.snapshotAsync", scope) },
-            Err(e) => {
-                self.report_callback_error(scope, "screen.snapshotAsync", &e);
-                Opened::Gone
-            }
-        }
+        open_snapshot_in(&self.snap_state, p, answer, &self.snap_bytes, &|idx, what, e| {
+            self.report_callback_error(idx, what, e)
+        })
     }
 
     /// An answer that will not run ([`drop_answer`]).

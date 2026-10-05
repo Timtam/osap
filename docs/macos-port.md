@@ -317,7 +317,7 @@ Every item here needs a Mac. They are listed in the order a first session should
    dependency, so on macOS Vision carries the case alone. Ten minutes with one request
    against the crops the Windows work already produced. (Answered by `ocr-bench` in 2026-10:
    Vision is blind to a lone digit at times, and the fallback now runs on a Mac too, by
-   Windows' rule, where the download carries it — see [`host.ocr.read`](api/ocr.md#macos).)
+   Windows' rule, where the download carries it — see [`host.ocr.recognize`](api/ocr.md#macos).)
 9. **Do Qt object names survive into `AXIdentifier`** — see the `class` section. If they do
    not, the modules that navigate by them need a different anchor on macOS.
 
@@ -334,7 +334,7 @@ every click, and a partial one that forgot Vision would have left OCR boxes mirr
 is invisible on single-line text and wrong on everything else.
 
 **The first OCR call killing the keyboard.** Vision loads its model on the first request —
-routinely half a second to two seconds — and `recognize` and `recognizeMany` run synchronously on
+routinely half a second to two seconds — and the text reads then ran synchronously on
 the pump thread. On
 a shared run loop that alone would have exceeded the tap's tolerance and disabled key
 capture, mid-session, in a way that reads as "it worked and then stopped". Warming Vision on
@@ -347,7 +347,7 @@ thread suffices for ordinary use: the tap was never disabled during minutes of T
 navigation, only by stalls of over a second, and the watchdog had it back within about two
 seconds each time.)
 
-**`host.ocr.read` takes OCR off the pump thread.** It photographs on a thread named
+**`host.ocr.recognize` takes OCR off the pump thread.** It photographs on a thread named
 `screen-capture` (the same `capture_backing` the synchronous calls use) and runs Vision on a
 second one, `ocr-recognise`, which asks for the user-initiated quality of service and wraps
 every job in an autorelease pool. The Vision warm-up keeps its own thread from
@@ -358,7 +358,7 @@ then, once the `ocr-warm-up` pass has ended, it makes a warm-up pass of its own 
 before its first job and on the hang clock of one (2026-10-01: the first read on that thread had
 cost 2.4 s on an Intel Air). One after the other, so that the first line times a first pass in
 the process and the second one on another thread. Both read a line of printed words and say in
-the log whether Vision read it. `recognize` and
-`recognizeMany` still run on the pump thread and still stall it; the overlay runtime's focus
-reads moved to `host.ocr.read` on 2026-10-01, and the modules' own synchronous reads have not
-moved yet (TODO.md).
+the log whether Vision read it. A read without a callback waits in its handler, and only its
+module waits; only where it cannot wait — a module's top level, an arbiter's callback, a
+coroutine of the module's own — does it still run on the pump thread and stall it, with a line
+in the log ([Where it waits](api/ocr.md#where-it-waits)).

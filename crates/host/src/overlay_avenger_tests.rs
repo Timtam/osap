@@ -122,13 +122,13 @@ rawset(T.host.ocr, "resolveLanguage", function(l)
   return nil
 end)
 do
-  local read = T.host.ocr.read
-  rawset(T.host.ocr, "read", function(what, opts, cb)
+  local read = T.submit
+  T.submit = function(what, opts, cb)
     local n = #S.reads
     read(what, opts, cb)
     -- Only a read that stayed in S.reads: the runtime's focus reads go to S.focusReads.
     if #S.reads > n then S.reads[#S.reads].lang = opts and opts.lang end
-  end)
+  end
 end
 rawset(T.host.screen, "saveMarked", function(path, opts)
   local marks = {}
@@ -250,7 +250,7 @@ function T.avenger()
   return made[1], made[2]
 end
 
--- A reading of `words` (each { text, x, y, w, h, approx? }), as host.ocr.read hands one back.
+-- A reading of `words` (each { text, x, y, w, h, approx? }), as host.ocr.recognize hands one back.
 function T.reading(words, lines)
   local text = {}
   for _, w in ipairs(words) do text[#text + 1] = w.text end
@@ -1900,5 +1900,35 @@ fn the_databases_position_is_forgotten_when_the_preset_may_have_changed() {
         T.choose(header, 5, 490, 116, 192, 96)
         T.ok(T.count("is forgotten: Load preset chosen") == 1, T.dump())
         T.ok(T.info(header, "AR Bond Pess Slide") == "AR Bond Pess Slide, not in the database", T.said())
+    "##);
+}
+
+/// A step waits for the preset's name before its click, and only its module waits: another program
+/// brought to the front meanwhile takes the press away — nothing is clicked or said in it, and the
+/// log says why.
+#[test]
+fn a_step_whose_window_left_the_front_during_its_name_read_clicks_nothing() {
+    run_mac(r##"
+        local S = T.S
+        local W = T.float(80)
+        S.listed = { W }
+        T.at(W)
+        local header = T.avenger()
+        T.answer(T.lastRead("vps-avenger header"), T.header(98, 84, 1.6, 80))
+        T.event()
+        T.run(400)
+        local said, clicks = #S.speech, #S.clicks
+        S.ocr = function(g)
+          if T.region(g) ~= "152,95,440,119" then return "" end
+          -- Another program comes to the front while the name is being read.
+          S.front, S.chain = T.OTHER, { T.OTHER }
+          T.turn()
+          return "Init Preset"
+        end
+        T.pressAt(header, 3)
+        T.ok(#S.clicks == clicks, "a click in the other program: " .. tostring(T.clickAt()))
+        T.ok(#S.speech == said, "something said: " .. T.said(said + 1))
+        T.ok(T.count("[avenger] 'Next preset': not going on after the name was read — the overlay is on another "
+          .. "window now") == 1, T.dump())
     "##);
 }

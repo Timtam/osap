@@ -279,11 +279,11 @@ local img = host.screen.capture({x1,y1,x2,y2})
 Win: Windows.Graphics.Capture + SIMD-NCC · macOS: ScreenCaptureKit (Screen Recording permission). *NCC was the plan and was not built: the shipped matcher is exact per colour channel within a `tolerance`, with no score, over a GDI capture (or DXGI Desktop Duplication for a module that declares it); there is no `host.screen.capture`, and on Windows every `pixel` call is a screen read of its own (on macOS only reads inside one small tile within 5 ms share a capture) — see the [reference](api/screen.md).*
 
 ### host.ocr — text recognition
-```luau
+```text
 local r = host.ocr.recognize({ region={540,13,608,23}, engine="best", lang="eng" })
 -- r = { text="Init", boxes={...} }
 ```
-Native by default (Windows.Media.Ocr / Apple Vision), ONNX fallback (study §2). Replaces ReaHotkey's Tesseract-exe invocation. *As built there is no `engine` option and the result has `words` rather than `boxes`. `recognize` is synchronous on the event loop; [`host.ocr.read`](api/ocr.md#host-ocr-read) photographs at the call and recognises on threads of its own, answering in a callback. `lang` is a BCP 47 language tag such as `"de"` or `"en"`, matched against the languages each platform's recogniser reads, so the same tag works on both; Tesseract's `"eng"` matches nothing and is answered as a language that is not available. Omitted, `read` uses the user's own language, and `recognize` Windows' user-profile languages or macOS Vision's default. See [Recognition language](api/ocr.md#recognition-language).*
+Native by default (Windows.Media.Ocr / Apple Vision), ONNX fallback (study §2). Replaces ReaHotkey's Tesseract-exe invocation. *As built there is no `engine` option and the result has `words` rather than `boxes`. [`host.ocr.recognize(what, opts?, cb?)`](api/ocr.md#host-ocr-recognize) photographs at the call and recognises on threads of its own: given a callback it answers there, and without one it waits in its handler while only its own module waits. `lang` is a BCP 47 language tag such as `"de"` or `"en"`, matched against the languages each platform's recogniser reads, so the same tag works on both; Tesseract's `"eng"` matches nothing and is answered as a language that is not available. Omitted, the read uses the user's own language. See [Recognition language](api/ocr.md#recognition-language).*
 
 ### Accessibility elements of foreign apps — shipped as `host.element`
 

@@ -23,9 +23,10 @@
 --     "the one beside it".
 --   * THE FACTOR every coordinate is scaled by (O:scale), from both — see "The factor" below.
 --
--- Read OFF THE EVENT LOOP (host.ocr.read), as the runtime's identity rule asks of a panel: on a
--- Mac a read that finds nothing can hold the loop for a quarter of a second, and `identify` is
--- asked in every plug-in window of every DAW the keyboard comes into. So `identify` answers nil —
+-- Read with a callback (host.ocr.recognize), as the runtime's identity rule asks of a panel: on a
+-- Mac a read that finds nothing takes a quarter of a second, a wait for it would hold this
+-- module's keys, and `identify` is asked in every plug-in window of every DAW the keyboard comes
+-- into. So `identify` answers nil —
 -- "could not tell yet" — until the answer lands, and then asks every overlay to look again
 -- (host.window.recheck), exactly as sforzando's wordmark and Kontakt 7's top row do. A read that
 -- saw nothing (blank, none, failed) is no answer and is asked again, and so is one that is only
@@ -583,7 +584,7 @@ local function request(ctrl, st)
   local title = titleOf(ctrl)
   local token = {}
   st.reading = token
-  local ok, err = pcall(host.ocr.read, band, { lang = H.lang(), key = "vps-avenger header" }, function(r)
+  local ok, err = pcall(host.ocr.recognize, band, { lang = H.lang(), key = "vps-avenger header" }, function(r)
     answered(ctrl, st, token, band, cx, cy, title, r)
   end)
   if not ok then

@@ -1597,7 +1597,8 @@ fn stack_functions(lua: &Lua) -> HashSet<(String, usize)> {
     (0..SAMPLE_DEPTH).map_while(|level| raw_frame(lua, level)).filter_map(|f| func_of(&f)).collect()
 }
 
-fn raw_frame(lua: &Lua, level: usize) -> Option<RawFrame> {
+/// Frame `level` of the running coroutine's stack, as Luau describes it; `None` past its end.
+pub(crate) fn raw_frame(lua: &Lua, level: usize) -> Option<RawFrame> {
     lua.inspect_stack(level, |d| {
         let src = d.source();
         RawFrame {
@@ -1655,6 +1656,21 @@ pub(crate) fn frame_text(f: &RawFrame, chunks: &HashMap<String, (String, String)
         (None, _) => format!("function <{place}:{}>", f.defined.unwrap_or(0)),
     };
     (format!("{place}{line}: in {func}"), module)
+}
+
+/// Where a Luau frame of `lua`'s VM is: `<module>/<file>:<line>` in a chunk a module's load or
+/// `host.include` named (`name_chunk`), and otherwise the chunk's name and the line.
+pub(crate) fn frame_place(lua: &Lua, f: &RawFrame) -> String {
+    let source = f.source.clone().unwrap_or_default();
+    let named = slot_of(lua).and_then(|s| lock(&s.chunks).get(&source).cloned());
+    let place = match named {
+        Some((id, rel)) => format!("{id}/{rel}"),
+        None => source.trim_start_matches(['=', '@']).to_string(),
+    };
+    match f.line {
+        Some(l) => format!("{place}:{l}"),
+        None => place,
+    }
 }
 
 /// Notes the host call a binding runs, for the guard: the stop's messages say "in host.screen.pixel"

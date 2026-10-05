@@ -22,6 +22,8 @@ struct Rec {
     /// The buttons each module holds, and the input queued during the stall.
     held: RefCell<Vec<(usize, &'static str)>>,
     queued: RefCell<Dropped>,
+    /// The inputs that wait in each module's mailbox, behind its waiting handler.
+    waiting: RefCell<Vec<(usize, String)>>,
     /// A step of handing things back to the OS that panics.
     panics_in: Cell<Option<&'static str>>,
     calls: RefCell<Vec<String>>,
@@ -80,8 +82,12 @@ impl StopHost for Rec {
         self.maybe_panic("drop");
         std::mem::take(&mut *self.queued.borrow_mut())
     }
-    fn after_disable(&self, idx: usize) {
+    fn after_disable(&self, idx: usize) -> Vec<String> {
         self.note(format!("disable {idx}"));
+        let mut waiting = self.waiting.borrow_mut();
+        let mine = waiting.iter().filter(|(i, _)| *i == idx).map(|(_, n)| n.clone()).collect();
+        waiting.retain(|(i, _)| *i != idx);
+        mine
     }
     fn collect_garbage(&self, serial: u64) {
         self.note(format!("gc {serial}"));
@@ -225,6 +231,34 @@ fn a_stop_turns_the_module_off_at_once_and_settles_after() {
     stops::settle(&h);
     assert!(h.calls().is_empty(), "settled once");
     assert!(h.stops.is_stopped(1), "and stopped until turned on");
+}
+
+/// A module stopped while it waited — a library's stop — had keys waiting in its mailbox behind its
+/// handler: they go with the stop, said in a line of their own — not as keys pressed while the
+/// application was held, which it was not — and in the dialog's "Dropped".
+#[test]
+fn the_keys_that_waited_for_a_stopped_module_are_dropped_and_said() {
+    let h = Rec::with(3);
+    h.waiting.borrow_mut().extend([(1, "Tab".to_string()), (1, "Tab".to_string()), (1, "Space".to_string()), (2, "Alt+V".to_string())]);
+    let ev = kit_stop();
+    stops::mark(&h, vec![ev.trip.clone()]);
+    h.calls();
+    stops::settle(&h);
+    let calls = h.calls();
+    let lines: Vec<&String> = calls.iter().filter(|c| c.starts_with("log keys ")).collect();
+    assert_eq!(
+        lines,
+        [
+            "log keys [com.example.sampler] 1 key(s) that waited for it were dropped with the stop: Alt+V",
+            "log keys [com.example.synth] 3 key(s) that waited for it were dropped with the stop: Tab \u{d7}2, Space",
+        ],
+        "{calls:?}"
+    );
+    let queued = ["Alt+V".to_string(), "Tab".to_string(), "Tab".to_string(), "Space".to_string()];
+    let dialog = stops::dialog_text(&ev, &queued);
+    assert!(dialog.contains("Dropped: 4 keys that waited for it: Alt+V, Tab \u{d7}2, Space.\n"), "{dialog}");
+    assert!(stops::dialog_text(&event(trip(game_vm(1), "hotkey", None, 0)), &["Tab".to_string()]).contains("Dropped: 1 key that waited for it: Tab.\n"));
+    assert!(!stops::dialog_text(&ev, &[]).contains("waited for it"), "nothing waited, nothing said");
 }
 
 /// A panic while the keys are handed back, the queued input dropped or a button let go of is
@@ -415,7 +449,7 @@ fn the_messages_are_the_documented_ones() {
          application again."
     );
     found(&said);
-    let dialog = stops::dialog_text(&one);
+    let dialog = stops::dialog_text(&one, &[]);
     assert_eq!(
         dialog,
         "Stopped Game helper: its hotkey callback needed more than the 256 megabytes of memory it may use.\n\n\
@@ -458,7 +492,7 @@ fn the_messages_are_the_documented_ones() {
          error window."
     );
     found(&said);
-    let dialog = stops::dialog_text(&nested);
+    let dialog = stops::dialog_text(&nested, &[]);
     found(&dialog);
     assert!(dialog.contains(
         "Where, as far as it is known:\n  stack traceback:\n  [C]: in function 'read'\n  [string \
@@ -497,7 +531,7 @@ fn the_messages_are_the_documented_ones() {
          module manager."
     );
     found(&said);
-    let dialog = stops::dialog_text(&ev);
+    let dialog = stops::dialog_text(&ev, &[]);
     assert_eq!(
         dialog,
         "Stopped Game helper: its hotkey callback ran for 2 seconds of processor time without returning, at \
@@ -550,7 +584,7 @@ fn the_messages_are_the_documented_ones() {
          module manager."
     );
     found(&said);
-    assert!(stops::dialog_text(&wall).contains(
+    assert!(stops::dialog_text(&wall, &[]).contains(
         "How long: 0.7 s of processor time, 10.0 s in all. A callback may take 2 s of processor time or 10 s in all.\n\
          In a host call: host.screen.pixel \u{2014} the time ran out in it, or it had just returned.\n"
     ));
@@ -601,7 +635,7 @@ fn the_messages_are_the_documented_ones() {
     );
     found(&said);
     assert_eq!(stops::dialog_title(&library), "Modules stopped: com.example.kit and 2 that run its code");
-    let dialog = stops::dialog_text(&library);
+    let dialog = stops::dialog_text(&library, &[]);
     assert_eq!(
         dialog,
         "Stopped Overlay kit and the 2 modules that run its code, Sampler overlay and Synth overlay: its code ran for 2 \
@@ -662,7 +696,7 @@ fn the_messages_are_the_documented_ones() {
     let title = stops::dialog_title(&off);
     assert_eq!(title, "Modules stopped: com.example.sampler and com.example.synth, which run Overlay kit's code");
     found(&title);
-    assert!(stops::dialog_text(&off).contains("; tick each of them to turn it on again, built afresh, as a reload builds it."));
+    assert!(stops::dialog_text(&off, &[]).contains("; tick each of them to turn it on again, built afresh, as a reload builds it."));
 }
 
 #[test]

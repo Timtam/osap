@@ -128,6 +128,14 @@ already in front ([`initial = true`](window.md#host-window-ontrigger)), or in th
 dialog reaches every callback in the turn after OK, about 15 ms later — never inside the dialog's
 own event — and a disabled module's in that turn too.
 
+**A callback called for the dialog or for another module's `set` is a
+[handler](../module-runtime-and-lifecycle.md#handlers)** of its module: while the module is busy —
+one of its handlers [waits](../module-runtime-and-lifecycle.md#a-handler-waits) for a read — it
+waits behind it and runs once the module is free, in the order its events came, never dropped; and
+it may wait itself, for a [`host.ocr.recognize`](./ocr.md#host-ocr-recognize) without a callback.
+Your own, run inside your `set`, is a plain call: it runs at once, also while a handler of your
+module waits, and a read there without a callback cannot wait ([Where it waits](./ocr.md#where-it-waits)).
+
 ```luau
 -- Module A defines "lang" and watches it.
 host.settings.onChange("lang", function(new) host.log.info("A heard " .. new) end)

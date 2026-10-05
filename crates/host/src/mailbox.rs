@@ -11,10 +11,9 @@
 //! (`stops.rs`) is busy until it is turned on again: of its events only a setting's `onChange`
 //! reaches its mailbox then — the others are dropped, as for any disabled module — and waits.
 //!
-//! **No handler waits in this build** (`task.rs`): in the application nothing but a setting
-//! changed in the dialog, or by another module, ever waits here, and that for one tick. The rules
-//! below are for the build in which handlers wait, and are run now by the tests, whose wait point
-//! (`task::test_wait`) makes a module busy.
+//! **A handler waits** in `host.ocr.recognize` without a callback (`task.rs`): its module is busy
+//! until the reading comes, and its events wait here meanwhile. A setting changed in the dialog,
+//! or by another module, waits here for one tick even for a free module.
 //!
 //! **What waits, and what is folded or dropped.**
 //! - A focus change is folded into one queued last: between two other events stands at most one,
@@ -24,9 +23,11 @@
 //!   keeps one step. Two deliberate presses never fold, and a second hold after a press of the key
 //!   keeps a step of its own.
 //! - Inputs — keys, hotkeys, controller buttons pressed — are dropped above [`INPUT_LIMIT`] queued,
-//!   and the log says how many once the module is free. Answers, timers, window events, settings
-//!   and a controller button's release are never dropped: a listener that heard a press always
-//!   hears its release.
+//!   and the log says so at the first, then at most every [`LIMIT_QUIET`] with how many since, and
+//!   the rest once the module is free. Answers, timers, window events, settings and a controller
+//!   button's release are never dropped: a listener that heard a press always hears its release.
+//! - A module busy for [`LONG_WAIT`] in one handler with inputs waiting behind it is said once per
+//!   handler: what it waits in, where, and how many inputs wait.
 //! - A queued `every` timer is not queued at all: it is skipped and comes round again.
 //! - An event somebody waits on — one that came in the interactive lane — makes the read the
 //!   module's handler parked in the background lane waits for an interactive one, and every read
@@ -64,6 +65,14 @@ use crate::task::{self, Ctx, Ran};
 
 /// How many inputs may wait in one module's mailbox; the next one is dropped.
 pub(crate) const INPUT_LIMIT: usize = 256;
+
+/// How often the line for inputs dropped at [`INPUT_LIMIT`] is said at most while the module stays
+/// busy: the first at once, then the count since.
+pub(crate) const LIMIT_QUIET: Duration = Duration::from_secs(10);
+
+/// How long one handler may keep its module busy, with inputs waiting behind it, before the log
+/// says so ([`busy_line`]): a module that waits and reads on and on looks deaf.
+pub(crate) const LONG_WAIT: Duration = Duration::from_secs(30);
 
 /// How long the queued phase of one tick may run: about a tick. Past it the phase ends after the
 /// event that is running, and the rest runs on the next tick, in order — the module stays busy
@@ -130,6 +139,24 @@ impl Event {
             _ => false,
         }
     }
+
+    /// An input's name, as the log says it: a key's or a hotkey's combination ("Tab", "Alt+V"), a
+    /// controller button's ("controller south"); `None` for what is no input.
+    pub(crate) fn input_name(&self) -> Option<String> {
+        match self {
+            Event::Hotkey { spec, .. } => Some(spec.clone()),
+            Event::Key { vk, mods, .. } => Some(crate::backend::spec_name_for(crate::backend::KeyOs::CURRENT, *vk, *mods)),
+            Event::Pad { kind: PadKind::Button, event, .. } => Some(match &event.kind {
+                crate::backend::gamepad::PadEventKind::Down(b) => {
+                    format!("controller {}", crate::backend::gamepad::names::button_name(*b))
+                }
+                _ => "a controller combination".to_string(),
+            }),
+            #[cfg(test)]
+            Event::Call { input: true, what, .. } => Some((*what).to_string()),
+            _ => None,
+        }
+    }
 }
 
 /// What a queued event runs, resolved when it runs.
@@ -169,10 +196,11 @@ struct Mailbox {
     queue: VecDeque<Queued>,
     /// Queued inputs, against [`INPUT_LIMIT`].
     inputs: usize,
-    /// Inputs dropped at the limit in this busy stretch, and what the module waited for, and for
-    /// how long, when the first was: said once it is free.
+    /// Inputs dropped at the limit since the last line about them, and what the module waited for,
+    /// and for how long, when the first of them was; and when that line was said.
     over: u32,
     over_why: Option<(String, u128)>,
+    over_said: Option<Instant>,
 }
 
 /// Every module's mailbox. Main thread only, like the rest of `Shared`.
@@ -342,6 +370,7 @@ fn enqueue<H: MailHost>(h: &H, owner: Owner, lua: &Lua, mut ev: Event) -> Delive
             inputs: 0,
             over: 0,
             over_why: None,
+            over_said: None,
         };
         let b = boxes.entry(owner.idx).or_insert_with(fresh);
         // A VM that went without its mailbox going with it: what it held is let go.
@@ -352,14 +381,18 @@ fn enqueue<H: MailHost>(h: &H, owner: Owner, lua: &Lua, mut ev: Event) -> Delive
             return Delivered::Dropped;
         }
         if ev.is_input() && b.inputs >= INPUT_LIMIT {
-            b.over += 1;
-            if b.over_why.is_none() {
-                b.over_why = Some(h.tasks().parked_of(owner.idx).unwrap_or_else(|| ("its earlier events".to_string(), 0)));
-            }
-            (stale, Some(ev))
+            let said = note_over(b, Instant::now(), || {
+                h.tasks().parked_of(owner.idx).unwrap_or_else(|| ("its earlier events".to_string(), 0))
+            });
+            (stale, Some((ev, said)))
         } else {
             if ev.is_input() {
                 b.inputs += 1;
+                // Named for the timer's line, should the module's handler be a poll's waiting
+                // for a read (`task::timer_wait_line`).
+                if let Some(name) = ev.input_name() {
+                    h.tasks().note_behind(owner.idx, name);
+                }
             }
             if let Event::Read(r) = &ev {
                 crate::ocr::lua::note_queued(h.ocr_state(), r);
@@ -369,11 +402,31 @@ fn enqueue<H: MailHost>(h: &H, owner: Owner, lua: &Lua, mut ev: Event) -> Delive
         }
     };
     discard_all(h, owner.idx, stale, Why::Gone);
-    if let Some(ev) = over {
+    if let Some((ev, said)) = over {
+        if let Some((n, (what, ms))) = said {
+            logging::line("keys", &limit_line(&h.module_id(owner.idx), n, &what, ms));
+        }
         h.discard(owner.idx, ev, Why::Limit);
         return Delivered::Dropped;
     }
     Delivered::Queued
+}
+
+/// An input dropped at the limit, counted in `b`: the line to say now — how many since the last,
+/// and what the module waited for when the first of them was — at the first, and then once
+/// [`LIMIT_QUIET`] has passed since the last; the rest is said when the module is free
+/// (`settle_box`). `why` is asked only for the first of a line.
+fn note_over(b: &mut Mailbox, now: Instant, why: impl FnOnce() -> (String, u128)) -> Option<(u32, (String, u128))> {
+    b.over += 1;
+    if b.over_why.is_none() {
+        b.over_why = Some(why());
+    }
+    if b.over_said.is_some_and(|at| now.saturating_duration_since(at) < LIMIT_QUIET) {
+        return None;
+    }
+    b.over_said = Some(now);
+    let n = std::mem::take(&mut b.over);
+    b.over_why.take().map(|w| (n, w))
 }
 
 /// Folds `ev` into what is queued, if it folds: a focus change after a focus change queued last;
@@ -433,6 +486,29 @@ pub(crate) struct Phase {
     pub budget: bool,
 }
 
+/// The line for a module whose one handler has kept it busy for [`LONG_WAIT`] or longer at `now`,
+/// with inputs waiting behind it, once per handler: what it waits in, for how long, where, and how
+/// many inputs wait. The lines said; asked by every queued phase.
+pub(crate) fn say_long_waits<H: MailHost>(h: &H, now: Instant) -> Vec<String> {
+    let waiting: Vec<(usize, usize)> =
+        h.mail().boxes.borrow().iter().filter(|(_, b)| b.inputs > 0).map(|(idx, b)| (*idx, b.inputs)).collect();
+    let mut said = Vec::new();
+    for (idx, inputs) in waiting {
+        if let Some((what, busy, place)) = h.tasks().long_wait(idx, now, LONG_WAIT) {
+            let line = busy_line(&h.module_id(idx), busy.as_secs(), &what, &place, inputs);
+            logging::line("keys", &line);
+            said.push(line);
+        }
+    }
+    said
+}
+
+/// The line for a module one handler has kept busy for `secs` seconds, in a `what` handler that
+/// waits at `place`, with `inputs` waiting behind it.
+pub(crate) fn busy_line(module: &str, secs: u64, what: &str, place: &str, inputs: usize) -> String {
+    format!("[{module}] has been busy for {secs} s in a {what} handler, waiting at {place}; {inputs} key(s) wait behind it")
+}
+
 /// The tick's phase for queued events: every free module with events gets them, oldest first,
 /// until its handler waits or the events it had when the phase began are done — an event queued
 /// during the phase waits for the next tick, so two modules whose `onChange` set each other's
@@ -446,6 +522,7 @@ pub(crate) fn run_queued<H: MailHost>(h: &H) -> Phase {
     if tasks.any_handler_running() {
         return phase;
     }
+    say_long_waits(h, Instant::now());
     let mut plan: Vec<(usize, usize)> = h
         .mail()
         .boxes
@@ -513,8 +590,8 @@ pub(crate) fn run_queued<H: MailHost>(h: &H) -> Phase {
     phase
 }
 
-/// A mailbox that emptied goes, with the VM it held; the inputs it dropped at the limit in this
-/// busy stretch are said now.
+/// A mailbox that emptied goes, with the VM it held; the inputs it dropped at the limit since its
+/// last line about them are said now.
 fn settle_box<H: MailHost>(h: &H, idx: usize) {
     let gone = {
         let mut boxes = h.mail().boxes.borrow_mut();
@@ -552,8 +629,9 @@ pub(crate) fn limit_line(module: &str, n: u32, what: &str, ms: u128) -> String {
 
 /// Takes module `idx`'s mailbox away — disabled, reloaded, removed: every event in it is
 /// discarded with `why`, but a disable keeps a setting's `onChange`, which a disabled module still
-/// hears. Beside `task_drop_owner`, wherever that is called.
-pub(crate) fn drop_owner<H: MailHost>(h: &H, idx: usize, why: Why) {
+/// hears. Beside `task_drop_owner`, wherever that is called. The names of the inputs it dropped —
+/// keys, hotkeys, controller buttons pressed — in the order they came: what a stop says it dropped.
+pub(crate) fn drop_owner<H: MailHost>(h: &H, idx: usize, why: Why) -> Vec<String> {
     let taken: Vec<Queued> = {
         let mut boxes = h.mail().boxes.borrow_mut();
         match boxes.get_mut(&idx) {
@@ -571,7 +649,9 @@ pub(crate) fn drop_owner<H: MailHost>(h: &H, idx: usize, why: Why) {
             Some(_) => boxes.remove(&idx).map(|b| b.queue.into_iter().collect()).unwrap_or_default(),
         }
     };
+    let names = taken.iter().filter_map(|q| q.ev.input_name()).collect();
     discard_all(h, idx, taken, why);
+    names
 }
 
 /// `rollback_to(n)`'s share: the mailbox of every module from index `n` on.
@@ -605,4 +685,33 @@ pub(crate) fn cost_per_event<H: MailHost>(h: &H, idx: usize, lua: &Lua, n: u32) 
     }
     let handler = t.elapsed().as_secs_f64() * 1e6 / f64::from(n);
     (handler, plain)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Inputs dropped at the limit while a module stays busy are said at the first, then at most
+    /// every [`LIMIT_QUIET`] with how many since — not only once the module is free, which a module
+    /// that waits and reads on and on never is.
+    #[test]
+    fn inputs_dropped_at_the_limit_are_said_at_once_and_then_every_ten_seconds() {
+        let mut b = Mailbox {
+            lua: Lua::new(),
+            gen: 1,
+            queue: VecDeque::new(),
+            inputs: INPUT_LIMIT,
+            over: 0,
+            over_why: None,
+            over_said: None,
+        };
+        let t0 = Instant::now();
+        let why = || ("timer".to_string(), 2300);
+        assert_eq!(note_over(&mut b, t0, why), Some((1, why())), "the first at once");
+        assert_eq!(note_over(&mut b, t0 + Duration::from_secs(3), why), None);
+        assert_eq!(note_over(&mut b, t0 + Duration::from_secs(9), why), None);
+        assert_eq!(note_over(&mut b, t0 + LIMIT_QUIET, why), Some((3, why())), "then how many since");
+        assert_eq!(note_over(&mut b, t0 + Duration::from_secs(11), why), None);
+        assert_eq!((b.over, b.over_why.is_some()), (1, true), "the rest is said once the module is free");
+    }
 }

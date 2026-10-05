@@ -363,7 +363,7 @@ pub enum Tweak {
     TargetPx(usize),
     /// Every compute stage that offers this device is pinned to it.
     Device(Device),
-    /// This one recognition language, as `host.ocr.read` sends it.
+    /// This one recognition language, as `host.ocr.recognize` sends it.
     Lang(&'static str),
     /// The neural recogniser instead of Vision, handed this much of the region. Small regions
     /// only.
@@ -419,7 +419,7 @@ pub static VARIANTS: &[Variant] = &[
     Variant { name: "cpu", tweak: Tweak::Device(Device::Cpu), what: "every stage that offers it pinned to the CPU (macOS 14 and later)" },
     Variant { name: "gpu", tweak: Tweak::Device(Device::Gpu), what: "every stage that offers it pinned to the GPU (macOS 14 and later)" },
     Variant { name: "ane", tweak: Tweak::Device(Device::NeuralEngine), what: "every stage that offers it pinned to the Neural Engine (macOS 14 and later)" },
-    Variant { name: "lang-en", tweak: Tweak::Lang("en-US"), what: "recognition language en-US, as host.ocr.read sends it to an English-speaking user" },
+    Variant { name: "lang-en", tweak: Tweak::Lang("en-US"), what: "recognition language en-US, as host.ocr.recognize sends it to an English-speaking user" },
     Variant {
         name: "paddle-raw",
         tweak: Tweak::Paddle(PaddleInput::Raw),

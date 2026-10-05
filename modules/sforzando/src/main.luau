@@ -103,15 +103,15 @@ local WORDMARK = host.os.pick {
 
 -- The wordmark on the DAW's plug-in panel, read OFF the event loop.
 --
--- On a child control (Windows) the read below is synchronous and asked once per control handle,
--- which is what it always was. The panel is asked once per STAY instead — every time the keyboard
--- comes back into a plug-in from the DAW's own controls or another window — and in EVERY plug-in
--- of every DAW, not only sforzando's, because a panel says nothing about which plug-in it holds.
--- On a Mac a synchronous read there is Vision with its retry ladder, up to 250 ms on the thread
--- that carries the event tap when nothing is found — which is exactly the common case, another
--- plug-in's graphics — so the first key after coming into any plug-in would wait for it. So it is
--- asked of the OCR worker, and `identify` answers nil ("could not tell yet") until the answer
--- lands, then asks every overlay to look again; `false` would be kept for the stay.
+-- On a child control (Windows) the read below is the answer itself, asked once per control handle:
+-- the handler that asked waits for the reading. The panel is asked once per STAY instead — every
+-- time the keyboard comes back into a plug-in from the DAW's own controls or another window — and
+-- in EVERY plug-in of every DAW, not only sforzando's, because a panel says nothing about which
+-- plug-in it holds. On a Mac a read there is Vision with its retry ladder, up to 250 ms when
+-- nothing is found — which is exactly the common case, another plug-in's graphics — so a wait for
+-- it would hold the module's first key after coming into any plug-in. So it is asked with a
+-- callback, and `identify` answers nil ("could not tell yet") until the answer lands, then asks
+-- every overlay to look again; `false` would be kept for the stay.
 --
 -- Only a read that READ something is a verdict: text without the wordmark is another plug-in.
 -- Nothing read — "blank", "none", a read that failed or was pushed out — is not a "no": a view
@@ -128,7 +128,7 @@ local function wordmarkOnPanel(ctrl)
   if wordmark.reading then return nil end
   wordmark.reading = true
   local ox, oy = math.floor(ctrl.client.x), math.floor(ctrl.client.y)
-  host.ocr.read({ ox + WORDMARK[1], oy + WORDMARK[2], ox + WORDMARK[3], oy + WORDMARK[4] },
+  host.ocr.recognize({ ox + WORDMARK[1], oy + WORDMARK[2], ox + WORDMARK[3], oy + WORDMARK[4] },
     { lang = "en", key = "sforzando-wordmark" }, function(r)
       -- Another window, size or stay by now: that one reads for itself.
       if wordmark.key ~= key then return end
@@ -178,14 +178,20 @@ ov:attachEmbedded({
     if host.element and host.element.find(ctrl.id, "PlogueXMLGUI", host.element.type.Pane) then
       return true
     end
-    -- Otherwise the "sforzando" wordmark in the header, read where it would be: off the loop on
-    -- the DAW's panel (above), and on a control of its own as it always was — a small region, on
-    -- the event loop, once per control handle.
+    -- Otherwise the "sforzando" wordmark in the header, read where it would be: with a callback
+    -- on the DAW's panel (above), and on a control of its own as the answer itself — a small
+    -- region, read in English as the wordmark is written, once per control handle; the handler
+    -- that asked waits for the reading, and nothing else does.
     if ctrl.stay ~= nil then return wordmarkOnPanel(ctrl) end
     local ox, oy = ctrl.client.x, ctrl.client.y
-    local r = host.ocr.recognize({
-      region = { ox + WORDMARK[1], oy + WORDMARK[2], ox + WORDMARK[3], oy + WORDMARK[4] },
-    })
-    return string.find(string.lower(r.text or ""), "sforzando", 1, true) ~= nil
+    local r = host.ocr.recognize({ ox + WORDMARK[1], oy + WORDMARK[2], ox + WORDMARK[3], oy + WORDMARK[4] },
+      { lang = "en" })
+    -- The panel's rule: only a read that READ something is a verdict. A capture that failed, a
+    -- recogniser that hung, too many reads waiting, no English recogniser: each is a reading, not a
+    -- raise, and `false` would be kept for this control for good. nil is "could not tell yet": the
+    -- next evaluation asks again, and the runtime takes IDENTIFY_UNDECIDED_MAX of them in a row as
+    -- no.
+    if r.status ~= "text" then return nil end
+    return string.find(string.lower(r.text), "sforzando", 1, true) ~= nil
   end,
 }, { menus = MENUS })

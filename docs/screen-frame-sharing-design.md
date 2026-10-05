@@ -2,6 +2,8 @@
 
 *Entscheidungsdokument, 2026-07-24. Anlass: Vorschlag, statt Live-Screen-Zugriffen pro Operation einen periodisch aktualisierten Screenshot des beobachteten Bereichs zu halten und alle Vergleichsoperationen dagegen auszuführen. Analyse: Call-Site-Inventar aller Module, Rust-Architektur-Audit, adversariale Design-Kritik (3 unabhängige Reviews + verifizierende Synthese), plus lokale GDI-Benchmarks.*
 
+> *Stand 2026-10-05:* `host.ocr.read` und `recognizeMany` gibt es nicht mehr: beide sind in [`host.ocr.recognize(was, optionen?, rückruf?)`](api/ocr.md#host-ocr-recognize) aufgegangen — mit Rückruf das frühere `read`, ohne Rückruf wartet der Handler, und eine Liste von Regionen ersetzt `recognizeMany`. Die Erwähnungen unten bleiben als Stand ihres Datums.
+
 ## 0. Messbasis
 
 Benchmark auf der Referenzmaschine (GTX 1060, 1920×1080 @ 60 Hz, Windows 11; PowerShell-P/Invoke des identischen GDI-Pfads wie `WindowsBackend::capture`, Median aus 30 Läufen):

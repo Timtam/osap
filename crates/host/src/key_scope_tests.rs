@@ -9,9 +9,10 @@
 //! `on_key` calls, into each module's real mailbox (`mailbox.rs`).
 //!
 //! **Busy** is a module whose handler waits: an event of its VM, run as a handler through its
-//! mailbox, parked at the tests' own wait point (`task::test_wait`). It goes on — and tears its
-//! overlay down — only when the test answers it (`task::test_release`), as a module whose
-//! callback waits for a read will once handlers wait. Until then the other module works.
+//! mailbox, parked at a read (`host.ocr.recognize` without a callback, answered by the read service
+//! over the fake recogniser when the test turns the loop) or at the tests' own wait point
+//! (`task::test_wait`), which goes on only when the test answers it (`task::test_release`). Until
+//! then the other module works.
 
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
@@ -44,6 +45,9 @@ struct Host {
     /// (module, context, message) of every error reported.
     errors: RefCell<Vec<(usize, String, String)>>,
     captures: Captures,
+    /// Hotkey registrations, as the host keeps them (`Event::Hotkey`, opened by the host's own
+    /// `open_hotkey_in`).
+    hotkeys: RefCell<HashMap<i32, crate::HotkeyReg>>,
     backend: StubBackend,
     _loop: crate::loop_guard::TestLoop,
 }
@@ -83,15 +87,12 @@ impl ReadHost for Host {
     fn read_source(&self, _: &Lua, _: (i32, i32, i32, i32)) -> CaptureSource {
         CaptureSource::Standard
     }
-    fn screen_size(&self) -> (i32, i32) {
-        (1920, 1080)
-    }
     fn slow_reads(&self) -> bool {
         false
     }
 }
 
-/// The events these modules hear: captured keys, and the tests' own.
+/// The events these modules hear: captured keys, hotkeys, and the tests' own.
 impl MailHost for Host {
     fn mail(&self) -> &Mailboxes {
         &self.mail
@@ -99,6 +100,9 @@ impl MailHost for Host {
     fn open(&self, idx: usize, _: &Lua, ev: Event) -> Opened {
         match ev {
             Event::Key { owner, token, vk, mods, front, .. } => captures::open_key(self, owner, token, vk, mods, front),
+            Event::Hotkey { id, owner, front, binding, spec } => {
+                crate::open_hotkey_in(self, &self.hotkeys, id, owner, front, binding, &spec)
+            }
             Event::Call { f, args, what, .. } => mailbox::open_call(idx, f, args, what),
             _ => Opened::Gone,
         }
@@ -134,6 +138,7 @@ fn host() -> Rc<Host> {
         epoch: Cell::new(0),
         errors: RefCell::new(Vec::new()),
         captures: Captures::default(),
+        hotkeys: RefCell::new(HashMap::new()),
         backend: StubBackend::default(),
         _loop: crate::loop_guard::mark_for_a_test(),
     })
@@ -142,8 +147,9 @@ fn host() -> Rc<Host> {
 /// VM generations, process-wide as the host's are; apart from task_tests.rs's.
 static NEXT_GEN: AtomicU64 = AtomicU64::new(500_000);
 
-/// A fresh VM for module `idx`, enabled, with the host's own `host.keys` capture bindings and the
-/// tests' wait point as the global `wait`.
+/// A fresh VM for module `idx`, enabled, with the host's own `host.keys` capture bindings and
+/// `host.ocr.recognize` — raising where it cannot wait — and the tests' wait point as the global
+/// `wait`.
 fn vm(h: &Rc<Host>, idx: usize) -> Lua {
     let lua = Lua::new();
     let gen = NEXT_GEN.fetch_add(1, Ordering::Relaxed);
@@ -160,6 +166,19 @@ fn vm(h: &Rc<Host>, idx: usize) -> Lua {
     let keys = lua.create_table().unwrap();
     crate::install_key_captures(&lua, &keys, idx, h.clone()).unwrap();
     host.set("keys", keys).unwrap();
+    let ocr = lua.create_table().unwrap();
+    let hh = h.clone();
+    let submit = lua
+        .create_function(move |lua, (what, opts, cb): (Value, Value, Value)| crate::ocr::lua::read(&*hh, lua, idx, what, opts, cb))
+        .unwrap();
+    let legacy = lua
+        .create_function(|lua, (_what, _opts, why): (Value, Value, String)| {
+            Ok((false, Value::String(lua.create_string(task::wait_message(task::Case::of(&why)))?)))
+        })
+        .unwrap();
+    let waits = task::waits(&lua, idx, h.clone(), legacy, submit).unwrap();
+    ocr.set("recognize", waits.get::<Function>("recognize").unwrap()).unwrap();
+    host.set("ocr", ocr).unwrap();
     lua.globals().set("wait", task::test_wait(&lua, idx, h.clone()).unwrap()).unwrap();
     lua.globals().set("host", host).unwrap();
     lua
@@ -507,4 +526,97 @@ fn a_key_that_waited_goes_to_its_module_s_new_capture_and_never_to_another_modul
         "[m1] Tab, pressed while the module was busy, was dropped: its registration was released meanwhile"
     );
     assert!(captures::busy_dropped_line("m1", "Alt+V", Gone::TakenOver).contains("the hotkey went to another module meanwhile"));
+}
+
+/// A hotkey press that waited in a busy module's mailbox runs through the host's own arm
+/// (`open_hotkey_in`): to the module's new registration of the combination when the one it was
+/// pressed for was released and made again meanwhile — the overlay went and came back — while the
+/// module's scope is everywhere or the window it was pressed in; never to another module's, which
+/// holds the combination by the time it runs.
+#[test]
+fn a_busy_module_s_hotkey_goes_to_its_new_registration_and_never_to_another_module_s() {
+    let h = host();
+    let a = vm(&h, 1);
+    let b = vm(&h, 2);
+    run(&a, "heard = {}");
+    run(&b, "heard = {}");
+    let binding = backend::parse_key_spec("Alt+V").ok();
+    let register = |id: i32, lua: &Lua, owner: usize, word: &str| {
+        let f: Function = lua.load(format!("return function() heard[#heard + 1] = '{word}' end")).eval().unwrap();
+        let cb = lua.create_registry_value(f).unwrap();
+        let reg = crate::HotkeyReg { module_idx: owner, lua: lua.clone(), cb, spec: "Alt+V".into(), binding, live: true };
+        h.hotkeys.borrow_mut().insert(id, reg);
+    };
+    let press = |id: i32| Event::Hotkey { id, owner: 1, front: Some(W1), binding, spec: "Alt+V".into() };
+    register(5, &a, 1, "old");
+    assert_eq!(event(&h, &a, 1, r#"wait("w")"#), Delivered::Parked);
+    assert_eq!(mailbox::deliver(&*h, 1, &a, press(5)), Delivered::Queued);
+    h.hotkeys.borrow_mut().remove(&5);
+    register(6, &a, 1, "new");
+    assert!(task::test_release(&*h, "w", Value::Nil));
+    mailbox::run_queued(&*h);
+    assert_eq!(heard(&a), "new", "the module's new registration of the combination");
+    // B holds the combination by the time A's press runs: dropped, never B's.
+    assert_eq!(event(&h, &a, 1, r#"wait("w")"#), Delivered::Parked);
+    assert_eq!(mailbox::deliver(&*h, 1, &a, press(6)), Delivered::Queued);
+    h.hotkeys.borrow_mut().remove(&6);
+    register(7, &b, 2, "B");
+    assert!(task::test_release(&*h, "w", Value::Nil));
+    mailbox::run_queued(&*h);
+    assert_eq!(heard(&a), "new");
+    assert_eq!(heard(&b), "", "never another module's");
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
+}
+
+/// Turns of the loop — the readings — until module `idx` has no handler any more, 10 s at most.
+fn settle(h: &Host, idx: usize) {
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while h.tasks.handler_of(idx).is_some() {
+        assert!(std::time::Instant::now() < until, "the read never came");
+        crate::ocr::lua::fire(h);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// A module that waits for a read: its keys wait behind it, and a key whose capture was made again
+/// meanwhile — the overlay went and came back through the arbiter — goes to the module's new
+/// capture once the reading has come.
+#[test]
+fn keys_wait_behind_a_read_and_go_to_the_new_capture() {
+    let h = host();
+    let a = vm(&h, 1);
+    h.backend.set_front(W1);
+    run(&a, r#"heard = {}; tab = host.keys.capture("Tab", function() heard[#heard + 1] = "old tab" end); host.keys.scope(true)"#);
+    let read = r#"heard[#heard + 1] = host.ocr.recognize({ 9921, 5, 9951, 15 }).text"#;
+    assert_eq!(event(&h, &a, 1, read), Delivered::Parked, "it waits for the reading");
+    assert_eq!(deliver(&h, "Tab", 1, W1), Arrived::Delivered(Delivered::Queued));
+    run(&a, r#"host.keys.release(tab); host.keys.capture("Tab", function() heard[#heard + 1] = "new tab" end)"#);
+    settle(&h, 1);
+    mailbox::run_queued(&*h);
+    assert_eq!(heard(&a), "9921,5 | new tab");
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
+}
+
+/// A menu flag counts for its module's window while that module holds a capture there — also while
+/// the module waits for a read, until the wait ends: Tab pressed in that window goes to the menu.
+/// Another module's window is not touched. A stop turns the module off at once, and its flag goes
+/// with its captures in the same hand-over to the hook.
+#[test]
+fn a_waiting_modules_menu_flag_holds_its_window_until_a_stop_lifts_it() {
+    let h = host();
+    let a = vm(&h, 1);
+    let b = vm(&h, 2);
+    h.backend.set_front(W1);
+    run(&a, r#"host.keys.capture("Tab", function() end); host.keys.scope(true); host.keys.menuOpen(true)"#);
+    h.backend.set_front(W2);
+    run(&b, r#"heard = {}; host.keys.capture("Tab", function() heard[#heard + 1] = "B tab" end); host.keys.scope(true)"#);
+    assert_eq!(event(&h, &a, 1, "host.ocr.recognize({ 9931, 5, 9961, 15 })"), Delivered::Parked);
+    assert_eq!(press(&h, "Tab", W1), Some(Capture::Pass { why: PassWhy::MenuFlag, owner: Some(1) }), "the menu has the keys");
+    assert_eq!(press(&h, "Tab", W2), Some(Capture::Take { owner: 2 }), "B's window is B's");
+    assert_eq!(deliver(&h, "Tab", 2, W2), RAN, "and B is free");
+    // The stop's first step: off, and the keys handed back to the hook (`stops::mark`).
+    h.enabled.borrow_mut()[1] = false;
+    h.refresh_captured();
+    assert_eq!(press(&h, "Tab", W1), Some(Capture::Pass { why: PassWhy::OutOfScope, owner: None }), "the flag went with the stop");
+    assert_eq!(heard(&b), "B tab");
 }
