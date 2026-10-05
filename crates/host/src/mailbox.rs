@@ -7,7 +7,9 @@
 //! as a handler of its VM. A module that has no handler and nothing queued is free, and its event
 //! runs at once, as a callback always did. A module is busy while its handler waits, while its
 //! mailbox is not empty, or while any module's handler is on the host's stack: no handler starts
-//! inside another. A busy module's event waits here.
+//! inside another. A busy module's event waits here. A module the host's guard stopped
+//! (`stops.rs`) is busy until it is turned on again: of its events only a setting's `onChange`
+//! reaches its mailbox then — the others are dropped, as for any disabled module — and waits.
 //!
 //! **No handler waits in this build** (`task.rs`): in the application nothing but a setting
 //! changed in the dialog, or by another module, ever waits here, and that for one tick. The rules
@@ -229,6 +231,15 @@ pub(crate) trait MailHost: ReadHost {
     /// An event that will not run: a disabled, reloaded or rolled-back module, the input limit.
     /// Releases what it owns, as each site does for a callback it does not call.
     fn discard(&self, idx: usize, ev: Event, why: Why);
+    /// Whether the host's guard stopped module `idx` (`stops.rs`): it is busy for as long as it
+    /// is stopped, so a setting's `onChange` — which a disabled module hears at once — waits in
+    /// its mailbox rather than be refused by its VM, until turning it on again rebuilds the module,
+    /// which reads its settings afresh. False for the tests' holders. A VM the guard stopped counts
+    /// as well, whatever this says ([`stopped`]): a module that was off when a library whose code
+    /// runs in it was stopped has a stopped VM and no record.
+    fn module_stopped(&self, _idx: usize) -> bool {
+        false
+    }
 }
 
 /// What became of a delivered event.
@@ -245,10 +256,18 @@ pub(crate) enum Delivered {
 }
 
 /// Whether module `idx` is busy: its handler is on the stack or parked, or its mailbox is not
-/// empty, or another module's handler is on the stack.
+/// empty, or another module's handler is on the stack — or the host's guard stopped it.
 pub(crate) fn busy<H: MailHost>(h: &H, idx: usize) -> bool {
     let tasks = h.tasks();
-    tasks.handler_of(idx).is_some() || h.mail().boxes.borrow().contains_key(&idx) || tasks.any_handler_running()
+    tasks.handler_of(idx).is_some()
+        || h.mail().boxes.borrow().contains_key(&idx)
+        || tasks.any_handler_running()
+        || h.module_stopped(idx)
+}
+
+/// Whether module `idx`, whose VM is `lua`, is stopped: by the host's record, or by its VM's.
+fn stopped<H: MailHost>(h: &H, idx: usize, lua: &Lua) -> bool {
+    h.module_stopped(idx) || crate::vm_guard::stopped(lua)
 }
 
 /// Whether an event for `owner` may run: its VM is still the one at its index, and its module is
@@ -273,7 +292,7 @@ pub(crate) fn deliver<H: MailHost>(h: &H, idx: usize, lua: &Lua, ev: Event) -> D
         h.discard(owner.idx, ev, why);
         return Delivered::Dropped;
     }
-    if busy(h, owner.idx) {
+    if busy(h, owner.idx) || crate::vm_guard::stopped(lua) {
         return enqueue(h, owner, lua, ev);
     }
     match run(h, owner.idx, lua, ev, current_priority()) {
@@ -432,7 +451,8 @@ pub(crate) fn run_queued<H: MailHost>(h: &H) -> Phase {
         .boxes
         .borrow()
         .iter()
-        .filter(|(idx, b)| !b.queue.is_empty() && tasks.handler_of(**idx).is_none())
+        // A stopped module's mailbox waits until it is turned on again.
+        .filter(|(idx, b)| !b.queue.is_empty() && tasks.handler_of(**idx).is_none() && !stopped(h, **idx, &b.lua))
         .map(|(idx, b)| (*idx, b.queue.len()))
         .collect();
     if plan.is_empty() {
@@ -454,6 +474,10 @@ pub(crate) fn run_queued<H: MailHost>(h: &H) -> Phase {
             let popped = {
                 let mut boxes = h.mail().boxes.borrow_mut();
                 let Some(b) = boxes.get_mut(&idx) else { break };
+                // Stopped by an event of this very phase: what is left waits, as it would have.
+                if stopped(h, idx, &b.lua) {
+                    break;
+                }
                 let Some(q) = b.queue.pop_front() else { break };
                 if q.ev.is_input() {
                     b.inputs = b.inputs.saturating_sub(1);

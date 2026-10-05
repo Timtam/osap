@@ -29,6 +29,7 @@ use crate::backend::gamepad::chord::{Chord, PadNow, Pending};
 use crate::backend::gamepad::{self as gp, demand, names, Axis, Button, PadEvent, PadEventKind, PadInfo, PadState};
 use crate::mailbox::{self, Event, Opened, PadKind};
 use crate::task::Ctx;
+use crate::vm_guard::host_call;
 use crate::{appcfg, clock_origin, logging, Shared};
 
 /// Which events a listener is for — the first argument of `host.gamepad.on`.
@@ -994,6 +995,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
     gamepad.set(
         "list",
         lua.create_function(|lua, ()| {
+            host_call!("host.gamepad.list");
             gp::ensure_started().map_err(mlua::Error::external)?;
             gp::refresh_if_idle();
             let t = lua.create_table()?;
@@ -1008,6 +1010,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
     gamepad.set(
         "state",
         lua.create_function(|lua, pad: f64| -> mlua::Result<mlua::Value> {
+            host_call!("host.gamepad.state");
             gp::ensure_started().map_err(mlua::Error::external)?;
             if pad.fract() != 0.0 || !(1.0..=gp::MAX_PADS as f64).contains(&pad) {
                 return Ok(mlua::Value::Nil);
@@ -1025,6 +1028,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
     gamepad.set(
         "on",
         lua.create_function(move |lua, (event, cb, opts): (String, Function, Option<Table>)| {
+            host_call!("host.gamepad.on");
             let filter = parse_filter(&event, opts.as_ref())?;
             gp::ensure_started().map_err(mlua::Error::external)?;
             if let Some(c) = filter.chord.as_ref() {
@@ -1054,6 +1058,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
     gamepad.set(
         "off",
         lua.create_function(move |_, token: i64| {
+            host_call!("host.gamepad.off");
             let removed = {
                 let mut ls = sh.pads.listeners.borrow_mut();
                 let before = ls.len();
@@ -1074,6 +1079,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
     gamepad.set(
         "status",
         lua.create_function(|lua, ()| {
+            host_call!("host.gamepad.status");
             let t = lua.create_table()?;
             match gp::start_outcome() {
                 None => t.set("watcher", "not started")?,

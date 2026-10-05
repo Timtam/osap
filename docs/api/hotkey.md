@@ -69,6 +69,14 @@ single module its own earliest registration does. Load order rather than raw reg
 order, so that reloading a module does not cost it its own key: it comes back with a fresh
 registration that would otherwise look like the newest claim on the combination.
 
+A module the application [stopped](../module-runtime-and-lifecycle.md#limits) — a callback
+ran too long or out of memory — gives up its combinations at once, as a disabled one does, so
+they go to the program in front or to a waiting claim. Presses of a hotkey made while that
+callback held the application are dropped, with a `[keys]` line, rather than delivered all at
+once when it ends — on Windows; on a Mac a press during the stall is not dropped (not checked
+on a Mac yet). The application's own reload key is the exception: pressed during the stall, it
+reloads every module after the stop. A stall that ends without a stop drops nothing.
+
 The practical consequence for an overlay: **do not announce a hotkey as available just
 because `register` returned an id.** It returns one either way.
 

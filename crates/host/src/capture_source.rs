@@ -19,11 +19,22 @@ use crate::backend::{self, Backend, CaptureFn, CaptureSource, CapturedImage};
 use crate::logging;
 
 /// One `code_module` dependency whose code runs inside a dependent's VM, with what the
-/// capture resolution needs to know about it. Collected by `collect_code_deps` in lib.rs,
-/// which loads each dependency's manifest anyway.
+/// capture resolution and the VM's memory limit need to know about it. Collected by
+/// `collect_code_deps` in lib.rs, which loads each dependency's manifest anyway.
 pub(crate) struct CodeDep {
     pub id: String,
+    /// Its manifest's `name`, for the module manager's details and the stop's messages.
+    pub name: String,
+    /// What its manifest's `[limits] memory_mib` grants its code (the default when absent): the
+    /// VM it runs in may use this much more (`vm_guard::describe`).
+    pub memory_mib: u32,
+    /// Whether its manifest sets `[limits] memory_mib`, rather than taking the default: the same
+    /// test as for the module itself, so a dependency that writes the default shows as set too.
+    pub memory_declared: bool,
     pub entry: PathBuf,
+    /// Its entry file's path in its own folder, as its manifest writes it (`src/main.luau`): how a
+    /// stop's messages name a line of its code (`vm_guard::name_chunk`).
+    pub entry_rel: String,
     pub screen: ScreenDecl,
     /// Whether its manifest requires `screen` or `ocr`. A `[screen]` table only counts from a
     /// module that reads the screen: a helper library that happens to carry one must not
@@ -318,6 +329,8 @@ fn describe(src: CaptureSource) -> &'static str {
 pub(crate) fn prewarm_hook(lua: &Lua) -> mlua::Result<Option<Function>> {
     if let CaptureSource::Duplication { .. } = vm_source(lua) {
         return Ok(Some(lua.create_function(|_, ()| {
+            // A host call like any binding: it can take a while — a graphics driver loads.
+            crate::vm_guard::host_call!("the host's start of desktop duplication");
             backend::prewarm_capture();
             Ok(())
         })?));
@@ -478,7 +491,11 @@ mod tests {
     fn dep(id: &str, screen: ScreenDecl, reads: bool, depth: u32, order: u32) -> CodeDep {
         CodeDep {
             id: id.into(),
+            name: id.into(),
+            memory_mib: module_manifest::DEFAULT_MEMORY_MIB,
+            memory_declared: false,
             entry: PathBuf::new(),
+            entry_rel: String::new(),
             screen,
             reads_screen: reads,
             deps: Vec::new(),

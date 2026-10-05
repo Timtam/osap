@@ -66,6 +66,7 @@ use crate::ocr::snap_queue::{self, ChangeInfo, SnapDone, SnapId, SnapKind, SnapO
 use crate::ocr::types::{current_priority, enter_priority, Priority, Rect};
 use crate::region::{self, ScreenRect};
 use crate::region_lua::{self, PointArg};
+use crate::vm_guard::host_call;
 use crate::{capture_source, describe_value, logging, one_value, with_reason, Shared};
 
 /// What one module VM's snapshots may hold between them. A constant like the template budget,
@@ -321,10 +322,14 @@ impl UserData for SnapshotHandle {
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("release", |_, s, ()| {
+            crate::vm_guard::host_call!("snapshot:release");
             s.release();
             Ok(())
         });
-        methods.add_method("crop", |lua, s, region: Value| crop(lua, s, &region));
+        methods.add_method("crop", |lua, s, region: Value| {
+            crate::vm_guard::host_call!("snapshot:crop");
+            crop(lua, s, &region)
+        });
         methods.add_meta_method(MetaMethod::ToString, |_, s, ()| Ok(s.describe()));
     }
 }
@@ -565,6 +570,7 @@ fn take(
 pub(crate) fn snapshot(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Function> {
     let sh = shared.clone();
     lua.create_function(move |lua, opts: Value| {
+        host_call!("host.screen.snapshot");
         take(lua, &sh.snap_bytes, sh.input_epoch.get(), &opts, |r| {
             // The source first, outside the timing, as every read does: in a module that reads
             // through desktop duplication the first read also compares the two sources, once.
@@ -656,6 +662,7 @@ fn read_pixels(
 pub(crate) fn pixels(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Function> {
     let sh = shared.clone();
     lua.create_function(move |lua, (points, opts): (Value, Value)| {
+        host_call!("host.screen.pixels");
         read_pixels(lua, &points, &opts, |at| {
             // The region the first-read comparison is offered: the points' box when one capture
             // of it is what the standard path takes, otherwise the first point, as `pixel`
@@ -1251,7 +1258,7 @@ fn deliver(
         let _prio = enter_priority(p.prio);
         match open_answer(st, p, answer, process) {
             Ok((f, args)) => {
-                if let Err(e) = crate::call_guarded(&f, args) {
+                if let Err(e) = crate::call_plain(&f, args) {
                     report(scope, &e);
                 }
             }
@@ -1453,7 +1460,7 @@ fn instant_at(ms: f64) -> Instant {
 /// `host.screen.snapshotAsync(opts, cb) -> nil`: see [`Shared::snap_async`].
 pub(crate) fn snapshot_async(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
-    lua.create_function(move |lua, (opts, cb): (Value, Value)| sh.snap_async(lua, idx, opts, cb))
+    lua.create_function(move |lua, (opts, cb): (Value, Value)| { host_call!("host.screen.snapshotAsync"); sh.snap_async(lua, idx, opts, cb) })
 }
 
 /// A handle over `frame` in `lua`, for other modules' tests.

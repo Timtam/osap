@@ -7086,6 +7086,154 @@ Follow-ups this work found and did not take on:
       the whole of `purge_module`'s registration purge in one helper, called before and after the
       `onDeactivate` calls; docs/module-runtime-and-lifecycle.md says what is dropped twice today.
 
+## A module that runs too long or uses too much memory is stopped (2026-10-04)
+
+G1 and G2 of the guard (a-final.md 5.1, g12-design.md; built in g1-built.md and g2-built.md, and
+changed after the three reviews in g12-final.md). Every VM has a memory limit and every callback a
+time limit; a module past either is stopped until the next start.
+
+- [x] **`[limits] memory_mib`** (module-manifest): whole MiB, default 256, 256 to 2048; outside
+      that the manifest fails like a bad `id` (start-up, hot-load, install review, `.zip`); a
+      wrong type fails as `invalid type`; an unknown key in `[limits]` is named in the log. The
+      install review says an amount above the default (for a `code_module`: in every VM its code
+      runs in), the update review a changed one (not a reason for a review); an install whose
+      unpacked `[limits]` differs from the reviewed one fails naming `[limits]`. Docs:
+      module-package-format.md, whose message and log lines tests hold word for word.
+- [x] **The VM's limit is the sum** over the code that runs in it (`populate_vm`:
+      `collect_code_deps` first, then `vm_guard::describe`), set before any module code runs;
+      every VM comes from `vm_guard::new_vm`, with 256 MiB at once (a source test holds it). A test
+      sums it from manifests on disk: the diamond's shared dependency once, a data dependency, an
+      absent optional one and one for another system not at all.
+- [x] **The time limit** (vm_guard.rs, thread_cpu.rs): 2 s of the event loop's processor time
+      (`GetThreadTimes` / `thread_info`, read by the `vm-guard` watchdog every 50 ms) or 10 s on
+      the wall clock, counted per slice from the outermost entry — a handler's delivery
+      (`task::start_thread`, `task::resume_parked`: one entry from the stretch that starts or
+      resumes it until it ends or waits, its own `coroutine.yield`s answered inside it, so
+      `while true do pcall(coroutine.yield) end` is one callback), `call_guarded`, a load step —
+      so waiting never counts. mlua's interrupt is installed once per VM, saved and switched off;
+      past a budget the watchdog writes it back into the VMs on the entry stack, once per slice
+      (again each look while the round waits). A VM inside another's callback that has run less
+      than half the budget that ran out itself lets the round pass (the caller takes it when the
+      call returns); the VM that takes it samples its stack for 10 ms and at least 16 times, and
+      the innermost function in every sample is the loop. That is a library's code — stopping the
+      library and every VM that runs it in one step — only for a loop in Luau that spent the
+      processor time with no host call running; the wall clock, a slow host call and the host's
+      own Luau stop only the VM's module; so does a callback that returns before its samples are
+      complete (one long host call, then its end), stopped as its entry ends. A load stops nobody
+      else. The outer callback's clocks restart. The stop is sticky: every safepoint raises again.
+- [x] **The stop** (stops.rs): when the outermost entry ends, `stops::mark` turns the modules off,
+      gives their keys back, releases the mouse buttons they hold with `mouseDown` (a per-module
+      record; also on disable, reload, rollback and exit), drops the keys and hotkey presses
+      queued during the stall (Windows: `KEY_QUEUE`, `HOTKEY_QUEUE`, and a `WM_HOTKEY` stamped
+      during the stall when it arrives, `DROP_OS_UNTIL`) — but answers the application's own
+      reload key — and writes the `[guard]` and `[keys]` lines; each step that touches the OS is
+      caught on its own, so the records are made whatever panics. Trips a panic left in the guard
+      are marked at the end of the turn. `stops::settle` at the end of the turn does the rest of
+      disabling and queues the dialog, the sentence (at most 255 characters, Windows'
+      notification) and the rows' notes (callback, host call, place). `settings.toml` keeps it
+      on; ticking it builds it afresh (`toggle_module`, `reload_module`) and turns it on; ticking
+      the library of a library's stop turns the whole group on; a reload keeps it off and its
+      report counts it. Details… in the manager shows the limit, its parts and the memory in use.
+- [x] **`host_call!` in every binding** (one atomic swap in, one store out), so the messages name
+      the host call the time ran out in; a source test holds every closure Luau can call to it,
+      and another every call from the host into Lua to the known places. G3 needs the same
+      marker.
+- [x] **mlua pinned to `=0.11.6`** (host and module-manifest's dev-dependency), with
+      `vm_guard_tests::mlua_pin`: the lock's versions, the field NULL in a new VM,
+      `set_interrupt` writing that field and nothing else, mlua leaving it alone afterwards
+      (`resume_error` included), the saved pointer calling the closure and its error ending a loop
+      and a coroutine, the closure seeing the interrupted coroutine, no call for the collector's
+      steps (armed, raising, a whole cycle of `gc_step` and allocations from Rust), the memory
+      limit, and the error variants the guard matches. They run in both CI jobs' `cargo test`.
+- [x] **The `[cpu]` lines**: the watchdog charges the loop's processor time to the VM on top at
+      each look; a module above 10 % of a minute, one callback of 250 ms, and a summary per module
+      at exit. A measurement; it changes nothing.
+- [ ] **NVDA test of G1 and G2** with `tools/guard-probe`, `-lib`, `-b`, `-c`
+      (`.\run-dev.ps1 -Build -Tools -Only guard-probe,guard-probe-lib,guard-probe-b,guard-probe-c`;
+      `-Build`, or an older build without the guard starts): the keys and what to expect are in
+      `tools/guard-probe/src/main.luau` (TESTS 0 to 18; every key ends by itself, so a build
+      without the guard never hangs on one). Then the real modules on `.\run-dev.ps1 -Build
+      -Release`: nothing may change, no `[guard] … stopped` line may appear, and the `[cpu]` lines
+      and each module's load time go back here.
+- [ ] **Set the `[cpu]` thresholds** (`CPU_LINE_PERCENT` 10 %, `CPU_LINE_CALLBACK` 250 ms, both
+      provisional in vm_guard.rs) after the first measurements.
+- [ ] **Decide: loads are held to the same 2 s / 10 s.** A legitimately slow load would now fail
+      ("stopped while loading"). Check the first build's `[cpu]` lines for load costs, Avenger's
+      above all.
+- [ ] **Decide: data-only dependents of a looping library stay on.** Today every library is a
+      `code_module`, so a loop in daw-hosts' own code turns off daw-hosts and nearly every overlay
+      at once; a module that depends on one for data only would not run its code, and stays on.
+- [ ] **Decide (changed after the reviews): turning a stopped module on builds it afresh**, as
+      a reload does, instead of turning on the same VM as the stop left it — which the G1 build
+      did, with the stopped VM's owed `onDeactivate` run first. A stop ends a callback anywhere:
+      the overlay runtime's `_deactivate` sets `active = false` before it unregisters its hotkeys,
+      so a stop between the two left hotkeys registered that the same VM, turned on again, gave
+      back to the OS while the overlay was not in front — swallowing keys in every program. The
+      owed `onDeactivate` is gone with it (the rebuilt VM has no overlay active), and so is the
+      design's alternative test `an_overlay_activated_again_without_a_deactivate_comes_up_whole`.
+- [ ] **Decide: ticking the library of a library's stop turns the whole group on** (each built
+      afresh), and ticking one of the others turns on only it. The alternative was a tick per row;
+      for the overlay runtime that is about a dozen.
+- [ ] **Decide: a stopped module's settings do not run** — they are stored, wait in its mailbox
+      rather than be refused by the stopped VM, and go with it when it is built afresh, which
+      reads them as they are then; **a reload keeps it off** (built as designed).
+- [ ] **Decide: controller presses during a stall** that ends in a stop: dropped like keys, or
+      delivered late as now?
+- [ ] **Decide: the budgets in a debug build.** The host's own work counts on a callback's
+      clocks, and a debug build runs it many times slower (one full-region image match took 12 s
+      there), so a callback the release build finishes in a fraction of a second can be stopped
+      under `run-dev.ps1` without `-Release`. Built: the same 2 s / 10 s in both, and the docs and
+      the probe say to judge real modules on a release build. Alternative: larger budgets under
+      `debug_assertions`.
+- [ ] **Keys pressed a moment before the stall** that waited in the same batch as the event that
+      stalled are dropped with the stall's (`drop_queued_input` takes the whole queue); the docs
+      say so. Dropping only keys stamped after the slice began would need the hook's `kb.time` in
+      `Taken` and the slice's start in tick terms.
+- [ ] **A memory error while `open` builds a handler's arguments** is reported as an error, not
+      a stop; the module is stopped at its next event. Only a module that keeps its VM full and
+      catches the error meets it (G1 open point).
+- [ ] **mlua's nil error for a memory error**: Luau calls a protected call's error handler for a
+      memory error too, and mlua's then returns nothing, so the error reaching the host is at times
+      `RuntimeError("<nil>")` (seen through a Rust callback, in five runs of six of the pin test on
+      Windows). The guard takes a nil error from a VM with less than 1/64 of its limit free for a
+      memory error. Recheck when mlua is unpinned.
+- [ ] **A sleep in the middle of a callback**: whether the wall clock (`Instant`) counts the
+      time the machine was asleep was not measured; if it does, a callback running at the moment
+      of a sleep would be stopped on waking. Rare (callbacks last milliseconds); the `[system]`
+      resume line beside a `[guard]` stop would show it.
+- [ ] **G3, a call that never returns** (a-final.md 5.1): the slice-age check, the hook's
+      pass-through flag, the speech sender, a second start that offers to end the frozen copy.
+      It builds on `vm_guard`'s `slice_seq`, `slice_start_ns` and `call` (the watchdog already
+      arms such a slice and logs it; nothing fires until the call returns).
+- [ ] **Stop by yield** in a handler instead of the sticky raise (a-guard.md 2.4, Y8), if a
+      module's `pcall` seeing the stop ever matters.
+- [ ] **A memory stop's sticky raise in a VM that is still full** can come as Luau's own
+      out-of-memory rather than the stop's text, until the settle collects the VM's garbage: the
+      module is stopped either way, and only an outer callback of the same VM sees the other text.
+      Collecting at the stop itself would cost the event loop a full collection at once.
+- [ ] **`guard-bench`** (g12-design.md 8), not built: the time from arming to the stop, idle and
+      under load, as a packaged command the Intel Mac runner (which runs no tests) can run, with a
+      `GUARD BENCH:` line in CI.
+- [ ] **`HANDLER COST` on the Mac**: every stretch is an entry of the guard, now with the time
+      limit's bookkeeping. On Windows, release, four runs: the figures are in
+      module-runtime-and-lifecycle.md; the Apple Silicon CI job prints it too, and
+      `GUARD ENTRY COST:` beside it.
+- [ ] **macOS, unverified:**
+      1. Keys typed during a 2 s stall reach the application once the tap times out, and the key
+         queue `drop_queued_input` drains is empty. Probe TEST 12 in a Mac session.
+      2. A Carbon hotkey pressed during a stall comes after it, or not at all. If it comes, it is
+         delivered, not dropped; the drop rule would need its event time.
+      3. `thread_cpu.rs`'s `thread_info` on the loop thread from the watchdog's: the test runs on
+         Apple Silicon only, and the Intel runner runs no tests.
+      4. The time from arming to the stop under load on an Intel Mac (`guard-bench`).
+      5. The stop's sentence (`announce`: a notification where there is one, else speech when a
+         screen reader runs), the Details… button and the row's note — wx controls like the
+         others — never seen on a Mac.
+      6. The sentence against VoiceOver reading the error window: on a Mac the sentence is
+         speech (AVSpeech or VoiceOver's announcement) while VoiceOver reads the window that took
+         the focus, so two voices may speak at once. The window says everything the sentence says.
+      The memory limit is mlua's allocator, the same on both.
+
 ## Dev tools
 
 - [x] **OCR window inspector (first version):** `tools/inspect` — **Ctrl+Alt+I** OCRs the focused window's client area and logs every recognized word with its **client-relative coordinates** (+ saves the capture with `AUTOMATION_PLATFORM_OCR_DEBUG=1`). Calibrates overlay regions and reveals where hardcoded (e.g. ReaHotkey) coordinates land vs the real controls. Resolved the sforzando polyphony case (the region was correct; the failures were the hover scrub-value — fixed by `hoverToRead`-off — and UWP OCR being blind to *single* digits). ✓ (2026-06-21)

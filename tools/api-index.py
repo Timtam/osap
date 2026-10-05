@@ -381,8 +381,10 @@ CAPABILITIES = [
     '- **A keyboard hook that only listens.** A [capture](keys.md#host-keys-capture) takes the '
     'key away; there is no listen-only mode for ordinary keys, only the `"<modifier> tap"` '
     'form watches without taking.',
-    '- **A script host with threads or async.** Every callback runs on one thread, and nothing '
-    'interrupts one that does not return. The slow work of '
+    '- **A script host with threads or async.** Every callback runs on one thread; one that runs '
+    'past 2 seconds of processor time or 10 seconds in all is stopped, with its module '
+    '([the limits](../module-runtime-and-lifecycle.md#limits)), and below that it holds '
+    'everything while it runs. The slow work of '
     '[`host.ocr.read`](ocr.md#host-ocr-read), '
     '[`matchCellsAsync`](screen.md#host-screen-matchcellsasync), '
     '[`imageSearchAsync`](screen.md#host-screen-imagesearchasync), '

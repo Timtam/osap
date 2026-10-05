@@ -112,8 +112,8 @@ fn post(event: &CGEvent) {
     CGEvent::post(CGEventTapLocation::HIDEventTap, Some(event));
 }
 
-// Taken by reference throughout, because `MouseButton` is neither `Copy` nor `Clone` and
-// every one of these wants to look at the same value more than once.
+// Taken by reference throughout, as they were written when `MouseButton` was neither `Copy` nor
+// `Clone`; it is both now (the host keeps the buttons a module holds down, to let go of them).
 fn cg_button(button: &MouseButton) -> CGMouseButton {
     match button {
         MouseButton::Left => CGMouseButton::Left,
@@ -122,7 +122,7 @@ fn cg_button(button: &MouseButton) -> CGMouseButton {
     }
 }
 
-/// The button's name for the log, since the shared enum carries no `Debug`.
+/// The button's name for the log, in the words of the rest of this file's lines.
 fn button_name(button: &MouseButton) -> &'static str {
     match button {
         MouseButton::Left => "left",

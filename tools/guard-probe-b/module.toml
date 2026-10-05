@@ -1,0 +1,14 @@
+id = "com.tool.guard-probe-b"
+name = "Guard probe B"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
+entry = "src/main.luau"
+dependencies = ["com.tool.guard-probe-lib"]
+
+# Part of tools/guard-probe (see the test list there).
+[capabilities]
+require = ["hotkey", "speech", "log", "arbiter", "settings"]
+
+# So the manager's Details… shows a declared amount and the sum: 300 + 256 = 556 MiB.
+[limits]
+memory_mib = 300

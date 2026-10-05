@@ -19,7 +19,10 @@
 >   and the asynchronous image searches run on one image worker, each answering in a callback,
 >   while `recognize`/`recognizeMany` and the synchronous screen reads still hold the loop —
 >   [threads](module-runtime-and-lifecycle.md#threads).
-> - **No memory limit or interrupt** is set on the Luau VMs.
+> - **A memory limit and a time limit** hold the Luau VMs: a module that runs its VM out of memory,
+>   or whose callback runs past 2 s of processor time or 10 s in all, is stopped until the next
+>   start, through Luau's interrupt, armed only when a callback is overdue; a host call that never
+>   returns still holds the application until it does — [limits](module-runtime-and-lifecycle.md#limits).
 > - **Keys:** the keyboard hook captures ordinary keys only (there is no listen-only mode for
 >   them; only a `"<modifier> tap"` is watched without being taken), and
 >   `host.input.send` sends virtual-key codes without scan codes — [`host.keys`](api/keys.md),
@@ -61,7 +64,7 @@
 
 ### Script runtime: Luau (answer to "Lua-fast + modern")
 
-The user's question "a language as fast as Lua, but with modern features" has a concrete answer in 2026: **Luau** (luau-lang/luau, MIT). It is Lua re-implemented in C++ (its own register VM, inline caching, fastcall builtins) and delivers exactly the sought profile: gradual/inferred types, clean OOP/closures *and* production-grade sandbox primitives (no FS/OS functions in the stdlib, hard memory limits, interruptible loops — by design; *the host as built sets neither a memory limit nor an interrupt, so a runaway module loop stalls the whole application — see [module-runtime-and-lifecycle.md](module-runtime-and-lifecycle.md#runtime-model)*). This makes it the only language that combines performance, modern features, and built-in sandboxing in one MIT embeddable — ideal for an AHK/KM successor that executes untrusted user code.
+The user's question "a language as fast as Lua, but with modern features" has a concrete answer in 2026: **Luau** (luau-lang/luau, MIT). It is Lua re-implemented in C++ (its own register VM, inline caching, fastcall builtins) and delivers exactly the sought profile: gradual/inferred types, clean OOP/closures *and* production-grade sandbox primitives (no FS/OS functions in the stdlib, hard memory limits, interruptible loops — by design; *the host as built sets a memory limit on every VM and arms the interrupt of a callback past its time limit, so a runaway module loop stalls the whole application for about 2 seconds and then its module is stopped — see [module-runtime-and-lifecycle.md](module-runtime-and-lifecycle.md#limits)*). This makes it the only language that combines performance, modern features, and built-in sandboxing in one MIT embeddable — ideal for an AHK/KM successor that executes untrusted user code.
 
 **Performance clarification (review-corrected):** Luau is *only in interpreter mode* on par with the LuaJIT *interpreter*. The LuaJIT *JIT* remains clearly faster; Luau native codegen is ~1.6x behind. For automation glue (hotkey snippets, UI control) this is irrelevant — the expensive operations are OS calls, not VM cycles. The original "close to LuaJIT" promise was too optimistic and is deliberately corrected here.
 

@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 
 use crate::ocr::types::{current_priority, enter_priority, Priority};
+use crate::vm_guard::host_call;
 
 /// A one-shot timer: fired once at or after `deadline`, then gone.
 struct Once {
@@ -280,6 +281,7 @@ pub(crate) fn table<S: 'static>(
     timer.set(
         "after",
         lua.create_function(move |lua, (ms, cb): (u64, Function)| {
+            host_call!("host.timer.after");
             get(&h).after(lua, idx, Duration::from_millis(ms), cb, now(&h))
         })?,
     )?;
@@ -290,6 +292,7 @@ pub(crate) fn table<S: 'static>(
         // (the host re-arms it), so it is the right tool for a poll — a library's landmark
         // appearing, a game's menu cursor moving.
         lua.create_function(move |lua, (ms, cb): (u64, Function)| {
+            host_call!("host.timer.every");
             get(&h).every(lua, idx, Duration::from_millis(ms), cb, now(&h))
         })?,
     )?;
@@ -297,6 +300,7 @@ pub(crate) fn table<S: 'static>(
     timer.set(
         "cancel",
         lua.create_function(move |_, token: Value| {
+            host_call!("host.timer.cancel");
             Ok(token_of(&token).is_some_and(|t| get(&h).cancel(idx, t)))
         })?,
     )?;
@@ -352,7 +356,7 @@ mod tests {
                 Due::Every { token, idx, .. } => (c.timers.every_fn(token), idx),
             };
             if let Some(f) = f {
-                if let Err(e) = crate::call_guarded(&f, ()) {
+                if let Err(e) = crate::call_plain(&f, ()) {
                     failed(idx, &e);
                 }
             }

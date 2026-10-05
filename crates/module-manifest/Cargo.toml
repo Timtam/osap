@@ -22,6 +22,7 @@ sha2 = "0.11"
 # drags wxWidgets behind it, and a gate nobody can afford to run is not a gate. Same version
 # and the same `luau` feature as host, so it is the same parser that will load the module.
 [dev-dependencies]
-mlua = { version = "0.11.6", features = ["luau"] }
+# Pinned as crates/host pins it (its guard writes behind mlua's back), so the lock keeps one mlua.
+mlua = { version = "=0.11.6", features = ["luau"] }
 # A folder per archive test that removes itself, however the test ends.
 tempfile = "3.27"

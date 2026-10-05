@@ -6,7 +6,7 @@ toc_max_heading_level: 2
 
 Timers are how a module waits without blocking. `after` covers the settling time an application needs before its new state can be read back — Kontakt clicks a header toggle and re-reads the panel 250 ms later — while `every` is for something that changes with no event at all, which is why Melodyne polls its read-out strip and why a library overlay polls for its landmark. A recurring timer is also re-armed across a disable, which a self-rescheduling `after` chain is not.
 
-**Neither is a thread.** Both are drained by the application's own loop, on the same main thread as speech, hotkeys and the arbiter, so a slow callback delays all of them: the pump logs any iteration over 250 ms, and what else it costs is platform-specific — see [A slow callback](#a-slow-callback). Nothing interrupts a callback that does not return: a loop that never ends stops the whole application.
+**Neither is a thread.** Both are drained by the application's own loop, on the same main thread as speech, hotkeys and the arbiter, so a slow callback delays all of them: the pump logs any iteration over 250 ms, and what else it costs is platform-specific — see [A slow callback](#a-slow-callback). A callback that has not returned after 2 seconds of the event loop's processor time, or 10 seconds in all, is stopped and its module turned off until the next start ([the limits](../module-runtime-and-lifecycle.md#limits)): a loop that never ends holds the whole application for about 2 seconds. An `every` that keeps tripping it is stopped once, not every interval, since its module is off afterwards.
 
 **Resolution is the loop's tick, about 15 ms.** Timers are looked at once per pass of the loop, which runs every 15 ms. A timer fires on the first pass at or after its time, never sooner, and `every` re-arms from the moment that pass ran — so an interval rounds up to whole ticks: `every(20)` fires about every 30 ms, `every(16)` about every 30 ms rather than at 60 Hz, and nothing fires more often than once a tick. The schedule also drifts by whatever each pass was late. Within one pass the one-shot timers that are due run first, then the recurring ones, each in the order they were armed.
 
@@ -138,7 +138,7 @@ No operating-system call; the same code as on Windows.
 
 ## A slow callback {#a-slow-callback}
 
-What a callback that takes too long costs beyond delaying everything else on the loop depends on the platform.
+What a callback that takes too long costs beyond delaying everything else on the loop depends on the platform. Past 2 seconds of processor time or 10 seconds in all it is stopped ([the limits](../module-runtime-and-lifecycle.md#limits)), and the keys pressed while it held the loop are dropped then, rather than delivered late as below.
 
 ### Windows
 

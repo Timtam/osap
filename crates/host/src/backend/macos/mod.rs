@@ -477,6 +477,14 @@ impl Backend for MacBackend {
         ax::listed_window_owns_point(id, x, y)
     }
 
+    /// The keys and hotkeys queued and not drained yet. Expected to be none: the tap and the
+    /// Carbon handler run on the event loop's thread, which the stall held, and the system switches
+    /// the tap off after about 300 ms, so keys typed meanwhile reach the application in front
+    /// (unverified on a Mac: TODO.md).
+    fn drop_queued_input(&self) -> crate::backend::DroppedInput {
+        queue::drop_pending()
+    }
+
     fn take_menu_pass_through(&self, owner: u32) -> Vec<(u32, u8)> {
         tap::take_menu_pass_through(owner)
     }

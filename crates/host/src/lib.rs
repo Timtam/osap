@@ -69,6 +69,22 @@ mod mailbox;
 mod task;
 /// The guard that keeps text recognition off the event loop — see the file.
 mod loop_guard;
+/// The guard over every module VM: its memory and time limits, every call from the host into its
+/// Lua, the watchdog that arms a callback past its time, and the stop of a module past a limit —
+/// see the file.
+mod vm_guard;
+/// The event loop's processor time, read from the guard's watchdog thread — see the file.
+/// Borrowed by crates/macos-check.
+mod thread_cpu;
+/// The guard's entries, limits and stops against real Luau VMs.
+#[cfg(test)]
+mod vm_guard_tests;
+/// What the host does with a stopped module: off until the next start, its keys back, its mouse
+/// buttons let go of, the keys of the stall dropped, and the messages — see the file.
+mod stops;
+/// The stop's two steps, its words and the manager's details, against a recording host.
+#[cfg(test)]
+mod stops_tests;
 mod gui;
 mod image_search;
 /// One running copy per user: the lock, and the request a second start sends — see the file.
@@ -106,7 +122,7 @@ mod timers;
 mod gamepad_api;
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -120,6 +136,7 @@ use image_search::{ImageResult, ImageTask, PendingImage};
 use mailbox::{Event, Opened};
 use module_manifest::LoadedModule;
 use template::Decoded;
+use vm_guard::host_call;
 
 const WINDOW_PRELUDE: &str = include_str!("window_prelude.luau");
 // The overlay runtime is the code module `com.platform.overlay`
@@ -336,6 +353,21 @@ struct Shared {
     tasks: task::Tasks,
     /// Each module's events that wait while it is busy (mailbox.rs).
     mail: mailbox::Mailboxes,
+    /// Every module VM's slot: its memory limit, the calls into it, whether it was stopped
+    /// (vm_guard.rs). Every VM the host builds comes from `vm_guard::new_vm(&shared.guard)`.
+    guard: Arc<vm_guard::Guard>,
+    /// The modules the guard stopped: off until the next start, and the stops not settled yet
+    /// (stops.rs).
+    stops: stops::Stops,
+    /// Rows of the manager that changed without the user changing them — a module stopped, or
+    /// turned on again after a stop — drained by the GUI's tick.
+    module_changes: RefCell<Vec<gui::ModuleChange>>,
+    /// The mouse buttons each module pressed with `host.input.mouseDown` and has not let go of,
+    /// by module index: released where the pointer is when the module stops running — stopped by
+    /// the guard, disabled, reloaded, rolled back, or the application ends
+    /// (`release_held_buttons`). A held button belongs to the whole desktop, so this lets go of
+    /// it for everyone.
+    held_buttons: RefCell<BTreeMap<usize, Vec<MouseButton>>>,
     /// module_idx → the generation of the VM it runs now (see `image_search::VmOwner`). A map,
     /// not a fifth parallel vector: `populate_vm` overwrites the entry for its index, so a
     /// rollback has nothing here to keep aligned.
@@ -1212,7 +1244,7 @@ impl Shared {
         self.forget_key_owner(idx);
         self.drop_pad_listeners(|i| i == idx);
         let mut to_resolve: Vec<String> = Vec::new();
-        let mut deactivations: Vec<Function> = Vec::new();
+        let mut deactivations: Vec<(Lua, Function)> = Vec::new();
         {
             let mut map = self.arbiter.borrow_mut();
             for (slot, s) in map.iter_mut() {
@@ -1226,7 +1258,7 @@ impl Shared {
                         s.claims.iter().find(|c| c.handle == active && c.module_idx == idx)
                     {
                         if let Ok(f) = c.lua.registry_value::<Function>(&c.on_deactivate) {
-                            deactivations.push(f);
+                            deactivations.push((c.lua.clone(), f));
                         }
                     }
                 }
@@ -1238,9 +1270,11 @@ impl Shared {
             }
             map.retain(|_, s| !s.claims.is_empty());
         }
-        for f in deactivations {
-            if let Err(e) = call_guarded(&f, ()) {
-                logging::line("arbiter", &format!("onDeactivate error during purge: {e}"));
+        for (lua, f) in deactivations {
+            match call_guarded(&lua, "arbiter onDeactivate", &f, ()) {
+                Called::Ok => {}
+                Called::Failed(e) => logging::line("arbiter", &format!("onDeactivate error during purge: {e}")),
+                stop => self.log_stopped_call(idx, "onDeactivate", &stop),
             }
         }
         for slot in to_resolve {
@@ -1257,6 +1291,8 @@ impl Shared {
         mailbox::drop_owner(self, idx, mailbox::Why::Reloaded);
         self.task_drop_owner(idx);
         self.forget_key_owner(idx);
+        // A mouse button the old VM held down: the new one does not know it holds it.
+        self.release_held_buttons(idx, "it was reloaded");
         let id = self.ids.borrow().get(idx).cloned();
         if let Some(id) = id {
             self.exports.borrow_mut().remove(&id);
@@ -1290,6 +1326,28 @@ impl Shared {
             }
             en[idx] = enabled;
         }
+        // Its VM takes calls again, whether or not it has a record: a module that was off when a
+        // library whose code runs in it looped was stopped with the library, and has no record,
+        // since it was off already. The manager's checkbox rebuilds a stopped VM before it gets here
+        // (`toggle_module`); this is for one that was not.
+        if enabled {
+            vm_guard::clear_module(&self.guard, idx);
+        }
+        // A module the guard stopped, ticked again: its record goes, and the manager's row loses
+        // its note.
+        if enabled && self.stops.clear(idx) {
+            let id = self.ids.borrow().get(idx).cloned().unwrap_or_default();
+            logging::line("guard", &format!("[{id}] turned on again after its stop"));
+            self.module_changes.borrow_mut().push(gui::ModuleChange { idx, enabled: true, stopped: None });
+        }
+        self.after_toggle(idx, enabled);
+        true
+    }
+
+    /// What enabling or disabling module `idx` does once its flag is flipped: everything held at
+    /// the OS recomputed, its slots re-elected, and — disabled — its reads, mailbox, handlers, key
+    /// scope and menu flag dropped. The checkbox's, and a stop's second step (`stops::settle`).
+    fn after_toggle(&self, idx: usize, enabled: bool) {
         // Fresh error-dialog slate on toggle: drop this module's dedup keys so a
         // still-present fault re-surfaces (rather than staying log-only) next run.
         if let Some(id) = self.ids.borrow().get(idx).cloned() {
@@ -1334,6 +1392,8 @@ impl Shared {
             // And its key scope and menu flag, which used to stay set — one switch for the
             // whole application then, left wherever the module last put it.
             self.forget_key_owner(idx);
+            // And a mouse button it holds down: nothing of it will let go of it now.
+            self.release_held_buttons(idx, "it was disabled");
         }
         // Searches answered while it was off are asked again, so their callbacks still come.
         if enabled {
@@ -1346,7 +1406,101 @@ impl Shared {
             "manager",
             &format!("module {idx} {}", if enabled { "enabled" } else { "disabled" }),
         );
-        true
+    }
+
+    /// The line for an arbiter callback the guard did not let run, or that a stop ended.
+    fn log_stopped_call(&self, idx: usize, which: &str, how: &Called) {
+        let id = self.ids.borrow().get(idx).cloned().unwrap_or_else(|| "?".into());
+        let what = match how {
+            // Owed to nobody: turning the module on again builds it afresh (`toggle_module`).
+            Called::Refused => "not run: the module was stopped by the host",
+            _ => "ended by the host's stop of the module",
+        };
+        logging::line("arbiter", &format!("{which} of {id} {what}"));
+    }
+
+    /// Notes that module `idx` pressed `button` with `host.input.mouseDown` and has not let go.
+    fn hold_button(&self, idx: usize, button: MouseButton) {
+        let mut held = self.held_buttons.borrow_mut();
+        let v = held.entry(idx).or_default();
+        if !v.contains(&button) {
+            v.push(button);
+        }
+    }
+
+    /// Module `idx` let go of `button`: its `mouseUp`, or a `click` or `drag` of it, whose own
+    /// release lets go of a button held down before it.
+    fn let_go_button(&self, idx: usize, button: MouseButton) {
+        let mut held = self.held_buttons.borrow_mut();
+        if let Some(v) = held.get_mut(&idx) {
+            v.retain(|b| *b != button);
+            if v.is_empty() {
+                held.remove(&idx);
+            }
+        }
+    }
+
+    /// The hotkey presses a stall's stop drops, but the application's own reload key: that one is
+    /// how a user gets out of a stalled application, not a module's key, so it is answered — every
+    /// module reloads at the end of this turn — and the log says so. The others, to be dropped.
+    fn answer_reload_key(&self, ids: Vec<i32>) -> Vec<i32> {
+        let reload = self.reload_hotkey_id.get();
+        let (asked, others): (Vec<i32>, Vec<i32>) = ids.into_iter().partition(|id| *id == reload);
+        if !asked.is_empty() {
+            logging::line(
+                "keys",
+                &format!("{} was pressed while the application waited: it is answered after the stop, not dropped", reload_hotkey_shown()),
+            );
+            self.reload_all.set(true);
+        }
+        others
+    }
+
+    /// Lets go of every mouse button module `idx` holds down, where the pointer is now — so the
+    /// pointer does not move — because the module stops running (`why`, for the log). The
+    /// buttons' names. Runs no Lua.
+    fn release_held_buttons(&self, idx: usize, why: &str) -> Vec<&'static str> {
+        let buttons = self.held_buttons.borrow_mut().remove(&idx).unwrap_or_default();
+        if buttons.is_empty() {
+            return Vec::new();
+        }
+        let (x, y) = self.backend.cursor_pos();
+        let id = self.ids.borrow().get(idx).cloned().unwrap_or_else(|| "?".into());
+        let mut names = Vec::new();
+        for b in buttons {
+            let name = button_name(b);
+            self.backend.mouse_up(x, y, b);
+            logging::line(
+                "input",
+                &format!("[{id}] released the {name} mouse button it had pressed with host.input.mouseDown: {why}"),
+            );
+            names.push(name);
+        }
+        names
+    }
+
+    /// At exit: every mouse button a module still holds is let go of.
+    fn release_all_held_buttons(&self) {
+        let held: Vec<usize> = self.held_buttons.borrow().keys().copied().collect();
+        for idx in held {
+            self.release_held_buttons(idx, "the application ended");
+        }
+    }
+
+    /// A stop's second step (stops.rs): the rest of disabling each stopped module, then the
+    /// messages. Both ticks call it, after the report of the window in front — and again after a
+    /// `host.window.recheck()` round, whose callbacks run after that and can stop a module too, so
+    /// that a stop in it is settled at the end of the same turn as well.
+    fn settle_stops(&self) {
+        // Trips no outermost entry's end handed over — a panic unwound through it — are marked now.
+        let waiting = vm_guard::take_waiting_trips(&self.guard);
+        if !waiting.is_empty() {
+            logging::line("guard", &format!("{} stop(s) handed over at the end of the turn", waiting.len()));
+            if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stops::mark(self, waiting))) {
+                logging::line("guard", &format!("the stop's first step failed: {}", panic_text(&p)));
+            }
+        }
+        stops::settle(self);
     }
 
     /// Rolls back every module-indexed collection to `n` modules: truncates the
@@ -1409,6 +1563,10 @@ impl Shared {
         // After the re-election, as on a disable: no claim of theirs is left to deactivate, but
         // nothing they set may outlive them either.
         self.captures.forget_owners_from(n);
+        for idx in n..rolled_back {
+            self.release_held_buttons(idx, "its load was rolled back");
+        }
+        self.stops.drop_from(n);
         self.roots.borrow_mut().truncate(n);
         self.ids.borrow_mut().truncate(n);
         self.enabled.borrow_mut().truncate(n);
@@ -1492,8 +1650,10 @@ impl Shared {
             // then promotes the next matcher.
             if was_active {
                 if let Ok(f) = c.lua.registry_value::<Function>(&c.on_deactivate) {
-                    if let Err(e) = call_guarded(&f, ()) {
-                        logging::line("arbiter", &format!("onDeactivate error: {e}"));
+                    match call_guarded(&c.lua, "arbiter onDeactivate", &f, ()) {
+                        Called::Ok => {}
+                        Called::Failed(e) => logging::line("arbiter", &format!("onDeactivate error: {e}")),
+                        stop => self.log_stopped_call(c.module_idx, "onDeactivate", &stop),
                     }
                 }
             }
@@ -1549,8 +1709,8 @@ impl Shared {
         // Bounded so a pathological oscillating callback is logged rather than
         // hanging the event loop; sane overlays settle in one or two passes.
         for _ in 0..100 {
-            let mut deactivate: Option<Function> = None;
-            let mut activate: Option<Function> = None;
+            let mut deactivate: Option<(Lua, usize, Function)> = None;
+            let mut activate: Option<(Lua, usize, Function)> = None;
             {
                 let mut map = self.arbiter.borrow_mut();
                 let Some(s) = map.get_mut(slot) else { return };
@@ -1575,24 +1735,40 @@ impl Shared {
                 }
                 if let Some(old) = s.active {
                     if let Some(c) = s.claims.iter().find(|c| c.handle == old) {
-                        deactivate = c.lua.registry_value::<Function>(&c.on_deactivate).ok();
+                        deactivate = c
+                            .lua
+                            .registry_value::<Function>(&c.on_deactivate)
+                            .ok()
+                            .map(|f| (c.lua.clone(), c.module_idx, f));
                     }
                 }
                 if let Some(neu) = winner {
                     if let Some(c) = s.claims.iter().find(|c| c.handle == neu) {
-                        activate = c.lua.registry_value::<Function>(&c.on_activate).ok();
+                        activate = c
+                            .lua
+                            .registry_value::<Function>(&c.on_activate)
+                            .ok()
+                            .map(|f| (c.lua.clone(), c.module_idx, f));
                     }
                 }
                 s.active = winner;
             }
-            if let Some(f) = deactivate {
-                if let Err(e) = call_guarded(&f, ()) {
-                    logging::line("arbiter", &format!("onDeactivate error: {e}"));
+            // A claim of a module the guard stopped loses its slot at once, and its onDeactivate is
+            // not run: the stopped VM refuses it. Nothing is owed — turning the module on again
+            // builds it afresh (`toggle_module`), with no overlay active — and the host takes back
+            // what it holds for the module meanwhile (stops.rs).
+            if let Some((lua, owner, f)) = deactivate {
+                match call_guarded(&lua, "arbiter onDeactivate", &f, ()) {
+                    Called::Ok => {}
+                    Called::Failed(e) => logging::line("arbiter", &format!("onDeactivate error: {e}")),
+                    stop => self.log_stopped_call(owner, "onDeactivate", &stop),
                 }
             }
-            if let Some(f) = activate {
-                if let Err(e) = call_guarded(&f, ()) {
-                    logging::line("arbiter", &format!("onActivate error: {e}"));
+            if let Some((lua, owner, f)) = activate {
+                match call_guarded(&lua, "arbiter onActivate", &f, ()) {
+                    Called::Ok => {}
+                    Called::Failed(e) => logging::line("arbiter", &format!("onActivate error: {e}")),
+                    stop => self.log_stopped_call(owner, "onActivate", &stop),
                 }
             }
         }
@@ -1635,13 +1811,14 @@ impl Shared {
         );
     }
 
-    /// Mirrors the in-memory `enabled[]` flags into the store.
+    /// Mirrors the in-memory `enabled[]` flags into the store — as the user wants them: a module
+    /// the guard stopped was on, and the next start loads it (`stops::stored_enabled`).
     fn sync_enabled_into_store(&self) {
         let ids = self.ids.borrow();
         let enabled = self.enabled.borrow();
         let mut store = self.store.borrow_mut();
         for (i, id) in ids.iter().enumerate() {
-            store.set_enabled(id, enabled.get(i).copied().unwrap_or(true));
+            store.set_enabled(id, stops::stored_enabled(enabled.get(i).copied().unwrap_or(true), self.stops.is_stopped(i)));
         }
     }
 
@@ -1732,7 +1909,8 @@ impl Shared {
         for (owner, lua, reg) in regs {
             if Some(owner) == caller {
                 let Opened::Run { f, args, ctx } = self.open_setting(idx, reg, key, new, old) else { continue };
-                if let Err(e) = call_guarded(&f, args) {
+                // A stop reports itself (stops.rs).
+                if let Called::Failed(e) = call_guarded(&lua, ctx.what.clone(), &f, args) {
                     self.report_callback_error(ctx.report, &ctx.what, &e);
                 }
             } else {
@@ -1753,6 +1931,77 @@ impl Shared {
         old: Option<&settings::Value>,
     ) -> Opened {
         open_on_change(&self.on_change, setting_of, reg, key, new, old)
+    }
+}
+
+/// The host's side of a stop (stops.rs).
+impl stops::StopHost for Shared {
+    fn stops(&self) -> &stops::Stops {
+        &self.stops
+    }
+
+    fn module_enabled(&self, idx: usize) -> bool {
+        self.module_on(idx)
+    }
+
+    fn flip_off(&self, idx: usize) -> bool {
+        match self.enabled.try_borrow_mut() {
+            Ok(mut en) => {
+                if let Some(e) = en.get_mut(idx) {
+                    *e = false;
+                }
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn refresh_keys(&self) {
+        self.refresh_hotkeys();
+        self.refresh_captured();
+        self.refresh_gamepad();
+    }
+
+    fn release_buttons(&self, idx: usize) -> Vec<&'static str> {
+        self.release_held_buttons(idx, "it was stopped by the host")
+    }
+
+    fn drop_queued_input(&self) -> stops::Dropped {
+        let d = self.backend.drop_queued_input();
+        let dropped = self.answer_reload_key(d.hotkeys);
+        let hotkeys = self.hotkeys.borrow();
+        let mut names: Vec<String> = d
+            .keys
+            .iter()
+            .map(|(vk, mask, _)| backend::spec_name_for(backend::KeyOs::CURRENT, *vk, *mask))
+            .collect();
+        names.extend(dropped.iter().map(|id| hotkeys.get(id).map_or_else(|| format!("hotkey {id}"), |r| r.spec.clone())));
+        stops::Dropped { keys: d.keys.len(), hotkeys: dropped.len(), names: stops::counted(&names) }
+    }
+
+    fn after_disable(&self, idx: usize) {
+        self.after_toggle(idx, false);
+    }
+
+    fn collect_garbage(&self, serial: u64) {
+        vm_guard::collect_garbage(serial);
+    }
+
+    fn log(&self, category: &str, line: &str) {
+        logging::line(category, line);
+    }
+
+    fn dialog(&self, key: String, title: String, text: String) {
+        self.queue_dialog(key, title, text);
+    }
+
+    fn announce(&self, text: &str) {
+        Shared::announce(self, text);
+    }
+
+    fn row_changed(&self, idx: usize, note: Option<String>) {
+        let enabled = note.is_none();
+        self.module_changes.borrow_mut().push(gui::ModuleChange { idx, enabled, stopped: note });
     }
 }
 
@@ -1845,6 +2094,10 @@ fn collect_one_code_dep(
         lm.manifest.dependencies.iter().chain(&lm.manifest.optional_dependencies).cloned().collect();
     out.push(capture_source::CodeDep {
         id: dep_id.to_string(),
+        name: lm.manifest.name.clone(),
+        memory_mib: lm.manifest.memory_mib(),
+        memory_declared: lm.manifest.limits.memory_mib.is_some(),
+        entry_rel: lm.manifest.entry.clone(),
         entry,
         reads_screen: capture_source::reads_screen(&lm.manifest.capabilities.require),
         screen: lm.manifest.screen,
@@ -1893,10 +2146,10 @@ fn check_dep_version(dependent: &str, dep_id: &str, req: &str, dep_version: &str
 /// the VM global. Used to give a code dependency its own identity-scoped host.
 /// Returns whatever the chunk returns. (Because the code becomes a function body,
 /// a `code_module`'s file must not use top-level `...` varargs.)
-fn eval_on_host(lua: &Lua, host: &Table, code: &str, name: &str) -> Result<mlua::Value> {
+fn eval_on_host(lua: &Lua, host: &Table, code: &str, name: &str) -> mlua::Result<mlua::Value> {
     let factory: Function =
         lua.load(format!("return function(host) {code}\nend")).set_name(name).eval()?;
-    Ok(factory.call::<mlua::Value>(host.clone())?)
+    factory.call::<mlua::Value>(host.clone())
 }
 
 /// A Luau file the host is about to compile, as text, without a leading UTF-8 byte-order mark.
@@ -2033,10 +2286,51 @@ fn dep_host_member(
     owner.raw_get(key)
 }
 
-/// Calls a no-arg-or-args Lua callback, catching BOTH a Lua error and a Rust
-/// panic (re-raised across the mlua boundary), so a faulting module's callback can
-/// never abort the process. Returns a human-readable error string.
-fn call_guarded<A: mlua::IntoLuaMulti>(f: &Function, args: A) -> Result<(), String> {
+/// What a plain call of a module's callback came to.
+#[derive(Debug, PartialEq, Eq)]
+enum Called {
+    Ok,
+    /// It raised (or a Rust panic under it was caught): the human-readable error.
+    Failed(String),
+    /// Not run: the VM was stopped before it.
+    Refused,
+    /// The VM was stopped while it ran — by it, or by a call inside it: the stop reports itself
+    /// (stops.rs), and its error is not the module's.
+    Stopped,
+}
+
+/// Calls a module's callback `f` in its VM `lua` as a plain call — the synchronous places: an
+/// arbiter's `onActivate` and `onDeactivate`, a module's own `onChange` inside its own `set` — as
+/// an entry of the guard (`vm_guard::Entry`, named `what` in a stop's messages), catching BOTH a
+/// Lua error and a Rust panic (re-raised across the mlua boundary), so a faulting module's
+/// callback can never abort the process.
+fn call_guarded<A: mlua::IntoLuaMulti>(
+    lua: &Lua,
+    what: impl Into<std::borrow::Cow<'static, str>>,
+    f: &Function,
+    args: A,
+) -> Called {
+    let Ok(entry) = vm_guard::Entry::enter(lua, vm_guard::EntryKind::Plain, what) else {
+        return Called::Refused;
+    };
+    let result = guard(|| {
+        let r = f.call::<()>(args);
+        entry.finish(&r);
+        r
+    });
+    if entry.stopped() {
+        return Called::Stopped;
+    }
+    match result {
+        Ok(()) => Called::Ok,
+        Err(e) => Called::Failed(e),
+    }
+}
+
+/// A callback called the old way, outside any entry: for the tests that run a timer's or a
+/// snapshot's callback without a mailbox.
+#[cfg(test)]
+pub(crate) fn call_plain<A: mlua::IntoLuaMulti>(f: &Function, args: A) -> Result<(), String> {
     guard(|| f.call::<()>(args))
 }
 
@@ -3400,11 +3694,40 @@ mod guard_tests {
         let lua = Lua::new();
         // A Lua error in a callback is surfaced as a string, not a crash.
         let err: Function = lua.load("return function() error('boom') end").eval().unwrap();
-        assert!(call_guarded(&err, ()).unwrap_err().contains("boom"));
+        assert!(call_plain(&err, ()).unwrap_err().contains("boom"));
+        assert!(matches!(call_guarded(&lua, "test", &err, ()), Called::Failed(e) if e.contains("boom")));
         // A clean callback succeeds.
         let ok: Function = lua.load("return function() end").eval().unwrap();
-        assert!(call_guarded(&ok, ()).is_ok());
-        // A Rust panic is caught too (kept out of the test output).
+        assert!(call_plain(&ok, ()).is_ok());
+        assert_eq!(call_guarded(&lua, "test", &ok, ()), Called::Ok);
+        // A panic under a guarded call is a failure of the call, not of the process.
+        quiet_expected_panics();
+        let boom = lua.create_function(|_, ()| -> mlua::Result<()> { panic!("{EXPECTED_PANIC}under a call") }).unwrap();
+        assert!(matches!(call_guarded(&lua, "test", &boom, ()), Called::Failed(e) if e.contains("under a call")));
+    }
+
+    /// A call into a VM the guard stopped is not made; one that stops it is not the module's error.
+    #[test]
+    fn a_plain_call_of_a_stopped_vm_is_refused_and_one_that_stops_it_is_no_failure() {
+        let guard = vm_guard::Guard::new();
+        let lua = vm_guard::new_vm(&guard);
+        vm_guard::describe_for_test(&lua, 0, "com.x.a", &[("com.x.a", 4)]);
+        vm_guard::loaded(&lua);
+        let fill: Function = lua
+            .load("return function() local t = {} while true do t[#t + 1] = string.rep('x', 1048000) .. #t end end")
+            .eval()
+            .unwrap();
+        // Made before the stop: a stopped VM raises at the first safepoint of anything run in it.
+        let ok: Function = lua.load("return function() end").eval().unwrap();
+        assert_eq!(call_guarded(&lua, "arbiter onDeactivate", &fill, ()), Called::Stopped);
+        assert_eq!(call_guarded(&lua, "arbiter onActivate", &ok, ()), Called::Refused);
+        assert_eq!(guard.take_trips().len(), 1, "one stop, no hook on this thread");
+    }
+
+    /// A Rust panic under the guard is a failure of the call, not of the process.
+    #[test]
+    fn a_rust_panic_under_the_guard_is_caught() {
+        // Kept out of the test output.
         quiet_expected_panics();
         let p = guard(|| panic!("{EXPECTED_PANIC}kaboom")).unwrap_err();
         assert!(p.contains("kaboom"));
@@ -3495,6 +3818,22 @@ fn populate_vm(
     lua: &Lua,
 ) -> Result<()> {
     let id = &module.manifest.id;
+    // Which modules' code will run in this VM, from their manifests on disk — first, because the
+    // VM's memory limit is the sum of what each may use (`[limits] memory_mib`, the module itself
+    // and each code dependency once), and it is set before anything runs in it. Read again at
+    // every build, so a reload after editing a manifest applies it.
+    let mut code_deps: Vec<capture_source::CodeDep> = Vec::new();
+    collect_code_deps(
+        parent,
+        &module.manifest.dependencies,
+        &module.manifest.optional_dependencies,
+        &mut code_deps,
+        &mut HashSet::new(),
+    )?;
+    vm_guard::describe(lua, vm_guard::VmInfo::of(idx, &module.manifest, &code_deps));
+    for key in &module.manifest.limits.unknown {
+        logging::line("manager", &limits_unknown_line(id, key));
+    }
     // Recorded before anything runs in it: whose VM this is. An image search asked for by any
     // code in it, a code dependency's too, is then answered while THIS module is enabled — and
     // never into an older VM that once stood at the same index.
@@ -3545,18 +3884,10 @@ fn populate_vm(
     // functions. Legacy (non-code) dependencies stay on the data path.
     let reg = lua.create_table()?;
     lua.set_named_registry_value("__module_exports", reg.clone())?;
-    let mut code_deps: Vec<capture_source::CodeDep> = Vec::new();
-    collect_code_deps(
-        parent,
-        &module.manifest.dependencies,
-        &module.manifest.optional_dependencies,
-        &mut code_deps,
-        &mut HashSet::new(),
-    )?;
     // Which picture this VM's screen and OCR reads see, from the manifests just read — so a
     // reload after editing `[screen]` needs nothing else refreshed. Before any code runs.
     capture_source::apply(lua, id, &module.manifest, &mut code_deps);
-    for capture_source::CodeDep { id: dep_id, entry: dep_entry, .. } in &code_deps {
+    for capture_source::CodeDep { id: dep_id, entry: dep_entry, entry_rel: dep_rel, .. } in &code_deps {
         let dep_code = read_luau_source(dep_entry).with_context(|| {
             format!("dependency '{dep_id}' entry not readable: {}", dep_entry.display())
         })?;
@@ -3568,8 +3899,13 @@ fn populate_vm(
             anyhow::anyhow!("code dependency '{dep_id}' of '{id}' not in the module table")
         })?;
         let host_dep = build_dep_host(lua, shared, &host_m, dep_idx)?;
-        let dep_ret = eval_on_host(lua, &host_dep, &dep_code, &dep_entry.display().to_string())
-            .with_context(|| format!("error running dependency '{dep_id}' of '{id}'"))?;
+        let dep_name = dep_entry.display().to_string();
+        // Its chunk is the dependency's file: a stop in it names that module, and takes it.
+        vm_guard::name_chunk(lua, &dep_name, dep_id, dep_rel);
+        let dep_ret = load_step(lua, format!("the code of {dep_id}"), || {
+            eval_on_host(lua, &host_dep, &dep_code, &dep_name)
+        })
+        .with_context(|| format!("error running dependency '{dep_id}' of '{id}'"))?;
         if let mlua::Value::Table(t) = &dep_ret {
             // A dependency must not hand its own host table back to the module that required
             // it. Everything else here is deliberate — a dependency acts with ITS permissions
@@ -3596,11 +3932,10 @@ fn populate_vm(
     let entry = module.entry_path();
     let code = read_luau_source(&entry)
         .with_context(|| format!("entry point not readable: {}", entry.display()))?;
-    let ret: mlua::Value = lua
-        .load(code)
-        .set_name(entry.display().to_string())
-        .eval()
-        .with_context(|| format!("error running module '{id}'"))?;
+    vm_guard::name_chunk(lua, &entry.display().to_string(), id, &module.manifest.entry);
+    let ret: mlua::Value =
+        load_step(lua, "its entry file", || lua.load(code).set_name(entry.display().to_string()).eval())
+            .with_context(|| format!("error running module '{id}'"))?;
     // Publish the module's returned table as a best-effort cross-VM data export for
     // the legacy host.require path (functions aren't serializable, so it's skipped
     // rather than fatal when the return isn't plain data).
@@ -3612,12 +3947,45 @@ fn populate_vm(
     // A returned `activate` runs here, in the module's OWN VM only — never when this
     // module is evaluated as a code dependency inside another VM — so e.g. a base
     // overlay is created once, not duplicated in every dependent that inherits it.
+    // Looked up inside the step: `get` runs the table's `__index`, which is the module's code too.
     if let mlua::Value::Table(t) = &ret {
-        if let Ok(mlua::Value::Function(activate)) = t.get::<mlua::Value>("activate") {
-            activate.call::<()>(()).with_context(|| format!("error activating module '{id}'"))?;
-        }
+        load_step(lua, "its activate function", || match t.get::<mlua::Value>("activate") {
+            Ok(mlua::Value::Function(activate)) => activate.call::<()>(()),
+            _ => Ok(()),
+        })
+        .with_context(|| format!("error activating module '{id}'"))?;
     }
+    // Loaded: a stop in this VM from now on stops the module, rather than failing its load.
+    vm_guard::loaded(lua);
     Ok(())
+}
+
+/// The `[manager]` line for a key in `[limits]` this application does not read.
+fn limits_unknown_line(id: &str, key: &str) -> String {
+    format!("[{id}] module.toml: [limits] has a key this application does not read: {key}")
+}
+
+/// One step of loading a module — a code dependency, the entry file, `activate` — as an entry of
+/// the guard: a memory error that reaches the host stops the VM, and the load fails with what
+/// stopped it (`stops::load_failure`) rather than with Luau's own words. So does a step whose VM
+/// was stopped earlier in the load, by a callback of its own that ran inside it.
+fn load_step<T>(
+    lua: &Lua,
+    what: impl Into<std::borrow::Cow<'static, str>>,
+    run: impl FnOnce() -> mlua::Result<T>,
+) -> Result<T> {
+    let Ok(entry) = vm_guard::Entry::enter(lua, vm_guard::EntryKind::Load, what) else {
+        anyhow::bail!(stops::load_failure(vm_guard::last_trip(lua).as_ref()));
+    };
+    let result = run();
+    entry.finish(&result);
+    // Looked at once the entry has ended too: a step past its limit that returned while its VM
+    // was still looking where it was is stopped as the entry ends (`vm_guard`).
+    drop(entry);
+    if vm_guard::stopped(lua) {
+        anyhow::bail!(stops::load_failure(vm_guard::last_trip(lua).as_ref()));
+    }
+    Ok(result?)
 }
 
 fn load_module(
@@ -3775,7 +4143,7 @@ fn load_module(
     // empty (the orphan entry is removed on failure); reload → the prior values are
     // restored, never lost to a transient failure.
     let store_snapshot = shared.store.borrow().snapshot(&id);
-    let lua = Lua::new();
+    let lua = vm_guard::new_vm(&shared.guard);
     // Catch a Lua error (propagated by `?`) OR a re-raised Rust panic from the
     // module's OWN code — code-dependency eval, entry eval, or `activate` — so a
     // faulty module fails to load and rolls back cleanly instead of aborting the
@@ -3869,7 +4237,7 @@ fn reload_module(
         s.clear();
     }
 
-    let lua = Lua::new();
+    let lua = vm_guard::new_vm(&shared.guard);
     let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         populate_vm(shared, &parent, idx, &module, &lua)
     }))
@@ -3889,7 +4257,7 @@ fn reload_module(
         // (`window_has_triggers` is false, and `dispatch_activate` / `dispatch_focus` skip it);
         // the next successful reload builds the real one in its place.
         if let Some(m) = modules.borrow_mut().get_mut(idx) {
-            m.lua = Lua::new();
+            m.lua = vm_guard::new_vm(&shared.guard);
         }
         // Now the module really is gone, so its combinations go to whoever was waiting.
         shared.refresh_hotkeys();
@@ -3933,6 +4301,42 @@ fn reload_module(
         .map(|m| (m.id.clone(), m.dependencies.clone()))
         .collect();
     Ok(registry::transitive_dependents(&old_id, &graph))
+}
+
+/// The manager's checkbox for loaded module `idx`. Turning on a module whose VM the guard stopped
+/// builds it afresh first, as a reload does, while it is still off: a stop ends a callback
+/// anywhere — an overlay's `onDeactivate` after it marked itself inactive and before it gave its
+/// keys back — and the same VM, turned on again, would carry that half-done state on (its stale
+/// hotkeys registered again, swallowing keys while the overlay is not in front). The rebuilt VM
+/// runs its entry file and `activate` again and reads its settings as they are now; what waited
+/// for the old one — a setting's `onChange` — goes with it. Ticking the library of a library's
+/// stop turns on every module the stop took with it (`Stops::turned_on_with`), each rebuilt. A
+/// rebuild that fails leaves that module off, with the reason in the log and the error window.
+fn toggle_module(shared: &Rc<Shared>, modules: &Rc<RefCell<Vec<Module>>>, idx: usize, enabled: bool) {
+    if !enabled {
+        shared.set_enabled(idx, false);
+        return;
+    }
+    for i in shared.stops.turned_on_with(idx) {
+        let stopped = modules.borrow().get(i).is_some_and(|m| vm_guard::stopped(&m.lua));
+        if stopped {
+            if let Err(e) = reload_module(shared, modules, i) {
+                let (id, name) = modules.borrow().get(i).map(|m| (m.id.clone(), m.name.clone())).unwrap_or_default();
+                logging::line("guard", &format!("[{id}] could not be built afresh to be turned on again: {e:#}"));
+                shared.queue_dialog(
+                    format!("{id}\u{1}turn-on"),
+                    format!("Module not turned on: {id}"),
+                    format!("{name} could not be built afresh to be turned on again, and stays off:\n\n{e:#}"),
+                );
+                if i == idx {
+                    // Its box stays unticked: what the user asked for did not happen.
+                    shared.module_changes.borrow_mut().push(gui::ModuleChange { idx: i, enabled: false, stopped: shared.stops.row_note(i) });
+                }
+                continue;
+            }
+        }
+        shared.set_enabled(i, true);
+    }
 }
 
 /// What a cascading reload did: the module itself, then each dependent that had to be
@@ -4036,7 +4440,31 @@ fn module_info(shared: &Shared, m: &Module, idx: usize) -> gui::ModuleInfo {
         dependencies: m.dependencies.clone(),
         settings,
         unsupported: None,
+        stopped: shared.stops.row_note(idx),
     }
+}
+
+/// The text of the manager's Details… for module `idx` (stops.rs, `details_text`): its state, its
+/// VM's memory limit and what it uses now, and where else its code runs.
+fn module_details(shared: &Shared, modules: &[Module], idx: usize) -> String {
+    let Some(m) = modules.get(idx) else {
+        return "This module is not loaded.".to_string();
+    };
+    let vm = vm_guard::info(&m.lua).unwrap_or_default();
+    let carriers = vm_guard::carriers_of(&shared.guard, &m.id);
+    let stop = shared.stops.record(idx);
+    stops::details_text(&stops::Details {
+        name: &m.name,
+        version: &m.version,
+        id: &m.id,
+        enabled: shared.module_on(idx),
+        stop: stop.as_deref(),
+        vm: &vm,
+        used: m.lua.used_memory() as u64,
+        carriers: &carriers,
+        dependencies: &m.dependencies,
+        now: Instant::now(),
+    })
 }
 
 /// The rows for modules this platform will not run: listed, and refusing everything that
@@ -4055,6 +4483,7 @@ fn excluded_infos(shared: &Shared) -> Vec<gui::ModuleInfo> {
             dependencies: Vec::new(),
             settings: Vec::new(),
             unsupported: Some(e.claimed.clone()),
+            stopped: None,
         })
         .collect()
 }
@@ -4081,6 +4510,9 @@ pub struct Manager {
     disabled_ids: HashSet<String>,
     /// Module ids currently being loaded — for dependency-cycle detection.
     loading: HashSet<String>,
+    /// The guard's watchdog thread (`vm-guard`, vm_guard.rs): stopped by [`Manager::stop_guard`]
+    /// at exit, or when the manager is dropped.
+    watchdog: Option<vm_guard::Watchdog>,
 }
 
 impl Manager {
@@ -4176,6 +4608,10 @@ impl Manager {
             ocr_state: ocr::lua::OcrState::default(),
             tasks: task::Tasks::default(),
             mail: mailbox::Mailboxes::default(),
+            guard: vm_guard::Guard::new(),
+            stops: stops::Stops::default(),
+            module_changes: RefCell::new(Vec::new()),
+            held_buttons: RefCell::new(BTreeMap::new()),
             vm_gens: RefCell::new(HashMap::new()),
             template_cache: RefCell::new(HashMap::new()),
             template_seq: Cell::new(0),
@@ -4187,18 +4623,48 @@ impl Manager {
         // given (see the field). Registering with the OS happens later, in `run`, on the
         // thread that will receive it.
         shared.reload_hotkey_id.set(shared.alloc_id());
+        // What the guard's stops go to when the callback that began them has returned: turned
+        // off at once, keys back, the log line (stops.rs). Weak, so the hook does not keep the
+        // host alive; this thread runs every module's code.
+        {
+            let weak = Rc::downgrade(&shared);
+            vm_guard::set_exit_hook(Rc::new(move |trips| {
+                if let Some(sh) = weak.upgrade() {
+                    stops::mark(&*sh, trips);
+                }
+            }));
+        }
+        // The guard's own: this thread's guard for the bindings' `host_call!`, and the watchdog
+        // that looks at the clocks every 50 ms — before the first module loads, since a load is
+        // held to the same budgets as a callback.
+        vm_guard::install(&shared.guard);
+        let watchdog = vm_guard::spawn_watchdog(shared.guard.clone());
         Ok(Self {
             shared,
             ocr_shutdown,
             modules: Rc::new(RefCell::new(Vec::new())),
             disabled_ids,
             loading: HashSet::new(),
+            watchdog: Some(watchdog),
         })
     }
 
     /// What stops `host.ocr.read`'s threads at exit — see the field.
     pub fn ocr_shutdown(&self) -> ocr::service::ShutdownHandle {
         self.ocr_shutdown.clone()
+    }
+
+    /// At exit, after the event loop: the watchdog stops, the `[cpu]` summary of the whole run is
+    /// written — what each module took of the event loop — and every mouse button a module still
+    /// holds down is let go of.
+    fn stop_guard(&mut self) {
+        if let Some(mut w) = self.watchdog.take() {
+            w.stop();
+        }
+        for line in self.shared.guard.cpu_summary() {
+            logging::line("cpu", &line);
+        }
+        self.shared.release_all_held_buttons();
     }
 
     /// Loads a module from an unpacked directory and runs its entry point.
@@ -4361,6 +4827,7 @@ impl Manager {
                 let shared = self.shared.clone();
                 let speak_shared = self.shared.clone();
                 let toggle_shared = self.shared.clone();
+                let toggle_modules = self.modules.clone();
                 let set_shared = self.shared.clone();
                 let modules = self.modules.clone();
                 let load_shared = self.shared.clone();
@@ -4378,7 +4845,7 @@ impl Manager {
                 gui::run_gui(
                     module_infos,
                     move |idx, id: String, enabled| match idx {
-                        Some(i) => toggle_shared.set_enabled(i, enabled),
+                        Some(i) => toggle_module(&toggle_shared, &toggle_modules, i, enabled),
                         None => toggle_shared.set_enabled_unloaded(&id, enabled),
                     },
                     move |idx, key, value| set_shared.set_setting(idx, &key, value),
@@ -4499,6 +4966,11 @@ impl Manager {
                         let t = std::time::Instant::now();
                         dispatcher.dispatch_initial();
                         let initial_ms = t.elapsed().as_millis();
+                        // A module the guard stopped during this turn: the rest of disabling it,
+                        // then the dialog, the sentence and its row (stops.rs).
+                        let t = std::time::Instant::now();
+                        shared.settle_stops();
+                        let stops_ms = t.elapsed().as_millis();
                         let pump_ms = pump_started.elapsed().as_millis();
                         if pump_ms >= 250 {
                             // The hazard is different on each platform, and the line has to
@@ -4528,7 +5000,8 @@ impl Manager {
                                      timers {timers_ms}, image results {images_ms}, text \
                                      recognition results {ocr_ms} ({} callback(s)), snapshot results \
                                      {snapshots_ms}, queued module events {queued_ms} ({} event(s), {} \
-                                     waiting), initial window report {initial_ms}) — {hazard}",
+                                     waiting), initial window report {initial_ms}, stopped modules \
+                                     {stops_ms}) — {hazard}",
                                     ocr_n.callbacks,
                                     queued.events,
                                     queued.parked
@@ -4537,8 +5010,10 @@ impl Manager {
                         }
                         // A module asked for a re-check (host.window.recheck) after
                         // changing plugin UI itself — dispatch it like an OS focus event.
+                        // Its callbacks can stop a module too, settled in this same turn.
                         if shared.recheck_requested.replace(false) {
                             dispatcher.on_focus_change();
+                            shared.settle_stops();
                         }
                         shared.log_housekeeping();
                         shared.flush_if_dirty();
@@ -4561,10 +5036,21 @@ impl Manager {
                             // is two interruptions where one would do and no reassurance at
                             // all. The reassurance is gone either way; the noise need not be.
                             let (done, failed) = reload_everything(&shared, &modules);
-                            shared.announce(&reload_report_text(&done, &failed));
+                            shared.announce(&reload_report_text(&done, &failed, shared.stops.count()));
                         }
                     },
                     move || errors_shared.drain_errors(),
+                    // Rows a stop turned off, or that were turned on again after one.
+                    {
+                        let shared = self.shared.clone();
+                        move || std::mem::take(&mut *shared.module_changes.borrow_mut())
+                    },
+                    // Details…: the module's state, its memory limit and use, where its code runs.
+                    {
+                        let shared = self.shared.clone();
+                        let modules = self.modules.clone();
+                        move |idx: usize| module_details(&shared, &modules.borrow(), idx)
+                    },
                     move |text: &str| speak_shared.announce(text),
                     {
                         let shared = self.shared.clone();
@@ -4729,6 +5215,9 @@ pub fn run(dirs: &[String]) -> Result<()> {
         // What `recognize` and `recognizeMany` held the event loop for, per module, once: the
         // whole session's cost, beside the first line that said it as it happened.
         manager.shared.log_legacy_summary();
+        // And what each module took of the event loop, from the guard's watchdog, which stops
+        // here; a mouse button a module still holds goes up.
+        manager.stop_guard();
         // The window loop has ended, so a second start from here on is told this copy is
         // quitting, and waits for the lock instead of handing its request to a window that
         // will never open. Here, before the manager — hotkeys, hooks, modules — is dropped at
@@ -4925,13 +5414,20 @@ fn reload_everything(
 /// Spoken, not shown: the key can be pressed from inside any application, and the tray
 /// window is usually not open — a silent rebuild is indistinguishable from a key that did
 /// not arrive. Failures are named because that is the part that needs acting on; successes
-/// are counted because eleven module names is not feedback, it is a recital.
-fn reload_report_text(done: &[String], failed: &[String]) -> String {
-    match (done.len(), failed.len()) {
+/// are counted because eleven module names is not feedback, it is a recital. Modules the guard
+/// stopped are rebuilt too and stay off — a reload is no way around a stop — and the report counts
+/// them, so a module that does not answer afterwards is not a mystery.
+fn reload_report_text(done: &[String], failed: &[String], stopped: usize) -> String {
+    let report = match (done.len(), failed.len()) {
         (0, 0) => "No modules to reload".to_string(),
         (n, 0) => format!("{n} module{} reloaded", if n == 1 { "" } else { "s" }),
         (0, _) => format!("Reload failed: {}", failed.join(", ")),
         (n, _) => format!("{n} reloaded, {} failed: {}", failed.len(), failed.join(", ")),
+    };
+    match stopped {
+        0 => report,
+        1 => format!("{report}; 1 stopped module stays off"),
+        n => format!("{report}; {n} stopped modules stay off"),
     }
 }
 
@@ -5095,10 +5591,34 @@ impl HostEvents for Dispatcher<'_> {
         self.shared.fire_snapshot_results();
         self.shared.run_queued_events();
         self.dispatch_initial();
+        self.shared.settle_stops();
         if self.shared.recheck_requested.replace(false) {
             self.on_focus_change();
+            self.shared.settle_stops();
         }
         self.shared.log_housekeeping();
+    }
+
+    /// `RegisterHotKey` presses made during the stall a stop ended, dropped as they reached the
+    /// queue after it (`Backend::drop_queued_input`): one `[keys]` line, by their combinations.
+    fn on_stall_hotkeys_dropped(&mut self, ids: Vec<i32>) {
+        let ids = self.shared.answer_reload_key(ids);
+        if ids.is_empty() {
+            return;
+        }
+        let names: Vec<String> = {
+            let hotkeys = self.shared.hotkeys.borrow();
+            ids.iter().map(|id| hotkeys.get(id).map_or_else(|| format!("hotkey {id}"), |r| r.spec.clone())).collect()
+        };
+        logging::line(
+            "keys",
+            &format!(
+                "{} hotkey press(es) made during the stall that ended in the stop above reached the application after \
+                 it, and were dropped: {}",
+                ids.len(),
+                stops::counted(&names).join(", ")
+            ),
+        );
     }
 
     /// A sleep, a lock, the session going and coming back, a display change: a `[system]` line
@@ -5402,6 +5922,10 @@ impl mailbox::MailHost for Shared {
         &self.mail
     }
 
+    fn module_stopped(&self, idx: usize) -> bool {
+        self.stops.is_stopped(idx)
+    }
+
     fn open(&self, idx: usize, lua: &Lua, ev: Event) -> Opened {
         match ev {
             Event::Hotkey { id, owner, front, binding, spec } => self.open_hotkey(id, owner, front, binding, &spec),
@@ -5628,6 +6152,7 @@ fn install_key_captures<H: captures::KeyHost>(lua: &Lua, keys: &Table, idx: usiz
     keys.set(
         "capture",
         lua.create_function(move |lua, (spec, cb): (String, Function)| {
+            host_call!("host.keys.capture");
             // The parser's own error, which names the part it could not read.
             let (vk, mask) = backend::parse_key_spec(&spec).map_err(mlua::Error::external)?;
             // No cross-module conflict surfacing here: captured keys are routinely
@@ -5657,6 +6182,7 @@ fn install_key_captures<H: captures::KeyHost>(lua: &Lua, keys: &Table, idx: usiz
         // unknown/stale token (already superseded by a later capture) is a harmless
         // no-op.
         lua.create_function(move |_, token: i64| {
+            host_call!("host.keys.release");
             if sh.captures().release(token) {
                 sh.refresh_captured();
             }
@@ -5667,6 +6193,7 @@ fn install_key_captures<H: captures::KeyHost>(lua: &Lua, keys: &Table, idx: usiz
     keys.set(
         "releaseAll",
         lua.create_function(move |_, ()| {
+            host_call!("host.keys.releaseAll");
             sh.captures().release_all(idx);
             sh.refresh_captured();
             Ok(())
@@ -5679,6 +6206,7 @@ fn install_key_captures<H: captures::KeyHost>(lua: &Lua, keys: &Table, idx: usiz
     keys.set(
         "scope",
         lua.create_function(move |_, to_foreground: bool| {
+            host_call!("host.keys.scope");
             let window = if to_foreground { sh.key_backend().resolve_key_scope() } else { 0 };
             if sh.captures().set_scope(idx, window) {
                 sh.refresh_key_owners();
@@ -5694,6 +6222,7 @@ fn install_key_captures<H: captures::KeyHost>(lua: &Lua, keys: &Table, idx: usiz
     keys.set(
         "menuOpen",
         lua.create_function(move |_, open: bool| {
+            host_call!("host.keys.menuOpen");
             if sh.captures().set_menu(idx, open) {
                 sh.refresh_key_owners();
             }
@@ -5708,6 +6237,7 @@ fn install_key_captures<H: captures::KeyHost>(lua: &Lua, keys: &Table, idx: usiz
     keys.set(
         "passedThrough",
         lua.create_function(move |lua, ()| {
+            host_call!("host.keys.passedThrough");
             let t = lua.create_table()?;
             for (vk, mask) in sh.key_backend().take_menu_pass_through(idx as u32) {
                 let k = lua.create_table()?;
@@ -5751,6 +6281,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     log.set(
         "info",
         lua.create_function(|_, msg: String| {
+            host_call!("host.log.info");
             logging::line("module", &msg);
             Ok(())
         })?,
@@ -5760,9 +6291,27 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // host.json.decode(text) / encode(value, opts?) / array(t?) — see json.rs. Ungated, like
     // host.os: they read nothing but the value they are handed.
     let json = lua.create_table()?;
-    json.set("decode", lua.create_function(json::decode)?)?;
-    json.set("encode", lua.create_function(json::encode)?)?;
-    json.set("array", lua.create_function(json::array)?)?;
+    json.set(
+        "decode",
+        lua.create_function(|lua, text: mlua::String| {
+            host_call!("host.json.decode");
+            json::decode(lua, text)
+        })?,
+    )?;
+    json.set(
+        "encode",
+        lua.create_function(|lua, args: (mlua::Value, mlua::Value)| {
+            host_call!("host.json.encode");
+            json::encode(lua, args)
+        })?,
+    )?;
+    json.set(
+        "array",
+        lua.create_function(|lua, t: mlua::Value| {
+            host_call!("host.json.array");
+            json::array(lua, t)
+        })?,
+    )?;
     host.set("json", json)?;
 
     // host.require(id) — access a declared dependency. A `code_module` dependency
@@ -5774,6 +6323,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     host.set(
         "require",
         lua.create_function(move |lua, id: String| -> mlua::Result<mlua::Value> {
+            host_call!("host.require");
             if let Ok(reg) = lua.named_registry_value::<mlua::Table>("__module_exports") {
                 let m: mlua::Value = reg.get(id.as_str())?;
                 if !m.is_nil() {
@@ -5797,6 +6347,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     host.set(
         "tryRequire",
         lua.create_function(move |lua, id: String| -> mlua::Result<mlua::Value> {
+            host_call!("host.tryRequire");
             if let Ok(reg) = lua.named_registry_value::<mlua::Table>("__module_exports") {
                 let m: mlua::Value = reg.get(id.as_str())?;
                 if !m.is_nil() {
@@ -5826,6 +6377,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     speech.set(
         "output",
         lua.create_function(move |_, (text, opts): (String, Option<Table>)| {
+            host_call!("host.speech.output");
             // A missing `interrupt` — no table, `{}`, `{ interrupt = nil }` — interrupts, as the
             // page promises. It used to be `get::<bool>(…).unwrap_or(true)`, and mlua reads nil
             // as `false`, so the default only applied when `opts` itself was left out: `{}`
@@ -5847,6 +6399,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     speech.set(
         "engines",
         lua.create_function(move |lua, ()| {
+            host_call!("host.speech.engines");
             let list = lua.create_table()?;
             for (i, e) in sh.speech.engines().into_iter().enumerate() {
                 let t = lua.create_table()?;
@@ -5876,13 +6429,14 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         speech.set(
             "use",
             lua.create_function(move |_, id: Option<String>| {
+                host_call!("host.speech.use");
                 Ok(sh.speech.use_engine(idx, id.as_deref()))
             })?,
         )?;
         let sh = shared.clone();
         speech.set(
             "engine",
-            lua.create_function(move |_, ()| Ok(sh.speech.chosen_engine(idx)))?,
+            lua.create_function(move |_, ()| { host_call!("host.speech.engine"); Ok(sh.speech.chosen_engine(idx)) })?,
         )?;
     }
 
@@ -5894,6 +6448,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     hk.set(
         "register",
         lua.create_function(move |lua, (spec, cb): (String, Function)| {
+            host_call!("host.hotkey.register");
             // What the operating system can never hold is refused here and now, loudly, rather
             // than recorded as a claim: a tap, a key the platform has no code for, and a
             // combination the system keeps for itself. Command+Q on a Mac would REGISTER, and
@@ -5958,6 +6513,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     hk.set(
         "unregister",
         lua.create_function(move |_, id: i32| {
+            host_call!("host.hotkey.unregister");
             // Whatever number Lua passes goes straight to the OS, so a stale or
             // made-up id could release the app's own reload key — and nothing would
             // report it; the key would simply stop working. It is not a module's to
@@ -5989,12 +6545,12 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     keys.set(
         "modifiersDown",
-        lua.create_function(move |_, ()| Ok(sh.backend.modifiers_down()))?,
+        lua.create_function(move |_, ()| { host_call!("host.keys.modifiersDown"); Ok(sh.backend.modifiers_down()) })?,
     )?;
     let sh = shared.clone();
     keys.set(
         "nativeMenuOpen",
-        lua.create_function(move |_, ()| Ok(sh.backend.native_menu_open()))?,
+        lua.create_function(move |_, ()| { host_call!("host.keys.nativeMenuOpen"); Ok(sh.backend.native_menu_open()) })?,
     )?;
     // host.keys.normalize(spec) -> string? — the key a spec stands for on this platform, in one
     // spelling. What the overlay runtime keys its claims by, so `Cmd+S` and `Ctrl+S` are one key
@@ -6003,6 +6559,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     keys.set(
         "normalize",
         lua.create_function(|_, spec: String| {
+            host_call!("host.keys.normalize");
             Ok(backend::normalize_spec_for(backend::KeyOs::CURRENT, &spec))
         })?,
     )?;
@@ -6012,6 +6569,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     keys.set(
         "describe",
         lua.create_function(|_, (spec, opts): (String, Option<Table>)| {
+            host_call!("host.keys.describe");
             let style = match opts {
                 None => backend::KeyStyle::Spoken,
                 Some(t) => match t.get::<Option<String>>("style")?.as_deref() {
@@ -6037,6 +6595,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     keys.set(
         "check",
         lua.create_function(move |lua, (spec, opts): (String, Option<Table>)| {
+            host_call!("host.keys.check");
             // Strict, like `interrupt` and `initial`: mlua reads any value but nil and `false`
             // as `true`, so `{ layout = "no" }` asked the layout without a word.
             let ask_layout = opt_bool(opts.as_ref(), "layout", true, "host.keys.check")?;
@@ -6075,7 +6634,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let started = clock_origin();
     host.set(
         "now",
-        lua.create_function(move |_, ()| Ok(started.elapsed().as_millis() as i64))?,
+        lua.create_function(move |_, ()| { host_call!("host.now"); Ok(started.elapsed().as_millis() as i64) })?,
     )?;
 
     // host.inputEpoch() — a counter that turns over only when something ACTED on the
@@ -6087,7 +6646,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh_ie = shared.clone();
     host.set(
         "inputEpoch",
-        lua.create_function(move |_, ()| Ok(sh_ie.input_epoch.get() as i64))?,
+        lua.create_function(move |_, ()| { host_call!("host.inputEpoch"); Ok(sh_ie.input_epoch.get() as i64) })?,
     )?;
 
     // host.timer.after / every / cancel — see timers.rs. Owned by `idx`, which for a dependency's
@@ -6099,7 +6658,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     os.set("current", std::env::consts::OS)?;
     os.set(
         "is",
-        lua.create_function(|_, name: String| Ok(name == std::env::consts::OS))?,
+        lua.create_function(|_, name: String| { host_call!("host.os.is"); Ok(name == std::env::consts::OS) })?,
     )?;
     host.set("os", os)?;
 
@@ -6122,6 +6681,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     win.set(
         "focus",
         lua.create_function(move |lua, id: isize| {
+            host_call!("host.window.focus");
             // A read of the window before focusing it sees it as it was: the module's pending
             // OCR pictures are taken first.
             sh.ocr_barrier(lua);
@@ -6146,6 +6706,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     win.set(
         "list",
         lua.create_function(move |lua, filter: Option<Table>| {
+            host_call!("host.window.list");
             let pids: Option<Vec<u32>> = match filter {
                 Some(f) => f.get::<Option<Vec<u32>>>("pids")?,
                 None => None,
@@ -6168,6 +6729,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     win.set(
         "apps",
         lua.create_function(move |lua, ()| {
+            host_call!("host.window.apps");
             let t = lua.create_table()?;
             for a in sh.backend.running_apps() {
                 let app = lua.create_table()?;
@@ -6193,6 +6755,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     win.set(
         "windowsOf",
         lua.create_function(move |lua, pid: u32| {
+            host_call!("host.window.windowsOf");
             let t = lua.create_table()?;
             for s in sh.backend.windows_of(pid) {
                 let w = lua.create_table()?;
@@ -6212,6 +6775,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     win.set(
         "active",
         lua.create_function(move |lua, ()| {
+            host_call!("host.window.active");
             let cached = {
                 let mut obs = sh.observations();
                 obs.asked += 1;
@@ -6247,6 +6811,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     win.set(
         "controls",
         lua.create_function(move |lua, win_arg: Option<Table>| {
+            host_call!("host.window.controls");
             let hwnd: isize = match win_arg {
                 Some(t) => t.get("id")?,
                 None => match sh.backend.active_window() {
@@ -6299,6 +6864,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "ownsPoint",
         lua.create_function(
             move |_, (id, x, y, opts): (isize, i32, i32, Option<Table>)| {
+                host_call!("host.window.ownsPoint");
                 let listed = opt_bool(opts.as_ref(), "listed", false, "host.window.ownsPoint")?;
                 if listed {
                     // A negative number is no window in any list: nothing can be said of it.
@@ -6316,6 +6882,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     win.set(
         "focusChain",
         lua.create_function(move |lua, ()| {
+            host_call!("host.window.focusChain");
             let chain = {
                 let mut obs = sh.observations();
                 obs.asked += 1;
@@ -6353,6 +6920,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     win.set(
         "recheck",
         lua.create_function(move |_, ()| {
+            host_call!("host.window.recheck");
             sh.recheck_requested.set(true);
             Ok(())
         })?,
@@ -6371,6 +6939,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     uia.set(
         "find",
         lua.create_function(move |_, (hwnd, name, ctype): (isize, String, i32)| {
+            host_call!("host.element.find");
             let key = (hwnd, name, ctype);
             let mut obs = sh.observations();
             obs.asked += 1;
@@ -6443,6 +7012,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     uia.set(
         "findAny",
         lua.create_function(move |_, (hwnd, names, types): (isize, Vec<String>, Vec<i32>)| {
+            host_call!("host.element.findAny");
             let key = (hwnd, names, types);
             let mut obs = sh.observations();
             obs.asked += 1;
@@ -6466,6 +7036,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     uia.set(
         "locate",
         lua.create_function(move |lua, (hwnd, name, ctype): (isize, String, i32)| {
+            host_call!("host.element.locate");
             match sh.backend.element_locate(hwnd, &name, ctype) {
                 Some((x, y)) => {
                     let t = lua.create_table()?;
@@ -6486,6 +7057,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "locateVia",
         lua.create_function(
             move |lua, (hwnd, via_name, via_type, name, ctype): (isize, String, i32, String, i32)| {
+                host_call!("host.element.locateVia");
                 match sh.backend.element_locate_via(hwnd, &via_name, via_type, &name, ctype) {
                     Some((x, y)) => {
                         let t = lua.create_table()?;
@@ -6507,6 +7079,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "pluginLocate",
         lua.create_function(
             move |lua, (hwnd, container, name, ctype): (isize, String, String, i32)| {
+                host_call!("host.element.pluginLocate");
                 let key = format!("pluginLocate {hwnd} {container} {name} {ctype}");
                 match located(&sh, "uia.pluginLocate", key, || {
                     sh.backend.element_plugin_locate(hwnd, &container, &name, ctype)
@@ -6529,6 +7102,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "stateProbe",
         lua.create_function(
             move |lua, (hwnd, container, name, ctype): (isize, String, String, i32)| {
+                host_call!("host.element.stateProbe");
                 match sh.backend.element_state_probe(hwnd, &container, &name, ctype) {
                     None => Ok(None),
                     Some((toggle, legacy)) => {
@@ -6550,6 +7124,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     uia.set(
         "dump",
         lua.create_function(move |lua, hwnd: isize| {
+            host_call!("host.element.dump");
             let arr = lua.create_table()?;
             for (i, n) in sh.backend.element_dump(hwnd).into_iter().enumerate() {
                 arr.set(i + 1, dump_node_to_table(lua, n)?)?;
@@ -6563,6 +7138,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     uia.set(
         "rawDump",
         lua.create_function(move |lua, hwnd: isize| {
+            host_call!("host.element.rawDump");
             let arr = lua.create_table()?;
             for (i, n) in sh.backend.element_raw_dump(hwnd).into_iter().enumerate() {
                 arr.set(i + 1, dump_node_to_table(lua, n)?)?;
@@ -6579,6 +7155,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "classNavPoint",
         lua.create_function(
             move |lua, (hwnd, class, ctype, child, sibling): (isize, String, i32, i32, i32)| {
+                host_call!("host.element.classNavPoint");
                 match sh.backend.element_class_nav_point(hwnd, &class, ctype, child, sibling) {
                     Some((x, y)) => {
                         let t = lua.create_table()?;
@@ -6600,6 +7177,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     uia.set(
         "focusStep",
         lua.create_function(move |lua, (hwnd, direction): (isize, i32)| {
+            host_call!("host.element.focusStep");
             match sh.backend.element_focus_step(hwnd, direction) {
                 Some(step) => Ok(Some(focus_step_table(lua, step)?)),
                 None => Ok(None),
@@ -6613,6 +7191,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     uia.set(
         "focusWithin",
         lua.create_function(move |lua, (hwnd, rect): (isize, Table)| {
+            host_call!("host.element.focusWithin");
             let x: i32 = rect.get("x")?;
             let y: i32 = rect.get("y")?;
             let w: i32 = rect.get("w")?;
@@ -6637,6 +7216,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "pixel",
         // pixel(x, y, opts?) or pixel({ window = w, fraction = { x, y } }, opts?) -> colour | nil, reason
         lua.create_function(move |lua, (a, b, c): (mlua::Value, mlua::Value, mlua::Value)| {
+            host_call!("host.screen.pixel");
             const F: &str = "host.screen.pixel";
             // The options come after the point: third after two numbers, second after a table.
             let opts = match &a {
@@ -6714,6 +7294,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     screen.set(
         "size",
         lua.create_function(move |lua, ()| {
+            host_call!("host.screen.size");
             let (w, h) = sh.backend.screen_size();
             let t = lua.create_table()?;
             t.set("w", w)?;
@@ -6745,6 +7326,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     screen.set(
         "profile",
         lua.create_function(move |lua, opts: Option<Table>| {
+            host_call!("host.screen.profile");
             const F: &str = "host.screen.profile";
             // Every argument is read before anything is answered, so a mistake in `axes`
             // raises whether or not there is anything to read this time. A snapshot first: a
@@ -6874,6 +7456,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     screen.set(
         "saveMarked",
         lua.create_function(move |lua, (path, opts): (String, Table)| {
+            host_call!("host.screen.saveMarked");
             let full = sh.root(idx).join(&path);
             png_path_only("host.screen.saveMarked", &full)?;
             // A window region is resolved to its screen rectangle first; the marks stay in
@@ -6957,6 +7540,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     screen.set(
         "predicate",
         lua.create_function(|_, expr: mlua::Value| {
+            host_call!("host.screen.predicate");
             const F: &str = "host.screen.predicate";
             let mlua::Value::String(s) = &expr else {
                 return Err(mlua::Error::external(format!(
@@ -6976,6 +7560,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     screen.set(
         "cells",
         lua.create_function(move |lua, opts: mlua::Value| {
+            host_call!("host.screen.cells");
             let call = read_cells_opts(lua, "host.screen.cells", opts)?;
             let r = match call.rect {
                 Ok(r) => r,
@@ -6998,6 +7583,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     screen.set(
         "matchCells",
         lua.create_function(move |lua, (opts, states): (mlua::Value, mlua::Value)| {
+            host_call!("host.screen.matchCells");
             const F: &str = "host.screen.matchCells";
             let call = read_cells_opts(lua, F, opts)?;
             let st = read_states(F, states, call.spec.cells())?;
@@ -7026,6 +7612,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     screen.set(
         "matchCellsAsync",
         lua.create_function(move |lua, (opts, states, cb): (mlua::Value, mlua::Value, mlua::Value)| {
+            host_call!("host.screen.matchCellsAsync");
             const F: &str = "host.screen.matchCellsAsync";
             let call = read_cells_opts(lua, F, opts)?;
             let st = read_states(F, states, call.spec.cells())?;
@@ -7048,6 +7635,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     screen.set(
         "save",
         lua.create_function(move |lua, (path, opts): (String, Option<Table>)| {
+            host_call!("host.screen.save");
             let full = sh.root(idx).join(&path);
             png_path_only("host.screen.save", &full)?;
             let snap = snapshot::from_opts(opts.as_ref(), "host.screen.save")?;
@@ -7098,6 +7686,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     ocr.set(
         "read",
         lua.create_function(move |lua, (what, opts, cb): (mlua::Value, mlua::Value, mlua::Value)| {
+            host_call!("host.ocr.read");
             sh.ocr_read(lua, idx, what, opts, cb)
         })?,
     )?;
@@ -7105,13 +7694,13 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     ocr.set(
         "languages",
-        lua.create_function(move |lua, ()| sh.ocr_languages_value(lua))?,
+        lua.create_function(move |lua, ()| { host_call!("host.ocr.languages"); sh.ocr_languages_value(lua) })?,
     )?;
     // host.ocr.resolveLanguage(tag | { tag } | nil) -> string? — what `lang` would read with.
     let sh = shared.clone();
     ocr.set(
         "resolveLanguage",
-        lua.create_function(move |_, v: mlua::Value| sh.ocr_resolve_value(&v))?,
+        lua.create_function(move |_, v: mlua::Value| { host_call!("host.ocr.resolveLanguage"); sh.ocr_resolve_value(&v) })?,
     )?;
 
     // host.ocr.pending(key) -> boolean — whether a read of this module with `key`, asked with
@@ -7120,7 +7709,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     ocr.set(
         "pending",
-        lua.create_function(move |lua, key: mlua::Value| ocr::lua::pending(&*sh, lua, idx, key))?,
+        lua.create_function(move |lua, key: mlua::Value| { host_call!("host.ocr.pending"); ocr::lua::pending(&*sh, lua, idx, key) })?,
     )?;
 
     // host.ocr.recognize(opts?) and host.ocr.recognizeMany(opts) — the two waits of a task
@@ -7130,6 +7719,10 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // says how long the first held the event loop.
     let sh = shared.clone();
     let legacy = lua.create_function(move |lua, (name, opts, why): (String, mlua::Value, String)| {
+        // The two calls this one function carries, named for the guard as the module wrote them.
+        static ONE: &str = "host.ocr.recognize";
+        static MANY: &str = "host.ocr.recognizeMany";
+        let _host_call = vm_guard::HostCall::enter(if name == MANY { &MANY } else { &ONE });
         let answer = task::legacy(&*sh, lua, idx, &name, &why, || {
             if name == "host.ocr.recognizeMany" {
                 legacy_recognize_many(lua, &sh, opts)
@@ -7151,7 +7744,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // situation is always re-observed. Deliberately NOT time-based: a stale coordinate
     // clicks the wrong thing, and "it was fresh 50 ms ago" is not a safety property.
     let sh = shared.clone();
-    host.set("epoch", lua.create_function(move |_, ()| Ok(sh.epoch.get()))?)?;
+    host.set("epoch", lua.create_function(move |_, ()| { host_call!("host.epoch"); Ok(sh.epoch.get()) })?)?;
 
     // host.input: cursorPos / move / click / drag / scroll / send / text
     let input = lua.create_table()?;
@@ -7159,6 +7752,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     input.set(
         "cursorPos",
         lua.create_function(move |lua, ()| {
+            host_call!("host.input.cursorPos");
             let (x, y) = sh.backend.cursor_pos();
             let t = lua.create_table()?;
             t.set("x", x)?;
@@ -7170,6 +7764,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     input.set(
         "move",
         lua.create_function(move |lua, (x, y): (i32, i32)| {
+            host_call!("host.input.move");
             // Read, then act: this module's pending OCR pictures are taken first.
             sh.ocr_barrier(lua);
             sh.bump_input_epoch();
@@ -7181,10 +7776,14 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     input.set(
         "click",
         lua.create_function(move |lua, (x, y, opts): (i32, i32, Option<Table>)| {
+            host_call!("host.input.click");
             // Read, then act: this module's pending OCR pictures are taken first.
             sh.ocr_barrier(lua);
             sh.bump_input_epoch();
-            sh.backend.mouse_click(x, y, button_from(opts.as_ref()));
+            let button = button_from(opts.as_ref());
+            sh.backend.mouse_click(x, y, button);
+            // Its own release lets go of a button held down before it.
+            sh.let_go_button(idx, button);
             Ok(())
         })?,
     )?;
@@ -7192,6 +7791,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     input.set(
         "post",
         lua.create_function(move |lua, (hwnd, key): (i64, String)| {
+            host_call!("host.input.post");
             // Read, then act: this module's pending OCR pictures are taken first.
             sh.ocr_barrier(lua);
             sh.backend
@@ -7203,10 +7803,15 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     input.set(
         "mouseDown",
         lua.create_function(move |lua, (x, y, opts): (i32, i32, Option<Table>)| {
+            host_call!("host.input.mouseDown");
             // Read, then act: this module's pending OCR pictures are taken first.
             sh.ocr_barrier(lua);
             sh.bump_input_epoch();
-            sh.backend.mouse_down(x, y, button_from(opts.as_ref()));
+            let button = button_from(opts.as_ref());
+            sh.backend.mouse_down(x, y, button);
+            // Held until its mouseUp — or until the module stops running, when the host lets go
+            // of it (`release_held_buttons`).
+            sh.hold_button(idx, button);
             Ok(())
         })?,
     )?;
@@ -7214,10 +7819,13 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     input.set(
         "mouseUp",
         lua.create_function(move |lua, (x, y, opts): (i32, i32, Option<Table>)| {
+            host_call!("host.input.mouseUp");
             // Read, then act: this module's pending OCR pictures are taken first.
             sh.ocr_barrier(lua);
             sh.bump_input_epoch();
-            sh.backend.mouse_up(x, y, button_from(opts.as_ref()));
+            let button = button_from(opts.as_ref());
+            sh.backend.mouse_up(x, y, button);
+            sh.let_go_button(idx, button);
             Ok(())
         })?,
     )?;
@@ -7225,10 +7833,14 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     input.set(
         "drag",
         lua.create_function(move |lua, (x1, y1, x2, y2, opts): (i32, i32, i32, i32, Option<Table>)| {
+            host_call!("host.input.drag");
             // Read, then act: this module's pending OCR pictures are taken first.
             sh.ocr_barrier(lua);
             sh.bump_input_epoch();
-            sh.backend.mouse_drag(x1, y1, x2, y2, button_from(opts.as_ref()));
+            let button = button_from(opts.as_ref());
+            sh.backend.mouse_drag(x1, y1, x2, y2, button);
+            // Its own release lets go of a button held down before it.
+            sh.let_go_button(idx, button);
             Ok(())
         })?,
     )?;
@@ -7245,6 +7857,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     input.set(
         "scroll",
         lua.create_function(move |lua, (x, y, notches): (i32, i32, f64)| {
+            host_call!("host.input.scroll");
             // Read, then act: this module's pending OCR pictures are taken first.
             sh.ocr_barrier(lua);
             sh.bump_input_epoch();
@@ -7257,6 +7870,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     input.set(
         "send",
         lua.create_function(move |lua, combo: String| {
+            host_call!("host.input.send");
             // Read, then act: this module's pending OCR pictures are taken first.
             sh.ocr_barrier(lua);
             sh.bump_input_epoch();
@@ -7267,6 +7881,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     input.set(
         "text",
         lua.create_function(move |lua, text: String| {
+            host_call!("host.input.text");
             // Read, then act: this module's pending OCR pictures are taken first.
             sh.ocr_barrier(lua);
             sh.bump_input_epoch();
@@ -7282,6 +7897,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     sound.set(
         "play",
         lua.create_function(move |_, rel: String| {
+            host_call!("host.sound.play");
             let path = sh.root(idx).join(&rel);
             let mut audio = sh.audio.borrow_mut();
             // Opened again when its stream failed or the default device is another one now
@@ -7329,6 +7945,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     host.set(
         "path",
         lua.create_function(move |_, rel: String| {
+            host_call!("host.path");
             // Absolute, so a path handed to another module (e.g. a library's image
             // searched by its container) resolves correctly regardless of that
             // module's own working directory.
@@ -7343,6 +7960,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     resource.set(
         "read",
         lua.create_function(move |_, rel: String| {
+            host_call!("host.resource.read");
             let path = sh.root(idx).join(&rel);
             std::fs::read_to_string(&path).map_err(mlua::Error::external)
         })?,
@@ -7355,7 +7973,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     resource.set(
         "exists",
-        lua.create_function(move |_, rel: String| Ok(sh.root(idx).join(&rel).exists()))?,
+        lua.create_function(move |_, rel: String| { host_call!("host.resource.exists"); Ok(sh.root(idx).join(&rel).exists()) })?,
     )?;
     host.set("resource", resource)?;
 
@@ -7367,6 +7985,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
         "define",
         lua.create_function(
             move |lua, (key, default, opts): (String, mlua::Value, Option<Table>)| {
+                host_call!("host.settings.define");
                 let def = lua_to_value(&default)?;
                 let field = field_from(&key, &def, opts.as_ref());
                 let id = sh.ids.borrow()[idx].clone();
@@ -7390,6 +8009,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     settings_api.set(
         "get",
         lua.create_function(move |lua, key: String| {
+            host_call!("host.settings.get");
             if !sh.schemas.borrow()[idx].contains_key(&key) {
                 return Err(mlua::Error::external(format!("setting '{key}' was not defined")));
             }
@@ -7406,6 +8026,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     settings_api.set(
         "set",
         lua.create_function(move |lua, (key, value): (String, mlua::Value)| {
+            host_call!("host.settings.set");
             let v = lua_to_value(&value)?;
             {
                 let schemas = sh.schemas.borrow();
@@ -7429,6 +8050,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     settings_api.set(
         "onChange",
         lua.create_function(move |lua, (key, cb): (String, Function)| {
+            host_call!("host.settings.onChange");
             file_on_change(&mut sh.on_change.borrow_mut(), lua, idx, key, cb)
         })?,
     )?;
@@ -7462,6 +8084,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 Function,
                 Function,
             )| {
+                host_call!("host.arbiter.register");
                 let ak = lua.create_registry_value(on_activate)?;
                 let dk = lua.create_registry_value(on_deactivate)?;
                 Ok(sh.arbiter_register(slot, idx, specificity, lua.clone(), ak, dk))
@@ -7472,6 +8095,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     arbiter.set(
         "setMatching",
         lua.create_function(move |_, (slot, handle, matching): (String, i64, bool)| {
+            host_call!("host.arbiter.setMatching");
             sh.arbiter_set_matching(&slot, handle, matching);
             Ok(())
         })?,
@@ -7480,6 +8104,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     arbiter.set(
         "unregister",
         lua.create_function(move |_, (slot, handle): (String, i64)| {
+            host_call!("host.arbiter.unregister");
             sh.arbiter_unregister(&slot, handle);
             Ok(())
         })?,
@@ -7487,7 +8112,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     arbiter.set(
         "winner",
-        lua.create_function(move |_, slot: String| Ok(sh.arbiter_winner(&slot)))?,
+        lua.create_function(move |_, slot: String| { host_call!("host.arbiter.winner"); Ok(sh.arbiter_winner(&slot)) })?,
     )?;
     // host.arbiter.winnerSpecificity(slot) -> number | nil — the rank of whoever currently
     // owns the slot. Lets a claimant skip work it cannot use: with twelve sample-library
@@ -7496,7 +8121,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     let sh = shared.clone();
     arbiter.set(
         "winnerSpecificity",
-        lua.create_function(move |_, slot: String| Ok(sh.arbiter_winner_specificity(&slot)))?,
+        lua.create_function(move |_, slot: String| { host_call!("host.arbiter.winnerSpecificity"); Ok(sh.arbiter_winner_specificity(&slot)) })?,
     )?;
     // host.arbiter.participants(slot) -> { {module, specificity, matching, active}, … }
     // A DIAGNOSTIC, and the only way to catch the failure this design is most prone to:
@@ -7509,6 +8134,7 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     arbiter.set(
         "participants",
         lua.create_function(move |lua, slot: String| {
+            host_call!("host.arbiter.participants");
             let arr = lua.create_table()?;
             let map = sh.arbiter.borrow();
             if let Some(s) = map.get(&slot) {
@@ -7593,6 +8219,7 @@ fn install_include(
     host.set(
         "include",
         lua.create_function(move |lua, rel: String| {
+            host_call!("host.include");
             let abs = include_target(&sh.root(idx), &rel).map_err(mlua::Error::external)?;
             let key = abs.to_string_lossy().to_string();
 
@@ -7623,6 +8250,10 @@ fn install_include(
             }
             loading.set(key.as_str(), true)?;
 
+            // Its chunk is this module's file — `idx`, the dependency's own for a dependency's
+            // include — named for the guard's frames: a stop in it names that module.
+            let owner = sh.ids.borrow().get(idx).cloned().unwrap_or_default();
+            vm_guard::name_chunk(lua, &key, &owner, &path_clean::clean(&rel).to_string_lossy());
             let result = (|| -> mlua::Result<mlua::Value> {
                 let f = compile_include(lua, &abs, &rel, &key)?;
                 let host_tbl: Table = lua.registry_value(&host_ref)?;
@@ -7778,6 +8409,57 @@ mod optional_code_dep_tests {
         collect_code_deps(tmp.path(), &["com.test.elsewhere".to_string()], &[], &mut out, &mut HashSet::new())
             .unwrap();
         assert_eq!(out.len(), 1);
+    }
+
+    /// A module in its own folder under `parent`: a `code_module` or one for data, its
+    /// dependencies, its `[limits] memory_mib` if it writes one, and the system it runs on.
+    fn module(parent: &Path, id: &str, code: bool, deps: &[&str], mib: Option<u32>, os: &str) {
+        let dir = parent.join(id.rsplit('.').next().unwrap());
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let list = deps.iter().map(|d| format!("{d:?}")).collect::<Vec<_>>().join(", ");
+        let limits = mib.map_or(String::new(), |m| format!("\n[limits]\nmemory_mib = {m}\n"));
+        std::fs::write(
+            dir.join("module.toml"),
+            format!(
+                "id = \"{id}\"\nname = \"{}\"\nversion = \"1.0.0\"\nentry = \"src/main.luau\"\ncode_module = {code}\n\
+                 dependencies = [{list}]\nsupported_os = [\"{os}\"]\n{limits}",
+                id.to_uppercase()
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("src").join("main.luau"), "return {}\n").unwrap();
+    }
+
+    /// A VM's memory limit is summed from the manifests on disk, as `populate_vm` collects them:
+    /// each code dependency once, transitively — the diamond's shared one once — with its own
+    /// amount; a dependency for data, an absent optional one and an optional one for another
+    /// system add nothing; and a dependency that writes the default out counts as set, as the
+    /// module itself does.
+    #[test]
+    fn the_vms_limit_is_summed_from_the_manifests_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let os = std::env::consts::OS;
+        module(tmp.path(), "com.t.a", true, &["com.t.c"], Some(512), os);
+        module(tmp.path(), "com.t.b", true, &["com.t.c"], None, os);
+        module(tmp.path(), "com.t.c", true, &[], Some(256), os);
+        module(tmp.path(), "com.t.d", false, &[], Some(2048), os);
+        module(tmp.path(), "com.t.f", true, &[], Some(1024), "plan9");
+        let root = module_manifest::ModuleManifest::parse(
+            "id = \"com.t.root\"\nname = \"Root\"\nversion = \"1.0.0\"\n\
+             dependencies = [\"com.t.a\", \"com.t.b\", \"com.t.d\"]\noptional_dependencies = [\"com.t.e\", \"com.t.f\"]\n",
+        )
+        .unwrap();
+        let mut deps = Vec::new();
+        collect_code_deps(tmp.path(), &root.dependencies, &root.optional_dependencies, &mut deps, &mut HashSet::new()).unwrap();
+        let info = vm_guard::VmInfo::of(0, &root, &deps);
+        let parts: Vec<(&str, u32, bool)> = info.code.iter().map(|c| (c.id.as_str(), c.mib, c.declared)).collect();
+        assert_eq!(
+            parts,
+            [("com.t.root", 256, false), ("com.t.c", 256, true), ("com.t.a", 512, true), ("com.t.b", 256, false)],
+            "C once, before A; D, E and F not at all"
+        );
+        assert_eq!(info.limit_mib(), 256 + 256 + 512 + 256);
+        assert_eq!(info.name_of("com.t.a").as_deref(), Some("COM.T.A"), "names from the manifests");
     }
 }
 
@@ -8199,6 +8881,15 @@ fn dispatch_initial(lua: &Lua, win: Option<&WinInfo>, reprime: bool, before: Opt
 }
 
 /// Reads `{ button = "left"|"right"|"middle" }` from input opts (default left).
+/// A button's name in the messages: "left", "right", "middle".
+fn button_name(button: MouseButton) -> &'static str {
+    match button {
+        MouseButton::Left => "left",
+        MouseButton::Right => "right",
+        MouseButton::Middle => "middle",
+    }
+}
+
 fn button_from(opts: Option<&Table>) -> MouseButton {
     let name = opts.and_then(|o| o.get::<String>("button").ok()).unwrap_or_default();
     match name.to_ascii_lowercase().as_str() {
@@ -9210,6 +9901,7 @@ fn win_to_table(lua: &Lua, w: &WinInfo) -> mlua::Result<Table> {
 /// No OCR barrier either: it reads, it does not act.
 fn foreground_fn(lua: &Lua, read: impl Fn() -> Option<backend::Foreground> + 'static) -> mlua::Result<Function> {
     lua.create_function(move |lua, ()| {
+        host_call!("host.window.foreground");
         let t = Instant::now();
         let f = read();
         slow_observation("window.foreground", "", t);
@@ -9457,7 +10149,7 @@ mod ocr_wiring_tests {
     /// or rolled back; and a pending one keeps the headless loop running.
     #[test]
     fn a_modules_snapshot_requests_go_with_it() {
-        assert!(body(LIB, "fn apply_enabled(").contains("self.snap_drop_owner(idx);"));
+        assert!(body(LIB, "fn after_toggle(").contains("self.snap_drop_owner(idx);"));
         assert!(body(LIB, "fn purge_module(").contains("self.snap_drop_owner(idx);"));
         assert!(body(LIB, "fn rollback_to(").contains("self.snap_drop_from(n);"));
         assert!(body(LIB, "pub fn run(&mut self)").contains("self.shared.snap_state.has_pending()"));
@@ -9857,7 +10549,7 @@ mod ocr_wiring_tests {
     /// back; and the two older calls send `lang` through the resolver.
     #[test]
     fn a_modules_reads_go_with_it_and_the_older_calls_resolve_their_language() {
-        assert!(body(LIB, "fn apply_enabled(").contains("self.ocr_drop_owner(idx, false);"));
+        assert!(body(LIB, "fn after_toggle(").contains("self.ocr_drop_owner(idx, false);"));
         assert!(body(LIB, "fn purge_module(").contains("self.ocr_drop_owner(idx, true);"));
         assert!(body(LIB, "fn rollback_to(").contains("self.ocr_drop_from(n);"));
         for f in ["fn legacy_recognize(", "fn legacy_recognize_many("] {
@@ -9871,13 +10563,13 @@ mod ocr_wiring_tests {
     /// tasks — so nothing it started reaches the old VM or keeps it in memory.
     #[test]
     fn a_modules_tasks_go_with_it_and_after_its_deactivation() {
-        let enable = body(LIB, "fn apply_enabled(");
+        let enable = body(LIB, "fn after_toggle(");
         let resolve = enable.find("self.arbiter_resolve(&slot);").expect("the re-election");
         for drop in ["self.ocr_drop_owner(idx, false);", "self.snap_drop_owner(idx);", "self.task_drop_owner(idx);"] {
             assert!(enable.find(drop).is_some_and(|at| at > resolve), "`{drop}` before the re-election");
         }
         let purge = body(LIB, "fn purge_module(");
-        let deactivated = purge.find("for f in deactivations {").expect("the onDeactivate calls");
+        let deactivated = purge.find("for (lua, f) in deactivations {").expect("the onDeactivate calls");
         let second = &purge[deactivated..];
         for drop in [
             "self.timers.retain(|i| i != idx);",
@@ -9911,11 +10603,11 @@ mod ocr_wiring_tests {
     /// bindings are the generic ones key_scope_tests.rs runs against real VMs.
     #[test]
     fn a_modules_key_scope_and_flag_go_with_it_after_its_deactivation() {
-        let enable = body(LIB, "fn apply_enabled(");
+        let enable = body(LIB, "fn after_toggle(");
         let resolve = enable.find("self.arbiter_resolve(&slot);").expect("the re-election");
         assert!(enable.find("self.forget_key_owner(idx);").is_some_and(|at| at > resolve), "before the re-election");
         let purge = body(LIB, "fn purge_module(");
-        let deactivated = purge.find("for f in deactivations {").expect("the onDeactivate calls");
+        let deactivated = purge.find("for (lua, f) in deactivations {").expect("the onDeactivate calls");
         assert!(purge[deactivated..].contains("self.forget_key_owner(idx);"), "not again after the onDeactivate");
         assert!(purge[..deactivated].contains("self.forget_key_owner(idx);"), "not before it either");
         let rollback = body(LIB, "fn rollback_to(");
@@ -10020,7 +10712,7 @@ mod ocr_wiring_tests {
     }
 
     /// A module's callback is called outside its mailbox only at the synchronous places — the
-    /// arbiter's `onActivate` and `onDeactivate` (the purge's, the unregistering's, the
+    /// arbiter's `onActivate` and `onDeactivate` (the purge's, the unregistering's and the
     /// re-election's) and a module's own `onChange` from its own `set` — wherever the call is
     /// written: every source file of the crate is searched, its test code left out. So a new
     /// event site that calls a callback itself — the HTML probe's page callbacks, merged without
@@ -10065,6 +10757,382 @@ mod ocr_wiring_tests {
         );
     }
 
+    /// Every source file of the crate but `vm_guard.rs`, its test code left out: (name, text,
+    /// the stretches only a test build compiles).
+    fn production_sources() -> Vec<(String, String, Vec<std::ops::Range<usize>>)> {
+        let mut stack = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+        let mut out = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                    continue;
+                }
+                let name = p.file_name().unwrap().to_string_lossy().to_string();
+                if !name.ends_with(".rs") || name.ends_with("_tests.rs") || name == "vm_guard.rs" {
+                    continue;
+                }
+                let src = std::fs::read_to_string(&p).unwrap();
+                let tests = test_only(&src);
+                out.push((name, src, tests));
+            }
+        }
+        out
+    }
+
+    /// Every VM the host builds is the guard's (`vm_guard::new_vm`): it has its memory limit from
+    /// the start, and a slot that can stop it. A `Lua::new()` anywhere else outside test code
+    /// would be a VM with neither.
+    #[test]
+    fn every_vm_is_made_by_the_guard() {
+        // Spelt in halves, so that this test's own text is not what is found.
+        let new = concat!("Lua::", "new()");
+        let mut found = Vec::new();
+        for (name, src, tests) in production_sources() {
+            for (at, _) in src.match_indices(new) {
+                if !tests.iter().any(|r| r.contains(&at)) {
+                    found.push(format!("{name}: {}", enclosing_fn(&src, at)));
+                }
+            }
+        }
+        assert!(found.is_empty(), "a VM the guard did not make: {found:?}");
+        let new_vm = concat!("vm_guard::new", "_vm(&shared.guard)");
+        assert!(body(LIB, "fn load_module(").contains(new_vm));
+        assert_eq!(body(LIB, "fn reload_module(").matches(new_vm).count(), 2, "the rebuilt VM and the empty one after a failure");
+    }
+
+    /// The calls into a VM's Lua that the guard watches: every handler stretch (task.rs), every
+    /// plain call (`call_guarded`), every step of a load (`populate_vm`'s `load_step`s), and a
+    /// handler whose coroutine could not be made. And the stop's own report replaces the
+    /// module's error, wherever a call's error would be reported.
+    #[test]
+    fn the_calls_into_a_vm_are_entries_of_the_guard() {
+        const TASK: &str = include_str!("task.rs");
+        let stretch = body(TASK, "fn stretch(");
+        assert!(stretch.contains("crate::vm_guard::Entry::enter(&lua, crate::vm_guard::EntryKind::Handler, what)"));
+        assert!(stretch.contains("e.finish(&r);"));
+        // One entry for the whole delivery, its own yields' answers inside it: the slice the
+        // clocks count does not start again at each.
+        assert!(body(TASK, "fn enter_delivery(").contains("crate::vm_guard::Entry::enter(&lua, crate::vm_guard::EntryKind::Handler, what)"));
+        for f in ["fn start_thread<", "fn resume_parked<"] {
+            let b = body(TASK, f);
+            let (enter, step, end) = (
+                b.find("let delivery = enter_delivery(").unwrap_or_else(|| panic!("{f}: no delivery entry")),
+                b.find(", &delivery, outcome);").unwrap_or_else(|| panic!("{f}: the step is not inside the delivery")),
+                b.find("drop(delivery);").unwrap_or_else(|| panic!("{f}: the delivery does not end after the step")),
+            );
+            assert!(enter < step && step < end, "{f}");
+        }
+        assert!(body(TASK, "fn step<").contains("outcome = stretch(tasks, id, delivery, ||"));
+        let step = body(TASK, "fn step<");
+        assert!(step.contains("!crate::vm_guard::stopped(lua)"), "a stopped handler's error is reported as the module's");
+        assert!(body(TASK, "pub(crate) fn run_handler<").contains("crate::vm_guard::note_failure(lua"));
+        let call = body(LIB, "fn call_guarded<");
+        assert!(call.contains("vm_guard::Entry::enter(lua, vm_guard::EntryKind::Plain, what)") && call.contains("entry.finish(&r);"));
+        let populate = body(LIB, "fn populate_vm(");
+        for step in [concat!("load_step(lua, format!(\"the code of ", "{dep_id}\")"), "load_step(lua, \"its entry file\"", "load_step(lua, \"its activate function\""] {
+            assert!(populate.contains(step), "`{step}` is not an entry of the guard");
+        }
+        // The limit is set before any of the module's code runs, and the load is marked done last.
+        let describe = populate.find("vm_guard::describe(lua,").expect("the limit");
+        assert!(describe < populate.find("install_host_api(").unwrap());
+        assert!(populate.trim_end().ends_with("vm_guard::loaded(lua);\n    Ok(())"), "the load is not marked done last");
+        assert!(body(LIB, "fn load_step<").contains("entry.finish(&result);"));
+    }
+
+    /// A stop is marked when the callback that began it ends (the exit hook, set once), and settled
+    /// by both ticks after the report of the window in front; the settings file keeps a stopped
+    /// module on; turning it on clears its stop and its VM; a rollback forgets the stops of what it
+    /// rolls back.
+    #[test]
+    fn the_stop_is_wired_where_disabling_is() {
+        assert!(body(LIB, "pub fn new() -> Result<Self>").contains("stops::mark(&*sh, trips);"));
+        let headless = body(LIB, "fn on_tick(&mut self)");
+        let (initial, settle) = (
+            headless.find(concat!("self.dispatch", "_initial();")).unwrap(),
+            headless.find(concat!("self.shared.settle", "_stops();")).expect("the headless tick settles no stop"),
+        );
+        assert!(initial < settle);
+        // A recheck round runs callbacks after that, in both ticks: what it stops is settled
+        // right after it, in the same turn, not one tick later.
+        let after_recheck = |tick: &str, round: &str, settle: &str| {
+            let at = tick.find(round).unwrap_or_else(|| panic!("no recheck round: {round}"));
+            assert!(tick[at..].trim_start_matches(round).trim_start().starts_with(settle), "a stop in the recheck round waits a tick: {round}");
+        };
+        after_recheck(headless, concat!("self.on_focus", "_change();"), concat!("self.shared.settle", "_stops();"));
+        after_recheck(body(LIB, "pub fn run(&mut self)"), concat!("dispatcher.on_focus", "_change();"), concat!("shared.settle", "_stops();"));
+        assert_eq!(LIB.matches(concat!("shared.settle", "_stops();")).count(), 4, "each tick, and each tick's recheck round");
+        assert!(LIB.contains(concat!("stopped modules \\", "\n")) && LIB.contains(concat!("{stops_", "ms}) — {hazard}")));
+        assert!(body(LIB, "fn sync_enabled_into_store(").contains("stops::stored_enabled("));
+        let enable = body(LIB, "fn apply_enabled(");
+        assert!(enable.contains("self.stops.clear(idx)") && enable.contains("vm_guard::clear_module(&self.guard, idx);"));
+        // The manager's checkbox builds a stopped VM afresh before it turns the module on — and
+        // every module a library's stop took, when the library is ticked.
+        let toggle = body(LIB, "fn toggle_module(");
+        let (group, rebuild, on) = (
+            toggle.find("shared.stops.turned_on_with(idx)").expect("the group"),
+            toggle.find("reload_module(shared, modules, i)").expect("no rebuild"),
+            toggle.find("shared.set_enabled(i, true);").expect("not turned on"),
+        );
+        assert!(group < rebuild && rebuild < on, "rebuilt before it is turned on");
+        assert!(toggle.contains("vm_guard::stopped(&m.lua)"), "only a stopped VM is rebuilt");
+        assert!(LIB.contains("Some(i) => toggle_module(&toggle_shared, &toggle_modules, i, enabled),"), "the checkbox does not go through it");
+        // A reload keeps a stopped module off: neither its record nor its flag is touched by it.
+        for f in ["fn reload_module(", "fn purge_module(", "fn reload_everything("] {
+            let b = body(LIB, f);
+            assert!(!b.contains("stops.clear(") && !b.contains("apply_enabled(") && !b.contains("set_enabled("), "{f} turns a stopped module on");
+        }
+        assert!(body(LIB, "fn rollback_to(").contains("self.stops.drop_from(n);"));
+        assert!(body(MAILBOX, "pub(crate) fn busy<").contains("h.module_stopped(idx)"));
+        // A stopped VM counts, record or not; and the queued phase looks again before each event.
+        let run = body(MAILBOX, "pub(crate) fn run_queued<");
+        assert!(run.contains("!stopped(h, **idx, &b.lua)") && run.contains("if stopped(h, idx, &b.lua) {"));
+        assert!(body(MAILBOX, "fn stopped<").contains("h.module_stopped(idx) || crate::vm_guard::stopped(lua)"));
+        assert!(body(MAILBOX, "pub(crate) fn deliver<").contains("busy(h, owner.idx) || crate::vm_guard::stopped(lua)"));
+        // Trips a panic left in the guard are marked at the end of the turn.
+        assert!(body(LIB, "fn settle_stops(").contains("vm_guard::take_waiting_trips(&self.guard)"));
+    }
+
+    /// The `[limits]` lines module-package-format.md shows are the ones written.
+    #[test]
+    fn the_limits_lines_are_the_documented_ones() {
+        let doc = include_str!("../../../docs/module-package-format.md").replace("\n  ", " ");
+        let unknown = format!("[manager] {}", crate::limits_unknown_line("com.example.game", "memroy_mib"));
+        assert!(doc.contains(&unknown), "module-package-format.md does not show: {unknown}");
+        let info = crate::vm_guard::VmInfo {
+            module: Some(0),
+            id: "com.platform.melodyne".into(),
+            name: "Melodyne".into(),
+            code: vec![
+                crate::vm_guard::CodeShare { id: "com.platform.melodyne".into(), name: "Melodyne".into(), mib: 256, declared: false },
+                crate::vm_guard::CodeShare { id: "com.platform.overlay".into(), name: "Overlay runtime".into(), mib: 256, declared: false },
+            ],
+        };
+        let limit = format!("[guard] {}", crate::vm_guard::limit_line(&info));
+        assert!(doc.contains(&limit), "module-package-format.md does not show: {limit}");
+    }
+
+    /// The guard probe's test list cites the lines its loops are on — the line a stop is heard at —
+    /// and every loop of the probe is one of them; every loop and every fill ends by itself, so a
+    /// build without the guard never hangs on a probe key; and the run line builds first.
+    #[test]
+    fn the_guard_probes_lines_are_its_loops() {
+        let main = include_str!("../../../tools/guard-probe/src/main.luau");
+        let others = [include_str!("../../../tools/guard-probe-b/src/main.luau"), include_str!("../../../tools/guard-probe-lib/src/main.luau")];
+        let loops = |src: &str| -> Vec<usize> {
+            src.lines()
+                .enumerate()
+                .filter(|(_, l)| !l.trim_start().starts_with("--") && l.contains("while os.clock() - started < 30 do"))
+                .map(|(i, _)| i + 1)
+                .collect()
+        };
+        let header: String = main.lines().take_while(|l| l.starts_with("--")).collect::<Vec<_>>().join("\n").replace("\n--", "");
+        let numbers_after = |marker: &str| -> Vec<usize> {
+            header
+                .match_indices(marker)
+                .filter_map(|(at, _)| {
+                    let digits: String = header[at + marker.len()..].trim_start().chars().take_while(char::is_ascii_digit).collect();
+                    digits.parse().ok()
+                })
+                .collect()
+        };
+        let cited: std::collections::BTreeSet<usize> = numbers_after("line ").into_iter().chain(numbers_after("main.luau:")).collect();
+        let mut all: std::collections::BTreeSet<usize> = loops(main).into_iter().collect();
+        for src in others {
+            all.extend(loops(src));
+        }
+        assert!(!cited.is_empty());
+        for n in &cited {
+            assert!(all.contains(n), "the guard probe expects a stop at line {n}, where none of its loops is");
+        }
+        for n in &all {
+            assert!(cited.contains(n), "the guard probe's loop at line {n} is not in its test list");
+        }
+        for src in std::iter::once(main).chain(others) {
+            let code: Vec<&str> = src.lines().filter(|l| !l.trim_start().starts_with("--")).collect();
+            assert!(!code.iter().any(|l| l.contains("while true do")), "a probe loop that never ends by itself");
+        }
+        assert!(header.contains(r".\run-dev.ps1 -Build -Tools -Only guard-probe,guard-probe-lib,guard-probe-b,guard-probe-c"));
+        assert!(header.contains(r".\run-dev.ps1 -Build -Release"));
+    }
+
+    /// The time limit is wired: the guard is this thread's and its watchdog runs from before the
+    /// first load until exit, which writes the `[cpu]` summary and lets go of every mouse button a
+    /// module still holds; the bindings that press and release buttons keep the record of them; a
+    /// module stopping lets go of its buttons wherever it stops running; and the chunks of a
+    /// module's code are named for the stop's frames.
+    #[test]
+    fn the_time_limit_is_wired() {
+        let new = body(LIB, "pub fn new() -> Result<Self>");
+        let install = new.find("vm_guard::install(&shared.guard);").expect("the guard is not this thread's");
+        let spawn = new.find("vm_guard::spawn_watchdog(shared.guard.clone())").expect("no watchdog");
+        assert!(install < spawn);
+        assert!(body(LIB, "pub fn run(dirs: &[String]) -> Result<()> {").contains("manager.stop_guard();"));
+        let stop = body(LIB, "fn stop_guard(&mut self)");
+        assert!(stop.contains("w.stop();") && stop.contains("self.shared.guard.cpu_summary()") && stop.contains("self.shared.release_all_held_buttons();"));
+        let api = body(LIB, "fn install_host_api(");
+        let input = bindings(api, "input");
+        let held = |name: &str| input.iter().find(|b| b.0 == name).unwrap_or_else(|| panic!("host.input.{name}")).1;
+        assert!(held("mouseDown").contains("sh.hold_button(idx, button);"));
+        for name in ["mouseUp", "click", "drag"] {
+            assert!(held(name).contains("sh.let_go_button(idx, button);"), "host.input.{name} does not let go of its button");
+        }
+        assert!(body(LIB, "fn after_toggle(").contains("self.release_held_buttons(idx, \"it was disabled\");"));
+        assert!(body(LIB, "fn purge_module(").contains("self.release_held_buttons(idx, \"it was reloaded\");"));
+        assert!(body(LIB, "fn rollback_to(").contains("self.release_held_buttons(idx, \"its load was rolled back\");"));
+        assert!(body(LIB, "fn release_buttons(&self, idx: usize)").contains("self.release_held_buttons(idx, \"it was stopped by the host\")"));
+        let populate = body(LIB, "fn populate_vm(");
+        assert!(populate.contains("vm_guard::name_chunk(lua, &dep_name, dep_id, dep_rel);"));
+        assert!(populate.contains("vm_guard::name_chunk(lua, &entry.display().to_string(), id, &module.manifest.entry);"));
+        assert!(body(LIB, "fn install_include(").contains("vm_guard::name_chunk(lua, &key, &owner,"));
+    }
+
+    /// Every closure Luau can call in production code marks itself with `host_call!` — so the stop's
+    /// messages can name the host call the time ran out in (and G3 a call that never returns) — and
+    /// each of the host table's bindings by the name a module writes. The exceptions are the host's
+    /// own plumbing, which no module calls by name: the gated views' `__index`, the prelude's
+    /// `_requestInitial`, `WAITED_KEY`'s clock and the task shim's internals.
+    #[test]
+    fn every_binding_names_its_host_call() {
+        let api = body(LIB, "fn install_host_api(");
+        let namespaces = [
+            ("log", "log"),
+            ("json", "json"),
+            ("speech", "speech"),
+            ("hk", "hotkey"),
+            ("keys", "keys"),
+            ("os", "os"),
+            ("win", "window"),
+            ("uia", "element"),
+            ("screen", "screen"),
+            ("ocr", "ocr"),
+            ("input", "input"),
+            ("sound", "sound"),
+            ("resource", "resource"),
+            ("settings_api", "settings"),
+            ("arbiter", "arbiter"),
+        ];
+        let mut named = 0;
+        for (var, ns) in namespaces {
+            for (name, text) in bindings(api, var) {
+                if !text.contains("create_function(") {
+                    continue; // a value, or a function made in another file, checked below
+                }
+                assert!(text.contains(&format!("host_call!(\"host.{ns}.{name}\")")), "host.{ns}.{name} does not name itself");
+                named += 1;
+            }
+        }
+        assert!(named > 60, "only {named} bindings found: the scan no longer reads install_host_api");
+        for name in ["require", "tryRequire", "now", "inputEpoch", "epoch", "path"] {
+            assert!(api.contains(&format!("host_call!(\"host.{name}\")")), "host.{name} does not name itself");
+        }
+        let keys = body(LIB, "fn install_key_captures<");
+        for name in ["capture", "release", "releaseAll", "scope", "menuOpen", "passedThrough"] {
+            assert!(keys.contains(&format!("host_call!(\"host.keys.{name}\")")), "host.keys.{name}");
+        }
+        assert!(body(LIB, "fn install_include(").contains("host_call!(\"host.include\")"));
+        for name in ["after", "every", "cancel"] {
+            assert!(TIMERS.contains(&format!("host_call!(\"host.timer.{name}\")")), "host.timer.{name}");
+        }
+        for name in ["list", "state", "on", "off", "status"] {
+            assert!(GAMEPAD.contains(&format!("host_call!(\"host.gamepad.{name}\")")), "host.gamepad.{name}");
+        }
+        for name in ["template", "imageSearch", "imageSearchMulti", "imageSearchAsync", "imageSearchEach", "imageSearchAll"] {
+            assert!(IMAGES.contains(&format!("host_call!(\"host.screen.{name}\")")), "host.screen.{name}");
+        }
+        for name in ["host.screen.snapshot", "host.screen.pixels", "host.screen.snapshotAsync", "snapshot:crop", "snapshot:release"] {
+            assert!(SNAP.contains(&format!("host_call!(\"{name}\")")), "{name}");
+        }
+        // And every closure in the crate, wherever it is written.
+        let exempt = [
+            ("lib.rs", "build_dep_host"),
+            ("lib.rs", "free_subsets"),
+            ("lib.rs", "gated_view"),
+            ("lib.rs", "initial_request_fn"),
+            ("lib.rs", "populate_vm"),
+            ("task.rs", "prims"),
+            ("task.rs", "waits"),
+        ];
+        let mut missing = Vec::new();
+        for (name, src, tests) in production_sources() {
+            for pat in ["create_function(", "add_method("] {
+                for (at, _) in src.match_indices(pat) {
+                    if tests.iter().any(|r| r.contains(&at)) {
+                        continue;
+                    }
+                    let f = enclosing_fn(&src, at);
+                    if exempt.contains(&(name.as_str(), f)) {
+                        continue;
+                    }
+                    let rest = &src[at + pat.len()..];
+                    let window = &rest[..rest.len().min(500)];
+                    let next = window.find(pat).unwrap_or(window.len());
+                    let first = &window[..next];
+                    if !(first.contains("host_call!(") || first.contains("HostCall::enter(")) {
+                        missing.push(format!("{name}: {f}"));
+                    }
+                }
+            }
+        }
+        assert!(missing.is_empty(), "a closure Luau can call without host_call!: {missing:?}");
+    }
+
+    /// Every call from the host into a VM's Lua in production code is one of the places the guard
+    /// knows: an entry (a handler's stretch, `call_guarded`, a load step), code run inside one (an
+    /// include, a dependency's evaluation), or the host's own Luau, which runs before any module
+    /// code (the prelude, the task shim) or which a stopped VM answers with nothing (the prelude's
+    /// queries). A new place fails here, rather than run a module's code past its limits.
+    #[test]
+    fn every_host_to_lua_call_goes_through_an_entry() {
+        let calls = [".call::<", ".call(", ".resume::<", ".resume(", ".resume_error", ".eval::<", ".eval()", ".exec()", ".into_function()"];
+        let mut found = std::collections::BTreeSet::new();
+        for (name, src, tests) in production_sources() {
+            // ureq's `call()`, not Luau's.
+            if name == "registry.rs" {
+                continue;
+            }
+            for c in calls {
+                for (at, _) in src.match_indices(c) {
+                    let line = src[..at].rfind('\n').map_or(0, |i| i + 1);
+                    if tests.iter().any(|r| r.contains(&at)) || src[line..at].trim_start().starts_with("//") {
+                        continue;
+                    }
+                    found.insert(format!("{name}: {}", enclosing_fn(&src, at)));
+                }
+            }
+        }
+        let expected = [
+            // Entries.
+            "lib.rs: call_guarded",
+            "lib.rs: populate_vm",
+            "lib.rs: eval_on_host",
+            "task.rs: start_thread",
+            "task.rs: resume_parked",
+            "task.rs: step",
+            // Inside the includer's entry, in the same VM.
+            "lib.rs: compile_include",
+            "lib.rs: install_include",
+            // The host's own Luau.
+            "lib.rs: install_window_prelude",
+            "lib.rs: has_triggers",
+            "lib.rs: trigger_seq",
+            "lib.rs: wants_initial",
+            "task.rs: status",
+            "task.rs: waits",
+        ];
+        let expected: std::collections::BTreeSet<String> = expected.iter().map(|s| s.to_string()).collect();
+        assert_eq!(found, expected, "a call into a VM the guard does not know");
+        const TASK: &str = include_str!("task.rs");
+        for f in ["fn start_thread<", "fn resume_parked<", "fn step<"] {
+            assert!(body(TASK, f).contains("stretch("), "`{f}` resumes a handler outside a stretch");
+        }
+        // `activate` is looked up inside the step too: the lookup runs the table's `__index`.
+        let populate = body(LIB, "fn populate_vm(");
+        let step = populate.find("load_step(lua, \"its activate function\", || match t.get::<mlua::Value>(\"activate\") {").expect("the lookup is outside the step");
+        assert!(populate[step..].starts_with(concat!("load_step(lua, \"its activate function\", || match t.get::<mlua::Value>(\"activate\") {\n", "            Ok(mlua::Value::Function(activate)) => activate.call::<()>(()),")));
+    }
+
     /// A hotkey that reaches a busy module notes the window the hook or the tap compares keys with,
     /// asked of nobody — never the scope's question, which on a Mac asks the frontmost application
     /// on the tap's thread and notes a pin. And its line says it waited only when it did.
@@ -10085,7 +11153,7 @@ mod ocr_wiring_tests {
     /// front: its report asked for on that tick is dropped.
     #[test]
     fn a_modules_mailbox_goes_with_it() {
-        let enable = body(LIB, "fn apply_enabled(");
+        let enable = body(LIB, "fn after_toggle(");
         let resolve = enable.find("self.arbiter_resolve(&slot);").expect("the re-election");
         let drop = enable.find("mailbox::drop_owner(self, idx, mailbox::Why::Disabled);").expect("the disable's");
         assert!(drop > resolve && drop < enable.find("self.task_drop_owner(idx);").unwrap());
@@ -10242,7 +11310,7 @@ mod uptime_wiring_tests {
         // Forgotten on toggle, on a reload, and for a rolled-back hot-load — with the line of a
         // `recognize` that held the event loop.
         assert!(body(LIB, "fn forget_error_repeats(").contains("self.tasks.forget_legacy_said(id);"));
-        assert!(body(LIB, "fn apply_enabled(").contains("self.forget_error_repeats(idx);"));
+        assert!(body(LIB, "fn after_toggle(").contains("self.forget_error_repeats(idx);"));
         assert!(body(LIB, "fn purge_module(").contains("self.forget_error_repeats(idx);"));
         let rollback = body(LIB, "fn rollback_to(");
         let forget = rollback.find("self.forget_error_repeats(idx);").expect("rollback forgets");

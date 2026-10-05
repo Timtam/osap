@@ -52,6 +52,9 @@ require = ["window", "screen", "ocr", "speech", "timer", "path", "resource"]
 [screen]                                      # optional: which picture host.screen and host.ocr read
 capture  = "duplication"                      # "standard" (default) | "duplication" (Windows only)
 fallback = "standard"                         # with "duplication": "standard" (default) | "none"
+
+[limits]                                      # optional: what the module's code may use
+memory_mib = 512                              # MiB of Luau memory; 256 (default) to 2048
 ```
 
 These are **all the keys the host reads**:
@@ -68,6 +71,7 @@ These are **all the keys the host reads**:
 | `supported_os` | no | See [below](#supported_os-and-why-omitting-it-is-the-safe-default). |
 | `[capabilities] require` | no | The host namespaces the module may use. See [below](#capabilities). |
 | `[screen]` | no | `capture` and `fallback`. See [below](#screen-and-why-it-is-declared-per-module). |
+| `[limits] memory_mib` | no | The most memory, in MiB, the module's code may use: 256 to 2048, default 256. See [below](#limits). |
 | `engine_api` | no | Read, and not used: nothing checks it against the running host. |
 | `license` | no | Read, and not used. |
 
@@ -180,6 +184,79 @@ On macOS the table is accepted and ignored. A switch in the Application settings
 modules that ask for it read the screen through the graphics card", on by default) turns
 duplication off for every module on a Windows machine where it misbehaves.
 
+### `[limits] memory_mib` {#limits}
+
+Every module VM has a memory limit. `memory_mib` is how much a module's code may use, in MiB
+(1 MiB = 1 048 576 bytes), for a module that really needs more than the default:
+
+```toml
+[limits]
+memory_mib = 512   # leave it out for the default, 256
+```
+
+- **The value** is a whole number from **256 to 2048**; leaving it out means 256. 256 is about
+  thirteen times the largest need measured so far — VPS Avenger with all 124 of its expansion
+  files uses 19 MB — and 2048 is the bound against a mistyped value.
+- **A wrong value fails the manifest**, as a bad `id` does, wherever the manifest is read: at
+  start-up (the folder is skipped, with the reason in the log), on a hot-load, when an install
+  or an update works out what it adds — before its review, so nothing is written — and for a
+  `.zip`. A number outside the range fails with this message:
+
+  ```
+  module.toml: `[limits] memory_mib` = 4096 is outside 256 to 2048: it is the most memory, in MiB, this module's code may use, and 256 is the default — leave it out unless the module needs more
+  ```
+
+  A value that is not a whole number — `"512"`, `512.0`, `true` — fails with the TOML reader's
+  `invalid type`. A key the host does not know inside `[limits]` — a misspelt `memroy_mib`, or
+  one a later host adds — does not fail it: the log names it at every load
+  (`[manager] [com.example.game] module.toml: [limits] has a key this application does not
+  read: memroy_mib`), and the module loads with the default.
+- **A VM's limit is the sum** over every module whose code runs in it: the module itself, and
+  each `code_module` it depends on — through `dependencies` or `optional_dependencies`, directly
+  or through another code module — counted once. A dependency that is not a `code_module`, or an
+  optional one that is absent or does not run on this system (its `supported_os`), adds
+  nothing, because its code does not run there. On Windows, Kontakt's VM, with nothing declared
+  anywhere, may use 1024 MiB: 256 of its own, and 256 each for the overlay runtime
+  (`com.platform.overlay`), the DAW host definitions (`com.platform.daw-hosts`) and Komplete
+  Kontrol, whose code all runs in it; a Kontakt library's VM adds Kontakt's 256 to that: 1280
+  MiB. On macOS, where Komplete Kontrol does not run, they are 768 and 1024 MiB. The amounts are
+  read from the manifests every time a VM is built, so a changed `memory_mib` takes effect when
+  the VMs its code runs in are built again: its own at its next reload, and those of the modules
+  that depend on it through `dependencies`, which that reload rebuilds with it. A module that
+  reaches it only through `optional_dependencies` is not rebuilt with it, and keeps the old sum
+  until its own next reload or the next start. The log says each VM's limit as it is built:
+  `[guard] [com.platform.melodyne] memory limit 512 MiB: 256 of its own, 256 for com.platform.overlay`.
+- **What counts** is everything allocated in the VM: the module's tables, strings, functions and
+  coroutines, and the host's own tables in it (about 1 MB with the overlay runtime). Pictures and
+  snapshots the host holds outside the VM do not count; they have budgets of their own
+  ([`host.screen.snapshot`](api/screen.md#host-screen-snapshot)). **Garbage counts until it is
+  collected**: the limit is checked at every allocation, without a collection first, and Luau
+  has no emergency collection. Luau collects as the heap grows, and keeps up with values that
+  are small next to the limit — made and dropped 400 times in a row, values of a thirty-second
+  of it (8 MiB at 256) never met it — but not with large ones: values of an eighth of the limit
+  (1 MiB in 8), or a sixteenth (4 MiB in 64), met it with garbage alone. A module that makes
+  values of many MiB at a time should declare room for them. When a callback returns with less
+  than an eighth of its VM's limit free — or less than 2 MiB, in a VM so small that an eighth is
+  less — the host collects the VM's garbage at once.
+- **Going past it.** The allocation that would go past the limit fails with Luau's
+  `not enough memory`. A `pcall` that catches it is the module's own business, and the module
+  goes on — though what it allocated before the error is garbage until the callback returns
+  (above), so another large allocation in the same callback can fail again. One that reaches
+  the host — the callback did not catch it — **stops the module**: it
+  is turned off until the next start, its keys go back to the program in front, and a spoken
+  sentence, a dialog, a log line and the module manager say so. The messages, word for word, are
+  under [A callback that runs too long, or a module that uses too much memory](module-runtime-and-lifecycle.md#limits). A module
+  that runs out while it loads does not load: `stopped while loading: its entry file needed more
+  than the 256 MiB of memory it may use`.
+- **Where you see it:** the module manager's **Details…** shows a module's limit, its parts and
+  what it uses now ([module-manager.md](module-manager.md#details)), and the install review
+  shows an amount above the default (*It may use up to 512 MiB of memory; most modules use the
+  default of 256 MiB.*; for a `code_module`, whose amount counts in its own VM and in every VM
+  its code runs in, *Its code may use up to 1024 MiB of memory in its own VM and in the VM of
+  each module that uses its code; …*).
+
+A host from before `[limits]` ignores the table, and sets no memory limit at all.
+
 ## More than one file
 
 The entry file pulls in the module's other files with [`host.include`](api/include.md), which
@@ -223,7 +300,12 @@ this context`.
 A module is arbitrary Luau code running inside the application, and a module package is an
 unsigned folder. The capability list is enforced per namespace, which catches a module
 reaching for something by accident; it is the author's own statement, not a sandbox. There is
-no signature, no trust store, and no confinement of file access to the module's folder.
+no signature, no trust store, and no confinement of file access to the module's folder. Its
+memory is limited ([above](#limits)), and so is the time a callback may run — 2 seconds of the
+event loop's processor time or 10 seconds in all, past which the module is stopped
+([the limits](module-runtime-and-lifecycle.md#limits)). The time limit is fixed; a module's memory
+can be raised in its manifest only up to 2048 MiB; and a host call that never returns still
+holds the whole application until it does.
 
 ## Archives {#archives}
 

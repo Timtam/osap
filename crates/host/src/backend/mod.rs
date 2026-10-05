@@ -697,6 +697,7 @@ impl FocusBounds {
 }
 
 /// Mouse button for input synthesis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MouseButton {
     Left,
     Right,
@@ -768,6 +769,18 @@ pub trait Backend {
     /// the module that would have taken it.
     fn take_menu_pass_through(&self, _owner: u32) -> Vec<(u32, u8)> {
         Vec::new()
+    }
+
+    /// Drops the captured keys and hotkey presses queued for the event loop and not delivered
+    /// yet, and returns them: the host's guard stopped a callback that held the loop, and what
+    /// was pressed meanwhile must not reach whichever module takes the key next, all at once
+    /// (`stops::mark`). A press already taken into the pump's batch before the stall began still
+    /// arrives. On Windows a `RegisterHotKey` press made during the stall, which reaches the
+    /// queue only after it, is dropped too as it arrives, by its time stamp
+    /// ([`HostEvents::on_stall_hotkeys_dropped`]). Nothing on a platform whose queue cannot fill
+    /// during a stall: on macOS the tap runs on the stalled thread itself.
+    fn drop_queued_input(&self) -> DroppedInput {
+        DroppedInput::default()
     }
 
     fn active_window(&self) -> Option<WinInfo>;
@@ -1155,6 +1168,21 @@ pub trait Backend {
     fn pump_pending(&self, events: &mut dyn HostEvents);
 }
 
+/// Whether tick `time` is not after tick `until` on a 32-bit millisecond clock that wraps (every
+/// 49.7 days for Windows' `GetTickCount`): `time` lies in the half of the circle before `until`.
+/// Pure, for Windows' drop of the `RegisterHotKey` presses made during a stall that ended in a stop.
+pub fn tick_not_after(time: u32, until: u32) -> bool {
+    until.wrapping_sub(time) < 0x8000_0000
+}
+
+/// What [`Backend::drop_queued_input`] dropped: captured keys as (virtual key, modifier mask,
+/// owning module), and hotkey presses by id.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DroppedInput {
+    pub keys: Vec<(u32, u8, u32)>,
+    pub hotkeys: Vec<i32>,
+}
+
 /// Sink for OS events, implemented by the host to bridge into Luau callbacks.
 pub trait HostEvents {
     fn on_hotkey(&mut self, id: i32);
@@ -1177,6 +1205,11 @@ pub trait HostEvents {
     /// once it has woken again. Delivered before the hotkeys, keys and window changes of the
     /// same drain, so they see the epochs it turned over. A default body, as for pads.
     fn on_system(&mut self, _events: Vec<crate::system_events::Stamped>) {}
+    /// Hotkey presses dropped as they reached the queue, by their time stamp: made during the stall
+    /// a stop ended, after [`Backend::drop_queued_input`] (Windows' `RegisterHotKey`, whose
+    /// message is posted to the stalled thread). The host names them in the log. A default body,
+    /// as for pads.
+    fn on_stall_hotkeys_dropped(&mut self, _ids: Vec<i32>) {}
     /// One turn of the event loop has finished delivering events.
     ///
     /// The GUI path has a timer tick for the work that has to happen whether or not anything

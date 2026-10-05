@@ -50,6 +50,8 @@ struct Host {
     pads: RefCell<HashMap<i64, (Lua, RegistryKey)>>,
     /// Every event that was discarded, and why.
     discarded: RefCell<Vec<(usize, &'static str, Why)>>,
+    /// The modules the host's guard stopped (`stops.rs`), as the host's `Stops` answers.
+    stopped: RefCell<BTreeSet<usize>>,
     _loop: crate::loop_guard::TestLoop,
 }
 
@@ -118,6 +120,9 @@ impl MailHost for Host {
     fn mail(&self) -> &Mailboxes {
         &self.mail
     }
+    fn module_stopped(&self, idx: usize) -> bool {
+        self.stopped.borrow().contains(&idx)
+    }
     fn open(&self, idx: usize, lua: &Lua, ev: Event) -> Opened {
         let window = |what: &'static str, call: mlua::Result<Option<(Function, MultiValue)>>| match call {
             Ok(Some((f, args))) => Opened::Run { f, args, ctx: Ctx::new(what, idx) },
@@ -185,6 +190,7 @@ fn host() -> Rc<Host> {
         settings: RefCell::new(HashMap::new()),
         pads: RefCell::new(HashMap::new()),
         discarded: RefCell::new(Vec::new()),
+        stopped: RefCell::new(BTreeSet::new()),
         _loop: crate::loop_guard::mark_for_a_test(),
     })
 }
@@ -201,7 +207,11 @@ fn now_ms() -> i64 {
 /// window bindings over `h`, the window prelude, the tests' wait point as the global `wait`, and
 /// `heard`, a list the callbacks write to. `host.log.info` writes to the global `logs`.
 fn vm(h: &Rc<Host>, idx: usize) -> Lua {
-    let lua = Lua::new();
+    vm_in(h, idx, Lua::new())
+}
+
+/// [`vm`], in the VM `lua` given — one the host's guard made, say.
+fn vm_in(h: &Rc<Host>, idx: usize, lua: Lua) -> Lua {
     let gen = NEXT_GEN.fetch_add(1, Ordering::Relaxed);
     lua.set_app_data(VmOwner { idx, gen });
     h.gens.borrow_mut().insert(idx, gen);
@@ -845,6 +855,128 @@ fn a_setting_runs_in_the_queued_phase_even_for_a_free_module() {
     assert_eq!(heard(&a), "3 from 2 | a key after it");
 }
 
+/// An event whose handler runs its VM out of memory, and does not catch it, stops the VM: the
+/// handler's stretch is the guard's entry, its error is not reported as the module's, the trip goes
+/// to the exit hook as the stretch ends, and the VM's next event is not run — nor reported.
+#[test]
+fn a_handler_that_runs_its_vm_out_of_memory_stops_it_and_is_not_reported() {
+    let h = host();
+    let guard = crate::vm_guard::Guard::new();
+    let lua = crate::vm_guard::new_vm(&guard);
+    crate::vm_guard::describe_for_test(&lua, 1, "m1", &[("m1", 8)]);
+    crate::vm_guard::loaded(&lua);
+    let a = vm_in(&h, 1, lua);
+    let got: Rc<RefCell<Vec<crate::vm_guard::Trip>>> = Rc::new(RefCell::new(Vec::new()));
+    let g = got.clone();
+    crate::vm_guard::set_exit_hook(Rc::new(move |t| g.borrow_mut().extend(t)));
+    let fill = "local t = {} while true do t[#t + 1] = string.rep('x', 1048000) .. #t end";
+    assert_eq!(call(&h, &a, 1, fill, true), Delivered::Ran);
+    assert!(h.errors.borrow().is_empty(), "not the module's error: {:?}", h.errors.borrow());
+    assert_eq!(got.borrow().len(), 1, "handed over when the handler's stretch ended");
+    assert_eq!((got.borrow()[0].what.as_str(), got.borrow()[0].kind), ("key", crate::vm_guard::EntryKind::Handler));
+    assert!(crate::vm_guard::stopped(&a));
+    a.gc_collect().unwrap();
+    // Compiled before it is delivered: a stopped VM raises at the first safepoint of anything run
+    // in it, the host's own reading of `heard` too — so that is read from Rust. Its VM is stopped,
+    // so the event waits rather than be refused (this holder keeps the module enabled; the host
+    // turns it off, and drops it), and the queued phase passes it by.
+    assert_eq!(say(&h, &a, 1, "after", true), Delivered::Queued);
+    assert_eq!(mailbox::run_queued(&*h), Phase::default());
+    let heard_n = a.globals().raw_get::<mlua::Table>("heard").unwrap().raw_len();
+    assert_eq!(heard_n, 0, "the stopped VM ran nothing");
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
+    assert_eq!(got.borrow().len(), 1, "one stop");
+    crate::vm_guard::clear_exit_hook();
+}
+
+/// A module the host's guard stopped is off, and busy until it is turned on again: a setting's
+/// `onChange` — which a module unticked in the manager hears at once — waits in its mailbox rather
+/// than be refused by the stopped VM, and the queued phase passes it by. Its other events are
+/// dropped, as for any module that is off. (The manager's checkbox rebuilds a stopped module, which
+/// drops what waited and reads its settings afresh; the mailbox runs them when nothing rebuilt it.)
+#[test]
+fn a_stopped_modules_settings_wait_until_it_is_turned_on_again() {
+    let h = host();
+    let a = vm(&h, 1);
+    let cb: Function = a.load("return function(new, old) heard[#heard + 1] = tostring(new) .. ' from ' .. tostring(old) end").eval().unwrap();
+    h.settings.borrow_mut().entry((1, "speed".to_string())).or_default().push((1, a.clone(), a.create_registry_value(cb).unwrap(), 5));
+    let setting = |v: i64| Event::Setting {
+        setting_of: 1,
+        reg: 5,
+        key: "speed".into(),
+        new: crate::settings::Value::Int(v),
+        old: Some(crate::settings::Value::Int(v - 1)),
+    };
+    // The stop: off, and stopped.
+    h.enabled.borrow_mut()[1] = false;
+    h.stopped.borrow_mut().insert(1);
+    assert!(mailbox::busy(&*h, 1));
+    assert_eq!(mailbox::deliver(&*h, 1, &a, setting(3)), Delivered::Queued, "even where a free module's runs at once");
+    assert_eq!(mailbox::deliver_later(&*h, 1, &a, setting(4)), Delivered::Queued);
+    assert_eq!(say(&h, &a, 1, "a key", true), Delivered::Dropped);
+    assert_eq!(mailbox::run_queued(&*h), Phase::default(), "the phase passes it by");
+    assert_eq!(heard(&a), "");
+    assert_eq!(h.mail.len(1), 2);
+    // Turned on again: the settings run, in order, in the next queued phase.
+    h.stopped.borrow_mut().remove(&1);
+    h.enabled.borrow_mut()[1] = true;
+    mailbox::run_queued(&*h);
+    assert_eq!(heard(&a), "3 from 2 | 4 from 3");
+    assert!(!mailbox::busy(&*h, 1));
+}
+
+/// A handler that yields in a loop — `while true do pcall(coroutine.yield) end` — is one callback to
+/// the guard: the host answers its own yields at once, inside the delivery, so its clocks do not
+/// start afresh at each answer, and it is stopped at its limit like any other loop. Each `tick()`
+/// is 100 ms of both clocks and a look of the watchdog, until the round is armed; a guard that never
+/// arms fails the test after 1000 instead of hanging it.
+#[test]
+fn a_handler_that_yields_in_a_loop_is_stopped() {
+    struct Fake(std::sync::Arc<AtomicU64>);
+    impl crate::vm_guard::Clocks for Fake {
+        fn wall_ns(&self) -> u64 {
+            self.0.load(Ordering::SeqCst)
+        }
+        fn loop_cpu(&self) -> Option<Duration> {
+            Some(Duration::from_nanos(self.0.load(Ordering::SeqCst)))
+        }
+    }
+    let h = host();
+    let now = std::sync::Arc::new(AtomicU64::new(0));
+    let guard = crate::vm_guard::Guard::with(crate::vm_guard::Budgets::APP, Box::new(Fake(now.clone())));
+    let lua = crate::vm_guard::new_vm(&guard);
+    crate::vm_guard::describe_for_test(&lua, 1, "m1", &[("m1", 256)]);
+    crate::vm_guard::loaded(&lua);
+    let a = vm_in(&h, 1, lua);
+    let got: Rc<RefCell<Vec<crate::vm_guard::Trip>>> = Rc::new(RefCell::new(Vec::new()));
+    let g = got.clone();
+    crate::vm_guard::set_exit_hook(Rc::new(move |t| g.borrow_mut().extend(t)));
+    let (ticks, armed) = (Rc::new(Cell::new(0u32)), Rc::new(Cell::new(false)));
+    let (t, ar, gd) = (ticks.clone(), armed.clone(), guard.clone());
+    let tick = a
+        .create_function(move |_, ()| {
+            if ar.get() {
+                return Ok(());
+            }
+            t.set(t.get() + 1);
+            if t.get() > 1000 {
+                return Err(mlua::Error::runtime("never armed"));
+            }
+            now.fetch_add(100_000_000, Ordering::SeqCst);
+            ar.set(gd.poll().armed.is_some());
+            Ok(())
+        })
+        .unwrap();
+    a.globals().set("tick", tick).unwrap();
+    assert_eq!(call(&h, &a, 1, "while true do pcall(coroutine.yield) tick() end", true), Delivered::Ran);
+    assert!(crate::vm_guard::stopped(&a), "the loop of yields was not stopped: {:?}", h.errors.borrow());
+    assert!((20..=22).contains(&ticks.get()), "stopped after 2 s, not {} ticks", ticks.get());
+    assert_eq!(got.borrow().len(), 1);
+    assert!(h.errors.borrow().is_empty(), "the stop is not the module's error: {:?}", h.errors.borrow());
+    assert!(h.tasks.handler_of(1).is_none());
+    crate::vm_guard::clear_exit_hook();
+}
+
 // ── The phase's budget ───────────────────────────────────────────────────────────────────────
 
 /// 300 events that take about 0.2 ms each, for two modules, spread over several ticks' phases
@@ -922,11 +1054,16 @@ fn the_budget_line_is_said_once_every_ten_seconds_with_a_count() {
 
 /// What an event costs as a handler, against the plain call it was: 20 000 of each, timed and
 /// printed — a measurement, not a limit. Run in release (`cargo test --release`) for the number
-/// module-runtime-and-lifecycle.md quotes.
+/// module-runtime-and-lifecycle.md quotes. In a VM the host's guard made, as every module's is:
+/// each stretch is an entry of the guard.
 #[test]
 fn one_event_as_a_handler_costs_a_few_microseconds() {
     let h = host();
-    let a = vm(&h, 1);
+    let guard = crate::vm_guard::Guard::new();
+    let lua = crate::vm_guard::new_vm(&guard);
+    crate::vm_guard::describe_for_test(&lua, 1, "m1", &[("m1", 256)]);
+    crate::vm_guard::loaded(&lua);
+    let a = vm_in(&h, 1, lua);
     let (handler, plain) = mailbox::cost_per_event(&*h, 1, &a, 20_000);
     println!(
         "HANDLER COST: one event as a handler {handler:.2} µs, as a plain call {plain:.2} µs ({} build)",

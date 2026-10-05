@@ -160,6 +160,13 @@ static CAPTURED_HELD: HeldBits = HeldBits::new();
 /// `hotkey_hook`), each with the way it came, so that the pump can tell the two deliveries of
 /// one press apart. Drained in place rather than taken, so its capacity stays.
 static HOTKEY_QUEUE: Mutex<Vec<(i32, Route)>> = Mutex::new(Vec::new());
+/// The end of a stall the host's guard ended in a stop (`drop_queued_input`): a `RegisterHotKey`
+/// press stamped at or before this tick is dropped when the next pump drains it — its `WM_HOTKEY`
+/// was posted to the stalled thread and reaches [`HOTKEY_QUEUE`] only after the stall. The tick in
+/// the low 32 bits, [`DROP_ARMED`] while it waits for that pump; read and cleared by it, on the
+/// pump's thread like the stop.
+static DROP_OS_UNTIL: AtomicU64 = AtomicU64::new(0);
+const DROP_ARMED: u64 = 1 << 32;
 /// The hotkeys Windows GRANTED, matched in the hook as well as by `RegisterHotKey` — see
 /// `hotkey_hook` for why. `None` until the first grant, which is also the table's only
 /// allocation. Filed and removed by the pump; the hook looks combinations up and keeps its
@@ -1758,6 +1765,28 @@ impl Backend for WindowsBackend {
         super::take_menu_passes(&mut locked(&MENU_PASS), owner)
     }
 
+    /// The captured keys the hook queued during the stall, and the hotkey presses the hook matched
+    /// or `RegisterHotKey` delivered meanwhile — each settled as if delivered, so the pairing of a
+    /// hook press with its `WM_HOTKEY` stays right, and counted when it would have been dispatched.
+    /// A `WM_HOTKEY` still in the thread's message queue is dropped as it arrives (`pump_pending`).
+    /// What the pump took into its own batch before the stall began is not here: pressed before
+    /// it, it still arrives, late.
+    fn drop_queued_input(&self) -> crate::backend::DroppedInput {
+        let keys: Vec<(u32, u8, u32)> =
+            std::mem::take(&mut *locked(&KEY_QUEUE)).into_iter().map(|k| (k.vk, k.mask, k.owner)).collect();
+        let pending: Vec<(i32, Route)> = locked(&HOTKEY_QUEUE).drain(..).collect();
+        let mut hotkeys = Vec::new();
+        for (id, route) in pending {
+            if settle_hotkey(id, route) {
+                hotkeys.push(id);
+            }
+        }
+        // SAFETY: a plain call.
+        let now = unsafe { GetTickCount() };
+        DROP_OS_UNTIL.store(DROP_ARMED | u64::from(now), Ordering::Release);
+        crate::backend::DroppedInput { keys, hotkeys }
+    }
+
     /// Visible top-level windows of a process — including a `#32768` popup menu, which is a
     /// top-level window owned by the thread that opened it, and a toolkit's self-drawn
     /// popup, which is usually a tool window of its own. `EnumWindows` is local and
@@ -1912,10 +1941,25 @@ impl Backend for WindowsBackend {
             events.on_system(system);
         }
         let hotkeys: Vec<(i32, Route)> = locked(&HOTKEY_QUEUE).drain(..).collect();
+        // After a stop: a `RegisterHotKey` press made during the stall it ended reaches the queue
+        // only now, and is dropped by its stamp, as the rest of the stall's presses were. Once, on
+        // the first pump after the stop: posted messages are retrieved before the timer that
+        // drives this pump, so they are all here by now.
+        let drop_until = DROP_OS_UNTIL.swap(0, Ordering::AcqRel);
+        let mut late = Vec::new();
         for (id, route) in hotkeys {
+            let stalled = drop_until & DROP_ARMED != 0
+                && matches!(route, Route::Os { time } if super::tick_not_after(time, drop_until as u32));
             if settle_hotkey(id, route) {
-                events.on_hotkey(id);
+                if stalled {
+                    late.push(id);
+                } else {
+                    events.on_hotkey(id);
+                }
             }
+        }
+        if !late.is_empty() {
+            events.on_stall_hotkeys_dropped(late);
         }
         let pending: Vec<isize> = FOREGROUND_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
         let mut unmatched_fg = false;

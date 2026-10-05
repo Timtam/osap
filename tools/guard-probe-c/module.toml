@@ -1,0 +1,11 @@
+id = "com.tool.guard-probe-c"
+name = "Guard probe C"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
+entry = "src/main.luau"
+dependencies = ["com.tool.guard-probe-lib"]
+
+# Part of tools/guard-probe (see the test list there): the second module that runs Guard probe
+# library's code, stopped with it when its code loops in Guard probe B's VM.
+[capabilities]
+require = ["hotkey", "speech", "log"]

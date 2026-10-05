@@ -23,6 +23,7 @@ use rayon::prelude::*;
 
 use crate::backend::frame::Frame;
 use crate::backend::{CaptureFn, CaptureSource, CapturedImage};
+use crate::vm_guard::host_call;
 use crate::capture_source;
 use crate::cells;
 use crate::ocr::policy::IMAGE_PER_OWNER;
@@ -1307,6 +1308,7 @@ fn build_handle(
 pub(crate) fn template(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
     lua.create_function(move |lua, spec: Table| {
+        host_call!("host.screen.template");
         let (sw, shh) = sh.backend.screen_size();
         let parsed = parse_spec(&spec, sw, shh)?;
         build_handle(
@@ -1450,6 +1452,7 @@ fn picture_now(sh: &Shared, lua: &Lua, snap: Option<Arc<Frame>>, region: (i32, i
 pub(crate) fn image_search(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
     lua.create_function(move |lua, (tv, opts): (Value, Option<Table>)| {
+        host_call!("host.screen.imageSearch");
         let load = |p: &str| sh.load_template(&sh.root(idx).join(p));
         let (tmpl, name) = resolve_with(&tv, "imageSearch", &load)?;
         let snap = snapshot::from_opts(opts.as_ref(), "host.screen.imageSearch")?;
@@ -1489,6 +1492,7 @@ pub(crate) fn image_search(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::
 pub(crate) fn image_search_multi(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
     lua.create_function(move |lua, (templates, opts): (Table, Option<Table>)| {
+        host_call!("host.screen.imageSearchMulti");
         let load = |p: &str| sh.load_template(&sh.root(idx).join(p));
         let list = resolve_list(&templates, "imageSearchMulti", &load)?;
         let could_not_look = |why: String| -> mlua::Result<MultiValue> {
@@ -1660,6 +1664,7 @@ fn submit(
 pub(crate) fn image_search_async(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
     lua.create_function(move |lua, (tv, opts, cb): (Value, Option<Table>, Function)| {
+        host_call!("host.screen.imageSearchAsync");
         let load = |p: &str| sh.load_template(&sh.root(idx).join(p));
         let list = match &tv {
             Value::Table(list) => resolve_list(list, "imageSearchAsync", &load)?,
@@ -1691,6 +1696,7 @@ pub(crate) fn image_search_async(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> 
 pub(crate) fn image_search_each(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
     lua.create_function(move |lua, (list, opts, cb): (Table, Option<Table>, Function)| {
+        host_call!("host.screen.imageSearchEach");
         const F: &str = "host.screen.imageSearchEach";
         let load = |p: &str| sh.load_template(&sh.root(idx).join(p));
         let snap = snapshot::from_opts(opts.as_ref(), F)?;
@@ -1779,6 +1785,7 @@ pub(crate) fn image_search_each(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> m
 pub(crate) fn image_search_all(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> mlua::Result<Function> {
     let sh = shared.clone();
     lua.create_function(move |lua, (tv, opts): (Value, Option<Table>)| {
+        host_call!("host.screen.imageSearchAll");
         let load = |p: &str| sh.load_template(&sh.root(idx).join(p));
         let (tmpl, name) = resolve_with(&tv, "imageSearchAll", &load)?;
         let snap = snapshot::from_opts(opts.as_ref(), "host.screen.imageSearchAll")?;

@@ -54,6 +54,14 @@ pub fn push_key(key: Taken) {
     KEYS.with(|q| q.borrow_mut().push(key));
 }
 
+/// What a stop of the host's guard drops: the captured keys and hotkey presses queued and not
+/// drained yet (`Backend::drop_queued_input`).
+pub fn drop_pending() -> crate::backend::DroppedInput {
+    let keys = KEYS.with(|q| std::mem::take(&mut *q.borrow_mut())).into_iter().map(|k| (k.vk, k.mask, k.owner)).collect();
+    let hotkeys = HOTKEYS.with(|q| std::mem::take(&mut *q.borrow_mut()));
+    crate::backend::DroppedInput { keys, hotkeys }
+}
+
 pub fn mark_focus_dirty() {
     FOCUS_DIRTY.with(|f| f.set(true));
 }

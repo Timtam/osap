@@ -1,0 +1,12 @@
+id = "com.tool.guard-probe-lib"
+name = "Guard probe library"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
+entry = "src/main.luau"
+# Its code runs in Guard probe B's and Guard probe C's VMs too, so their memory limits are their
+# own plus this one's 256 MiB, and a loop in it stops all three.
+code_module = true
+
+[capabilities]
+# `screen` for TEST 17: the library reads a pixel for the module that calls it.
+require = ["log", "screen"]

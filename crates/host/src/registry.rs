@@ -88,6 +88,9 @@ pub struct InstalledModule {
     pub optional_dependencies: Vec<String>,
     /// What it declares under `[capabilities] require` — what an update is compared against.
     pub capabilities: Vec<String>,
+    /// What its code may use, in MiB: `[limits] memory_mib`, or the default — what an update's
+    /// review compares against.
+    pub memory_mib: u32,
     /// (repo, branch, commit sha) it was installed from, if installed remotely.
     pub source: Option<Source>,
     /// What the manifest claims about operating systems, verbatim and possibly empty.
@@ -458,6 +461,9 @@ pub struct UpdatePlan {
     /// ALREADY installed, as (id, optional). Such a module is not downloaded, but its code
     /// now runs for this one, so it is shown too.
     pub added_installed_dependencies: Vec<(String, bool)>,
+    /// What its code may use, in MiB, (installed, new) — when the new version changes it. Said
+    /// in the review, but not a reason for one: memory is not a capability.
+    pub memory_mib: Option<(u32, u32)>,
 }
 
 impl UpdatePlan {
@@ -693,6 +699,8 @@ impl GitHub {
             }
         }
         let (id, name) = (m.id.clone(), target.manifest.name.clone());
+        let new_mib = target.manifest.memory_mib();
+        let memory_mib = (new_mib != m.memory_mib).then_some((m.memory_mib, new_mib));
         let mut known = have;
         let mut modules = vec![target];
         self.add_required(&mut modules, 0, &mut known, &mut TopicIndex::new(), false)?;
@@ -704,6 +712,7 @@ impl GitHub {
             install: InstallPlan { modules, unavailable_optional: Vec::new() },
             added_capabilities,
             added_installed_dependencies,
+            memory_mib,
         })
     }
 }
@@ -990,6 +999,8 @@ fn differs(reviewed: &ModuleManifest, got: &ModuleManifest) -> Option<&'static s
         Some("supported_os")
     } else if reviewed.screen != got.screen {
         Some("[screen]")
+    } else if reviewed.limits != got.limits {
+        Some("[limits]")
     } else if reviewed != got {
         Some("module.toml")
     } else {
@@ -1093,6 +1104,9 @@ fn describe_planned(n: usize, p: &PlannedModule, os: &str) -> String {
         p.repo
     );
     s.push_str(&describe_capabilities(&m.capabilities.require));
+    if m.memory_mib() > module_manifest::DEFAULT_MEMORY_MIB {
+        s.push_str(&memory_line(m.memory_mib(), m.code_module));
+    }
     if !m.runs_on(os) {
         let claimed: Vec<String> = m.supported_os.iter().map(|o| one_line(o, 30)).collect();
         s.push_str(&format!(
@@ -1102,6 +1116,20 @@ fn describe_planned(n: usize, p: &PlannedModule, os: &str) -> String {
         ));
     }
     s
+}
+
+/// The review's line for a module whose `[limits] memory_mib` asks for more than the default. A
+/// `code_module`'s amount counts in every VM its code runs in — its own, and each dependent's.
+fn memory_line(mib: u32, code_module: bool) -> String {
+    let default = module_manifest::DEFAULT_MEMORY_MIB;
+    if code_module {
+        format!(
+            "Its code may use up to {mib} MiB of memory in its own VM and in the VM of each module that uses its \
+             code; most modules use the default of {default} MiB.\n"
+        )
+    } else {
+        format!("It may use up to {mib} MiB of memory; most modules use the default of {default} MiB.\n")
+    }
 }
 
 fn describe_capabilities(caps: &[String]) -> String {
@@ -1183,6 +1211,11 @@ pub fn update_review_text(plan: &UpdatePlan, installed: &[InstalledModule], os: 
         }
         s.push('\n');
     }
+    if let Some((was, now)) = plan.memory_mib {
+        s.push_str(&format!(
+            "It may now use up to {now} MiB of memory; the installed version may use {was} MiB.\n\n"
+        ));
+    }
     if !plan.added_installed_dependencies.is_empty() {
         s.push_str("It starts using these modules you already have; their code will run for it:\n\n");
         for (id, optional) in &plan.added_installed_dependencies {
@@ -1256,6 +1289,7 @@ fn installed_in_with(dir: &Path, force_log: bool) -> Vec<InstalledModule> {
         out.push(InstalledModule {
             dependencies: ids(&m.manifest.dependencies),
             optional_dependencies: ids(&m.manifest.optional_dependencies),
+            memory_mib: m.manifest.memory_mib(),
             capabilities: m.manifest.capabilities.require,
             id: m.manifest.id,
             name: m.manifest.name,
@@ -2130,6 +2164,7 @@ mod github_tests {
             dependencies: deps.iter().map(|s| s.to_string()).collect(),
             optional_dependencies: Vec::new(),
             capabilities: caps.iter().map(|s| s.to_string()).collect(),
+            memory_mib: module_manifest::DEFAULT_MEMORY_MIB,
             source: Some(Source {
                 repo: format!("o/{}", id.rsplit('.').next().unwrap()),
                 branch: "main".to_string(),
@@ -2183,6 +2218,61 @@ mod github_tests {
         // Dropping a capability or keeping a dependency is nothing to agree to.
         assert!(!plan.needs_review(), "{plan:?}");
         assert_eq!(plan.install.modules.len(), 1);
+    }
+
+    /// A module that asks for more memory says so in the install review; one whose update changes
+    /// the amount says so in the update review, without that alone asking for one; and an unpacked
+    /// manifest whose `[limits]` differs from the reviewed one is named for it.
+    #[test]
+    fn a_declared_memory_limit_is_shown_and_held_to_the_review() {
+        let big = format!("{}\n[limits]\nmemory_mib = 512\n", manifest("com.t.root", &["speech"], &[], &[]));
+        let world = World::new(&[("root", big.clone()), ("plain", manifest("com.t.plain", &[], &[], &[]))]);
+        let plan = world.fake.github().resolve_tree("o/root", Some("main"), &[]).expect("plan");
+        let text = install_review_text(&plan, "windows");
+        assert!(
+            text.contains("speak through your screen reader (speech)\nIt may use up to 512 MiB of memory; most modules use the default of 256 MiB."),
+            "{text}"
+        );
+        let plain = world.fake.github().resolve_tree("o/plain", Some("main"), &[]).expect("plan");
+        assert!(!install_review_text(&plain, "windows").contains("MiB"), "the default is not said");
+        // Nor the default written out; and a code module's amount is said to count wherever its
+        // code runs.
+        let written = format!("{}\n[limits]\nmemory_mib = 256\n", manifest("com.t.w", &[], &[], &[]));
+        let lib = format!(
+            "{}\n[limits]\nmemory_mib = 1024\n",
+            manifest("com.t.lib", &[], &[], &[]).replacen("version = \"1.0.0\"\n", "version = \"1.0.0\"\ncode_module = true\n", 1)
+        );
+        let world2 = World::new(&[("w", written), ("lib", lib)]);
+        let w = world2.fake.github().resolve_tree("o/w", Some("main"), &[]).expect("plan");
+        assert!(!install_review_text(&w, "windows").contains("MiB"), "256 written out is the default");
+        let l = world2.fake.github().resolve_tree("o/lib", Some("main"), &[]).expect("plan");
+        assert!(
+            install_review_text(&l, "windows").contains(
+                "Its code may use up to 1024 MiB of memory in its own VM and in the VM of each module that uses its \
+                 code; most modules use the default of 256 MiB."
+            ),
+            "{}",
+            install_review_text(&l, "windows")
+        );
+        // Word for word in the manager's guide.
+        let guide = include_str!("../../../docs/module-manager.md").replace('\n', " ");
+        assert!(guide.contains(memory_line(512, false).trim_end()), "module-manager.md does not show the install line");
+        assert!(guide.contains(memory_line(1024, true).trim_end()), "module-manager.md does not show a code module's line");
+
+        let installed = vec![InstalledModule { memory_mib: 1024, ..installed_row("com.t.root", &["speech"], &[]) }];
+        let plan = world.fake.github().resolve_update(&installed[0], &installed).expect("update plan");
+        assert_eq!(plan.memory_mib, Some((1024, 512)));
+        assert!(!plan.needs_review(), "memory is not a capability");
+        let text = update_review_text(&plan, &installed, "windows");
+        assert!(text.contains("It may now use up to 512 MiB of memory; the installed version may use 1024 MiB."), "{text}");
+        let doc = include_str!("../../../docs/module-manager.md").replace('\n', " ");
+        assert!(doc.contains("It may now use up to 1024 MiB of memory; the installed version may use 512 MiB."), "module-manager.md");
+        let same = vec![InstalledModule { memory_mib: 512, ..installed_row("com.t.root", &["speech"], &[]) }];
+        assert_eq!(world.fake.github().resolve_update(&same[0], &same).unwrap().memory_mib, None);
+
+        let reviewed = ModuleManifest::parse(&big).unwrap();
+        let got = ModuleManifest::parse(&big.replace("memory_mib = 512", "memory_mib = 2048")).unwrap();
+        assert_eq!(differs(&reviewed, &got), Some("[limits]"));
     }
 
     #[test]

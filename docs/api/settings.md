@@ -110,7 +110,10 @@ It fires on **every** `set`, including one that stores the value already there,
 so compare `new` with `old` if only a real change matters. The settings dialog's OK
 applies every field, changed or not, so it fires the callbacks of every setting the
 dialog shows. Unlike the module's other callbacks, these also fire while the module
-is disabled — the dialog can be opened for a disabled module too. `old` is not `nil` in
+is disabled — the dialog can be opened for a disabled module too — but not while the
+application has [stopped it](../module-runtime-and-lifecycle.md#limits): then they do not
+run; the values are stored, and turning the module on again builds it afresh, so it reads
+them as they are then. `old` is not `nil` in
 practice: `define` stores the default when nothing is stored, so the first change
 after load reports the default (or the persisted value) as `old`, never `nil`.
 

@@ -75,6 +75,66 @@ pub struct ModuleManifest {
     /// [`ScreenDecl`].
     #[serde(default)]
     pub screen: ScreenDecl,
+    /// `[limits]`: what this module's code may use, wherever it runs — see [`LimitsDecl`].
+    /// Absent means the defaults.
+    #[serde(default)]
+    pub limits: LimitsDecl,
+}
+
+/// The memory a module's code may use when its manifest says nothing, in MiB (1 MiB =
+/// 1 048 576 bytes). Also the least `[limits] memory_mib` accepts: the key is for a module that
+/// needs MORE, and it rules out 0, which the VM's allocator would read as "no limit".
+pub const DEFAULT_MEMORY_MIB: u32 = 256;
+/// The most `[limits] memory_mib` accepts, in MiB: the bound against an absurd value. About a
+/// hundred times the largest real need measured — VPS Avenger with all 124 of its expansion
+/// files uses 19 MB.
+pub const MAX_MEMORY_MIB: u32 = 2048;
+
+/// `[limits]` block: what the module's code may use.
+///
+/// ```toml
+/// [limits]
+/// memory_mib = 512   # MiB of Luau memory; leave it out for the default, 256
+/// ```
+///
+/// `memory_mib` is carried as written and held to [`DEFAULT_MEMORY_MIB`]..=[`MAX_MEMORY_MIB`]
+/// by [`ModuleManifest::validate`], so a value outside fails the manifest the way a bad `id`
+/// does — refused by the install review before anything is written. A value of the wrong TYPE
+/// (`"512"`, `512.0`, `true`) fails it as any mistyped field does. A key this crate does not
+/// know — a misspelt `memroy_mib`, or one a later host adds — is carried by name in `unknown`,
+/// for the host to name in the log, and is never a reason to refuse the manifest: the same rule
+/// as `[screen]`'s.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LimitsDecl {
+    pub memory_mib: Option<i64>,
+    /// The table's other keys, in the order the TOML reader hands them over (by name).
+    pub unknown: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for LimitsDecl {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = LimitsDecl;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a [limits] table")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut m: A) -> std::result::Result<LimitsDecl, A::Error> {
+                let mut out = LimitsDecl::default();
+                while let Some(key) = m.next_key::<String>()? {
+                    match key.as_str() {
+                        "memory_mib" => out.memory_mib = Some(m.next_value::<i64>()?),
+                        _ => {
+                            m.next_value::<serde::de::IgnoredAny>()?;
+                            out.unknown.push(key);
+                        }
+                    }
+                }
+                Ok(out)
+            }
+        }
+        d.deserialize_map(V)
+    }
 }
 
 /// `[screen]` block: how the screen is read for this module's VM.
@@ -99,7 +159,7 @@ pub struct ModuleManifest {
 pub struct ScreenDecl {
     pub capture: Option<String>,
     pub fallback: Option<String>,
-    /// The table's other keys, in the order written.
+    /// The table's other keys, in the order the TOML reader hands them over (by name).
     pub unknown: Vec<String>,
 }
 
@@ -176,7 +236,26 @@ impl ModuleManifest {
                 check_single_name(field, dep_id(spec), false)?;
             }
         }
+        if let Some(mib) = self.limits.memory_mib {
+            if !(i64::from(DEFAULT_MEMORY_MIB)..=i64::from(MAX_MEMORY_MIB)).contains(&mib) {
+                anyhow::bail!(
+                    "module.toml: `[limits] memory_mib` = {mib} is outside {DEFAULT_MEMORY_MIB} to \
+                     {MAX_MEMORY_MIB}: it is the most memory, in MiB, this module's code may use, \
+                     and {DEFAULT_MEMORY_MIB} is the default — leave it out unless the module needs more"
+                );
+            }
+        }
         Ok(())
+    }
+
+    /// The MiB this module's own code may use: `[limits] memory_mib`, or
+    /// [`DEFAULT_MEMORY_MIB`]. Held to its range by [`ModuleManifest::validate`], which every
+    /// reader of a manifest goes through; clamped here as well, so a manifest built some other
+    /// way cannot hand the host 0 (no limit) or more than the bound.
+    pub fn memory_mib(&self) -> u32 {
+        self.limits.memory_mib.map_or(DEFAULT_MEMORY_MIB, |v| {
+            v.clamp(i64::from(DEFAULT_MEMORY_MIB), i64::from(MAX_MEMORY_MIB)) as u32
+        })
     }
 
     /// Does this module claim to run on `os` (an `std::env::consts::OS` name)?
@@ -799,6 +878,67 @@ some_later_key = 3
         assert_eq!(m.screen, ScreenDecl::default());
     }
 
+    #[test]
+    fn a_manifest_without_limits_gets_the_default() {
+        let base = "id = \"com.x.y\"\nname = \"X\"\nversion = \"1.0.0\"\n";
+        // No table, and an empty one: every module written before `[limits]` existed.
+        for text in [base.to_string(), format!("{base}\n[limits]\n")] {
+            let m = ModuleManifest::parse(&text).expect("parses");
+            assert_eq!(m.limits, LimitsDecl::default());
+            assert_eq!(m.memory_mib(), DEFAULT_MEMORY_MIB);
+            assert_eq!(m.memory_mib(), 256);
+        }
+    }
+
+    #[test]
+    fn memory_mib_is_read_and_bounded() {
+        let with = |v: &str| format!("id = \"com.x.y\"\nname = \"X\"\nversion = \"1.0.0\"\n\n[limits]\nmemory_mib = {v}\n");
+        for (v, mib) in [("256", 256), ("512", 512), ("2048", 2048), ("1000", 1000)] {
+            let m = ModuleManifest::parse(&with(v)).unwrap_or_else(|e| panic!("{v} must be accepted: {e:#}"));
+            assert_eq!(m.limits.memory_mib, Some(i64::from(mib)));
+            assert_eq!(m.memory_mib(), mib);
+        }
+        for v in ["0", "255", "2049", "-1", "1_000_000", "9223372036854775807"] {
+            let e = ModuleManifest::parse(&with(v)).expect_err(v);
+            let text = format!("{e:#}");
+            assert!(text.contains("`[limits] memory_mib`") && text.contains("256 to 2048"), "{v}: {text}");
+        }
+        // The documented message, word for word — and in the document.
+        let e = ModuleManifest::parse(&with("4096")).expect_err("4096");
+        assert_eq!(
+            format!("{e:#}"),
+            "module.toml: `[limits] memory_mib` = 4096 is outside 256 to 2048: it is the most memory, \
+             in MiB, this module's code may use, and 256 is the default — leave it out unless the \
+             module needs more"
+        );
+        let doc = include_str!("../../../docs/module-package-format.md");
+        assert!(doc.contains(&format!("{e:#}")), "module-package-format.md does not show the message");
+        // A manifest built without `parse` cannot hand the host 0 or more than the bound.
+        let mut m = ModuleManifest::parse(&with("512")).unwrap();
+        m.limits.memory_mib = Some(0);
+        assert_eq!(m.memory_mib(), DEFAULT_MEMORY_MIB);
+        m.limits.memory_mib = Some(1 << 40);
+        assert_eq!(m.memory_mib(), MAX_MEMORY_MIB);
+    }
+
+    #[test]
+    fn a_mistyped_memory_mib_fails_and_an_unknown_key_is_carried() {
+        let base = "id = \"com.x.y\"\nname = \"X\"\nversion = \"1.0.0\"\n\n[limits]\n";
+        for bad in ["memory_mib = \"512\"\n", "memory_mib = 512.0\n", "memory_mib = true\n", "memory_mib = [512]\n"] {
+            let e = ModuleManifest::parse(&format!("{base}{bad}")).expect_err(bad);
+            assert!(format!("{e:#}").contains("invalid type"), "{bad}: {e:#}");
+        }
+        let m = ModuleManifest::parse(&format!("{base}memroy_mib = 3\nlater = \"x\"\n"))
+            .expect("a misspelt or unknown key does not fail the manifest");
+        assert_eq!(m.limits.memory_mib, None, "the misspelt key is not read as memory_mib");
+        assert_eq!(m.limits.unknown, vec!["later".to_string(), "memroy_mib".to_string()]);
+        assert_eq!(m.memory_mib(), DEFAULT_MEMORY_MIB);
+        // A table of the wrong shape is a mistyped field too.
+        let e = ModuleManifest::parse("id = \"com.x.y\"\nname = \"X\"\nversion = \"1.0.0\"\nlimits = 512\n")
+            .expect_err("limits = 512");
+        assert!(format!("{e:#}").contains("invalid type"), "{e:#}");
+    }
+
     fn manifest_text(id: &str, version: &str, entry: Option<&str>) -> String {
         let mut t = format!("id = {id:?}\nname = \"X\"\nversion = {version:?}\n");
         if let Some(e) = entry {
@@ -878,6 +1018,15 @@ some_later_key = 3
         )
         .unwrap();
         assert_ne!(a, renamed);
+        // `[limits]` takes part, so an install whose unpacked manifest asks for more memory than
+        // the reviewed one is caught.
+        let more = ModuleManifest::parse(&format!(
+            "{}\n[limits]\nmemory_mib = 512\n",
+            manifest_text("com.x.y", "1.0.0", None)
+        ))
+        .unwrap();
+        assert_ne!(a, more);
+        assert_ne!(a.limits, more.limits);
     }
 
     /// A zip built in memory from (name, contents) pairs; a name ending in `/` is a folder.

@@ -81,6 +81,8 @@ Reports whether this claim's own conditions hold right now, and re-elects the sl
 the call that answers "is it actually open" — see [Who decides whether it matches](#matches)
 above. A change of winner runs the losing claim's `onDeactivate` and then the winner's `onActivate`, in that order, so the two never overlap.
 
+One exception to "in that order": a claim of a module the application stopped (its callback ran too long or out of memory, see [A callback that runs too long, or a module that uses too much memory](../module-runtime-and-lifecycle.md#limits)) loses its slot at once, and the winner's `onActivate` runs then, but the stopped module runs no code, so its `onDeactivate` is not run — nor run later: turning the module on again builds it afresh, as a reload does, and the new VM starts with no overlay active, registering its claims again. An `onDeactivate` the stop itself ended is not run again either.
+
 Call it on every re-check, not only on a change — the arbiter keeps the last thing each claim reported and compares for itself.
 
 ```luau

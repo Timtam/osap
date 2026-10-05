@@ -90,7 +90,7 @@ process is not running this application.
 ## Installed tab
 
 Lists every loaded module with a native checkbox. Below the list: **Settings…**,
-**Reload**, and **Uninstall** (the last two act on the selected module).
+**Details…**, **Reload**, and **Uninstall** (each acts on the selected module).
 
 ### Enable / disable
 
@@ -107,6 +107,43 @@ to the `.exe` on Windows, in the folder that holds the `.app` on macOS), so a
 disabled module stays disabled across restarts — and is still loaded at start-up,
 with its callbacks switched off.
 
+**A module the application stopped.** A module whose callback ran for 2 seconds of
+processor time or 10 seconds in all without returning, or ran out of memory without
+catching it, is turned off by the application itself, until the next start (see
+[A callback that runs too long, or a module that uses too much memory](module-runtime-and-lifecycle.md#limits)).
+When a loop in a library's own Luau spent the processor time, the library and every
+module that runs its code are turned off together. You hear a sentence and get the error
+window, and each row is unticked and says why at its end — the callback, the host call
+the time ran out in, and the place:
+
+```
+Game helper  v1.2.0   (com.example.game) — stopped: its hotkey callback ran too long, at src/main.luau:40
+Game helper  v1.2.0   (com.example.game) — stopped: its hotkey callback ran too long, in host.screen.pixel, at src/main.luau:71
+Game helper  v1.2.0   (com.example.game) — stopped: its hotkey callback needed more than 256 MiB of memory
+Synth overlay  v1.0.0   (com.example.synth) — stopped: its hotkey callback ran too long, in host.screen.imageSearchMulti, at Overlay kit's src/main.luau:1595
+Overlay kit  v1.0.0   (com.example.kit) — stopped: its code ran too long in Synth overlay's hotkey callback, at src/main.luau:9
+Sampler overlay  v1.0.0   (com.example.sampler) — stopped with Overlay kit: its code ran too long in Synth overlay's hotkey callback, at src/main.luau:9
+```
+
+The place is the file in the module's folder and the line where its code was when it
+was stopped. A file of another module is named with it: in the fourth row a whole-window
+image match the library made for Synth overlay ran out the wall clock, and only Synth
+overlay was stopped. The last two rows are a loop in the library's own code.
+
+The row changes on the next tick of the window — the screen reader may read the
+selected row again then. Ticking the row turns the module on again at once and the
+note goes; it is **built afresh**, as Reload builds it, not picked up where the stop
+left it — a stop ends a callback anywhere, an overlay half-way through giving up its
+keys, say — so it runs its entry file again and reads its settings as they are now.
+Ticking the library of a library's stop turns on every module the stop took with it,
+each built afresh; ticking one of the others turns on only that one. If a module cannot
+be built afresh, it stays off, and the error window says why. Left as it is, the module
+is on again at the next start: the application stopped it, you did not, so
+`settings.toml` keeps it on. To keep it off after a restart too, tick it and untick it.
+A Reload of a stopped module rebuilds it and leaves it off, and the reload key's report
+counts the stopped modules that stay off ("11 modules reloaded; 1 stopped module stays
+off"). Details… says when and why it was stopped.
+
 ### Settings…
 
 Opens a per-module dialog built from the settings the module declared via
@@ -115,7 +152,39 @@ setting (checkbox / number field / dropdown / text), each labelled for the scree
 reader. Changes are validated and persisted; a module can react live via
 `host.settings.onChange`. **OK applies every field**, changed or not, so every
 setting's `onChange` callbacks fire — and the button works for a disabled module
-too, whose `onChange` callbacks then fire as well.
+too, whose `onChange` callbacks then fire as well. For a module the application
+stopped they do not run; the values are saved, and the module reads them when it is
+turned on again and built afresh.
+
+### Details… {#details}
+
+Shows what the application knows about the selected module, in a read-only text
+field that has the focus when the window opens, so the screen reader reads it at
+once: its name, version and id; whether it is on, turned off in this list, or stopped
+by the application (when, and why, in the words of the stop's sentence); the memory
+its VM may use, how that limit is made up, and how much it uses now; where else its
+code runs; and the modules it depends on. For a module that declares 300 MiB and
+depends on a library whose code runs in its VM:
+
+```
+Synth overlay 0.1.0 (com.example.synth)
+State: on.
+Memory: its VM may use up to 556 MiB — 300 of its own (set in its module.toml) and 256 for Overlay kit (com.example.kit), whose code runs in it. In use now: 1.9 MiB.
+Its code runs only in its own VM.
+Depends on: com.example.kit.
+```
+
+Stopped three minutes ago, its state line reads:
+
+```
+State: off — stopped by the application 3 minutes ago: Stopped Synth overlay: its hotkey callback needed more than the 556 megabytes of memory it may use. Its keys went to the program in front again. It stays off until you tick it in the Installed list or start the application again; ticked, it is built afresh. To keep it off after a restart too, tick it and untick it.
+```
+
+For a `code_module` the fourth line names the modules whose VMs run its code —
+`Its code also runs in the VMs of: Kontakt (com.platform.kontakt), …` — since a limit
+of its own counts in each of those VMs too. The limit and the declaration behind it
+are explained in [module-package-format.md](module-package-format.md#limits). For a
+row whose module this platform will not run, Details… says that instead.
 
 ### Reload
 
@@ -219,7 +288,9 @@ version, id, the repository it comes from, why it is there (*the module you chos
 by …*, *optional for …*) and, one per line, what its **capabilities** let it do — *read text
 on the screen (ocr)*, *speak through your screen reader (speech)*, and so on; a module that
 asks for none says so. The text is in a read-only field that has the focus when the dialog
-opens, so the screen reader reads it at once, and it can be read again line by line. Optional
+opens, so the screen reader reads it at once, and it can be read again line by line. A
+module that asks for more memory than the default says so in its paragraph: *It may use up to 512 MiB of memory; most modules use the default of 256 MiB.* — or, for a
+`code_module`, whose amount counts wherever its code runs, *Its code may use up to 1024 MiB of memory in its own VM and in the VM of each module that uses its code; most modules use the default of 256 MiB.* A manifest that writes the default out, `memory_mib = 256`, says nothing here. Optional
 modules are listed in their own section after the required ones, and an optional dependency
 that cannot be installed is named with the reason. The buttons are **Install** and
 **Cancel** — or, when there are optional modules, **Install with the optional modules**,
@@ -288,6 +359,9 @@ install review lists exactly that: the new capabilities, the modules it starts u
 their capabilities, and each module to be installed with it. **Update** applies it; **Cancel**,
 Escape and the close box change nothing. An update that asks for nothing new is applied
 without a question. Capabilities or dependencies the new version *drops* are not asked about.
+When the new version changes how much memory it may use, the review says so too — *It may
+now use up to 1024 MiB of memory; the installed version may use 512 MiB.* — but that alone
+does not bring up a review: memory is not a capability.
 
 Like an install, the update is pinned to the commit the comparison read, and the modules it
 newly needs are installed and hot-loaded before the updated module is reloaded — together with
@@ -421,12 +495,22 @@ again. Every occurrence is also written to the log file
 when that folder cannot be written). A module that keeps failing is **not**
 disabled automatically.
 
-What this does not cover is a callback that never returns. There is no time or
-memory limit on a module's code, so a loop that does not end holds the one thread
-everything runs on — every module, speech, every key and hotkey callback, and on
-macOS the event tap — until the application is ended. (The Windows keyboard hook
-has a thread of its own, so typing elsewhere goes on, and captured keys stay
-swallowed, their callbacks never coming.)
+A module's time and memory are limited: a callback that runs for 2 seconds of the
+event loop's processor time or 10 seconds in all without returning, or runs its VM
+out of memory without catching it, stops the module until the next start — with a
+sentence, the error window and a note in its row (see [Enable / disable](#enable--disable)
+and [A callback that runs too long, or a module that uses too much memory](module-runtime-and-lifecycle.md#limits)).
+A loop that does not end therefore costs about 2 seconds during which nothing answers
+— every module, speech, every key and hotkey callback, and on macOS the event tap —
+and then its keys go back to the program in front. Keys pressed meanwhile are dropped
+on Windows, so another overlay does not get them all at once afterwards — all but the
+application's own reload key, which is answered after the stop.
+
+What this does not cover is a host call that never returns — an accessibility query
+into a program that has stopped answering, say. The module is stopped only once the
+call comes back, so until then the one thread everything runs on is held, until the
+application is ended. (The Windows keyboard hook has a thread of its own, so typing
+elsewhere goes on, and captured keys stay swallowed, their callbacks never coming.)
 
 ## Headless mode
 

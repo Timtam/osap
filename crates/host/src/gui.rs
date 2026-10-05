@@ -50,6 +50,18 @@ pub struct ModuleInfo {
     pub settings: Vec<SettingDesc>,
     /// The platforms this module claims, when this is not one of them.
     pub unsupported: Option<String>,
+    /// Set while the host's guard keeps the module off: the note its row carries ("stopped: it
+    /// needed more than 256 MiB of memory").
+    pub stopped: Option<String>,
+}
+
+/// A row the host changed without the user changing it: a module the guard stopped (off, with its
+/// note), or one turned on again after its stop (on, without one). Drained by the tick.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModuleChange {
+    pub idx: usize,
+    pub enabled: bool,
+    pub stopped: Option<String>,
 }
 
 /// One built row in the Installed list: what the handlers need — the module index
@@ -63,6 +75,7 @@ struct Row {
     module_idx: Option<usize>,
     id: String,
     name: String,
+    version: String,
     /// What the list shows. Held because the control can neither rename one item nor
     /// delete one — the list is rebuilt from these.
     label: String,
@@ -76,6 +89,8 @@ struct Row {
     dependencies: Vec<String>,
     /// Set when this platform will not run the module: the platforms it does claim.
     unsupported: Option<String>,
+    /// Set while the host's guard keeps the module off: what the row says about it.
+    stopped: Option<String>,
 }
 
 impl Row {
@@ -84,12 +99,40 @@ impl Row {
             module_idx: info.module_idx,
             id: info.id.clone(),
             name: info.name.clone(),
-            label: row_label(&info.name, &info.version, &info.id, info.unsupported.as_deref()),
+            version: info.version.clone(),
+            label: row_label(&info.name, &info.version, &info.id, info.unsupported.as_deref(), info.stopped.as_deref()),
             enabled: info.enabled,
             settings: info.settings.clone(),
             dependencies: info.dependencies.clone(),
             unsupported: info.unsupported.clone(),
+            stopped: info.stopped.clone(),
         }
+    }
+
+    /// Takes what a reload or an update says of the module — its settings, dependencies, name,
+    /// version and stop — and builds its label again.
+    fn refresh(&mut self, info: &ModuleInfo) {
+        self.settings = info.settings.clone();
+        self.dependencies = info.dependencies.clone();
+        self.name = info.name.clone();
+        self.version = info.version.clone();
+        self.stopped = info.stopped.clone();
+        self.relabel();
+    }
+
+    fn relabel(&mut self) {
+        self.label = row_label(&self.name, &self.version, &self.id, self.unsupported.as_deref(), self.stopped.as_deref());
+    }
+
+    /// Applies a change the host made: true when what the list shows changed.
+    fn apply(&mut self, change: &ModuleChange) -> bool {
+        if self.enabled == change.enabled && self.stopped == change.stopped {
+            return false;
+        }
+        self.enabled = change.enabled;
+        self.stopped = change.stopped.clone();
+        self.relabel();
+        true
     }
 
     /// The one sentence every refusal on this row says, so they cannot drift apart.
@@ -106,13 +149,15 @@ impl Row {
 
 /// How a module reads in the list. One place: it is written at first fill, at install and
 /// at update, and three copies of a format string drift.
-fn row_label(name: &str, version: &str, id: &str, unsupported: Option<&str>) -> String {
-    match unsupported {
+fn row_label(name: &str, version: &str, id: &str, unsupported: Option<&str>, stopped: Option<&str>) -> String {
+    match (unsupported, stopped) {
         // Said in the row itself, because a screen reader reads the row and nothing else. A
         // disabled-looking checkbox with no explanation is the version of this that leaves
         // somebody guessing.
-        Some(claimed) => format!("{name}  v{version}   ({id}) — not loaded, needs {claimed}"),
-        None => format!("{name}  v{version}   ({id})"),
+        (Some(claimed), _) => format!("{name}  v{version}   ({id}) — not loaded, needs {claimed}"),
+        // The same for a module the host's guard turned off: the row says why it is unticked.
+        (None, Some(note)) => format!("{name}  v{version}   ({id}) — {note}"),
+        (None, None) => format!("{name}  v{version}   ({id})"),
     }
 }
 
@@ -636,6 +681,11 @@ pub fn run_gui(
     on_reload: impl Fn(usize) -> Result<(ModuleInfo, crate::ReloadReport), String> + 'static,
     mut pump: impl FnMut() + 'static,
     mut drain_errors: impl FnMut() -> Vec<(String, String)> + 'static,
+    // The rows the host changed on its own — a module the guard stopped, or one turned on again
+    // after its stop — taken each tick.
+    mut drain_changes: impl FnMut() -> Vec<ModuleChange> + 'static,
+    // The text of Details… for a loaded module, by its index.
+    details: impl Fn(usize) -> String + 'static,
     // Announcing belongs to the host: it owns the single speech engine — a second one is an
     // error on macOS, where both of the `tts` crate's backends register the same Objective-C
     // class name — and it owns the rule about when the application may speak at all. So the
@@ -701,9 +751,11 @@ pub fn run_gui(
 
         let inst_buttons = BoxSizer::builder(Orientation::Horizontal).build();
         let settings_btn = Button::builder(&installed).with_label("Settings…").build();
+        let details_btn = Button::builder(&installed).with_label("Details…").build();
         let reload_btn = Button::builder(&installed).with_label("Reload").build();
         let uninstall_btn = Button::builder(&installed).with_label("Uninstall").build();
         inst_buttons.add(&settings_btn, 0, SizerFlag::All, 6);
+        inst_buttons.add(&details_btn, 0, SizerFlag::All, 6);
         inst_buttons.add(&reload_btn, 0, SizerFlag::All, 6);
         inst_buttons.add(&uninstall_btn, 0, SizerFlag::All, 6);
         is.add_sizer(&inst_buttons, 0, SizerFlag::All, 6);
@@ -1123,6 +1175,28 @@ pub fn run_gui(
             });
         }
 
+        // "Details…": the selected module's state, the memory its VM may use and uses now, and
+        // where its code runs — in a focused, read-only text field, read on open, like every other
+        // message here. A row for a module this platform will not run says why instead.
+        {
+            let (rows, list) = (rows.clone(), list.clone());
+            details_btn.on_click(move |_| {
+                let Some(sel) = list.selection() else {
+                    return;
+                };
+                let picked = {
+                    let rb = rows.borrow();
+                    rb.get(sel).map(|r| (r.module_idx, r.why_not(), r.unsupported.is_some()))
+                };
+                let text = match picked {
+                    Some((_, why, true)) => why,
+                    Some((Some(idx), _, false)) => details(idx),
+                    _ => return,
+                };
+                modal_message(&frame, "Module details", &text, false);
+            });
+        }
+
         // "Reload" rebuilds the selected module's VM in place from its source dir
         // (edit a dev module + reload without restarting the app). Dependents that
         // hold its code keep the old copy until restarted.
@@ -1154,11 +1228,7 @@ pub fn run_gui(
                         {
                             let mut rb = rows.borrow_mut();
                             if let Some(r) = rb.iter_mut().find(|r| r.module_idx == Some(idx)) {
-                                r.settings = info.settings.clone();
-                                r.dependencies = info.dependencies.clone();
-                                r.name = info.name.clone();
-                                r.label =
-                                    row_label(&info.name, &info.version, &info.id, None);
+                                r.refresh(&info);
                             }
                         }
                         list.rebuild(&rows.borrow());
@@ -1763,6 +1833,26 @@ pub fn run_gui(
                         report_error(&error_window, &frame, &title, &msg);
                     }
                 }
+                // A module the host's guard stopped is unticked and says why in its row; one
+                // turned on again loses the note. The list is rebuilt only when a row changed,
+                // since a rebuild can make the screen reader read the selected row again — and,
+                // like the error window, not while a review is being read.
+                let changes = if reviewing.get() { Vec::new() } else { drain_changes() };
+                if !changes.is_empty() {
+                    let changed = {
+                        let mut rb = rows.borrow_mut();
+                        let mut changed = false;
+                        for c in &changes {
+                            if let Some(r) = rb.iter_mut().find(|r| r.module_idx == Some(c.idx)) {
+                                changed |= r.apply(c);
+                            }
+                        }
+                        changed
+                    };
+                    if changed {
+                        list.rebuild(&rows.borrow());
+                    }
+                }
                 // Drain background-job results and apply them on the GUI thread.
                 let jobs: Vec<Job> = std::mem::take(&mut *inbox.lock().unwrap());
                 for job in jobs {
@@ -2034,16 +2124,9 @@ pub fn run_gui(
                                             if let Some(r) =
                                                 rb.iter_mut().find(|r| r.module_idx == Some(idx))
                                             {
-                                                r.settings = info.settings.clone();
-                                                r.dependencies = info.dependencies.clone();
-                                                r.name = info.name.clone();
-                                                r.label = row_label(
-                                                    &info.name,
-                                                    &info.version,
-                                                    &info.id,
-                                                    // It reloaded, so it loaded.
-                                                    None,
-                                                );
+                                                // It reloaded, so it loaded: the row is not one
+                                                // for a module this platform will not run.
+                                                r.refresh(&info);
                                             }
                                         }
                                         let others = report.reloaded.len().saturating_sub(1);

@@ -26,6 +26,19 @@ pub mod build_info;
 #[path = "../../host/src/loop_guard.rs"]
 pub mod loop_guard;
 
+/// The event loop's processor time, read from the guard's watchdog thread: its macOS half,
+/// `thread_info(THREAD_BASIC_INFO)` on the port of `pthread_mach_thread_np`, has no other way to
+/// meet a compiler before it meets a Mac.
+#[path = "../../host/src/thread_cpu.rs"]
+pub mod thread_cpu;
+
+/// Names what the guard calls in `thread_cpu.rs`, so a signature that changes fails here and not
+/// only on the Mac: an unreferenced item only warns.
+pub fn thread_cpu_calls() {
+    let _: fn() -> Option<thread_cpu::LoopThread> = thread_cpu::LoopThread::current;
+    let _: fn(&thread_cpu::LoopThread) -> Option<std::time::Duration> = thread_cpu::LoopThread::cpu;
+}
+
 /// The single-instance guard's names, socket and decision. Kept free of wxdragon for this:
 /// the lock itself is created in `gui.rs`, and reaches this file only through its `Lock`
 /// trait. The macOS half — the uid, the per-user temporary folder, the Unix-domain socket and

@@ -549,9 +549,24 @@ fn start_thread<H: ReadHost>(
             waited: Duration::ZERO,
         },
     );
-    let outcome = stretch(h.tasks(), id, || thread.resume::<MultiValue>(args));
-    step(h, id, lua, &thread, outcome);
+    let delivery = enter_delivery(h.tasks(), id);
+    let outcome = stretch(h.tasks(), id, &delivery, || thread.resume::<MultiValue>(args));
+    step(h, id, lua, &thread, &delivery, outcome);
+    // The delivery's entry ends here, with the handler ended or parked, nothing of it running.
+    drop(delivery);
     Ok(())
+}
+
+/// The guard's entry for one delivery of handler `id`: from the stretch that starts or resumes it
+/// until it ends or waits. The resumes after its own `coroutine.yield`, which the host answers at
+/// once (`step`), are inside it, so they do not start its clocks afresh: a handler that yields in a
+/// loop — `while true do pcall(coroutine.yield) end` — is one callback to the guard, stopped at its
+/// limit like any other loop. `None` when the handler is not in the table.
+type Delivery = Option<Result<crate::vm_guard::Entry, crate::vm_guard::Refused>>;
+
+fn enter_delivery(tasks: &Tasks, id: TaskId) -> Delivery {
+    let (lua, what) = tasks.table.borrow().get(&id).map(|t| (t.lua.clone(), t.ctx.what.clone()))?;
+    Some(crate::vm_guard::Entry::enter(&lua, crate::vm_guard::EntryKind::Handler, what))
 }
 
 /// What became of a handler's first stretch.
@@ -586,8 +601,11 @@ pub(crate) fn run_handler<H: ReadHost>(
     let id = tasks.next_id();
     let report = (ctx.report, ctx.what.clone());
     if let Err(e) = start_thread(h, id, lua, owner, f, args, Kind::Handler { waits: handlers_wait() }, ctx, prio) {
-        // Only running out of memory makes a coroutine fail to be made.
-        h.report_error(report.0, &report.1, &e.to_string());
+        // Only running out of memory makes a coroutine fail to be made: a VM that is full, and
+        // that is a stop of its module, which reports itself (`vm_guard`, `stops.rs`).
+        if !crate::vm_guard::note_failure(lua, crate::vm_guard::EntryKind::Handler, report.1.clone(), &e) {
+            h.report_error(report.0, &report.1, &e.to_string());
+        }
         return Ran::Ended;
     }
     match tasks.table.borrow().get(&id) {
@@ -598,14 +616,53 @@ pub(crate) fn run_handler<H: ReadHost>(
 
 /// Runs one stretch of handler `id`: on the host's stack while it lasts, a Rust panic caught as an
 /// error, as every callback's is.
-fn stretch(tasks: &Tasks, id: TaskId, go: impl FnOnce() -> mlua::Result<MultiValue>) -> Result<MultiValue, String> {
-    if let Some(t) = tasks.table.borrow_mut().get_mut(&id) {
-        t.running = true;
+///
+/// **The guard's entry.** Every stretch runs inside its delivery's entry ([`enter_delivery`]) —
+/// the one an event starts (`mailbox::run` → [`run_handler`] → [`start_thread`]) and every one
+/// after a wait ([`resume_parked`]), each spanning the resumes after the handler's own
+/// `coroutine.yield` ([`step`]) — and, since no handler starts inside another, that entry is the
+/// outermost in the application: a stop of the slice is marked when it ends (`stops::mark`), with
+/// the handler ended or parked. Each stretch is an entry of its own nested in it, so a memory error
+/// is looked at where it reached the host. A stretch of a stopped VM is not run, and ends with
+/// [`vm_guard::NOT_RUN`](crate::vm_guard::NOT_RUN), which [`step`] does not report.
+fn stretch(
+    tasks: &Tasks,
+    id: TaskId,
+    delivery: &Delivery,
+    go: impl FnOnce() -> mlua::Result<MultiValue>,
+) -> Result<MultiValue, String> {
+    let refused = match delivery {
+        Some(Err(crate::vm_guard::Refused)) => true,
+        Some(Ok(d)) => d.stopped(),
+        None => false,
+    };
+    let vm = tasks.table.borrow_mut().get_mut(&id).map(|t| {
+        t.running = !refused;
+        (t.lua.clone(), t.ctx.what.clone())
+    });
+    if refused {
+        return Err(crate::vm_guard::NOT_RUN.to_string());
     }
+    let entry = match vm {
+        Some((lua, what)) => match crate::vm_guard::Entry::enter(&lua, crate::vm_guard::EntryKind::Handler, what) {
+            Ok(e) => Some(e),
+            Err(crate::vm_guard::Refused) => {
+                if let Some(t) = tasks.table.borrow_mut().get_mut(&id) {
+                    t.running = false;
+                }
+                return Err(crate::vm_guard::NOT_RUN.to_string());
+            }
+        },
+        None => None,
+    };
     tasks.running.borrow_mut().push(id);
     let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(go)) {
-        Ok(Ok(v)) => Ok(v),
-        Ok(Err(e)) => Err(e.to_string()),
+        Ok(r) => {
+            if let Some(e) = &entry {
+                e.finish(&r);
+            }
+            r.map_err(|e| e.to_string())
+        }
         Err(p) => Err(crate::panic_text(&p)),
     };
     {
@@ -617,12 +674,21 @@ fn stretch(tasks: &Tasks, id: TaskId, go: impl FnOnce() -> mlua::Result<MultiVal
     if let Some(t) = tasks.table.borrow_mut().get_mut(&id) {
         t.running = false;
     }
+    // Off the stack before the entry ends: a stop it ends with is marked with nothing of it running.
+    drop(entry);
     outcome
 }
 
 /// What became of a stretch: the handler ended (returned, raised, closed), parked on its wait, or
 /// yielded otherwise — then that yield raises where it was made, and the handler goes on.
-fn step<H: ReadHost>(h: &H, id: TaskId, lua: &Lua, thread: &Thread, mut outcome: Result<MultiValue, String>) {
+fn step<H: ReadHost>(
+    h: &H,
+    id: TaskId,
+    lua: &Lua,
+    thread: &Thread,
+    delivery: &Delivery,
+    mut outcome: Result<MultiValue, String>,
+) {
     let tasks = h.tasks();
     loop {
         let (gone, ending, prio) = match tasks.table.borrow().get(&id) {
@@ -635,8 +701,10 @@ fn step<H: ReadHost>(h: &H, id: TaskId, lua: &Lua, thread: &Thread, mut outcome:
         }
         let values = match outcome {
             Err(e) => {
+                // A handler of a VM the guard stopped — by this very stretch, or before it — is not
+                // the module's error: the stop reports itself (stops.rs).
                 let ctx = tasks.table.borrow().get(&id).map(|t| t.ctx.clone());
-                if let Some(ctx) = ctx {
+                if let Some(ctx) = ctx.filter(|_| !crate::vm_guard::stopped(lua)) {
                     h.report_error(ctx.report, &ctx.what, &e);
                 }
                 forget(h, id, true);
@@ -674,7 +742,7 @@ fn step<H: ReadHost>(h: &H, id: TaskId, lua: &Lua, thread: &Thread, mut outcome:
             end_wait(h, lua, w);
         }
         let _prio = enter_priority(prio);
-        outcome = stretch(tasks, id, || thread.resume_error::<MultiValue>(OWN_YIELD));
+        outcome = stretch(tasks, id, delivery, || thread.resume_error::<MultiValue>(OWN_YIELD));
     }
 }
 
@@ -751,8 +819,10 @@ fn resume_parked<H: ReadHost>(h: &H, id: TaskId, this: impl Fn(&On) -> bool, val
         return false;
     };
     let _prio = enter_priority(prio);
-    let outcome = stretch(tasks, id, || thread.resume::<MultiValue>((nonce, value)));
-    step(h, id, &lua, &thread, outcome);
+    let delivery = enter_delivery(tasks, id);
+    let outcome = stretch(tasks, id, &delivery, || thread.resume::<MultiValue>((nonce, value)));
+    step(h, id, &lua, &thread, &delivery, outcome);
+    drop(delivery);
     true
 }
 

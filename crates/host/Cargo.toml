@@ -10,7 +10,11 @@ image = { version = "0.25.10", default-features = false, features = ["png"] }
 # Template matching is embarrassingly parallel — every candidate position is independent —
 # and a batch is one task per installed sample library. See spawn_image_worker.
 rayon = "1"
-mlua = { version = "0.11.6", features = ["luau", "error-send", "serialize"] }
+# Pinned: the guard (src/vm_guard.rs) writes Luau's interrupt field behind mlua's back — mlua's
+# own interrupt procedure, saved once and written back when a callback runs too long — so any
+# other mlua is a decision, not an update. `vm_guard_tests::mlua_pin` fails in CI when mlua changes
+# how it uses that field; module-manifest's dev-dependency is pinned with it, for one mlua.
+mlua = { version = "=0.11.6", features = ["luau", "error-send", "serialize"] }
 module-manifest = { path = "../module-manifest" }
 rodio = "0.20"
 semver = "1"

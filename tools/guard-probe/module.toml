@@ -1,0 +1,11 @@
+id = "com.tool.guard-probe"
+name = "Guard probe"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
+entry = "src/main.luau"
+
+# Each key does something a module must never do, so you can hear the application stop it. One
+# of a set of four: guard-probe-b, guard-probe-c and guard-probe-lib beside it. The keys and what
+# to expect are at the top of src/main.luau.
+[capabilities]
+require = ["hotkey", "speech", "log", "arbiter", "input", "screen"]
